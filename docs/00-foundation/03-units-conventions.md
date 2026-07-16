@@ -46,6 +46,12 @@ f64 の相対精度($\approx 2.2\times10^{-16}$)なら、$10^{-10}$ m(原子)〜
 | 標準大気圧 | $p_0$ | $101\,325\ \mathrm{Pa}$ | 定義値 |
 | 空気密度(15 °C, 1 atm) | $\rho_{air}$ | $1.225\ \mathrm{kg/m^3}$ | ISA 標準大気 |
 | 水の密度(20 °C) | $\rho_{water}$ | $998.2\ \mathrm{kg/m^3}$ | CRC Handbook |
+| 万有引力定数 | $G$ | $6.67430\times10^{-11}\ \mathrm{N\,m^2/kg^2}$ | CODATA 2018 |
+| 太陽の重力定数 | $GM_\odot$ | $1.32712440\times10^{20}\ \mathrm{m^3/s^2}$ | IAU 2015 |
+| 地球の重力定数 | $GM_\oplus$ | $3.986004418\times10^{14}\ \mathrm{m^3/s^2}$ | IERS |
+| 天文単位 | $\mathrm{AU}$ | $1.495978707\times10^{11}\ \mathrm{m}$ | IAU 定義値 |
+
+天体ドメインの定数(各天体の $GM$・半径・軌道)は [16-astro/01-gravitation-nbody.md](../16-astro/01-gravitation-nbody.md) §9 に集約。
 
 ### 1.2 量子ドメインの単位の扱い
 
@@ -65,12 +71,19 @@ SI のままだと $\hbar \sim 10^{-34}$ が絡む極端な指数になるため
 - 外積は右手系: $\hat{x} \times \hat{y} = \hat{z}$。
 - 法線は「A から B へ」など、各 API で向きを必ず文書化する(接触法線は A→B と統一)。
 - 平面は $\hat{n}\cdot\mathbf{x} = d$ で表す($\hat{n}$ 単位法線、$d$ は原点からの符号付き距離)。
+- **座標系の階梯 / floating origin**(天体スケール): 単一絶対座標(系重心原点)は f64 で軌道に十分だが、
+  遠方天体の表面スケール物理では**浮動原点フレーム**(系重心 → 天体中心 → 地表ローカルの親子)に切替える
+  ([02-scale-ladder.md](02-scale-ladder.md) §2.2)。フレーム間の相対運動は天体ドメイン([16-astro/](../16-astro/))が供給。
+- **UI 表示のみ** AU・km・度などへの換算を許す(内部は常に m・ラジアン)。
 
 ## 3. 時間の規約
 
 - シミュレーション時間 $t$ は World が管理する f64 の秒。壁時計(実時間)とは独立。
 - **固定タイムステップ**。基本ステップ $\Delta t = 1/120$ s(デフォルト)。ドメインごとの sub-stepping は
   [20-integration/01-coupling-matrix.md](../20-integration/01-coupling-matrix.md) で規定する。
+- **独立時間軸のドメイン**(天体・FDTD・量子): 自分の大/小刻みで進み World の基本ステップと co-step しない。
+  天体は近接イベントで決定論的に微細刻みへレジーム切替([02-scale-ladder.md](02-scale-ladder.md) §2.3)。
+  UI では天文時間(日・年)を表示可(内部は秒)。
 - コアは `Date.now()` / OS 時計 / `Math.random` 相当を参照しない(決定論、[20-integration/02-determinism-replay.md](../20-integration/02-determinism-replay.md))。
 
 ## 4. 数値の規約

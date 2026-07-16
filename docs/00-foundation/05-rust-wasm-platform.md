@@ -24,8 +24,10 @@ crates/
   sim-em/                 # 回路・静場・FDTD・光学 (依存: sim-core)
   sim-quantum/            # シュレディンガーソルバ・有効モデル (依存: sim-core)
   sim-statistical/        # 分子動力学デモ・ランジュバン・MC (依存: sim-core)
+  sim-astro/              # N体重力・軌道・再突入・相対論補正 (依存: sim-core)
   sim-coupling/           # 全 Coupling 実装 (依存: 各ドメイン crate)
   sim-world/              # World facade・Orchestrator・シナリオ (依存: sim-coupling)
+  sim-render/             # レンダリング (Phase D: パストレ・マテリアル・カメラ。依存: sim-world 読取のみ)
   sim-wasm/               # wasm-bindgen バインディング (依存: sim-world のみ)
 demo/                     # Vite + TypeScript + Three.js (sim-wasm の pkg を import)
 ```
@@ -66,14 +68,19 @@ impl WasmWorld {
 - コマンド・観測は当面 JSON 文字列(呼び出し頻度が低いので十分)。毎フレームの高頻度データのみバイナリビュー。
 - 転送用 f32 変換バッファはコア側に持つ(描画精度は f32 で十分、物理は f64 のまま)。
 
-## 4. 並列化方針
+## 4. 並列化・最適化方針
 
-- **Phase 1〜2 はシングルスレッド**で正しさと決定論を確立する。
-- その後、ドメイン内データ並列(流体格子のスライス分割、SPH の近傍バケット並列、broadphase)を
-  `rayon`(ネイティブ)/ `wasm-bindgen-rayon`(ブラウザ、SharedArrayBuffer + COOP/COEP 必要)で導入。
-- **決定論の制約**: 並列リダクションは加算順序を固定する(チャンク順逐次結合)。
-  「並列でも同一シード→同一結果」を CI で検証してから既定有効にする。
-- GPU(WebGPU)は将来オプション(大規模流体)。設計上は `FluidSolver` トレイトの別実装として隔離する。
+性能戦略の全体は [06-performance-strategy.md](06-performance-strategy.md)(3 本柱: アルゴリズム上位化・
+SIMD/並列化・データ局所性 + GPU)に集約する。本節は WASM プラットフォーム固有の要点のみ:
+
+- 正しさ・決定論を先に確立し、最適化は**実装(Phase B)と同時にドメインごとに適用**する
+  ([22-roadmap/01](../22-roadmap/01-phases.md))。スカラー・シングルスレッド参照実装を常に残す。
+- ドメイン内データ並列は `rayon`(ネイティブ)/ `wasm-bindgen-rayon`(ブラウザ、SharedArrayBuffer +
+  COOP/COEP 必要)。SIMD は `wasm simd128`。
+- **決定論の制約**: 並列リダクションは順序固定(チャンク順逐次結合)。「並列でも同一シード→同一結果」を
+  CI で検証([20-integration/02](../20-integration/02-determinism-replay.md))。
+- GPU(WebGPU, `wgpu`)は**設計に組み込むが CPU 優先**。重い格子/粒子ドメイン(流体・FDTD・SPH・
+  N体・パストレ)の差し替え可能なバックエンドとして隔離([06-performance-strategy.md](06-performance-strategy.md) §3)。
 
 ## 5. 性能予算(60 fps インタラクティブ時)
 
@@ -86,7 +93,9 @@ impl WasmWorld {
 | SPH 粒子 | 2×10⁴ | 4 ms |
 | 気体分子デモ | 10⁴ 粒子 | 2 ms |
 | FDTD(専用シーン) | 128² (2D) | 5 ms |
+| 天体 N 体(太陽系) | ~30 体 + 衛星群 | < 1 ms |
 | 熱・回路・結合・その他 | — | 1 ms |
+| パストレ(Phase D, オフライン) | — | フレーム予算外(画像/秒で管理、GPU 推奨) |
 
 - 予算超過時の方針: 精度を落とすのではなく**規模かリアルタイム性を落とす**(スロー再生・オフライン計算)。
   「検証して遊ぶ」ツールとして、静かに精度を落とすことを禁じる([01-vision.md](01-vision.md) §5)。
