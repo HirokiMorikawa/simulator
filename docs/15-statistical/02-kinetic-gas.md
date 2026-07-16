@@ -100,3 +100,13 @@ LJ 凝縮デモはその後。
 | He: 質量 / 直径 | 6.64×10⁻²⁷ kg / 2.2×10⁻¹⁰ m | 同 |
 | 既定粒子数 | 4096 | 予算 2ms([00-foundation/05](../00-foundation/05-rust-wasm-platform.md) §5) |
 | sub-step 基準 | 衝突あたり ≥ 10 step | 貫通防止 |
+
+## 10. 性能プロファイル
+
+- ホットスポット: 分子衝突検出、壁衝突、LJ 力計算。
+- 目標アルゴリズムとオーダー: 空間ハッシュ + Morton 順で $O(N)$。velocity Verlet。
+- SoA レイアウト: position/velocity/mass 別配列。定期 Morton ソート。
+- 並列化単位: 粒子を近傍セルで rayon 分割。
+- SIMD 対象カーネル: 衝突判定・LJ 力のバッチ。
+- GPU 適性: 高(多数粒子)。
+- ベンチ: 10⁴ 粒子(予算 2 ms、S1-S3)。

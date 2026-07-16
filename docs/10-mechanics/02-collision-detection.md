@@ -145,3 +145,13 @@ collision_detection(bodies):
     if m: manifolds.push(match_features_with_cache(m))  # warm start 引き継ぎ
   return manifolds
 ```
+
+## 10. 性能プロファイル
+
+- ホットスポット: broadphase のペア列挙、narrowphase の交差計算。
+- 目標アルゴリズムとオーダー: 総当たり $O(n^2)$ → SAP → 動的 AABB BVH $O(n\log n)$。narrowphase は GJK/EPA・SAT。
+- SoA レイアウト: AABB(min/max)配列、マニフォールドプール。
+- 並列化単位: 候補ペアを rayon 分割し narrowphase を並列(書込みは per-pair、衝突なし)。
+- SIMD 対象カーネル: AABB 重なり判定のバッチ、球・箱の距離計算。
+- GPU 適性: 中(broadphase の並列化は可能だが分岐が多い)。
+- ベンチ: 密なスタック・多数散乱で broadphase/narrowphase を個別計測。

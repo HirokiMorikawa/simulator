@@ -128,3 +128,13 @@ Phase 5: FLIP/level set 検討。
 | 渦度強化 $\varepsilon_{conf}$ | 0(検証)/ 0.5(見た目) | 非物理項ゆえ既定オフ |
 | Boussinesq $\beta$(空気) | $1/T_{amb} \approx 3.4\times10^{-3}$ K⁻¹ | 理想気体の体膨張係数 |
 | smoke 浮力 $\alpha_{smoke}$ | シーン指定 | 煙の相対密度による |
+
+## 10. 性能プロファイル
+
+- ホットスポット: 圧力 Poisson の PCG 反復、semi-Lagrangian 移流の補間。
+- 目標アルゴリズムとオーダー: PCG → **マルチグリッド前処理**で反復数を大幅削減(~$O(n)$)。
+- SoA レイアウト: MacGrid の u/v/w・圧力・cell_type を別配列。**キャッシュブロッキング/タイリング**(8³ ブロック)。
+- 並列化単位: 格子スライス/タイルを rayon 分割。PCG の内積は順序固定リダクション。
+- SIMD 対象カーネル: 7 点ステンシル(ラプラシアン・発散・勾配)、移流の補間。
+- GPU 適性: **高**(格子ソルバは GPU の代表用途。WebGPU compute、CPU 参照実装維持)。
+- ベンチ: 64³ 煙・カルマン渦で criterion(予算 4 ms)。

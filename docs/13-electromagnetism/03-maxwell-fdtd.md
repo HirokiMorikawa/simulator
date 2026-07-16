@@ -95,3 +95,13 @@ Phase 5: 2D TM/TE + PML + 基本源 + 上記デモ。3D 小域はその後。
 | セル/波長 | 20 | 分散誤差 < 0.2% |
 | PML 層数 / 次数 | 10 / 3 | Taflove & Hagness, *Computational Electrodynamics* 推奨域 |
 | 2D 既定解像度 | 256² | 予算 5 ms([00-foundation/05](../00-foundation/05-rust-wasm-platform.md) §5) |
+
+## 10. 性能プロファイル
+
+- ホットスポット: Yee 格子の E/H 更新(leapfrog)、PML。
+- 目標アルゴリズムとオーダー: 陽的更新 $O(n)$/step。**サブグリッド**で局所細分化。独立時間軸。
+- SoA レイアウト: ez/hx/hy・材質を別 Grid3。タイリング。
+- 並列化単位: 格子スライス/タイルを rayon 分割(陽的なので依存が局所)。
+- SIMD 対象カーネル: E/H 更新ステンシル(simd128)。
+- GPU 適性: **高**(FDTD は GPU の代表用途。CPU 参照実装維持)。
+- ベンチ: 256² 伝播・回折で criterion(予算 5 ms)。
