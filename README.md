@@ -16,7 +16,7 @@
 
 | セクション | 内容 |
 |---|---|
-| [00-foundation](docs/00-foundation/) | ビジョン、スケールの階梯と有効理論(根本思想)、規約、アーキテクチャ、Rust+WASM |
+| [00-foundation](docs/00-foundation/) | ビジョン、スケールの階梯と有効理論(根本思想)、規約、アーキテクチャ、Rust+WASM、性能戦略 |
 | [01-math](docs/01-math/) | 線形代数、場(格子・粒子)、数値積分、決定論的乱数 |
 | [10-mechanics](docs/10-mechanics/) | 剛体、衝突検出、接触ソルバ、摩擦、ジョイント、ソフトボディ |
 | [11-fluid](docs/11-fluid/) | Navier-Stokes、格子法、SPH、浮力、空力・水力 |
@@ -24,9 +24,11 @@
 | [13-electromagnetism](docs/13-electromagnetism/) | 静電磁場、回路(MNA)、FDTD、光学、モーター結合 |
 | [14-quantum](docs/14-quantum/) | 量子力学の役割と限界、シュレディンガーソルバ、有効モデル |
 | [15-statistical](docs/15-statistical/) | ミクロ⇔マクロ、気体分子運動論、ブラウン運動、モンテカルロ |
+| [16-astro](docs/16-astro/) | N 体重力・軌道・再突入(太陽系スケール)、相対論オプトイン |
+| [17-rendering](docs/17-rendering/) | 物理正確フルパストレーシング(Phase D) |
 | [20-integration](docs/20-integration/) | ドメイン間結合行列、決定論・リプレイ、エンティティ層、World API |
 | [21-verification](docs/21-verification/) | 解析解テスト表、保存則、デモシナリオ集 |
-| [22-roadmap](docs/22-roadmap/) | 実装フェーズ計画 |
+| [22-roadmap](docs/22-roadmap/) | 実装フェーズ計画(TDD: Phase A/B/C/D) |
 
 ## 設計の要点
 

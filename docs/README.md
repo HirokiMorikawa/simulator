@@ -24,6 +24,7 @@
 | [03-units-conventions.md](00-foundation/03-units-conventions.md) | SI 単位系、座標系、記号・命名規約 |
 | [04-architecture.md](00-foundation/04-architecture.md) | Solver / Coupling / Orchestrator、レイヤ依存、ステップパイプライン |
 | [05-rust-wasm-platform.md](00-foundation/05-rust-wasm-platform.md) | crate 構成、WASM 境界、性能予算、並列化方針 |
+| [06-performance-strategy.md](00-foundation/06-performance-strategy.md) | 性能 3 本柱(アルゴリズム上位化・SIMD/並列化・データ局所性)+ GPU(WebGPU, CPU 優先) |
 
 ### 01-math — 数学・数値基盤
 | 文書 | 内容 |
@@ -83,6 +84,20 @@
 | [02-kinetic-gas.md](15-statistical/02-kinetic-gas.md) | 気体分子運動論、マクスウェル=ボルツマン分布 |
 | [03-diffusion-brownian.md](15-statistical/03-diffusion-brownian.md) | 拡散、ブラウン運動、揺動散逸定理 |
 | [04-monte-carlo.md](15-statistical/04-monte-carlo.md) | メトロポリス法、イジング模型 |
+
+### 16-astro — 天体力学
+| 文書 | 内容 |
+|---|---|
+| [01-gravitation-nbody.md](16-astro/01-gravitation-nbody.md) | N 体重力、Barnes-Hut、シンプレクティック積分 |
+| [02-orbital-mechanics.md](16-astro/02-orbital-mechanics.md) | 軌道要素・摂動・大気圏再突入・宇宙機推進 |
+| [03-relativistic-corrections.md](16-astro/03-relativistic-corrections.md) | オプトイン 1PN 補正(近日点移動・GPS・光偏向) |
+
+### 17-rendering — レンダリング(Phase D)
+| 文書 | 内容 |
+|---|---|
+| [01-rendering-architecture.md](17-rendering/01-rendering-architecture.md) | 物理から分離した 2 経路描画(プレビュー / パストレ) |
+| [02-path-tracing.md](17-rendering/02-path-tracing.md) | 物理正確スペクトル・パストレーシング |
+| [03-materials-camera.md](17-rendering/03-materials-camera.md) | 光学物性 BSDF・物理カメラ・トーンマッピング |
 
 ### 20-integration — 横断設計
 | 文書 | 内容 |
