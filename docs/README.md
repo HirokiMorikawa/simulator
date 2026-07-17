@@ -118,6 +118,7 @@
 | 文書 | 内容 |
 |---|---|
 | [01-phases.md](22-roadmap/01-phases.md) | 実装フェーズ分割、完了条件、デモ対応表 |
+| [02-feature-checklist.md](22-roadmap/02-feature-checklist.md) | 機能群一覧・実装チェック表(AI の中断・再開用の進行記録) |
 
 ## 文書規約
 
