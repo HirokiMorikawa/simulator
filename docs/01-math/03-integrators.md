@@ -16,6 +16,7 @@ crate: `sim-math`。
 | 熱伝導(硬い拡散項) | 陰的 Euler(PCG) | 1 | 無条件安定 [12-thermal/02](../12-thermal/02-heat-transfer.md) |
 | 流体移流 | semi-Lagrangian | 1 | 無条件安定 [11-fluid/02](../11-fluid/02-eulerian-grid.md) |
 | 回路(硬い系) | 後退 Euler / 台形則 | 1/2 | [13-electromagnetism/02](../13-electromagnetism/02-circuits.md) |
+| 電磁場中の荷電粒子・点質量 | Boris pusher | 2 | 磁場回転を厳密ノルム保存(E2 の担当)[13-electromagnetism/05](../13-electromagnetism/05-em-mechanics-coupling.md) |
 | FDTD | leapfrog(Yee) | 2 | [13-electromagnetism/03](../13-electromagnetism/03-maxwell-fdtd.md) |
 | シュレディンガー | split-step Fourier | 2 | ノルム厳密保存 [14-quantum/02](../14-quantum/02-schrodinger-solver.md) |
 
@@ -61,6 +62,26 @@ $y_{n+1} = y_n + f(t_{n+1}, y_{n+1})\Delta t$。線形問題では $(I - \Delta 
 無条件安定(A安定)。拡散方程式では PCG([02-fields.md](02-fields.md) §5)で解く。
 数値散逸があるため、精度が要る検証モードでは Crank-Nicolson(台形則、二次)に切り替え可能にする。
 
+### 2.6 Boris pusher — 電磁場中の荷電粒子の既定
+
+ローレンツ力 $\mathbf{F} = q(\mathbf{E} + \mathbf{v}\times\mathbf{B})$ を受ける荷電粒子・帯電点質量の
+標準積分器(プラズマ PIC 法の標準手法)。電場キックと磁場回転を分離する:
+
+$$\mathbf{v}^- = \mathbf{v}_n + \frac{q\mathbf{E}}{m}\frac{\Delta t}{2}$$
+$$\mathbf{t} = \frac{q\mathbf{B}}{m}\frac{\Delta t}{2},\quad \mathbf{s} = \frac{2\mathbf{t}}{1+|\mathbf{t}|^2},\quad
+\mathbf{v}' = \mathbf{v}^- + \mathbf{v}^-\times\mathbf{t},\quad \mathbf{v}^+ = \mathbf{v}^- + \mathbf{v}'\times\mathbf{s}$$
+$$\mathbf{v}_{n+1} = \mathbf{v}^+ + \frac{q\mathbf{E}}{m}\frac{\Delta t}{2},\qquad
+\mathbf{x}_{n+1} = \mathbf{x}_n + \mathbf{v}_{n+1}\Delta t$$
+
+- 磁場回転部($\mathbf{v}^-\to\mathbf{v}^+$)は**厳密な回転**であり $|\mathbf{v}|$ をビットレベルの
+  丸めを除き保存する — 「磁場は仕事をしない」を離散レベルで再現し、E2 サイクロトロンの
+  「速さ一定 abs 1e-9」を構造的に満たす(semi-implicit Euler は磁場回転で速さが系統的に
+  増大するため不適)。
+- 二次精度・長時間安定(位相誤差はあるがエネルギードリフトしない)。
+- **適用範囲**: 電磁場中の荷電粒子・帯電点質量([13-electromagnetism/01](../13-electromagnetism/01-electrostatics-magnetostatics.md) §4・
+  [05](../13-electromagnetism/05-em-mechanics-coupling.md) §2.1)。剛体接触とは混ぜない
+  (接触インパルスを持つ帯電剛体はローレンツ力を force generator として semi-implicit Euler 側で扱う)。
+
 ## 3. 安定性の実行時検査
 
 各ソルバは自分の安定条件から `max_stable_dt()` を計算して Orchestrator に申告する
@@ -98,6 +119,18 @@ pub struct ExplicitEuler;       // 教材 (エネルギー増加を見せる)
 ```
 
 RK4 は分離不能なのでこのトレイトに載せず、無衝突専用の `BallisticIntegrator` として別に提供する。
+
+Boris pusher(§2.6)も剛体接触と混ぜないため `RigidIntegrator` には載せず、
+荷電粒子・帯電点質量専用の独立型として提供する:
+
+```rust
+/// 電磁場中の荷電粒子・点質量専用 (§2.6)。剛体接触とは併用しない。
+pub struct BorisPusher;
+impl BorisPusher {
+    /// E, B は粒子位置で評価済みの場。速度回転部は厳密ノルム保存。
+    pub fn step(&self, x: &mut Vec3, v: &mut Vec3, q_over_m: f64, e: Vec3, b: Vec3, dt: f64);
+}
+```
 
 ## 6. 検証
 
