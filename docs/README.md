@@ -13,6 +13,7 @@
 3. **物理ドメイン** — 10〜15 番台 : 興味のあるドメインから読んでよい(各文書は統一フォーマットで自己完結)
 4. **横断設計** — [20-integration/](20-integration/) : ドメインをどう束ねるか
 5. **検証・ロードマップ** — [21-verification/](21-verification/), [22-roadmap/](22-roadmap/)
+6. **フロントエンド** — [23-frontend/](23-frontend/) : デモシェル・UI(「遊ぶ」の実体)
 
 ## 全文書一覧
 
@@ -106,6 +107,8 @@
 | [02-determinism-replay.md](20-integration/02-determinism-replay.md) | 決定論、シード乱数、状態ハッシュ、リプレイ |
 | [03-entity-layer.md](20-integration/03-entity-layer.md) | 物・人・生物・乗り物のエンティティ設計 |
 | [04-world-api.md](20-integration/04-world-api.md) | World 公開 API、シーン記述形式 |
+| [05-frame-hierarchy.md](20-integration/05-frame-hierarchy.md) | フレーム階層(floating origin): 跨ぎの接触・拘束・非慣性項・決定論 |
+| [06-regime-switching.md](20-integration/06-regime-switching.md) | レジーム切替: 時間加速・天体独立時間軸・切替プロトコル |
 
 ### 21-verification — 検証
 | 文書 | 内容 |
@@ -119,6 +122,11 @@
 |---|---|
 | [01-phases.md](22-roadmap/01-phases.md) | 実装フェーズ分割、完了条件、デモ対応表 |
 | [02-feature-checklist.md](22-roadmap/02-feature-checklist.md) | 機能群一覧・実装チェック表(AI の中断・再開用の進行記録) |
+
+### 23-frontend — フロントエンド
+| 文書 | 内容 |
+|---|---|
+| [01-demo-shell.md](23-frontend/01-demo-shell.md) | デモシェル(共通 6 機能)、予測→実験ワークフロー、回路エディタ、シーン編集 |
 
 ## 文書規約
 
