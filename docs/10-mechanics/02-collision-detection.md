@@ -92,7 +92,28 @@ $\delta = r_A + r_B - L$、接触点 $= \mathbf{c}_A + \hat{\mathbf{n}}(r_A - \d
 - 接触点は貫入方向への摂動サポート点から復元。実装の要諦(退化単体・数値許容)は
   実装フェーズで Gino van den Bergen, *Collision Detection in Interactive 3D Environments* を正とする。
 
-### 4.6 接触マニフォールドの持続化
+### 4.6 最小 CCD — speculative contact(P1 標準機能)
+
+高速小物体のトンネリング対策を 2 段に分割する:
+
+- **最小 CCD(P1、剛体コアの標準機能)**: 方式は **speculative contact** を採用(C-5 決定)。
+  - **対象の決定的判定**: $|\mathbf{v}|\,\Delta t > \alpha\, r_{min}$($r_{min}$ = 自形状の最小半厚、
+    $\alpha = 0.5$ 固定)を満たす「弾丸級」の動的物体のみ。判定は状態の決定的関数
+    (実行時の適応判断なし — 決定論規約)。
+  - **broadphase**: 対象物体の AABB を速度 × $\Delta t$ で掃引拡張(swept AABB)。
+  - **narrowphase**: 接触マージンを $|\mathbf{v}|\Delta t$ に拡張し、今ステップ中に到達しうる
+    接触点を**負の貫入深さ(距離)つきで先取り**する。接触ソルバは「残り距離だけ進んだら
+    速度を止める」非貫入拘束として扱う(TOI 反復なし、既存 sequential impulses に統合)。
+  - **ghost contact 対策**: マージン接触(まだ触れていない)は非貫入拘束のみとし、
+    反発・摩擦インパルスは実接触(貫入 ≥ 0)になったステップから適用する。
+  - **適用範囲**: 球・カプセル等の単純形状 × 高速(D2 弾道・ニュートンのゆりかご級)。
+    回転由来のトンネリング(細長物体の振り回し)は対象外。
+  - **検証**: 弾丸トンネリング防止テスト(M15 — 薄板を高速球が貫通しない、
+    [21-verification/01](../21-verification/01-analytic-tests.md))。
+- **フル CCD(Phase 5)**: 回転を含む一般形状の conservative advancement(§4.5 GJK と同時)。
+  現行どおり Phase 5 に残す。
+
+### 4.7 接触マニフォールドの持続化
 
 ステップ間でマニフォールドをキャッシュし、feature_id が一致する接触点の蓄積インパルスを引き継ぐ
 (warm starting、[03-contact-solver.md](03-contact-solver.md) §4.4)。
@@ -100,10 +121,11 @@ $\delta = r_A + r_B - L$、接触点 $= \mathbf{c}_A + \hat{\mathbf{n}}(r_A - \d
 
 ## 5. 適用スケールと限界
 
-- 離散衝突検出(ステップ端点での判定)なので、**高速小物体はすり抜けうる**:
-  弾丸($v=300$ m/s)は 1 ステップで 2.5 m 進む。Phase 1〜4 は speculative margin で緩和し、
-  真の対策 CCD(連続衝突検出: 球は ray-cast、凸は conservative advancement)は Phase 5。
-  すり抜け発生は診断イベントで可視化する(黙って壊れない)。
+- 離散衝突検出(ステップ端点での判定)なので、素の状態では**高速小物体はすり抜けうる**:
+  弾丸($v=300$ m/s)は 1 ステップで 2.5 m 進む。弾丸級(単純形状 × 高速)は
+  **最小 CCD(speculative contact、§4.6)を P1 から標準適用**してトンネリングを防止する。
+  回転を含む一般形状の完全な対策(conservative advancement)は Phase 5。
+  最小 CCD の対象外での すり抜け発生は診断イベントで可視化する(黙って壊れない)。
 - 無限平面は static 専用。地形は Phase 5 の高さ場/メッシュで拡張。
 
 ## 6. 他ドメインとの結合
@@ -123,7 +145,8 @@ $\delta = r_A + r_B - L$、接触点 $= \mathbf{c}_A + \hat{\mathbf{n}}(r_A - \d
 
 ## 8. 実装フェーズ対応
 
-§4 の表参照。Phase 1 = 総当たり + 球/箱/平面の 4 関数 + マニフォールド持続化。
+§4 の表参照。Phase 1 = 総当たり + 球/箱/平面の 4 関数 + マニフォールド持続化 +
+**最小 CCD(speculative contact、§4.6)**。フル CCD(conservative advancement)= Phase 5。
 
 ## 9. パラメータ表・擬似コード
 

@@ -36,7 +36,8 @@ $$\mathbf{I}_w\,\dot{\boldsymbol\omega} + \boldsymbol\omega \times (\mathbf{I}_w
 ```rust
 pub struct RigidBodySet {
     // 状態 (毎ステップ更新)
-    pub position: Vec<Vec3>,          // 重心のワールド座標
+    pub position: Vec<Vec3>,          // 重心の所属フレームローカル座標
+    pub frame: Vec<FrameId>,          // 所属フレーム。単一フレームシーンでは全て ROOT
     pub rotation: Vec<Quat>,
     pub linear_velocity: Vec<Vec3>,
     pub angular_velocity: Vec<Vec3>,  // ワールド座標系
