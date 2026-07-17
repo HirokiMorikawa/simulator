@@ -109,8 +109,9 @@ impl Transform {
   - `m.mul(m.inverse()) == I`(条件数の良い行列で)
   - `skew(a).mul_vec(b) == a.cross(b)`
   - `integrate_angular_velocity` を n 分割して合成 → 解析回転 `from_axis_angle(ω̂, |ω| t)` に一次収束
-- 決定論: 全演算が同一入力→ビット同一出力(浮動小数の融合積和 FMA を含む最適化差を CI のターゲット間比較で監視。
-  問題が出た場合は該当箇所の演算順を固定する)。
+- 決定論: 同一バイナリ内では全演算が同一入力→ビット同一出力。ターゲット間(wasm⇔ネイティブ)の
+  最適化差(FMA・libm 実装差)はビット一致を要求せず、許容誤差で照合する
+  ([20-integration/02](../20-integration/02-determinism-replay.md) §5 階層 2)。
 
 ## 7. パフォーマンス指針
 
