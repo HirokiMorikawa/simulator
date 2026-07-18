@@ -50,6 +50,7 @@ Phase A の前提条件として本表で機械的に保証する。
 | M12 | スタック静止 | 4 段木箱 10 s: $v < 10^{-3}$、貫入 < slop | — | 接触ソルバ(スリープ) | semi-implicit Euler | 秒級 |
 | M13 | カテナリー | ロープ静止形状 $y = a\cosh(x/a)$ | 最大偏差 2% | XPBD ロープ([10-mechanics/06](../10-mechanics/06-soft-body-particles.md)) | XPBD(位置ベース) | 秒級 |
 | M14 | ロープの伸び | $\delta = WL/(EA)$ | rel 5% | XPBD ロープ | XPBD(位置ベース) | 秒級 |
+| M15 | 弾丸トンネリング防止 | 高速球(300 m/s、r = 5 mm)が厚さ 2 mm の静的鋼板に衝突 → 貫通せず反発(反発後の速さ $= e\,v_0$) | 貫通イベントゼロ・貫入 < slop | 接触ソルバ + 最小 CCD(speculative contact、[10-mechanics/02](../10-mechanics/02-collision-detection.md) §4.6) | semi-implicit Euler | 秒級 |
 
 ## 流体
 
