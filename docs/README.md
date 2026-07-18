@@ -126,7 +126,7 @@
 ### 23-frontend — フロントエンド
 | 文書 | 内容 |
 |---|---|
-| [01-demo-shell.md](23-frontend/01-demo-shell.md) | デモシェル(共通 6 機能)、予測→実験ワークフロー、回路エディタ、シーン編集 |
+| [01-editor.md](23-frontend/01-editor.md) | Unity 風統合エディタ: Hierarchy / Scene / Inspector / Timeline / Console / Project、回路エディタ・Edit/Play モード |
 
 ## 文書規約
 

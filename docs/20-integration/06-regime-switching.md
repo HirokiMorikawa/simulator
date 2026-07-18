@@ -81,7 +81,7 @@ pub enum TimeRegime {
 ## 5. 実装フェーズ対応
 
 Pα(天体ウェーブ): 本プロトコルの実装、D34(時間加速スライダー)・D37(再突入遷移)で検証。
-UI(加速スライダー・レジーム表示)は [23-frontend/01](../23-frontend/01-demo-shell.md)。
+UI(加速スライダー・レジーム表示)は [23-frontend/01](../23-frontend/01-editor.md)。
 
 ## 6. パラメータ表
 
