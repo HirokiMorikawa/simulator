@@ -81,6 +81,31 @@
 - **開発体制**: 実装は AI が一括で行う。人月ベースの規模見積り・
   途中経過の到達性計測は導入せず、到達の確認は開発完了時の全テスト緑・全デモ合格で行う。
 
+### 4.1 実装の難所一覧
+
+全ドメイン文書を横断して洗い出した実装の難所。各難所は該当文書に
+**分岐条件・退化時の扱い・数値的フォールバック**が記載されている(粒度は
+[22-roadmap/01-phases.md](../22-roadmap/01-phases.md) 横断ルール 5 の規約 =
+アルゴリズム選択・分岐条件・フォールバックまで。コード表現レベルには踏み込まない)。
+
+| 難所 | 分岐条件 / 退化時の扱い / フォールバック(要約) | 詳細 |
+|---|---|---|
+| 接触マニフォールド生成の退化 | 平行軸除外・クリップ 0 点→最深 1 点・5 点以上→決定的 4 点縮約・深い貫入→補正クランプ | [10-mechanics/02](../10-mechanics/02-collision-detection.md) §4.4 |
+| 深い貫入からの位置補正 | Baumgarte / split impulse の 2 方式と補正量クランプ | [10-mechanics/03](../10-mechanics/03-contact-solver.md) §4.5 |
+| GJK/EPA の退化単体(P5) | 共面/共線単体の数値許容。要諦は van den Bergen を正とする | [10-mechanics/02](../10-mechanics/02-collision-detection.md) §4.5 |
+| XPBD 布の自己衝突 | 空間ハッシュの粒子間最小距離拘束(P5)。貫通は診断 | [10-mechanics/06](../10-mechanics/06-soft-body-particles.md) §4 |
+| SPH 境界粒子の密度欠損・テンション不安定 | Akinci 補正 + 密度クランプ・圧力クランプ XOR artificial pressure・孤立粒子は弾道扱い・薄板は生成規約 | [11-fluid/03](../11-fluid/03-sph.md) §4.2 |
+| マルチグリッドの不規則境界 | 混在率 30% 超で粗格子化打ち切り → 短縮 V サイクル → 最悪 Jacobi-PCG 退行。既定は PCG(IC(0)) | [11-fluid/02](../11-fluid/02-eulerian-grid.md) §4.4 |
+| カルマン渦が検証モードで出ない恐れ | 実装時に数値実験で確認してから合格条件確定(R-6) | [21-verification/01](../21-verification/01-analytic-tests.md) F11 注記 |
+| MNA 非線形素子(ダイオード)の収束 | 限流 Newton → ダンピング → gmin stepping → source stepping → ラッチ + 診断(全段固定 = 決定的) | [13-electromagnetism/02](../13-electromagnetism/02-circuits.md) §4 |
+| FDTD の吸収境界 | PML 8–16 層・多項式グレーディング、反射率 < −40 dB を検証 | [13-electromagnetism/03](../13-electromagnetism/03-maxwell-fdtd.md) §3/§7 |
+| split-step の刻み制約 | 位相エイリアス回避の $\Delta t$ 制約(精度制約として明示) | [14-quantum/02](../14-quantum/02-schrodinger-solver.md) §4 |
+| イジング臨界減速 | Wolff クラスタ法を必須実装(R-5)、L=256 は長時間級 | [15-statistical/04](../15-statistical/04-monte-carlo.md) §4 |
+| N 体の近接特異点 | ソフトニング $\varepsilon$ + 近接イベントでのレジーム切替 | [16-astro/01](../16-astro/01-gravitation-nbody.md) §2/§4、[20-integration/06](../20-integration/06-regime-switching.md) |
+| stiff な弱結合(無慣性ロータ×回路等) | 剛性指標の閾値表で sub-iteration 段階選択(上限固定)、X1/X2 で検出 | [20-integration/01](../20-integration/01-coupling-matrix.md) §2 |
+| フレーム跨ぎの決定論 | ヒステリシス付き閾値・跨ぎイベント全順序化・単体テスト 6 種 | [20-integration/05](../20-integration/05-frame-hierarchy.md) §3–§7 |
+| パストレの分散(ファイアフライ) | 重要度サンプリング + MIS、同一シード同一画像(R7) | [17-rendering/02](../17-rendering/02-path-tracing.md) §4 |
+
 ## 5. 対象範囲と非目標
 
 ### 5.1 対象とする空間スケール(v2 で拡張)
