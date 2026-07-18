@@ -17,8 +17,8 @@
 ## 現在地
 
 - **フェーズ**: 設計(レビュー対応)
-- **作業中**: PR-6(新設文書)
-- **次**: PR-7(下記 §0)
+- **作業中**: PR-7(実装の難所の詳細化)
+- **次**: レビュー承認
 
 ## 0. 設計フェーズ残作業
 
@@ -35,7 +35,7 @@
 - [x] PR-3 決定論方針の反映・台帳再定義・sub-iteration 規則 + stiff 検出テスト行
 - [x] PR-4 位置表現の決定反映・最小 CCD 標準機能化 + 検証テスト行・立位保持基準の置換
 - [x] PR-5 性能構成規則・wasm 配布戦略・巻き戻しコスト
-- [ ] PR-6 新設文書: UI/フロントエンド設計・フレーム階層詳細設計・レジーム切替プロトコル
+- [x] PR-6 新設文書: UI/フロントエンド設計・フレーム階層詳細設計・レジーム切替プロトコル
 - [ ] PR-7 実装の難所の詳細化(全ドメイン文書横断)
 - [ ] 実装開始ゲート通過(vision §4: レビュー承認)
 
@@ -171,17 +171,29 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [ ] 担当テスト Green: R1–R7
 - [ ] デモ D40–D43 合格
 
-## 6. フロントエンド(設計は PR-6 の新設文書が正)
+## 6. フロントエンド(設計は [../23-frontend/01-editor.md](../23-frontend/01-editor.md) が正)
 
-- [ ] デモシェル: 再生制御(再生/停止/1step/スロー)
-- [ ] デモシェル: Probe グラフ + CSV エクスポート
-- [ ] デモシェル: 保存量パネル(台帳・residual)
-- [ ] デモシェル: シード・ハッシュ・リプレイ保存/読込
-- [ ] デモシェル: 近似バッジ(`approximations()`)
-- [ ] 予測→実験ワークフロー
-- [ ] 回路エディタ(D19 自由配線)
-- [ ] シーン編集・スポーン
-- [ ] デモのヘッドレス CI テスト基盤(Probe assert)
+Unity 風統合エディタ:
+
+- [ ] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
+- [ ] Scene View: Three.js 3D ビューポート + Gizmo(移動/回転/スケール)+ ピック
+- [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
+- [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
+- [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
+- [ ] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク
+- [ ] Console: イベント・診断ログ(発散・CFL 警告・シーンクラス/スロー再生バッジ)+ フィルタ + クリック→時刻/オブジェクト連動
+- [ ] Probe Graphs パネル: 複数系列・対数軸・CSV エクスポート
+- [ ] Project ドロワー: Scenes/Materials/Prefabs/Replays
+- [ ] Edit / Play モードの切替と編集ロック
+- [ ] Command 系(Grab/MoveGrab/Release/SetMotorTarget/…)と入力列記録
+- [ ] レイアウトプリセット(Default / Physics-focus / Circuit-focus / Astro)
+- [ ] 回路エディタ(Scene View サブモード、D19 自由配線)
+- [ ] フレームサブモード(L5 ドリルイン)
+- [ ] 予測→実験ミニパネル(シーン側オプトイン)
+- [ ] シーン編集・スポーン・材料派生
+- [ ] シーン + Replay + ブックマークのエクスポート/インポート
+- [ ] Undo / Redo(Edit モードのみ)
+- [ ] ヘッドレスランナー(Probe assert・CI 基盤)
 
 ## 7. デモ合格管理表(D1–D43)
 
