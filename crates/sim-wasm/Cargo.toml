@@ -1,0 +1,20 @@
+[package]
+name = "sim-wasm"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sim-math = { path = "../sim-math" }
+sim-world = { path = "../sim-world" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+# binaryen (wasm-opt) is fetched from GitHub releases at build time, which is
+# unavailable in network-restricted environments (CI/sandboxes). Rely on
+# rustc/LLVM's own wasm codegen instead.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

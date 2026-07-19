@@ -1,0 +1,9 @@
+[package]
+name = "sim-render"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+sim-core = { path = "../sim-core" }
+sim-math = { path = "../sim-math" }

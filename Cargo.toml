@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sim-math",
+    "crates/sim-core",
+    "crates/sim-mechanics",
+    "crates/sim-fluid",
+    "crates/sim-thermal",
+    "crates/sim-em",
+    "crates/sim-quantum",
+    "crates/sim-statistical",
+    "crates/sim-astro",
+    "crates/sim-coupling",
+    "crates/sim-world",
+    "crates/sim-render",
+    "crates/sim-wasm",
+]
+
+[workspace.package]
+edition = "2021"
+publish = false
+
+[profile.release]
+opt-level = 3
