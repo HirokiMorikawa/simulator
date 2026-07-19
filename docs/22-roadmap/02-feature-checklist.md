@@ -16,9 +16,12 @@
 
 ## 現在地
 
-- **フェーズ**: 実装(Phase 0 完了)
-- **作業中**: なし
-- **次**: Phase A — 全ドメインの型・トレイトのスケルトン定義 + 全テスト記述(下記 §2)
+- **フェーズ**: 実装(Phase 0 完了。math ウェーブは線形代数のみ先行して Green)
+- **作業中**: math ウェーブ残り(場・積分器カタログ・SimRng、下記 §3)
+- **次**: math ウェーブ完了後、Phase A(全ドメインの型・トレイトのスケルトン + 全テスト記述、下記 §2)に着手。
+  線形代数(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`)は依存が無く低リスクなため、
+  Phase A の Red 段階を経ずに直接実装 + テストで Green 化した(§3 の当該行のみ先行完了)。
+  他ドメインは設計通り Phase A(型スケルトン + 全テスト記述・Red確認)から進める。
 
 ## 0. 設計フェーズ残作業
 
@@ -83,7 +86,7 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 
 ### math ウェーブ
 
-- [ ] 線形代数(Vec3/Quat/Mat3/テンソル)
+- [x] 線形代数(Vec3/Quat/Mat3/テンソル)
 - [ ] 場(MAC / セル中心格子・補間)
 - [ ] 積分器カタログ(semi-implicit Euler・velocity Verlet・RK4・XPBD・Boris pusher・
       Euler–Maruyama/BAOAB・陰的 Euler・semi-Lagrangian・leapfrog・split-step Fourier)
