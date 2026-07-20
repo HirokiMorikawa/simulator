@@ -8,7 +8,7 @@
 
 use crate::body::{BodyType, DragModel, RigidBodySet};
 use crate::shape::Shape;
-use crate::{collision, contact, RigidBodyDesc};
+use crate::{collision, contact, sleep, RigidBodyDesc};
 use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_fluid::{Atmosphere, StaticWaterRegion};
 
@@ -55,7 +55,7 @@ impl MechanicsSolver {
     fn apply_forces(&mut self) {
         let n = self.bodies.len();
         for i in 0..n {
-            if self.bodies.body_type[i] == BodyType::Dynamic {
+            if self.bodies.body_type[i] == BodyType::Dynamic && !self.bodies.asleep[i] {
                 let mass = self.bodies.mass(i);
                 self.bodies.force_accum[i].y -= mass * self.gravity;
 
@@ -90,7 +90,7 @@ impl MechanicsSolver {
     fn integrate_velocities(&mut self, dt: f64) {
         let n = self.bodies.len();
         for i in 0..n {
-            if self.bodies.body_type[i] != BodyType::Dynamic {
+            if self.bodies.body_type[i] != BodyType::Dynamic || self.bodies.asleep[i] {
                 continue;
             }
             let accel = self.bodies.force_accum[i].scale(self.bodies.inv_mass[i]);
@@ -115,6 +115,9 @@ impl MechanicsSolver {
             if self.bodies.body_type[i] == BodyType::Static {
                 continue;
             }
+            if self.bodies.body_type[i] == BodyType::Dynamic && self.bodies.asleep[i] {
+                continue;
+            }
             self.bodies.position[i] =
                 self.bodies.position[i].addcarry_scaled(self.bodies.linear_velocity[i], dt);
             self.bodies.rotation[i] = self.bodies.rotation[i]
@@ -132,6 +135,16 @@ impl MechanicsSolver {
             self.bodies.torque_accum[i] = sim_math::Vec3::ZERO;
         }
     }
+
+    /// 少なくとも一方が「起きている dynamic body」なら解決対象(設計 §4「起床は新規接触・
+    /// 力適用時」の反対: 両側とも寝ていれば新規に動く要素が無い)。
+    fn manifold_is_active(&self, m: &collision::ContactManifold) -> bool {
+        let a_awake_dynamic =
+            self.bodies.body_type[m.body_a] == BodyType::Dynamic && !self.bodies.asleep[m.body_a];
+        let b_awake_dynamic =
+            self.bodies.body_type[m.body_b] == BodyType::Dynamic && !self.bodies.asleep[m.body_b];
+        a_awake_dynamic || b_awake_dynamic
+    }
 }
 
 impl Solver for MechanicsSolver {
@@ -145,13 +158,26 @@ impl Solver for MechanicsSolver {
         self.apply_forces();
         self.integrate_velocities(dt);
         let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
+        // 両側の dynamic body が全て asleep な接触は再解決しない(収束済みで変化が無いのに
+        // 毎ステップ再解決すると warm start・split impulse の数値的な揺らぎで再起床してしまう
+        // ことを実装検証中に発見した — 「積分を停止」だけでは不十分で、接触解決自体も
+        // 停止する必要がある、設計 docs/10-mechanics/01-rigid-body.md §4)。
+        let active_manifolds: Vec<collision::ContactManifold> = manifolds
+            .iter()
+            .filter(|m| self.manifold_is_active(m))
+            .cloned()
+            .collect();
         contact::resolve(
-            &manifolds,
+            &active_manifolds,
             &mut self.bodies,
             ctx.materials,
             self.restitution_velocity_threshold,
             &mut self.contact_cache,
         );
+        // 接触解決後(post-solve)の速度で静止判定する(解決前は重力積分直後でまだ抗力が
+        // 相殺していないため静止判定に使えない)。島判定には(スキップした分も含め)
+        // 全マニフォールドを使う。
+        sleep::update_sleep_state(&mut self.bodies, &manifolds, dt);
         self.integrate_positions(dt);
         self.update_inertia_and_clear_accum();
     }

@@ -40,9 +40,11 @@
   幾何光学の代数公式(`optics.rs`: スネル則・臨界角・フレネル係数・ブリュースター角・薄レンズ・
   プリズム最小偏角)を実装し E9–E12 を Green 化(フル `RayTracer` は未実装、公式のみ)。
   P2 力学に SAP broadphase(`collision::sap_candidate_pairs`、x軸掃引)を追加し総当たり版と
-  結果が完全一致することを確認(BVH は未着手)。
+  結果が完全一致することを確認(BVH は未着手)。P2 力学にスリープ(`sleep::update_sleep_state`、
+  接触島 union-find + 積分停止 + 接触解決停止)を実装(実装検証中に「積分停止だけでは
+  不十分、接触解決自体も止めないと数値的揺らぎで再起床を繰り返す」ことを発見・修正)。
 - **作業中**: 力学(`sim-mechanics`)P1 最後の残り — 最小CCD(M15、意図的に後回し)。
-  次点候補: BVH・スリープ(P2 残り)、M10(要ジョイント、P3)、
+  次点候補: BVH(P2 残り)、M10(要ジョイント、P3)、
   磁気双極子・回路MNA・フル RayTracer(sim-em 残り)、他ドメイン(quantum)の Phase A スケルトン
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
@@ -197,7 +199,17 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       結果は総当たり版と (indexA,indexB) 昇順で完全一致するようソート済み(決定論・既存の
       数値挙動を保つ)。散らばった40体シーンで総当たり列挙と一致することをテストで確認
       (`collision::tests::sap_matches_brute_force_pair_enumeration_on_scattered_scene`)
-- [x] 転がり摩擦(スリープは未着手)— `crates/sim-mechanics/src/contact.rs::solve_rolling`。
+- [x] スリープ — `crates/sim-mechanics/src/sleep.rs::update_sleep_state`。dynamic-dynamic
+      接触の連結成分(接触島、union-find)単位で、島内の全 dynamic body の速度が閾値
+      (0.01 m/s / 0.02 rad/s)未満の状態が0.5秒続いたら asleep にし、力適用・速度積分・
+      位置積分に加えて**両側とも asleep な接触の再解決**も止める(`manifold_is_active`)。
+      実装検証中に、contact solve だけ止めずに毎ステップ回し続けると warm start・split
+      impulse の数値的な揺らぎで凍結直後の速度が再摂動され再起床→再入眠を繰り返し、
+      M12の最終速度が閾値1e-3を上回る(かえって収束が乱れる)ことを発見・修正。
+      眠りに入った瞬間は残留速度を厳密に0にする。新規接触(異なる島の合流)で即座に
+      起床することをテストで確認(`p2_analytic.rs::sleep_engages_after_box_settles_on_ground`,
+      `sleeping_box_wakes_on_new_contact_from_falling_body`)
+- [x] 転がり摩擦 — `crates/sim-mechanics/src/contact.rs::solve_rolling`。
       設計 04-friction.md §4.1 のトルク制約 $|\tau_{roll}|\le\mu_{roll}Nr$ を、線形速度を
       変えない純粋な偶力(角速度のみ更新)として `solve_tangent` と同じクランプ構造で実装
       (Sphere 形状の半径を使用、非球形接触は自動的に無効化)。

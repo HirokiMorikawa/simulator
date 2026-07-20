@@ -105,6 +105,11 @@ pub struct RigidBodySet {
     pub drag: Vec<DragModel>,
     // 熱結合用
     pub temperature: Vec<f64>,
+    // スリープ用(設計 docs/10-mechanics/01-rigid-body.md §4)。
+    /// 島全体の速度が閾値未満の状態が続いている秒数。
+    pub still_time: Vec<f64>,
+    /// 積分停止中か(島単位で揃う、`crate::sleep::update_sleep_state` が管理)。
+    pub asleep: Vec<bool>,
     shapes: ShapeStore,
 }
 
@@ -126,6 +131,8 @@ impl RigidBodySet {
             material: Vec::new(),
             drag: Vec::new(),
             temperature: Vec::new(),
+            still_time: Vec::new(),
+            asleep: Vec::new(),
             shapes: ShapeStore::new(),
         }
     }
@@ -196,6 +203,8 @@ impl RigidBodySet {
         self.material.push(desc.material);
         self.drag.push(desc.drag);
         self.temperature.push(desc.initial_temperature);
+        self.still_time.push(0.0);
+        self.asleep.push(false);
 
         index
     }
