@@ -35,8 +35,10 @@
   重力加速度で平衡到達を高速化)。`sim-em` に静電場(`PointChargeSystem`、点電荷直接和
   クーロン力 + 一様外場合成 + Boris pusher 積分)を実装し E1・E2 を Green 化(E2 は既存の
   `sim-math::BorisPusher` テストが検証済みの物理を sim-em の公開 API 経由で改めて確認)。
+  P2 力学に転がり摩擦(`contact::solve_rolling`、トルク制約を純粋な偶力として実装)を追加し、
+  対応する M 番号がないため自前でエネルギー収支を導出したテストで検証(rel 2%)。
 - **作業中**: 力学(`sim-mechanics`)P1 最後の残り — 最小CCD(M15、意図的に後回し)。
-  次点候補: SAP/BVH・スリープ・転がり摩擦(P2 残り)、M10(要ジョイント、P3)、
+  次点候補: SAP/BVH・スリープ(P2 残り)、M10(要ジョイント、P3)、
   磁気双極子・回路MNA(sim-em 残り)、他ドメイン(quantum)の Phase A スケルトン
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
@@ -187,7 +189,14 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       する(NGS の要点、同一bodyに複数接触点があると独立減算では過剰補正になることを
       実装中に発見・修正)。M6 を設計の目標精度(rel 1%)まで、M12 を Green 化した
 - [ ] SAP / BVH(broadphase)
-- [ ] スリープ・転がり摩擦
+- [x] 転がり摩擦(スリープは未着手)— `crates/sim-mechanics/src/contact.rs::solve_rolling`。
+      設計 04-friction.md §4.1 のトルク制約 $|\tau_{roll}|\le\mu_{roll}Nr$ を、線形速度を
+      変えない純粋な偶力(角速度のみ更新)として `solve_tangent` と同じクランプ構造で実装
+      (Sphere 形状の半径を使用、非球形接触は自動的に無効化)。
+      `crates/sim-mechanics/tests/p2_analytic.rs::rolling_friction_decelerates_ball_at_designed_rate`
+      で検証: 対応する M 番号が無いため設計のトルク制約から自前でエネルギー収支を導出し、
+      滑りなし転がり球の並進減速度が単純な $a=\mu_{roll}g$ ではなく回転慣性を含む有効質量
+      $\frac75 m$ から出る $a=\frac57\mu_{roll}g$ になることを実測で確認(rel 2%)
 - [ ] 担当テスト Green: M6(精度), M10, M11(M6 Green。M10 は固定ピボット回転がジョイント実装
       (P3、docs/10-mechanics/05-joints-constraints.md)に依存。M11 は簡易線形化で解析成長率との
       比較を試みたが、非線形フィードバック(ωx・ωzの積がωyへ2λ倍のレートで再結合)により
