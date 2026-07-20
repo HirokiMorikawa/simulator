@@ -1,14 +1,23 @@
 //! 回路 — 修正節点解析(MNA)。設計: docs/13-electromagnetism/02-circuits.md。
 //!
-//! P4 スコープの最小実装: 線形素子(抵抗・コンデンサ・インダクタ・独立電圧源)のみの
-//! MNA(設計 §3)。動的素子(C・L)は後退Euler(設計 §4「既定」)のコンパニオンモデルへ
-//! 変換して代数化する。非線形素子(ダイオード・モーター)・Newton-Raphson フォールバック
-//! 連鎖(gmin/source stepping)・スイッチ・トポロジ不変時のLU分解キャッシュは未実装。
-//! 線形方程式はステップごとに部分ピボット付きガウス消去で解く(回路規模が小さいため
-//! 十分、設計 §10「密LUで十分」)。
+//! P4 スコープの実装: 線形素子(抵抗・コンデンサ・インダクタ・独立電圧源)のMNA(設計 §3)+
+//! ダイオード(Shockley式)のNewton-Raphson反復(設計 §4)。動的素子(C・L)は後退Euler
+//! (設計 §4「既定」)のコンパニオンモデルへ変換して代数化する。ダイオードも同様に
+//! 各Newton反復で現在の動作点まわりの線形コンパニオンモデル(微分コンダクタンス+
+//! 等価電流源、SPICE標準)へ変換する。電圧ステップ制限(設計§4の限流手法、
+//! 1反復あたりの変化を$2nV_T$にクランプ)は実装したが、フォールバック連鎖の
+//! 振動ダンピング・gmin stepping・source stepping・ラッチは未実装(半波整流の
+//! テストケースは電圧ステップ制限つきNewtonのみで確実に収束するため)。
+//! モーター・スイッチは未実装。線形方程式は毎回部分ピボット付きガウス消去で解く
+//! (回路規模が小さいため十分、設計 §10「密LUで十分」)。
 
 /// ノード0は常にグラウンド(電位0、未知数に含めない)。設計 §3。
 pub const GROUND: usize = 0;
+
+/// ダイオードのNewton反復上限(設計§4「上限10反復」)。
+const DIODE_MAX_NEWTON_ITERATIONS: usize = 10;
+/// 収束判定: 電圧ステップがこれ未満なら収束とみなす(設計§4「Δv<10⁻⁹V」)。
+const DIODE_CONVERGENCE_TOLERANCE: f64 = 1e-9;
 
 /// 回路。素子はノード番号の対 `(a, b)` で接続を表す(a, b どちらも `GROUND` を含みうる)。
 #[derive(Default)]
@@ -18,10 +27,14 @@ pub struct Circuit {
     capacitors: Vec<(usize, usize, f64)>,
     inductors: Vec<(usize, usize, f64)>,
     voltage_sources: Vec<(usize, usize, f64)>,
+    /// (anode, cathode, saturation_current, n・V_T)。設計§2「Shockley $i=I_s(e^{v/nV_T}-1)$」。
+    diodes: Vec<(usize, usize, f64, f64)>,
     /// 前ステップの端子間電圧(コンデンサの後退Eulerコンパニオンモデルの履歴項)。
     capacitor_voltage: Vec<f64>,
     /// 前ステップの枝電流(インダクタの後退Eulerコンパニオンモデルの履歴項)。
     inductor_current: Vec<f64>,
+    /// ダイオードの動作点電圧(Newton反復の現在推定値、次ステップのウォームスタートにも使う)。
+    diode_voltage: Vec<f64>,
     /// 直近の解(ノード電圧、`node_voltage` で参照する)。
     last_node_voltage: Vec<f64>,
     /// 直近の解(電圧源の枝電流)。
@@ -57,6 +70,19 @@ impl Circuit {
     /// 独立電圧源。`a` が正極、`b` が負極(`v_a - v_b = voltage`)。
     pub fn add_voltage_source(&mut self, a: usize, b: usize, voltage: f64) {
         self.voltage_sources.push((a, b, voltage));
+    }
+
+    /// 既存の電圧源の値を変更する(`add_voltage_source` を呼んだ順のインデックス)。
+    /// 時間変化する電源(AC等)を`step`の呼び出し間で表現するために使う。
+    pub fn set_voltage_source_voltage(&mut self, index: usize, voltage: f64) {
+        self.voltage_sources[index].2 = voltage;
+    }
+
+    /// ダイオード(Shockley式、設計§2)。`anode`→`cathode`が順方向。
+    /// `n_vt` は $nV_T$(理想係数×熱電圧、300Kで$V_T\approx25.85$mV)。
+    pub fn add_diode(&mut self, anode: usize, cathode: usize, saturation_current: f64, n_vt: f64) {
+        self.diodes.push((anode, cathode, saturation_current, n_vt));
+        self.diode_voltage.push(0.0);
     }
 
     pub fn node_voltage(&self, node: usize) -> f64 {
@@ -149,7 +175,48 @@ impl Circuit {
             b_vec[k] = -l_over_dt * self.inductor_current[idx];
         }
 
-        let x = solve_linear_system(a_mat, b_vec);
+        // ダイオード(設計§4「Newton-Raphson反復、電圧ステップ制限つき」)。線形部分の
+        // 行列(上で構築済み)は反復間で不変なので、毎回そのコピーへダイオードの
+        // コンパニオンモデル(現在の動作点まわりの微分コンダクタンス+等価電流源、
+        // コンデンサと同じ構造)だけを追加してから解く。
+        let x = if self.diodes.is_empty() {
+            solve_linear_system(a_mat, b_vec)
+        } else {
+            let mut x = vec![0.0; n];
+            for _ in 0..DIODE_MAX_NEWTON_ITERATIONS {
+                let mut iter_a = a_mat.clone();
+                let mut iter_b = b_vec.clone();
+                for (idx, &(a, b, is_sat, n_vt)) in self.diodes.iter().enumerate() {
+                    let v_op = self.diode_voltage[idx];
+                    let exp_term = (v_op / n_vt).exp();
+                    let i_at_op = is_sat * (exp_term - 1.0);
+                    let g_d = is_sat / n_vt * exp_term;
+                    let i_eq = g_d * v_op - i_at_op;
+                    stamp_conductance(&mut iter_a, a, b, g_d);
+                    if let Some(ia) = node_idx(a) {
+                        iter_b[ia] += i_eq;
+                    }
+                    if let Some(ib) = node_idx(b) {
+                        iter_b[ib] -= i_eq;
+                    }
+                }
+                x = solve_linear_system(iter_a, iter_b);
+
+                let mut max_step = 0.0_f64;
+                for (idx, &(a, b, _, n_vt)) in self.diodes.iter().enumerate() {
+                    let v_new = self.node_voltage_from(&x, a) - self.node_voltage_from(&x, b);
+                    let raw_step = v_new - self.diode_voltage[idx];
+                    // 電圧ステップ制限(設計§4「1反復あたりの変化を2nV_Tにクランプ」)。
+                    let clamped_step = raw_step.clamp(-2.0 * n_vt, 2.0 * n_vt);
+                    self.diode_voltage[idx] += clamped_step;
+                    max_step = max_step.max(clamped_step.abs());
+                }
+                if max_step < DIODE_CONVERGENCE_TOLERANCE {
+                    break;
+                }
+            }
+            x
+        };
 
         self.last_node_voltage = vec![0.0; self.num_nodes];
         self.last_node_voltage[1..self.num_nodes].copy_from_slice(&x[..n_node_unknowns]);
@@ -226,6 +293,45 @@ fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ダイオード整流: 半波整流の平均電圧、rel 2%(設計 docs/13-electromagnetism/02-circuits.md
+    /// §7「ダイオード整流: 半波整流の平均電圧(±2%)」。対応するE番号は無い)。
+    /// 理想ダイオード(順方向降下ゼロ)近似での解析平均 $V_{peak}/\pi$ と比較する。
+    /// $V_{peak}=100V$ に対しShockleyダイオードの実際の順方向降下は約0.77V($I_s=10^{-14}$A,
+    /// $nV_T=25.85$mVでの概算)しかないため、理想近似との差(rel≈1.2%)は2%以内に収まる。
+    #[test]
+    fn diode_half_wave_rectifier_average_output_matches_ideal_diode_approximation() {
+        let v_peak = 100.0;
+        let r = 1000.0;
+        let is_sat = 1e-14; // Si小信号ダイオード(設計§9)
+        let n_vt = 0.02585; // n≈1、300KでのV_T(設計§9)
+
+        let mut circuit = Circuit::new(3); // 0=GND, 1=AC源, 2=出力(ダイオード・抵抗の接続点)
+        circuit.add_voltage_source(1, GROUND, 0.0); // index 0、毎ステップ値を更新する
+        circuit.add_diode(1, 2, is_sat, n_vt); // anode=AC源側、cathode=出力側
+        circuit.add_resistor(2, GROUND, r);
+
+        let period = 1.0; // 角周波数のみが意味を持つ任意単位
+        let omega = 2.0 * std::f64::consts::PI / period;
+        let samples = 1000;
+        let dt = period / samples as f64;
+
+        let mut sum_v_out = 0.0;
+        for i in 0..samples {
+            let t = i as f64 * dt;
+            let v_in = v_peak * (omega * t).sin();
+            circuit.set_voltage_source_voltage(0, v_in);
+            circuit.step(dt);
+            sum_v_out += circuit.node_voltage(2);
+        }
+        let measured_avg = sum_v_out / samples as f64;
+        let expected_avg = v_peak / std::f64::consts::PI;
+        let rel_err = (measured_avg - expected_avg).abs() / expected_avg;
+        assert!(
+            rel_err < 0.02,
+            "measured_avg={measured_avg} expected_avg={expected_avg} rel_err={rel_err}"
+        );
+    }
 
     /// E5: 分圧回路。直並列の解析値と機械精度一致(docs/21-verification/01-analytic-tests.md E5)。
     /// 動的素子が無いため、任意の dt での単一 MNA 解が厳密解と一致する(時間発展不要)。
