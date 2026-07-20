@@ -16,15 +16,17 @@
 
 ## 現在地
 
-- **フェーズ**: 実装(Phase 0 完了。math ウェーブは線形代数・PRNG・積分器カタログの状態非依存部分が Green、場 Grid3/MacGrid が残作業)
-- **作業中**: math ウェーブ残り(場 Grid3/MacGrid、下記 §3)
-- **次**: 場を実装して math ウェーブを完了させたら、Phase A(全ドメインの型・トレイトのスケルトン + 全テスト記述、下記 §2)に着手。
-  線形代数・PRNG・積分器カタログの汎用部分(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/
-  `explicit_euler_step`/`semi_implicit_euler_step`/`velocity_verlet_step`/`rk4_step`(`BallisticIntegrator`)/
-  `BorisPusher`)は依存が無く低リスクなため、Phase A の Red 段階を経ずに直接実装 + テストで Green 化した
-  (§3 の当該行のみ先行完了)。ただし `RigidIntegrator` トレイト(P1、`RigidBodySet` に依存)・
-  陰的 Euler(場が必要)・leapfrog(Yee)・split-step Fourier・XPBD・semi-Lagrangian・BAOAB は
-  状態型を持つ各ドメイン crate が P1–P5 で実装する(sim-math には汎用プリミティブのみ置く)。
+- **フェーズ**: 実装(Phase 0 完了。math ウェーブは状態非依存の全項目が Green — 線形代数・PRNG・
+  積分器カタログ・場(Grid3/MacGrid/PCG/ParticleSet/SpatialHash))
+- **作業中**: なし
+- **次**: Phase A(全ドメインの型・トレイトのスケルトン + 全テスト記述、下記 §2)に着手。
+  math ウェーブ(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの汎用部分/
+  `Grid3`/`MacGrid`/`GridSampler`/トライリニア・Catmull-Rom補間/勾配・ラプラシアン/`pcg`/`ParticleSet`/
+  `SpatialHash`)は依存が無く低リスクなため、Phase A の Red 段階を経ずに直接実装 + テストで Green 化した。
+  ただし `RigidIntegrator` トレイト(P1、`RigidBodySet` に依存)・陰的 Euler の具体的な線形系(場は
+  揃ったが熱ドメインの温度場が必要)・IC(0)前処理(格子ラプラシアンの疎パターンが必要)・
+  leapfrog(Yee)・split-step Fourier・XPBD・semi-Lagrangian・BAOAB は状態型を持つ各ドメイン crate が
+  P1–P5 で実装する(sim-math には汎用プリミティブのみ置く)。
   他ドメインは設計通り Phase A(型スケルトン + 全テスト記述・Red確認)から進める。
 
 ## 0. 設計フェーズ残作業
@@ -91,15 +93,20 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 ### math ウェーブ
 
 - [x] 線形代数(Vec3/Quat/Mat3/テンソル)
-- [ ] 場(MAC / セル中心格子・補間)
-- [ ] 積分器カタログ: 状態非依存の汎用部分は Green
+- [x] 場(MAC / セル中心格子・補間)— `Grid3<T>`/`BoundaryRule`/`GridSampler`(Clamp/Constant/
+      ZeroGradient/Periodic)、トライリニア・Catmull-Rom 補間、勾配・ラプラシアン(一様係数・流束形式の
+      変係数版)、`MacGrid`+発散、PCG(`pcg`、Jacobi 前処理。IC(0) は P3 で具体的な格子ステンシルと
+      併せて実装)、`ParticleSet`、`SpatialHash`(Teschner ハッシュ、総当たり一致テスト済み) —
+      `crates/sim-math/src/{grid,pcg,particles}.rs`
+- [x] 積分器カタログ: 状態非依存の汎用部分は Green
       (explicit/semi-implicit Euler・velocity Verlet・RK4=`BallisticIntegrator`・Boris pusher、
       `crates/sim-math/src/integrators.rs`)。ドメイン状態型が要る残り(XPBD・Euler–Maruyama/BAOAB・
       陰的 Euler・semi-Lagrangian・leapfrog・split-step Fourier)と `RigidIntegrator` トレイトは
       各ドメイン crate の P1–P5 実装時に追加する
 - [x] 決定論 PRNG(SimRng)・分布サンプリング(PCG-XSH-RR 64/32、公式参照ベクタ一致 —
       docs/01-math/04-random.md §1/§3/§5)
-- [ ] 数学基盤テスト・収束次数 ◆ Green(線形代数・PRNG は個別に Green 済み。場・積分器が残る)
+- [x] 数学基盤テスト・収束次数 ◆ Green(sim-math 全体で47テスト。ドメイン結合が要る残りの積分器・
+      IC(0) は各ドメイン crate の担当ウェーブで追加テストする)
 
 ### P1 — 力学基礎
 
