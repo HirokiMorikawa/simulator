@@ -133,6 +133,7 @@ name = "sim-mechanics"
 version = "0.1.0"
 dependencies = [
  "sim-core",
+ "sim-fluid",
  "sim-math",
 ]
 

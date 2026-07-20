@@ -1,9 +1,10 @@
-//! P1 解析解テスト(M5–M9)。定義: docs/21-verification/01-analytic-tests.md。
+//! P1 解析解テスト(M5–M9, F1–F3)。定義: docs/21-verification/01-analytic-tests.md。
 //! ユニットテストではなく crate 公開 API 経由の統合テスト(World 層が無い Phase A 時点の代替)。
 
 use sim_core::{Event, EventQueue, Material, MaterialDb, PairOverride, Solver, SolverContext};
+use sim_fluid::Atmosphere;
 use sim_math::{Quat, SimRng, Vec3};
-use sim_mechanics::{BodyType, MechanicsSolver, RigidBodyDesc, Shape};
+use sim_mechanics::{BodyType, DragModel, MechanicsSolver, RigidBodyDesc, Shape};
 
 fn step_n(solver: &mut MechanicsSolver, materials: &MaterialDb, dt: f64, n: u32) {
     let mut rng = SimRng::new(1, 1);
@@ -349,5 +350,99 @@ fn friction_pair_override_is_honored_in_contact_solver() {
     assert!(
         speed < 1e-3,
         "override friction should keep body static, speed={speed}"
+    );
+}
+
+/// F1: 終端速度(鋼球 半径5mm)— v_t=sqrt(2mg/(ρCdA))、rel 1%
+/// (docs/21-verification/01-analytic-tests.md F1、docs/11-fluid/05-aero-hydrodynamics.md §2.1)。
+/// 空気密度・Cd(亜臨界)は同 §9 のパラメータ表(ISA 15°C 海面)。
+#[test]
+fn f1_terminal_velocity_matches_high_re_drag_formula() {
+    let materials = MaterialDb::standard();
+    let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+
+    let mut solver = MechanicsSolver::new(9.80665);
+    let air_viscosity = 1.81e-5; // CRC Handbook、空気 15°C 近傍
+    let atmosphere = Atmosphere::still(1.225, air_viscosity);
+    solver.atmosphere = Some(atmosphere);
+
+    let radius = 0.005;
+    let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, steel);
+    desc.drag = DragModel::Sphere { radius };
+    let idx = solver.create_body(desc, &materials);
+
+    // v_t/g ~ 数秒のスケール(高Re域では緩和が緩やか)なので30秒(3600 step)与える。
+    step_n(&mut solver, &materials, 1.0 / 120.0, 3600);
+
+    let mass = 7850.0 * (4.0 / 3.0) * std::f64::consts::PI * radius.powi(3);
+    let area = std::f64::consts::PI * radius * radius;
+    let cd = 0.47;
+    let analytic_vt = (2.0 * mass * 9.80665 / (atmosphere.density * cd * area)).sqrt();
+
+    let measured = -solver.bodies.linear_velocity[idx].y; // 下向きが負
+    assert!(
+        (measured - analytic_vt).abs() / analytic_vt < 0.01,
+        "measured={measured} analytic={analytic_vt}"
+    );
+}
+
+/// F2: 雨滴(直径2mm)の終端速度 ≈ 6.5 m/s(Gunn-Kinzer 1949 実測)、rel 5%
+/// (docs/21-verification/01-analytic-tests.md F2)。単純球抗力モデルは雨滴の扁平化を
+/// 表現しないため、実測との差は球近似の既知の誤差として 5% 許容に収まることを検証する。
+#[test]
+fn f2_raindrop_terminal_velocity_matches_gunn_kinzer_measurement() {
+    let materials = MaterialDb::standard();
+    let water = materials.find_by_name("水").unwrap();
+
+    let mut solver = MechanicsSolver::new(9.80665);
+    solver.atmosphere = Some(Atmosphere::still(1.225, 1.81e-5));
+
+    let radius = 0.001; // 直径2mm
+    let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, water);
+    desc.drag = DragModel::Sphere { radius };
+    let idx = solver.create_body(desc, &materials);
+
+    step_n(&mut solver, &materials, 1.0 / 120.0, 600); // 5s、τ~0.34s に対し十分
+
+    let measured = -solver.bodies.linear_velocity[idx].y;
+    let gunn_kinzer = 6.5;
+    assert!(
+        (measured - gunn_kinzer).abs() / gunn_kinzer < 0.05,
+        "measured={measured} gunn_kinzer={gunn_kinzer}"
+    );
+}
+
+/// F3: ストークス沈降 v=2r²Δρg/(9μ)、rel 2%
+/// (docs/21-verification/01-analytic-tests.md F3、docs/11-fluid/05-aero-hydrodynamics.md §2.1)。
+///
+/// 浮力(F4–F6)は未実装のため、本テストは Δρ≈ρ_particle となるよう媒質密度を無視できるほど
+/// 小さく(0.5 kg/m³、実在流体ではなく低Re環境を作るための試験値)取ることで、浮力の欠如が
+/// 与える誤差を目標許容(2%)より十分小さく(<0.1%)抑えて隔離検証する。粘性は Re<0.02(スト
+/// ークス域として十分小さい、Schiller-Naumann補正の寄与 <1%)かつ緩和時定数 τ=(2/9)ρr²/μ が
+/// dt(1/120s)を大きく上回る(数値安定性)ように選ぶ。
+#[test]
+fn f3_stokes_settling_matches_analytic_formula() {
+    let materials = MaterialDb::standard();
+    let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+    let steel_density = 7850.0;
+
+    let mut solver = MechanicsSolver::new(9.80665);
+    let fluid_density = 0.5;
+    let viscosity = 1.0;
+    solver.atmosphere = Some(Atmosphere::still(fluid_density, viscosity));
+
+    let radius = 0.01;
+    let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, steel);
+    desc.drag = DragModel::Sphere { radius };
+    let idx = solver.create_body(desc, &materials);
+
+    step_n(&mut solver, &materials, 1.0 / 120.0, 240); // 2s ~ 11*τ、定常収束に十分
+
+    let delta_rho = steel_density - fluid_density;
+    let analytic = 2.0 * radius * radius * delta_rho * 9.80665 / (9.0 * viscosity);
+    let measured = -solver.bodies.linear_velocity[idx].y;
+    assert!(
+        (measured - analytic).abs() / analytic < 0.02,
+        "measured={measured} analytic={analytic}"
     );
 }

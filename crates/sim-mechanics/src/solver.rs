@@ -6,9 +6,10 @@
 //! 最小CCD・warm starting・split impulse は別増分で追加する
 //! (docs/22-roadmap/01-phases.md P1/P2 ウェーブ)。
 
-use crate::body::{BodyType, RigidBodySet};
+use crate::body::{BodyType, DragModel, RigidBodySet};
 use crate::{collision, contact, RigidBodyDesc};
 use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
+use sim_fluid::Atmosphere;
 
 pub struct MechanicsSolver {
     pub bodies: RigidBodySet,
@@ -17,6 +18,10 @@ pub struct MechanicsSolver {
     /// 反発を無視する接近速度の閾値(設計 §4.3・§9、既定 0.5 m/s)。ジッタ防止用の
     /// ヒューリスティクスであり、理想化された弾性衝突の検証(M5 等)では 0 に下げてよい。
     pub restitution_velocity_threshold: f64,
+    /// 抗力の評価に使う周囲媒質(設計 docs/11-fluid/05-aero-hydrodynamics.md §3)。
+    /// `None`(既定)は真空相当(抗力なし)。P1 は単一の一様媒質のみ(局所媒質・格子流体
+    /// との排他は Phase 3、docs/11-fluid/05 §6)。
+    pub atmosphere: Option<Atmosphere>,
 }
 
 impl MechanicsSolver {
@@ -25,6 +30,7 @@ impl MechanicsSolver {
             bodies: RigidBodySet::new(),
             gravity,
             restitution_velocity_threshold: contact::DEFAULT_RESTITUTION_VELOCITY_THRESHOLD,
+            atmosphere: None,
         }
     }
 
@@ -32,14 +38,21 @@ impl MechanicsSolver {
         self.bodies.create_body(desc, materials)
     }
 
-    /// 設計 §4 パイプラインの `apply_forces`。P1 スコープでは重力のみ
-    /// (抗力・浮力・結合力は流体/熱ウェーブとの結合実装時に追加)。
+    /// 設計 §4 パイプラインの `apply_forces`。P1 スコープ: 重力 + 球の抗力
+    /// (docs/11-fluid/05-aero-hydrodynamics.md §2.1)。浮力・結合力は後続増分。
     fn apply_forces(&mut self) {
         let n = self.bodies.len();
         for i in 0..n {
             if self.bodies.body_type[i] == BodyType::Dynamic {
                 let mass = self.bodies.mass(i);
                 self.bodies.force_accum[i].y -= mass * self.gravity;
+
+                if let (Some(atm), DragModel::Sphere { radius }) =
+                    (&self.atmosphere, self.bodies.drag[i])
+                {
+                    self.bodies.force_accum[i] = self.bodies.force_accum[i]
+                        + sim_fluid::drag_force_sphere(radius, atm, self.bodies.linear_velocity[i]);
+                }
             }
         }
     }

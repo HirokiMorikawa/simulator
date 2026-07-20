@@ -7,3 +7,4 @@ publish.workspace = true
 [dependencies]
 sim-math = { path = "../sim-math" }
 sim-core = { path = "../sim-core" }
+sim-fluid = { path = "../sim-fluid" }
