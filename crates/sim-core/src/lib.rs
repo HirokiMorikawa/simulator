@@ -21,6 +21,16 @@ pub struct BodyId {
     pub generation: u32,
 }
 
+/// 所属フレーム。単一フレームのシーンでは全て `ROOT`。
+/// 設計: docs/00-foundation/02-scale-ladder.md §2.2、docs/00-foundation/04-architecture.md §3。
+/// フル フレーム階層(floating origin)は Pα(docs/20-integration/05-frame-hierarchy.md)で拡張する。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct FrameId(pub u32);
+
+impl FrameId {
+    pub const ROOT: FrameId = FrameId(0);
+}
+
 /// World が唯一持つ時刻。固定 dt・単調増加。壁時計・OS 乱数から独立
 /// (docs/00-foundation/04-architecture.md §1.1.2(4)、
 ///  docs/20-integration/02-determinism-replay.md §2「可変タイムステップ」の禁止)。
@@ -101,6 +111,13 @@ impl StateHasher {
         self.write_f64(v.x);
         self.write_f64(v.y);
         self.write_f64(v.z);
+    }
+
+    pub fn write_quat(&mut self, q: sim_math::Quat) {
+        self.write_f64(q.x);
+        self.write_f64(q.y);
+        self.write_f64(q.z);
+        self.write_f64(q.w);
     }
 
     pub fn finish(&self) -> u64 {

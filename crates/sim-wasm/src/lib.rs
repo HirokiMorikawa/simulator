@@ -23,6 +23,7 @@ impl WasmWorld {
             gravity,
             dt,
             initial_position: sim_math::Vec3::new(0.0, initial_height, 0.0),
+            seed: 0,
         };
         WasmWorld {
             inner: World::new(options),

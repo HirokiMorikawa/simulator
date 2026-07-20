@@ -1,20 +1,21 @@
 //! World facade。設計: docs/00-foundation/04-architecture.md §1.1、
 //!       docs/20-integration/04-world-api.md。
 //!
-//! Phase 0 は完了条件(docs/22-roadmap/01-phases.md Phase 0)である
-//! 「箱 1 個が落ちる最小 World」だけを満たす縮小版。フル API
-//! (create_body/joint/circuit/... 、コマンドキュー、スナップショット等)は
-//! Phase A 以降で docs/20-integration/04-world-api.md §2 に沿って拡張する。
+//! Phase A 時点では最小 World(1 剛体・重力のみ)を正式な `MechanicsSolver`/
+//! `RigidBodySet` 経由で動かす縮小版。フル API(create_body/joint/circuit/...、
+//! コマンドキュー、スナップショット、`Coupling`/`EnergyLedger`)は後続の増分で
+//! docs/20-integration/04-world-api.md §2 に沿って拡張する。
 
-use sim_core::{SimClock, StateHasher};
-use sim_math::Vec3;
-use sim_mechanics::FallingBody;
+use sim_core::{EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
+use sim_math::{SimRng, Transform, Vec3};
+use sim_mechanics::{BodyType, MechanicsSolver, RigidBodyDesc, Shape};
 
-/// Phase 0 の World 生成オプション。
+/// World 生成オプション。
 pub struct WorldOptions {
     pub gravity: f64,
     pub dt: f64,
     pub initial_position: Vec3,
+    pub seed: u64,
 }
 
 impl Default for WorldOptions {
@@ -23,31 +24,65 @@ impl Default for WorldOptions {
             gravity: 9.80665,
             dt: 1.0 / 120.0,
             initial_position: Vec3::new(0.0, 10.0, 0.0),
+            seed: 0,
         }
     }
 }
 
-/// シミュレートされた環境そのもの(Phase 0 縮小版)。
-/// 世界時刻の一意性は `clock`(docs/00-foundation/04-architecture.md §1.1.2(4))、
-/// 状態オーナーシップの一意性は `body` が正典状態を保持することで満たす(同 §1.1.2(1))。
+/// シミュレートされた環境そのもの。世界時刻の一意性は `clock`
+/// (docs/00-foundation/04-architecture.md §1.1.2(4))、状態オーナーシップの一意性は
+/// `mechanics`(正典状態)が保持することで満たす(同 §1.1.2(1))。
 pub struct World {
-    clock: SimClock,
-    gravity: f64,
-    body: FallingBody,
+    clock: sim_core::SimClock,
+    mechanics: MechanicsSolver,
+    materials: MaterialDb,
+    rng: SimRng,
+    events: EventQueue,
+    box_body: usize,
 }
+
+const STREAM_DIAG: u64 = 0;
 
 impl World {
     pub fn new(options: WorldOptions) -> World {
+        let materials = MaterialDb::standard();
+        let steel = materials
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+        let mut mechanics = MechanicsSolver::new(options.gravity);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            steel,
+        );
+        desc.body_type = BodyType::Dynamic;
+        desc.transform = Transform {
+            position: options.initial_position,
+            rotation: sim_math::Quat::IDENTITY,
+        };
+        let box_body = mechanics.create_body(desc, &materials);
+
         World {
-            clock: SimClock::new(options.dt),
-            gravity: options.gravity,
-            body: FallingBody::new(options.initial_position),
+            clock: sim_core::SimClock::new(options.dt),
+            mechanics,
+            materials,
+            rng: SimRng::new(options.seed, STREAM_DIAG),
+            events: EventQueue::new(),
+            box_body,
         }
     }
 
     /// 1 world step(固定 dt)。docs/20-integration/04-world-api.md §2 の `step()`。
     pub fn step(&mut self) {
-        self.body.step(self.gravity, self.clock.dt());
+        let dt = self.clock.dt();
+        let mut ctx = SolverContext {
+            materials: &self.materials,
+            rng: &mut self.rng,
+            events: &mut self.events,
+        };
+        self.mechanics.step(dt, &mut ctx);
+        let _ = self.events.drain_sorted(); // Phase A: 購読者未実装のため排出のみ。
         self.clock.advance();
     }
 
@@ -60,17 +95,16 @@ impl World {
     }
 
     pub fn body_position(&self) -> Vec3 {
-        self.body.position
+        self.mechanics.bodies.position[self.box_body]
     }
 
-    /// 全状態(clock + body)を決定的順序でハッシュする。
+    /// 全状態(clock + mechanics)を決定的順序でハッシュする。
     /// 設計: docs/20-integration/02-determinism-replay.md §3。
     pub fn state_hash(&self) -> u64 {
         let mut hasher = StateHasher::new();
         hasher.write_u64(self.clock.step_count());
         hasher.write_f64(self.clock.time());
-        hasher.write_vec3(self.body.position);
-        hasher.write_vec3(self.body.velocity);
+        self.mechanics.state_hash(&mut hasher);
         hasher.finish()
     }
 }
