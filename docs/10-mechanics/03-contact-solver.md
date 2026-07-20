@@ -95,7 +95,12 @@ solve_normal(point p):
 
 ### 4.3 velocity_bias(反発と位置補正)
 
-$$b = \underbrace{-e \cdot \max(-v_n^{pre} - v_{thresh},\, 0)}_{反発} \;+\; \underbrace{\frac{\beta}{\Delta t}\max(\delta - \delta_{slop},\, 0)}_{Baumgarte}$$
+$$b = \underbrace{e \cdot \max(-v_n^{pre} - v_{thresh},\, 0)}_{反発} \;+\; \underbrace{\frac{\beta}{\Delta t}\max(\delta - \delta_{slop},\, 0)}_{Baumgarte}$$
+
+（符号の根拠: $v_n$ は A→B 法線方向の分離速度と定義されているため、接近中は $v_n^{pre}<0$ で
+$-v_n^{pre}$ が接近速度の大きさになる。§2.3 の目標 $v_n^+ = -e\,v_n^-$ は $v_n^->0$ の下で
+正の分離速度を要求するので、反発項の係数は **符号 $+e$**（実装時に判明した符号誤りを修正、
+docs/22-roadmap/01-phases.md 横断ルール5「実装が設計から乖離したら設計書を先に改訂する」に基づく訂正）。
 
 - $v_n^{pre}$: ソルバ開始前(重力適用後)の法線速度。反発閾値 $v_{thresh} = 0.5$ m/s 未満の
   微小衝突では反発させない(静止接触のジッタ・微小バウンド防止)。
