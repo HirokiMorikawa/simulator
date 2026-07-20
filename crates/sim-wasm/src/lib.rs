@@ -7,12 +7,14 @@
 //! Phase A 以降で追加する。
 
 use js_sys::Float32Array;
+use sim_mechanics::{RigidBodyDesc, Shape};
 use sim_world::{World, WorldOptions};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
+    box_body: usize,
 }
 
 #[wasm_bindgen]
@@ -22,12 +24,22 @@ impl WasmWorld {
         let options = WorldOptions {
             gravity,
             dt,
-            initial_position: sim_math::Vec3::new(0.0, initial_height, 0.0),
             seed: 0,
         };
-        WasmWorld {
-            inner: World::new(options),
-        }
+        let mut inner = World::new(options);
+        let steel = inner
+            .materials()
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: sim_math::Vec3::new(0.5, 0.5, 0.5),
+            },
+            steel,
+        );
+        desc.transform.position = sim_math::Vec3::new(0.0, initial_height, 0.0);
+        let box_body = inner.create_body(desc);
+        WasmWorld { inner, box_body }
     }
 
     /// 1 world step。
@@ -47,7 +59,7 @@ impl WasmWorld {
     /// 05-rust-wasm-platform.md §3 の `body_transforms_f32` の Phase 0 縮小版
     /// (回転は未実装のため位置のみ)。
     pub fn body_position_f32(&self) -> Float32Array {
-        let p = self.inner.body_position();
+        let p = self.inner.body_position(self.box_body);
         let out = Float32Array::new_with_length(3);
         out.set_index(0, p.x as f32);
         out.set_index(1, p.y as f32);

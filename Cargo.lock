@@ -175,6 +175,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "sim-math",
+ "sim-mechanics",
  "sim-world",
  "wasm-bindgen",
 ]

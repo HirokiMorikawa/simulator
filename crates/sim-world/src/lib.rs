@@ -1,22 +1,25 @@
 //! World facade。設計: docs/00-foundation/04-architecture.md §1.1、
 //!       docs/20-integration/04-world-api.md。
 //!
-//! Phase A 時点では最小 World(1 剛体・重力のみ)を正式な `MechanicsSolver`/
-//! `RigidBodySet` 経由で動かす縮小版。フル API(create_body/joint/circuit/...、
-//! コマンドキュー、スナップショット、`Coupling`)は後続の増分で
-//! docs/20-integration/04-world-api.md §2 に沿って拡張する。
+//! Phase A 時点では `create_body` による複数剛体の構築 + `MechanicsSolver` 駆動を
+//! 正式な `RigidBodySet` 経由で提供する縮小版。フル API(joint/circuit/fluid region/
+//! Coupling、コマンドキュー、スナップショット、シーン JSON)は後続の増分で
+//! docs/20-integration/04-world-api.md §2 に沿って拡張する。`BodyId` は現時点では
+//! 世代なしの `usize`(`RigidBodySet` が削除・再利用に未対応のため。世代付き
+//! `sim_core::BodyId` への移行は `remove_body` 実装時)。
 //! `EnergyLedger`(docs/00-foundation/04-architecture.md §1.1.2(2))は P1 で導入済み:
-//! 毎 step 後に mechanics ドメインの `total_energy()` を記帳する。
+//! シーン構築(`create_body` 呼び出し列)が終わり最初の `step()` が呼ばれた時点の
+//! 合計エネルギーを基準点として、以後毎 step 後に記帳する(構築途中の`create_body`
+//! 呼び出し自体は台帳上の「エネルギーの出現」として扱わない)。
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
-use sim_math::{SimRng, Transform, Vec3};
-use sim_mechanics::{BodyType, MechanicsSolver, RigidBodyDesc, Shape};
+use sim_math::{SimRng, Vec3};
+use sim_mechanics::{MechanicsSolver, RigidBodyDesc};
 
-/// World 生成オプション。
+/// World 生成オプション。剛体はここでは作らず `create_body` で追加する。
 pub struct WorldOptions {
     pub gravity: f64,
     pub dt: f64,
-    pub initial_position: Vec3,
     pub seed: u64,
 }
 
@@ -25,7 +28,6 @@ impl Default for WorldOptions {
         WorldOptions {
             gravity: 9.80665,
             dt: 1.0 / 120.0,
-            initial_position: Vec3::new(0.0, 10.0, 0.0),
             seed: 0,
         }
     }
@@ -40,8 +42,9 @@ pub struct World {
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
-    box_body: usize,
-    ledger: EnergyLedger,
+    /// 最初の `step()` で遅延初期化する(構築フェーズの `create_body` を
+    /// 台帳の基準点計算に含めないため)。
+    ledger: Option<EnergyLedger>,
 }
 
 const STREAM_DIAG: u64 = 0;
@@ -52,38 +55,40 @@ const ENERGY_SCALE_FLOOR: f64 = 1.0;
 
 impl World {
     pub fn new(options: WorldOptions) -> World {
-        let materials = MaterialDb::standard();
-        let steel = materials
-            .find_by_name("鋼(炭素鋼)")
-            .expect("standard DB has steel");
-        let mut mechanics = MechanicsSolver::new(options.gravity);
-        let mut desc = RigidBodyDesc::dynamic(
-            Shape::Box {
-                half_extents: Vec3::new(0.5, 0.5, 0.5),
-            },
-            steel,
-        );
-        desc.body_type = BodyType::Dynamic;
-        desc.transform = Transform {
-            position: options.initial_position,
-            rotation: sim_math::Quat::IDENTITY,
-        };
-        let box_body = mechanics.create_body(desc, &materials);
-        let initial_energy = mechanics.total_energy().total();
-
         World {
             clock: sim_core::SimClock::new(options.dt),
-            mechanics,
-            materials,
+            mechanics: MechanicsSolver::new(options.gravity),
+            materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
-            box_body,
-            ledger: EnergyLedger::new(initial_energy),
+            ledger: None,
         }
+    }
+
+    /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す
+    /// `MaterialId` の解決に使う。
+    pub fn materials(&self) -> &MaterialDb {
+        &self.materials
+    }
+
+    /// 剛体を追加する。設計 docs/20-integration/04-world-api.md §2 の `create_body`
+    /// (戻り値は現時点では世代なし index、モジュール冒頭注記)。
+    pub fn create_body(&mut self, desc: RigidBodyDesc) -> usize {
+        self.mechanics.create_body(desc, &self.materials)
+    }
+
+    /// 直接可変アクセス(抗力・浮力の周囲媒質設定など)。設計が定める
+    /// 「書き込みはコマンド経由」規律の対象は実行中の状態変更であり、
+    /// シーン構築時の設定はこの限りでない(§1 設計原則)。
+    pub fn mechanics_mut(&mut self) -> &mut MechanicsSolver {
+        &mut self.mechanics
     }
 
     /// 1 world step(固定 dt)。docs/20-integration/04-world-api.md §2 の `step()`。
     pub fn step(&mut self) {
+        if self.ledger.is_none() {
+            self.ledger = Some(EnergyLedger::new(self.mechanics.total_energy().total()));
+        }
         let dt = self.clock.dt();
         let mut ctx = SolverContext {
             materials: &self.materials,
@@ -93,18 +98,21 @@ impl World {
         self.mechanics.step(dt, &mut ctx);
         let _ = self.events.drain_sorted(); // Phase A: 購読者未実装のため排出のみ。
         self.ledger
+            .as_mut()
+            .expect("initialized above")
             .record(self.mechanics.total_energy().total(), ENERGY_SCALE_FLOOR);
         self.clock.advance();
     }
 
     /// 直近の記帳残差(設計 docs/21-verification/02-conservation-laws.md §2)。
     /// トレンド監視指標であり、単発のバグ検出には使わない(ドメイン別保存則テストが担う)。
+    /// `step()` を一度も呼んでいない場合は 0。
     pub fn energy_residual(&self) -> f64 {
-        self.ledger.latest_residual()
+        self.ledger.as_ref().map_or(0.0, |l| l.latest_residual())
     }
 
     pub fn energy_residual_history(&self) -> &[f64] {
-        self.ledger.residual_history()
+        self.ledger.as_ref().map_or(&[], |l| l.residual_history())
     }
 
     pub fn time(&self) -> f64 {
@@ -115,8 +123,8 @@ impl World {
         self.clock.step_count()
     }
 
-    pub fn body_position(&self) -> Vec3 {
-        self.mechanics.bodies.position[self.box_body]
+    pub fn body_position(&self, body: usize) -> Vec3 {
+        self.mechanics.bodies.position[body]
     }
 
     /// 全状態(clock + mechanics)を決定的順序でハッシュする。
@@ -133,16 +141,63 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sim_math::Transform;
+    use sim_mechanics::{BodyType, Shape};
+
+    const INITIAL_HEIGHT: f64 = 10.0;
+
+    /// Phase 0 相当の「箱1個が落ちる」シーンを構築する(鋼の箱、高さ `INITIAL_HEIGHT`)。
+    fn create_falling_box(world: &mut World) -> usize {
+        let steel = world
+            .materials()
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            steel,
+        );
+        desc.body_type = BodyType::Dynamic;
+        desc.transform = Transform {
+            position: Vec3::new(0.0, INITIAL_HEIGHT, 0.0),
+            rotation: sim_math::Quat::IDENTITY,
+        };
+        world.create_body(desc)
+    }
 
     #[test]
     fn box_falls_and_test_is_green() {
         let mut world = World::new(WorldOptions::default());
-        let y0 = world.body_position().y;
+        let idx = create_falling_box(&mut world);
+        let y0 = world.body_position(idx).y;
         for _ in 0..120 {
             world.step();
         }
-        assert!(world.body_position().y < y0);
+        assert!(world.body_position(idx).y < y0);
         assert_eq!(world.step_count(), 120);
+    }
+
+    /// 複数剛体: create_body を複数回呼んでも各 body が独立に扱えること。
+    #[test]
+    fn multiple_bodies_are_independently_addressable() {
+        let mut world = World::new(WorldOptions::default());
+        let a = create_falling_box(&mut world);
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.2 }, steel);
+        desc.body_type = BodyType::Static; // 静止参照点(比較用)
+        desc.transform.position = Vec3::new(3.0, 2.0, 0.0);
+        let b = world.create_body(desc);
+
+        for _ in 0..60 {
+            world.step();
+        }
+        assert!(world.body_position(a).y < INITIAL_HEIGHT, "a should fall");
+        assert_eq!(
+            world.body_position(b),
+            Vec3::new(3.0, 2.0, 0.0),
+            "static body must not move"
+        );
     }
 
     /// 決定論テスト(階層1): 同一初期条件 → 同数ステップ後のハッシュが一致する。
@@ -151,6 +206,7 @@ mod tests {
     fn determinism_same_scenario_twice_matches_hash() {
         let run = || {
             let mut world = World::new(WorldOptions::default());
+            create_falling_box(&mut world);
             for _ in 0..300 {
                 world.step();
             }
@@ -167,18 +223,20 @@ mod tests {
     /// あり不明な漏れではない)。E(0)=m g h0 が ENERGY_SCALE_FLOOR を大きく上回るので
     /// residual の scale は E(0) に決まり、質量 m が式から消える:
     /// residual(N) = N * 0.5 * g * dt^2 / h0。台帳の記帳がこの解析予測と一致することを検証する。
+    /// (台帳は最初の `step()` で遅延初期化するため、`create_body` はここでは計上されない。)
     #[test]
     fn energy_ledger_residual_matches_analytic_symplectic_drift() {
         let options = WorldOptions::default();
-        let (g, dt, h0) = (options.gravity, options.dt, options.initial_position.y);
+        let (g, dt) = (options.gravity, options.dt);
         let n = 100u32;
 
-        let mut world = World::new(WorldOptions::default());
+        let mut world = World::new(options);
+        create_falling_box(&mut world);
         for _ in 0..n {
             world.step();
         }
 
-        let expected = n as f64 * 0.5 * g * dt * dt / h0;
+        let expected = n as f64 * 0.5 * g * dt * dt / INITIAL_HEIGHT;
         let measured = world.energy_residual();
         assert!(
             (measured - expected).abs() / expected < 1e-6,
