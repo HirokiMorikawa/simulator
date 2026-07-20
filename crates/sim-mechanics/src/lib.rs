@@ -12,10 +12,14 @@ mod contact;
 mod joint;
 mod shape;
 mod sleep;
+mod soft_body;
 mod solver;
 
 pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};
 pub use collision::{ContactManifold, ContactPoint};
 pub use joint::{BallJoint, DistanceJoint};
 pub use shape::{Aabb, Shape};
+pub use soft_body::{
+    rope, DistanceConstraint, SoftBody, DEFAULT_DAMPING, DEFAULT_ITERATIONS, DEFAULT_SUBSTEPS,
+};
 pub use solver::MechanicsSolver;
