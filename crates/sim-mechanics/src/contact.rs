@@ -10,6 +10,7 @@
 
 use crate::body::RigidBodySet;
 use crate::collision::ContactManifold;
+use crate::shape::Shape;
 use sim_core::MaterialDb;
 use sim_math::{Mat3, Vec3};
 use std::collections::BTreeMap;
@@ -39,6 +40,10 @@ const SLOP: f64 = 0.005;
 pub const VELOCITY_ITERATIONS: u32 = 10;
 /// position iterations 既定回数。設計 §9(Box2D 準拠)。
 pub const POSITION_ITERATIONS: u32 = 4;
+/// 転がり摩擦係数の既定値(設計 04-friction.md §9「硬い面の代表値」)。材料ペア表は
+/// 持たず単一既定値のみ(設計のパラメータ表自体が単一値であり、滑り摩擦のような
+/// ペア表は要求していない)。
+const DEFAULT_ROLLING_FRICTION: f64 = 0.005;
 
 struct PointConstraint {
     r_a: Vec3,
@@ -46,11 +51,13 @@ struct PointConstraint {
     feature_id: u32,
     normal_mass: f64,
     tangent_mass: (f64, f64),
+    rolling_mass: (f64, f64),
     velocity_bias: f64,
     /// split impulse(§4.5)の位置補正チャンネル専用。速度には影響しない。
     penetration: f64,
     normal_impulse: f64,
     tangent_impulse: (f64, f64),
+    rolling_impulse: (f64, f64),
 }
 
 struct Constraint {
@@ -59,6 +66,10 @@ struct Constraint {
     normal: Vec3,
     tangent: (Vec3, Vec3),
     friction: f64,
+    /// 転がり摩擦のトルク上限 μ_roll・N・r の r(設計 04-friction.md §4.1)。
+    /// Sphere 形状の半径から求める(接触する2体のうち球のものを採用、両方球なら大きい方)。
+    /// 球でない接触(箱同士等)は 0 になり転がり摩擦は自動的に無効化される。
+    rolling_radius: f64,
     points: Vec<PointConstraint>,
 }
 
@@ -78,6 +89,24 @@ fn effective_mass(
         1.0 / k
     } else {
         0.0
+    }
+}
+
+/// 転がり摩擦は純粋な偶力(トルクのみ、線形速度に寄与しない)なので、有効質量も
+/// 角速度項のみで決まる(設計 04-friction.md §4.1)。
+fn angular_effective_mass(inv_ia: Mat3, inv_ib: Mat3, dir: Vec3) -> f64 {
+    let k = dir.dot(inv_ia.mul_vec(dir)) + dir.dot(inv_ib.mul_vec(dir));
+    if k > 0.0 {
+        1.0 / k
+    } else {
+        0.0
+    }
+}
+
+fn sphere_radius(shape: &Shape) -> f64 {
+    match shape {
+        Shape::Sphere { radius } => *radius,
+        _ => 0.0,
     }
 }
 
@@ -103,6 +132,8 @@ fn prepare(
             let (t1, t2) = m.normal.orthonormal_basis();
             let friction = materials.friction_pair(bodies.material[a], bodies.material[b]);
             let restitution = materials.restitution_pair(bodies.material[a], bodies.material[b]);
+            let rolling_radius =
+                sphere_radius(bodies.shape_of(a)).max(sphere_radius(bodies.shape_of(b)));
 
             let points = m
                 .points
@@ -139,6 +170,18 @@ fn prepare(
                             t2,
                         ),
                     );
+                    let rolling_mass = (
+                        angular_effective_mass(
+                            bodies.inv_inertia_world[a],
+                            bodies.inv_inertia_world[b],
+                            t1,
+                        ),
+                        angular_effective_mass(
+                            bodies.inv_inertia_world[a],
+                            bodies.inv_inertia_world[b],
+                            t2,
+                        ),
+                    );
 
                     let v_a =
                         point_velocity(bodies.linear_velocity[a], bodies.angular_velocity[a], r_a);
@@ -162,10 +205,12 @@ fn prepare(
                         feature_id: p.feature_id,
                         normal_mass,
                         tangent_mass,
+                        rolling_mass,
                         velocity_bias: restitution_bias,
                         penetration: p.penetration,
                         normal_impulse: warm.normal,
                         tangent_impulse: warm.tangent,
+                        rolling_impulse: (0.0, 0.0),
                     }
                 })
                 .collect();
@@ -176,6 +221,7 @@ fn prepare(
                 normal: m.normal,
                 tangent: (t1, t2),
                 friction,
+                rolling_radius,
                 points,
             }
         })
@@ -257,6 +303,52 @@ fn solve_tangent(c: &mut Constraint, bodies: &mut RigidBodySet) {
             let impulse = tangent.scale(applied);
             apply_impulse(bodies, c.body_a, impulse, p.r_a, -1.0);
             apply_impulse(bodies, c.body_b, impulse, p.r_b, 1.0);
+        }
+    }
+}
+
+fn apply_angular_impulse(bodies: &mut RigidBodySet, body: usize, angular_impulse: Vec3, sign: f64) {
+    let inv_i = bodies.inv_inertia_world[body];
+    bodies.angular_velocity[body] =
+        bodies.angular_velocity[body] + inv_i.mul_vec(angular_impulse).scale(sign);
+}
+
+/// 設計 04-friction.md §4.1「転がる球・円柱の減速…トルク制約 |τ_roll|≤μ_roll・N・r を
+/// 同じクランプ構造で実装」。純粋な偶力(等大反対のトルクのみ、線形速度は変えない)なので
+/// `solve_tangent` と異なり `apply_impulse` の r×impulse 経由ではなく角速度を直接更新する。
+/// `rolling_radius` が 0(非球形接触)なら limit が常に 0 になり事実上無効化される。
+fn solve_rolling(c: &mut Constraint, bodies: &mut RigidBodySet) {
+    if c.rolling_radius <= 0.0 {
+        return;
+    }
+    for p in &mut c.points {
+        for (k, tangent) in [c.tangent.0, c.tangent.1].into_iter().enumerate() {
+            let w_t =
+                tangent.dot(bodies.angular_velocity[c.body_b] - bodies.angular_velocity[c.body_a]);
+
+            let mass = if k == 0 {
+                p.rolling_mass.0
+            } else {
+                p.rolling_mass.1
+            };
+            let delta = -w_t * mass;
+            let old = if k == 0 {
+                p.rolling_impulse.0
+            } else {
+                p.rolling_impulse.1
+            };
+            let limit = DEFAULT_ROLLING_FRICTION * p.normal_impulse * c.rolling_radius;
+            let new_impulse = (old + delta).clamp(-limit, limit);
+            if k == 0 {
+                p.rolling_impulse.0 = new_impulse;
+            } else {
+                p.rolling_impulse.1 = new_impulse;
+            }
+            let applied = new_impulse - old;
+
+            let angular_impulse = tangent.scale(applied);
+            apply_angular_impulse(bodies, c.body_a, angular_impulse, -1.0);
+            apply_angular_impulse(bodies, c.body_b, angular_impulse, 1.0);
         }
     }
 }
@@ -358,6 +450,7 @@ pub fn resolve(
         for c in &mut constraints {
             solve_normal(c, bodies);
             solve_tangent(c, bodies);
+            solve_rolling(c, bodies);
         }
     }
     position_correction(&constraints, bodies);

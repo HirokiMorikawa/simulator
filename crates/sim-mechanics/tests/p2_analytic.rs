@@ -74,3 +74,71 @@ fn m12_four_box_stack_settles_below_velocity_threshold() {
         below_top = solver.bodies.position[idx].y + half;
     }
 }
+
+/// 転がり摩擦(docs/10-mechanics/04-friction.md §4.1「トルク制約 |τ_roll|≤μ_roll・N・r」)。
+/// M-series には対応する番号がないため、設計の力学導出をそのままテストにする:
+/// 滑りなし転がり(v=-ωr)を初期条件に与えると、エネルギー収支
+/// $\frac{d}{dt}\left(\frac{7}{10}mv^2\right) = -\tau_{roll}\,\omega$
+/// (剛体球の慣性 $I=\frac25 mr^2$ を含む有効質量 $\frac75 m$ から)より並進減速度は
+/// $a=\frac57\mu_{roll} g$ になる(単純な $a=\mu_{roll} g$ ではない)。転がり摩擦が
+/// 無ければ(設計 §1「これが無いと球が永遠に転がり続ける」)速度は一定のまま減衰しない。
+#[test]
+fn rolling_friction_decelerates_ball_at_designed_rate() {
+    let materials = MaterialDb::standard();
+    let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+    let gravity = 9.80665;
+
+    let mut solver = MechanicsSolver::new(gravity);
+    let radius = 0.1;
+    let v0 = 2.0;
+    let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, steel);
+    desc.transform.position = Vec3::new(0.0, radius, 0.0);
+    desc.linear_velocity = Vec3::new(v0, 0.0, 0.0);
+    // 滑りなし転がり(初期スリップ0)。接触点オフセット r_a=(0,-radius,0) に対し
+    // v + ω×r_a = 0 を満たす ω は (0,0,-v0/radius)。
+    desc.angular_velocity = Vec3::new(0.0, 0.0, -v0 / radius);
+    let idx = solver.create_body(desc, &materials);
+
+    let plane = RigidBodyDesc {
+        body_type: BodyType::Static,
+        ..RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            steel,
+        )
+    };
+    solver.create_body(plane, &materials);
+
+    let dt = 1.0 / 120.0;
+    let duration = 20.0;
+    let mut rng = SimRng::new(1, 1);
+    let mut events = EventQueue::new();
+    for _ in 0..(duration / dt) as u32 {
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        solver.step(dt, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+    }
+
+    let final_speed = solver.bodies.linear_velocity[idx].x;
+    let final_omega = solver.bodies.angular_velocity[idx].z;
+    // 滑りなし転がりを維持していること(v ≈ -ω・radius)の確認。
+    assert!(
+        (final_speed + final_omega * radius).abs() / v0 < 0.01,
+        "rolling constraint violated: v={final_speed} omega={final_omega}"
+    );
+
+    const ROLLING_FRICTION: f64 = 0.005; // crates/sim-mechanics/src/contact.rs の既定値と同じ
+    let expected_decel = (5.0 / 7.0) * ROLLING_FRICTION * gravity;
+    let measured_decel = (v0 - final_speed) / duration;
+    let rel_err = (measured_decel - expected_decel).abs() / expected_decel;
+    assert!(
+        rel_err < 0.02,
+        "measured_decel={measured_decel} expected_decel={expected_decel} rel_err={rel_err}"
+    );
+}
