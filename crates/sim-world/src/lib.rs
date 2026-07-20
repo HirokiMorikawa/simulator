@@ -3,10 +3,12 @@
 //!
 //! Phase A 時点では最小 World(1 剛体・重力のみ)を正式な `MechanicsSolver`/
 //! `RigidBodySet` 経由で動かす縮小版。フル API(create_body/joint/circuit/...、
-//! コマンドキュー、スナップショット、`Coupling`/`EnergyLedger`)は後続の増分で
+//! コマンドキュー、スナップショット、`Coupling`)は後続の増分で
 //! docs/20-integration/04-world-api.md §2 に沿って拡張する。
+//! `EnergyLedger`(docs/00-foundation/04-architecture.md §1.1.2(2))は P1 で導入済み:
+//! 毎 step 後に mechanics ドメインの `total_energy()` を記帳する。
 
-use sim_core::{EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
+use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_math::{SimRng, Transform, Vec3};
 use sim_mechanics::{BodyType, MechanicsSolver, RigidBodyDesc, Shape};
 
@@ -39,9 +41,14 @@ pub struct World {
     rng: SimRng,
     events: EventQueue,
     box_body: usize,
+    ledger: EnergyLedger,
 }
 
 const STREAM_DIAG: u64 = 0;
+/// エネルギー台帳の代表エネルギー(ゼロ初期エネルギー対策の下限)。設計
+/// docs/21-verification/02-conservation-laws.md §2 の E_scale。シーンごとの代表値を求める
+/// API はまだ無いため、P1 では固定値 1 J とする(将来シーン記述に応じて拡張)。
+const ENERGY_SCALE_FLOOR: f64 = 1.0;
 
 impl World {
     pub fn new(options: WorldOptions) -> World {
@@ -62,6 +69,7 @@ impl World {
             rotation: sim_math::Quat::IDENTITY,
         };
         let box_body = mechanics.create_body(desc, &materials);
+        let initial_energy = mechanics.total_energy().total();
 
         World {
             clock: sim_core::SimClock::new(options.dt),
@@ -70,6 +78,7 @@ impl World {
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
             box_body,
+            ledger: EnergyLedger::new(initial_energy),
         }
     }
 
@@ -83,7 +92,19 @@ impl World {
         };
         self.mechanics.step(dt, &mut ctx);
         let _ = self.events.drain_sorted(); // Phase A: 購読者未実装のため排出のみ。
+        self.ledger
+            .record(self.mechanics.total_energy().total(), ENERGY_SCALE_FLOOR);
         self.clock.advance();
+    }
+
+    /// 直近の記帳残差(設計 docs/21-verification/02-conservation-laws.md §2)。
+    /// トレンド監視指標であり、単発のバグ検出には使わない(ドメイン別保存則テストが担う)。
+    pub fn energy_residual(&self) -> f64 {
+        self.ledger.latest_residual()
+    }
+
+    pub fn energy_residual_history(&self) -> &[f64] {
+        self.ledger.residual_history()
     }
 
     pub fn time(&self) -> f64 {
@@ -138,5 +159,33 @@ mod tests {
         let hash_a = run();
         let hash_b = run();
         assert_eq!(hash_a, hash_b);
+    }
+
+    /// エネルギー台帳: 接触なし自由落下では semi-implicit Euler が定数外力(一様重力)に対して
+    /// 1 step あたり厳密に `-0.5 m g^2 dt^2` の力学的エネルギー損失を持つ(周期軌道でないため
+    /// symplectic 特有の有界誤差ではなく、線形ドリフトになる — 既知の積分器由来のドリフトで
+    /// あり不明な漏れではない)。E(0)=m g h0 が ENERGY_SCALE_FLOOR を大きく上回るので
+    /// residual の scale は E(0) に決まり、質量 m が式から消える:
+    /// residual(N) = N * 0.5 * g * dt^2 / h0。台帳の記帳がこの解析予測と一致することを検証する。
+    #[test]
+    fn energy_ledger_residual_matches_analytic_symplectic_drift() {
+        let options = WorldOptions::default();
+        let (g, dt, h0) = (options.gravity, options.dt, options.initial_position.y);
+        let n = 100u32;
+
+        let mut world = World::new(WorldOptions::default());
+        for _ in 0..n {
+            world.step();
+        }
+
+        let expected = n as f64 * 0.5 * g * dt * dt / h0;
+        let measured = world.energy_residual();
+        assert!(
+            (measured - expected).abs() / expected < 1e-6,
+            "measured={measured} expected={expected}"
+        );
+        assert_eq!(world.energy_residual_history().len(), n as usize);
+        // 外力なし・接触なしの単調な力学的エネルギー減少なので残差は単調非減少のはず。
+        assert!(world.energy_residual_history()[0] <= measured);
     }
 }

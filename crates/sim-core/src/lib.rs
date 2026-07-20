@@ -6,8 +6,10 @@
 //! `Solver`/`Coupling` トレイト・`EventQueue`・`CommandQueue` 等は Phase A で
 //! 各ドメインスケルトンと合わせて追加する(docs/00-foundation/04-architecture.md §1.2–1.3)。
 
+mod ledger;
 mod material;
 mod solver;
+pub use ledger::EnergyLedger;
 pub use material::{Material, MaterialDb, MaterialId, PairOverride, PhaseChangeProps};
 pub use solver::{
     DomainId, EnergyBreakdown, Event, EventKind, EventQueue, Solver, SolverContext, SourceId,
