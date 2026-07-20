@@ -7,9 +7,10 @@
 //! (docs/22-roadmap/01-phases.md P1/P2 ウェーブ)。
 
 use crate::body::{BodyType, DragModel, RigidBodySet};
+use crate::shape::Shape;
 use crate::{collision, contact, RigidBodyDesc};
 use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
-use sim_fluid::Atmosphere;
+use sim_fluid::{Atmosphere, StaticWaterRegion};
 
 pub struct MechanicsSolver {
     pub bodies: RigidBodySet,
@@ -22,6 +23,9 @@ pub struct MechanicsSolver {
     /// `None`(既定)は真空相当(抗力なし)。P1 は単一の一様媒質のみ(局所媒質・格子流体
     /// との排他は Phase 3、docs/11-fluid/05 §6)。
     pub atmosphere: Option<Atmosphere>,
+    /// 浮力の評価に使う静的水域(設計 docs/11-fluid/04-free-surface-buoyancy.md §3)。
+    /// `None`(既定)は水域なし。P1 は直立姿勢の直方体のみ対応(`sim_fluid::buoyancy` 冒頭注記)。
+    pub water: Option<StaticWaterRegion>,
 }
 
 impl MechanicsSolver {
@@ -31,6 +35,7 @@ impl MechanicsSolver {
             gravity,
             restitution_velocity_threshold: contact::DEFAULT_RESTITUTION_VELOCITY_THRESHOLD,
             atmosphere: None,
+            water: None,
         }
     }
 
@@ -39,7 +44,8 @@ impl MechanicsSolver {
     }
 
     /// 設計 §4 パイプラインの `apply_forces`。P1 スコープ: 重力 + 球の抗力
-    /// (docs/11-fluid/05-aero-hydrodynamics.md §2.1)。浮力・結合力は後続増分。
+    /// (docs/11-fluid/05-aero-hydrodynamics.md §2.1)+ 直立直方体の浮力
+    /// (docs/11-fluid/04-free-surface-buoyancy.md §2.1)。結合力は後続増分。
     fn apply_forces(&mut self) {
         let n = self.bodies.len();
         for i in 0..n {
@@ -52,6 +58,23 @@ impl MechanicsSolver {
                 {
                     self.bodies.force_accum[i] = self.bodies.force_accum[i]
                         + sim_fluid::drag_force_sphere(radius, atm, self.bodies.linear_velocity[i]);
+                }
+
+                if let (Some(water), Shape::Box { half_extents }) =
+                    (&self.water, self.bodies.shape_of(i))
+                {
+                    let (v_sub, _c_buoy) = sim_fluid::submerged_box_axis_aligned(
+                        self.bodies.position[i],
+                        *half_extents,
+                        water.water_level,
+                    );
+                    // 浮心は直立対称箱では常に body 中心と同じ x,z を持ち、浮力は鉛直成分
+                    // のみなのでトルクは厳密に0(r×F、r・Fが共にy軸方向で外積0)。
+                    // トルク適用は不要(_c_buoy は式の対称性の記録として保持)。
+                    if v_sub > 0.0 {
+                        self.bodies.force_accum[i] = self.bodies.force_accum[i]
+                            + sim_fluid::buoyancy_force(v_sub, water.density, self.gravity);
+                    }
                 }
             }
         }

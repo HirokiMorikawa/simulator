@@ -1,10 +1,31 @@
-//! P1 解析解テスト(M5–M9, F1–F3)。定義: docs/21-verification/01-analytic-tests.md。
+//! P1 解析解テスト(M5–M9, F1–F5)。定義: docs/21-verification/01-analytic-tests.md。
+//! (F6 は代数検算のためユニットテスト crates/sim-fluid/src/buoyancy.rs で検証)
 //! ユニットテストではなく crate 公開 API 経由の統合テスト(World 層が無い Phase A 時点の代替)。
 
 use sim_core::{Event, EventQueue, Material, MaterialDb, PairOverride, Solver, SolverContext};
-use sim_fluid::Atmosphere;
+use sim_fluid::{Atmosphere, StaticWaterRegion};
 use sim_math::{Quat, SimRng, Vec3};
 use sim_mechanics::{BodyType, DragModel, MechanicsSolver, RigidBodyDesc, Shape};
+
+/// 密度 `density` の試験用材料を登録する(摩擦・反発はゼロ、F4/F5 の浮力単体テスト用)。
+fn buoyancy_test_material(materials: &mut MaterialDb, density: f64) -> sim_core::MaterialId {
+    materials.push(Material {
+        name: "test-buoyancy-body",
+        density,
+        friction: 0.0,
+        restitution: 0.0,
+        youngs_modulus: None,
+        specific_heat: 1000.0,
+        conductivity: 1.0,
+        emissivity: 0.5,
+        melting: None,
+        resistivity: None,
+        relative_permittivity: 1.0,
+        refractive_index: None,
+        source: "test fixture",
+        uncertainty: 0.0,
+    })
+}
 
 fn step_n(solver: &mut MechanicsSolver, materials: &MaterialDb, dt: f64, n: u32) {
     let mut rng = SimRng::new(1, 1);
@@ -443,6 +464,104 @@ fn f3_stokes_settling_matches_analytic_formula() {
     let measured = -solver.bodies.linear_velocity[idx].y;
     assert!(
         (measured - analytic).abs() / analytic < 0.02,
+        "measured={measured} analytic={analytic}"
+    );
+}
+
+/// F4: 立方体の喫水 = 密度比 × 辺長、rel 1%(静水域)
+/// (docs/21-verification/01-analytic-tests.md F4、docs/11-fluid/04-free-surface-buoyancy.md §2.2)。
+/// 解析的な釣り合い位置(浮力=重力)にゼロ速度で置き、力が厳密に釣り合っていて動かないことを
+/// 検証する(密度比の定義から浮力=重力は代数的に厳密に成立する、テスト内コメント参照)。
+#[test]
+fn f4_cube_waterline_depth_matches_density_ratio() {
+    let mut materials = MaterialDb::standard();
+    let water_density = 998.2;
+    let ratio = 0.6;
+    let body = buoyancy_test_material(&mut materials, ratio * water_density);
+
+    let mut solver = MechanicsSolver::new(9.80665);
+    solver.water = Some(StaticWaterRegion::new(0.0, water_density));
+
+    let half = 0.5; // 一辺 1m
+    let side = 2.0 * half;
+    // 釣り合い: ratio*ρ_f*V = ρ_f*g*(ratio*side*base_area)、V=side*base_area なので
+    // 両辺の ratio*ρ_f*side*base_area が一致し、喫水 h_sub=ratio*side で厳密に釣り合う。
+    let h_sub = ratio * side;
+    let equilibrium_y = -h_sub + half;
+    let mut desc = RigidBodyDesc::dynamic(
+        Shape::Box {
+            half_extents: Vec3::new(half, half, half),
+        },
+        body,
+    );
+    desc.transform.position = Vec3::new(0.0, equilibrium_y, 0.0);
+    let idx = solver.create_body(desc, &materials);
+
+    step_n(&mut solver, &materials, 1.0 / 120.0, 120);
+
+    let drift = (solver.bodies.position[idx].y - equilibrium_y).abs();
+    assert!(
+        drift / side < 0.01,
+        "drift={drift} equilibrium_y={equilibrium_y}"
+    );
+}
+
+/// F5: 浮体の上下振動周期 T=2π√(m/(ρ_f g A_wl))、rel 5%
+/// (docs/21-verification/01-analytic-tests.md F5、docs/11-fluid/04-free-surface-buoyancy.md §7)。
+/// 釣り合い位置から変位させ、速度が正から非正に転じる最初の時刻(=1周期後、開始が変位最大点
+/// のため)を測定して比較する。減衰(水中抗力)は未実装のため無損失SHMとして厳密に周期的。
+#[test]
+fn f5_floating_body_heave_period_matches_analytic_formula() {
+    let mut materials = MaterialDb::standard();
+    let water_density = 998.2;
+    let ratio = 0.5;
+    let body = buoyancy_test_material(&mut materials, ratio * water_density);
+
+    let mut solver = MechanicsSolver::new(9.80665);
+    solver.water = Some(StaticWaterRegion::new(0.0, water_density));
+
+    let half = 0.5;
+    let side = 2.0 * half;
+    let equilibrium_y = -(ratio * side) + half;
+    let amplitude = 0.1; // half=0.5 に対し十分小さく、全没・完全露出を避ける
+    let mut desc = RigidBodyDesc::dynamic(
+        Shape::Box {
+            half_extents: Vec3::new(half, half, half),
+        },
+        body,
+    );
+    desc.transform.position = Vec3::new(0.0, equilibrium_y + amplitude, 0.0);
+    let idx = solver.create_body(desc, &materials);
+
+    let dt = 1.0 / 120.0;
+    let mut rng = SimRng::new(1, 1);
+    let mut events = EventQueue::new();
+    let mut t = 0.0;
+    let mut period = None;
+    let mut prev_v = 0.0;
+    for _ in 0..400 {
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        solver.step(dt, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+        t += dt;
+        let v = solver.bodies.linear_velocity[idx].y;
+        if prev_v > 0.0 && v <= 0.0 && period.is_none() {
+            period = Some(t);
+        }
+        prev_v = v;
+    }
+
+    let measured = period.expect("should observe one full heave period within simulated window");
+    let mass = ratio * water_density * side.powi(3);
+    let waterline_area = side * side;
+    let analytic =
+        2.0 * std::f64::consts::PI * (mass / (water_density * 9.80665 * waterline_area)).sqrt();
+    assert!(
+        (measured - analytic).abs() / analytic < 0.05,
         "measured={measured} analytic={analytic}"
     );
 }
