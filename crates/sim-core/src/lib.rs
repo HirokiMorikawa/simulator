@@ -1,10 +1,17 @@
-//! ID・時間・決定論ハッシュの基盤。
+//! ID・時間・決定論ハッシュ・材料物性データベースの基盤。
 //! 設計: docs/00-foundation/04-architecture.md §1.1.2(4)/§3、
-//!       docs/20-integration/02-determinism-replay.md §2/§3。
+//!       docs/20-integration/02-determinism-replay.md §2/§3、
+//!       docs/12-thermal/04-material-thermal-props.md。
 //!
-//! Phase 0 では `BodyId` / `SimClock` / `StateHasher` のみを実装する。
-//! `MaterialDb` / `Solver` トレイト等は Phase A で追加する
-//! (docs/00-foundation/04-architecture.md §1.2)。
+//! `Solver`/`Coupling` トレイト・`EventQueue`・`CommandQueue` 等は Phase A で
+//! 各ドメインスケルトンと合わせて追加する(docs/00-foundation/04-architecture.md §1.2–1.3)。
+
+mod material;
+mod solver;
+pub use material::{Material, MaterialDb, MaterialId, PairOverride, PhaseChangeProps};
+pub use solver::{
+    DomainId, EnergyBreakdown, Event, EventKind, EventQueue, Solver, SolverContext, SourceId,
+};
 
 /// 世代付きインデックス。削除済み ID へのアクセスは `None`(パニックしない)。
 /// 設計: docs/00-foundation/04-architecture.md §3。

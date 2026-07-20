@@ -17,9 +17,11 @@
 ## 現在地
 
 - **フェーズ**: 実装(Phase 0 完了。math ウェーブは状態非依存の全項目が Green — 線形代数・PRNG・
-  積分器カタログ・場(Grid3/MacGrid/PCG/ParticleSet/SpatialHash))
-- **作業中**: なし
-- **次**: Phase A(全ドメインの型・トレイトのスケルトン + 全テスト記述、下記 §2)に着手。
+  積分器カタログ・場(Grid3/MacGrid/PCG/ParticleSet/SpatialHash)。Phase A 着手済み: `sim-core` の
+  `Solver`トレイト・`MaterialDb`・`EventQueue`)
+- **作業中**: Phase A — 各ドメイン crate の型・トレイトのスケルトン(下記 §2)。次は力学(`sim-mechanics`)
+- **次**: 力学(`RigidBodySet`・衝突型)の型スケルトン → 流体・熱・電磁・量子・統計・天体・レンダリング
+  → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
   math ウェーブ(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの汎用部分/
   `Grid3`/`MacGrid`/`GridSampler`/トライリニア・Catmull-Rom補間/勾配・ラプラシアン/`pcg`/`ParticleSet`/
   `SpatialHash`)は依存が無く低リスクなため、Phase A の Red 段階を経ずに直接実装 + テストで Green 化した。
@@ -60,7 +62,7 @@
 
 型・トレイトのスケルトン(中身 `todo!()`、コンパイル可):
 
-- [ ] math(Vec3/Quat/Mat3・場・`Integrator`・SimRng)
+- [x] math(Vec3/Quat/Mat3・場・`Integrator`・SimRng)— Red を経ず直接 Green 化済み(§3参照)
 - [ ] 力学(剛体状態・`Solver`/`Constraint`・衝突型)
 - [ ] 流体(MAC 格子・SPH 粒子)
 - [ ] 熱(熱ノード・相変化)
@@ -69,7 +71,9 @@
 - [ ] 統計(気体分子・イジング・ランジュバン)
 - [ ] 天体(N 体・軌道・フレーム階層)
 - [ ] レンダリング(パストレ骨格)
-- [ ] World / Coupling / 台帳 / スナップショット
+- [ ] World / Coupling / 台帳 / スナップショット — `sim-core` 側の共通基盤(`Solver`トレイト・
+      `SolverContext`・`EventQueue`・`MaterialDb`)は先行実装済み(`crates/sim-core/src/{solver,material}.rs`)。
+      `World`本体の拡張・`Coupling`トレイト・`EnergyLedger`・スナップショットは未着手
 
 テスト記述(定義は [21-verification/01-analytic-tests.md](../21-verification/01-analytic-tests.md)、
 Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
