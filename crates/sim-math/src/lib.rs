@@ -5,11 +5,15 @@
 //! (docs/01-math/03-integrators.md)、場・PCG・粒子集合(docs/01-math/02-fields.md)
 //! を実装する(math ウェーブ、docs/22-roadmap/01-phases.md)。
 
+mod complex;
+mod fft;
 mod grid;
 mod integrators;
 mod particles;
 mod pcg;
 mod random;
+pub use complex::Complex64;
+pub use fft::{fft, ifft};
 pub use grid::{
     catmull_rom_sample, gradient, laplacian, laplacian_variable_coefficient, trilinear_sample,
     BoundaryRule, Grid3, GridSampler, MacGrid,
