@@ -16,6 +16,6 @@ mod solver;
 
 pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};
 pub use collision::{ContactManifold, ContactPoint};
-pub use joint::DistanceJoint;
+pub use joint::{BallJoint, DistanceJoint};
 pub use shape::{Aabb, Shape};
 pub use solver::MechanicsSolver;
