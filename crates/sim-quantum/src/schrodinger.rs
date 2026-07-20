@@ -410,4 +410,101 @@ mod tests {
             }
         }
     }
+
+    /// 矩形障壁の解析的透過率(トンネル $E<V_0$: $\sinh$、over-barrier $E>V_0$: $\sin$、
+    /// 設計 §7)。原子単位($\hbar=m=1$)。
+    fn barrier_transmission(e: f64, v0: f64, a: f64) -> f64 {
+        if e <= 0.0 {
+            return 0.0;
+        }
+        if (e - v0).abs() < 1e-9 {
+            return 1.0 / (1.0 + v0 * v0 * a * a / (4.0 * e));
+        }
+        if e < v0 {
+            let kappa = (2.0 * (v0 - e)).sqrt();
+            let s = (kappa * a).sinh();
+            1.0 / (1.0 + v0 * v0 * s * s / (4.0 * e * (v0 - e)))
+        } else {
+            let kp = (2.0 * (e - v0)).sqrt();
+            let s = (kp * a).sin();
+            1.0 / (1.0 + v0 * v0 * s * s / (4.0 * e * (e - v0)))
+        }
+    }
+
+    /// Q5: トンネル透過率、矩形障壁解析式のエネルギー重み平均、rel 2%
+    /// (docs/21-verification/01-analytic-tests.md Q5)。波束は単一エネルギーではなく
+    /// 運動量空間に広がりを持つため、素朴に$E_0=k_0^2/2$を解析式に代入するだけでは
+    /// 一致しない(透過率はエネルギーについて凸関数のため、実測はJensenの不等式的に
+    /// $T(E_0)$より系統的に大きくなる)。初期波束の運動量スペクトル$|\hat\psi(k)|^2$
+    /// (`sim_math::fft`、`step`と同じ$k$規約)を重みとした解析式の期待値と比較する。
+    /// 測定タイミングは、障壁通過直後(波束が障壁領域を完全に離れ確率が安定する時刻)から、
+    /// 反射波束が周期境界を一周して透過側として誤カウントされる前までの安定した時間窓
+    /// (t=42〜56、実測でプラトーを確認)の中央付近を使う。
+    #[test]
+    fn q5_tunneling_transmission_matches_energy_weighted_analytic_formula() {
+        let n = 1024;
+        let dx = 0.1;
+        let domain = n as f64 * dx;
+        let barrier_center = domain * 0.5;
+        let v0 = 1.0;
+        let a = 2.0;
+        let barrier_lo = barrier_center - a * 0.5;
+        let barrier_hi = barrier_center + a * 0.5;
+
+        let mut wf = WaveFunction1D::new(n, dx);
+        for (i, v_i) in wf.v.iter_mut().enumerate() {
+            let x = i as f64 * dx;
+            if x >= barrier_lo && x < barrier_hi {
+                *v_i = v0;
+            }
+        }
+
+        let x0 = 15.0;
+        let sigma = 3.0;
+        let k0 = 1.2;
+        wf.set_gaussian_wave_packet(x0, sigma, k0);
+
+        // 初期波束の運動量スペクトルで重み付けした解析透過率の期待値。
+        let mut psi_hat = wf.psi.clone();
+        fft(&mut psi_hat);
+        let dk = 2.0 * std::f64::consts::PI / (n as f64 * dx);
+        let mut weight_sum = 0.0;
+        let mut weighted_t = 0.0;
+        for (i, p) in psi_hat.iter().enumerate() {
+            let k_index = if i <= n / 2 {
+                i as isize
+            } else {
+                i as isize - n as isize
+            };
+            let k = k_index as f64 * dk;
+            if k <= 0.0 {
+                continue; // 右向き成分のみが入射エネルギー分布として意味を持つ。
+            }
+            let e = k * k / 2.0;
+            let w = p.norm_sq();
+            weight_sum += w;
+            weighted_t += w * barrier_transmission(e, v0, a);
+        }
+        let t_analytic = weighted_t / weight_sum;
+
+        let dt = 0.01;
+        for _ in 0..5000 {
+            wf.step(dt);
+        }
+
+        let transmitted: f64 = wf
+            .psi
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i as f64 * dx >= barrier_hi)
+            .map(|(_, p)| p.norm_sq())
+            .sum::<f64>()
+            * dx;
+
+        let rel_err = (transmitted - t_analytic).abs() / t_analytic;
+        assert!(
+            rel_err < 0.02,
+            "transmitted={transmitted:.5} t_analytic={t_analytic:.5} rel_err={rel_err:.5}"
+        );
+    }
 }
