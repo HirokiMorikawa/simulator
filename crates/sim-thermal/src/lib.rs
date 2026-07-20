@@ -80,6 +80,16 @@ impl ThermalSolver {
     }
 }
 
+/// Antoine の式(水、mmHg・°C、範囲1–100°C、設計 docs/12-thermal/03-phase-change.md §2)。
+/// $\log_{10}p_{sat}=8.07131-\frac{1730.63}{233.426+T}$ を沸点 $T$ について逆算する
+/// (与圧 `pressure_mmhg` での沸点、山の上の沸点デモの理論値)。
+pub fn antoine_boiling_point_celsius(pressure_mmhg: f64) -> f64 {
+    const A: f64 = 8.07131;
+    const B: f64 = 1730.63;
+    const C: f64 = 233.426;
+    B / (A - pressure_mmhg.log10()) - C
+}
+
 impl Solver for ThermalSolver {
     /// 陰的Eulerは無条件安定(設計 02-heat-transfer.md §4.3)。
     fn max_stable_dt(&self) -> f64 {
@@ -118,10 +128,19 @@ impl Solver for ThermalSolver {
 
         let mut b = vec![0.0; n];
         for (i, node) in self.nodes.iter().enumerate() {
-            let h_rad = self.radiation_coefficient(node);
+            // 放射項の Newton 線形化(現在温度 T^n まわり、§4.3「線形化点は現在温度」):
+            // εσT^4 ≈ 4εσ(T^n)^3・T − 3εσ(T^n)^4。対角項(diag_extra)は 4εσ(T^n)^3 の係数、
+            // 右辺には打ち消された −(−3εσ(T^n)^4) = +3εσ(T^n)^4 の補正項と、環境からの
+            // 入射 εσT_env^4(線形化しない定数項、T_env は既知の外部値)を加える。
+            // (この補正項が無いと、線形化した「対流もどき」放射モデル h_rad・(T−T_env) の
+            // 平衡状態 q=4εσA(T_eq−T_env)T_eq^3止まりになり、真の非線形平衡 q=εσA(T_eq^4−T_env^4)
+            // からずれる — T4 の実装検証中に4倍の乖離として発見した)。
+            let radiative_source = node.emissivity
+                * STEFAN_BOLTZMANN
+                * (3.0 * node.temperature.powi(4) + self.environment_radiation_temperature.powi(4));
             b[i] = (node.heat_capacity / dt) * node.temperature
                 + node.convection_coefficient * node.area * self.ambient_temperature
-                + h_rad * node.area * self.environment_radiation_temperature
+                + radiative_source * node.area
                 + node.heat_accum / dt;
         }
 
@@ -257,6 +276,65 @@ mod tests {
         assert_eq!(
             solver.nodes[idx].heat_accum, 0.0,
             "heat_accum must clear after each step"
+        );
+    }
+
+    /// T4: 放射平衡 $T=(q/\varepsilon\sigma A)^{1/4}$、rel 2%(docs/21-verification/01-analytic-tests.md T4)。
+    /// 対流は切り離し(convection_coefficient=0)、環境放射温度を0にして与圧に対応する
+    /// 設計の単純形($T_{env}=0$)と一致させる。孤立ノードに一定電力 `q` を毎ステップ
+    /// 供給し(heat_accum は毎ステップクリアされるため `q*dt` を都度設定)、放射損失と
+    /// つり合う平衡温度に収束させる。
+    #[test]
+    fn t4_radiation_equilibrium_matches_stefan_boltzmann_formula() {
+        let mut solver = ThermalSolver::new(293.15);
+        solver.environment_radiation_temperature = 0.0;
+        let c = 10.0;
+        let emissivity = 0.9;
+        let area = 0.01;
+        let q = 30.0; // W
+        let mut node = ThermalNode::new(293.15, c);
+        node.emissivity = emissivity;
+        node.area = area;
+        let idx = solver.add_node(node);
+
+        let expected_t = (q / (emissivity * STEFAN_BOLTZMANN * area)).powf(0.25);
+
+        let materials = MaterialDb::standard();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+        let dt = 0.05;
+        let steps = 20_000u32;
+        for _ in 0..steps {
+            solver.nodes[idx].heat_accum = q * dt;
+            let mut ctx = SolverContext {
+                materials: &materials,
+                rng: &mut rng,
+                events: &mut events,
+            };
+            solver.step(dt, &mut ctx);
+        }
+
+        let measured = solver.nodes[idx].temperature;
+        let rel_err = (measured - expected_t).abs() / expected_t;
+        assert!(rel_err < 0.02, "measured={measured} expected={expected_t}");
+    }
+
+    /// T8: 沸点の気圧依存(Antoine式)、abs 1°C(docs/21-verification/01-analytic-tests.md T8)。
+    /// 設計 docs/12-thermal/03-phase-change.md §7「0.7 atmで≈90°C」を直接検証する。
+    #[test]
+    fn t8_boiling_point_at_reduced_pressure_matches_antoine_equation() {
+        let pressure_mmhg = 0.7 * 760.0;
+        let boiling_point = antoine_boiling_point_celsius(pressure_mmhg);
+        assert!(
+            (boiling_point - 90.0).abs() < 1.0,
+            "boiling_point={boiling_point}"
+        );
+
+        // 標準気圧(1atm=760mmHg)では既知の沸点100°Cに一致すること(パラメータの検算)。
+        let boiling_point_1atm = antoine_boiling_point_celsius(760.0);
+        assert!(
+            (boiling_point_1atm - 100.0).abs() < 1.0,
+            "boiling_point_1atm={boiling_point_1atm}"
         );
     }
 }
