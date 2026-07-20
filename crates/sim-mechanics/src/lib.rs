@@ -10,6 +10,7 @@ mod body;
 mod collision;
 mod contact;
 mod shape;
+mod sleep;
 mod solver;
 
 pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};

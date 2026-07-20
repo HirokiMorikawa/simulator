@@ -142,3 +142,127 @@ fn rolling_friction_decelerates_ball_at_designed_rate() {
         "measured_decel={measured_decel} expected_decel={expected_decel} rel_err={rel_err}"
     );
 }
+
+/// スリープ(docs/10-mechanics/01-rigid-body.md §4「速度が閾値未満の接触島単位で積分を
+/// 停止」)。単独の木箱が地面に着地して静止すると、既定の継続時間(0.5s)後に asleep になり
+/// 速度が厳密に0に凍結されることを確認する。
+#[test]
+fn sleep_engages_after_box_settles_on_ground() {
+    let materials = MaterialDb::standard();
+    let wood = materials.find_by_name("木材(松)").unwrap();
+    let mut solver = MechanicsSolver::new(9.80665);
+    let half = 0.5;
+    let ground = RigidBodyDesc {
+        body_type: BodyType::Static,
+        ..RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            wood,
+        )
+    };
+    solver.create_body(ground, &materials);
+    let mut desc = RigidBodyDesc::dynamic(
+        Shape::Box {
+            half_extents: Vec3::new(half, half, half),
+        },
+        wood,
+    );
+    desc.transform.position = Vec3::new(0.0, half + 0.05, 0.0);
+    let idx = solver.create_body(desc, &materials);
+
+    let dt = 1.0 / 120.0;
+    let mut rng = SimRng::new(1, 1);
+    let mut events = EventQueue::new();
+    for _ in 0..600 {
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        solver.step(dt, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+    }
+
+    assert!(
+        solver.bodies.asleep[idx],
+        "box should be asleep after settling for 5s"
+    );
+    assert_eq!(solver.bodies.linear_velocity[idx], Vec3::ZERO);
+    assert_eq!(solver.bodies.angular_velocity[idx], Vec3::ZERO);
+}
+
+/// スリープからの起床(設計 §4「起床は新規接触・力適用時」)。眠っている箱に別の落下する
+/// 箱がぶつかると、新規接触で起床することを確認する。
+#[test]
+fn sleeping_box_wakes_on_new_contact_from_falling_body() {
+    let materials = MaterialDb::standard();
+    let wood = materials.find_by_name("木材(松)").unwrap();
+    let mut solver = MechanicsSolver::new(9.80665);
+    let half = 0.5;
+    let ground = RigidBodyDesc {
+        body_type: BodyType::Static,
+        ..RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            wood,
+        )
+    };
+    solver.create_body(ground, &materials);
+    let mut resting_desc = RigidBodyDesc::dynamic(
+        Shape::Box {
+            half_extents: Vec3::new(half, half, half),
+        },
+        wood,
+    );
+    resting_desc.transform.position = Vec3::new(0.0, half, 0.0);
+    let resting_idx = solver.create_body(resting_desc, &materials);
+
+    let dt = 1.0 / 120.0;
+    let mut rng = SimRng::new(1, 1);
+    let mut events = EventQueue::new();
+    for _ in 0..600 {
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        solver.step(dt, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+    }
+    assert!(
+        solver.bodies.asleep[resting_idx],
+        "resting box should be asleep before impact"
+    );
+
+    let mut falling_desc = RigidBodyDesc::dynamic(
+        Shape::Box {
+            half_extents: Vec3::new(half, half, half),
+        },
+        wood,
+    );
+    falling_desc.transform.position = Vec3::new(0.0, half * 2.0 + 3.0, 0.0);
+    solver.create_body(falling_desc, &materials);
+
+    let mut woke = false;
+    for _ in 0..240 {
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        solver.step(dt, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+        if !solver.bodies.asleep[resting_idx] {
+            woke = true;
+            break;
+        }
+    }
+    assert!(
+        woke,
+        "resting box should wake once the falling box lands on it"
+    );
+}
