@@ -715,50 +715,76 @@ fn shape_pair_manifold(
 /// 設計 §4.4「軸選択に前ステップの軸を優先するヒステリシス」。
 pub type AxisCache = std::collections::BTreeMap<(usize, usize), usize>;
 
-/// 総当たり broadphase(§4.1)+ narrowphase ディスパッチ(§4.2)。
-/// ペア列挙順は (indexA, indexB) 昇順に固定(決定論)。
-pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactManifold> {
+/// SAP(Sweep and Prune)broadphase。設計 §4.1 表「P2: SAP/BVH」。全 body の AABB を x 軸の
+/// 最小値でソートして掃引し、x 軸上で重ならなくなった時点で以降の候補を打ち切る
+/// (ソート済みのため以降はさらに x 座標が離れる一方)ことで O(N²) の総当たりペア列挙を
+/// 避ける。3 次元の実際の重なりは(x軸の絞り込み後に)`aabb_overlap` で確認する。
+/// ペアは (indexA, indexB) 昇順にソートして返す(総当たり版と結果を一致させ、決定論・
+/// 既存の数値挙動を保つ)。
+fn sap_candidate_pairs(bodies: &RigidBodySet) -> Vec<(usize, usize)> {
     let n = bodies.len();
-    let mut manifolds = Vec::new();
-    for a in 0..n {
-        for b in (a + 1)..n {
-            // static/kinematic 同士は無意味ペア(設計 §4.4 表)。
-            if bodies.body_type[a] != BodyType::Dynamic && bodies.body_type[b] != BodyType::Dynamic
-            {
-                continue;
+    let mut entries: Vec<(usize, Aabb)> = (0..n)
+        .map(|i| (i, aabb_of(bodies.shape_of(i), transform_of(bodies, i))))
+        .collect();
+    entries.sort_by(|(_, a), (_, b)| a.min.x.partial_cmp(&b.min.x).unwrap());
+
+    let mut pairs = Vec::new();
+    for i in 0..entries.len() {
+        let (idx_i, aabb_i) = entries[i];
+        for &(idx_j, aabb_j) in &entries[i + 1..] {
+            if aabb_j.min.x > aabb_i.max.x {
+                break;
             }
-            let xf_a = transform_of(bodies, a);
-            let xf_b = transform_of(bodies, b);
-            let shape_a = bodies.shape_of(a);
-            let shape_b = bodies.shape_of(b);
-            if !aabb_overlap(aabb_of(shape_a, xf_a), aabb_of(shape_b, xf_b)) {
-                continue;
-            }
-            let result = if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
-                (shape_a, shape_b)
-            {
-                let preferred = axis_cache.get(&(a, b)).copied();
-                let r = box_box(xf_a, *ha, xf_b, *hb, preferred);
-                match &r {
-                    Some((_, _, axis_idx)) => {
-                        axis_cache.insert((a, b), *axis_idx);
-                    }
-                    None => {
-                        axis_cache.remove(&(a, b));
-                    }
-                }
-                r.map(|(n, p, _)| (n, p))
-            } else {
-                shape_pair_manifold(shape_a, xf_a, shape_b, xf_b)
-            };
-            if let Some((normal, points)) = result {
-                manifolds.push(ContactManifold {
-                    body_a: a,
-                    body_b: b,
-                    normal,
-                    points,
+            if aabb_overlap(aabb_i, aabb_j) {
+                pairs.push(if idx_i < idx_j {
+                    (idx_i, idx_j)
+                } else {
+                    (idx_j, idx_i)
                 });
             }
+        }
+    }
+    pairs.sort_unstable();
+    pairs
+}
+
+/// SAP broadphase(§4.1)+ narrowphase ディスパッチ(§4.2)。
+/// ペア列挙順は (indexA, indexB) 昇順に固定(決定論)。
+pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactManifold> {
+    let mut manifolds = Vec::new();
+    for (a, b) in sap_candidate_pairs(bodies) {
+        // static/kinematic 同士は無意味ペア(設計 §4.4 表)。
+        if bodies.body_type[a] != BodyType::Dynamic && bodies.body_type[b] != BodyType::Dynamic {
+            continue;
+        }
+        let xf_a = transform_of(bodies, a);
+        let xf_b = transform_of(bodies, b);
+        let shape_a = bodies.shape_of(a);
+        let shape_b = bodies.shape_of(b);
+        let result = if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
+            (shape_a, shape_b)
+        {
+            let preferred = axis_cache.get(&(a, b)).copied();
+            let r = box_box(xf_a, *ha, xf_b, *hb, preferred);
+            match &r {
+                Some((_, _, axis_idx)) => {
+                    axis_cache.insert((a, b), *axis_idx);
+                }
+                None => {
+                    axis_cache.remove(&(a, b));
+                }
+            }
+            r.map(|(n, p, _)| (n, p))
+        } else {
+            shape_pair_manifold(shape_a, xf_a, shape_b, xf_b)
+        };
+        if let Some((normal, points)) = result {
+            manifolds.push(ContactManifold {
+                body_a: a,
+                body_b: b,
+                normal,
+                points,
+            });
         }
     }
     manifolds
@@ -920,6 +946,62 @@ mod tests {
         let manifolds = detect(&bodies, &mut axis_cache);
         assert_eq!(manifolds.len(), 1);
         assert!(manifolds[0].body_a < manifolds[0].body_b);
+    }
+
+    /// SAP broadphase(設計 §4.1 表「P2: SAP/BVH」)。散らばった多数体シーンで、SAP が
+    /// 列挙する候補ペア集合が総当たり(全 $\binom{N}{2}$ ペアを `aabb_overlap` で判定)と
+    /// 完全一致すること(順序含む)を確認する。x 軸掃引による枝刈りが結果を変えず、
+    /// 純粋に $O(N^2)$ 列挙を高速化するだけであることの検証。
+    #[test]
+    fn sap_matches_brute_force_pair_enumeration_on_scattered_scene() {
+        let mut bodies = RigidBodySet::new();
+        let materials = sim_core::MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = sim_math::SimRng::new(7, 7);
+        for i in 0..40 {
+            // 密に散らばらせて総当たりと十分な数のペアが重なるようにする(この検証には
+            // 「重なりが実在する」ことが必要、疎すぎると意味のあるテストにならない)。
+            let pos = Vec3::new(
+                rng.range_f64(-2.0, 2.0),
+                rng.range_f64(-2.0, 2.0),
+                rng.range_f64(-2.0, 2.0),
+            );
+            let mut desc = if i % 2 == 0 {
+                crate::RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.5 }, steel)
+            } else {
+                crate::RigidBodyDesc::dynamic(
+                    Shape::Box {
+                        half_extents: Vec3::new(0.4, 0.6, 0.3),
+                    },
+                    steel,
+                )
+            };
+            desc.transform.position = pos;
+            bodies.create_body(desc, &materials);
+        }
+
+        let sap_pairs = sap_candidate_pairs(&bodies);
+
+        let n = bodies.len();
+        let mut brute_force = Vec::new();
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let xf_a = transform_of(&bodies, a);
+                let xf_b = transform_of(&bodies, b);
+                if aabb_overlap(
+                    aabb_of(bodies.shape_of(a), xf_a),
+                    aabb_of(bodies.shape_of(b), xf_b),
+                ) {
+                    brute_force.push((a, b));
+                }
+            }
+        }
+
+        assert!(
+            !brute_force.is_empty(),
+            "scene should contain overlapping AABBs for this test to be meaningful"
+        );
+        assert_eq!(sap_pairs, brute_force);
     }
 
     /// Box-Box 面接触: 同サイズの立方体2個をy方向に0.1だけ重ねると、
