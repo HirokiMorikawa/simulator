@@ -9,11 +9,13 @@
 mod body;
 mod collision;
 mod contact;
+mod joint;
 mod shape;
 mod sleep;
 mod solver;
 
 pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};
 pub use collision::{ContactManifold, ContactPoint};
+pub use joint::DistanceJoint;
 pub use shape::{Aabb, Shape};
 pub use solver::MechanicsSolver;
