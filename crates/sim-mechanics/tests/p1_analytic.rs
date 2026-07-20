@@ -115,12 +115,12 @@ fn m5_equal_mass_elastic_collision_exchanges_velocities() {
     );
 }
 
-/// M6: 反発バウンド — 高さ比 = e^2。
-/// Phase 1 は Baumgarte のみ(split impulse は Phase 2、docs/10-mechanics/03-contact-solver.md §4.5)。
-/// Baumgarte の偽エネルギーは離散化ラグ由来の貫入量に比例するため、細かい dt で抑える。
+/// M6: 反発バウンド — 高さ比 = e^2、rel 1%(docs/21-verification/01-analytic-tests.md M6、
+/// split impulse モード)。split impulse(docs/10-mechanics/03-contact-solver.md §4.5)導入により
+/// 位置補正が速度チャンネルを汚さなくなったため、設計が目標とする rel 1% を達成できる。
 /// 反発閾値は M5 と同じ理由で 0 にする(既定 0.5 m/s の固定減算は、この落下速度
-/// (≈6 m/s)では e を約8%見かけ上下げてしまい、閾値自体の効果とバウムガルテ誤差が
-/// 混ざって解析解と比較できなくなるため)。
+/// (≈6 m/s)では e を約8%見かけ上下げてしまい、閾値自体の効果と解析解の比較が
+/// 混ざってしまうため)。
 #[test]
 fn m6_bounce_height_ratio_matches_restitution_squared() {
     let mut materials = MaterialDb::standard();
@@ -181,9 +181,8 @@ fn m6_bounce_height_ratio_matches_restitution_squared() {
     let ratio = post_bounce_max / drop_height;
     let expected = restitution * restitution;
     assert!(
-        (ratio - expected).abs() / expected < 0.1,
-        "height ratio {ratio} vs expected {expected} (e^2); Baumgarte-only Phase 1 は \
-         split impulse (Phase 2) 導入まで rel 1% を保証しない(設計注記)"
+        (ratio - expected).abs() / expected < 0.01,
+        "height ratio {ratio} vs expected {expected} (e^2)"
     );
 }
 
