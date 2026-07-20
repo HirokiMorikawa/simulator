@@ -39,8 +39,10 @@
   対応する M 番号がないため自前でエネルギー収支を導出したテストで検証(rel 2%)。`sim-em` に
   幾何光学の代数公式(`optics.rs`: スネル則・臨界角・フレネル係数・ブリュースター角・薄レンズ・
   プリズム最小偏角)を実装し E9–E12 を Green 化(フル `RayTracer` は未実装、公式のみ)。
+  P2 力学に SAP broadphase(`collision::sap_candidate_pairs`、x軸掃引)を追加し総当たり版と
+  結果が完全一致することを確認(BVH は未着手)。
 - **作業中**: 力学(`sim-mechanics`)P1 最後の残り — 最小CCD(M15、意図的に後回し)。
-  次点候補: SAP/BVH・スリープ(P2 残り)、M10(要ジョイント、P3)、
+  次点候補: BVH・スリープ(P2 残り)、M10(要ジョイント、P3)、
   磁気双極子・回路MNA・フル RayTracer(sim-em 残り)、他ドメイン(quantum)の Phase A スケルトン
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
@@ -190,7 +192,11 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       位置・姿勢へ直接適用)に分離。各反復・各点で現在の body 位置から貫入量を**再計算**
       する(NGS の要点、同一bodyに複数接触点があると独立減算では過剰補正になることを
       実装中に発見・修正)。M6 を設計の目標精度(rel 1%)まで、M12 を Green 化した
-- [ ] SAP / BVH(broadphase)
+- [x] SAP(broadphase、BVH は未着手)— `crates/sim-mechanics/src/collision.rs::sap_candidate_pairs`。
+      x 軸への AABB 射影でソート+掃引し、総当たり $O(N^2)$ のペア列挙を削減(設計 §4.1 表)。
+      結果は総当たり版と (indexA,indexB) 昇順で完全一致するようソート済み(決定論・既存の
+      数値挙動を保つ)。散らばった40体シーンで総当たり列挙と一致することをテストで確認
+      (`collision::tests::sap_matches_brute_force_pair_enumeration_on_scattered_scene`)
 - [x] 転がり摩擦(スリープは未着手)— `crates/sim-mechanics/src/contact.rs::solve_rolling`。
       設計 04-friction.md §4.1 のトルク制約 $|\tau_{roll}|\le\mu_{roll}Nr$ を、線形速度を
       変えない純粋な偶力(角速度のみ更新)として `solve_tangent` と同じクランプ構造で実装
