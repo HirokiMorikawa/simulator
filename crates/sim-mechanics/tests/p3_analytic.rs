@@ -1,10 +1,11 @@
-//! P3 解析解テスト(M3, M4)。定義: docs/21-verification/01-analytic-tests.md。
+//! P3 解析解テスト(M3, M4, M10)。定義: docs/21-verification/01-analytic-tests.md。
 //! 単振り子を「質点 + ワールド固定支点への Distance ジョイント(質量無しの棒/紐)」として
-//! 表現する(docs/10-mechanics/05-joints-constraints.md、`DistanceJoint`)。
+//! 表現する(docs/10-mechanics/05-joints-constraints.md、`DistanceJoint`)。独楽(M10)は
+//! 「重心からオフセットした支点をワールド固定する Ball ジョイント」で表現する(`BallJoint`)。
 
 use sim_core::{Event, EventQueue, MaterialDb, Solver, SolverContext};
-use sim_math::{SimRng, Vec3};
-use sim_mechanics::{DistanceJoint, MechanicsSolver, RigidBodyDesc, Shape};
+use sim_math::{Quat, SimRng, Vec3};
+use sim_mechanics::{BallJoint, DistanceJoint, MechanicsSolver, RigidBodyDesc, Shape};
 
 /// 算術幾何平均(AGM)で完全楕円積分 $K(k)=\pi/(2\,\mathrm{agm}(1,\sqrt{1-k^2}))$ を計算する
 /// (M4 の大振幅振り子周期の理論値に使う)。
@@ -117,5 +118,95 @@ fn m4_large_amplitude_pendulum_period_matches_elliptic_integral() {
     assert!(
         rel_err < 0.01,
         "measured={measured} analytic={analytic_period} rel_err={rel_err}"
+    );
+}
+
+/// M10: 独楽の歳差 $\dot\phi=mgr/(I\omega)$(速い自転極限)、rel 2%
+/// (docs/21-verification/01-analytic-tests.md M10)。重心から距離 `d` オフセットした支点を
+/// `BallJoint`(`body_b=None`)でワールド固定し、自転軸を鉛直から角度 θ0 傾けて大きな自転
+/// 角速度 ω0 を与えると、自転軸(=重心の水平位置)が鉛直まわりに歳差運動する。
+/// 等方慣性の球(慣性テンソルがスカラー)を使うため、この歳差速度公式は「速い自転」の
+/// 近似ではなく厳密になる(非等方項 $(I_1-I_3)\dot\phi^2\cos\theta$ が恒等的に消える)—
+/// ただし章動(自転軸の周期的な揺れ)は残るため、ω0 を十分大きく(章動振幅を歳差信号に
+/// 対して無視できる水準まで)取り、短時間平均で歳差速度を実測する。
+#[test]
+fn m10_top_precession_rate_matches_mgr_over_i_omega() {
+    let materials = MaterialDb::standard();
+    let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+    let gravity = 9.80665;
+
+    let mass = 1.0;
+    let radius = 0.05; // 球半径(慣性計算用)
+    let pivot_offset = 0.1; // 支点から重心までの距離 d
+    let theta0: f64 = 0.3; // 鉛直からの傾き(rad)
+    let omega0 = 1000.0; // 自転角速度(rad/s、速い自転極限を満たす値)
+    let inertia = 2.0 / 5.0 * mass * radius * radius;
+    let expected_phi_dot = mass * gravity * pivot_offset / (inertia * omega0);
+
+    let mut solver = MechanicsSolver::new(gravity);
+    let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, steel);
+    desc.mass_override = Some(mass);
+    desc.transform.rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), theta0);
+    let anchor_a = Vec3::new(0.0, -pivot_offset, 0.0);
+    let pivot = Vec3::ZERO;
+    let r_a = desc.transform.rotation.to_mat3().mul_vec(anchor_a);
+    desc.transform.position = pivot - r_a;
+    let spin_dir = desc
+        .transform
+        .rotation
+        .to_mat3()
+        .mul_vec(Vec3::new(0.0, 1.0, 0.0));
+    desc.angular_velocity = spin_dir.scale(omega0);
+    let idx = solver.create_body(desc, &materials);
+    solver.add_ball_joint(BallJoint {
+        body_a: idx,
+        anchor_a,
+        body_b: None,
+        anchor_b: pivot,
+    });
+
+    let dt = 1.0 / 20_000.0;
+    let duration = 1.0;
+    let steps = (duration / dt) as u32;
+    let mut rng = SimRng::new(1, 1);
+    let mut events = EventQueue::new();
+
+    let start_pos = solver.bodies.position[idx];
+    let mut prev_angle = (start_pos.z - pivot.z).atan2(start_pos.x - pivot.x);
+    let mut unwrapped_angle = 0.0;
+    for _ in 0..steps {
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        solver.step(dt, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+
+        let pos = solver.bodies.position[idx];
+        let angle = (pos.z - pivot.z).atan2(pos.x - pivot.x);
+        let mut delta = angle - prev_angle;
+        if delta > std::f64::consts::PI {
+            delta -= 2.0 * std::f64::consts::PI;
+        } else if delta < -std::f64::consts::PI {
+            delta += 2.0 * std::f64::consts::PI;
+        }
+        unwrapped_angle += delta;
+        prev_angle = angle;
+    }
+
+    // 支点がほぼ固定されたままであること(拘束が機能していることの確認)。
+    let tip_world =
+        solver.bodies.position[idx] + solver.bodies.rotation[idx].to_mat3().mul_vec(anchor_a);
+    assert!(
+        (tip_world - pivot).length() < 1e-3,
+        "pivot should stay fixed, drifted to {tip_world:?}"
+    );
+
+    let measured_phi_dot = (unwrapped_angle / (steps as f64 * dt)).abs();
+    let rel_err = (measured_phi_dot - expected_phi_dot).abs() / expected_phi_dot;
+    assert!(
+        rel_err < 0.02,
+        "measured={measured_phi_dot} expected={expected_phi_dot} rel_err={rel_err}"
     );
 }

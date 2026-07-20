@@ -7,7 +7,7 @@
 //! (docs/22-roadmap/01-phases.md P1/P2 ウェーブ)。
 
 use crate::body::{BodyType, DragModel, RigidBodySet};
-use crate::joint::DistanceJoint;
+use crate::joint::{BallJoint, DistanceJoint};
 use crate::shape::Shape;
 use crate::{collision, contact, joint, sleep, RigidBodyDesc};
 use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
@@ -33,6 +33,8 @@ pub struct MechanicsSolver {
     axis_cache: collision::AxisCache,
     /// Distance ジョイント一覧(設計 docs/10-mechanics/05-joints-constraints.md §3)。
     pub joints: Vec<DistanceJoint>,
+    /// Ball ジョイント一覧(設計 docs/10-mechanics/05-joints-constraints.md §3)。
+    pub ball_joints: Vec<BallJoint>,
 }
 
 impl MechanicsSolver {
@@ -46,6 +48,7 @@ impl MechanicsSolver {
             contact_cache: contact::WarmStartCache::new(),
             axis_cache: collision::AxisCache::new(),
             joints: Vec::new(),
+            ball_joints: Vec::new(),
         }
     }
 
@@ -55,6 +58,10 @@ impl MechanicsSolver {
 
     pub fn add_distance_joint(&mut self, joint: DistanceJoint) {
         self.joints.push(joint);
+    }
+
+    pub fn add_ball_joint(&mut self, joint: BallJoint) {
+        self.ball_joints.push(joint);
     }
 
     /// 設計 §4 パイプラインの `apply_forces`。P1 スコープ: 重力 + 球の抗力
@@ -166,7 +173,8 @@ impl Solver for MechanicsSolver {
         self.apply_forces();
         self.integrate_velocities(dt);
         // 処理順「ジョイント→接触」(設計 docs/10-mechanics/05-joints-constraints.md §4.1)。
-        joint::resolve(&self.joints, &mut self.bodies, dt);
+        joint::resolve_distance(&self.joints, &mut self.bodies, dt);
+        joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
         let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
         // 両側の dynamic body が全て asleep な接触は再解決しない(収束済みで変化が無いのに
         // 毎ステップ再解決すると warm start・split impulse の数値的な揺らぎで再起床してしまう
