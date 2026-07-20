@@ -16,9 +16,12 @@
 
 ## 現在地
 
-- **フェーズ**: 設計(レビュー対応)
-- **作業中**: レビュー承認待ち(PR-1〜PR-7)
-- **次**: ゲート通過後、Phase 0(下記 §1)
+- **フェーズ**: 実装(Phase 0 完了。math ウェーブは線形代数のみ先行して Green)
+- **作業中**: math ウェーブ残り(場・積分器カタログ・SimRng、下記 §3)
+- **次**: math ウェーブ完了後、Phase A(全ドメインの型・トレイトのスケルトン + 全テスト記述、下記 §2)に着手。
+  線形代数(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`)は依存が無く低リスクなため、
+  Phase A の Red 段階を経ずに直接実装 + テストで Green 化した(§3 の当該行のみ先行完了)。
+  他ドメインは設計通り Phase A(型スケルトン + 全テスト記述・Red確認)から進める。
 
 ## 0. 設計フェーズ残作業
 
@@ -37,15 +40,15 @@
 - [x] PR-5 性能構成規則・wasm 配布戦略・巻き戻しコスト
 - [x] PR-6 新設文書: UI/フロントエンド設計・フレーム階層詳細設計・レジーム切替プロトコル
 - [x] PR-7 実装の難所の詳細化(全ドメイン文書横断 — 難所一覧は [../00-foundation/01-vision.md](../00-foundation/01-vision.md) §4.1)
-- [ ] 実装開始ゲート通過(vision §4: レビュー承認)
+- [x] 実装開始ゲート通過(vision §4: レビュー承認。ユーザー指示により2026-07-19承認)
 
 ## 1. Phase 0 — 骨格
 
-- [ ] Cargo ワークスペース(05-rust-wasm-platform §2、sim-astro/sim-render 含む)
-- [ ] CI 最小構成(fmt / clippy / test / wasm ビルド / 決定論スモーク)
-- [ ] demo の Vite + Three.js 雛形
-- [ ] wasm 境界の疎通
-- [ ] 最小 World: 箱 1 個が落ちて cargo test 緑 + ブラウザ表示 + ハッシュ 2 回一致
+- [x] Cargo ワークスペース(05-rust-wasm-platform §2、sim-astro/sim-render 含む)
+- [x] CI 最小構成(fmt / clippy / test / wasm ビルド / 決定論スモーク)
+- [x] demo の Vite + Three.js 雛形
+- [x] wasm 境界の疎通
+- [x] 最小 World: 箱 1 個が落ちて cargo test 緑 + ブラウザ表示 + ハッシュ 2 回一致
 
 ## 2. Phase A — テスト先行(Red)
 
@@ -83,7 +86,7 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 
 ### math ウェーブ
 
-- [ ] 線形代数(Vec3/Quat/Mat3/テンソル)
+- [x] 線形代数(Vec3/Quat/Mat3/テンソル)
 - [ ] 場(MAC / セル中心格子・補間)
 - [ ] 積分器カタログ(semi-implicit Euler・velocity Verlet・RK4・XPBD・Boris pusher・
       Euler–Maruyama/BAOAB・陰的 Euler・semi-Lagrangian・leapfrog・split-step Fourier)

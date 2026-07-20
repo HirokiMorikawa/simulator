@@ -1,0 +1,9 @@
+[package]
+name = "sim-mechanics"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+sim-math = { path = "../sim-math" }
+sim-core = { path = "../sim-core" }

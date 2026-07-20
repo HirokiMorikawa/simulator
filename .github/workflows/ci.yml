@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    name: fmt / clippy / test (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test (全ドメインの解析解テスト・決定論テスト)
+        run: cargo test --workspace
+
+  wasm:
+    name: wasm-pack build (sim-wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: wasm-pack build
+        run: wasm-pack build crates/sim-wasm --target web --out-dir ../../demo/pkg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sim-wasm-pkg
+          path: demo/pkg
+
+  demo:
+    name: demo build (Vite)
+    runs-on: ubuntu-latest
+    needs: wasm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: sim-wasm-pkg
+          path: demo/pkg
+      - name: npm ci
+        working-directory: demo
+        run: npm ci
+      - name: npm run build
+        working-directory: demo
+        run: npm run build

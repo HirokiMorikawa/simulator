@@ -1,0 +1,11 @@
+# Rust
+/target/
+**/target/
+
+# Node / demo
+demo/node_modules/
+demo/dist/
+demo/pkg/
+
+# Editor / OS
+.DS_Store
