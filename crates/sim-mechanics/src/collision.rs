@@ -227,6 +227,8 @@ fn box_axis_world(xf: Transform, axis: usize) -> Vec3 {
 
 /// 分離軸(cross積の退化除外の閾値)。設計 §4.4 の $10^{-10}$。
 const SAT_DEGENERATE_AXIS_LEN_SQ: f64 = 1e-10;
+/// 軸選択ヒステリシスの相対閾値。設計 §4.4・§9「SAT 軸ヒステリシス: 相対5%」。
+const AXIS_HYSTERESIS_RELATIVE: f64 = 0.05;
 
 /// 15軸(A面3 + B面3 + 辺×辺9)の SAT。分離軸が見つかれば `None`。
 /// 重なっている場合は最小重なり軸のインデックスと重なり量を返す。
@@ -237,6 +239,7 @@ fn box_box_sat(
     half_a: Vec3,
     xf_b: Transform,
     half_b: Vec3,
+    preferred_axis: Option<usize>,
 ) -> Option<(usize, f64)> {
     let a_axes = [
         box_axis_world(xf_a, 0),
@@ -267,6 +270,7 @@ fn box_box_sat(
 
     let mut min_pen = f64::INFINITY;
     let mut min_idx = 0usize;
+    let mut preferred_pen: Option<f64> = None;
     for (axis, idx) in candidates {
         let len_sq = axis.length_sq();
         if len_sq < SAT_DEGENERATE_AXIS_LEN_SQ {
@@ -283,6 +287,17 @@ fn box_box_sat(
         if pen < min_pen {
             min_pen = pen;
             min_idx = idx;
+        }
+        if preferred_axis == Some(idx) {
+            preferred_pen = Some(pen);
+        }
+    }
+    // 軸選択のヒステリシス(設計 §4.4「相対5%」): 前ステップの軸が今回も僅差(5%以内)なら
+    // 数値ジッタによる軸のフリップ(≒法線の振動、warm starting の feature_id 対応も崩す)を
+    // 避けてそれを維持する。
+    if let (Some(axis), Some(pen)) = (preferred_axis, preferred_pen) {
+        if pen <= min_pen * (1.0 + AXIS_HYSTERESIS_RELATIVE) {
+            return Some((axis, pen));
         }
     }
     Some((min_idx, min_pen))
@@ -455,6 +470,23 @@ fn box_box_face_contact(
     let ref_face_point = ref_face[0];
     let depth_of = |p: Vec3| (ref_face_point - p).dot(ref_normal);
 
+    // feature_id: warm starting(設計 §4.4)がステップ間で正しく対応づけられるよう、
+    // クリップ後の配列インデックス(ステップごとに変わりうる)ではなく、軸選択
+    // (ref_axis/sign・incident_axis/sign)+ 参照面上の象限(側軸2本の符号)から組み立てる。
+    // 静止・準静止のスタックでは軸選択も象限もステップ間で安定するため、warm start の
+    // 前提(同一 feature_id ⇒ 同一物理接触点)を満たす(頂点/辺の追跡による厳密な対応付けは
+    // 将来の精緻化課題)。
+    let base_feature = (ref_axis as u32)
+        | (u32::from(ref_sign > 0.0) << 2)
+        | ((best_axis as u32) << 3)
+        | (u32::from(best_sign > 0.0) << 5);
+    let quadrant_of = |p: Vec3| -> u32 {
+        let d = p - ref_xf.position;
+        let s0 = u32::from(d.dot(ref_axes[side_axes[0]]) >= 0.0);
+        let s1 = u32::from(d.dot(ref_axes[side_axes[1]]) >= 0.0);
+        s0 | (s1 << 1)
+    };
+
     if poly.is_empty() {
         // 設計 §4.4 表: クリップ結果が0点 → 元の入射面頂点から最深点1点にフォールバック。
         let deepest = incident_face
@@ -466,14 +498,13 @@ fn box_box_face_contact(
         return vec![ContactPoint {
             world_point: deepest.addcarry_scaled(ref_normal, 0.5 * pen),
             penetration: pen,
-            feature_id: 0,
+            feature_id: base_feature | (quadrant_of(deepest) << 6),
         }];
     }
 
     let mut points: Vec<ContactPoint> = poly
         .iter()
-        .enumerate()
-        .filter_map(|(i, &p)| {
+        .filter_map(|&p| {
             let pen = depth_of(p);
             if pen < -1e-9 {
                 None // 参照面より外側(貫入していない)は除外
@@ -481,7 +512,7 @@ fn box_box_face_contact(
                 Some(ContactPoint {
                     world_point: p.addcarry_scaled(ref_normal, 0.5 * pen),
                     penetration: pen.max(0.0),
-                    feature_id: i as u32,
+                    feature_id: base_feature | (quadrant_of(p) << 6),
                 })
             }
         })
@@ -498,7 +529,7 @@ fn box_box_face_contact(
         return vec![ContactPoint {
             world_point: deepest.addcarry_scaled(ref_normal, 0.5 * pen),
             penetration: pen.max(0.0),
-            feature_id: 0,
+            feature_id: base_feature | (quadrant_of(deepest) << 6),
         }];
     }
 
@@ -587,20 +618,25 @@ fn box_box_edge_contact(
     ContactPoint {
         world_point: closest_a.addcarry_scaled(closest_b - closest_a, 0.5),
         penetration,
-        feature_id: 0,
+        // warm starting(設計 §4.4)用の安定 feature_id: 辺の組 (i,j) から一意に決まる
+        // (面接触の feature_id 範囲 0-127 とは 200 のオフセットで重ならないようにする)。
+        feature_id: 200 + (i * 3 + j) as u32,
     }
 }
 
 /// Box-Box(SAT)。設計 docs/10-mechanics/02-collision-detection.md §4.4。
-/// 軸選択のヒステリシス(ジッタ抑制、同 §4.4)・持続的マニフォールド(§4.7)は未実装
-/// (Phase 2 の後続増分)。
+/// `preferred_axis` は軸選択ヒステリシス用(前ステップで選ばれた軸、`detect` が管理する
+/// `AxisCache` から渡す。テスト等で履歴が無い場合は `None` で純粋な最小重なり軸を使う)。
+/// 戻り値の第3要素は今回選ばれた軸インデックス(呼び出し側がキャッシュ更新に使う)。
+/// マニフォールド持続化(§4.7、feature_id の移動量チェックによる再利用判定)は未実装。
 fn box_box(
     xf_a: Transform,
     half_a: Vec3,
     xf_b: Transform,
     half_b: Vec3,
-) -> Option<(Vec3, Vec<ContactPoint>)> {
-    let (axis_idx, penetration) = box_box_sat(xf_a, half_a, xf_b, half_b)?;
+    preferred_axis: Option<usize>,
+) -> Option<(Vec3, Vec<ContactPoint>, usize)> {
+    let (axis_idx, penetration) = box_box_sat(xf_a, half_a, xf_b, half_b, preferred_axis)?;
 
     let a_axes = [
         box_axis_world(xf_a, 0),
@@ -631,7 +667,7 @@ fn box_box(
             penetration,
         )]
     };
-    Some((normal, points))
+    Some((normal, points, axis_idx))
 }
 
 fn shape_pair_manifold(
@@ -666,16 +702,22 @@ fn shape_pair_manifold(
             sphere_box(xf_b.position, *radius, xf_a, *half_extents).map(|(n, p)| (n, vec![p]))
         }
         (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) => {
-            box_box(xf_a, *ha, xf_b, *hb)
+            // 軸選択ヒステリシス無し(履歴を持たない単発呼び出し。`detect` は別途
+            // `AxisCache` 付きで `box_box` を直接呼ぶ、下記参照)。
+            box_box(xf_a, *ha, xf_b, *hb, None).map(|(n, p, _)| (n, p))
         }
         (Shape::Plane { .. }, Shape::Plane { .. }) => None, // static同士は broadphase で除外すべき無意味ペア
         _ => todo!("Capsule/Compound/ConvexMesh は Phase 2/5"),
     }
 }
 
+/// Box-Box の軸選択ヒステリシス用キャッシュ(ペア→前ステップで選ばれた軸インデックス)。
+/// 設計 §4.4「軸選択に前ステップの軸を優先するヒステリシス」。
+pub type AxisCache = std::collections::BTreeMap<(usize, usize), usize>;
+
 /// 総当たり broadphase(§4.1)+ narrowphase ディスパッチ(§4.2)。
 /// ペア列挙順は (indexA, indexB) 昇順に固定(決定論)。
-pub fn detect(bodies: &RigidBodySet) -> Vec<ContactManifold> {
+pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactManifold> {
     let n = bodies.len();
     let mut manifolds = Vec::new();
     for a in 0..n {
@@ -692,7 +734,24 @@ pub fn detect(bodies: &RigidBodySet) -> Vec<ContactManifold> {
             if !aabb_overlap(aabb_of(shape_a, xf_a), aabb_of(shape_b, xf_b)) {
                 continue;
             }
-            if let Some((normal, points)) = shape_pair_manifold(shape_a, xf_a, shape_b, xf_b) {
+            let result = if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
+                (shape_a, shape_b)
+            {
+                let preferred = axis_cache.get(&(a, b)).copied();
+                let r = box_box(xf_a, *ha, xf_b, *hb, preferred);
+                match &r {
+                    Some((_, _, axis_idx)) => {
+                        axis_cache.insert((a, b), *axis_idx);
+                    }
+                    None => {
+                        axis_cache.remove(&(a, b));
+                    }
+                }
+                r.map(|(n, p, _)| (n, p))
+            } else {
+                shape_pair_manifold(shape_a, xf_a, shape_b, xf_b)
+            };
+            if let Some((normal, points)) = result {
                 manifolds.push(ContactManifold {
                     body_a: a,
                     body_b: b,
@@ -857,7 +916,8 @@ mod tests {
         bodies.create_body(d1, &materials);
         bodies.create_body(d2, &materials);
 
-        let manifolds = detect(&bodies);
+        let mut axis_cache = AxisCache::new();
+        let manifolds = detect(&bodies, &mut axis_cache);
         assert_eq!(manifolds.len(), 1);
         assert!(manifolds[0].body_a < manifolds[0].body_b);
     }

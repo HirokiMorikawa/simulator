@@ -1,13 +1,28 @@
 //! Sequential impulses 接触ソルバ。設計: docs/10-mechanics/03-contact-solver.md、
 //! docs/10-mechanics/04-friction.md(接線 solve)。
 //!
-//! Phase 1 スコープ: 法線 + 反発 + Baumgarte 位置補正 + 箱近似クーロン摩擦。
-//! Warm starting・split impulse は Phase 2 で追加する。
+//! 法線 + 反発 + Baumgarte 位置補正 + 箱近似クーロン摩擦 + warm starting(設計 §4.1/§4.4、
+//! 本来 Phase 1 スコープ — 4段スタック(M12)の収束にはこれが鍵、docs/22-roadmap/01-phases.md
+//! 横断ルール5に基づき実装漏れを訂正)。split impulse・マニフォールド持続化の feature_id
+//! マッチング(移動量2mm以内チェック、設計 §4.7)は未実装(Phase 2 の後続増分)。
 
 use crate::body::RigidBodySet;
 use crate::collision::ContactManifold;
 use sim_core::MaterialDb;
 use sim_math::{Mat3, Vec3};
+use std::collections::BTreeMap;
+
+/// Warm starting 用の永続キャッシュ。キーは (body_a, body_b, feature_id)。
+/// 設計 §4.4「前ステップの累積インパルス(feature_idで対応づけ)をソルバ開始時に適用」。
+/// 簡易実装: 毎ステップ現在の接触点で上書きするのみで、接触が消えた古いキーの明示的な
+/// 削除(GC)は行わない(body 削除・再利用が未実装のため実害はない、Phase 2 の精緻化課題)。
+pub type WarmStartCache = BTreeMap<(usize, usize, u32), WarmStartImpulse>;
+
+#[derive(Clone, Copy, Default)]
+pub struct WarmStartImpulse {
+    normal: f64,
+    tangent: (f64, f64),
+}
 
 /// 反発を無視する接近速度の閾値(静止接触のジッタ防止)。設計 §4.3・§9 の既定値。
 /// `resolve` の引数として渡す(検証シナリオでジッタ防止ヒューリスティクスを外して
@@ -23,6 +38,7 @@ pub const VELOCITY_ITERATIONS: u32 = 10;
 struct PointConstraint {
     r_a: Vec3,
     r_b: Vec3,
+    feature_id: u32,
     normal_mass: f64,
     tangent_mass: (f64, f64),
     velocity_bias: f64,
@@ -63,12 +79,14 @@ fn point_velocity(v: Vec3, omega: Vec3, r: Vec3) -> Vec3 {
 }
 
 /// 設計 §4.1「prepare: 各接触点の m_eff・接線基底・velocity_bias を計算」。
+/// `warm_start_cache` から前ステップの累積インパルスを feature_id で引き継ぐ(§4.4)。
 fn prepare(
     manifolds: &[ContactManifold],
     bodies: &RigidBodySet,
     materials: &MaterialDb,
     dt: f64,
     restitution_velocity_threshold: f64,
+    warm_start_cache: &WarmStartCache,
 ) -> Vec<Constraint> {
     manifolds
         .iter()
@@ -126,14 +144,20 @@ fn prepare(
                         restitution * (-v_n_pre - restitution_velocity_threshold).max(0.0);
                     let baumgarte_bias = (BAUMGARTE_BETA / dt) * (p.penetration - SLOP).max(0.0);
 
+                    let warm = warm_start_cache
+                        .get(&(a, b, p.feature_id))
+                        .copied()
+                        .unwrap_or_default();
+
                     PointConstraint {
                         r_a,
                         r_b,
+                        feature_id: p.feature_id,
                         normal_mass,
                         tangent_mass,
                         velocity_bias: restitution_bias + baumgarte_bias,
-                        normal_impulse: 0.0,
-                        tangent_impulse: (0.0, 0.0),
+                        normal_impulse: warm.normal,
+                        tangent_impulse: warm.tangent,
                     }
                 })
                 .collect();
@@ -229,14 +253,38 @@ fn solve_tangent(c: &mut Constraint, bodies: &mut RigidBodySet) {
     }
 }
 
-/// 接触解決の1ステップ分: prepare → velocity iterations(法線→摩擦、固定順)。
-/// 設計 §4.1。warm starting は Phase 2。
+/// 設計 §4.1「warm start: 前ステップの累積インパルスをそのまま適用」。
+fn apply_warm_start(constraints: &[Constraint], bodies: &mut RigidBodySet) {
+    for c in constraints {
+        for p in &c.points {
+            if p.normal_impulse != 0.0 {
+                let impulse = c.normal.scale(p.normal_impulse);
+                apply_impulse(bodies, c.body_a, impulse, p.r_a, -1.0);
+                apply_impulse(bodies, c.body_b, impulse, p.r_b, 1.0);
+            }
+            if p.tangent_impulse.0 != 0.0 {
+                let impulse = c.tangent.0.scale(p.tangent_impulse.0);
+                apply_impulse(bodies, c.body_a, impulse, p.r_a, -1.0);
+                apply_impulse(bodies, c.body_b, impulse, p.r_b, 1.0);
+            }
+            if p.tangent_impulse.1 != 0.0 {
+                let impulse = c.tangent.1.scale(p.tangent_impulse.1);
+                apply_impulse(bodies, c.body_a, impulse, p.r_a, -1.0);
+                apply_impulse(bodies, c.body_b, impulse, p.r_b, 1.0);
+            }
+        }
+    }
+}
+
+/// 接触解決の1ステップ分: prepare → warm start 適用 → velocity iterations(法線→摩擦、固定順)
+/// → 次ステップ用に累積インパルスをキャッシュへ書き戻す。設計 §4.1/§4.4。
 pub fn resolve(
     manifolds: &[ContactManifold],
     bodies: &mut RigidBodySet,
     materials: &MaterialDb,
     dt: f64,
     restitution_velocity_threshold: f64,
+    warm_start_cache: &mut WarmStartCache,
 ) {
     let mut constraints = prepare(
         manifolds,
@@ -244,11 +292,24 @@ pub fn resolve(
         materials,
         dt,
         restitution_velocity_threshold,
+        warm_start_cache,
     );
+    apply_warm_start(&constraints, bodies);
     for _ in 0..VELOCITY_ITERATIONS {
         for c in &mut constraints {
             solve_normal(c, bodies);
             solve_tangent(c, bodies);
+        }
+    }
+    for c in &constraints {
+        for p in &c.points {
+            warm_start_cache.insert(
+                (c.body_a, c.body_b, p.feature_id),
+                WarmStartImpulse {
+                    normal: p.normal_impulse,
+                    tangent: p.tangent_impulse,
+                },
+            );
         }
     }
 }

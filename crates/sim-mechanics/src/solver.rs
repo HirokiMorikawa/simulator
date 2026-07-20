@@ -1,9 +1,9 @@
 //! 力学ソルバ。設計: docs/10-mechanics/01-rigid-body.md §4/§9、
 //!       docs/10-mechanics/02-collision-detection.md、docs/10-mechanics/03-contact-solver.md。
 //!
-//! P1 スコープ: 重力の適用・semi-implicit Euler 積分・総当たり衝突検出・
-//! sequential impulses 接触ソルバ(反発+Baumgarte+箱近似クーロン摩擦)。
-//! 最小CCD・warm starting・split impulse は別増分で追加する
+//! P1/P2 スコープ: 重力の適用・semi-implicit Euler 積分・総当たり衝突検出・
+//! sequential impulses 接触ソルバ(反発+Baumgarte+箱近似クーロン摩擦+warm starting)。
+//! 最小CCD・split impulse・スリープは別増分で追加する
 //! (docs/22-roadmap/01-phases.md P1/P2 ウェーブ)。
 
 use crate::body::{BodyType, DragModel, RigidBodySet};
@@ -26,6 +26,10 @@ pub struct MechanicsSolver {
     /// 浮力の評価に使う静的水域(設計 docs/11-fluid/04-free-surface-buoyancy.md §3)。
     /// `None`(既定)は水域なし。P1 は直立姿勢の直方体のみ対応(`sim_fluid::buoyancy` 冒頭注記)。
     pub water: Option<StaticWaterRegion>,
+    /// Warm starting 用の永続キャッシュ(設計 docs/10-mechanics/03-contact-solver.md §4.4)。
+    contact_cache: contact::WarmStartCache,
+    /// Box-Box 軸選択ヒステリシス用キャッシュ(設計 docs/10-mechanics/02-collision-detection.md §4.4)。
+    axis_cache: collision::AxisCache,
 }
 
 impl MechanicsSolver {
@@ -36,6 +40,8 @@ impl MechanicsSolver {
             restitution_velocity_threshold: contact::DEFAULT_RESTITUTION_VELOCITY_THRESHOLD,
             atmosphere: None,
             water: None,
+            contact_cache: contact::WarmStartCache::new(),
+            axis_cache: collision::AxisCache::new(),
         }
     }
 
@@ -138,13 +144,14 @@ impl Solver for MechanicsSolver {
     fn step(&mut self, dt: f64, ctx: &mut SolverContext) {
         self.apply_forces();
         self.integrate_velocities(dt);
-        let manifolds = collision::detect(&self.bodies);
+        let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
         contact::resolve(
             &manifolds,
             &mut self.bodies,
             ctx.materials,
             dt,
             self.restitution_velocity_threshold,
+            &mut self.contact_cache,
         );
         self.integrate_positions(dt);
         self.update_inertia_and_clear_accum();
