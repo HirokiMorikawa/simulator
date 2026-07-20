@@ -1,10 +1,15 @@
 //! 線形代数基盤。設計: docs/01-math/01-linear-algebra.md
 //!
 //! `Vec3`/`Quat`/`Mat3`/`Transform` を実装(math ウェーブ、
-//! docs/22-roadmap/01-phases.md)。場(Grid3/MacGrid)・積分器カタログは
-//! 同ウェーブの別ステップで追加する(docs/01-math/02-fields.md・03-integrators.md)。
+//! docs/22-roadmap/01-phases.md)。場(Grid3/MacGrid)は同ウェーブの別ステップで
+//! 追加する(docs/01-math/02-fields.md)。
 
+mod integrators;
 mod random;
+pub use integrators::{
+    explicit_euler_step, rk4_step, semi_implicit_euler_step, velocity_verlet_step,
+    BallisticIntegrator, BorisPusher,
+};
 pub use random::SimRng;
 
 use std::ops::{Add, Mul, Neg, Sub};
