@@ -39,8 +39,11 @@
   対応する M 番号がないため自前でエネルギー収支を導出したテストで検証(rel 2%)。`sim-em` に
   幾何光学の代数公式(`optics.rs`: スネル則・臨界角・フレネル係数・ブリュースター角・薄レンズ・
   プリズム最小偏角)を実装し E9–E12 を Green 化(フル `RayTracer` は未実装、公式のみ)。
-  P2 力学に SAP broadphase(`collision::sap_candidate_pairs`、x軸掃引)を追加し総当たり版と
-  結果が完全一致することを確認(BVH は未着手)。P2 力学にスリープ(`sleep::update_sleep_state`、
+  P2 力学に SAP broadphase(x軸掃引)を追加し総当たり版と結果が完全一致することを確認した後、
+  設計の目標アルゴリズム到達点である動的AABB BVH(`collision::bvh_candidate_pairs`、重心の
+  最広軸で中央値分割するトップダウン構築)に置き換え(SAPのコード・テストは削除)。実装中に、
+  無限平面の重心を素朴に計算するとNaNになりBVH構築がpanicすることを発見・修正した。
+  P2 力学にスリープ(`sleep::update_sleep_state`、
   接触島 union-find + 積分停止 + 接触解決停止)を実装(実装検証中に「積分停止だけでは
   不十分、接触解決自体も止めないと数値的揺らぎで再起床を繰り返す」ことを発見・修正)。
   P3 力学にジョイント(`joint::{DistanceJoint, BallJoint}`)を実装し、単振り子として
@@ -76,9 +79,11 @@
   分けて解決した。`sim-quantum` にトンネル効果(Q5、矩形障壁への波束入射)を実装し
   Green 化 — 波束の運動量スペクトルで重み付けした解析式の期待値との比較に切り替え、
   周期境界の一周(反射波束が透過側に誤カウントされる)前の安定した時間窓で測定する
-  ことで解決した。
+  ことで解決した。P2 力学の broadphase を SAP から動的AABB BVH(`collision::bvh_candidate_pairs`)
+  へ置き換え(設計 §4.1 表の目標アルゴリズム到達点)、既存の M8/M9 等(地面平面を使う
+  テスト)で無限平面の重心計算がNaNになりBVH構築がpanicするバグを発見・修正した。
 - **作業中**: 力学(`sim-mechanics`)P1 最後の残り — 最小CCD(M15、意図的に後回し)。
-  次点候補: BVH(P2 残り)、ダイオード/モーター結合・フル RayTracer(sim-em 残り)、
+  次点候補: ダイオード/モーター結合・フル RayTracer(sim-em 残り)、
   イジング(S7–S9、Metropolis + Wolff 必須)、量子の二重スリット(Q6、2D ソルバが新規必要)
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
@@ -230,11 +235,16 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       位置・姿勢へ直接適用)に分離。各反復・各点で現在の body 位置から貫入量を**再計算**
       する(NGS の要点、同一bodyに複数接触点があると独立減算では過剰補正になることを
       実装中に発見・修正)。M6 を設計の目標精度(rel 1%)まで、M12 を Green 化した
-- [x] SAP(broadphase、BVH は未着手)— `crates/sim-mechanics/src/collision.rs::sap_candidate_pairs`。
-      x 軸への AABB 射影でソート+掃引し、総当たり $O(N^2)$ のペア列挙を削減(設計 §4.1 表)。
-      結果は総当たり版と (indexA,indexB) 昇順で完全一致するようソート済み(決定論・既存の
-      数値挙動を保つ)。散らばった40体シーンで総当たり列挙と一致することをテストで確認
-      (`collision::tests::sap_matches_brute_force_pair_enumeration_on_scattered_scene`)
+- [x] 動的AABB BVH(broadphase)— `crates/sim-mechanics/src/collision.rs::bvh_candidate_pairs`。
+      設計 §4.1 表の目標アルゴリズム到達点($O(N\log N)$)。先にSAP(x軸掃引)を実装したが、
+      このBVH(重心バウンディングボックスの最広軸で中央値分割するトップダウン構築+
+      左右部分木の交差ペア再帰列挙)に置き換え、SAPのコード・テストは削除した。結果は
+      総当たり版と (indexA,indexB) 昇順で完全一致するようソート済み(決定論・既存の数値挙動
+      を保つ)。散らばった40体シーンで総当たり列挙と一致することをテストで確認
+      (`collision::tests::bvh_matches_brute_force_pair_enumeration_on_scattered_scene`)。
+      実装中に、無限平面(`aabb_of`がmin=-∞/max=+∞を返す)の重心を素朴に$(min+max)/2$で
+      計算するとNaNになりBVH構築のソートがpanicする(既存のM8/M9等、地面平面を使うテストで
+      発覚)ことを発見・修正 — 有限側だけで代表点を決めるヘルパー`centroid`を追加した
 - [x] スリープ — `crates/sim-mechanics/src/sleep.rs::update_sleep_state`。dynamic-dynamic
       接触の連結成分(接触島、union-find)単位で、島内の全 dynamic body の速度が閾値
       (0.01 m/s / 0.02 rad/s)未満の状態が0.5秒続いたら asleep にし、力適用・速度積分・

@@ -715,44 +715,191 @@ fn shape_pair_manifold(
 /// 設計 §4.4「軸選択に前ステップの軸を優先するヒステリシス」。
 pub type AxisCache = std::collections::BTreeMap<(usize, usize), usize>;
 
-/// SAP(Sweep and Prune)broadphase。設計 §4.1 表「P2: SAP/BVH」。全 body の AABB を x 軸の
-/// 最小値でソートして掃引し、x 軸上で重ならなくなった時点で以降の候補を打ち切る
-/// (ソート済みのため以降はさらに x 座標が離れる一方)ことで O(N²) の総当たりペア列挙を
-/// 避ける。3 次元の実際の重なりは(x軸の絞り込み後に)`aabb_overlap` で確認する。
-/// ペアは (indexA, indexB) 昇順にソートして返す(総当たり版と結果を一致させ、決定論・
-/// 既存の数値挙動を保つ)。
-fn sap_candidate_pairs(bodies: &RigidBodySet) -> Vec<(usize, usize)> {
-    let n = bodies.len();
-    let mut entries: Vec<(usize, Aabb)> = (0..n)
-        .map(|i| (i, aabb_of(bodies.shape_of(i), transform_of(bodies, i))))
-        .collect();
-    entries.sort_by(|(_, a), (_, b)| a.min.x.partial_cmp(&b.min.x).unwrap());
+/// 動的 AABB BVH のノード。設計 §4.1 表「P2: SAP/BVH」、$O(N\log N)$ の目標アルゴリズム
+/// (性能プロファイル §10)。SAP(x軸掃引、総当たり O(N²) の削減)を先に実装したが、設計が
+/// 目標とする最終形の BVH に置き換えた(永続構造・挿入/削除は未実装、毎ステップ全 body
+/// から決定論的に作り直す)。
+enum BvhNode {
+    Leaf {
+        index: usize,
+        aabb: Aabb,
+    },
+    Internal {
+        aabb: Aabb,
+        left: Box<BvhNode>,
+        right: Box<BvhNode>,
+    },
+}
 
-    let mut pairs = Vec::new();
-    for i in 0..entries.len() {
-        let (idx_i, aabb_i) = entries[i];
-        for &(idx_j, aabb_j) in &entries[i + 1..] {
-            if aabb_j.min.x > aabb_i.max.x {
-                break;
-            }
-            if aabb_overlap(aabb_i, aabb_j) {
-                pairs.push(if idx_i < idx_j {
-                    (idx_i, idx_j)
-                } else {
-                    (idx_j, idx_i)
-                });
-            }
+impl BvhNode {
+    fn aabb(&self) -> Aabb {
+        match self {
+            BvhNode::Leaf { aabb, .. } => *aabb,
+            BvhNode::Internal { aabb, .. } => *aabb,
         }
     }
+}
+
+fn union_aabb(a: Aabb, b: Aabb) -> Aabb {
+    Aabb {
+        min: Vec3::new(
+            a.min.x.min(b.min.x),
+            a.min.y.min(b.min.y),
+            a.min.z.min(b.min.z),
+        ),
+        max: Vec3::new(
+            a.max.x.max(b.max.x),
+            a.max.y.max(b.max.y),
+            a.max.z.max(b.max.z),
+        ),
+    }
+}
+
+/// 無限平面(設計上 `aabb_of` が min=-∞/max=+∞ を返す)は素朴な `(min+max)/2` だと
+/// NaN になるため、有限な側だけで代表点を決める(有限軸なら真の重心、無限軸は0扱い
+/// — 無限平面は常にどのAABBとも重なるため、木上のどこに置かれても`aabb_overlap`が
+/// 正しく重なりを検出し、ソート順自体の妥当性には影響しない)。
+fn centroid(aabb: Aabb) -> Vec3 {
+    let mid = |lo: f64, hi: f64| -> f64 {
+        match (lo.is_finite(), hi.is_finite()) {
+            (true, true) => (lo + hi) * 0.5,
+            (true, false) => lo,
+            (false, true) => hi,
+            (false, false) => 0.0,
+        }
+    };
+    Vec3::new(
+        mid(aabb.min.x, aabb.max.x),
+        mid(aabb.min.y, aabb.max.y),
+        mid(aabb.min.z, aabb.max.z),
+    )
+}
+
+/// トップダウン構築: 重心のバウンディングボックスで最も広い軸を選び、その軸の重心座標で
+/// ソートして中央値で2分する(単純な中央値分割、SAHのような費用関数は未実装)。
+fn build_bvh(mut leaves: Vec<(usize, Aabb)>) -> BvhNode {
+    if leaves.len() == 1 {
+        let (index, aabb) = leaves[0];
+        return BvhNode::Leaf { index, aabb };
+    }
+
+    let mut centroid_min = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut centroid_max = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for &(_, aabb) in &leaves {
+        let c = centroid(aabb);
+        centroid_min = Vec3::new(
+            centroid_min.x.min(c.x),
+            centroid_min.y.min(c.y),
+            centroid_min.z.min(c.z),
+        );
+        centroid_max = Vec3::new(
+            centroid_max.x.max(c.x),
+            centroid_max.y.max(c.y),
+            centroid_max.z.max(c.z),
+        );
+    }
+    let extent = centroid_max - centroid_min;
+    let axis = if extent.x >= extent.y && extent.x >= extent.z {
+        0
+    } else if extent.y >= extent.z {
+        1
+    } else {
+        2
+    };
+
+    leaves.sort_by(|(_, a), (_, b)| {
+        let ca = centroid(*a);
+        let cb = centroid(*b);
+        let (va, vb) = match axis {
+            0 => (ca.x, cb.x),
+            1 => (ca.y, cb.y),
+            _ => (ca.z, cb.z),
+        };
+        va.partial_cmp(&vb).unwrap()
+    });
+
+    let mid = leaves.len() / 2;
+    let right_leaves = leaves.split_off(mid);
+    let left = build_bvh(leaves);
+    let right = build_bvh(right_leaves);
+    let aabb = union_aabb(left.aabb(), right.aabb());
+    BvhNode::Internal {
+        aabb,
+        left: Box::new(left),
+        right: Box::new(right),
+    }
+}
+
+/// 2つの部分木間の重なりペアを再帰的に集める(標準的なBVH自己衝突走査)。各ペア
+/// (i,j) はその最小共通祖先ノードでの `collect_cross_pairs` 呼び出しでちょうど1回だけ
+/// 生成されるため、重複除去は不要。
+fn collect_cross_pairs(a: &BvhNode, b: &BvhNode, pairs: &mut Vec<(usize, usize)>) {
+    if !aabb_overlap(a.aabb(), b.aabb()) {
+        return;
+    }
+    match (a, b) {
+        (BvhNode::Leaf { index: ia, .. }, BvhNode::Leaf { index: ib, .. }) => {
+            pairs.push(if ia < ib { (*ia, *ib) } else { (*ib, *ia) });
+        }
+        (BvhNode::Leaf { .. }, BvhNode::Internal { left, right, .. }) => {
+            collect_cross_pairs(a, left, pairs);
+            collect_cross_pairs(a, right, pairs);
+        }
+        (BvhNode::Internal { left, right, .. }, BvhNode::Leaf { .. }) => {
+            collect_cross_pairs(left, b, pairs);
+            collect_cross_pairs(right, b, pairs);
+        }
+        (
+            BvhNode::Internal {
+                left: al,
+                right: ar,
+                ..
+            },
+            BvhNode::Internal {
+                left: bl,
+                right: br,
+                ..
+            },
+        ) => {
+            collect_cross_pairs(al, bl, pairs);
+            collect_cross_pairs(al, br, pairs);
+            collect_cross_pairs(ar, bl, pairs);
+            collect_cross_pairs(ar, br, pairs);
+        }
+    }
+}
+
+/// 木の内部で自分自身との重なり(左右の部分木間)を再帰的に集める。
+fn collect_self_pairs(node: &BvhNode, pairs: &mut Vec<(usize, usize)>) {
+    if let BvhNode::Internal { left, right, .. } = node {
+        collect_self_pairs(left, pairs);
+        collect_self_pairs(right, pairs);
+        collect_cross_pairs(left, right, pairs);
+    }
+}
+
+/// 動的 AABB BVH broadphase。ペアは (indexA, indexB) 昇順にソートして返す
+/// (総当たり版と結果を一致させ、決定論・既存の数値挙動を保つ)。
+fn bvh_candidate_pairs(bodies: &RigidBodySet) -> Vec<(usize, usize)> {
+    let n = bodies.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let leaves: Vec<(usize, Aabb)> = (0..n)
+        .map(|i| (i, aabb_of(bodies.shape_of(i), transform_of(bodies, i))))
+        .collect();
+    let root = build_bvh(leaves);
+    let mut pairs = Vec::new();
+    collect_self_pairs(&root, &mut pairs);
     pairs.sort_unstable();
     pairs
 }
 
-/// SAP broadphase(§4.1)+ narrowphase ディスパッチ(§4.2)。
+/// BVH broadphase(§4.1)+ narrowphase ディスパッチ(§4.2)。
 /// ペア列挙順は (indexA, indexB) 昇順に固定(決定論)。
 pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactManifold> {
     let mut manifolds = Vec::new();
-    for (a, b) in sap_candidate_pairs(bodies) {
+    for (a, b) in bvh_candidate_pairs(bodies) {
         // static/kinematic 同士は無意味ペア(設計 §4.4 表)。
         if bodies.body_type[a] != BodyType::Dynamic && bodies.body_type[b] != BodyType::Dynamic {
             continue;
@@ -948,19 +1095,16 @@ mod tests {
         assert!(manifolds[0].body_a < manifolds[0].body_b);
     }
 
-    /// SAP broadphase(設計 §4.1 表「P2: SAP/BVH」)。散らばった多数体シーンで、SAP が
+    /// 動的 AABB BVH(設計 §4.1 表「P2: SAP/BVH」)。散らばった多数体シーンで、BVH が
     /// 列挙する候補ペア集合が総当たり(全 $\binom{N}{2}$ ペアを `aabb_overlap` で判定)と
-    /// 完全一致すること(順序含む)を確認する。x 軸掃引による枝刈りが結果を変えず、
-    /// 純粋に $O(N^2)$ 列挙を高速化するだけであることの検証。
+    /// 完全一致すること(順序含む)を確認する。
     #[test]
-    fn sap_matches_brute_force_pair_enumeration_on_scattered_scene() {
+    fn bvh_matches_brute_force_pair_enumeration_on_scattered_scene() {
         let mut bodies = RigidBodySet::new();
         let materials = sim_core::MaterialDb::standard();
         let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
         let mut rng = sim_math::SimRng::new(7, 7);
         for i in 0..40 {
-            // 密に散らばらせて総当たりと十分な数のペアが重なるようにする(この検証には
-            // 「重なりが実在する」ことが必要、疎すぎると意味のあるテストにならない)。
             let pos = Vec3::new(
                 rng.range_f64(-2.0, 2.0),
                 rng.range_f64(-2.0, 2.0),
@@ -980,7 +1124,7 @@ mod tests {
             bodies.create_body(desc, &materials);
         }
 
-        let sap_pairs = sap_candidate_pairs(&bodies);
+        let bvh_pairs = bvh_candidate_pairs(&bodies);
 
         let n = bodies.len();
         let mut brute_force = Vec::new();
@@ -1001,7 +1145,7 @@ mod tests {
             !brute_force.is_empty(),
             "scene should contain overlapping AABBs for this test to be meaningful"
         );
-        assert_eq!(sap_pairs, brute_force);
+        assert_eq!(bvh_pairs, brute_force);
     }
 
     /// Box-Box 面接触: 同サイズの立方体2個をy方向に0.1だけ重ねると、
