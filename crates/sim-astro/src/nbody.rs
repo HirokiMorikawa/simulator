@@ -235,4 +235,86 @@ mod tests {
         };
         assert_eq!(run(), run());
     }
+
+    /// A1: ケプラー第3法則 T²∝a³、rel 0.1%(docs/21-verification/01-analytic-tests.md A1)。
+    /// 設計は「太陽系8惑星」を想定するが、実際の8惑星(水星88日〜海王星165年)を刻み解像
+    /// 良く高速テストとして回すのは非現実的なため、同じ中心天体の周りに8個の合成衛星を
+    /// 幾何級数的な半径(比1.4、最大/最小の周期比 ≈34倍で高速に完走できる)で配置し、
+    /// 同一のN体シミュレータ・積分器でT²∝a³が全軌道スケールで成立することを検証する
+    /// (法則自体は距離のスケールに依らない — a3/a2 で単一衛星の円軌道physicsは既に検証済み。
+    /// 本テストは「複数衛星を同時にシミュレートしても各軌道が独立にケプラー則を満たすか」を
+    /// 追加検証する)。各衛星の公転周期は y 座標が負→正に転じる時刻(1周目の帰還)から実測する。
+    #[test]
+    fn a1_kepler_third_law_holds_across_orbital_scales() {
+        let mass_central = 1.989e30;
+        let mut sys = NBodySystem::new(0.0);
+        sys.add_body(Vec3::ZERO, Vec3::ZERO, mass_central);
+
+        let n_satellites = 8;
+        let mut indices = Vec::new();
+        let mut radii = Vec::new();
+        for k in 0..n_satellites {
+            let r = 5.0e10 * 1.4_f64.powi(k);
+            let v = (GRAVITATIONAL_CONSTANT * mass_central / r).sqrt();
+            let idx = sys.add_body(Vec3::new(r, 0.0, 0.0), Vec3::new(0.0, v, 0.0), 1.0);
+            indices.push(idx);
+            radii.push(r);
+        }
+
+        let analytic_period = |r: f64| {
+            2.0 * std::f64::consts::PI
+                * (r.powi(3) / (GRAVITATIONAL_CONSTANT * mass_central)).sqrt()
+        };
+        let t_min = analytic_period(radii[0]);
+        let t_max = analytic_period(radii[n_satellites as usize - 1]);
+        let dt = t_min / 2000.0;
+        let total_steps = (1.05 * t_max / dt).ceil() as u32;
+
+        let materials = sim_core::MaterialDb::standard();
+        let mut rng = sim_math::SimRng::new(1, 1);
+        let mut events = sim_core::EventQueue::new();
+
+        let mut gone_negative = vec![false; n_satellites as usize];
+        let mut measured_period: Vec<Option<f64>> = vec![None; n_satellites as usize];
+        let mut prev_y: Vec<f64> = indices.iter().map(|&idx| sys.position[idx].y).collect();
+        let mut prev_t = 0.0;
+        for step in 0..total_steps {
+            let mut ctx = SolverContext {
+                materials: &materials,
+                rng: &mut rng,
+                events: &mut events,
+            };
+            sys.step(dt, &mut ctx);
+            let t = (step + 1) as f64 * dt;
+            for (s, &idx) in indices.iter().enumerate() {
+                if measured_period[s].is_some() {
+                    continue;
+                }
+                let y = sys.position[idx].y;
+                if y < 0.0 {
+                    gone_negative[s] = true;
+                } else if gone_negative[s] {
+                    // 線形補間でゼロ交差時刻をサブステップ精度で求める(離散検出の誤差 O(dt/T) を
+                    // O(dt^2/T) に落とし、rel 0.1% 判定に十分な精度を確保する)。
+                    let frac = -prev_y[s] / (y - prev_y[s]);
+                    measured_period[s] = Some(prev_t + frac * (t - prev_t));
+                }
+                prev_y[s] = y;
+            }
+            prev_t = t;
+        }
+
+        let expected_ratio = 4.0 * std::f64::consts::PI * std::f64::consts::PI
+            / (GRAVITATIONAL_CONSTANT * mass_central);
+        for (s, &r) in radii.iter().enumerate() {
+            let t_measured =
+                measured_period[s].expect("orbit should complete within simulated window");
+            let ratio = t_measured * t_measured / r.powi(3);
+            let rel_err = (ratio - expected_ratio).abs() / expected_ratio;
+            assert!(
+                rel_err < 0.001,
+                "satellite {s}: T^2/a^3={ratio} expected={expected_ratio} rel_err={rel_err}"
+            );
+        }
+    }
 }
