@@ -1,15 +1,25 @@
 //! 線形代数基盤。設計: docs/01-math/01-linear-algebra.md
 //!
-//! `Vec3`/`Quat`/`Mat3`/`Transform` を実装(math ウェーブ、
-//! docs/22-roadmap/01-phases.md)。場(Grid3/MacGrid)は同ウェーブの別ステップで
-//! 追加する(docs/01-math/02-fields.md)。
+//! `Vec3`/`Quat`/`Mat3`/`Transform`(docs/01-math/01-linear-algebra.md)、
+//! `SimRng`(docs/01-math/04-random.md)、積分器カタログの汎用部分
+//! (docs/01-math/03-integrators.md)、場・PCG・粒子集合(docs/01-math/02-fields.md)
+//! を実装する(math ウェーブ、docs/22-roadmap/01-phases.md)。
 
+mod grid;
 mod integrators;
+mod particles;
+mod pcg;
 mod random;
+pub use grid::{
+    catmull_rom_sample, gradient, laplacian, laplacian_variable_coefficient, trilinear_sample,
+    BoundaryRule, Grid3, GridSampler, MacGrid,
+};
 pub use integrators::{
     explicit_euler_step, rk4_step, semi_implicit_euler_step, velocity_verlet_step,
     BallisticIntegrator, BorisPusher,
 };
+pub use particles::{ParticleSet, SpatialHash};
+pub use pcg::{pcg, PcgResult, Preconditioner};
 pub use random::SimRng;
 
 use std::ops::{Add, Mul, Neg, Sub};
