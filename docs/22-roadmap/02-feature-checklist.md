@@ -34,9 +34,13 @@
   経由の構成へ一般化。`EnergyLedger` は最初の `step()` まで遅延初期化(シーン構築中の
   `create_body` 呼び出しを台帳の基準点計算に含めないため)。`sim-wasm::WasmWorld` の
   JS向け公開シグネチャ(コンストラクタ・`body_position_f32()`)は内部実装のみ追随させ不変に
-  維持、`demo` のビルドで確認)
+  維持、`demo` のビルドで確認。P2 の Box-Box(SAT)を実装(15軸判定+面クリップ+辺×辺、
+  単体テスト4件 Green)。ただし M12(4段スタック)はまだ Green にならない — warm starting・
+  スリープが未実装のため PGS が多段接触で収束しきらず貫入が slop を超えることを実測で確認、
+  両方の実装後に再挑戦する課題として記録)
 - **作業中**: 力学(`sim-mechanics`)P1 最後の残り — 最小CCD(M15、意図的に後回し。
-  下記 §2/§3 の P1 行)。完了後は M12/P2(Box-Box)か他ドメインの Phase A スケルトンへ
+  下記 §2/§3 の P1 行)。P2 では warm starting・スリープ(M12 Green化に必要)か
+  他ドメインの Phase A スケルトンへ
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
   math ウェーブ(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの汎用部分/
@@ -138,8 +142,10 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 
 - [x] 剛体(状態・慣性テンソル・力/トルク API)— `crates/sim-mechanics/src/{body,shape,solver}.rs`
 - [x] 総当たり衝突・接触ソルバ(sequential impulses)— `crates/sim-mechanics/src/{collision,contact}.rs`。
-      narrowphase は Sphere-Sphere/Sphere-Plane/Box-Plane/Sphere-Box(Phase1の4組)。Box-Box(SAT)は
-      P2。warm starting・split impulse は P2
+      narrowphase は Sphere-Sphere/Sphere-Plane/Box-Plane/Sphere-Box(Phase1の4組)+
+      Box-Box(SAT、15軸+Sutherland-Hodgmanクリップ、`collision.rs::box_box`)。
+      軸選択のヒステリシス・マニフォールド持続化(§4.7)・warm starting・split impulse は
+      未実装(多段スタックで貫入が slop を超える既知の制限、下記 M12 参照)
 - [x] 摩擦(クーロン・摩擦円錐)— 箱近似(2接線独立クランプ、`contact.rs::solve_tangent`)、
       `MaterialDb::friction_pair`(幾何平均+ペア表)を実接触ソルバで使用
 - [ ] 最小 CCD(弾丸級の speculative contact)
@@ -158,12 +164,18 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `crates/sim-world/src/lib.rs::tests::energy_ledger_residual_matches_analytic_symplectic_drift`
       で検証
 - [ ] 担当テスト Green: M1–M9, M12, M15, F1–F6, T1, T2(M1・M5–M9・F1–F6・T1・T2 Green。
-      残るは M12=Box-Box待ち(P2)、M15=最小CCD待ちのみ)
+      M12 は Box-Box(SAT)実装済みだが 4段木箱10秒で貫入が slop(5mm)を超える
+      (level 1 で実測 約1.06cm) — warm starting・スリープ未実装のため PGS が多段接触で
+      収束しきらないのが原因と診断、両方実装後に再挑戦する。M15=最小CCD待ち)
 
 ### P2 — 力学拡充
 
+- [x] Box-Box(SAT)— `crates/sim-mechanics/src/collision.rs::box_box`。15軸分離判定
+      (面3+3、辺×辺9)+ 面接触は参照面への Sutherland-Hodgman クリップ(最大4点、
+      設計 §4.4 の縮約は簡易版: 面積最大化でなく深度降順で上位4点)+ 辺×辺接触は
+      2線分の最近点1点。退化ケース(平行辺の軸除外・クリップ0点フォールバック)を実装。
+      軸選択ヒステリシス(ジッタ抑制)・マニフォールド持続化は未実装
 - [ ] SAP / BVH(broadphase)
-- [ ] Box-Box(SAT)
 - [ ] split impulse・スリープ・転がり摩擦
 - [ ] 担当テスト Green: M6(精度), M10, M11(M10 は固定ピボット回転がジョイント実装
       (P3、docs/10-mechanics/05-joints-constraints.md)に依存。M11 は簡易線形化で解析成長率との
