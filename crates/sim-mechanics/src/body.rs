@@ -39,13 +39,16 @@ pub enum BodyType {
     Kinematic,
 }
 
-/// 流体抗力モデルへの参照点(型のみ。力の計算は F1–F6・流体結合の担当)。
-/// 設計: docs/10-mechanics/01-rigid-body.md §3、docs/11-fluid/05-aero-hydrodynamics.md。
+/// 流体抗力モデル。設計: docs/10-mechanics/01-rigid-body.md §3、
+/// docs/11-fluid/05-aero-hydrodynamics.md §3。力の計算(Schiller-Naumann 補正付き
+/// 抗力式)は `MechanicsSolver::apply_forces` が `sim_fluid::drag_force_sphere` を
+/// 呼んで行う(P1 スコープは Sphere のみ、Cd は Re から自動決定)。
+/// `Box3`(姿勢依存の投影面積補間)・`Panels`(布・翼)は Phase 3–4。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DragModel {
     None,
-    Sphere { cd: f64 },
-    Box { cd: f64 },
+    Sphere { radius: f64 },
+    Box3 { half_extents: Vec3, cd: f64 },
 }
 
 /// 生成記述子。設計 §3。
