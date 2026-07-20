@@ -149,7 +149,6 @@ impl Solver for MechanicsSolver {
             &manifolds,
             &mut self.bodies,
             ctx.materials,
-            dt,
             self.restitution_velocity_threshold,
             &mut self.contact_cache,
         );
