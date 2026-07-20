@@ -1,10 +1,17 @@
-//! ID・時間・決定論ハッシュの基盤。
+//! ID・時間・決定論ハッシュ・材料物性データベースの基盤。
 //! 設計: docs/00-foundation/04-architecture.md §1.1.2(4)/§3、
-//!       docs/20-integration/02-determinism-replay.md §2/§3。
+//!       docs/20-integration/02-determinism-replay.md §2/§3、
+//!       docs/12-thermal/04-material-thermal-props.md。
 //!
-//! Phase 0 では `BodyId` / `SimClock` / `StateHasher` のみを実装する。
-//! `MaterialDb` / `Solver` トレイト等は Phase A で追加する
-//! (docs/00-foundation/04-architecture.md §1.2)。
+//! `Solver`/`Coupling` トレイト・`EventQueue`・`CommandQueue` 等は Phase A で
+//! 各ドメインスケルトンと合わせて追加する(docs/00-foundation/04-architecture.md §1.2–1.3)。
+
+mod material;
+mod solver;
+pub use material::{Material, MaterialDb, MaterialId, PairOverride, PhaseChangeProps};
+pub use solver::{
+    DomainId, EnergyBreakdown, Event, EventKind, EventQueue, Solver, SolverContext, SourceId,
+};
 
 /// 世代付きインデックス。削除済み ID へのアクセスは `None`(パニックしない)。
 /// 設計: docs/00-foundation/04-architecture.md §3。
@@ -12,6 +19,16 @@
 pub struct BodyId {
     pub index: u32,
     pub generation: u32,
+}
+
+/// 所属フレーム。単一フレームのシーンでは全て `ROOT`。
+/// 設計: docs/00-foundation/02-scale-ladder.md §2.2、docs/00-foundation/04-architecture.md §3。
+/// フル フレーム階層(floating origin)は Pα(docs/20-integration/05-frame-hierarchy.md)で拡張する。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct FrameId(pub u32);
+
+impl FrameId {
+    pub const ROOT: FrameId = FrameId(0);
 }
 
 /// World が唯一持つ時刻。固定 dt・単調増加。壁時計・OS 乱数から独立
@@ -94,6 +111,13 @@ impl StateHasher {
         self.write_f64(v.x);
         self.write_f64(v.y);
         self.write_f64(v.z);
+    }
+
+    pub fn write_quat(&mut self, q: sim_math::Quat) {
+        self.write_f64(q.x);
+        self.write_f64(q.y);
+        self.write_f64(q.z);
+        self.write_f64(q.w);
     }
 
     pub fn finish(&self) -> u64 {

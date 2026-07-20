@@ -1,0 +1,262 @@
+//! 力学ソルバ。設計: docs/10-mechanics/01-rigid-body.md §4/§9。
+//!
+//! P1 スコープ: 重力の適用・semi-implicit Euler 積分・慣性テンソルのワールド更新。
+//! 衝突検出・接触ソルバ・摩擦・最小CCDは別増分で追加する
+//! (docs/22-roadmap/01-phases.md P1 ウェーブ)。
+
+use crate::body::{BodyType, RigidBodySet};
+use crate::RigidBodyDesc;
+use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
+
+pub struct MechanicsSolver {
+    pub bodies: RigidBodySet,
+    /// 重力加速度(下向き、m/s^2)。既定 9.80665(docs/00-foundation/03-units-conventions.md)。
+    pub gravity: f64,
+}
+
+impl MechanicsSolver {
+    pub fn new(gravity: f64) -> MechanicsSolver {
+        MechanicsSolver {
+            bodies: RigidBodySet::new(),
+            gravity,
+        }
+    }
+
+    pub fn create_body(&mut self, desc: RigidBodyDesc, materials: &MaterialDb) -> usize {
+        self.bodies.create_body(desc, materials)
+    }
+
+    /// 設計 §4 パイプラインの `apply_forces`。P1 スコープでは重力のみ
+    /// (抗力・浮力・結合力は流体/熱ウェーブとの結合実装時に追加)。
+    fn apply_forces(&mut self) {
+        let n = self.bodies.len();
+        for i in 0..n {
+            if self.bodies.body_type[i] == BodyType::Dynamic {
+                let mass = self.bodies.mass(i);
+                self.bodies.force_accum[i].y -= mass * self.gravity;
+            }
+        }
+    }
+
+    /// `v += (F/m)dt`、`ω += I_w⁻¹(τ − ω×I_wω)dt`(ジャイロ項は既定で陽的、設計 §4/§9)。
+    fn integrate_velocities(&mut self, dt: f64) {
+        let n = self.bodies.len();
+        for i in 0..n {
+            if self.bodies.body_type[i] != BodyType::Dynamic {
+                continue;
+            }
+            let accel = self.bodies.force_accum[i].scale(self.bodies.inv_mass[i]);
+            self.bodies.linear_velocity[i] =
+                self.bodies.linear_velocity[i].addcarry_scaled(accel, dt);
+
+            let inv_iw = self.bodies.inv_inertia_world[i];
+            if let Some(iw) = inv_iw.inverse() {
+                let omega = self.bodies.angular_velocity[i];
+                let gyro = omega.cross(iw.mul_vec(omega));
+                let ang_accel = inv_iw.mul_vec(self.bodies.torque_accum[i] - gyro);
+                self.bodies.angular_velocity[i] = omega.addcarry_scaled(ang_accel, dt);
+            }
+        }
+    }
+
+    /// `x += v dt`、`q = normalize(q + dt/2 * ω_quat ⊗ q)`(設計 §9)。
+    /// Dynamic/Kinematic の両方が対象(Kinematic はスクリプトで速度が指定される)。
+    fn integrate_positions(&mut self, dt: f64) {
+        let n = self.bodies.len();
+        for i in 0..n {
+            if self.bodies.body_type[i] == BodyType::Static {
+                continue;
+            }
+            self.bodies.position[i] =
+                self.bodies.position[i].addcarry_scaled(self.bodies.linear_velocity[i], dt);
+            self.bodies.rotation[i] = self.bodies.rotation[i]
+                .integrate_angular_velocity(self.bodies.angular_velocity[i], dt);
+        }
+    }
+
+    /// ワールド慣性の相似変換キャッシュ更新 + アキュムレータのクリア(設計 §4 末尾)。
+    fn update_inertia_and_clear_accum(&mut self) {
+        let n = self.bodies.len();
+        for i in 0..n {
+            self.bodies.inv_inertia_world[i] =
+                self.bodies.inv_inertia_local[i].similarity(self.bodies.rotation[i].to_mat3());
+            self.bodies.force_accum[i] = sim_math::Vec3::ZERO;
+            self.bodies.torque_accum[i] = sim_math::Vec3::ZERO;
+        }
+    }
+}
+
+impl Solver for MechanicsSolver {
+    /// 接触・拘束を持たない P1 現段階では安定条件の制約が無い(拘束導入時に更新)。
+    fn max_stable_dt(&self) -> f64 {
+        f64::INFINITY
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        self.apply_forces();
+        self.integrate_velocities(dt);
+        // 衝突検出・接触ソルバはここに挿入される(別増分)。
+        self.integrate_positions(dt);
+        self.update_inertia_and_clear_accum();
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        let n = self.bodies.len();
+        hasher.write_u64(n as u64);
+        for i in 0..n {
+            hasher.write_vec3(self.bodies.position[i]);
+            hasher.write_quat(self.bodies.rotation[i]);
+            hasher.write_vec3(self.bodies.linear_velocity[i]);
+            hasher.write_vec3(self.bodies.angular_velocity[i]);
+        }
+    }
+
+    /// Dynamic 剛体の運動エネルギー(並進+回転)+ 重力ポテンシャル(基準 y=0)。
+    /// Kinematic の運動は外部注入エネルギーとして台帳側(World)が扱うため、ここでは対象外
+    /// (docs/00-foundation/04-architecture.md §1.1.2(2))。
+    fn total_energy(&self) -> EnergyBreakdown {
+        let mut kinetic = 0.0;
+        let mut potential = 0.0;
+        let n = self.bodies.len();
+        for i in 0..n {
+            if self.bodies.body_type[i] != BodyType::Dynamic {
+                continue;
+            }
+            let mass = self.bodies.mass(i);
+            kinetic += 0.5 * mass * self.bodies.linear_velocity[i].length_sq();
+            if let Some(inertia_world) = self.bodies.inv_inertia_world[i].inverse() {
+                let omega = self.bodies.angular_velocity[i];
+                kinetic += 0.5 * omega.dot(inertia_world.mul_vec(omega));
+            }
+            potential += mass * self.gravity * self.bodies.position[i].y;
+        }
+        EnergyBreakdown {
+            kinetic,
+            potential,
+            ..Default::default()
+        }
+    }
+}
+
+/// Phase 0 の `FallingBody`(回転なし・接触なし)相当を、正式な `RigidBodySet` +
+/// `MechanicsSolver` 経由で再現できることを確認する M1 相当のテスト。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shape::Shape;
+    use sim_core::{EventQueue, MaterialDb};
+    use sim_math::{SimRng, Vec3};
+
+    fn make_ctx<'a>(
+        materials: &'a MaterialDb,
+        rng: &'a mut SimRng,
+        events: &'a mut EventQueue,
+    ) -> SolverContext<'a> {
+        SolverContext {
+            materials,
+            rng,
+            events,
+        }
+    }
+
+    /// M1: 自由落下 h=10m の到達時刻 t*=sqrt(2h/g)=1.4278s、相対誤差 0.5% 以内
+    /// (docs/21-verification/01-analytic-tests.md M1)。
+    #[test]
+    fn m1_free_fall_matches_analytic_time_to_ground() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        desc.transform.position = Vec3::new(0.0, 10.0, 0.0);
+        let idx = solver.create_body(desc, &materials);
+
+        let dt = 1.0 / 120.0;
+        let mut t = 0.0;
+        while solver.bodies.position[idx].y > 0.0 {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            t += dt;
+        }
+
+        let analytic = (2.0 * 10.0 / 9.80665_f64).sqrt();
+        assert!(
+            (t - analytic).abs() / analytic < 0.005,
+            "t={t} analytic={analytic}"
+        );
+    }
+
+    #[test]
+    fn static_body_does_not_move_under_gravity() {
+        let materials = MaterialDb::standard();
+        let concrete = materials.find_by_name("コンクリート").unwrap();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(1.0, 1.0, 1.0),
+            },
+            concrete,
+        );
+        desc.body_type = BodyType::Static;
+        let idx = solver.create_body(desc, &materials);
+
+        for _ in 0..120 {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(1.0 / 120.0, &mut ctx);
+        }
+        assert_eq!(solver.bodies.position[idx], Vec3::ZERO);
+    }
+
+    #[test]
+    fn kinematic_body_moves_at_prescribed_velocity_without_gravity() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.1 }, steel);
+        desc.body_type = BodyType::Kinematic;
+        desc.linear_velocity = Vec3::new(1.0, 0.0, 0.0);
+        let idx = solver.create_body(desc, &materials);
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..120 {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+        }
+        assert!((solver.bodies.position[idx].x - 1.0).abs() < 1e-9);
+        assert!(
+            (solver.bodies.position[idx].y - 0.0).abs() < 1e-12,
+            "gravity must not affect kinematic bodies"
+        );
+    }
+
+    /// 決定論: 同一初期条件を2回実行 → state_hash が一致する。
+    #[test]
+    fn determinism_same_scenario_twice_matches_hash() {
+        let run = || {
+            let materials = MaterialDb::standard();
+            let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+            let mut rng = SimRng::new(7, 7);
+            let mut events = EventQueue::new();
+            let mut solver = MechanicsSolver::new(9.80665);
+            let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.2 }, steel);
+            desc.transform.position = Vec3::new(0.0, 5.0, 0.0);
+            solver.create_body(desc, &materials);
+            for _ in 0..300 {
+                let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+                solver.step(1.0 / 120.0, &mut ctx);
+            }
+            let mut hasher = StateHasher::new();
+            solver.state_hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(run(), run());
+    }
+}
