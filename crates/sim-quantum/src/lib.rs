@@ -5,4 +5,4 @@
 //! スケルトンは今後の増分で追加する(docs/22-roadmap/01-phases.md)。
 
 mod schrodinger;
-pub use schrodinger::WaveFunction1D;
+pub use schrodinger::{find_eigenstates, WaveFunction1D};
