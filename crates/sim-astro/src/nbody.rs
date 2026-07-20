@@ -317,4 +317,59 @@ mod tests {
             );
         }
     }
+
+    /// A4: ホーマン遷移 — 解析式どおりのΔv1で出発円軌道(半径r1)から瞬間噴射すると、
+    /// 半周後の遠地点半径が目標円軌道半径r2に、解析式どおりのΔv2で円軌道化すると
+    /// 最終速度が目標円軌道速度v2に、それぞれrel 0.5%以内で一致すること
+    /// (docs/21-verification/01-analytic-tests.md A4)。
+    #[test]
+    fn a4_hohmann_transfer_delta_v_matches_analytic_value() {
+        let mass_central = 1.989e30; // 太陽質量
+        let r1 = 1.496e11; // 1AU(出発円軌道)
+        let r2 = 2.0 * r1; // 目標円軌道(2AU)
+
+        let v1_circ = (GRAVITATIONAL_CONSTANT * mass_central / r1).sqrt();
+        let v2_circ = (GRAVITATIONAL_CONSTANT * mass_central / r2).sqrt();
+        let a_transfer = 0.5 * (r1 + r2);
+        let v_transfer_r1 =
+            (GRAVITATIONAL_CONSTANT * mass_central * (2.0 / r1 - 1.0 / a_transfer)).sqrt();
+        let v_transfer_r2 =
+            (GRAVITATIONAL_CONSTANT * mass_central * (2.0 / r2 - 1.0 / a_transfer)).sqrt();
+        let dv1 = v_transfer_r1 - v1_circ;
+        let dv2 = v2_circ - v_transfer_r2;
+
+        let mut sys = NBodySystem::new(0.0);
+        sys.add_body(Vec3::ZERO, Vec3::ZERO, mass_central);
+        // 出発円軌道上、進行方向に沿って瞬間噴射(Δv1、近地点噴射)。
+        let idx = sys.add_body(
+            Vec3::new(r1, 0.0, 0.0),
+            Vec3::new(0.0, v1_circ + dv1, 0.0),
+            1.0,
+        );
+
+        let transfer_time = std::f64::consts::PI
+            * (a_transfer.powi(3) / (GRAVITATIONAL_CONSTANT * mass_central)).sqrt();
+        let steps = 200_000u32;
+        let dt = transfer_time / steps as f64;
+        step_n(&mut sys, dt, steps);
+
+        // 半周後、遠地点(半径最大)に到達しているはず。
+        let apoapsis_r = sys.position[idx].length();
+        let rel_err_r2 = (apoapsis_r - r2).abs() / r2;
+        assert!(
+            rel_err_r2 < 0.005,
+            "apoapsis_r={apoapsis_r} r2={r2} rel_err={rel_err_r2}"
+        );
+
+        // 円軌道化の噴射(Δv2、進行方向に加算)。
+        let v_dir = sys.velocity[idx].normalize_or_zero();
+        sys.velocity[idx] = sys.velocity[idx].addcarry_scaled(v_dir, dv2);
+
+        let final_speed = sys.velocity[idx].length();
+        let rel_err_v2 = (final_speed - v2_circ).abs() / v2_circ;
+        assert!(
+            rel_err_v2 < 0.005,
+            "final_speed={final_speed} v2_circ={v2_circ} rel_err={rel_err_v2}"
+        );
+    }
 }
