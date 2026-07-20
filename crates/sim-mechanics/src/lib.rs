@@ -1,13 +1,18 @@
-//! 力学ソルバ。設計: docs/10-mechanics/01-rigid-body.md、02-collision-detection.md。
+//! 力学ソルバ。設計: docs/10-mechanics/01-rigid-body.md、02-collision-detection.md、
+//!       03-contact-solver.md、04-friction.md。
 //!
-//! P1 スコープ(docs/22-roadmap/01-phases.md): 剛体状態・慣性テンソル・重力積分。
-//! 衝突検出(broadphase/narrowphase)・接触ソルバ・摩擦・最小CCDは後続の増分で追加する。
+//! P1 スコープ(docs/22-roadmap/01-phases.md): 剛体状態・慣性テンソル・重力積分・
+//! 総当たり衝突検出(Sphere/Box/Plane)・sequential impulses 接触ソルバ・箱近似クーロン摩擦。
+//! 最小CCD・warm starting・split impulse・Box-Box(SAT)は後続の増分で追加する。
 //! Phase 0 の `FallingBody` 最小実装はこの正式な `RigidBodySet`/`MechanicsSolver` に置き換えた。
 
 mod body;
+mod collision;
+mod contact;
 mod shape;
 mod solver;
 
 pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};
+pub use collision::{ContactManifold, ContactPoint};
 pub use shape::{Aabb, Shape};
 pub use solver::MechanicsSolver;

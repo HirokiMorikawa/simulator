@@ -1,17 +1,22 @@
-//! 力学ソルバ。設計: docs/10-mechanics/01-rigid-body.md §4/§9。
+//! 力学ソルバ。設計: docs/10-mechanics/01-rigid-body.md §4/§9、
+//!       docs/10-mechanics/02-collision-detection.md、docs/10-mechanics/03-contact-solver.md。
 //!
-//! P1 スコープ: 重力の適用・semi-implicit Euler 積分・慣性テンソルのワールド更新。
-//! 衝突検出・接触ソルバ・摩擦・最小CCDは別増分で追加する
-//! (docs/22-roadmap/01-phases.md P1 ウェーブ)。
+//! P1 スコープ: 重力の適用・semi-implicit Euler 積分・総当たり衝突検出・
+//! sequential impulses 接触ソルバ(反発+Baumgarte+箱近似クーロン摩擦)。
+//! 最小CCD・warm starting・split impulse は別増分で追加する
+//! (docs/22-roadmap/01-phases.md P1/P2 ウェーブ)。
 
 use crate::body::{BodyType, RigidBodySet};
-use crate::RigidBodyDesc;
+use crate::{collision, contact, RigidBodyDesc};
 use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
 
 pub struct MechanicsSolver {
     pub bodies: RigidBodySet,
     /// 重力加速度(下向き、m/s^2)。既定 9.80665(docs/00-foundation/03-units-conventions.md)。
     pub gravity: f64,
+    /// 反発を無視する接近速度の閾値(設計 §4.3・§9、既定 0.5 m/s)。ジッタ防止用の
+    /// ヒューリスティクスであり、理想化された弾性衝突の検証(M5 等)では 0 に下げてよい。
+    pub restitution_velocity_threshold: f64,
 }
 
 impl MechanicsSolver {
@@ -19,6 +24,7 @@ impl MechanicsSolver {
         MechanicsSolver {
             bodies: RigidBodySet::new(),
             gravity,
+            restitution_velocity_threshold: contact::DEFAULT_RESTITUTION_VELOCITY_THRESHOLD,
         }
     }
 
@@ -87,15 +93,23 @@ impl MechanicsSolver {
 }
 
 impl Solver for MechanicsSolver {
-    /// 接触・拘束を持たない P1 現段階では安定条件の制約が無い(拘束導入時に更新)。
+    /// sequential impulses は固定 dt 前提の速度レベル解法で明示的な CFL 条件を持たない
+    /// (Box2D 系と同様)。拘束(ジョイント)導入時に硬い系の刻み制約を追加検討する。
     fn max_stable_dt(&self) -> f64 {
         f64::INFINITY
     }
 
-    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+    fn step(&mut self, dt: f64, ctx: &mut SolverContext) {
         self.apply_forces();
         self.integrate_velocities(dt);
-        // 衝突検出・接触ソルバはここに挿入される(別増分)。
+        let manifolds = collision::detect(&self.bodies);
+        contact::resolve(
+            &manifolds,
+            &mut self.bodies,
+            ctx.materials,
+            dt,
+            self.restitution_velocity_threshold,
+        );
         self.integrate_positions(dt);
         self.update_inertia_and_clear_accum();
     }
