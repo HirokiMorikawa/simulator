@@ -22,9 +22,10 @@
   Sphere-Sphere/Sphere-Plane/Box-Plane/Sphere-Box narrowphase)/sequential impulses 接触ソルバ
   (反発+Baumgarte+箱近似クーロン摩擦)を実装し M1・M5–M9 を Green 化。`sim-world` の `World` を
   Phase 0 の `FallingBody` から `MechanicsSolver` 経由に移行。`sim-thermal` に集中熱容量ノード網
-  (ニュートン冷却+線形化放射+陰的Euler/PCG)を実装し T1・T2 を Green 化)
+  (ニュートン冷却+線形化放射+陰的Euler/PCG)を実装し T1・T2 を Green 化。`sim-core` に
+  `EnergyLedger` を実装し `sim-world::World` に配線、解析ドリフト予測との一致で検証)
 - **作業中**: 力学(`sim-mechanics`)P1 の残り — 重力以外の力(抗力/浮力、流体結合待ち)・
-  エネルギー台帳・最小CCD(下記 §2/§3 の P1 行)
+  最小CCD(下記 §2/§3 の P1 行)
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
   math ウェーブ(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの汎用部分/
@@ -133,7 +134,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [x] 重力(実装済み)。抗力・浮力は流体結合待ち(未実装、項目名は残す)
 - [x] 熱ノード(基礎)— `crates/sim-thermal/src/lib.rs`。集中熱容量ノード網 + ニュートン冷却
       (対流)+ 放射(線形化、Picard 1回)+ 陰的Euler(matrix-free PCG、`sim_math::pcg`)
-- [ ] エネルギー台帳(残差トレンド監視)
+- [x] エネルギー台帳(残差トレンド監視)— `crates/sim-core/src/ledger.rs::EnergyLedger`
+      (docs/00-foundation/04-architecture.md §1.1.2(2)、docs/21-verification/02-conservation-laws.md
+      §2 の residual 式)。`sim-world::World` に配線し毎 step 後に mechanics 合計エネルギーを記帳。
+      解析予測(接触なし自由落下の semi-implicit Euler 線形ドリフト)と記帳値が一致することを
+      `crates/sim-world/src/lib.rs::tests::energy_ledger_residual_matches_analytic_symplectic_drift`
+      で検証
 - [ ] 担当テスト Green: M1–M9, M12, M15, F1–F6, T1, T2(M1・M5–M9・T1・T2 Green。M12=Box-Box待ち
       (P2)、M15=最小CCD待ち、F1–F6=抗力・浮力(流体結合)実装後)
 
