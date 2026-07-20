@@ -35,11 +35,14 @@
   `create_body` 呼び出しを台帳の基準点計算に含めないため)。`sim-wasm::WasmWorld` の
   JS向け公開シグネチャ(コンストラクタ・`body_position_f32()`)は内部実装のみ追随させ不変に
   維持、`demo` のビルドで確認。P2 の Box-Box(SAT)を実装(15軸判定+面クリップ+辺×辺、
-  単体テスト4件 Green)。ただし M12(4段スタック)はまだ Green にならない — warm starting・
-  スリープが未実装のため PGS が多段接触で収束しきらず貫入が slop を超えることを実測で確認、
-  両方の実装後に再挑戦する課題として記録)
+  単体テスト4件 Green)。続けて warm starting(feature_idベース)+ 軸選択ヒステリシス
+  (相対5%)を実装 — 同一サイズの箱スタックでA面軸/B面軸の重なり量が完全一致し浮動小数点
+  誤差で軸がフリップして warm start を破壊する問題を発見・ヒステリシスで解消し、4段目の
+  速度残差が約1.65cm/sから約0.41cm/sへ改善したが、M12はなお Green にならない(2段目の
+  貫入が約9.5mmでslop超過)。原因は split impulse 未実装と特定し、実装後に再挑戦する課題
+  として記録)
 - **作業中**: 力学(`sim-mechanics`)P1 最後の残り — 最小CCD(M15、意図的に後回し。
-  下記 §2/§3 の P1 行)。P2 では warm starting・スリープ(M12 Green化に必要)か
+  下記 §2/§3 の P1 行)。P2 では split impulse(M12 Green化に必要)か
   他ドメインの Phase A スケルトンへ
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
@@ -144,8 +147,11 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [x] 総当たり衝突・接触ソルバ(sequential impulses)— `crates/sim-mechanics/src/{collision,contact}.rs`。
       narrowphase は Sphere-Sphere/Sphere-Plane/Box-Plane/Sphere-Box(Phase1の4組)+
       Box-Box(SAT、15軸+Sutherland-Hodgmanクリップ、`collision.rs::box_box`)。
-      軸選択のヒステリシス・マニフォールド持続化(§4.7)・warm starting・split impulse は
-      未実装(多段スタックで貫入が slop を超える既知の制限、下記 M12 参照)
+      軸選択のヒステリシス(相対5%、`collision::AxisCache`)+ warm starting
+      (feature_idベース、`contact::WarmStartCache`。feature_idは軸選択+参照面上の象限から
+      安定的に組み立てる、post-clipのインデックスは使わない)を実装。マニフォールド持続化
+      (§4.7 の移動量2mmチェック)・split impulse は未実装(多段スタックで貫入が slop を
+      超える既知の制限、下記 M12 参照)
 - [x] 摩擦(クーロン・摩擦円錐)— 箱近似(2接線独立クランプ、`contact.rs::solve_tangent`)、
       `MaterialDb::friction_pair`(幾何平均+ペア表)を実接触ソルバで使用
 - [ ] 最小 CCD(弾丸級の speculative contact)
@@ -164,19 +170,28 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `crates/sim-world/src/lib.rs::tests::energy_ledger_residual_matches_analytic_symplectic_drift`
       で検証
 - [ ] 担当テスト Green: M1–M9, M12, M15, F1–F6, T1, T2(M1・M5–M9・F1–F6・T1・T2 Green。
-      M12 は Box-Box(SAT)実装済みだが 4段木箱10秒で貫入が slop(5mm)を超える
-      (level 1 で実測 約1.06cm) — warm starting・スリープ未実装のため PGS が多段接触で
-      収束しきらないのが原因と診断、両方実装後に再挑戦する。M15=最小CCD待ち)
+      M12 は Box-Box(SAT)+ warm starting + 軸選択ヒステリシス実装後も未 Green:
+      軸フリップ由来の不安定化はヒステリシスで解消し速度が改善した(4段目時点の実測が
+      約1.65cm/sから約0.41cm/sへ改善)が、なお貫入がslop(5mm)を超える(2段目で約9.5mm)。
+      原因は split impulse 未実装(Baumgarteのみ)によるもので、split impulse 実装後に
+      再挑戦する。M15=最小CCD待ち)
 
 ### P2 — 力学拡充
 
 - [x] Box-Box(SAT)— `crates/sim-mechanics/src/collision.rs::box_box`。15軸分離判定
       (面3+3、辺×辺9)+ 面接触は参照面への Sutherland-Hodgman クリップ(最大4点、
       設計 §4.4 の縮約は簡易版: 面積最大化でなく深度降順で上位4点)+ 辺×辺接触は
-      2線分の最近点1点。退化ケース(平行辺の軸除外・クリップ0点フォールバック)を実装。
-      軸選択ヒステリシス(ジッタ抑制)・マニフォールド持続化は未実装
+      2線分の最近点1点。退化ケース(平行辺の軸除外・クリップ0点フォールバック)を実装
+- [x] 軸選択ヒステリシス(相対5%、`collision::AxisCache`)— 設計 §4.4・§9。同一サイズの
+      箱が積み重なるとA面軸/B面軸の重なり量が理論上完全一致し、浮動小数点誤差で
+      ステップごとに選択軸がフリップして warm start の feature_id 対応を破壊する
+      (実測: ヒステリシスなしでは warm starting がむしろ速度残差を悪化させた)ことを発見・
+      修正
+- [x] Warm starting(feature_idベース、`contact::WarmStartCache`)— 設計 §4.4。マニフォールド
+      持続化(§4.7 の移動量チェックによる再利用判定)は未実装、feature_id 自体は軸選択+
+      参照面象限から安定的に算出(post-clipインデックスは不安定なため不使用)
 - [ ] SAP / BVH(broadphase)
-- [ ] split impulse・スリープ・転がり摩擦
+- [ ] split impulse・スリープ・転がり摩擦(M12 Green化に必要)
 - [ ] 担当テスト Green: M6(精度), M10, M11(M10 は固定ピボット回転がジョイント実装
       (P3、docs/10-mechanics/05-joints-constraints.md)に依存。M11 は簡易線形化で解析成長率との
       比較を試みたが、非線形フィードバック(ωx・ωzの積がωyへ2λ倍のレートで再結合)により
