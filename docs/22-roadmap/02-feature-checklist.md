@@ -16,10 +16,10 @@
 
 ## 現在地
 
-- **フェーズ**: 実装(Phase 0 完了。math ウェーブは線形代数のみ先行して Green)
-- **作業中**: math ウェーブ残り(場・積分器カタログ・SimRng、下記 §3)
+- **フェーズ**: 実装(Phase 0 完了。math ウェーブは線形代数・PRNG が Green、場・積分器カタログが残作業)
+- **作業中**: math ウェーブ残り(場 Grid3/MacGrid・積分器カタログ、下記 §3)
 - **次**: math ウェーブ完了後、Phase A(全ドメインの型・トレイトのスケルトン + 全テスト記述、下記 §2)に着手。
-  線形代数(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`)は依存が無く低リスクなため、
+  線形代数・PRNG(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`)は依存が無く低リスクなため、
   Phase A の Red 段階を経ずに直接実装 + テストで Green 化した(§3 の当該行のみ先行完了)。
   他ドメインは設計通り Phase A(型スケルトン + 全テスト記述・Red確認)から進める。
 
@@ -90,8 +90,9 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [ ] 場(MAC / セル中心格子・補間)
 - [ ] 積分器カタログ(semi-implicit Euler・velocity Verlet・RK4・XPBD・Boris pusher・
       Euler–Maruyama/BAOAB・陰的 Euler・semi-Lagrangian・leapfrog・split-step Fourier)
-- [ ] 決定論 PRNG(SimRng)・分布サンプリング
-- [ ] 数学基盤テスト・収束次数 ◆ Green
+- [x] 決定論 PRNG(SimRng)・分布サンプリング(PCG-XSH-RR 64/32、公式参照ベクタ一致 —
+      docs/01-math/04-random.md §1/§3/§5)
+- [ ] 数学基盤テスト・収束次数 ◆ Green(線形代数・PRNG は個別に Green 済み。場・積分器が残る)
 
 ### P1 — 力学基礎
 
