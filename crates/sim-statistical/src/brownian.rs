@@ -147,4 +147,51 @@ mod tests {
             "variance={variance} expected={expected} rel_err={rel_err}"
         );
     }
+
+    /// S6: 沈降平衡 — 一様重力下、床(y=0)で弾性反射する粒子集団の高度分布が
+    /// 指数則 $c(h)\propto e^{-mgh/k_BT}$(ペラン実験)に従うこと、rel 5%
+    /// (docs/21-verification/01-analytic-tests.md S6)。指数分布の平均は $k_BT/(mg)$。
+    ///
+    /// 実重力(9.8 m/s²)では平衡到達までの拡散時間が $h_0^2/D$ ~ 秒級になり自動テストには
+    /// 遅すぎるため、S5 の k_trap 増強と同じ発想で合成的に強めた重力加速度を使い、
+    /// 平衡到達スケール $h_0$(ひいては緩和時間)を縮める。dt は S4 で精度確認済みの
+    /// $\gamma\Delta t/m\approx0.17$ をそのまま使い回す。床の反射は境界条件の型が設計に
+    /// 明記されていない検証専用の最小実装として、テスト内で位置・速度を直接操作する。
+    #[test]
+    fn s6_sedimentation_equilibrium_matches_boltzmann_height_distribution() {
+        let (mass, gamma, kb_t) = polystyrene_bead();
+        let mut set = BrownianParticleSet::new(mass, gamma, kb_t);
+        let n = 5_000;
+        for _ in 0..n {
+            set.add_particle(Vec3::ZERO, Vec3::ZERO);
+        }
+
+        let g_eff = 2000.0; // m/s²(合成値。h0=kBT/(mg)を小さくし平衡到達を高速化)
+        let gravity_force = Vec3::new(0.0, -mass * g_eff, 0.0);
+        let expected_mean_height = kb_t / (mass * g_eff);
+
+        let diffusion = set.diffusion_coefficient();
+        let relax_time = expected_mean_height * expected_mean_height / diffusion;
+        let dt = 1.0e-8;
+        let steps = (5.0 * relax_time / dt).ceil() as u32;
+
+        let mut rng = SimRng::new(3, 3);
+        for _ in 0..steps {
+            set.step_baoab(dt, &mut rng, |_| gravity_force);
+            for i in 0..set.position.len() {
+                if set.position[i].y < 0.0 {
+                    set.position[i].y = -set.position[i].y;
+                    set.velocity[i].y = -set.velocity[i].y;
+                }
+            }
+        }
+
+        let mean_height: f64 =
+            set.position.iter().map(|p| p.y).sum::<f64>() / set.position.len() as f64;
+        let rel_err = (mean_height - expected_mean_height).abs() / expected_mean_height;
+        assert!(
+            rel_err < 0.05,
+            "mean_height={mean_height} expected={expected_mean_height} rel_err={rel_err}"
+        );
+    }
 }
