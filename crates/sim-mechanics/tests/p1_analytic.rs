@@ -1,10 +1,10 @@
-//! P1 解析解テスト(M5–M9, F1–F5)。定義: docs/21-verification/01-analytic-tests.md。
+//! P1 解析解テスト(M2, M5–M9, M15, F1–F5)。定義: docs/21-verification/01-analytic-tests.md。
 //! (F6 は代数検算のためユニットテスト crates/sim-fluid/src/buoyancy.rs で検証)
 //! ユニットテストではなく crate 公開 API 経由の統合テスト(World 層が無い Phase A 時点の代替)。
 
 use sim_core::{Event, EventQueue, Material, MaterialDb, PairOverride, Solver, SolverContext};
 use sim_fluid::{Atmosphere, StaticWaterRegion};
-use sim_math::{Quat, SimRng, Vec3};
+use sim_math::{BallisticIntegrator, Quat, SimRng, Vec3};
 use sim_mechanics::{BodyType, DragModel, MechanicsSolver, RigidBodyDesc, Shape};
 
 /// 密度 `density` の試験用材料を登録する(摩擦・反発はゼロ、F4/F5 の浮力単体テスト用)。
@@ -636,5 +636,41 @@ fn m15_bullet_speed_sphere_does_not_tunnel_through_thin_plate() {
     assert!(
         rel_err < 0.25,
         "final_vx={final_vx} expected_rebound={expected_rebound} rel_err={rel_err}"
+    );
+}
+
+/// M2: 斜方投射45°(真空、無衝突)— 到達距離 R = v0²/g(設計§21-verification/01)。
+/// `MechanicsSolver`(既定はsemi-implicit Euler、衝突ソルバ込み)ではなく、設計が
+/// 明記するとおり無衝突専用の`BallisticIntegrator`(RK4)を直接使う。等速度の重力加速度
+/// のみを与えるとRK4は4次多項式まで厳密なため(実際の解は位置が時間の2次式)、離散化
+/// 誤差は原理的に浮動小数点丸め程度しか生じない。飛行時間T=2v0sinθ/gちょうどでdtを
+/// 割り切れるように刻み数を選ぶことで、着地点の線形補間も不要にした。
+#[test]
+fn m2_45_degree_projectile_range_matches_v0_squared_over_g() {
+    let g = 9.80665;
+    let v0 = 20.0;
+    let theta = std::f64::consts::FRAC_PI_4;
+    let gravity_accel = Vec3::new(0.0, -g, 0.0);
+
+    let flight_time = 2.0 * v0 * theta.sin() / g;
+    let steps = 2000;
+    let dt = flight_time / steps as f64;
+
+    let integrator = BallisticIntegrator;
+    let mut x = Vec3::new(0.0, 0.0, 0.0);
+    let mut v = Vec3::new(v0 * theta.cos(), v0 * theta.sin(), 0.0);
+    for _ in 0..steps {
+        let (nx, nv) = integrator.step(x, v, |_x, _v| gravity_accel, dt);
+        x = nx;
+        v = nv;
+    }
+
+    let expected_range = v0 * v0 / g;
+    assert!(x.y.abs() < 1e-6, "should land back at y=0, got y={}", x.y);
+    let rel_err = (x.x - expected_range).abs() / expected_range;
+    assert!(
+        rel_err < 0.005,
+        "range={:.6} expected={expected_range:.6} rel_err={rel_err:.6}",
+        x.x
     );
 }
