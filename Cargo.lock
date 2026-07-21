@@ -184,9 +184,12 @@ dependencies = [
 name = "sim-world"
 version = "0.1.0"
 dependencies = [
+ "sim-astro",
  "sim-core",
+ "sim-em",
  "sim-math",
  "sim-mechanics",
+ "sim-thermal",
 ]
 
 [[package]]

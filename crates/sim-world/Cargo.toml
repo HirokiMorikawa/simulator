@@ -8,3 +8,6 @@ publish.workspace = true
 sim-math = { path = "../sim-math" }
 sim-core = { path = "../sim-core" }
 sim-mechanics = { path = "../sim-mechanics" }
+sim-thermal = { path = "../sim-thermal" }
+sim-em = { path = "../sim-em" }
+sim-astro = { path = "../sim-astro" }

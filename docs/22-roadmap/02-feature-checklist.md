@@ -348,7 +348,21 @@
   `remove_body`は下層スロットを「無効化」(Static化+遠方(y=-1e9)へ退避+速度ゼロ化)する
   に留めた(ジョイント・結合の連鎖削除は、Worldがまだそれらを保持していないため対象外)。
   `sim-wasm`側も`BodyId`(`sim-world`からの再エクスポート)を使うよう追従。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次はWorldの全ドメイン合成。
+  続けてWorldの全ドメイン合成に着手 — `mechanics`は常時有効、`thermal`
+  (`sim_thermal::ThermalSolver`)・`em_electrostatics`(`sim_em::PointChargeSystem`)・
+  `astro`(`sim_astro::NBodySystem`)を`Option`として追加し`enable_*`で有効化できるように
+  した(いずれも既に`sim_core::Solver`トレイトを実装済みのため接続は直接的だった)。
+  `step()`は有効なドメインを固定順(mechanics→thermal→em→astro)で進め、`state_hash`も
+  同順(有効/無効自体もハッシュに含める)。`total_energy`は`EnergyBreakdown::Add`を使って
+  全ドメイン分を合算。`multiple_domains_step_independently_in_the_same_world`
+  (箱の自由落下+2ノード熱平衡を同一Worldで同時に有効化)で検証 — 実装検証中、World既定
+  dt(1/120)はsim-thermal単体のT2テストの大きなdt(0.5)よりずっと小さいため、同じ物理
+  時間を確保するのに必要なステップ数が多く、PCG収束許容由来の累積誤差も大きくなる
+  (許容を1e-5→1e-3に緩めて対応)ことを発見した。`Coupling`を挟まない単純な合成であり、
+  設計が求めるLie-Trotter operator splitting(pre/post coupling)や`max_stable_dt()`からの
+  決定的sub-step数算出は`Orchestrator`本体の増分に持ち越す。`fluid`(Solverトレイト未実装)・
+  quantum/statistical(専用シーンのみ)は今回見送った。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次はOrchestrator本体。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→

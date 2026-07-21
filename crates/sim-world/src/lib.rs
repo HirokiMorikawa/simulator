@@ -19,6 +19,21 @@
 //! シーン構築(`create_body` 呼び出し列)が終わり最初の `step()` が呼ばれた時点の
 //! 合計エネルギーを基準点として、以後毎 step 後に記帳する(構築途中の`create_body`
 //! 呼び出し自体は台帳上の「エネルギーの出現」として扱わない)。
+//!
+//! **全ドメイン合成(ワークストリームB増分)**: `mechanics` は常時有効な正典ドメインとして
+//! 保持し、`thermal`(`sim_thermal::ThermalSolver`)・`em_electrostatics`
+//! (`sim_em::PointChargeSystem`)・`astro`(`sim_astro::NBodySystem`)は`Option`として
+//! 追加した(シーンが使う分だけ`enable_*`で有効化、設計「Solverトレイトの共通契約」
+//! docs/00-foundation/04-architecture.md §1.2に既に準拠している型をそのまま接続)。
+//! `step()`は有効なドメインを固定順(mechanics→thermal→em→astro、`state_hash`も同順)で
+//! 順に進める — これは`Coupling`を挟まない単純な合成であり、設計が求めるLie-Trotter
+//! operator splitting(pre/post coupling付き、docs/20-integration/01-coupling-matrix.md
+//! §4)や`max_stable_dt()`からの決定的sub-step数算出(`Orchestrator`の責務)はまだ実装
+//! しない — それらは`Coupling`実装・`Orchestrator`本体が入る後続増分で追加する(現時点は
+//! 「同じWorld dtで無結合の複数ドメインが共存できる」という土台のみ)。`fluid`
+//! (`sim-fluid`のGridFluid系・SPH)は`Solver`トレイトを未実装のため今回は見送る
+//! (各流体型に`Solver`実装を追加するか専用の接続方式を検討する必要があり、後続増分)。
+//! `quantum`/`statisticalは専用シーンでのみ有効化する設計方針のため同様に見送る。
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_math::{SimRng, Vec3};
@@ -51,6 +66,12 @@ impl Default for WorldOptions {
 pub struct World {
     clock: sim_core::SimClock,
     mechanics: MechanicsSolver,
+    /// 熱ドメイン(モジュールdoc「全ドメイン合成」参照、シーンが使う場合のみ`Some`)。
+    thermal: Option<sim_thermal::ThermalSolver>,
+    /// 電磁気ドメイン(静電、モジュールdoc参照、シーンが使う場合のみ`Some`)。
+    em_electrostatics: Option<sim_em::PointChargeSystem>,
+    /// 天体ドメイン(モジュールdoc参照、シーンが使う場合のみ`Some`)。
+    astro: Option<sim_astro::NBodySystem>,
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
@@ -72,12 +93,54 @@ impl World {
         World {
             clock: sim_core::SimClock::new(options.dt),
             mechanics: MechanicsSolver::new(options.gravity),
+            thermal: None,
+            em_electrostatics: None,
+            astro: None,
             materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
             ledger: None,
             generations: Vec::new(),
         }
+    }
+
+    /// 熱ドメインを有効化する(モジュールdoc「全ドメイン合成」参照)。
+    pub fn enable_thermal(&mut self, solver: sim_thermal::ThermalSolver) {
+        self.thermal = Some(solver);
+    }
+
+    pub fn thermal(&self) -> Option<&sim_thermal::ThermalSolver> {
+        self.thermal.as_ref()
+    }
+
+    pub fn thermal_mut(&mut self) -> Option<&mut sim_thermal::ThermalSolver> {
+        self.thermal.as_mut()
+    }
+
+    /// 電磁気(静電)ドメインを有効化する。
+    pub fn enable_em_electrostatics(&mut self, solver: sim_em::PointChargeSystem) {
+        self.em_electrostatics = Some(solver);
+    }
+
+    pub fn em_electrostatics(&self) -> Option<&sim_em::PointChargeSystem> {
+        self.em_electrostatics.as_ref()
+    }
+
+    pub fn em_electrostatics_mut(&mut self) -> Option<&mut sim_em::PointChargeSystem> {
+        self.em_electrostatics.as_mut()
+    }
+
+    /// 天体ドメインを有効化する。
+    pub fn enable_astro(&mut self, solver: sim_astro::NBodySystem) {
+        self.astro = Some(solver);
+    }
+
+    pub fn astro(&self) -> Option<&sim_astro::NBodySystem> {
+        self.astro.as_ref()
+    }
+
+    pub fn astro_mut(&mut self) -> Option<&mut sim_astro::NBodySystem> {
+        self.astro.as_mut()
     }
 
     /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す
@@ -129,10 +192,26 @@ impl World {
         &mut self.mechanics
     }
 
+    /// 有効な全ドメインの合計エネルギー(固定順、モジュールdoc参照)。
+    fn total_energy(&self) -> sim_core::EnergyBreakdown {
+        let mut total = self.mechanics.total_energy();
+        if let Some(t) = &self.thermal {
+            total = total + t.total_energy();
+        }
+        if let Some(e) = &self.em_electrostatics {
+            total = total + e.total_energy();
+        }
+        if let Some(a) = &self.astro {
+            total = total + a.total_energy();
+        }
+        total
+    }
+
     /// 1 world step(固定 dt)。docs/20-integration/04-world-api.md §2 の `step()`。
+    /// 有効な全ドメインを固定順(mechanics→thermal→em→astro、モジュールdoc参照)で進める。
     pub fn step(&mut self) {
         if self.ledger.is_none() {
-            self.ledger = Some(EnergyLedger::new(self.mechanics.total_energy().total()));
+            self.ledger = Some(EnergyLedger::new(self.total_energy().total()));
         }
         let dt = self.clock.dt();
         let mut ctx = SolverContext {
@@ -141,11 +220,36 @@ impl World {
             events: &mut self.events,
         };
         self.mechanics.step(dt, &mut ctx);
+        if let Some(t) = &mut self.thermal {
+            let mut ctx = SolverContext {
+                materials: &self.materials,
+                rng: &mut self.rng,
+                events: &mut self.events,
+            };
+            t.step(dt, &mut ctx);
+        }
+        if let Some(e) = &mut self.em_electrostatics {
+            let mut ctx = SolverContext {
+                materials: &self.materials,
+                rng: &mut self.rng,
+                events: &mut self.events,
+            };
+            e.step(dt, &mut ctx);
+        }
+        if let Some(a) = &mut self.astro {
+            let mut ctx = SolverContext {
+                materials: &self.materials,
+                rng: &mut self.rng,
+                events: &mut self.events,
+            };
+            a.step(dt, &mut ctx);
+        }
         let _ = self.events.drain_sorted(); // Phase A: 購読者未実装のため排出のみ。
+        let total = self.total_energy().total();
         self.ledger
             .as_mut()
             .expect("initialized above")
-            .record(self.mechanics.total_energy().total(), ENERGY_SCALE_FLOOR);
+            .record(total, ENERGY_SCALE_FLOOR);
         self.clock.advance();
     }
 
@@ -177,13 +281,27 @@ impl World {
         Some(self.mechanics.bodies.position[id.index as usize])
     }
 
-    /// 全状態(clock + mechanics)を決定的順序でハッシュする。
-    /// 設計: docs/20-integration/02-determinism-replay.md §3。
+    /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:
+    /// mechanics→thermal→em→astro、設計docs/20-integration/02-determinism-replay.md §3)で
+    /// ハッシュする。各`Option`ドメインは有効/無効自体も書き込む(構造の異なる2つのWorldが
+    /// 偶然衝突するリスクを減らす)。
     pub fn state_hash(&self) -> u64 {
         let mut hasher = StateHasher::new();
         hasher.write_u64(self.clock.step_count());
         hasher.write_f64(self.clock.time());
         self.mechanics.state_hash(&mut hasher);
+        hasher.write_u64(self.thermal.is_some() as u64);
+        if let Some(t) = &self.thermal {
+            t.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.em_electrostatics.is_some() as u64);
+        if let Some(e) = &self.em_electrostatics {
+            e.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.astro.is_some() as u64);
+        if let Some(a) = &self.astro {
+            a.state_hash(&mut hasher);
+        }
         hasher.finish()
     }
 }
@@ -288,6 +406,53 @@ mod tests {
             generation: 0,
         };
         assert!(world.body_position(bogus).is_none());
+    }
+
+    /// 全ドメイン合成(モジュールdoc参照): mechanics(箱の自由落下)とthermal
+    /// (2ノード熱平衡、`sim_thermal`のT2テストと同じ構成)を同一Worldで同時に有効化し、
+    /// 1つの`step()`呼び出しで両方が(結合なしで)独立に正しく進行することを検証する。
+    #[test]
+    fn multiple_domains_step_independently_in_the_same_world() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        let y0 = world.body_position(box_id).unwrap().y;
+
+        let (c1, c2) = (50.0, 200.0);
+        let (t1_0, t2_0) = (400.0, 250.0);
+        let mut thermal = sim_thermal::ThermalSolver::new(293.15);
+        let idx1 = thermal.add_node(sim_thermal::ThermalNode::new(t1_0, c1));
+        let idx2 = thermal.add_node(sim_thermal::ThermalNode::new(t2_0, c2));
+        thermal.add_link(idx1, idx2, 5.0);
+        world.enable_thermal(thermal);
+        let expected_teq = (c1 * t1_0 + c2 * t2_0) / (c1 + c2);
+
+        // 熱の時定数 tau = 1/(conductance*(1/C1+1/C2)) = 8s。Worldの既定dt(1/120、力学の
+        // 安定刻みに合わせる、Orchestrator未実装のため両ドメインで共有)では、
+        // sim-thermal単体のT2テストのような大きなdt(0.5s)は使えないため、その分ステップ数を
+        // 増やして同じ物理時間(20*tau=160s)を確保する。
+        let steps = (160.0 / WorldOptions::default().dt) as u32;
+        for _ in 0..steps {
+            world.step();
+        }
+
+        assert!(
+            world.body_position(box_id).unwrap().y < y0,
+            "mechanics domain should still evolve independently"
+        );
+        // World既定dt(1/120)はsim-thermal単体のT2テスト(dt=0.5)よりずっと小さいため、
+        // 同じ物理時間を確保するのに必要なステップ数がはるかに多く、各ステップのPCG
+        // 収束許容(tol_rel=1e-10)由来の累積誤差もその分大きくなる(実装検証中に1e-5では
+        // 僅かに超過(~1e-4)することを確認したため、許容を1e-3に緩めた)。
+        let t1 = world.thermal().unwrap().nodes[idx1].temperature;
+        let t2 = world.thermal().unwrap().nodes[idx2].temperature;
+        assert!(
+            (t1 - expected_teq).abs() < 1e-3,
+            "T1={t1} vs Teq={expected_teq}"
+        );
+        assert!(
+            (t2 - expected_teq).abs() < 1e-3,
+            "T2={t2} vs Teq={expected_teq}"
+        );
     }
 
     /// 決定論テスト(階層1): 同一初期条件 → 同数ステップ後のハッシュが一致する。
