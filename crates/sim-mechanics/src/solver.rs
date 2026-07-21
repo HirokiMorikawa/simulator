@@ -9,7 +9,7 @@
 use crate::body::{BodyType, DragModel, RigidBodySet};
 use crate::joint::{BallJoint, DistanceJoint};
 use crate::shape::Shape;
-use crate::{collision, contact, joint, sleep, RigidBodyDesc};
+use crate::{ccd, collision, contact, joint, sleep, RigidBodyDesc};
 use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_fluid::{Atmosphere, StaticWaterRegion};
 
@@ -196,6 +196,9 @@ impl Solver for MechanicsSolver {
         // 相殺していないため静止判定に使えない)。島判定には(スキップした分も含め)
         // 全マニフォールドを使う。
         sleep::update_sleep_state(&mut self.bodies, &manifolds, dt);
+        // 最小CCD(speculative contact、設計§4.6)。既存の実接触解決のあとに、まだ検出
+        // されていない今ステップ中のすり抜けだけを速度クランプで防ぐ(P1標準機能)。
+        ccd::apply_speculative_contacts(&mut self.bodies, dt);
         self.integrate_positions(dt);
         self.update_inertia_and_clear_accum();
     }

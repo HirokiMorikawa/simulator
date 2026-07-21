@@ -7,6 +7,7 @@
 //! Phase 0 の `FallingBody` 最小実装はこの正式な `RigidBodySet`/`MechanicsSolver` に置き換えた。
 
 mod body;
+mod ccd;
 mod collision;
 mod contact;
 mod joint;
