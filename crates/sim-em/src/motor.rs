@@ -104,4 +104,48 @@ mod tests {
             "torque={torque} expected={expected} rel_err={rel_err}"
         );
     }
+
+    /// X1: 無慣性ロータ×回路 — 極端に小さい回転子慣性(10⁻⁹ kg·m²、設計§9代表値
+    /// (~1e-7)よりさらに2桁小さい、電気時定数(L/R≈3e-4s)と機械時定数
+    /// (RI/k²≈3.5e-4s)が同程度になる境界ケース)でも10秒間、ω・iが有界に留まり
+    /// (発散ゼロ)、定常値(無負荷回転数 $V/k$)にrel<2%で収束することを確認する
+    /// (docs/21-verification/01-analytic-tests.md X1)。汎用`MotorCoupling`
+    /// (回路sub-step+力学stepの2時間スケール進行、設計§4)はヒンジモーターが
+    /// Phase 5未実装のため使えないが、`DcMotor`は電気・機械の両状態を単一ステップで
+    /// 直接連立させる縮約実装(モジュールdoc参照)であり、この境界ケースの安定性を
+    /// そのまま検証できる。
+    #[test]
+    fn x1_near_inertialess_rotor_stays_bounded_and_converges_to_no_load_speed() {
+        let mut motor = fa130();
+        motor.rotor_inertia = 1e-9;
+        let voltage = 3.0;
+        let dt = 1e-6;
+        let steps = 10_000_000u64; // 10秒
+
+        let expected_no_load_speed = voltage / motor.k;
+        let bound = expected_no_load_speed * 5.0;
+        let current_bound = (voltage / motor.resistance) * 5.0;
+
+        for _ in 0..steps {
+            motor.step(dt, voltage, 0.0);
+            assert!(
+                motor.angular_velocity.is_finite() && motor.angular_velocity.abs() < bound,
+                "omega diverged: {}",
+                motor.angular_velocity
+            );
+            assert!(
+                motor.current.is_finite() && motor.current.abs() < current_bound,
+                "current diverged: {}",
+                motor.current
+            );
+        }
+
+        let rel_err =
+            (motor.angular_velocity - expected_no_load_speed).abs() / expected_no_load_speed;
+        assert!(
+            rel_err < 0.02,
+            "omega={} expected={expected_no_load_speed} rel_err={rel_err}",
+            motor.angular_velocity
+        );
+    }
 }
