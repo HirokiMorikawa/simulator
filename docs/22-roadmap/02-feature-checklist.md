@@ -311,8 +311,21 @@
   わずかに超過することを発見し、古典的RK4に切り替えて解決(同じステップ数のまま
   rel<1e-6を達成)。跨ぎ判定・接触/拘束の跨ぎ処理は`World`のブロードフェーズ・アイランド
   管理に依存するためPhase C(ワークストリームB)に持ち越す。
-- **作業中**: ワークストリームA(Phase B残タスク)継続中 — 次はレジーム切替。
-- **次**: A(残り: レジーム切替・エンティティ関節PD・F10)→ B(Phase C:
+  続けてレジーム切替(`docs/20-integration/06-regime-switching.md`)に着手 —
+  `sim-astro::regime`に`TimeRegime`型と、フレーム階層の増分で追加した`FrameTree::
+  transform_state`(位置・速度の厳密な状態受け渡し変換)をAstro⇄Local双方向に適用する
+  関数を実装。再突入(D37)を模した設定(自転+公転する惑星の地表フレームへ軌道上の
+  カプセルの状態を変換)で、ROOT換算の運動量・運動エネルギー・位置が往復変換前後で
+  rel<1e-9で一致することを確認(設計§4の基準そのまま)。切替時刻の量子化・切替を跨ぐ
+  リプレイ一致・巻き戻しは`World`のスナップショット・コマンドキュー・イベント順序に
+  依存するためPhase C(ワークストリームB)に持ち越す。
+
+  なお、この増分の実装途中でセッションの作業コンテナのローカルディスクが一時的に
+  desync(以前のスナップショットに巻き戻る現象)し、コミット前のレジーム切替の実装が
+  一度失われ、上記の内容で作り直した(F11・X2・フレーム階層の各コミットはGitHub側で
+  確認する限り無事だった)。
+- **作業中**: ワークストリームA(Phase B残タスク)継続中 — 次はエンティティ関節PD静的姿勢維持。
+- **次**: A(残り: エンティティ関節PD・F10)→ B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
   D(フロントエンド統合エディタ、Bと一部並行)の順で進める。詳細は上記プランファイル参照。
@@ -739,7 +752,14 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `coriolis_matches_inertial_frame_solution_and_does_zero_work`(コリオリ検算、RK4積分で
       rel<1e-6・コリオリ仕事abs<1e-12)— がGreen。跨ぎ判定(re-parenting)・接触/拘束の跨ぎ
       処理は`World`のブロードフェーズ・アイランド管理に依存するため未実装(§3・§4、Phase C)
-- [ ] レジーム切替(時間加速)
+- [x] レジーム切替(時間加速)— `crates/sim-astro/src/regime.rs`に`TimeRegime`型(設計§2の
+      定義そのまま)と、状態受け渡し(§3.2)の基礎変換(`sim_core::frame::FrameTree::
+      transform_state`をAstro⇄Local双方向に適用する`astro_to_local_state`/
+      `local_to_astro_state`)を実装。`astro_to_local_round_trip_preserves_root_frame_energy_and_momentum`
+      (自転+公転する惑星地表フレームへの再突入模擬、往復変換前後でROOT換算の運動量・
+      運動エネルギー・位置がrel<1e-9で一致、設計§4の基準そのまま)がGreen。切替時刻の
+      量子化・切替を跨ぐリプレイ一致・巻き戻しは`World`のスナップショット・コマンド
+      キュー・イベント順序に依存するため未実装(§3・§4、Phase C)
 - [x] 1PN 補正(オプトイン、A8・A9・A10。`RelativitySettings`構造体・`NBodySystem`への
       完全統合は未実装)—
       `crates/sim-astro/src/relativity.rs::{pn1_acceleration, pn1_precession_per_orbit,

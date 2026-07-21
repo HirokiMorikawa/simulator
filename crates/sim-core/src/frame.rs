@@ -134,6 +134,69 @@ impl FrameTree {
         to_to_root.inverse().compose(from_to_root)
     }
 
+    /// フレームid内の位置・速度をROOT系での位置・速度に変換する(transport theorem:
+    /// 各親への1ホップごとに `parent = origin_in_parent + R*child`、
+    /// `v_parent = velocity_in_parent + R*v_child + omega_in_parent × (R*child)` を
+    /// idからROOTまで順に適用する)。設計§3.2の跨ぎ変換式の基礎となる一般形。
+    pub fn state_to_root(&self, id: FrameId, position: Vec3, velocity: Vec3) -> (Vec3, Vec3) {
+        let chain = self.ancestor_chain(id); // [id, parent, ..., ROOT]
+        let mut pos = position;
+        let mut vel = velocity;
+        for &fid in chain.iter() {
+            if fid == FrameId::ROOT {
+                break;
+            }
+            let f = self.frame(fid);
+            let rotated_pos = f.rotation_in_parent.rotate(pos);
+            let rotated_vel = f.rotation_in_parent.rotate(vel);
+            let new_pos = f.origin_in_parent + rotated_pos;
+            let new_vel = f.velocity_in_parent
+                + rotated_vel
+                + f.angular_velocity_in_parent.cross(rotated_pos);
+            pos = new_pos;
+            vel = new_vel;
+        }
+        (pos, vel)
+    }
+
+    /// ROOT系の位置・速度を、フレームid内の位置・速度に変換する(`state_to_root`の逆変換、
+    /// ROOTからidまでの祖先鎖を逆向きにたどり各ホップの逆変換を適用する)。
+    pub fn state_from_root(&self, id: FrameId, position: Vec3, velocity: Vec3) -> (Vec3, Vec3) {
+        let chain = self.ancestor_chain(id); // [id, parent, ..., ROOT]
+        let mut pos = position;
+        let mut vel = velocity;
+        for &fid in chain.iter().rev() {
+            if fid == FrameId::ROOT {
+                continue;
+            }
+            let f = self.frame(fid);
+            let inv_rotation = f.rotation_in_parent.conjugate();
+            let delta_pos = pos - f.origin_in_parent;
+            let new_pos = inv_rotation.rotate(delta_pos);
+            let delta_vel =
+                vel - f.velocity_in_parent - f.angular_velocity_in_parent.cross(delta_pos);
+            let new_vel = inv_rotation.rotate(delta_vel);
+            pos = new_pos;
+            vel = new_vel;
+        }
+        (pos, vel)
+    }
+
+    /// フレームfrom内の位置・速度をフレームto内の位置・速度へ厳密変換する
+    /// (設計docs/20-integration/05-frame-hierarchy.md §3.2「跨ぎ時の状態変換」の式、
+    /// ROOTを経由する合成として実装)。レジーム切替のAstro⇄Local状態受け渡し
+    /// (docs/20-integration/06-regime-switching.md §3.2)が使う基礎変換。
+    pub fn transform_state(
+        &self,
+        from: FrameId,
+        to: FrameId,
+        position: Vec3,
+        velocity: Vec3,
+    ) -> (Vec3, Vec3) {
+        let (root_pos, root_vel) = self.state_to_root(from, position, velocity);
+        self.state_from_root(to, root_pos, root_vel)
+    }
+
     /// フレームidの合成角速度(ROOT系で表現、祖先鎖の角速度を積算)。設計§5の非慣性項計算に使う。
     pub fn angular_velocity_in_root(&self, id: FrameId) -> Vec3 {
         let chain = self.ancestor_chain(id);
@@ -223,6 +286,47 @@ mod tests {
             identity_rotation_diff.length() < 1e-12,
             "round trip rotation mismatch: {:?}",
             round_trip.rotation
+        );
+    }
+
+    /// 位置・速度の状態変換(設計§3.2「跨ぎ時の状態変換」)の往復が恒等であること
+    /// (レジーム切替Astro⇄Local状態受け渡しの基礎変換、docs/20-integration/06-regime-switching.md §3.2)。
+    /// 親フレームが並進速度・回転角速度の両方を持つ(公転+自転する天体のような)ケースで検証する。
+    #[test]
+    fn round_trip_state_transform_between_moving_rotating_frames_is_identity() {
+        let mut tree = FrameTree::new();
+        let planet = tree.add_frame(
+            FrameId::ROOT,
+            Vec3::new(1.5e8, 0.0, 0.0),
+            Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 0.4),
+            Vec3::new(0.0, 29.8, 0.0), // 公転速度(km/s級、単位は任意でよい)
+            Vec3::new(0.0, 0.0, 7.3e-5), // 自転角速度
+        );
+
+        let position = Vec3::new(6371.0, 100.0, -50.0);
+        let velocity = Vec3::new(0.1, -0.2, 0.05);
+
+        let (root_pos, root_vel) = tree.state_to_root(planet, position, velocity);
+        let (back_pos, back_vel) = tree.state_from_root(planet, root_pos, root_vel);
+
+        assert!(
+            (back_pos - position).length() < 1e-9 * position.length(),
+            "position round trip mismatch: {back_pos:?} vs {position:?}"
+        );
+        assert!(
+            (back_vel - velocity).length() < 1e-9 * velocity.length().max(1.0),
+            "velocity round trip mismatch: {back_vel:?} vs {velocity:?}"
+        );
+
+        // transform_state(planet, planet, ...) も同じ恒等変換になるはず(ROOT経由の往復)。
+        let (identity_pos, identity_vel) = tree.transform_state(planet, planet, position, velocity);
+        assert!(
+            (identity_pos - position).length() < 1e-9 * position.length(),
+            "transform_state self-mapping position mismatch: {identity_pos:?}"
+        );
+        assert!(
+            (identity_vel - velocity).length() < 1e-9 * velocity.length().max(1.0),
+            "transform_state self-mapping velocity mismatch: {identity_vel:?}"
         );
     }
 
