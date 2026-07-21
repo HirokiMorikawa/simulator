@@ -302,8 +302,17 @@
   ピストン/箱ベンチマークと同型)に変更したところ、緩やかに減衰する綺麗な有界振動が
   得られ、debugビルドで約54秒の設定でGreen化した。これでワークストリームAの
   X2が完了。
-- **作業中**: ワークストリームA(Phase B残タスク)継続中 — 次はフレーム階層/floating origin。
-- **次**: A(残り: フレーム階層・レジーム切替・エンティティ関節PD・F10)→ B(Phase C:
+  続けてフレーム階層・floating origin(`docs/20-integration/05-frame-hierarchy.md`)に着手 —
+  `sim_core::frame`モジュールに`FrameTree`(木構造・フレーム間変換、既存の`sim-math::Transform`
+  の`compose`/`inverse`をそのまま利用)と非慣性項(遠心力・コリオリ力・オイラー力)の計算を
+  実装。設計§7の単体テストのうち、跨ぎ判定(re-parenting)を必要としない「往復変換」
+  「コリオリ検算」の2本はWorld本体なしで検証可能なため実装 — コリオリ検算は当初、半-implicit
+  Eulerでdt=1e-4・2000ステップの数値積分を行ったところrel_err≈2.5e-6と目標(rel<1e-6)を
+  わずかに超過することを発見し、古典的RK4に切り替えて解決(同じステップ数のまま
+  rel<1e-6を達成)。跨ぎ判定・接触/拘束の跨ぎ処理は`World`のブロードフェーズ・アイランド
+  管理に依存するためPhase C(ワークストリームB)に持ち越す。
+- **作業中**: ワークストリームA(Phase B残タスク)継続中 — 次はレジーム切替。
+- **次**: A(残り: レジーム切替・エンティティ関節PD・F10)→ B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
   D(フロントエンド統合エディタ、Bと一部並行)の順で進める。詳細は上記プランファイル参照。
@@ -360,8 +369,9 @@
 - [x] 量子(TDSE)— `WaveFunction1D`/`WaveFunction2D`を直接実装、Q1–Q6全てGreen
 - [x] 統計(気体分子・イジング・ランジュバン)— `GasSim`/`IsingSim`/ランジュバン(BAOAB)を
       直接実装、S1–S9全てGreen
-- [ ] 天体(N 体・軌道・フレーム階層)— `NBodySystem`・軌道摂動・1PN補正でA1–A10はGreen化
-      済みだが、フレーム階層・floating originは未実装(§3 Pα参照、着手予定)
+- [x] 天体(N 体・軌道・フレーム階層)— `NBodySystem`・軌道摂動・1PN補正でA1–A10はGreen化。
+      フレーム階層・floating originは`sim_core::frame`(`FrameTree`)に実装(§3・§8参照。
+      跨ぎ判定はWorld本体に依存するためPhase Cへ)
 - [ ] レンダリング(パストレ骨格)— `sim-render`は空crateのまま未着手(Phase D、着手予定)
 - [ ] World / Coupling / 台帳 / スナップショット — `sim-core` 側の共通基盤(`Solver`トレイト・
       `SolverContext`・`EventQueue`・`MaterialDb`)・`EnergyLedger`・`sim-coupling`の排他結合
@@ -440,8 +450,9 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       実際の衝突速度がv0から数%~20%程度目減りしうる(dtを1/1200→1/12000に変えて確認)。
       主たる合格基準(貫通イベントゼロ・貫入<slop)はこの限界の影響を受けず正確に満たすため、
       反発速度の一致は緩めの許容誤差(rel<25%)で確認する設計にした
-- [x] 位置表現 = フレーム ID + ローカル座標(`sim_core::FrameId`、単一ルートフレームで運用中。
-      フル階層は Pα)
+- [x] 位置表現 = フレーム ID + ローカル座標(`sim_core::FrameId`。木構造・フレーム間変換・
+      非慣性項は`sim_core::frame::FrameTree`に実装済み。エンティティ層は単一ルートフレームで
+      運用中、跨ぎ判定の統合はWorld本体、Phase C)
 - [x] 重力(実装済み)。抗力(球、Schiller-Naumann補正付き、`sim-fluid::aero`+
       `MechanicsSolver::apply_forces`)を実装、F1–F3 Green化。浮力(直立直方体、
       `sim-fluid::buoyancy`+`MechanicsSolver.water`)を実装、F4–F6 Green化(一般姿勢の
@@ -722,7 +733,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       低軌道衛星を80周回積分 — 面積/質量比を大きくしすぎると固定刻み幅では再突入直前の
       急激な力学変化に追従できず数値発散することを発見し、発散しない範囲の弾道係数・
       周回数を事前にPythonで数値実験して選定して解決(詳細は§3参照)
-- [ ] フレーム階層・floating origin
+- [x] フレーム階層・floating origin(木構造・フレーム間変換・非慣性項までを`sim_core::frame`
+      (`FrameTree`)に実装。§7の単体テストのうち跨ぎ判定を要さない2本 —
+      `round_trip_transform_between_frames_is_identity`(往復変換恒等、abs<1e-12)・
+      `coriolis_matches_inertial_frame_solution_and_does_zero_work`(コリオリ検算、RK4積分で
+      rel<1e-6・コリオリ仕事abs<1e-12)— がGreen。跨ぎ判定(re-parenting)・接触/拘束の跨ぎ
+      処理は`World`のブロードフェーズ・アイランド管理に依存するため未実装(§3・§4、Phase C)
 - [ ] レジーム切替(時間加速)
 - [x] 1PN 補正(オプトイン、A8・A9・A10。`RelativitySettings`構造体・`NBodySystem`への
       完全統合は未実装)—

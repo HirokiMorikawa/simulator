@@ -6,9 +6,11 @@
 //! `Solver`/`Coupling` トレイト・`EventQueue`・`CommandQueue` 等は Phase A で
 //! 各ドメインスケルトンと合わせて追加する(docs/00-foundation/04-architecture.md §1.2–1.3)。
 
+mod frame;
 mod ledger;
 mod material;
 mod solver;
+pub use frame::{fictitious_forces, FictitiousForces, Frame, FrameTree};
 pub use ledger::EnergyLedger;
 pub use material::{Material, MaterialDb, MaterialId, PairOverride, PhaseChangeProps};
 pub use solver::{
@@ -25,7 +27,9 @@ pub struct BodyId {
 
 /// 所属フレーム。単一フレームのシーンでは全て `ROOT`。
 /// 設計: docs/00-foundation/02-scale-ladder.md §2.2、docs/00-foundation/04-architecture.md §3。
-/// フル フレーム階層(floating origin)は Pα(docs/20-integration/05-frame-hierarchy.md)で拡張する。
+/// フレーム階層(木構造・フレーム間変換・非慣性項)は`frame`モジュール(`FrameTree`)が実装する。
+/// 跨ぎ判定(re-parenting)は`World`のブロードフェーズに依存するため未実装(Phase C、`frame`
+/// モジュールdoc参照)。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct FrameId(pub u32);
 
