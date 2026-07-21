@@ -393,7 +393,32 @@
   系統的に過大評価になること(PGS+Baumgarteソルバの既知の限界、クランプの有無では
   解決しない)。根本修正は接触ソルバへの踏み込んだ改修を要するため見送り、テストの
   許容誤差をrel<15%に設定して対応した(対記帳が「概ね」機能することの確認という趣旨)。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り11種のCoupling実装。
+  続けて2種目の`Coupling`実装`JouleHeat`(設計§3「P2: 回路の抵抗損失(ジュール熱) →
+  ThermalNode」)に着手 — 全12種のうち、`Circuit`(`sim-em`)が既に抵抗電圧を問い合わせ
+  可能で前提工事が最小のため選定(他は流体Solverトレイト接続・Sliderジョイント・
+  電荷付き剛体連携等、未実装の前提を要する)。まず`sim_em::Circuit`に`Solver`トレイトを
+  実装(`max_stable_dt`は後退Euler無条件安定につきINFINITY、`step`は既存の1引数版
+  inherentメソッドにそのまま委譲 — Rustのメソッド解決規則によりinherentメソッドが
+  同名のトレイトメソッドより優先されるため、トレイト実装内から`self.step(dt)`と書いても
+  無限再帰しないことを確認、既存24本の`sim-em`テストが無変更で通ることも確認。
+  `total_energy`はコンデンサ+インダクタの蓄積電磁エネルギー、`state_hash`はノード電圧・
+  電流・ダイオード電圧の全状態)。加えて`resistor_count`/`resistor_power(i)`(瞬時電力
+  $P=V^2/R$)アクセサを追加。`DomainStates`に`em_circuit: Option<&mut Circuit>`
+  フィールドを追加(`DissipationToHeat`用のmechanics+thermalに続く3つ目のドメイン)。
+  `JouleHeat`は全抵抗の瞬時電力を`dt`で積分し単一`ThermalNode`へ注入する縮約実装
+  (`DissipationToHeat`と同じ理由: 抵抗↔熱ノード対応表が未実装)。`DissipationToHeat`とは
+  異なり瞬時電力は蓄積量ではないため毎回`Circuit`側から読み出すだけでよくリセット不要。
+  定電圧源+単一抵抗(RC/RL要素なし、初回解で即座に定常状態)の回路で、注入熱量が
+  オームの法則の定常電力$V^2/R$×経過時間とrel<1%で一致することをテストで確認
+  (`DissipationToHeat`のような測定窓バイアスが生じない、瞬時電力の直接積分のため)。
+  最後に`sim-world::World`に`circuit: Option<sim_em::Circuit>`フィールド +
+  `enable_circuit`/`circuit`/`circuit_mut`を追加し、`step()`/`state_hash()`/
+  `total_energy()`の固定順(mechanics→thermal→em→astro→circuit)に組み込んだ
+  (`DissipationToHeat`・`JouleHeat`自体はまだ`World::step()`のパイプラインには未接続 —
+  Coupling registry相当の仕組みが必要で後続増分、各Couplingは`sim-coupling`crate内で
+  単体検証済み)。RC回路の過渡応答(`V0(1-e^{-t/RC})`)がWorld経由でも力学ドメインと
+  独立に理論値と一致することを新規テストで確認。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り10種のCoupling実装。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -859,9 +884,13 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [ ] 結合行列の実装(保存量の対記帳・排他結合 validator)— 排他結合の静的検査
       (`sim-coupling::{SceneCouplingConfig, validate_exclusive_couplings}`、設計§2規則2
       が列挙する3組(浮力: 静的水域×SPH/格子流体、空気抗力: 集中定数×格子結合、
-      コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出)のみ実装。各Coupling
-      実装本体(`BuoyancyDrag`・`GridFluidRigid`等)・保存量の対記帳・sub-iteration
-      剛性閾値表は`World`/各ドメインSolver統合を待つため未実装
+      コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出)を実装済み。`Coupling`
+      トレイト + `DomainStates`(現時点でmechanics・thermal・em_circuitの3ドメイン)、
+      具体的な実装2種(`DissipationToHeat`: 接触散逸→熱、`JouleHeat`: 回路I²R→熱)を
+      対記帳付きで実装済み(いずれも単一`ThermalNode`への縮約実装、剛体/抵抗↔熱ノード
+      対応表は未実装)。`World`にも`circuit`ドメインを追加済み。残り10種の`Coupling`
+      (`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`パイプラインへの
+      Coupling接続(registry相当の仕組みが必要)・sub-iteration剛性閾値表は未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
 - [ ] 統合シナリオ: 氷と飲み物

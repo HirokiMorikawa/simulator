@@ -22,18 +22,21 @@
 //!
 //! **全ドメイン合成(ワークストリームB増分)**: `mechanics` は常時有効な正典ドメインとして
 //! 保持し、`thermal`(`sim_thermal::ThermalSolver`)・`em_electrostatics`
-//! (`sim_em::PointChargeSystem`)・`astro`(`sim_astro::NBodySystem`)は`Option`として
-//! 追加した(シーンが使う分だけ`enable_*`で有効化、設計「Solverトレイトの共通契約」
-//! docs/00-foundation/04-architecture.md §1.2に既に準拠している型をそのまま接続)。
-//! `step()`は有効なドメインを固定順(mechanics→thermal→em→astro、`state_hash`も同順)で
-//! 順に進める。各ドメインは`orchestrator::sub_step_count`(設計§1.3の決定的sub-step数算出、
-//! `max_stable_dt()`から算出)に従いsub-stepする — Lie-Trotter operator splitting自体
-//! (pre/post couplingを挟むパイプライン、docs/20-integration/01-coupling-matrix.md §4)は
-//! `Coupling`実装が1つも無い現時点では意味を持たないため、`Coupling`導入時に合わせて
-//! 拡張する(`orchestrator`モジュールdoc参照)。`fluid`(`sim-fluid`のGridFluid系・SPH)は
-//! `Solver`トレイトを未実装のため今回は見送る(各流体型に`Solver`実装を追加するか専用の
-//! 接続方式を検討する必要があり、後続増分)。`quantum`/`statistical`は専用シーンでのみ
-//! 有効化する設計方針のため同様に見送る。
+//! (`sim_em::PointChargeSystem`)・`astro`(`sim_astro::NBodySystem`)・`circuit`
+//! (`sim_em::Circuit`、回路のMNAソルバ。`Solver`トレイト実装は`sim-coupling::JouleHeat`
+//! 増分で追加済み)は`Option`として追加した(シーンが使う分だけ`enable_*`で有効化、設計
+//! 「Solverトレイトの共通契約」docs/00-foundation/04-architecture.md §1.2に既に準拠している
+//! 型をそのまま接続)。`step()`は有効なドメインを固定順(mechanics→thermal→em→astro→circuit、
+//! `state_hash`も同順)で順に進める。各ドメインは`orchestrator::sub_step_count`(設計§1.3の
+//! 決定的sub-step数算出、`max_stable_dt()`から算出)に従いsub-stepする — Lie-Trotter
+//! operator splitting自体(pre/post couplingを挟むパイプライン、
+//! docs/20-integration/01-coupling-matrix.md §4)は、`Coupling`実装(`sim-coupling`の
+//! `DissipationToHeat`・`JouleHeat`)がまだ`World`に接続されていない(各Couplingは
+//! `sim-coupling`crate内で単体検証済みだが、`World::step()`のパイプラインへの組み込みは
+//! Coupling registry相当の仕組みが必要で後続増分)ため未実装。`fluid`(`sim-fluid`の
+//! GridFluid系・SPH)は`Solver`トレイトを未実装のため今回は見送る(各流体型に`Solver`実装を
+//! 追加するか専用の接続方式を検討する必要があり、後続増分)。`quantum`/`statistical`は
+//! 専用シーンでのみ有効化する設計方針のため同様に見送る。
 
 mod orchestrator;
 
@@ -74,6 +77,8 @@ pub struct World {
     em_electrostatics: Option<sim_em::PointChargeSystem>,
     /// 天体ドメイン(モジュールdoc参照、シーンが使う場合のみ`Some`)。
     astro: Option<sim_astro::NBodySystem>,
+    /// 回路ドメイン(モジュールdoc参照、シーンが使う場合のみ`Some`)。
+    circuit: Option<sim_em::Circuit>,
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
@@ -122,6 +127,7 @@ impl World {
             thermal: None,
             em_electrostatics: None,
             astro: None,
+            circuit: None,
             materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
@@ -167,6 +173,19 @@ impl World {
 
     pub fn astro_mut(&mut self) -> Option<&mut sim_astro::NBodySystem> {
         self.astro.as_mut()
+    }
+
+    /// 回路ドメインを有効化する。
+    pub fn enable_circuit(&mut self, circuit: sim_em::Circuit) {
+        self.circuit = Some(circuit);
+    }
+
+    pub fn circuit(&self) -> Option<&sim_em::Circuit> {
+        self.circuit.as_ref()
+    }
+
+    pub fn circuit_mut(&mut self) -> Option<&mut sim_em::Circuit> {
+        self.circuit.as_mut()
     }
 
     /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す
@@ -230,6 +249,9 @@ impl World {
         if let Some(a) = &self.astro {
             total = total + a.total_energy();
         }
+        if let Some(c) = &self.circuit {
+            total = total + c.total_energy();
+        }
         total
     }
 
@@ -255,6 +277,9 @@ impl World {
         }
         if let Some(a) = &mut self.astro {
             run_domain_substeps(a, dt, &self.materials, &mut self.rng, &mut self.events);
+        }
+        if let Some(c) = &mut self.circuit {
+            run_domain_substeps(c, dt, &self.materials, &mut self.rng, &mut self.events);
         }
         let _ = self.events.drain_sorted(); // Phase A: 購読者未実装のため排出のみ。
         let total = self.total_energy().total();
@@ -294,7 +319,8 @@ impl World {
     }
 
     /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:
-    /// mechanics→thermal→em→astro、設計docs/20-integration/02-determinism-replay.md §3)で
+    /// mechanics→thermal→em→astro→circuit、
+    /// 設計docs/20-integration/02-determinism-replay.md §3)で
     /// ハッシュする。各`Option`ドメインは有効/無効自体も書き込む(構造の異なる2つのWorldが
     /// 偶然衝突するリスクを減らす)。
     pub fn state_hash(&self) -> u64 {
@@ -313,6 +339,10 @@ impl World {
         hasher.write_u64(self.astro.is_some() as u64);
         if let Some(a) = &self.astro {
             a.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.circuit.is_some() as u64);
+        if let Some(c) = &self.circuit {
+            c.state_hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -464,6 +494,41 @@ mod tests {
         assert!(
             (t2 - expected_teq).abs() < 1e-3,
             "T2={t2} vs Teq={expected_teq}"
+        );
+    }
+
+    /// 全ドメイン合成: 回路ドメイン(モジュールdoc参照)を有効化し、力学(箱の自由落下)と
+    /// 同一Worldで独立に進行することを確認する(RC回路の過渡応答が理論値`V0(1-e^{-t/RC})`
+    /// に一致することも合わせて検証、sim-em `e3_rc_transient` テストと同じ構成)。
+    #[test]
+    fn circuit_domain_steps_independently_in_the_same_world() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        let y0 = world.body_position(box_id).unwrap().y;
+
+        let (v0, r, c) = (5.0, 1000.0, 1.0e-3);
+        let mut circuit = sim_em::Circuit::new(3);
+        circuit.add_voltage_source(1, sim_em::GROUND, v0);
+        circuit.add_resistor(1, 2, r);
+        circuit.add_capacitor(2, sim_em::GROUND, c, 0.0);
+        world.enable_circuit(circuit);
+
+        let tau = r * c;
+        let steps = (5.0 * tau / WorldOptions::default().dt) as u32;
+        for _ in 0..steps {
+            world.step();
+        }
+
+        assert!(
+            world.body_position(box_id).unwrap().y < y0,
+            "mechanics domain should still evolve independently"
+        );
+        let t = steps as f64 * WorldOptions::default().dt;
+        let expected_v = v0 * (1.0 - (-t / tau).exp());
+        let measured_v = world.circuit().unwrap().node_voltage(2);
+        assert!(
+            (measured_v - expected_v).abs() / v0 < 1e-3,
+            "measured_v={measured_v} expected_v={expected_v}"
         );
     }
 

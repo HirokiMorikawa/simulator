@@ -10,6 +10,11 @@
 //! テストケースは電圧ステップ制限つきNewtonのみで確実に収束するため)。
 //! モーター・スイッチは未実装。線形方程式は毎回部分ピボット付きガウス消去で解く
 //! (回路規模が小さいため十分、設計 §10「密LUで十分」)。
+//!
+//! `Solver`トレイト実装(`sim-coupling::JouleHeat`が`World`経由で駆動するための窓口、
+//! 設計docs/00-foundation/04-architecture.md §1.2)はファイル末尾。
+
+use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
 
 /// ノード0は常にグラウンド(電位0、未知数に含めない)。設計 §3。
 pub const GROUND: usize = 0;
@@ -239,6 +244,69 @@ impl Circuit {
             0.0
         } else {
             x[node - 1]
+        }
+    }
+
+    /// 抵抗の本数(`resistor_power`のインデックス範囲、`sim-coupling::JouleHeat`が読む)。
+    pub fn resistor_count(&self) -> usize {
+        self.resistors.len()
+    }
+
+    /// 抵抗`index`の直近の消費電力 $P=V^2/R$(設計docs/20-integration/01-coupling-matrix.md
+    /// `JouleHeat`が読む)。
+    pub fn resistor_power(&self, index: usize) -> f64 {
+        let (a, b, r) = self.resistors[index];
+        let v = self.node_voltage(a) - self.node_voltage(b);
+        v * v / r
+    }
+}
+
+impl Solver for Circuit {
+    /// 後退Eulerは無条件安定(設計§4)。
+    fn max_stable_dt(&self) -> f64 {
+        f64::INFINITY
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        // 同名の inherent メソッド(1引数版、上の`impl Circuit`ブロック)を呼ぶ —
+        // Rustのメソッド解決規則により inherent メソッドが同名のトレイトメソッドより
+        // 優先されるため、トレイト実装内から`self.step(dt)`と書いても再帰しない。
+        self.step(dt);
+    }
+
+    /// コンデンサ・インダクタに蓄えられた電磁エネルギー(設計§1.1.2(2)「電磁場」)。
+    /// 抵抗のジュール熱は瞬時消費であり蓄積量ではないため対象外(`resistor_power`が
+    /// 別途瞬時電力を提供、`JouleHeat`が積算する)。
+    fn total_energy(&self) -> EnergyBreakdown {
+        let mut electromagnetic = 0.0;
+        for (idx, &(_, _, c)) in self.capacitors.iter().enumerate() {
+            electromagnetic += 0.5 * c * self.capacitor_voltage[idx] * self.capacitor_voltage[idx];
+        }
+        for (idx, &(_, _, l)) in self.inductors.iter().enumerate() {
+            electromagnetic += 0.5 * l * self.inductor_current[idx] * self.inductor_current[idx];
+        }
+        EnergyBreakdown {
+            electromagnetic,
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.last_node_voltage.len() as u64);
+        for &v in &self.last_node_voltage {
+            hasher.write_f64(v);
+        }
+        for &i in &self.last_source_current {
+            hasher.write_f64(i);
+        }
+        for &v in &self.capacitor_voltage {
+            hasher.write_f64(v);
+        }
+        for &i in &self.inductor_current {
+            hasher.write_f64(i);
+        }
+        for &v in &self.diode_voltage {
+            hasher.write_f64(v);
         }
     }
 }

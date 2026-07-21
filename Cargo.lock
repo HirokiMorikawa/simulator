@@ -105,6 +105,7 @@ name = "sim-coupling"
 version = "0.1.0"
 dependencies = [
  "sim-core",
+ "sim-em",
  "sim-math",
  "sim-mechanics",
  "sim-thermal",

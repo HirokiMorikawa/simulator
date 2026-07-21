@@ -119,6 +119,7 @@ mod tests {
                 let mut states = DomainStates {
                     mechanics: &mut mechanics,
                     thermal: Some(&mut thermal),
+                    em_circuit: None,
                 };
                 coupling.apply(&mut states, dt);
             }
