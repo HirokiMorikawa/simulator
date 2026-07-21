@@ -5,12 +5,14 @@
 //! P4: `sph`(弱圧縮SPH、docs/11-fluid/03-sph.md)を実装。P3: `grid_fluid`
 //! (格子流体、docs/11-fluid/02-eulerian-grid.md、2D周期境界のみ・F8/F9)・
 //! `poiseuille`(ポアズイユ流、完全発達した平行平板間流れが厳密に1D陰的粘性拡散に
-//! 帰着することを使った専用縮約実装、F7)を実装。カルマン渦列(F11、円柱障害物+
-//! 渦度強化の要否判断)は後続増分に残す。
+//! 帰着することを使った専用縮約実装、F7)・`karman`(カルマン渦列、流入/流出境界+円柱の
+//! マスキング方式固体セル、渦度強化を設計§4.5の代替経路として使用、F11)を実装。
+//! F10(ダム崩壊)はMartin & Moyce 1952実測データ入手待ちのまま未着手。
 
 mod aero;
 mod buoyancy;
 mod grid_fluid;
+mod karman;
 mod poiseuille;
 mod sph;
 pub use aero::{
@@ -21,5 +23,6 @@ pub use buoyancy::{
     buoyancy_force, hydrostatic_pressure, submerged_box_axis_aligned, StaticWaterRegion,
 };
 pub use grid_fluid::GridFluid2D;
+pub use karman::KarmanChannel2D;
 pub use poiseuille::PoiseuilleChannel1D;
 pub use sph::SphFluid;
