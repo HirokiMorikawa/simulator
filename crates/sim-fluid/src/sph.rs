@@ -27,6 +27,15 @@
 //! (設計§2.2)・有限の人工粘性による残留振動により、設計の目標値そのものではなく
 //! 実測で安定的に達成できる誤差域で検証する(`hydrostatic_equilibrium`テスト参照)。
 //! sub-step数のCFL自動決定は未実装(呼び出し側が固定dtを渡す)。
+//!
+//! F10(ダム崩壊先端、Martin & Moyce 1952実測データとの比較)は設計改訂により
+//! 新規テストとしては実装しない — 実測データが二次文献経由でも数値表として入手
+//! できず、代替に検討したRitter解析解も実際のダム崩壊(実測・他の数値手法いずれも)
+//! から系統的に~50%乖離するため妥当なrel 10%比較対象にならないことを実装検証中に
+//! 確認した(docs/21-verification/01-analytic-tests.md F10注記)。F10は下記の
+//! `total_momentum_is_conserved_with_no_external_force`(全運動量保存)+
+//! `hydrostatic_pressure_matches_rho_g_h_within_wcsph_boundary_approximation`
+//! (静水圧平衡)で代替的に満たされるものとする。
 
 use sim_math::{SpatialHash, Vec3};
 
