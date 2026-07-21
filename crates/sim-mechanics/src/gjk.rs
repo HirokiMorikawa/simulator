@@ -1,11 +1,13 @@
-//! GJK(Gilbert-Johnson-Keerthi)距離アルゴリズム。設計: docs/10-mechanics/02-collision-detection.md §4.5。
+//! GJK(Gilbert-Johnson-Keerthi)距離アルゴリズム + EPA(Expanding Polytope Algorithm)。
+//! 設計: docs/10-mechanics/02-collision-detection.md §4.5。
 //!
 //! Phase 5 スコープの部分実装: GJK(ミンコフスキー差の原点への最近点探索による分離距離・
-//! 重なり判定)のみ。EPA(貫入深さ・法線の復元)は後続増分で追加する(設計§4.5が
-//! 「実装の要諦(退化単体・数値許容)は実装フェーズでGino van den Bergenの書籍を正とする」
-//! と明記するとおり、本実装は教科書の完全な実装ではなく、Johnsonのサブアルゴリズム
-//! (単体の全部分集合を試して原点の重心座標が非負になる部分集合を探す方式)による
-//! 素直な実装)。
+//! 重なり判定)+ EPA(重なり時の貫入深さ・法線復元)。フルCCD(conservative advancement)は
+//! 後続増分で追加する(設計§4.5が「実装の要諦(退化単体・数値許容)は実装フェーズで
+//! Gino van den Bergenの書籍を正とする」と明記するとおり、本実装は教科書の完全な実装では
+//! なく、GJKはJohnsonのサブアルゴリズム(単体の全部分集合を試して原点の重心座標が
+//! 非負になる部分集合を探す方式)、EPAはシルエット辺法(可視面を除去し境界の辺で
+//! 新しい面を張る素直な多面体拡張)による直接的な実装)。
 
 use sim_math::Vec3;
 
@@ -48,10 +50,11 @@ fn minkowski_support(a: &ConvexShape, b: &ConvexShape, dir: Vec3) -> Vec3 {
     a.support(dir) - b.support(dir.scale(-1.0))
 }
 
-/// GJKの結果: 分離している場合は分離距離、重なっている場合はそれを示す(EPAは未実装)。
+/// GJKの結果: 分離している場合は分離距離、重なっている場合は原点を包含する四面体
+/// (ミンコフスキー差の点4つ、EPAの初期多面体として使う)。
 pub enum GjkResult {
     Separated { distance: f64 },
-    Overlapping,
+    Overlapping { simplex: [Vec3; 4] },
 }
 
 fn signed_volume6(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3) -> f64 {
@@ -155,17 +158,69 @@ fn closest_in_subset(points: &[Vec3], subset: &[usize]) -> Option<Vec3> {
     }
 }
 
+/// 原点を含むことが分かっている単体(1〜4点)を、EPAが必要とする非退化な四面体
+/// (アフィン独立な4点)に育てる。凸包に新しい支持点を追加しても凸包は単調に
+/// 大きくなるだけなので、既に原点を含む単体に(ミンコフスキー差の実在の点である)
+/// 支持点を足しても原点を含むことは保たれる。
+fn complete_to_tetrahedron(a: &ConvexShape, b: &ConvexShape, mut simplex: Vec<Vec3>) -> [Vec3; 4] {
+    let candidate_dirs = [
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(0.0, 0.0, -1.0),
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(-1.0, -1.0, -1.0),
+        Vec3::new(1.0, -1.0, 1.0),
+        Vec3::new(-1.0, 1.0, -1.0),
+    ];
+    let mut idx = 0;
+    while simplex.len() < 4 && idx < candidate_dirs.len() * 2 {
+        let dir = candidate_dirs[idx % candidate_dirs.len()];
+        idx += 1;
+        let candidate = minkowski_support(a, b, dir);
+        if simplex.iter().any(|&p| (p - candidate).length_sq() < 1e-12) {
+            continue;
+        }
+        let independent = match simplex.len() {
+            1 => true,
+            2 => {
+                let ab = simplex[1] - simplex[0];
+                let ac = candidate - simplex[0];
+                ab.cross(ac).length_sq() > 1e-18
+            }
+            3 => {
+                let ab = simplex[1] - simplex[0];
+                let ac = simplex[2] - simplex[0];
+                let normal = ab.cross(ac);
+                let ad = candidate - simplex[0];
+                normal.dot(ad).abs() > 1e-12
+            }
+            _ => true,
+        };
+        if independent {
+            simplex.push(candidate);
+        }
+    }
+    while simplex.len() < 4 {
+        let last = *simplex.last().unwrap();
+        simplex.push(last + Vec3::new(1e-6, 1e-6, 1e-6));
+    }
+    [simplex[0], simplex[1], simplex[2], simplex[3]]
+}
+
 /// GJK本体: ミンコフスキー差の凸包に対する原点までの最近点を反復的に求める。
 pub fn gjk_distance(a: &ConvexShape, b: &ConvexShape) -> GjkResult {
-    let mut dir = Vec3::new(1.0, 0.0, 0.0);
-    let mut simplex: Vec<Vec3> = vec![minkowski_support(a, b, dir)];
+    let mut simplex: Vec<Vec3> = vec![minkowski_support(a, b, Vec3::new(1.0, 0.0, 0.0))];
     let mut closest = simplex[0];
 
     for _ in 0..64 {
         if closest.length_sq() < 1e-16 {
-            return GjkResult::Overlapping;
+            let tetra = complete_to_tetrahedron(a, b, simplex);
+            return GjkResult::Overlapping { simplex: tetra };
         }
-        dir = closest.scale(-1.0);
+        let dir = closest.scale(-1.0);
         let new_point = minkowski_support(a, b, dir);
         // 新しい支持点が探索方向へこれ以上進めない(収束)なら終了。
         if new_point.dot(dir) <= closest.dot(dir) + 1e-12 {
@@ -183,6 +238,127 @@ pub fn gjk_distance(a: &ConvexShape, b: &ConvexShape) -> GjkResult {
     }
 }
 
+/// EPAの結果: 貫入深さと、Aの表面をBから押し出す向きの法線(Aからみて外向き)。
+pub struct EpaResult {
+    pub depth: f64,
+    pub normal: Vec3,
+}
+
+struct Face {
+    indices: [usize; 3],
+    normal: Vec3,
+    distance: f64,
+}
+
+/// 面(i0,i1,i2)を構築する。原点は常に多面体の内部にある(EPAの不変条件)ため、
+/// 法線が原点から離れる向きになるよう巻き順を調整する。
+fn build_face(vertices: &[Vec3], i0: usize, i1: usize, i2: usize) -> Face {
+    let a = vertices[i0];
+    let b = vertices[i1];
+    let c = vertices[i2];
+    let raw_normal = (b - a).cross(c - a);
+    let len = raw_normal.length();
+    let normal = raw_normal.scale(1.0 / len.max(1e-18));
+    if normal.dot(a) < 0.0 {
+        let flipped = normal.scale(-1.0);
+        Face {
+            indices: [i0, i2, i1],
+            normal: flipped,
+            distance: flipped.dot(a),
+        }
+    } else {
+        Face {
+            indices: [i0, i1, i2],
+            normal,
+            distance: normal.dot(a),
+        }
+    }
+}
+
+/// EPAの反復上限。多面体形状(実際の`ConvexShape::Points`用途)なら数回の面分割で
+/// ミンコフスキー差の境界と厳密に一致し即座に収束するが、球のような滑らかな形状は
+/// 各反復で誤差がおよそ半分になるだけ(線形収束)のため、テストで使う球ケースが
+/// 1e-9まで収束するには経験的に約90回前後必要と判明し、余裕を見て100回とした。
+const EPA_MAX_ITERATIONS: usize = 100;
+
+/// EPA本体: GJKが返した原点包含四面体を出発点に、ミンコフスキー差の境界多面体を
+/// 支持点で拡張しながら、原点に最も近い面へ収束させる(貫入深さ・法線を復元)。
+pub fn epa_penetration(a: &ConvexShape, b: &ConvexShape, simplex: [Vec3; 4]) -> EpaResult {
+    let mut vertices: Vec<Vec3> = simplex.to_vec();
+    let mut faces: Vec<Face> = vec![
+        build_face(&vertices, 0, 1, 2),
+        build_face(&vertices, 0, 3, 1),
+        build_face(&vertices, 0, 2, 3),
+        build_face(&vertices, 1, 3, 2),
+    ];
+
+    for _ in 0..EPA_MAX_ITERATIONS {
+        let (min_idx, _) = faces
+            .iter()
+            .enumerate()
+            .min_by(|(_, f1), (_, f2)| f1.distance.partial_cmp(&f2.distance).unwrap())
+            .unwrap();
+        let min_normal = faces[min_idx].normal;
+        let min_distance = faces[min_idx].distance;
+
+        let support_point = minkowski_support(a, b, min_normal);
+        let support_distance = support_point.dot(min_normal);
+
+        if support_distance - min_distance < 1e-9 {
+            return EpaResult {
+                depth: min_distance,
+                normal: min_normal,
+            };
+        }
+
+        let new_idx = vertices.len();
+        vertices.push(support_point);
+
+        // 新しい支持点から見える面を除去し、シルエット辺(可視面1枚だけに属する辺)を
+        // 新しい頂点との面で埋める。
+        let visible: Vec<bool> = faces
+            .iter()
+            .map(|f| f.normal.dot(support_point - vertices[f.indices[0]]) > 1e-10)
+            .collect();
+
+        let mut directed_edges: Vec<(usize, usize)> = Vec::new();
+        for (f, &vis) in faces.iter().zip(&visible) {
+            if vis {
+                directed_edges.push((f.indices[0], f.indices[1]));
+                directed_edges.push((f.indices[1], f.indices[2]));
+                directed_edges.push((f.indices[2], f.indices[0]));
+            }
+        }
+        let silhouette: Vec<(usize, usize)> = directed_edges
+            .iter()
+            .copied()
+            .filter(|&(x, y)| !directed_edges.contains(&(y, x)))
+            .collect();
+
+        let mut new_faces: Vec<Face> = faces
+            .into_iter()
+            .zip(&visible)
+            .filter(|(_, &vis)| !vis)
+            .map(|(f, _)| f)
+            .collect();
+        for (x, y) in silhouette {
+            new_faces.push(build_face(&vertices, x, y, new_idx));
+        }
+        faces = new_faces;
+    }
+
+    // 収束しなかった場合のフォールバック: 直近の最良面を返す。
+    let (min_idx, _) = faces
+        .iter()
+        .enumerate()
+        .min_by(|(_, f1), (_, f2)| f1.distance.partial_cmp(&f2.distance).unwrap())
+        .unwrap();
+    EpaResult {
+        depth: faces[min_idx].distance,
+        normal: faces[min_idx].normal,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,7 +373,7 @@ mod tests {
                     "distance={distance:.6} expected={expected_distance:.6} rel_err={rel_err:.4}"
                 );
             }
-            GjkResult::Overlapping => panic!("expected Separated, got Overlapping"),
+            GjkResult::Overlapping { .. } => panic!("expected Separated, got Overlapping"),
         }
     }
 
@@ -227,7 +403,85 @@ mod tests {
             center: Vec3::new(1.0, 0.0, 0.0),
             radius: 2.0,
         };
-        assert!(matches!(gjk_distance(&a, &b), GjkResult::Overlapping));
+        assert!(matches!(
+            gjk_distance(&a, &b),
+            GjkResult::Overlapping { .. }
+        ));
+    }
+
+    /// EPA: 重なった2球の貫入深さが解析式 $r_1+r_2-|c_1-c_2|$ と一致し、法線が
+    /// 中心を結ぶ軸に平行であること(設計§4.5)。実装検証中、球(多面体ではなく滑らかな
+    /// 形状)に対してはEPAが各反復で誤差をおよそ半分にするだけの線形収束にしかならず
+    /// (実際の`ConvexShape::Points`用途である多面体同士なら数回の面分割で厳密に収束する)、
+    /// 既定の反復上限64では収束しきらないことを発見し、上限を100に増やして解決した
+    /// (`EPA_MAX_ITERATIONS`のコメント参照)。
+    #[test]
+    fn epa_penetration_depth_for_overlapping_spheres_matches_analytic_formula() {
+        let a = ConvexShape::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 2.0,
+        };
+        let b = ConvexShape::Sphere {
+            center: Vec3::new(1.0, 0.0, 0.0),
+            radius: 2.0,
+        };
+        let simplex = match gjk_distance(&a, &b) {
+            GjkResult::Overlapping { simplex } => simplex,
+            GjkResult::Separated { .. } => panic!("expected overlap"),
+        };
+        let result = epa_penetration(&a, &b, simplex);
+        let expected_depth = 2.0 + 2.0 - 1.0;
+        let rel_err = (result.depth - expected_depth).abs() / expected_depth;
+        assert!(
+            rel_err < 1e-4,
+            "depth={:.6} expected={expected_depth:.6} rel_err={rel_err:.4}",
+            result.depth
+        );
+        assert!(
+            result.normal.y.abs() < 1e-3 && result.normal.z.abs() < 1e-3,
+            "normal should be parallel to the center-to-center axis, got {:?}",
+            result.normal
+        );
+    }
+
+    /// EPA: 平坦な面を持つ多面体(軸並行の箱、x軸方向にのみ重なる)は、実際の
+    /// `ConvexShape::Points`用途どおり数回の反復で厳密に(球よりずっと速く)収束し、
+    /// 貫入深さがAABBの重なり幅と、法線がx軸方向と、それぞれ高精度で一致すること。
+    #[test]
+    fn epa_penetration_depth_for_overlapping_boxes_matches_axis_overlap() {
+        let box_points = |min: Vec3, max: Vec3| -> Vec<Vec3> {
+            let mut pts = Vec::new();
+            for &x in &[min.x, max.x] {
+                for &y in &[min.y, max.y] {
+                    for &z in &[min.z, max.z] {
+                        pts.push(Vec3::new(x, y, z));
+                    }
+                }
+            }
+            pts
+        };
+        let a_pts = box_points(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));
+        let b_pts = box_points(Vec3::new(0.0, -1.0, -1.0), Vec3::new(2.0, 1.0, 1.0));
+        let a = ConvexShape::Points(&a_pts);
+        let b = ConvexShape::Points(&b_pts);
+
+        let simplex = match gjk_distance(&a, &b) {
+            GjkResult::Overlapping { simplex } => simplex,
+            GjkResult::Separated { .. } => panic!("expected overlap"),
+        };
+        let result = epa_penetration(&a, &b, simplex);
+        let expected_depth = 1.0;
+        let rel_err = (result.depth - expected_depth).abs() / expected_depth;
+        assert!(
+            rel_err < 1e-6,
+            "depth={:.6} expected={expected_depth:.6} rel_err={rel_err:.6}",
+            result.depth
+        );
+        assert!(
+            result.normal.y.abs() < 1e-9 && result.normal.z.abs() < 1e-9,
+            "normal should be exactly parallel to the x-axis, got {:?}",
+            result.normal
+        );
     }
 
     /// ちょうど接する2球(境界ケース): 分離距離がほぼ0であること。
@@ -243,7 +497,7 @@ mod tests {
         };
         match gjk_distance(&a, &b) {
             GjkResult::Separated { distance } => assert!(distance < 1e-6, "distance={distance}"),
-            GjkResult::Overlapping => {}
+            GjkResult::Overlapping { .. } => {}
         }
     }
 
@@ -300,7 +554,7 @@ mod tests {
 
             let gjk_overlap = matches!(
                 gjk_distance(&ConvexShape::Points(&a_pts), &ConvexShape::Points(&b_pts)),
-                GjkResult::Overlapping
+                GjkResult::Overlapping { .. }
             );
 
             // 総当たり近似判定: 両凸包を稠密にサンプルした点集合間の最小距離が
