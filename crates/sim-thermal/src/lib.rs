@@ -1,8 +1,16 @@
-//! 熱ドメイン。設計: docs/12-thermal/01-thermodynamics-laws.md、02-heat-transfer.md。
+//! 熱ドメイン。設計: docs/12-thermal/01-thermodynamics-laws.md、02-heat-transfer.md、
+//!       03-phase-change.md。
 //!
 //! P1 スコープ(docs/22-roadmap/01-phases.md): 集中熱容量ノード網 + ニュートン冷却(対流)+
-//! 放射(線形化)+ 陰的Euler(matrix-free PCG)。接触伝導ネットワークの自動生成・格子温度場・
-//! 気体区画は Phase 3。
+//! 放射(線形化)+ 陰的Euler(matrix-free PCG)。接触伝導ネットワークの自動生成・格子温度場は
+//! Phase 3(P3未着手)。気体区画(`gas`、T5・T6)・相変化(`phase`、エンタルピー法、T7)は
+//! 力学・格子との結合(ピストン、多ノード伝導網)を待たずに単独の状態として先に実装した。
+
+mod gas;
+mod phase;
+
+pub use gas::{carnot_efficiency_bound, GasCompartment, GasSpecies, GAS_CONSTANT};
+pub use phase::{Phase, PhaseMaterial, PhaseState};
 
 use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{pcg, Preconditioner};
