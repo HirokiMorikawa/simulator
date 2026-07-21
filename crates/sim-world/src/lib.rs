@@ -4,9 +4,17 @@
 //! Phase A 時点では `create_body` による複数剛体の構築 + `MechanicsSolver` 駆動を
 //! 正式な `RigidBodySet` 経由で提供する縮小版。フル API(joint/circuit/fluid region/
 //! Coupling、コマンドキュー、スナップショット、シーン JSON)は後続の増分で
-//! docs/20-integration/04-world-api.md §2 に沿って拡張する。`BodyId` は現時点では
-//! 世代なしの `usize`(`RigidBodySet` が削除・再利用に未対応のため。世代付き
-//! `sim_core::BodyId` への移行は `remove_body` 実装時)。
+//! docs/20-integration/04-world-api.md §2 に沿って拡張する。
+//!
+//! `create_body`/`remove_body`/`body_position` は `sim_core::BodyId`(世代付き index)を
+//! 使う(設計 docs/00-foundation/04-architecture.md §3「削除済み ID へのアクセスは
+//! `None`」)。世代は `World` 層で管理する — `sim_mechanics::RigidBodySet` 自体はまだ
+//! スロットの削除・再利用に対応していないため(密な `Vec` ベースで、削除は配列の
+//! 詰め直しか tombstone 化を要する大きめの改修になる)、`remove_body` は下層スロットを
+//! 「無効化」(`BodyType::Static` 化 + 遠方(y=-1e9)へ退避 + 速度ゼロ化)するに留め、世代
+//! カウンタだけを正式にインクリメントして以後のアクセスを `None` にする。ジョイント・
+//! 結合の連鎖削除(設計 §2 の `remove_body` 完全仕様)は、`World` がまだジョイント・
+//! Coupling を保持していないため対象外(それらの導入時に合わせて拡張する)。
 //! `EnergyLedger`(docs/00-foundation/04-architecture.md §1.1.2(2))は P1 で導入済み:
 //! シーン構築(`create_body` 呼び出し列)が終わり最初の `step()` が呼ばれた時点の
 //! 合計エネルギーを基準点として、以後毎 step 後に記帳する(構築途中の`create_body`
@@ -14,7 +22,11 @@
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_math::{SimRng, Vec3};
-use sim_mechanics::{MechanicsSolver, RigidBodyDesc};
+use sim_mechanics::{BodyType, MechanicsSolver, RigidBodyDesc};
+
+// 下流crate(sim-wasm等)が別途sim-core依存を追加しなくてもBodyIdを使えるよう、
+// Worldの公開APIとしてそのまま再エクスポートする。
+pub use sim_core::BodyId;
 
 /// World 生成オプション。剛体はここでは作らず `create_body` で追加する。
 pub struct WorldOptions {
@@ -45,6 +57,8 @@ pub struct World {
     /// 最初の `step()` で遅延初期化する(構築フェーズの `create_body` を
     /// 台帳の基準点計算に含めないため)。
     ledger: Option<EnergyLedger>,
+    /// `BodyId` の世代管理(`RigidBodySet` のインデックスに対応、モジュールdoc参照)。
+    generations: Vec<u32>,
 }
 
 const STREAM_DIAG: u64 = 0;
@@ -62,6 +76,7 @@ impl World {
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
             ledger: None,
+            generations: Vec::new(),
         }
     }
 
@@ -71,10 +86,40 @@ impl World {
         &self.materials
     }
 
-    /// 剛体を追加する。設計 docs/20-integration/04-world-api.md §2 の `create_body`
-    /// (戻り値は現時点では世代なし index、モジュール冒頭注記)。
-    pub fn create_body(&mut self, desc: RigidBodyDesc) -> usize {
-        self.mechanics.create_body(desc, &self.materials)
+    /// 剛体を追加する。設計 docs/20-integration/04-world-api.md §2 の `create_body`。
+    pub fn create_body(&mut self, desc: RigidBodyDesc) -> BodyId {
+        let index = self.mechanics.create_body(desc, &self.materials);
+        debug_assert_eq!(
+            index,
+            self.generations.len(),
+            "RigidBodySet is expected to only grow (no slot reuse yet, module doc)"
+        );
+        self.generations.push(0);
+        BodyId {
+            index: index as u32,
+            generation: 0,
+        }
+    }
+
+    fn is_valid(&self, id: BodyId) -> bool {
+        (id.index as usize) < self.generations.len()
+            && self.generations[id.index as usize] == id.generation
+    }
+
+    /// ボディを削除する。世代カウンタをインクリメントし、以後この `id` (と古い世代の
+    /// 再利用)へのアクセスは `None` になる(設計の不変条件)。下層の `RigidBodySet`
+    /// スロット自体はまだ真に解放されない(モジュールdoc参照) — 無効化として
+    /// `BodyType::Static` 化・遠方への退避・速度ゼロ化を行い、実質的な影響を無くす。
+    pub fn remove_body(&mut self, id: BodyId) {
+        if !self.is_valid(id) {
+            return;
+        }
+        let idx = id.index as usize;
+        self.generations[idx] += 1;
+        self.mechanics.bodies.body_type[idx] = BodyType::Static;
+        self.mechanics.bodies.position[idx] = Vec3::new(0.0, -1.0e9, 0.0);
+        self.mechanics.bodies.linear_velocity[idx] = Vec3::ZERO;
+        self.mechanics.bodies.angular_velocity[idx] = Vec3::ZERO;
     }
 
     /// 直接可変アクセス(抗力・浮力の周囲媒質設定など)。設計が定める
@@ -123,8 +168,13 @@ impl World {
         self.clock.step_count()
     }
 
-    pub fn body_position(&self, body: usize) -> Vec3 {
-        self.mechanics.bodies.position[body]
+    /// 設計 docs/00-foundation/04-architecture.md §3「削除済み ID へのアクセスは `None`
+    /// (パニックしない)」。
+    pub fn body_position(&self, id: BodyId) -> Option<Vec3> {
+        if !self.is_valid(id) {
+            return None;
+        }
+        Some(self.mechanics.bodies.position[id.index as usize])
     }
 
     /// 全状態(clock + mechanics)を決定的順序でハッシュする。
@@ -147,7 +197,7 @@ mod tests {
     const INITIAL_HEIGHT: f64 = 10.0;
 
     /// Phase 0 相当の「箱1個が落ちる」シーンを構築する(鋼の箱、高さ `INITIAL_HEIGHT`)。
-    fn create_falling_box(world: &mut World) -> usize {
+    fn create_falling_box(world: &mut World) -> BodyId {
         let steel = world
             .materials()
             .find_by_name("鋼(炭素鋼)")
@@ -170,11 +220,11 @@ mod tests {
     fn box_falls_and_test_is_green() {
         let mut world = World::new(WorldOptions::default());
         let idx = create_falling_box(&mut world);
-        let y0 = world.body_position(idx).y;
+        let y0 = world.body_position(idx).unwrap().y;
         for _ in 0..120 {
             world.step();
         }
-        assert!(world.body_position(idx).y < y0);
+        assert!(world.body_position(idx).unwrap().y < y0);
         assert_eq!(world.step_count(), 120);
     }
 
@@ -192,12 +242,52 @@ mod tests {
         for _ in 0..60 {
             world.step();
         }
-        assert!(world.body_position(a).y < INITIAL_HEIGHT, "a should fall");
+        assert!(
+            world.body_position(a).unwrap().y < INITIAL_HEIGHT,
+            "a should fall"
+        );
         assert_eq!(
-            world.body_position(b),
+            world.body_position(b).unwrap(),
             Vec3::new(3.0, 2.0, 0.0),
             "static body must not move"
         );
+    }
+
+    /// 世代付き`BodyId`(設計 docs/00-foundation/04-architecture.md §3)の不変条件:
+    /// 削除済み ID へのアクセスは `None`(パニックしない)。同じインデックスへの新規
+    /// `create_body`(現時点では `RigidBodySet` がスロット再利用に未対応のため実際には
+    /// 新しいインデックスになるが、`is_valid`の世代比較ロジック自体はどちらの場合も
+    /// 正しく機能する)。
+    #[test]
+    fn removed_body_id_returns_none_and_does_not_panic() {
+        let mut world = World::new(WorldOptions::default());
+        let a = create_falling_box(&mut world);
+        assert!(world.body_position(a).is_some());
+
+        world.remove_body(a);
+        assert!(
+            world.body_position(a).is_none(),
+            "removed body id must resolve to None, not panic"
+        );
+
+        // 削除後も他のボディ・ステップ実行は正常に動作する(パニックしない)。
+        let b = create_falling_box(&mut world);
+        for _ in 0..10 {
+            world.step();
+        }
+        assert!(world.body_position(b).is_some());
+        assert!(world.body_position(a).is_none());
+    }
+
+    /// 未知(存在しない index)の`BodyId`も`None`(パニックしない)。
+    #[test]
+    fn unknown_body_id_returns_none() {
+        let world = World::new(WorldOptions::default());
+        let bogus = BodyId {
+            index: 999,
+            generation: 0,
+        };
+        assert!(world.body_position(bogus).is_none());
     }
 
     /// 決定論テスト(階層1): 同一初期条件 → 同数ステップ後のハッシュが一致する。

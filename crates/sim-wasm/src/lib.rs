@@ -8,13 +8,13 @@
 
 use js_sys::Float32Array;
 use sim_mechanics::{RigidBodyDesc, Shape};
-use sim_world::{World, WorldOptions};
+use sim_world::{BodyId, World, WorldOptions};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
-    box_body: usize,
+    box_body: BodyId,
 }
 
 #[wasm_bindgen]
@@ -59,7 +59,10 @@ impl WasmWorld {
     /// 05-rust-wasm-platform.md §3 の `body_transforms_f32` の Phase 0 縮小版
     /// (回転は未実装のため位置のみ)。
     pub fn body_position_f32(&self) -> Float32Array {
-        let p = self.inner.body_position(self.box_body);
+        let p = self
+            .inner
+            .body_position(self.box_body)
+            .expect("box_body is created in new() and never removed");
         let out = Float32Array::new_with_length(3);
         out.set_index(0, p.x as f32);
         out.set_index(1, p.y as f32);

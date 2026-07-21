@@ -340,7 +340,15 @@
   (docs/21-verification/01-analytic-tests.md・docs/11-fluid/03-sph.md)を改訂し、F10は
   既存のWCSPH全運動量保存+静水圧平衡テストで代替的に満たすものとした(詳細は§8の
   F10注記)。これでワークストリームA(Phase B残タスク)が完了。
-- **作業中**: ワークストリームB(Phase C: World/Coupling/Orchestrator)着手前の準備。
+  続けてワークストリームB(Phase C)最初の増分として`sim_core::BodyId`(世代付きindex)を
+  `sim-world::World`に採用 — `create_body`/`remove_body`/`body_position`をBodyId経由に
+  変更(`create_body`はBodyIdを返す、`body_position`は`Option<Vec3>`を返し削除済みIDへの
+  アクセスはNone、パニックしない)。`sim_mechanics::RigidBodySet`自体はまだスロット削除・
+  再利用に未対応(密なVecベース、大きめの改修を要する)なため、世代管理はWorld層で行い、
+  `remove_body`は下層スロットを「無効化」(Static化+遠方(y=-1e9)へ退避+速度ゼロ化)する
+  に留めた(ジョイント・結合の連鎖削除は、Worldがまだそれらを保持していないため対象外)。
+  `sim-wasm`側も`BodyId`(`sim-world`からの再エクスポート)を使うよう追従。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次はWorldの全ドメイン合成。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -404,8 +412,9 @@
 - [ ] レンダリング(パストレ骨格)— `sim-render`は空crateのまま未着手(Phase D、着手予定)
 - [ ] World / Coupling / 台帳 / スナップショット — `sim-core` 側の共通基盤(`Solver`トレイト・
       `SolverContext`・`EventQueue`・`MaterialDb`)・`EnergyLedger`・`sim-coupling`の排他結合
-      validatorは実装済み。`World`本体の全ドメイン合成・`Coupling`トレイト・`Orchestrator`・
-      スナップショットは未着手(Phase C、着手予定)
+      validatorは実装済み。`World`は`sim_core::BodyId`(世代付きindex)採用済み(§8参照)。
+      `World`本体の全ドメイン合成・`Coupling`トレイト・`Orchestrator`・スナップショットは
+      未着手(Phase C、着手予定)
 
 テスト記述(定義は [21-verification/01-analytic-tests.md](../21-verification/01-analytic-tests.md)、
 Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
