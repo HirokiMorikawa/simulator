@@ -264,12 +264,19 @@
   `validate_exclusive_couplings`。各Coupling実装本体(`BuoyancyDrag`等)・保存量の
   対記帳・sub-iteration剛性閾値表は`World`/各ドメインSolver統合を待つため未実装(Phase A
   型スケルトンも導入せず、実装可能な範囲から先に実体を持たせた、このセッション一貫の方針)。
-- **作業中**: なし(直前の増分で排他結合validatorが完了、次点候補から自由に選択)。
-  次点候補: カルマン渦列(F11、円柱障害物+渦度強化の要否判断が必要)、X2(格子流体×
-  剛体、64³格子+10秒級の重い検証)、イジングL=256フル版(長時間級のため優先度低)、
-  Phase A型スケルトン(sim-quantum/sim-render/sim-worldの未着手部分)
-- **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
-  → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
+  ここまでで直近12個のPR(#57–#68)が完了。続けてユーザーから「プロジェクト完遂の為、
+  洗い出しして残タスクを進めたい」との指示を受け、残作業を4本柱(A: 未着手の物理ギャップ、
+  B: Phase C の World/Coupling/Orchestrator本体・結合シナリオ・CIゲート、C: Phase Dの
+  パストレースレンダラ、D: フロントエンド統合エディタ)に整理。順序は設計書どおりの
+  厳密なフェーズ順(A→B→C→D)、実行モードは1つのdraft PRに全ての変更を積み重ね最後まで
+  自律開発する方針で合意し、詳細な実行計画を `/root/.claude/plans/elegant-meandering-pixel.md`
+  に記録した。上記のPhase Aチェック項目の整理(実際にはRedを経ず記述と同時にGreen化する
+  開発順序を一貫して取ったことの明記)はAの最初の増分として実施。
+- **作業中**: ワークストリームA(Phase B残タスク)に着手 — 次はF11(カルマン渦列)。
+- **次**: A(未着手の物理ギャップ: F11・X2・フレーム階層・レジーム切替・エンティティ関節PD・
+  F10)→ B(Phase C: World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能
+  CIゲート・D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
+  D(フロントエンド統合エディタ、Bと一部並行)の順で進める。詳細は上記プランファイル参照。
   math ウェーブ(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの汎用部分/
   `Grid3`/`MacGrid`/`GridSampler`/トライリニア・Catmull-Rom補間/勾配・ラプラシアン/`pcg`/`ParticleSet`/
   `SpatialHash`)は依存が無く低リスクなため、Phase A の Red 段階を経ずに直接実装 + テストで Green 化した。
@@ -314,36 +321,47 @@
 - [x] 力学(剛体状態・`Solver`/`Constraint`・衝突型)— `RigidBodySet`/`BodyType`/`Shape`(Sphere/Box/
       Plane 実装、Capsule/Compound/ConvexMesh は型のみ)/`MechanicsSolver`(`Solver`実装)まで完了。
       `Constraint`(ジョイント)型は P3 で追加
-- [ ] 流体(MAC 格子・SPH 粒子)
-- [ ] 熱(熱ノード・相変化)
-- [ ] 電磁(回路 MNA・静場・FDTD・光学)
-- [ ] 量子(TDSE)
-- [ ] 統計(気体分子・イジング・ランジュバン)
-- [ ] 天体(N 体・軌道・フレーム階層)
-- [ ] レンダリング(パストレ骨格)
+- [x] 流体(MAC 格子・SPH 粒子)— 型スケルトン先行(`todo!()`)は経ず、実体(`GridFluid2D`・
+      `PoiseuilleChannel1D`・`SphFluid`)を直接実装してF1–F9をGreen化した(F10/F11は§8参照、未着手)
+- [x] 熱(熱ノード・相変化)— 同様に`ThermalNode`/`ThermalSolver`/`GasCompartment`/`PhaseState`/
+      `ConductionRod1D`を直接実装、T1–T8全てGreen
+- [x] 電磁(回路 MNA・静場・FDTD・光学)— `Circuit`/`PointChargeSystem`/`FdtdSim2D`/`optics`/
+      `raytracer`を直接実装、E1–E13全てGreen
+- [x] 量子(TDSE)— `WaveFunction1D`/`WaveFunction2D`を直接実装、Q1–Q6全てGreen
+- [x] 統計(気体分子・イジング・ランジュバン)— `GasSim`/`IsingSim`/ランジュバン(BAOAB)を
+      直接実装、S1–S9全てGreen
+- [ ] 天体(N 体・軌道・フレーム階層)— `NBodySystem`・軌道摂動・1PN補正でA1–A10はGreen化
+      済みだが、フレーム階層・floating originは未実装(§3 Pα参照、着手予定)
+- [ ] レンダリング(パストレ骨格)— `sim-render`は空crateのまま未着手(Phase D、着手予定)
 - [ ] World / Coupling / 台帳 / スナップショット — `sim-core` 側の共通基盤(`Solver`トレイト・
-      `SolverContext`・`EventQueue`・`MaterialDb`)は先行実装済み(`crates/sim-core/src/{solver,material}.rs`)。
-      `World`本体の拡張・`Coupling`トレイト・`EnergyLedger`・スナップショットは未着手
+      `SolverContext`・`EventQueue`・`MaterialDb`)・`EnergyLedger`・`sim-coupling`の排他結合
+      validatorは実装済み。`World`本体の全ドメイン合成・`Coupling`トレイト・`Orchestrator`・
+      スナップショットは未着手(Phase C、着手予定)
 
 テスト記述(定義は [21-verification/01-analytic-tests.md](../21-verification/01-analytic-tests.md)、
 Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 
-- [ ] 力学 M1–M15 を記述、全 Red 確認
-- [ ] 流体 F1–F11 を記述、全 Red 確認
-- [ ] 熱 T1–T8 を記述、全 Red 確認
-- [ ] 電磁 E1–E13 を記述、全 Red 確認
-- [ ] 量子 Q1–Q6 を記述、全 Red 確認
-- [ ] 統計 S1–S9 を記述、全 Red 確認
-- [ ] 天体 A1–A10 を記述、全 Red 確認
-- [ ] レンダリング R1–R7 を記述、全 Red 確認
-- [ ] 結合 stiff 検出 X1–X2 を記述、全 Red 確認
-- [ ] 各ドメイン文書 §7 のユニットテストを記述
+- [x] 力学 M1–M15 を記述、全 Red 確認 — 実際にはRedを経ず記述と同時にGreen化する開発順序を
+      取った(1コミット1増分でテスト+実装をセットで追加)。M1–M15全てGreen(§8参照)
+- [ ] 流体 F1–F11 を記述、全 Red 確認(F1–F9はGreen、F10・F11は未着手。§8参照)
+- [x] 熱 T1–T8 を記述、全 Red 確認(同上の開発順序でT1–T8全てGreen)
+- [x] 電磁 E1–E13 を記述、全 Red 確認(同上の開発順序でE1–E13全てGreen)
+- [x] 量子 Q1–Q6 を記述、全 Red 確認(同上の開発順序でQ1–Q6全てGreen)
+- [x] 統計 S1–S9 を記述、全 Red 確認(同上の開発順序でS1–S9全てGreen)
+- [x] 天体 A1–A10 を記述、全 Red 確認(同上の開発順序でA1–A10全てGreen)
+- [ ] レンダリング R1–R7 を記述、全 Red 確認(未着手、Phase D)
+- [ ] 結合 stiff 検出 X1–X2 を記述、全 Red 確認(X1はGreen、X2は未着手。§8参照)
+- [ ] 各ドメイン文書 §7 のユニットテストを記述 — 各crateに広範なユニットテストが存在するが、
+      各設計文書§7との網羅的な突き合わせ監査は未実施
 - [ ] 保存則テスト(21-verification/02)を記述(力学ドメインの角運動量・回転運動エネルギー
       保存は Green 実装済み — `crates/sim-mechanics/tests/conservation.rs`。陽的ジャイロ積分の
       ドリフト率を実測・文書化(dt=1/120・1秒で |L|≈0.52%、KE≈0.79%、許容2%)。他ドメイン・
-      他保存量は未記述)
-- [ ] 決定論テスト(20-integration/02 §6)を記述
-- [ ] テスト自体のレビュー完了(Phase A 完了条件)
+      他保存量は未記述、Phase Cで保存則CIゲートとして整備予定)
+- [ ] 決定論テスト(20-integration/02 §6)を記述(個別crateにハッシュ一致テストは散在するが、
+      World全体を対象にした正式な決定論テストはPhase Cで整備予定)
+- [ ] テスト自体のレビュー完了(Phase A 完了条件)— 文字どおりのPhase A(記述→レビュー→
+      Red確認→実装)は行わず、実装と同時にテストを書く開発順序を一貫して取ったため、この
+      チェック項目はこの開発順序では意味を持たない(現在地ナラティブに各増分の経緯を記録済み)
 
 ## 3. Phase B — 実装ウェーブ(Green)
 
