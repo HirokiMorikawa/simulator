@@ -12,6 +12,7 @@ mod body;
 mod ccd;
 mod collision;
 mod contact;
+mod gjk;
 mod joint;
 mod shape;
 mod sleep;
@@ -21,6 +22,7 @@ mod vehicle;
 
 pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};
 pub use collision::{ContactManifold, ContactPoint};
+pub use gjk::{gjk_distance, ConvexShape, GjkResult};
 pub use joint::{BallJoint, DistanceJoint};
 pub use shape::{Aabb, Shape};
 pub use soft_body::{
