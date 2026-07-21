@@ -54,6 +54,11 @@ pub fn circular_orbital_speed(gm: f64, r: f64) -> f64 {
     (gm / r).sqrt()
 }
 
+/// 光の重力偏向角(設計§2.3): $\delta = 4GM/(c^2b)$([rad]、$b$は衝突径数)。
+pub fn light_deflection_angle(gm: f64, c: f64, impact_parameter: f64) -> f64 {
+    4.0 * gm / (c * c * impact_parameter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,6 +167,26 @@ mod tests {
         assert!(
             rel_err < 0.01,
             "measured={measured_precession_per_orbit:.6} analytic={analytic_precession_per_orbit:.6} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// A10: 光の重力偏向(太陽縁、設計§7): $\delta=4GM_\odot/(c^2R_\odot)$、rel<2%。
+    /// 実際の太陽のGM・半径をそのまま使い、解析式のみで既知値1.7512″と比較する
+    /// (積分公式、シミュレーション不要)。
+    #[test]
+    fn a10_light_deflection_at_solar_limb_matches_known_value() {
+        let gm_sun = 1.327_124_400_18e20; // [m^3/s^2]
+        let r_sun = 6.957e8; // [m]
+
+        let deflection_rad = light_deflection_angle(gm_sun, SPEED_OF_LIGHT, r_sun);
+        let radians_to_arcsec = 180.0 / std::f64::consts::PI * 3600.0;
+        let measured_arcsec = deflection_rad * radians_to_arcsec;
+
+        let expected_arcsec = 1.7512;
+        let rel_err = (measured_arcsec - expected_arcsec).abs() / expected_arcsec;
+        assert!(
+            rel_err < 0.02,
+            "measured={measured_arcsec:.4} expected={expected_arcsec} rel_err={rel_err:.4}"
         );
     }
 }
