@@ -8,14 +8,17 @@
 //! インダクタ・独立電圧源の線形素子のみ、docs/13-electromagnetism/02-circuits.md)・
 //! `motor`(DCモーターの集中定数モデル)・`induction_rod`(導体棒の電磁誘導、いずれも
 //! docs/13-electromagnetism/05-em-mechanics-coupling.md)・`raytracer`(幾何光学レイトレーサ:
-//! 球/平面と光線の交差 + 反射/屈折の分岐トレース、プランクの法則、同docs §3/§4)を実装。
-//! 光線束(rayon並列化)・波長サンプリングのCIE等色関数RGB変換・結像のスクリーンビニング・
-//! 鏡像力・摩擦帯電・ダイオード等の非線形素子(Newton-Raphsonフォールバック連鎖)・
-//! 汎用`MotorCoupling`(ヒンジモーター経由)・渦電流ブレーキ・FDTD の型・トレイトの
-//! スケルトンは Phase A で追加する(docs/22-roadmap/01-phases.md)。
+//! 球/平面と光線の交差 + 反射/屈折の分岐トレース、プランクの法則、同docs §3/§4)・
+//! `fdtd`(2D TMz Yee格子FDTD、PEC境界のみ、docs/13-electromagnetism/03-maxwell-fdtd.md)
+//! を実装。光線束(rayon並列化)・波長サンプリングのCIE等色関数RGB変換・結像の
+//! スクリーンビニング・鏡像力・摩擦帯電・ダイオード等の非線形素子
+//! (Newton-Raphsonフォールバック連鎖)・汎用`MotorCoupling`(ヒンジモーター経由)・
+//! 渦電流ブレーキ・FDTDの誘電体界面/PML/ソース の型・トレイトのスケルトンは
+//! Phase A で追加する(docs/22-roadmap/01-phases.md)。
 
 mod circuit;
 mod electrostatics;
+mod fdtd;
 mod induction_rod;
 mod magnetism;
 mod motor;
@@ -23,6 +26,7 @@ mod optics;
 mod raytracer;
 pub use circuit::{Circuit, GROUND};
 pub use electrostatics::{PointChargeSystem, UniformField, COULOMB_CONSTANT, VACUUM_PERMITTIVITY};
+pub use fdtd::FdtdSim2D;
 pub use induction_rod::InductionRod;
 pub use magnetism::{
     dipole_field, dipole_force, dipole_torque, MagneticDipole, VACUUM_PERMEABILITY,
