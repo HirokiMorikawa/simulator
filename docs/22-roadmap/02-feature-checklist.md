@@ -418,7 +418,28 @@
   Coupling registry相当の仕組みが必要で後続増分、各Couplingは`sim-coupling`crate内で
   単体検証済み)。RC回路の過渡応答(`V0(1-e^{-t/RC})`)がWorld経由でも力学ドメインと
   独立に理論値と一致することを新規テストで確認。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り10種のCoupling実装。
+  続けて3種目の`Coupling`実装`BrownianForce`(設計§3「P4: 温度・粘性 → 微小剛体の
+  ランダム力」、docs/15-statistical/03-diffusion-brownian.md §2.1のランジュバン方程式)に
+  着手。全12種のうち、`GridFluidRigid`・`ConvectionLink`・`BoussinesqBuoyancy`・`SphRigid`
+  は流体`Solver`トレイト統合が未実装、`PistonGas`はSliderジョイントが未実装、
+  `LorentzForce`は電荷付き剛体連携、`InductionCoupling`は追加物理が必要、
+  `PhaseChangeMorph`はイベント駆動の剛体/流体生成が必要、`BuoyancyDrag`は既に
+  `MechanicsSolver`に直接埋め込み済みでリスクの高い改修が必要、`MotorCoupling`は
+  既にX1(無慣性ロータ×回路)でad-hocに対応済み — これらに対し`BrownianForce`は
+  既存の温度(ThermalNode)+材料粘性(定数)のみで完結し前提工事が最小のため選定した。
+  設計§4.1が示すBAOAB(Ornstein-Uhlenbeck厳密解)は`sim-statistical`自身の粒子系向け
+  積分器であり、本Couplingはランジュバン方程式($m\dot v=-\gamma v+\sqrt{2\gamma k_BT}\xi$)
+  を素朴なEuler-Maruyamaで離散化する縮約版とした。`Coupling`トレイトのシグネジャに
+  rng引数が無い(設計のシグネチャそのまま)ため、`BrownianForce`自身が`SimRng`を
+  保持する形にした(`World`中央ストリーム管理への正式統合はCoupling registry導入時の
+  後続増分)。摩擦散逸・ジュール熱とは異なり、ゆらぎ散逸定理に基づくブラウン力は
+  「平均としてのみ」熱浴とエネルギーが釣り合う統計的結合であり1step毎の厳密な対記帳が
+  そもそも成立しないため、検証はエネルギー等分配則($\langle\frac12mv^2\rangle=
+  \frac32k_BT$)への長時間平均収束で行った(重力・接触なしの1μm相当の微小剛体に
+  `BrownianForce`のみを外力として40万ステップ適用)。実装検証中の実測rel_errは2.2%
+  (乱数シード違いでも同程度)だったが、シード依存の変動を見込みテスト許容誤差は
+  rel<10%に設定した。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り9種のCoupling実装。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -886,10 +907,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       が列挙する3組(浮力: 静的水域×SPH/格子流体、空気抗力: 集中定数×格子結合、
       コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出)を実装済み。`Coupling`
       トレイト + `DomainStates`(現時点でmechanics・thermal・em_circuitの3ドメイン)、
-      具体的な実装2種(`DissipationToHeat`: 接触散逸→熱、`JouleHeat`: 回路I²R→熱)を
-      対記帳付きで実装済み(いずれも単一`ThermalNode`への縮約実装、剛体/抵抗↔熱ノード
-      対応表は未実装)。`World`にも`circuit`ドメインを追加済み。残り10種の`Coupling`
-      (`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`パイプラインへの
+      具体的な実装3種(`DissipationToHeat`: 接触散逸→熱、`JouleHeat`: 回路I²R→熱、
+      `BrownianForce`: 温度・粘性→微小剛体のランダム力)を実装済み(前2種は単一
+      `ThermalNode`への縮約実装で厳密な対記帳、`BrownianForce`はゆらぎ散逸定理に
+      基づく統計的結合のため長時間平均のエネルギー等分配則収束で検証、剛体/抵抗↔熱
+      ノード対応表は未実装)。`World`にも`circuit`ドメインを追加済み。残り9種の
+      `Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`パイプラインへの
       Coupling接続(registry相当の仕組みが必要)・sub-iteration剛性閾値表は未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
