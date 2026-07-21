@@ -22,7 +22,9 @@ mod vehicle;
 
 pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};
 pub use collision::{ContactManifold, ContactPoint};
-pub use gjk::{epa_penetration, gjk_distance, ConvexShape, EpaResult, GjkResult};
+pub use gjk::{
+    conservative_advancement_toi, epa_penetration, gjk_distance, ConvexShape, EpaResult, GjkResult,
+};
 pub use joint::{BallJoint, DistanceJoint};
 pub use shape::{Aabb, Shape};
 pub use soft_body::{

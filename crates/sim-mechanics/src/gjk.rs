@@ -1,13 +1,16 @@
-//! GJK(Gilbert-Johnson-Keerthi)距離アルゴリズム + EPA(Expanding Polytope Algorithm)。
-//! 設計: docs/10-mechanics/02-collision-detection.md §4.5。
+//! GJK(Gilbert-Johnson-Keerthi)距離アルゴリズム + EPA(Expanding Polytope Algorithm)+
+//! フルCCD(conservative advancement)。設計: docs/10-mechanics/02-collision-detection.md §4.5。
 //!
-//! Phase 5 スコープの部分実装: GJK(ミンコフスキー差の原点への最近点探索による分離距離・
-//! 重なり判定)+ EPA(重なり時の貫入深さ・法線復元)。フルCCD(conservative advancement)は
-//! 後続増分で追加する(設計§4.5が「実装の要諦(退化単体・数値許容)は実装フェーズで
+//! Phase 5 スコープの実装: GJK(ミンコフスキー差の原点への最近点探索による分離距離・
+//! 重なり判定)+ EPA(重なり時の貫入深さ・法線復元)+ フルCCD(並進のみ、回転を含む
+//! 一般形状は未対応)。設計§4.5が「実装の要諦(退化単体・数値許容)は実装フェーズで
 //! Gino van den Bergenの書籍を正とする」と明記するとおり、本実装は教科書の完全な実装では
 //! なく、GJKはJohnsonのサブアルゴリズム(単体の全部分集合を試して原点の重心座標が
 //! 非負になる部分集合を探す方式)、EPAはシルエット辺法(可視面を除去し境界の辺で
-//! 新しい面を張る素直な多面体拡張)による直接的な実装)。
+//! 新しい面を張る素直な多面体拡張)、フルCCDは並進のみのconservative advancement
+//! (GJKの分離距離+分離法線を使い、法線方向の相対速度で時間を厳密に前進させる。
+//! 回転がないため速度は法線方向で一定であり、下界を使う一般形と異なり反復ごとに
+//! 正確な時刻更新ができる)による直接的な実装。
 
 use sim_math::Vec3;
 
@@ -46,14 +49,17 @@ impl ConvexShape<'_> {
     }
 }
 
-fn minkowski_support(a: &ConvexShape, b: &ConvexShape, dir: Vec3) -> Vec3 {
-    a.support(dir) - b.support(dir.scale(-1.0))
+/// ミンコフスキー差A⊖(B+b_offset)のサポート写像。`b_offset`はBの並進(CCDで使う、
+/// 通常は`Vec3::ZERO`)。
+fn minkowski_support(a: &ConvexShape, b: &ConvexShape, b_offset: Vec3, dir: Vec3) -> Vec3 {
+    a.support(dir) - (b.support(dir.scale(-1.0)) + b_offset)
 }
 
-/// GJKの結果: 分離している場合は分離距離、重なっている場合は原点を包含する四面体
-/// (ミンコフスキー差の点4つ、EPAの初期多面体として使う)。
+/// GJKの結果: 分離している場合は分離距離と分離方向(BからAへ向かう単位法線、CCDが
+/// 相対速度の投影に使う。Bの位置から見てAがどちらにあるかを指す)、重なっている場合は
+/// 原点を包含する四面体(ミンコフスキー差の点4つ、EPAの初期多面体として使う)。
 pub enum GjkResult {
-    Separated { distance: f64 },
+    Separated { distance: f64, normal: Vec3 },
     Overlapping { simplex: [Vec3; 4] },
 }
 
@@ -162,7 +168,12 @@ fn closest_in_subset(points: &[Vec3], subset: &[usize]) -> Option<Vec3> {
 /// (アフィン独立な4点)に育てる。凸包に新しい支持点を追加しても凸包は単調に
 /// 大きくなるだけなので、既に原点を含む単体に(ミンコフスキー差の実在の点である)
 /// 支持点を足しても原点を含むことは保たれる。
-fn complete_to_tetrahedron(a: &ConvexShape, b: &ConvexShape, mut simplex: Vec<Vec3>) -> [Vec3; 4] {
+fn complete_to_tetrahedron(
+    a: &ConvexShape,
+    b: &ConvexShape,
+    b_offset: Vec3,
+    mut simplex: Vec<Vec3>,
+) -> [Vec3; 4] {
     let candidate_dirs = [
         Vec3::new(1.0, 0.0, 0.0),
         Vec3::new(-1.0, 0.0, 0.0),
@@ -179,7 +190,7 @@ fn complete_to_tetrahedron(a: &ConvexShape, b: &ConvexShape, mut simplex: Vec<Ve
     while simplex.len() < 4 && idx < candidate_dirs.len() * 2 {
         let dir = candidate_dirs[idx % candidate_dirs.len()];
         idx += 1;
-        let candidate = minkowski_support(a, b, dir);
+        let candidate = minkowski_support(a, b, b_offset, dir);
         if simplex.iter().any(|&p| (p - candidate).length_sq() < 1e-12) {
             continue;
         }
@@ -212,20 +223,27 @@ fn complete_to_tetrahedron(a: &ConvexShape, b: &ConvexShape, mut simplex: Vec<Ve
 
 /// GJK本体: ミンコフスキー差の凸包に対する原点までの最近点を反復的に求める。
 pub fn gjk_distance(a: &ConvexShape, b: &ConvexShape) -> GjkResult {
-    let mut simplex: Vec<Vec3> = vec![minkowski_support(a, b, Vec3::new(1.0, 0.0, 0.0))];
+    gjk_distance_offset(a, b, Vec3::ZERO)
+}
+
+/// `gjk_distance`の一般形: Bを`b_offset`だけ並進させた状態で判定する(CCDが使う)。
+fn gjk_distance_offset(a: &ConvexShape, b: &ConvexShape, b_offset: Vec3) -> GjkResult {
+    let mut simplex: Vec<Vec3> = vec![minkowski_support(a, b, b_offset, Vec3::new(1.0, 0.0, 0.0))];
     let mut closest = simplex[0];
 
     for _ in 0..64 {
         if closest.length_sq() < 1e-16 {
-            let tetra = complete_to_tetrahedron(a, b, simplex);
+            let tetra = complete_to_tetrahedron(a, b, b_offset, simplex);
             return GjkResult::Overlapping { simplex: tetra };
         }
         let dir = closest.scale(-1.0);
-        let new_point = minkowski_support(a, b, dir);
+        let new_point = minkowski_support(a, b, b_offset, dir);
         // 新しい支持点が探索方向へこれ以上進めない(収束)なら終了。
         if new_point.dot(dir) <= closest.dot(dir) + 1e-12 {
+            let distance = closest.length();
             return GjkResult::Separated {
-                distance: closest.length(),
+                distance,
+                normal: closest.scale(1.0 / distance.max(1e-18)),
             };
         }
         simplex.push(new_point);
@@ -233,8 +251,10 @@ pub fn gjk_distance(a: &ConvexShape, b: &ConvexShape) -> GjkResult {
         simplex = subset.iter().map(|&i| simplex[i]).collect();
         closest = new_closest;
     }
+    let distance = closest.length();
     GjkResult::Separated {
-        distance: closest.length(),
+        distance,
+        normal: closest.scale(1.0 / distance.max(1e-18)),
     }
 }
 
@@ -301,7 +321,7 @@ pub fn epa_penetration(a: &ConvexShape, b: &ConvexShape, simplex: [Vec3; 4]) -> 
         let min_normal = faces[min_idx].normal;
         let min_distance = faces[min_idx].distance;
 
-        let support_point = minkowski_support(a, b, min_normal);
+        let support_point = minkowski_support(a, b, Vec3::ZERO, min_normal);
         let support_distance = support_point.dot(min_normal);
 
         if support_distance - min_distance < 1e-9 {
@@ -359,6 +379,51 @@ pub fn epa_penetration(a: &ConvexShape, b: &ConvexShape, simplex: [Vec3; 4]) -> 
     }
 }
 
+/// CCD(continuous collision detection)の反復上限。並進のみのconservative advancementは
+/// GJKの分離距離を法線方向の相対速度でちょうど1回で使い切れる場合が多いが、形状が
+/// 非球対称だと最近点の位置がステップごとに変わり分離法線も変わるため、複数回の
+/// 前進が必要になることがある。
+const CCD_MAX_ITERATIONS: usize = 64;
+
+/// 並進のみのconservative advancement(設計§4.5、モジュールdoc参照)によるTOI
+/// (time of impact)計算。`rel_vel`はAを静止基準としたときのBの並進速度(Aは静止、
+/// Bだけが`rel_vel`で動くと考えた等価な相対運動)で、`max_time`以内に接触
+/// (貫入深さ0)へ到達する時刻を返す。回転は扱わないため、GJKが返す分離法線
+/// (BからAへ向かう単位法線)への`rel_vel`の射影(closing speed = `rel_vel.dot(normal)`)
+/// は各反復内で保守的な下界としてではなく(並進のみなので)厳密な閉じ速度として使える
+/// — ただし最近点の組が反復間で変わりうるため、複数回に分けて前進しTOIを積み上げる。
+/// 閉じていない(離れていく、または平行に移動する)場合は`None`を返す。
+pub fn conservative_advancement_toi(
+    a: &ConvexShape,
+    b: &ConvexShape,
+    rel_vel: Vec3,
+    max_time: f64,
+) -> Option<f64> {
+    let mut t = 0.0;
+    for _ in 0..CCD_MAX_ITERATIONS {
+        let offset = rel_vel.scale(t);
+        match gjk_distance_offset(a, b, offset) {
+            GjkResult::Overlapping { .. } => return Some(t),
+            GjkResult::Separated { distance, normal } => {
+                if distance < 1e-9 {
+                    return Some(t);
+                }
+                let closing_speed = rel_vel.dot(normal);
+                if closing_speed <= 1e-12 {
+                    return None;
+                }
+                t += distance / closing_speed;
+                if t > max_time {
+                    return None;
+                }
+            }
+        }
+    }
+    // 反復上限に達した場合、この時点のtは接触に十分近いとみなして返す
+    // (分離距離が反復ごとに単調減少しているため、上限到達時も概ね接触寸前)。
+    Some(t.min(max_time))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,7 +431,7 @@ mod tests {
 
     fn assert_separated(result: GjkResult, expected_distance: f64, tol: f64) {
         match result {
-            GjkResult::Separated { distance } => {
+            GjkResult::Separated { distance, .. } => {
                 let rel_err = (distance - expected_distance).abs() / expected_distance.max(1e-9);
                 assert!(
                     rel_err < tol,
@@ -496,7 +561,9 @@ mod tests {
             radius: 1.0,
         };
         match gjk_distance(&a, &b) {
-            GjkResult::Separated { distance } => assert!(distance < 1e-6, "distance={distance}"),
+            GjkResult::Separated { distance, .. } => {
+                assert!(distance < 1e-6, "distance={distance}")
+            }
             GjkResult::Overlapping { .. } => {}
         }
     }
@@ -595,6 +662,103 @@ mod tests {
         assert_eq!(
             mismatches, 0,
             "{mismatches} mismatches out of {trials} trials"
+        );
+    }
+
+    /// CCD: 一定の相対速度で接近する2球のTOIが解析式 $(gap)/(closing\_speed)$ と
+    /// 厳密に一致すること(並進のみ・回転なしなら閉じ速度は法線方向で一定なので、
+    /// conservative advancementが正確な時刻を1回の前進で求められるはず)。
+    #[test]
+    fn ccd_toi_for_approaching_spheres_matches_analytic_gap_over_speed() {
+        let a = ConvexShape::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let b = ConvexShape::Sphere {
+            center: Vec3::new(10.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let closing_speed = 2.0;
+        let rel_vel = Vec3::new(-closing_speed, 0.0, 0.0); // Aを静止基準としたBの速度(-x、Aに接近)
+        let gap = 10.0 - 1.0 - 1.0;
+        let expected_toi = gap / closing_speed;
+
+        let toi = conservative_advancement_toi(&a, &b, rel_vel, 100.0)
+            .expect("approaching spheres should collide within max_time");
+        let rel_err = (toi - expected_toi).abs() / expected_toi;
+        assert!(
+            rel_err < 1e-6,
+            "toi={toi:.6} expected={expected_toi:.6} rel_err={rel_err:.6}"
+        );
+    }
+
+    /// CCD: 平行移動(接近しない)場合はTOIが存在せず`None`を返すこと。
+    #[test]
+    fn ccd_toi_is_none_when_shapes_do_not_approach() {
+        let a = ConvexShape::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let b = ConvexShape::Sphere {
+            center: Vec3::new(10.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        // y方向にすれ違うだけで、x方向(分離軸)の閉じ速度はゼロ。
+        let rel_vel = Vec3::new(0.0, 3.0, 0.0);
+        assert_eq!(conservative_advancement_toi(&a, &b, rel_vel, 100.0), None);
+    }
+
+    /// CCD: 接近はするが`max_time`以内には到達しない場合は`None`を返すこと。
+    #[test]
+    fn ccd_toi_is_none_when_impact_is_beyond_max_time() {
+        let a = ConvexShape::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let b = ConvexShape::Sphere {
+            center: Vec3::new(10.0, 0.0, 0.0),
+            radius: 1.0,
+        };
+        let rel_vel = Vec3::new(-2.0, 0.0, 0.0);
+        let gap = 10.0 - 1.0 - 1.0;
+        let true_toi = gap / 2.0;
+        assert_eq!(
+            conservative_advancement_toi(&a, &b, rel_vel, true_toi * 0.5),
+            None
+        );
+    }
+
+    /// CCD: 平行移動する多面体(軸並行の箱同士、x方向に接近)のTOIがAABB間の
+    /// 解析的ギャップ/閉じ速度と一致すること(球以外の凸形状での検証)。
+    #[test]
+    fn ccd_toi_for_approaching_boxes_matches_analytic_gap_over_speed() {
+        let box_points = |min: Vec3, max: Vec3| -> Vec<Vec3> {
+            let mut pts = Vec::new();
+            for &x in &[min.x, max.x] {
+                for &y in &[min.y, max.y] {
+                    for &z in &[min.z, max.z] {
+                        pts.push(Vec3::new(x, y, z));
+                    }
+                }
+            }
+            pts
+        };
+        let a_pts = box_points(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));
+        let b_pts = box_points(Vec3::new(4.0, -1.0, -1.0), Vec3::new(6.0, 1.0, 1.0));
+        let a = ConvexShape::Points(&a_pts);
+        let b = ConvexShape::Points(&b_pts);
+
+        let closing_speed = 1.5;
+        let rel_vel = Vec3::new(-closing_speed, 0.0, 0.0); // Aを静止基準としたBの速度(-x、Aに接近)
+        let gap = 3.0;
+        let expected_toi = gap / closing_speed;
+
+        let toi = conservative_advancement_toi(&a, &b, rel_vel, 100.0)
+            .expect("approaching boxes should collide within max_time");
+        let rel_err = (toi - expected_toi).abs() / expected_toi;
+        assert!(
+            rel_err < 1e-6,
+            "toi={toi:.6} expected={expected_toi:.6} rel_err={rel_err:.6}"
         );
     }
 }
