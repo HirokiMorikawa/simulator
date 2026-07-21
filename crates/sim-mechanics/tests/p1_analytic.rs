@@ -564,3 +564,77 @@ fn f5_floating_body_heave_period_matches_analytic_formula() {
         "measured={measured} analytic={analytic}"
     );
 }
+
+/// M15: 弾丸トンネリング防止(貫通せず反発、docs/21-verification/01-analytic-tests.md M15)。
+/// 高速球(300 m/s、r=5mm)が厚さ2mmの静的鋼板に衝突する。1ステップの移動距離
+/// (dt=1/1200sで0.25m)が板厚(2mm)を大きく超えるため、最小CCD(speculative contact、
+/// `ccd::apply_speculative_contacts`)なしでは離散衝突検出のステップ端点判定を
+/// すり抜けて板を素通りしてしまう。
+///
+/// 設計の主たる合格基準は「貫通イベントゼロ・貫入 < slop」であり、本実装(TOI反復なしの
+/// 速度クランプ、設計§4.6が許容する簡略化)では、クランプが効くステップの離散化位相に
+/// よって実際の衝突速度がv0から若干目減りする(実装検証中に、dtを変えると反発速度の
+/// 相対誤差が2%~20%まで変動することを発見 — 真のTOIサブステップでないため、クランプ後の
+/// 速度がちょうど衝突する瞬間のv0と厳密には一致しないという原理的な限界)。そのため反発
+/// 速度の一致は緩めの許容誤差で確認し、主要な合格基準(貫通ゼロ・貫入有界)を主眼に置く。
+#[test]
+fn m15_bullet_speed_sphere_does_not_tunnel_through_thin_plate() {
+    let mut materials = MaterialDb::standard();
+    let restitution = 0.5;
+    let mat = frictionless_bouncy_material(&mut materials, restitution);
+
+    let mut solver = MechanicsSolver::new(0.0); // 重力なし(水平弾道、簡潔化)
+    solver.restitution_velocity_threshold = 0.0;
+
+    let radius = 0.005; // 5mm
+    let v0 = 300.0;
+    let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, mat);
+    desc.transform.position = Vec3::new(-1.0, 0.0, 0.0);
+    desc.linear_velocity = Vec3::new(v0, 0.0, 0.0);
+    let idx = solver.create_body(desc, &materials);
+
+    let plate_half_thickness = 0.001; // 板厚2mm
+    let plate = RigidBodyDesc {
+        body_type: BodyType::Static,
+        ..RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(plate_half_thickness, 0.5, 0.5),
+            },
+            mat,
+        )
+    };
+    solver.create_body(plate, &materials);
+
+    let dt = 1.0 / 1200.0;
+    let slop = 0.005; // contact::SLOP と同じ値(private のためテスト内で複製)
+    let mut min_gap_seen = f64::INFINITY;
+    let mut tunneled = false;
+    for _ in 0..60 {
+        step_n(&mut solver, &materials, dt, 1);
+        let x = solver.bodies.position[idx].x;
+        let vx = solver.bodies.linear_velocity[idx].x;
+        let gap = -plate_half_thickness - (x + radius); // 板の近い面までの隙間(負なら貫入)
+        min_gap_seen = min_gap_seen.min(gap);
+        if x > plate_half_thickness + radius && vx > 0.0 {
+            tunneled = true; // 板の反対側に正の速度で抜けた = 貫通
+        }
+    }
+
+    assert!(!tunneled, "bullet should not tunnel through the plate");
+    assert!(
+        min_gap_seen > -slop,
+        "penetration should stay below slop: min_gap_seen={min_gap_seen}"
+    );
+
+    let final_vx = solver.bodies.linear_velocity[idx].x;
+    let expected_rebound = -restitution * v0;
+    assert!(
+        final_vx < 0.0,
+        "bullet should bounce back: final_vx={final_vx}"
+    );
+    let rel_err = (final_vx - expected_rebound).abs() / expected_rebound.abs();
+    assert!(
+        rel_err < 0.25,
+        "final_vx={final_vx} expected_rebound={expected_rebound} rel_err={rel_err}"
+    );
+}
