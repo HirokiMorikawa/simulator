@@ -492,9 +492,22 @@
   スナップショットへ復元(この時点でハッシュがスナップショット時点と一致することを
   確認)→残り150step続行、という構成で、300step通し実行と同じ`state_hash()`に
   一致することをテストで確認し、初回実装で一発Green化した。
+  続けて`World`公開API拡張の一環として`Command`キュー(設計§1「実行中の変更は
+  シーン構築時のcreate系とコマンドの2経路のみ」、docs/20-integration/04-world-api.md
+  §2)を実装。設計が例示する5種(`ApplyForce`・`SetMotorTarget`・`SetSwitch`・
+  `SetHeatSource`・`Grab`/`MoveGrab`/`Release`)のうち、剛体に外力を加える
+  `ApplyForce{body, force, point}`のみを実装(他は対象のジョイント/回路/熱ノード
+  APIが本crateの薄いラッパーとして未整備なため後続増分)。`push_command`で待ち行列に
+  積み、`step()`の先頭(物理更新前)で適用しつつ`(step_count, command)`として
+  `command_log()`に記録する。`point`が`Some`なら`r×F`のトルクも`torque_accum`に
+  加算(重心への力`None`はトルクなし)。無効な`BodyId`(削除済み)は黙って無視
+  (設計の不変条件、パニックしない)。重心力がsemi-implicit Eulerの速度更新
+  `Δv=(F/m)dt`に一致すること・力が1step限りで消えること(`force_accum`のstep末尾
+  クリア)・偏心力が角速度を生むこと・無効IDが無視されることの4テストで検証し、
+  初回実装で一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
-  (Scenario/Command queue/Probe/イベント購読/raycast等のクエリ)、または残り
-  7種のCoupling(いずれも前提工事を要する)。
+  (Scenario/Probe/イベント購読/raycast等のクエリ)、または残り7種のCoupling
+  (いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -976,8 +989,10 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       剛性閾値表は未実装
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
-      各ドメインcrateの型に`Clone`を導出済み)を実装済み。`Scenario`/`from_scenario`
-      (シーンJSON、validator接続)・`Command`キュー・`Probe`・`subscribe`/
+      各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
+      `command_log`、`ApplyForce{body, force, point}`のみ実装、他4種
+      (`SetMotorTarget`・`SetSwitch`・`SetHeatSource`・`Grab`系)は未実装)を実装済み。
+      `Scenario`/`from_scenario`(シーンJSON、validator接続)・`Probe`・`subscribe`/
       `drain_events`・`raycast`/`overlap_sphere`/`sample_fluid`/`circuit_probe`等の
       クエリは未実装
 - [ ] 統合シナリオ: ブレーキ発熱

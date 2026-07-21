@@ -65,6 +65,24 @@ impl Default for WorldOptions {
     }
 }
 
+/// 実行中の状態変更コマンド(設計§1「書き込みは規律」— 実行中の変更は
+/// シーン構築時のcreate系と本コマンドの2経路のみ、docs/20-integration/04-world-api.md
+/// §2)。次`step()`の先頭で適用され、`command_log()`に記録される(リプレイ検証用)。
+///
+/// **縮約実装の理由**: 設計が例示する5種(`ApplyForce`・`SetMotorTarget`・`SetSwitch`・
+/// `SetHeatSource`・`Grab`/`MoveGrab`/`Release`)のうち、剛体に外力を加える
+/// `ApplyForce`のみを実装する(他は対象のジョイント/回路/熱ノードAPIが本crateの
+/// 薄いラッパーとして未整備なため後続増分)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Command {
+    /// 剛体`body`のワールド座標`point`(`None`なら重心、トルクなし)に`force`を加える。
+    ApplyForce {
+        body: BodyId,
+        force: Vec3,
+        point: Option<Vec3>,
+    },
+}
+
 /// シミュレートされた環境そのもの。世界時刻の一意性は `clock`
 /// (docs/00-foundation/04-architecture.md §1.1.2(4))、状態オーナーシップの一意性は
 /// `mechanics`(正典状態)が保持することで満たす(同 §1.1.2(1))。
@@ -96,6 +114,12 @@ pub struct World {
     ledger: Option<EnergyLedger>,
     /// `BodyId` の世代管理(`RigidBodySet` のインデックスに対応、モジュールdoc参照)。
     generations: Vec<u32>,
+    /// `push_command`で積まれ、次`step()`の先頭で適用されるコマンドの待ち行列
+    /// (`Command`のdoc参照)。
+    pending_commands: Vec<Command>,
+    /// 適用済みコマンドの記録(`step_count`と対、リプレイ検証用、設計§2「記録されリプレイ
+    /// 可能」)。
+    command_log: Vec<(u64, Command)>,
 }
 
 const STREAM_DIAG: u64 = 0;
@@ -142,6 +166,42 @@ impl World {
             events: EventQueue::new(),
             ledger: None,
             generations: Vec::new(),
+            pending_commands: Vec::new(),
+            command_log: Vec::new(),
+        }
+    }
+
+    /// コマンドを次`step()`の先頭適用待ちの列に積む(`Command`のdoc参照)。
+    pub fn push_command(&mut self, cmd: Command) {
+        self.pending_commands.push(cmd);
+    }
+
+    /// 適用済みコマンドの記録(`(step_count, command)`の対、`Command`のdoc参照)。
+    pub fn command_log(&self) -> &[(u64, Command)] {
+        &self.command_log
+    }
+
+    /// 待ち行列の全コマンドを、次数の物理更新前に(このstepの`step_count`で記録しつつ)
+    /// 適用する(設計§1「次ステップ先頭で適用・記録」)。無効な`BodyId`を参照する
+    /// コマンドは黙って無視する(削除済みIDへのアクセスは`None`、設計の不変条件)。
+    fn apply_pending_commands(&mut self) {
+        let step = self.clock.step_count();
+        for cmd in std::mem::take(&mut self.pending_commands) {
+            match cmd {
+                Command::ApplyForce { body, force, point } => {
+                    if self.is_valid(body) {
+                        let idx = body.index as usize;
+                        self.mechanics.bodies.force_accum[idx] =
+                            self.mechanics.bodies.force_accum[idx] + force;
+                        if let Some(p) = point {
+                            let r = p - self.mechanics.bodies.position[idx];
+                            self.mechanics.bodies.torque_accum[idx] =
+                                self.mechanics.bodies.torque_accum[idx] + r.cross(force);
+                        }
+                    }
+                }
+            }
+            self.command_log.push((step, cmd));
         }
     }
 
@@ -270,6 +330,7 @@ impl World {
         if self.ledger.is_none() {
             self.ledger = Some(EnergyLedger::new(self.total_energy().total()));
         }
+        self.apply_pending_commands();
         let dt = self.clock.dt();
         run_domain_substeps(
             &mut self.mechanics,
@@ -649,5 +710,100 @@ mod tests {
         assert_eq!(world.energy_residual_history().len(), n as usize);
         // 外力なし・接触なしの単調な力学的エネルギー減少なので残差は単調非減少のはず。
         assert!(world.energy_residual_history()[0] <= measured);
+    }
+
+    /// `Command::ApplyForce`(重心、`point: None`): 設計§1「実行中の変更はコマンド経由」
+    /// (docs/20-integration/04-world-api.md §2)。重力なしのWorldで1step分の力を加え、
+    /// semi-implicit Eulerの速度更新 `Δv=(F/m)dt` に一致することを確認する。
+    #[test]
+    fn apply_force_command_at_center_of_mass_matches_semi_implicit_euler_velocity_update() {
+        let options = WorldOptions {
+            gravity: 0.0,
+            ..WorldOptions::default()
+        };
+        let dt = options.dt;
+        let mut world = World::new(options);
+        let box_id = create_falling_box(&mut world);
+        let mass = world.mechanics_mut().bodies.mass(box_id.index as usize);
+
+        let force = Vec3::new(10.0, 0.0, 0.0);
+        world.push_command(Command::ApplyForce {
+            body: box_id,
+            force,
+            point: None,
+        });
+        world.step();
+
+        let expected_v = force.scale(dt / mass);
+        let measured_v = world.mechanics_mut().bodies.linear_velocity[box_id.index as usize];
+        assert!(
+            (measured_v - expected_v).length() < 1e-9,
+            "measured_v={measured_v:?} expected_v={expected_v:?}"
+        );
+        // 重心への力なのでトルクは生じない。
+        assert_eq!(
+            world.mechanics_mut().bodies.angular_velocity[box_id.index as usize],
+            Vec3::ZERO
+        );
+        assert_eq!(world.command_log().len(), 1);
+        assert_eq!(
+            world.command_log()[0].0,
+            0,
+            "applied during the first step (step_count=0 at apply time)"
+        );
+
+        // 力は1stepのみ有効(force_accumはstep末尾でクリアされる)— もう1step進めても
+        // 力なしの慣性運動(等速直線運動)になるはず。
+        let v_after_first_step = measured_v;
+        world.step();
+        let v_after_second_step =
+            world.mechanics_mut().bodies.linear_velocity[box_id.index as usize];
+        assert!(
+            (v_after_second_step - v_after_first_step).length() < 1e-9,
+            "force must not persist beyond the step it was applied in"
+        );
+    }
+
+    /// `Command::ApplyForce`(重心以外の`point`): トルクが生じ角速度がゼロでなくなることを
+    /// 確認する(設計§2 `ApplyForce{body, force, point}`)。
+    #[test]
+    fn apply_force_command_off_center_produces_angular_velocity() {
+        let options = WorldOptions {
+            gravity: 0.0,
+            ..WorldOptions::default()
+        };
+        let mut world = World::new(options);
+        let box_id = create_falling_box(&mut world);
+        let position = world.body_position(box_id).unwrap();
+
+        world.push_command(Command::ApplyForce {
+            body: box_id,
+            force: Vec3::new(0.0, 0.0, 10.0),
+            point: Some(position + Vec3::new(0.5, 0.0, 0.0)),
+        });
+        world.step();
+
+        let omega = world.mechanics_mut().bodies.angular_velocity[box_id.index as usize];
+        assert!(
+            omega.length() > 0.0,
+            "off-center force should induce rotation: omega={omega:?}"
+        );
+    }
+
+    /// 無効な`BodyId`(削除済み)を参照する`ApplyForce`はパニックせず黙って無視される
+    /// (設計§1「削除済みIDへのアクセスはNone」の不変条件、Command版)。
+    #[test]
+    fn apply_force_command_with_removed_body_id_is_silently_ignored() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        world.remove_body(box_id);
+
+        world.push_command(Command::ApplyForce {
+            body: box_id,
+            force: Vec3::new(100.0, 0.0, 0.0),
+            point: None,
+        });
+        world.step(); // パニックしないことの確認そのものがテスト。
+        assert_eq!(world.command_log().len(), 1);
     }
 }
