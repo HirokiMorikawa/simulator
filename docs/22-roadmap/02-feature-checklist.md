@@ -439,7 +439,19 @@
   `BrownianForce`のみを外力として40万ステップ適用)。実装検証中の実測rel_errは2.2%
   (乱数シード違いでも同程度)だったが、シード依存の変動を見込みテスト許容誤差は
   rel<10%に設定した。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り9種のCoupling実装。
+  続けて4種目の`Coupling`実装`LorentzForce`(設計§3「P4: 静場 → 帯電剛体」)に着手。
+  `sim_mechanics::RigidBodySet`に電荷フィールドが無いため、対象剛体のindexと電荷量を
+  `Coupling`自身のフィールドとして持つ縮約版とした(`DissipationToHeat`・`JouleHeat`が
+  単一`ThermalNode`を対象として持つのと同じパターン)。`DomainStates`に
+  `em_electrostatics: Option<&mut PointChargeSystem>`フィールドを追加(4つ目のドメイン)。
+  `sim_em::PointChargeSystem`の点電荷群が作るクーロン場+一様外部場を対象剛体の位置で
+  評価し、ローレンツ力$F=q(E+v\times B)$を速度に直接注入。設計§1「保存量の橋」の
+  運動量版として、点電荷群由来のクーロン力は対ごとに構成し(対象剛体への力と厳密に
+  逆向きの反作用を発生源の点電荷自身の速度にも適用)、総運動量の変化が構成上ゼロになる
+  ようにした(一様外部場由来の項は「外部」由来のため反作用なし、`PointChargeSystem::
+  step()`自身の規約と同じ)。同符号の剛体+点電荷源が反発しつつ系の全運動量が終始
+  ゼロのまま(対記帳の検証)であることをテストで確認、初回実装で一発Green化した。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り8種のCoupling実装。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -906,13 +918,15 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       (`sim-coupling::{SceneCouplingConfig, validate_exclusive_couplings}`、設計§2規則2
       が列挙する3組(浮力: 静的水域×SPH/格子流体、空気抗力: 集中定数×格子結合、
       コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出)を実装済み。`Coupling`
-      トレイト + `DomainStates`(現時点でmechanics・thermal・em_circuitの3ドメイン)、
-      具体的な実装3種(`DissipationToHeat`: 接触散逸→熱、`JouleHeat`: 回路I²R→熱、
-      `BrownianForce`: 温度・粘性→微小剛体のランダム力)を実装済み(前2種は単一
-      `ThermalNode`への縮約実装で厳密な対記帳、`BrownianForce`はゆらぎ散逸定理に
-      基づく統計的結合のため長時間平均のエネルギー等分配則収束で検証、剛体/抵抗↔熱
-      ノード対応表は未実装)。`World`にも`circuit`ドメインを追加済み。残り9種の
-      `Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`パイプラインへの
+      トレイト + `DomainStates`(現時点でmechanics・thermal・em_circuit・
+      em_electrostaticsの4ドメイン)、具体的な実装4種(`DissipationToHeat`: 接触散逸→熱、
+      `JouleHeat`: 回路I²R→熱、`BrownianForce`: 温度・粘性→微小剛体のランダム力、
+      `LorentzForce`: 静場→帯電剛体)を実装済み(前2種は単一`ThermalNode`への縮約実装で
+      厳密な対記帳、`BrownianForce`はゆらぎ散逸定理に基づく統計的結合のため長時間平均の
+      エネルギー等分配則収束で検証、`LorentzForce`は点電荷群との対ごとの反作用で運動量を
+      厳密に対記帳、剛体/抵抗↔熱ノード対応表・剛体の電荷フィールドは未実装)。`World`にも
+      `circuit`ドメインを追加済み。残り8種の`Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・
+      `World::step()`パイプラインへの
       Coupling接続(registry相当の仕組みが必要)・sub-iteration剛性閾値表は未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電

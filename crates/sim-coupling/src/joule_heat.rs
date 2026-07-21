@@ -86,6 +86,7 @@ mod tests {
                 mechanics: &mut mechanics,
                 thermal: Some(&mut thermal),
                 em_circuit: Some(&mut circuit),
+                em_electrostatics: None,
             };
             coupling.apply(&mut states, dt);
         }

@@ -155,6 +155,7 @@ mod tests {
                 mechanics: &mut mechanics,
                 thermal: Some(&mut thermal),
                 em_circuit: None,
+                em_electrostatics: None,
             };
             coupling.apply(&mut states, dt);
             if step >= warmup_steps {
