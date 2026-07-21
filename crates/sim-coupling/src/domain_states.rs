@@ -1,0 +1,31 @@
+//! `Coupling`トレイトと`DomainStates`(設計 docs/00-foundation/04-architecture.md §1.3)。
+//!
+//! **縮約実装の理由**: 設計は`DomainStates`を「全ドメインへの可変ビュー」として抽象的に
+//! 示すのみで具体的な型は規定していない。本crateでは、`World`(`sim-world`)が実際に
+//! 保持しているドメイン集合(mechanics・thermal・em・astro、ワークストリームBの増分で
+//! `sim-world::World`に追加済み)のうち、今回実装する`DissipationToHeat`が必要とする
+//! mechanics + thermalの2つだけを持つ具体的な構造体として定義する(汎用的な型消去
+//! レジストリではない)。他のCouplingが必要とする組み合わせ(例: em+mechanics の
+//! `LorentzForce`)は、そのCouplingを実装する増分で`DomainStates`にフィールドを追加する。
+
+use sim_core::DomainId;
+use sim_mechanics::MechanicsSolver;
+use sim_thermal::ThermalSolver;
+
+/// Couplingが読み書きできる各ドメインの可変ビュー(モジュールdoc参照、現時点では
+/// mechanics + thermalのみ)。
+pub struct DomainStates<'a> {
+    pub mechanics: &'a mut MechanicsSolver,
+    pub thermal: Option<&'a mut ThermalSolver>,
+}
+
+/// ドメイン間結合(設計 docs/00-foundation/04-architecture.md §1.3「保存量の橋」)。
+/// 2つ(以上)のソルバの状態を読み、互いに作用を書き込む。取り出した量と注入した量が
+/// 一致することを実装側がデバッグビルドで検算する(設計の要求、§1.1.2(2))。
+pub trait Coupling {
+    /// 依存するソルバ(実行順序の決定に使う、設計§1.3)。
+    fn domains(&self) -> (DomainId, DomainId);
+
+    /// 結合の適用。
+    fn apply(&mut self, world: &mut DomainStates, dt: f64);
+}

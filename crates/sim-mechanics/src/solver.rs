@@ -37,6 +37,26 @@ pub struct MechanicsSolver {
     pub ball_joints: Vec<BallJoint>,
     /// PD位置サーボ付きヒンジモーター一覧(設計 §4.5、`joint`モジュールdoc参照)。
     pub hinge_motors: Vec<HingeMotorPd>,
+    /// 直近stepの接触解決(摩擦+反発)による運動エネルギー散逸量(設計
+    /// docs/20-integration/01-coupling-matrix.md `DissipationToHeat`が読む、
+    /// `sim-coupling`クレートのdoc参照)。接触解決の直前直後の運動エネルギー差分として
+    /// 測定する(位置は変化しないためポテンシャルエネルギーは不変、速度の変化のみを見れば
+    /// 十分)。抗力による散逸は含まない(抗力は保存力(重力)と共に`apply_forces`で積分
+    /// されるため、この測定窓では分離できない。後続増分で抗力の仕事を個別に計測して追加
+    /// する)。0にクランプしない — Baumgarte安定化・warm startingは稀に1step内で微小に
+    /// 運動エネルギーを増やすことがある(PGS系接触ソルバの既知の数値アーティファクト、
+    /// 物理的な現象ではない)ため、クランプすると増加分を無視し減少分だけ計上する系統的な
+    /// 片側バイアスになる。実装検証中の発見: それでもなお、10秒・1200stepの滑走→静止
+    /// シナリオでは、この量の累積和が実際の力学的エネルギー総損失(区間の`total_energy()`
+    /// の差)より約9%大きいことを確認した — 原因は、Baumgarte位置誤差補正がこの
+    /// (`contact::resolve()`呼び出し前後のみの)測定窓では運動エネルギー変化として
+    /// 現れる一方、その補正効果は次stepの位置積分にも影響し、測定窓の外側で部分的に
+    /// 打ち消されるため、前後差分の単純な累積が系統的に過大評価になること(PGS+
+    /// Baumgarteソルバの既知の限界であり、クランプの有無では解決しない)。根本修正
+    /// (Baumgarteのバイアス速度分を測定から除外する等)は接触ソルバへの踏み込んだ変更を
+    /// 要するため本増分では見送り、`sim-coupling::DissipationToHeat`の受け入れテスト側で
+    /// この系統誤差を踏まえた許容誤差(rel<15%)を設定して対応する。
+    pub last_contact_dissipation: f64,
 }
 
 impl MechanicsSolver {
@@ -52,6 +72,7 @@ impl MechanicsSolver {
             joints: Vec::new(),
             ball_joints: Vec::new(),
             hinge_motors: Vec::new(),
+            last_contact_dissipation: 0.0,
         }
     }
 
@@ -193,6 +214,7 @@ impl Solver for MechanicsSolver {
             .filter(|m| self.manifold_is_active(m))
             .cloned()
             .collect();
+        let ke_before_contact = self.total_energy().kinetic;
         contact::resolve(
             &active_manifolds,
             &mut self.bodies,
@@ -200,6 +222,13 @@ impl Solver for MechanicsSolver {
             self.restitution_velocity_threshold,
             &mut self.contact_cache,
         );
+        let ke_after_contact = self.total_energy().kinetic;
+        debug_assert!(
+            ke_after_contact <= ke_before_contact + 1e-6 * ke_before_contact.max(1.0),
+            "contact resolution must not increase kinetic energy beyond numerical noise: \
+             before={ke_before_contact} after={ke_after_contact}"
+        );
+        self.last_contact_dissipation = ke_before_contact - ke_after_contact;
         // 接触解決後(post-solve)の速度で静止判定する(解決前は重力積分直後でまだ抗力が
         // 相殺していないため静止判定に使えない)。島判定には(スキップした分も含め)
         // 全マニフォールドを使う。

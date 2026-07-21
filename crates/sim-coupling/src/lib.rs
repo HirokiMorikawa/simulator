@@ -1,10 +1,16 @@
 //! ドメイン間結合行列・排他結合の静的検査。設計: docs/20-integration/01-coupling-matrix.md。
 //!
-//! Phase Cスコープの縮約実装: シーン設定における排他結合(同じ物理を2経路で計算しない、
-//! 設計§2規則2)の静的検査のみを実装する。結合行列本体の各Coupling実装(`BuoyancyDrag`・
-//! `GridFluidRigid`等、設計§3)・sub-iteration剛性閾値表(設計§2規則3)は、`World`/各
-//! ドメインSolverの統合を待つため未実装(Phase A型スケルトンも導入していない — 本crateは
-//! これまで空だったため、実装可能な範囲から先に実体を持たせた)。
+//! シーン設定における排他結合(同じ物理を2経路で計算しない、設計§2規則2)の静的検査
+//! (`validate_exclusive_couplings`)に加え、`Coupling`トレイト + `DomainStates`
+//! (設計docs/00-foundation/04-architecture.md §1.3「保存量の橋」、`domain_states`
+//! モジュールdoc参照)と、最初の具体的な実装`DissipationToHeat`
+//! (`dissipation_to_heat`モジュールdoc参照)を実装する。残る11種(`BuoyancyDrag`・
+//! `GridFluidRigid`等、設計§3)・sub-iteration剛性閾値表(設計§2規則3)は後続増分で追加する。
+
+mod dissipation_to_heat;
+mod domain_states;
+pub use dissipation_to_heat::DissipationToHeat;
+pub use domain_states::{Coupling, DomainStates};
 
 /// シーンの結合設定(設計§2規則2が列挙する3組の排他結合、設定は各ドメインシーンJSON相当)。
 #[derive(Clone, Copy, Debug, Default)]
