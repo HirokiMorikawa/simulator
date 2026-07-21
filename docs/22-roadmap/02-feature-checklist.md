@@ -324,8 +324,15 @@
   desync(以前のスナップショットに巻き戻る現象)し、コミット前のレジーム切替の実装が
   一度失われ、上記の内容で作り直した(F11・X2・フレーム階層の各コミットはGitHub側で
   確認する限り無事だった)。
-- **作業中**: ワークストリームA(Phase B残タスク)継続中 — 次はエンティティ関節PD静的姿勢維持。
-- **次**: A(残り: エンティティ関節PD・F10)→ B(Phase C:
+  続けてエンティティ受け入れ: 関節PD静的姿勢維持(docs/20-integration/03-entity-layer.md §7)に
+  着手 — `sim-mechanics`にHinge/motor(設計§4.4の軸直交拘束行を持つ正式なHingeジョイント)が
+  未実装だったため、`joint::HingeMotorPd`(PD位置サーボ、`BallJoint`アンカー+ワールド固定軸
+  1自由度の縮約実装、正式なHingeの軸直交拘束行は省略)を新規実装。完全な15剛体人体骨格
+  ではなく、ワールド固定ピボットに`BallJoint`で繋がれた単一の脚リンクが地面に接地しつつ
+  45°のしゃがみ角を保持する縮約構成で、設計§4.5既定ゲイン(kp=20 s⁻¹, kd=2)のまま60秒間の
+  最大ドリフト約3.8°(基準5°以内)・接地点が地面にめり込まないことを確認してGreen化した。
+- **作業中**: ワークストリームA(Phase B残タスク)継続中 — 次はF10(ダム崩壊、実測データ入手待ち)。
+- **次**: A(残り: F10)→ B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
   D(フロントエンド統合エディタ、Bと一部並行)の順で進める。詳細は上記プランファイル参照。
@@ -632,7 +639,14 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [x] ランジュバン(ブラウン運動)— `crates/sim-statistical/src/brownian.rs::BrownianParticleSet`。
       BAOAB(kick-drift-kick+OU厳密解+kick-drift-kick、設計 §4.1)を実装。濃度場の拡散
       (陰的Euler・熱伝導と共有)・移流拡散・回転ブラウン運動は Phase 5+
-- [ ] エンティティ受け入れ: 関節 PD 静的姿勢維持
+- [x] エンティティ受け入れ: 関節 PD 静的姿勢維持(docs/20-integration/03-entity-layer.md §7)—
+      `crates/sim-mechanics/src/joint.rs::HingeMotorPd`(PD位置サーボ、正式なHingeジョイントの
+      軸直交拘束行を持たない縮約実装、単一自由度をワールド固定軸+`BallJoint`アンカーで表現)
+      を新規実装。`solver::tests::entity_layer_hinge_motor_maintains_crouch_pose_for_60s_with_ground_contact`
+      (完全な15剛体人体骨格ではなく、ワールド固定ピボットに`BallJoint`で繋がれた単一脚
+      リンクが地面に接地しつつ45°のしゃがみ角を保持する縮約構成、`sim-entity`未実装のため
+      PD自体も本crateに暫定配置)が、設計§4.5既定ゲイン(kp=20 s⁻¹, kd=2)のまま60秒間の
+      最大ドリフト約3.8°(基準5°以内)・接地点が地面にめり込まないことを確認してGreen
 - [x] 担当テスト Green: E1–E7, E9–E12, S4–S6, T8, WCSPH(全運動量・静水圧平衡の代替検証)、
       車両(制動距離・定常円旋回)
       (E1・E2・E3–E5・E6・E7・E9–E12・S4・S5・S6 Green。F10はMartin-Moyce実測データ未入手の

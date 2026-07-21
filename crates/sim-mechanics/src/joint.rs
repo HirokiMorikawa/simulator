@@ -9,11 +9,24 @@
 //! (コレスキー分解)ではなく、ワールド座標系のx/y/z軸に沿った3本の独立スカラー拘束として
 //! PGS反復で解く(接触ソルバの摩擦円錐を2本の独立スカラー制約で近似する「箱近似」と同じ
 //! 簡略化方針、docs/10-mechanics/04-friction.md §2.1)。
-//! Hinge/Slider/Fixed/Wheel・limit・motor・ソフト拘束・真のブロックソルバは
-//! Phase 3 の残りとして未実装。
+//! Hinge の軸直交拘束行(設計§4.4「+2」)・Slider/Fixed/Wheel・limit・ソフト拘束・
+//! 真のブロックソルバは Phase 3 の残りとして未実装。
+//!
+//! `HingeMotorPd`(設計§4.5 位置サーボ+モーター行)は、上記の軸直交拘束行を持つ正式な
+//! Hinge ジョイントとしてではなく、`BallJoint`(アンカー3行のみ)と組み合わせて使う
+//! 縮約実装として追加する — 対象の動作(単一平面内の振り子的な関節、
+//! docs/20-integration/03-entity-layer.md §7 静的姿勢維持テスト)では重力トルクが
+//! ヒンジ軸まわりのみに生じ他の2自由度が励起されないため、軸直交拘束行を省略しても
+//! 正しく振る舞う(この前提が崩れる汎用シーンでは正式なHingeジョイントが必要になる)。
+//! 設計の「motor行(dθ=ω_target、|λ|≤τ_max·dt)」を、PGSの速度拘束行としてではなく、
+//! 軸まわりの角速度をω_targetへ1ステップで近づけるのに必要なトルクをτ_maxでクランプして
+//! 直接トルクとして印加する形で実装する(効果は同じ: 無負荷でω_targetに漸近、
+//! 過負荷でτ_maxに飽和)。PD自体(ω_target = kp(θ_target-θ) - kd・θ̇)は設計§4.5が
+//! 「制御ループはエンティティ層」と定めるが、`sim-entity` crateが未実装のため、この
+//! 縮約実装では暫定的に物理モーターと同じ場所(本crate)に置く。
 
 use crate::body::RigidBodySet;
-use sim_math::Vec3;
+use sim_math::{Quat, Vec3};
 
 /// 設計 §9「ジョイント Baumgarte β = 0.2(接触と同じ)」。
 const BAUMGARTE_BETA: f64 = 0.2;
@@ -235,5 +248,58 @@ pub fn resolve_ball(joints: &[BallJoint], bodies: &mut RigidBodySet, dt: f64) {
         for p in &prepared {
             solve_velocity_ball(p, bodies);
         }
+    }
+}
+
+/// PD 位置サーボ付きヒンジモーター(設計§4.5、モジュールdocの縮約理由参照)。
+/// ワールド固定軸まわりの単一自由度を、`BallJoint`(アンカー)と組み合わせて表現する。
+pub struct HingeMotorPd {
+    pub body: usize,
+    /// ヒンジ軸(ワールド座標、固定、単位ベクトル)。
+    pub axis: Vec3,
+    /// 生成時点の`body`の姿勢(角度0の基準)。
+    pub reference_rotation: Quat,
+    pub theta_target: f64,
+    pub kp: f64,
+    pub kd: f64,
+    pub torque_max: f64,
+}
+
+impl HingeMotorPd {
+    /// 基準姿勢からの、軸まわりの相対回転角(swing-twist分解の簡略版 — 回転が純粋に
+    /// 軸まわりである前提、モジュールdoc参照)。
+    pub fn measure_angle(&self, bodies: &RigidBodySet) -> f64 {
+        let q_rel = bodies.rotation[self.body].mul(self.reference_rotation.conjugate());
+        let vector_part = Vec3::new(q_rel.x, q_rel.y, q_rel.z);
+        2.0 * vector_part.dot(self.axis).atan2(q_rel.w)
+    }
+
+    /// PD制御(設計§4.5: ω_target = kp(θ_target-θ) - kd・θ̇)でトルクを計算し、
+    /// `torque_accum`に加算する。トルクは1ステップでω_targetへ到達するのに必要な値を
+    /// τ_maxでクランプ(設計の「motor行: |λ|≤τ_max・dt」と同じ飽和則)して印加する。
+    /// 印加した実際のトルク(軸成分)を返す(仕事の計上に使える)。
+    pub fn apply(&self, bodies: &mut RigidBodySet, dt: f64) -> f64 {
+        let theta = self.measure_angle(bodies);
+        let omega_axis = bodies.angular_velocity[self.body].dot(self.axis);
+        let omega_target = self.kp * (self.theta_target - theta) - self.kd * omega_axis;
+
+        let inv_inertia = bodies.inv_inertia_world[self.body];
+        let inv_inertia_axis = self.axis.dot(inv_inertia.mul_vec(self.axis));
+        let desired_torque = if inv_inertia_axis > 0.0 {
+            (omega_target - omega_axis) / (inv_inertia_axis * dt)
+        } else {
+            0.0
+        };
+        let torque = desired_torque.clamp(-self.torque_max, self.torque_max);
+
+        bodies.torque_accum[self.body] = bodies.torque_accum[self.body] + self.axis.scale(torque);
+        torque
+    }
+}
+
+/// `HingeMotorPd`一覧を全て`apply`する。
+pub fn apply_hinge_motors(motors: &[HingeMotorPd], bodies: &mut RigidBodySet, dt: f64) {
+    for motor in motors {
+        motor.apply(bodies, dt);
     }
 }
