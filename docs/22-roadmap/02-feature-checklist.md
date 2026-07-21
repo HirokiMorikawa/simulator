@@ -470,7 +470,31 @@
   ではなく実際の剛体+回路をCouplingで結んだ構成でも指数減衰$v(t)=v_0e^{-t/\tau}$に
   収束することを確認 — 実測rel_errは0.019%とE7自体(rel<0.5%)より良く、1step遅れの
   影響は$dt\ll\tau$では無視できるほど小さいことを確認した。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り7種のCoupling実装。
+  残り7種のCoupling(`BuoyancyDrag`・`GridFluidRigid`・`ConvectionLink`・
+  `BoussinesqBuoyancy`・`PistonGas`・`SphRigid`・`PhaseChangeMorph`)は、いずれも
+  本格的な前提工事(`GridFluidRigid`/`ConvectionLink`/`BoussinesqBuoyancy`/`SphRigid`は
+  流体`Solver`トレイト統合、`PistonGas`はSliderジョイント、`PhaseChangeMorph`は
+  イベント駆動の剛体/流体生成(`DomainStates`にevents参照が無く現状のCoupling
+  シグネチャでは実現不可)、`BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の
+  リスクの高い改修)を要すると判断し、これ以上Couplingを追加する前に、設計書の
+  厳密な順序(A→B→C→D)の中でも優先度が高く前提の少ない`World`公開API拡張
+  (docs/20-integration/04-world-api.md §2)に着手する方針に切り替えた。
+  まず`snapshot`/`restore`(決定論CIゲートの「スナップショット再開時のリプレイ一致」
+  の前提)を実装 — `World`の全フィールド(`mechanics`・`thermal`等の各ドメイン
+  ソルバ、`materials`・`rng`・`events`・`ledger`・`generations`)が既に`Clone`可能に
+  なるよう、`sim-core`(`MaterialDb`・`EventQueue`・`EnergyLedger`)・`sim-mechanics`
+  (`MechanicsSolver`・`RigidBodySet`・`ShapeStore`・`DistanceJoint`・`BallJoint`・
+  `HingeMotorPd`)・`sim-thermal`(`ThermalSolver`)・`sim-em`(`PointChargeSystem`・
+  `Circuit`)・`sim-astro`(`NBodySystem`)の各型に`#[derive(Clone)]`を追加した上で、
+  `World`自体にも`#[derive(Clone)]`を導出し、`snapshot()`/`restore()`はその
+  `Clone`実装をそのまま使う縮約実装とした(差分スナップショットによるメモリ効率化は
+  後続増分)。150step実行→スナップショット→さらに50step進めて状態を変える→
+  スナップショットへ復元(この時点でハッシュがスナップショット時点と一致することを
+  確認)→残り150step続行、という構成で、300step通し実行と同じ`state_hash()`に
+  一致することをテストで確認し、初回実装で一発Green化した。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
+  (Scenario/Command queue/Probe/イベント購読/raycast等のクエリ)、または残り
+  7種のCoupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -950,12 +974,22 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       残り7種の`Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`
       パイプラインへのCoupling接続(registry相当の仕組みが必要)・sub-iteration
       剛性閾値表は未実装
+- [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
+      `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
+      各ドメインcrateの型に`Clone`を導出済み)を実装済み。`Scenario`/`from_scenario`
+      (シーンJSON、validator接続)・`Command`キュー・`Probe`・`subscribe`/
+      `drain_events`・`raycast`/`overlap_sphere`/`sample_fluid`/`circuit_probe`等の
+      クエリは未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
 - [ ] 統合シナリオ: 氷と飲み物
 - [ ] 統合シナリオ: 断熱圧縮
 - [ ] 統合シナリオ: 再突入
-- [ ] CI ゲート: 決定論(2 回実行一致・スナップショット再開一致 = 階層 1、スレッド数変更・wasm⇔ネイティブは許容誤差 = 階層 2 — C-1 案 1)
+- [ ] CI ゲート: 決定論(2 回実行一致・スナップショット再開一致 = 階層 1、スレッド数変更・wasm⇔ネイティブは許容誤差 = 階層 2 — C-1 案 1)。
+      `World`の2回実行ハッシュ一致・スナップショット再開一致自体はテストとして実装
+      済み(`determinism_same_scenario_twice_matches_hash`・
+      `determinism_snapshot_restore_replay_matches_uninterrupted_run`)だが、
+      CIワークフロー(`.github/workflows/ci.yml`)への正式なゲート組み込みは未実装
 - [ ] CI ゲート: 保存則 residual
 - [ ] CI ゲート: 性能ベンチ回帰(構成規則)
 - [ ] 全デモ D1–D39 合格([§7](#7-デモ合格管理表-d1d43))

@@ -12,6 +12,7 @@ pub const GRAVITATIONAL_CONSTANT: f64 = 6.674e-11;
 
 /// N体系。設計 §3 の `NBodySystem` から、Barnes-Hut ツリー・積分器種別の選択機構を除いた
 /// P0 スコープ(総当たり + leapfrog 固定)。
+#[derive(Clone)]
 pub struct NBodySystem {
     pub position: Vec<Vec3>,
     pub velocity: Vec<Vec3>,

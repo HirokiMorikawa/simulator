@@ -8,7 +8,7 @@ use sim_math::{Mat3, Quat, Transform, Vec3};
 pub struct ShapeHandle(pub u32);
 
 /// 形状プール。`RigidBodySet` から間接参照する(設計 §3 の `Vec<ShapeHandle>`)。
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ShapeStore {
     shapes: Vec<Shape>,
 }
@@ -85,6 +85,7 @@ impl RigidBodyDesc {
 }
 
 /// 剛体状態の SoA コンテナ。設計 §3。
+#[derive(Clone)]
 pub struct RigidBodySet {
     // 状態(毎ステップ更新)
     pub position: Vec<Vec3>,

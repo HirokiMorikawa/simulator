@@ -34,6 +34,7 @@ const BAUMGARTE_BETA: f64 = 0.2;
 pub const JOINT_VELOCITY_ITERATIONS: u32 = 10;
 
 /// 2点間距離拘束。`body_b = None` はワールド固定(振り子の支点等)を表す。
+#[derive(Clone, Copy)]
 pub struct DistanceJoint {
     pub body_a: usize,
     /// body_a ローカル座標のアンカー点。
@@ -171,6 +172,7 @@ pub fn resolve_distance(joints: &[DistanceJoint], bodies: &mut RigidBodySet, dt:
 
 /// アンカー一致拘束(設計 §2.1)。`body_b = None` はワールド固定点(独楽の支点等、
 /// M10)を表す — 剛体はその点を中心に自由に回転できる。
+#[derive(Clone, Copy)]
 pub struct BallJoint {
     pub body_a: usize,
     /// body_a ローカル座標のアンカー点。
@@ -253,6 +255,7 @@ pub fn resolve_ball(joints: &[BallJoint], bodies: &mut RigidBodySet, dt: f64) {
 
 /// PD 位置サーボ付きヒンジモーター(設計§4.5、モジュールdocの縮約理由参照)。
 /// ワールド固定軸まわりの単一自由度を、`BallJoint`(アンカー)と組み合わせて表現する。
+#[derive(Clone, Copy)]
 pub struct HingeMotorPd {
     pub body: usize,
     /// ヒンジ軸(ワールド座標、固定、単位ベクトル)。

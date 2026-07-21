@@ -23,6 +23,7 @@ pub struct UniformField {
 }
 
 /// 点電荷系。設計 §3 `ChargedBody` の集合版(P0 スコープでは剛体と未結合の独立粒子)。
+#[derive(Clone)]
 pub struct PointChargeSystem {
     pub position: Vec<Vec3>,
     pub velocity: Vec<Vec3>,

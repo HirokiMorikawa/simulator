@@ -13,6 +13,7 @@ use crate::{ccd, collision, contact, joint, sleep, RigidBodyDesc};
 use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_fluid::{Atmosphere, StaticWaterRegion};
 
+#[derive(Clone)]
 pub struct MechanicsSolver {
     pub bodies: RigidBodySet,
     /// 重力加速度(下向き、m/s^2)。既定 9.80665(docs/00-foundation/03-units-conventions.md)。

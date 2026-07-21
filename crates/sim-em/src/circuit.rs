@@ -25,7 +25,7 @@ const DIODE_MAX_NEWTON_ITERATIONS: usize = 10;
 const DIODE_CONVERGENCE_TOLERANCE: f64 = 1e-9;
 
 /// 回路。素子はノード番号の対 `(a, b)` で接続を表す(a, b どちらも `GROUND` を含みうる)。
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Circuit {
     num_nodes: usize,
     resistors: Vec<(usize, usize, f64)>,

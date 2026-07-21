@@ -68,6 +68,15 @@ impl Default for WorldOptions {
 /// シミュレートされた環境そのもの。世界時刻の一意性は `clock`
 /// (docs/00-foundation/04-architecture.md §1.1.2(4))、状態オーナーシップの一意性は
 /// `mechanics`(正典状態)が保持することで満たす(同 §1.1.2(1))。
+///
+/// `Clone`を導出できるのは、全フィールド(`mechanics`・`thermal`等の各ドメインソルバ、
+/// `materials`・`rng`・`events`・`ledger`・`generations`)が既にClone可能なため
+/// (このワークストリームBの増分で各ドメインcrateに`#[derive(Clone)]`を追加した)。
+/// `snapshot`/`restore`(設計docs/20-integration/04-world-api.md §2、
+/// docs/20-integration/02-determinism-replay.md §6「スナップショット再開時の
+/// リプレイ一致」)はこの`Clone`実装をそのまま使う縮約実装 — 差分スナップショット
+/// (メモリ効率化)は後続増分。
+#[derive(Clone)]
 pub struct World {
     clock: sim_core::SimClock,
     mechanics: MechanicsSolver,
@@ -309,6 +318,20 @@ impl World {
         self.clock.step_count()
     }
 
+    /// 現在の全状態のスナップショットを取る(設計docs/20-integration/04-world-api.md §2、
+    /// 型doc「`Clone`を導出できる理由」参照)。
+    pub fn snapshot(&self) -> World {
+        self.clone()
+    }
+
+    /// スナップショットから状態を復元する(設計docs/20-integration/02-determinism-replay.md
+    /// §6「スナップショット再開時のリプレイ一致」— 復元直後に`step()`を続けても、
+    /// スナップショットを取らず通しで実行した場合と`state_hash()`が一致することを
+    /// テストで検証する)。
+    pub fn restore(&mut self, snapshot: &World) {
+        *self = snapshot.clone();
+    }
+
     /// 設計 docs/00-foundation/04-architecture.md §3「削除済み ID へのアクセスは `None`
     /// (パニックしない)」。
     pub fn body_position(&self, id: BodyId) -> Option<Vec3> {
@@ -547,6 +570,55 @@ mod tests {
         let hash_a = run();
         let hash_b = run();
         assert_eq!(hash_a, hash_b);
+    }
+
+    /// 決定論テスト(階層1): スナップショット再開時のリプレイ一致
+    /// (設計docs/20-integration/02-determinism-replay.md §6)。同一シナリオを
+    /// 300step通しで実行した場合と、150step時点でスナップショットを取り、
+    /// (スナップショットが単なる巻き戻し先ではなく実際に状態を保持していることを
+    /// 検証するため)さらに50step進めて状態を変えた上でスナップショットへ復元し、
+    /// 残り150stepを続けた場合とで、最終`state_hash()`が一致することを確認する。
+    #[test]
+    fn determinism_snapshot_restore_replay_matches_uninterrupted_run() {
+        let straight_run_hash = {
+            let mut world = World::new(WorldOptions::default());
+            create_falling_box(&mut world);
+            for _ in 0..300 {
+                world.step();
+            }
+            world.state_hash()
+        };
+
+        let mut world = World::new(WorldOptions::default());
+        create_falling_box(&mut world);
+        for _ in 0..150 {
+            world.step();
+        }
+        let snapshot = world.snapshot();
+        let hash_at_snapshot = world.state_hash();
+
+        // スナップショット取得後も別途進め、復元前の状態をスナップショットと異なる
+        // ものにする(復元が実際に巻き戻すことを検証する対照)。
+        for _ in 0..50 {
+            world.step();
+        }
+        assert_ne!(
+            hash_at_snapshot,
+            world.state_hash(),
+            "world should have diverged from the snapshot after 50 more steps"
+        );
+
+        world.restore(&snapshot);
+        assert_eq!(
+            hash_at_snapshot,
+            world.state_hash(),
+            "restore should bring the hash back to exactly the snapshot point"
+        );
+
+        for _ in 0..150 {
+            world.step();
+        }
+        assert_eq!(straight_run_hash, world.state_hash());
     }
 
     /// エネルギー台帳: 接触なし自由落下では semi-implicit Euler が定数外力(一様重力)に対して
