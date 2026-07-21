@@ -161,9 +161,25 @@
   追加しても単調に大きくなる性質を使って非退化な四面体に安全に育てる処理で解決。
   さらにEPA自体、球のような滑らかな形状には各反復で誤差がおよそ半分になるだけの
   線形収束(多面体なら数回で厳密収束)しかせず、反復上限64では収束しきらないことを
-  発見し、上限を100に増やして解決した。フルCCDは後続増分に残す。
-- **作業中**: なし(直前の増分でGJK・EPAが完了、次点候補から自由に選択)。
-  次点候補: フルCCD(conservative advancement、Phase 5)、イジングL=256フル版(長時間級)
+  発見し、上限を100に増やして解決した。
+  続けてフルCCD(`conservative_advancement_toi`、並進のみのconservative advancement)を
+  実装 — GJKに`b_offset`引数を追加して「Bを仮想的に並進させた状態での分離距離・
+  分離法線」を計算できるように拡張し(`gjk_distance_offset`)、`GjkResult::Separated`に
+  分離法線を追加した。分離法線への相対速度の射影を閉じ速度として使い、TOIを
+  `distance/closing_speed`で反復的に前進させる方式。実装検証中、閉じ速度の符号を
+  最初`-rel_vel.dot(normal)`と誤って導出し(直感的に「Aから見た速度」で考えて符号を
+  逆にした)、これだと接近しているケースでも閉じ速度が負に出て`None`を誤って返す
+  バグになることに気づいた。ミンコフスキー差がオフセット分だけ逆方向に平行移動する
+  という支持写像の性質から解析的に符号を再導出し(Pythonで数値微分しても検算)、
+  正しくは`rel_vel.dot(normal)`(`rel_vel`はAを静止基準としたBの並進速度)であることを
+  確認して修正した。分離2球・分離した2つの箱(点群)がそれぞれ解析的なTOI
+  ($gap/closing\_speed$、並進のみなら閉じ速度が一定なので厳密に一致する)と1e-6未満の
+  相対誤差で一致することを確認し、非接近ケース(直交方向の相対速度)・`max_time`超過
+  ケースがそれぞれ`None`を返すことも確認した。回転を含む一般形状のCCDは未対応
+  (設計§4.5のスコープ外、モジュールdocに明記)。
+- **作業中**: なし(直前の増分でフルCCDが完了、次点候補から自由に選択)。
+  次点候補: イジングL=256フル版(長時間級のため優先度低)、Phase A型スケルトン
+  (sim-quantum/sim-render/sim-coupling/sim-worldの未着手部分)、Phase C結合検証
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
   math ウェーブ(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの汎用部分/
@@ -519,9 +535,11 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       自体で支配されて発散し(T=1.8でχ=2085、Tへ向かうほど単調減少という物理的にありえない
       形になった)、標準的な回避策である$\langle|M|\rangle$を使う修正で正しいTc近傍のピーク
       形状に直った
-- [x] GJK・EPA(分離距離・重なり判定・貫入深さ復元。フルCCDのみ未実装)—
-      `crates/sim-mechanics/src/gjk.rs::{gjk_distance, epa_penetration, ConvexShape, GjkResult,
-      EpaResult}`。ミンコフスキー差の凸包に対する原点への最近点をJohnsonのサブアルゴリズム
+- [x] GJK・EPA・フルCCD(分離距離・重なり判定・貫入深さ復元・並進のみのconservative
+      advancement TOI。回転を含む一般形状のCCDは未対応)—
+      `crates/sim-mechanics/src/gjk.rs::{gjk_distance, epa_penetration,
+      conservative_advancement_toi, ConvexShape, GjkResult, EpaResult}`。
+      ミンコフスキー差の凸包に対する原点への最近点をJohnsonのサブアルゴリズム
       (単体の全部分集合を試し、原点の重心座標が非負になる部分集合のうち最近のものを採る
       素直な実装、設計§4.5の「実装の要諦は書籍を正とする」を受けて教科書の完全な実装では
       なくこの方式にした)で反復探索(GJK)。分離2球・重なり2球・分離した2つの箱(8頂点の
@@ -536,10 +554,13 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       なるだけの線形収束にしかならず(多面体同士なら数回の面分割で厳密に収束する)、
       既定の反復上限64では収束しきらないことを発見し、上限を100に増やして解決した。
       分離2球のAABB間距離・重なった2球の貫入深さ(解析式と一致)・重なった2つの箱
-      (数回で厳密収束)で検証。フルCCD(GJKと同時に実装するconservative advancement)は
-      後続増分で追加する
+      (数回で厳密収束)で検証。フルCCD(`conservative_advancement_toi`)は分離法線への
+      相対速度の射影を閉じ速度とし、TOIを`distance/closing_speed`で反復前進させる方式
+      (並進のみなら閉じ速度が一定なので厳密なTOIが求まる)。分離2球・分離した2つの箱の
+      TOIが解析式($gap/closing\_speed$)と1e-6未満の相対誤差で一致することを確認し、
+      非接近ケース・`max_time`超過ケースの`None`復帰も確認した
 - [x] 担当テスト Green: Q1–Q6, E8, E13, S1–S3, S7–S9(Q1・Q2・Q3・Q4・Q5・Q6・E8・E13・
-      S1・S2・S3・S7・S8・S9 Green。GJKは分離距離・重なり判定のみGreen、残るはEPA・フルCCD)
+      S1・S2・S3・S7・S8・S9 Green。GJK・EPA・フルCCDも全テストGreen)
 
 ### Pα — 天体
 
