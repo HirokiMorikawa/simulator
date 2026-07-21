@@ -168,7 +168,9 @@ impl SphFluid {
             .zip(self.velocity.iter())
             .zip(accel_old.iter())
         {
-            *pos = pos.addcarry_scaled(vel, dt).addcarry_scaled(acc, 0.5 * dt * dt);
+            *pos = pos
+                .addcarry_scaled(vel, dt)
+                .addcarry_scaled(acc, 0.5 * dt * dt);
         }
 
         self.compute_density_and_pressure();
