@@ -258,10 +258,16 @@
   で50周回積分。角運動量ベクトルから求めた昇交点(RAAN)の歳差率が解析式
   $\dot\Omega=-\frac32nJ_2(R_e/p)^2\cos i$とrel<2%で一致し、初回実装で一発Green化した。
   これで天体ドメインの解析解テストA1–A10が全てGreenになった。
-- **作業中**: なし(直前の増分でA5が完了、A1–A10全てGreen。次点候補から自由に選択)。
+  続けて`sim-coupling`(それまで空crateだった)に排他結合の静的検査を実装 —
+  設計§2規則2が列挙する3組(浮力: 静的水域×SPH/格子流体、空気抗力: 集中定数×格子結合、
+  コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出する`SceneCouplingConfig`/
+  `validate_exclusive_couplings`。各Coupling実装本体(`BuoyancyDrag`等)・保存量の
+  対記帳・sub-iteration剛性閾値表は`World`/各ドメインSolver統合を待つため未実装(Phase A
+  型スケルトンも導入せず、実装可能な範囲から先に実体を持たせた、このセッション一貫の方針)。
+- **作業中**: なし(直前の増分で排他結合validatorが完了、次点候補から自由に選択)。
   次点候補: カルマン渦列(F11、円柱障害物+渦度強化の要否判断が必要)、X2(格子流体×
   剛体、64³格子+10秒級の重い検証)、イジングL=256フル版(長時間級のため優先度低)、
-  Phase A型スケルトン(sim-quantum/sim-render/sim-coupling/sim-worldの未着手部分)
+  Phase A型スケルトン(sim-quantum/sim-render/sim-worldの未着手部分)
 - **次**: 力学 P1 の残りを詰めたら流体・熱・電磁・量子・統計・天体・レンダリングの型スケルトンへ
   → World/Coupling 拡張、の順にスケルトンと Phase A テスト記述を進める(下記 §2)。
   math ウェーブ(`sim-math` の `Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの汎用部分/
@@ -688,7 +694,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 
 ## 4. Phase C — 結合・全体検証
 
-- [ ] 結合行列の実装(保存量の対記帳・排他結合 validator)
+- [ ] 結合行列の実装(保存量の対記帳・排他結合 validator)— 排他結合の静的検査
+      (`sim-coupling::{SceneCouplingConfig, validate_exclusive_couplings}`、設計§2規則2
+      が列挙する3組(浮力: 静的水域×SPH/格子流体、空気抗力: 集中定数×格子結合、
+      コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出)のみ実装。各Coupling
+      実装本体(`BuoyancyDrag`・`GridFluidRigid`等)・保存量の対記帳・sub-iteration
+      剛性閾値表は`World`/各ドメインSolver統合を待つため未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
 - [ ] 統合シナリオ: 氷と飲み物
