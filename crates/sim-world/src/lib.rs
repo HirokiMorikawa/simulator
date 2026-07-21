@@ -39,6 +39,7 @@
 //! 専用シーンでのみ有効化する設計方針のため同様に見送る。
 
 mod orchestrator;
+mod overlap;
 mod raycast;
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
@@ -425,6 +426,18 @@ impl World {
             normal: hit.normal,
             distance: hit.distance,
         })
+    }
+
+    /// 球オーバーラップクエリ(設計docs/20-integration/04-world-api.md §2、`overlap`
+    /// モジュールdoc参照。`filter`引数は未実装)。
+    pub fn overlap_sphere(&self, center: Vec3, r: f64) -> Vec<BodyId> {
+        overlap::overlap_sphere(&self.mechanics.bodies, center, r)
+            .into_iter()
+            .map(|index| BodyId {
+                index: index as u32,
+                generation: self.generations[index],
+            })
+            .collect()
     }
 
     /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:
@@ -855,5 +868,20 @@ mod tests {
             "distance={}",
             hit.distance
         );
+    }
+
+    /// `World::overlap_sphere`(設計docs/20-integration/04-world-api.md §2、`overlap`
+    /// モジュールdoc参照): 重なる剛体の`BodyId`(世代付き)を正しく返すことを確認する。
+    #[test]
+    fn overlap_sphere_returns_body_ids_of_overlapping_bodies_only() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        let position = world.body_position(box_id).unwrap();
+
+        let near_hits = world.overlap_sphere(position, 0.1);
+        assert_eq!(near_hits, vec![box_id]);
+
+        let far_hits = world.overlap_sphere(position + Vec3::new(1000.0, 0.0, 0.0), 0.1);
+        assert!(far_hits.is_empty());
     }
 }

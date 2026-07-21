@@ -519,9 +519,17 @@
   ローカル空間変換ヒット・剛体transformと独立な平面ヒット、の5本の単体テスト+
   `World::raycast`が正しい`BodyId`を返すことを確認する結合テストで検証し、
   初回実装で一発Green化した。
+  続けて`World`公開API拡張の一環として`overlap_sphere`クエリ(設計docs/20-integration/
+  04-world-api.md §2)を実装。`raycast`と同じ理由で`filter`引数は省略、対象形状も
+  同様に`Sphere`/`Box`/`Plane`のみ。`Box`との判定は`sim_mechanics::collision::
+  sphere_box`と全く同じ「ローカル空間でクランプして最近接点を求める」手法を使う
+  (接触解決のnarrowphaseと同一の幾何、コードの再利用ではなく手法の再現)。球同士・
+  回転した箱(ローカル空間クランプの検証)・平面(剛体transformとは独立にワールド
+  座標の`normal`/`d`で判定)の3本の単体テスト+`World::overlap_sphere`が正しい
+  `BodyId`集合を返すことを確認する結合テストで検証し、初回実装で一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
-  (Scenario/Probe/イベント購読/overlap_sphere等のクエリ)、または残り7種の
-  Coupling(いずれも前提工事を要する)。
+  (Scenario/Probe/イベント購読/sample_fluid/circuit_probe等のクエリ)、または
+  残り7種のCoupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1006,11 +1014,10 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
       `command_log`、`ApplyForce{body, force, point}`のみ実装、他4種
       (`SetMotorTarget`・`SetSwitch`・`SetHeatSource`・`Grab`系)は未実装)・
-      `raycast`(`Sphere`/`Box`/`Plane`のみ、`filter`引数未実装、`Capsule`/
-      `Compound`/`ConvexMesh`はP2/P5未実装のため対象外)を実装済み。
+      `raycast`・`overlap_sphere`(いずれも`Sphere`/`Box`/`Plane`のみ、`filter`引数
+      未実装、`Capsule`/`Compound`/`ConvexMesh`はP2/P5未実装のため対象外)を実装済み。
       `Scenario`/`from_scenario`(シーンJSON、validator接続)・`Probe`・`subscribe`/
-      `drain_events`・`overlap_sphere`/`sample_fluid`/`circuit_probe`等の
-      クエリは未実装
+      `drain_events`・`sample_fluid`/`circuit_probe`等のクエリは未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
 - [ ] 統合シナリオ: 氷と飲み物
