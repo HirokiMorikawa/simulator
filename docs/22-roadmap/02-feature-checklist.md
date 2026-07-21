@@ -505,9 +505,23 @@
   `Δv=(F/m)dt`に一致すること・力が1step限りで消えること(`force_accum`のstep末尾
   クリア)・偏心力が角速度を生むこと・無効IDが無視されることの4テストで検証し、
   初回実装で一発Green化した。
+  続けて`World`公開API拡張の一環として`raycast`クエリ(設計docs/20-integration/
+  04-world-api.md §2)を実装。設計の`filter`引数は具体的な型が示されていないため
+  省略(将来レイヤー/BodyId除外フィルタとして追加)。対象形状は`sim_mechanics::
+  collision`のnarrowphaseが現時点で実装済みの`Sphere`/`Box`/`Plane`のみ
+  (`Capsule`/`Compound`/`ConvexMesh`はP2/P5未実装)。`Sphere`は姿勢が意味を
+  持たないため中心+半径のみで判定、`Box`は剛体のtransformのローカル空間へ変換した
+  スラブ法、`Plane`は`collision::sphere_plane`と同じくワールド座標系の`normal`・`d`を
+  剛体のtransformとは独立に直接使う(`Shape::Plane`の「static専用・無限平面」という
+  性質どおり)。結果の`RayHit`は生の`RigidBodySet`indexではなく世代付き`BodyId`を
+  返す(削除済みindexの再利用との取り違え防止)。球への正面ヒットの距離・法線が
+  解析的に一致・的外れで`None`・`max_distance`超過で`None`・45°回転させた箱への
+  ローカル空間変換ヒット・剛体transformと独立な平面ヒット、の5本の単体テスト+
+  `World::raycast`が正しい`BodyId`を返すことを確認する結合テストで検証し、
+  初回実装で一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
-  (Scenario/Probe/イベント購読/raycast等のクエリ)、または残り7種のCoupling
-  (いずれも前提工事を要する)。
+  (Scenario/Probe/イベント購読/overlap_sphere等のクエリ)、または残り7種の
+  Coupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -991,9 +1005,11 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
       `command_log`、`ApplyForce{body, force, point}`のみ実装、他4種
-      (`SetMotorTarget`・`SetSwitch`・`SetHeatSource`・`Grab`系)は未実装)を実装済み。
+      (`SetMotorTarget`・`SetSwitch`・`SetHeatSource`・`Grab`系)は未実装)・
+      `raycast`(`Sphere`/`Box`/`Plane`のみ、`filter`引数未実装、`Capsule`/
+      `Compound`/`ConvexMesh`はP2/P5未実装のため対象外)を実装済み。
       `Scenario`/`from_scenario`(シーンJSON、validator接続)・`Probe`・`subscribe`/
-      `drain_events`・`raycast`/`overlap_sphere`/`sample_fluid`/`circuit_probe`等の
+      `drain_events`・`overlap_sphere`/`sample_fluid`/`circuit_probe`等の
       クエリは未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電

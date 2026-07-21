@@ -39,6 +39,7 @@
 //! 専用シーンでのみ有効化する設計方針のため同様に見送る。
 
 mod orchestrator;
+mod raycast;
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_math::{SimRng, Vec3};
@@ -81,6 +82,16 @@ pub enum Command {
         force: Vec3,
         point: Option<Vec3>,
     },
+}
+
+/// `raycast`の結果(`raycast`モジュールdoc参照)。生の`RigidBodySet`indexではなく
+/// 世代付き`BodyId`を返す(削除済み剛体の再利用indexと取り違えないため)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayHit {
+    pub body: BodyId,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub distance: f64,
 }
 
 /// シミュレートされた環境そのもの。世界時刻の一意性は `clock`
@@ -400,6 +411,20 @@ impl World {
             return None;
         }
         Some(self.mechanics.bodies.position[id.index as usize])
+    }
+
+    /// レイキャストクエリ(設計docs/20-integration/04-world-api.md §2、`raycast`
+    /// モジュールdoc参照。`filter`引数は未実装、同モジュールdoc参照)。
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_distance: f64) -> Option<RayHit> {
+        raycast::raycast(&self.mechanics.bodies, origin, dir, max_distance).map(|hit| RayHit {
+            body: BodyId {
+                index: hit.body_index as u32,
+                generation: self.generations[hit.body_index],
+            },
+            point: hit.point,
+            normal: hit.normal,
+            distance: hit.distance,
+        })
     }
 
     /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:
@@ -805,5 +830,30 @@ mod tests {
         });
         world.step(); // パニックしないことの確認そのものがテスト。
         assert_eq!(world.command_log().len(), 1);
+    }
+
+    /// `World::raycast`(設計docs/20-integration/04-world-api.md §2、`raycast`
+    /// モジュールdoc参照): `RayHit::body`が生インデックスではなく世代付き`BodyId`を
+    /// 正しく返すことを確認する(削除済みindexの再利用と取り違えないための不変条件)。
+    #[test]
+    fn raycast_returns_body_id_with_correct_generation() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        let y0 = world.body_position(box_id).unwrap().y;
+
+        let hit = world
+            .raycast(
+                Vec3::new(0.0, y0 + 10.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                100.0,
+            )
+            .expect("ray straight down should hit the box");
+        assert_eq!(hit.body, box_id);
+        // 箱の半径0.5の上面までの距離(重心からの10mからさらに半径分近い)。
+        assert!(
+            (hit.distance - 9.5).abs() < 1e-9,
+            "distance={}",
+            hit.distance
+        );
     }
 }
