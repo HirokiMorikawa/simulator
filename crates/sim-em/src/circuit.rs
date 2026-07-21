@@ -259,6 +259,14 @@ impl Circuit {
         let v = self.node_voltage(a) - self.node_voltage(b);
         v * v / r
     }
+
+    /// 電圧源`index`(`add_voltage_source`を呼んだ順)の直近の解電流(向きは`a→b`が正、
+    /// 設計docs/13-electromagnetism/05-em-mechanics-coupling.md §2.2「導体棒」、
+    /// `sim-coupling::InductionCoupling`が読む)。`step()`を一度も呼んでいない場合は
+    /// (`node_voltage`と同様に)0を返す(パニックしない)。
+    pub fn source_current(&self, index: usize) -> f64 {
+        self.last_source_current.get(index).copied().unwrap_or(0.0)
+    }
 }
 
 impl Solver for Circuit {

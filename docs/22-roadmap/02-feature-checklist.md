@@ -451,7 +451,26 @@
   ようにした(一様外部場由来の項は「外部」由来のため反作用なし、`PointChargeSystem::
   step()`自身の規約と同じ)。同符号の剛体+点電荷源が反発しつつ系の全運動量が終始
   ゼロのまま(対記帳の検証)であることをテストで確認、初回実装で一発Green化した。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り8種のCoupling実装。
+  続けて5種目の`Coupling`実装`InductionCoupling`(設計§3「導体棒・渦電流」、
+  docs/13-electromagnetism/05-em-mechanics-coupling.md §2.2)に着手。`sim_em::
+  InductionRod`は既にこの物理(ファラデー則→回路→レンツ則)を自己完結したミニ統合
+  クラスとして実装済み(E7テストGreen)だが、実際の`MechanicsSolver`剛体+
+  `Circuit`抵抗回路という2つの正典ドメイン間の橋としては未実装だったため、
+  `InductionCoupling`として実装し直した(レール方向はワールドX軸に固定する縮約)。
+  `Coupling`トレイトの`apply`が1回しか呼ばれない一方、設計§4の実行順序表は
+  `MotorCoupling`をpre(電気→トルク)とpost(ω→逆起電力)の両方に置いており、この種の
+  結合が本質的に2箇所で作用することを示す。`World::step()`へのCoupling接続自体が
+  未実装(他のCoupling同様)なため、本実装は単一`apply`呼び出し内で「今step確定した
+  速度から次の回路stepへ渡す起電力を設定」+「前回の回路stepで解かれた電流から
+  レンツ力を今step反映」を両方行う1step遅れの縮約版とした。`Circuit`に
+  `source_current(index)`アクセサを新規追加(`resistor_power`と同じパターン、
+  `step()`未実行時は0を返す安全策込み)。実装検証中、電流の符号規約を経験的に確認する
+  必要があった(符号を誤ると制動どころか正のフィードバックで速度が発散した)。
+  E7と同じ設定(m/l/B/R/v0一致)で、`sim_em::InductionRod`の自己無撞着な明示的Euler
+  ではなく実際の剛体+回路をCouplingで結んだ構成でも指数減衰$v(t)=v_0e^{-t/\tau}$に
+  収束することを確認 — 実測rel_errは0.019%とE7自体(rel<0.5%)より良く、1step遅れの
+  影響は$dt\ll\tau$では無視できるほど小さいことを確認した。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り7種のCoupling実装。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -919,15 +938,18 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       が列挙する3組(浮力: 静的水域×SPH/格子流体、空気抗力: 集中定数×格子結合、
       コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出)を実装済み。`Coupling`
       トレイト + `DomainStates`(現時点でmechanics・thermal・em_circuit・
-      em_electrostaticsの4ドメイン)、具体的な実装4種(`DissipationToHeat`: 接触散逸→熱、
+      em_electrostaticsの4ドメイン)、具体的な実装5種(`DissipationToHeat`: 接触散逸→熱、
       `JouleHeat`: 回路I²R→熱、`BrownianForce`: 温度・粘性→微小剛体のランダム力、
-      `LorentzForce`: 静場→帯電剛体)を実装済み(前2種は単一`ThermalNode`への縮約実装で
-      厳密な対記帳、`BrownianForce`はゆらぎ散逸定理に基づく統計的結合のため長時間平均の
-      エネルギー等分配則収束で検証、`LorentzForce`は点電荷群との対ごとの反作用で運動量を
-      厳密に対記帳、剛体/抵抗↔熱ノード対応表・剛体の電荷フィールドは未実装)。`World`にも
-      `circuit`ドメインを追加済み。残り8種の`Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・
-      `World::step()`パイプラインへの
-      Coupling接続(registry相当の仕組みが必要)・sub-iteration剛性閾値表は未実装
+      `LorentzForce`: 静場→帯電剛体、`InductionCoupling`: 導体棒・渦電流)を実装済み
+      (前2種は単一`ThermalNode`への縮約実装で厳密な対記帳、`BrownianForce`はゆらぎ散逸
+      定理に基づく統計的結合のため長時間平均のエネルギー等分配則収束で検証、
+      `LorentzForce`は点電荷群との対ごとの反作用で運動量を厳密に対記帳、
+      `InductionCoupling`は1step遅れの縮約(design上`MotorCoupling`同様pre/post
+      両方に置かれるべき結合を単一`apply`に統合)でE7の解析解に収束、剛体/抵抗↔熱ノード
+      対応表・剛体の電荷フィールドは未実装)。`World`にも`circuit`ドメインを追加済み。
+      残り7種の`Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`
+      パイプラインへのCoupling接続(registry相当の仕組みが必要)・sub-iteration
+      剛性閾値表は未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
 - [ ] 統合シナリオ: 氷と飲み物
