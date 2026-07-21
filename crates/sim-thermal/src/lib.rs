@@ -2,14 +2,17 @@
 //!       03-phase-change.md。
 //!
 //! P1 スコープ(docs/22-roadmap/01-phases.md): 集中熱容量ノード網 + ニュートン冷却(対流)+
-//! 放射(線形化)+ 陰的Euler(matrix-free PCG)。接触伝導ネットワークの自動生成・格子温度場は
-//! Phase 3(P3未着手)。気体区画(`gas`、T5・T6)・相変化(`phase`、エンタルピー法、T7)は
-//! 力学・格子との結合(ピストン、多ノード伝導網)を待たずに単独の状態として先に実装した。
+//! 放射(線形化)+ 陰的Euler(matrix-free PCG)。接触伝導ネットワークの自動生成(剛体接触からの
+//! 動的なリンク生成)はPhase 3未着手。気体区画(`gas`、T5・T6)・相変化(`phase`、エンタルピー法、
+//! T7)・格子温度場(`lattice`、1D棒のみ、T3)は力学結合(ピストン・接触リンク自動生成)を
+//! 待たずに単独の状態として先に実装した。
 
 mod gas;
+mod lattice;
 mod phase;
 
 pub use gas::{carnot_efficiency_bound, GasCompartment, GasSpecies, GAS_CONSTANT};
+pub use lattice::ConductionRod1D;
 pub use phase::{Phase, PhaseMaterial, PhaseState};
 
 use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
