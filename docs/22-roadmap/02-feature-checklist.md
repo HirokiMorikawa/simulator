@@ -362,7 +362,20 @@
   設計が求めるLie-Trotter operator splitting(pre/post coupling)や`max_stable_dt()`からの
   決定的sub-step数算出は`Orchestrator`本体の増分に持ち越す。`fluid`(Solverトレイト未実装)・
   quantum/statistical(専用シーンのみ)は今回見送った。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次はOrchestrator本体。
+  続けてOrchestrator本体(設計docs/00-foundation/04-architecture.md §1.3・
+  docs/20-integration/01-coupling-matrix.md §4)の中核機構に着手 — 各ドメインの
+  `max_stable_dt()`から決定的にsub-step数を算出する`sim-world::orchestrator`モジュール
+  (`sub_step_count`: frame_dtをmax_stable_dt以下に均等分割する最小のsub-step数を算出、
+  `sub_step_dt`: 均等な刻み幅を算出)を実装し、`World::step()`の各ドメイン呼び出しを
+  `run_domain_substeps`(disjoint field borrowを保つため自由関数として実装)経由に置き換えた。
+  現時点で実装済みの全ドメインソルバ(mechanics・thermal・em・astro)は`max_stable_dt()`が
+  全て`f64::INFINITY`を返すため、実際には常に1 sub-stepになる(将来、有限の
+  `max_stable_dt()`を返すソルバが追加されて初めて複数sub-stepが発生する、正直に
+  モジュールdocに記録)。Lie-Trotter operator splitting自体(pre/post couplingを挟む
+  パイプライン)は`Coupling`実装が1つも無い現時点では意味を持たないため、`Coupling`
+  導入時に合わせて拡張する。`sub_step_count`/`sub_step_dt`の単体テスト6本(境界値・
+  切り上げ・均等分割の厳密性)で検証、既存の全Worldテストも無変化で回帰確認済み。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は`Coupling`トレイト+具体的な実装。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→

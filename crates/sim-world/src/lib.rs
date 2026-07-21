@@ -26,14 +26,16 @@
 //! 追加した(シーンが使う分だけ`enable_*`で有効化、設計「Solverトレイトの共通契約」
 //! docs/00-foundation/04-architecture.md §1.2に既に準拠している型をそのまま接続)。
 //! `step()`は有効なドメインを固定順(mechanics→thermal→em→astro、`state_hash`も同順)で
-//! 順に進める — これは`Coupling`を挟まない単純な合成であり、設計が求めるLie-Trotter
-//! operator splitting(pre/post coupling付き、docs/20-integration/01-coupling-matrix.md
-//! §4)や`max_stable_dt()`からの決定的sub-step数算出(`Orchestrator`の責務)はまだ実装
-//! しない — それらは`Coupling`実装・`Orchestrator`本体が入る後続増分で追加する(現時点は
-//! 「同じWorld dtで無結合の複数ドメインが共存できる」という土台のみ)。`fluid`
-//! (`sim-fluid`のGridFluid系・SPH)は`Solver`トレイトを未実装のため今回は見送る
-//! (各流体型に`Solver`実装を追加するか専用の接続方式を検討する必要があり、後続増分)。
-//! `quantum`/`statisticalは専用シーンでのみ有効化する設計方針のため同様に見送る。
+//! 順に進める。各ドメインは`orchestrator::sub_step_count`(設計§1.3の決定的sub-step数算出、
+//! `max_stable_dt()`から算出)に従いsub-stepする — Lie-Trotter operator splitting自体
+//! (pre/post couplingを挟むパイプライン、docs/20-integration/01-coupling-matrix.md §4)は
+//! `Coupling`実装が1つも無い現時点では意味を持たないため、`Coupling`導入時に合わせて
+//! 拡張する(`orchestrator`モジュールdoc参照)。`fluid`(`sim-fluid`のGridFluid系・SPH)は
+//! `Solver`トレイトを未実装のため今回は見送る(各流体型に`Solver`実装を追加するか専用の
+//! 接続方式を検討する必要があり、後続増分)。`quantum`/`statistical`は専用シーンでのみ
+//! 有効化する設計方針のため同様に見送る。
+
+mod orchestrator;
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_math::{SimRng, Vec3};
@@ -87,6 +89,30 @@ const STREAM_DIAG: u64 = 0;
 /// docs/21-verification/02-conservation-laws.md §2 の E_scale。シーンごとの代表値を求める
 /// API はまだ無いため、P1 では固定値 1 J とする(将来シーン記述に応じて拡張)。
 const ENERGY_SCALE_FLOOR: f64 = 1.0;
+
+/// 1ドメインをOrchestratorの決定的sub-step数(`orchestrator::sub_step_count`)に従って
+/// フレームdt分進める。フィールドを個別の引数として受け取ることで、呼び出し側で
+/// `&mut self.<domain>` と `&mut self.rng`/`&mut self.events` の disjoint borrow が
+/// 同時に成立する(構造体メソッド越しだと借用チェッカに見えなくなるため、あえて自由関数
+/// にしている)。
+fn run_domain_substeps<S: Solver>(
+    solver: &mut S,
+    frame_dt: f64,
+    materials: &MaterialDb,
+    rng: &mut SimRng,
+    events: &mut EventQueue,
+) {
+    let n = orchestrator::sub_step_count(frame_dt, solver.max_stable_dt());
+    let sub_dt = orchestrator::sub_step_dt(frame_dt, n);
+    for _ in 0..n {
+        let mut ctx = SolverContext {
+            materials,
+            rng: &mut *rng,
+            events: &mut *events,
+        };
+        solver.step(sub_dt, &mut ctx);
+    }
+}
 
 impl World {
     pub fn new(options: WorldOptions) -> World {
@@ -214,35 +240,21 @@ impl World {
             self.ledger = Some(EnergyLedger::new(self.total_energy().total()));
         }
         let dt = self.clock.dt();
-        let mut ctx = SolverContext {
-            materials: &self.materials,
-            rng: &mut self.rng,
-            events: &mut self.events,
-        };
-        self.mechanics.step(dt, &mut ctx);
+        run_domain_substeps(
+            &mut self.mechanics,
+            dt,
+            &self.materials,
+            &mut self.rng,
+            &mut self.events,
+        );
         if let Some(t) = &mut self.thermal {
-            let mut ctx = SolverContext {
-                materials: &self.materials,
-                rng: &mut self.rng,
-                events: &mut self.events,
-            };
-            t.step(dt, &mut ctx);
+            run_domain_substeps(t, dt, &self.materials, &mut self.rng, &mut self.events);
         }
         if let Some(e) = &mut self.em_electrostatics {
-            let mut ctx = SolverContext {
-                materials: &self.materials,
-                rng: &mut self.rng,
-                events: &mut self.events,
-            };
-            e.step(dt, &mut ctx);
+            run_domain_substeps(e, dt, &self.materials, &mut self.rng, &mut self.events);
         }
         if let Some(a) = &mut self.astro {
-            let mut ctx = SolverContext {
-                materials: &self.materials,
-                rng: &mut self.rng,
-                events: &mut self.events,
-            };
-            a.step(dt, &mut ctx);
+            run_domain_substeps(a, dt, &self.materials, &mut self.rng, &mut self.events);
         }
         let _ = self.events.drain_sorted(); // Phase A: 購読者未実装のため排出のみ。
         let total = self.total_energy().total();
