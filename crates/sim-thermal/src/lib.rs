@@ -58,6 +58,7 @@ pub struct ThermalLink {
 }
 
 /// 熱ノード網ソルバ。設計 02-heat-transfer.md §4.3(陰的Euler + PCG、グラフラプラシアン)。
+#[derive(Clone)]
 pub struct ThermalSolver {
     pub nodes: Vec<ThermalNode>,
     pub links: Vec<ThermalLink>,

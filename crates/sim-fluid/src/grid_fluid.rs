@@ -10,15 +10,43 @@
 //! `u` は x面 $(ih,(j+\tfrac12)h)$、`v` は y面 $((i+\tfrac12)h,jh)$ に置く。周期境界のため
 //! 各成分の格子点数はセル数と同じ($n_x\times n_y$、境界の重複層を持たない)。
 
+use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::Vec3;
 
+/// 単一の矩形剛体をマスキング方式(cut-cell法ではない、`sim_fluid::GridFluidRigidBox2D`
+/// (X2)と同じ縮約手法)で格子に埋め込む。`sim_coupling::GridFluidRigid`(設計
+/// docs/20-integration/01-coupling-matrix.md §3「P3: 格子流体 ⇔ 剛体(ボクセル化境界・
+/// 圧力積分)」)が、`World`のmechanicsボディの位置・速度から毎stepこの値を書き換える。
+#[derive(Clone, Copy)]
+pub struct GridSolidBox {
+    pub center: (f64, f64),
+    pub half_width: f64,
+    pub half_height: f64,
+    pub velocity: Vec3,
+}
+
 /// 周期境界の2D格子流体。`u`・`v` は共に長さ `nx*ny`(staggered配置、モジュールdoc参照)。
+#[derive(Clone)]
 pub struct GridFluid2D {
     pub nx: usize,
     pub ny: usize,
     pub h: f64,
     pub u: Vec<f64>,
     pub v: Vec<f64>,
+    /// `Solver::step`が使う既定密度(既存の`project(dt, density)`は引数で個別指定可能、
+    /// このフィールドは`World`経由の自動ステップでのみ使われる)。
+    pub density: f64,
+    /// `Solver::step`が使う既定動粘性係数。0.0なら陽的粘性拡散をスキップする
+    /// (設計§4.3: 粘性が無視できるほど小さい場合の既定分岐)。
+    pub kinematic_viscosity: f64,
+    /// `GridFluidRigid`結合用の単一剛体マスク。`None`なら従来どおり完全周期境界
+    /// (既存の挙動に一切変更なし)。
+    pub solid: Option<GridSolidBox>,
+    /// 直近の`step`が投影した圧力場(`sim_coupling::GridFluidRigid`の圧力積分抽出専用、
+    /// `boundary_force`(`sph.rs`)と同じ理由でpub)。次の`step`呼び出しの冒頭で必ず
+    /// 上書きされる導出値(派生キャッシュ)のため、`state_hash`には含めない(スナップショット
+    /// 復元後も次の`step`で再計算されるので決定論に影響しない)。
+    pub last_pressure: Vec<f64>,
 }
 
 fn wrap(i: i64, n: usize) -> usize {
@@ -33,6 +61,10 @@ impl GridFluid2D {
             h,
             u: vec![0.0; nx * ny],
             v: vec![0.0; nx * ny],
+            density: 1.0,
+            kinematic_viscosity: 0.0,
+            solid: None,
+            last_pressure: vec![0.0; nx * ny],
         }
     }
 
@@ -101,6 +133,10 @@ impl GridFluid2D {
             h: self.h,
             u: old_u,
             v: old_v,
+            density: self.density,
+            kinematic_viscosity: self.kinematic_viscosity,
+            solid: self.solid,
+            last_pressure: self.last_pressure.clone(),
         };
 
         for j in 0..self.ny as i64 {
@@ -154,11 +190,101 @@ impl GridFluid2D {
         }
     }
 
+    fn is_solid_at(solid: &GridSolidBox, x: f64, y: f64) -> bool {
+        (x - solid.center.0).abs() < solid.half_width
+            && (y - solid.center.1).abs() < solid.half_height
+    }
+
+    /// 剛体内部(または面上)のセルの速度を剛体の速度に強制する(`GridFluidRigidBox2D`
+    /// (X2)と同じマスキング方式の縮約実装、設計 docs/11-fluid/02-eulerian-grid.md §6
+    /// 「剛体→流体」)。
+    fn apply_solid_mask(&mut self, solid: &GridSolidBox) {
+        for j in 0..self.ny as i64 {
+            for i in 0..self.nx as i64 {
+                let x = i as f64 * self.h;
+                let y = (j as f64 + 0.5) * self.h;
+                if Self::is_solid_at(solid, x, y) {
+                    let idx = self.idx(i, j);
+                    self.u[idx] = solid.velocity.x;
+                }
+            }
+        }
+        for j in 0..self.ny as i64 {
+            for i in 0..self.nx as i64 {
+                let x = (i as f64 + 0.5) * self.h;
+                let y = j as f64 * self.h;
+                if Self::is_solid_at(solid, x, y) {
+                    let idx = self.idx(i, j);
+                    self.v[idx] = solid.velocity.y;
+                }
+            }
+        }
+    }
+
+    /// 剛体表面の圧力積分による流体力(設計 docs/11-fluid/02-eulerian-grid.md §6
+    /// 「流体→剛体: 剛体表面セルの圧力を面積分」)。`self.solid`が`None`なら`None`を返す。
+    /// `x`・`y`成分とも、剛体を囲む4面(左右・上下)それぞれの圧力差を積分する
+    /// (`GridFluidRigidBox2D::pressure_force_on_box`は鉛直方向のみだったが、こちらは
+    /// 剛体が2自由度で自由運動できる一般結合のため両方向を計算する)。
+    pub fn pressure_force_on_solid(&self) -> Option<Vec3> {
+        let solid = self.solid?;
+        let nx = self.nx as i64;
+        let ny = self.ny as i64;
+
+        let mut i_min = None;
+        let mut i_max = None;
+        for i in 0..nx {
+            let x = (i as f64 + 0.5) * self.h;
+            if Self::is_solid_at(&solid, x, solid.center.1) {
+                i_min = Some(i_min.map_or(i, |m: i64| m.min(i)));
+                i_max = Some(i_max.map_or(i, |m: i64| m.max(i)));
+            }
+        }
+        let mut j_min = None;
+        let mut j_max = None;
+        for j in 0..ny {
+            let y = (j as f64 + 0.5) * self.h;
+            if Self::is_solid_at(&solid, solid.center.0, y) {
+                j_min = Some(j_min.map_or(j, |m: i64| m.min(j)));
+                j_max = Some(j_max.map_or(j, |m: i64| m.max(j)));
+            }
+        }
+        let (Some(i_min), Some(i_max), Some(j_min), Some(j_max)) = (i_min, i_max, j_min, j_max)
+        else {
+            return Some(Vec3::ZERO);
+        };
+        let i_left = i_min - 1;
+        let i_right = i_max + 1;
+        let j_below = j_min - 1;
+        let j_above = j_max + 1;
+
+        let mut fx = 0.0;
+        for j in j_min..=j_max {
+            let y = (j as f64 + 0.5) * self.h;
+            if (y - solid.center.1).abs() < solid.half_height {
+                let p_left = self.last_pressure[self.idx(i_left, j)];
+                let p_right = self.last_pressure[self.idx(i_right, j)];
+                fx += self.h * (p_left - p_right);
+            }
+        }
+        let mut fy = 0.0;
+        for i in i_min..=i_max {
+            let x = (i as f64 + 0.5) * self.h;
+            if (x - solid.center.0).abs() < solid.half_width {
+                let p_below = self.last_pressure[self.idx(i, j_below)];
+                let p_above = self.last_pressure[self.idx(i, j_above)];
+                fy += self.h * (p_below - p_above);
+            }
+        }
+        Some(Vec3::new(fx, fy, 0.0))
+    }
+
     /// 圧力投影(設計§4.4): ポアソン方程式 $\nabla^2p=\frac{\rho}{\Delta t}\nabla\cdot u^*$ を
     /// matrix-free PCGで解き、$u^{n+1}=u^*-\frac{\Delta t}{\rho}\nabla p$ を適用する。
     /// 周期境界ではラプラシアンが特異(定数関数が零空間)なため、右辺の平均をあらかじめ
-    /// 引いて可解性条件を満たす(標準的な周期ポアソン解法のテクニック)。
-    pub fn project(&mut self, dt: f64, density: f64) {
+    /// 引いて可解性条件を満たす(標準的な周期ポアソン解法のテクニック)。圧力場自体を返す
+    /// (`GridFluidRigid`の圧力積分抽出に使う、既存呼び出し元は戻り値を無視すればよい)。
+    pub fn project(&mut self, dt: f64, density: f64) -> Vec<f64> {
         let n = self.nx * self.ny;
         let mut rhs = vec![0.0; n];
         for j in 0..self.ny as i64 {
@@ -219,6 +345,103 @@ impl GridFluid2D {
                 let idx = wrap(i, self.nx) + self.nx * wrap(j, self.ny);
                 self.v[idx] -= scale * dpdy;
             }
+        }
+
+        pressure
+    }
+
+    /// 全格子点での速度の最大値(`max_stable_dt`の移流CFL項が使う)。
+    fn max_speed(&self) -> f64 {
+        let mut max_sq: f64 = 0.0;
+        for i in 0..self.u.len() {
+            let speed_sq = self.u[i] * self.u[i] + self.v[i] * self.v[i];
+            max_sq = max_sq.max(speed_sq);
+        }
+        max_sq.sqrt()
+    }
+
+    /// `Solver::step`が呼ぶ1ステップ分の処理(設計§4.6のステップまとめから、
+    /// このモジュールが実装する範囲——移流+粘性拡散+投影(+`solid`が設定されていれば
+    /// 剛体マスキング)——を抜き出したもの)。外力・煙/温度移流(§4.2, §4.6)はこの
+    /// 縮約実装の対象外。剛体マスクは投影の前後両方に適用する(`GridFluidRigidBox2D::step`
+    /// と同じ理由: 投影前に境界条件として与え、投影後に丸め誤差で漏れた分を再度矯正する)。
+    pub fn step(&mut self, dt: f64) {
+        self.advect_velocity(dt);
+        if self.kinematic_viscosity > 0.0 {
+            self.diffuse_explicit(dt, self.kinematic_viscosity);
+        }
+        if let Some(solid) = self.solid {
+            self.apply_solid_mask(&solid);
+        }
+        self.last_pressure = self.project(dt, self.density);
+        if let Some(solid) = self.solid {
+            self.apply_solid_mask(&solid);
+        }
+    }
+}
+
+impl Solver for GridFluid2D {
+    /// 設計§4.3の陽的粘性の安定限界 $\nu\Delta t/h^2 \le 0.25$ と、§4.6が定める
+    /// 移流のCFL規約(CFL≦5)の両方から決まる、より厳しい方を返す。半Lagrangian移流
+    /// 自体は無条件安定(§4.1)なのでCFL項は「妥当な補間精度を保つための目安」であり、
+    /// 厳密な安定限界ではないが、`Orchestrator`のsub-step決定に使う値として一貫させる。
+    fn max_stable_dt(&self) -> f64 {
+        const ADVECTION_CFL: f64 = 5.0;
+        let speed = self.max_speed();
+        let dt_adv = if speed > 0.0 {
+            ADVECTION_CFL * self.h / speed
+        } else {
+            f64::INFINITY
+        };
+        let dt_visc = if self.kinematic_viscosity > 0.0 {
+            0.25 * self.h * self.h / self.kinematic_viscosity
+        } else {
+            f64::INFINITY
+        };
+        dt_adv.min(dt_visc)
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        // inherent メソッド(1引数版、上の`impl GridFluid2D`ブロック)が同名のトレイト
+        // メソッドより優先されるため無限再帰しない(`sim_em::Circuit`・`SphFluid`と同じ
+        // パターン)。
+        self.step(dt);
+    }
+
+    /// 運動エネルギーのみ(非圧縮流は圧力によるポテンシャルエネルギーを持たず、
+    /// 外力由来のポテンシャルはこの縮約実装が外力自体を扱わないため対象外)。
+    fn total_energy(&self) -> EnergyBreakdown {
+        let cell_mass = self.density * self.h * self.h;
+        let mut kinetic = 0.0;
+        for i in 0..self.u.len() {
+            kinetic += 0.5 * cell_mass * (self.u[i] * self.u[i] + self.v[i] * self.v[i]);
+        }
+        EnergyBreakdown {
+            kinetic,
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.u.len() as u64);
+        for i in 0..self.u.len() {
+            hasher.write_f64(self.u[i]);
+            hasher.write_f64(self.v[i]);
+        }
+        // `solid`は次stepの挙動に影響する状態(`last_pressure`と異なり、次stepの冒頭で
+        // 再計算される派生値ではない)なのでハッシュに含める(決定論replayの一部)。
+        match self.solid {
+            Some(solid) => {
+                hasher.write_u64(1);
+                hasher.write_f64(solid.center.0);
+                hasher.write_f64(solid.center.1);
+                hasher.write_f64(solid.half_width);
+                hasher.write_f64(solid.half_height);
+                hasher.write_f64(solid.velocity.x);
+                hasher.write_f64(solid.velocity.y);
+                hasher.write_f64(solid.velocity.z);
+            }
+            None => hasher.write_u64(0),
         }
     }
 }
@@ -329,5 +552,144 @@ mod tests {
             rel_err < 0.05,
             "measured_rate={measured_rate:.6} analytic_rate={analytic_rate:.6} rel_err={rel_err:.4}"
         );
+    }
+
+    /// `Solver`トレイト統合: `max_stable_dt`が粘性・移流双方の安定限界の厳しい方を
+    /// 返し、`Solver::step`経由でも`step(dt)`と同じ状態遷移になること。
+    #[test]
+    fn solver_trait_max_stable_dt_reflects_viscous_and_advective_limits_and_step_advances_state() {
+        let nx = 8;
+        let ny = 8;
+        let h = 1.0 / nx as f64;
+        let mut fluid = GridFluid2D::new(nx, ny, h);
+        fluid.kinematic_viscosity = 0.2;
+        fluid.u[0] = 3.0;
+
+        let expected_visc = 0.25 * h * h / fluid.kinematic_viscosity;
+        let expected_adv = 5.0 * h / 3.0;
+        let expected = expected_visc.min(expected_adv);
+        assert!(
+            (fluid.max_stable_dt() - expected).abs() < 1e-12,
+            "max_stable_dt={} expected={}",
+            fluid.max_stable_dt(),
+            expected
+        );
+
+        let mut via_step = fluid.clone();
+        via_step.step(0.001);
+
+        let mut via_trait = fluid.clone();
+        let materials = sim_core::MaterialDb::standard();
+        let mut rng = sim_math::SimRng::new(1, 1);
+        let mut events = sim_core::EventQueue::new();
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        Solver::step(&mut via_trait, 0.001, &mut ctx);
+
+        assert_eq!(via_step.u, via_trait.u);
+        assert_eq!(via_step.v, via_trait.v);
+    }
+
+    /// 静止状態(速度ゼロ・粘性ゼロ)では移流・拡散いずれも安定限界を持たないため
+    /// `max_stable_dt`は`INFINITY`(`Orchestrator::sub_step_count`はこれを1に解釈する)。
+    #[test]
+    fn solver_trait_max_stable_dt_is_infinite_at_rest_with_no_viscosity() {
+        let fluid = GridFluid2D::new(8, 8, 0.1);
+        assert_eq!(fluid.max_stable_dt(), f64::INFINITY);
+    }
+
+    /// `solid`が`None`なら`pressure_force_on_solid`は`None`(`GridFluidRigid`結合の
+    /// ボディ非存在ガードが依拠する)。
+    #[test]
+    fn pressure_force_on_solid_is_none_without_a_solid() {
+        let fluid = GridFluid2D::new(8, 8, 0.5);
+        assert!(fluid.pressure_force_on_solid().is_none());
+    }
+
+    /// `pressure_force_on_solid`の面積分の配線を、既知の(手で設定した)圧力場で
+    /// 決定論的に検証する(`SphRigid`実装検証時に確立したパターン: 圧力場自体の物理的
+    /// 妥当性は`GridFluidRigidBox2D`(X2)の既存テストが別途担うので、ここでは
+    /// このメソッド自身の面積分ロジックだけを検算する)。p(i,j)=3i+2jという(非物理的だが)
+    /// 既知の線形場を与え、剛体を囲む4面の圧力差積分を手計算した期待値と比較する。
+    #[test]
+    fn pressure_force_on_solid_integrates_a_known_linear_pressure_field() {
+        let nx = 8;
+        let ny = 8;
+        let h = 0.5;
+        let mut fluid = GridFluid2D::new(nx, ny, h);
+        for j in 0..ny as i64 {
+            for i in 0..nx as i64 {
+                let idx = (i as usize) + nx * (j as usize);
+                fluid.last_pressure[idx] = 3.0 * i as f64 + 2.0 * j as f64;
+            }
+        }
+        // box_center=(2.0,2.0), half=0.75 => セル中心 x=1.75,2.25 (i=3,4) が箱内、
+        // i_left=2, i_right=5(y方向も同型でj_below=2, j_above=5)。
+        fluid.solid = Some(GridSolidBox {
+            center: (2.0, 2.0),
+            half_width: 0.75,
+            half_height: 0.75,
+            velocity: Vec3::ZERO,
+        });
+
+        let force = fluid.pressure_force_on_solid().expect("solid is set");
+        assert!(
+            (force.x - (-9.0)).abs() < 1e-9,
+            "force.x={} expected=-9.0",
+            force.x
+        );
+        assert!(
+            (force.y - (-6.0)).abs() < 1e-9,
+            "force.y={} expected=-6.0",
+            force.y
+        );
+        assert_eq!(force.z, 0.0);
+    }
+
+    /// `step`は`solid`が設定されている間、投影の前後どちらでもマスク領域内のセルを
+    /// 厳密に剛体速度へ強制する(投影後に再度マスクをかけ直す、`GridFluidRigidBox2D::step`
+    /// と同じ理由: 丸め誤差で漏れた分を再矯正する)。マスク外のセルは通常どおり移流・
+    /// 投影の影響を受ける(この一様流の場合、境界近傍のセルはマスクされた剛体速度からの
+    /// 圧力反力を受けて非零になり得る)。
+    #[test]
+    fn step_forces_masked_cells_to_the_solid_velocity_exactly() {
+        let nx = 8;
+        let ny = 8;
+        let h = 0.5;
+        let mut fluid = GridFluid2D::new(nx, ny, h);
+        for i in 0..fluid.u.len() {
+            fluid.u[i] = 0.3;
+        }
+        let solid_velocity = Vec3::new(1.5, -2.0, 0.0);
+        fluid.solid = Some(GridSolidBox {
+            center: (2.0, 2.0),
+            half_width: 0.75,
+            half_height: 0.75,
+            velocity: solid_velocity,
+        });
+
+        fluid.step(0.001);
+
+        for j in 0..ny as i64 {
+            for i in 0..=nx as i64 {
+                let x = i as f64 * h;
+                let y = (j as f64 + 0.5) * h;
+                if (x - 2.0).abs() < 0.75 && (y - 2.0).abs() < 0.75 {
+                    assert_eq!(fluid.u_at(i, j), solid_velocity.x);
+                }
+            }
+        }
+        for j in 0..=ny as i64 {
+            for i in 0..nx as i64 {
+                let x = (i as f64 + 0.5) * h;
+                let y = j as f64 * h;
+                if (x - 2.0).abs() < 0.75 && (y - 2.0).abs() < 0.75 {
+                    assert_eq!(fluid.v_at(i, j), solid_velocity.y);
+                }
+            }
+        }
     }
 }

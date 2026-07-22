@@ -7,12 +7,16 @@
 //! (docs/22-roadmap/01-phases.md P1/P2 ウェーブ)。
 
 use crate::body::{BodyType, DragModel, RigidBodySet};
-use crate::joint::{BallJoint, DistanceJoint};
+use crate::joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint};
 use crate::shape::Shape;
 use crate::{ccd, collision, contact, joint, sleep, RigidBodyDesc};
-use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
+use sim_core::{
+    EnergyBreakdown, Event, EventKind, MaterialDb, Solver, SolverContext, SourceId, StateHasher,
+};
 use sim_fluid::{Atmosphere, StaticWaterRegion};
+use std::collections::HashSet;
 
+#[derive(Clone)]
 pub struct MechanicsSolver {
     pub bodies: RigidBodySet,
     /// 重力加速度(下向き、m/s^2)。既定 9.80665(docs/00-foundation/03-units-conventions.md)。
@@ -35,6 +39,35 @@ pub struct MechanicsSolver {
     pub joints: Vec<DistanceJoint>,
     /// Ball ジョイント一覧(設計 docs/10-mechanics/05-joints-constraints.md §3)。
     pub ball_joints: Vec<BallJoint>,
+    /// Slider ジョイント一覧(設計 §4.4表「Slider」、`joint`モジュールdoc参照)。
+    pub slider_joints: Vec<SliderJoint>,
+    /// PD位置サーボ付きヒンジモーター一覧(設計 §4.5、`joint`モジュールdoc参照)。
+    pub hinge_motors: Vec<HingeMotorPd>,
+    /// 直近stepの接触解決(摩擦+反発)による運動エネルギー散逸量(設計
+    /// docs/20-integration/01-coupling-matrix.md `DissipationToHeat`が読む、
+    /// `sim-coupling`クレートのdoc参照)。接触解決の直前直後の運動エネルギー差分として
+    /// 測定する(位置は変化しないためポテンシャルエネルギーは不変、速度の変化のみを見れば
+    /// 十分)。抗力による散逸は含まない(抗力は保存力(重力)と共に`apply_forces`で積分
+    /// されるため、この測定窓では分離できない。後続増分で抗力の仕事を個別に計測して追加
+    /// する)。0にクランプしない — Baumgarte安定化・warm startingは稀に1step内で微小に
+    /// 運動エネルギーを増やすことがある(PGS系接触ソルバの既知の数値アーティファクト、
+    /// 物理的な現象ではない)ため、クランプすると増加分を無視し減少分だけ計上する系統的な
+    /// 片側バイアスになる。実装検証中の発見: それでもなお、10秒・1200stepの滑走→静止
+    /// シナリオでは、この量の累積和が実際の力学的エネルギー総損失(区間の`total_energy()`
+    /// の差)より約9%大きいことを確認した — 原因は、Baumgarte位置誤差補正がこの
+    /// (`contact::resolve()`呼び出し前後のみの)測定窓では運動エネルギー変化として
+    /// 現れる一方、その補正効果は次stepの位置積分にも影響し、測定窓の外側で部分的に
+    /// 打ち消されるため、前後差分の単純な累積が系統的に過大評価になること(PGS+
+    /// Baumgarteソルバの既知の限界であり、クランプの有無では解決しない)。根本修正
+    /// (Baumgarteのバイアス速度分を測定から除外する等)は接触ソルバへの踏み込んだ変更を
+    /// 要するため本増分では見送り、`sim-coupling::DissipationToHeat`の受け入れテスト側で
+    /// この系統誤差を踏まえた許容誤差(rel<15%)を設定して対応する。
+    pub last_contact_dissipation: f64,
+    /// 直近stepで検出された接触ペア(`(body_a, body_b)`、`ContactManifold`と同じ正規化
+    /// 順序)。今stepの検出結果との差分から`EventKind::ContactStarted`/`ContactEnded`
+    /// (設計docs/00-foundation/04-architecture.md §1.1.2(5))を`ctx.events`へ発行する
+    /// (`World`最初のイベント生産者、`subscribe`/`drain_events`のdoc参照)。
+    contact_pairs: HashSet<(usize, usize)>,
 }
 
 impl MechanicsSolver {
@@ -49,6 +82,10 @@ impl MechanicsSolver {
             axis_cache: collision::AxisCache::new(),
             joints: Vec::new(),
             ball_joints: Vec::new(),
+            slider_joints: Vec::new(),
+            hinge_motors: Vec::new(),
+            last_contact_dissipation: 0.0,
+            contact_pairs: HashSet::new(),
         }
     }
 
@@ -62,6 +99,14 @@ impl MechanicsSolver {
 
     pub fn add_ball_joint(&mut self, joint: BallJoint) {
         self.ball_joints.push(joint);
+    }
+
+    pub fn add_slider_joint(&mut self, joint: SliderJoint) {
+        self.slider_joints.push(joint);
+    }
+
+    pub fn add_hinge_motor(&mut self, motor: HingeMotorPd) {
+        self.hinge_motors.push(motor);
     }
 
     /// 設計 §4 パイプラインの `apply_forces`。P1 スコープ: 重力 + 球の抗力
@@ -160,6 +205,37 @@ impl MechanicsSolver {
             self.bodies.body_type[m.body_b] == BodyType::Dynamic && !self.bodies.asleep[m.body_b];
         a_awake_dynamic || b_awake_dynamic
     }
+
+    /// 前stepの接触ペア集合との差分から`ContactStarted`/`ContactEnded`イベントを
+    /// `ctx.events`へ発行する(`contact_pairs`フィールドdoc参照)。`Event::step`は
+    /// このソルバがワールド全体のstep_countを知らないため`0`で埋め、呼び出し側
+    /// (`World::step`)がイベント排出時に正しい値へ上書きする(設計上の全体順序は
+    /// 「同一stepの排出集合」として保たれるため、ここでは各イベントに一貫した
+    /// プレースホルダを入れておけば十分)。
+    fn emit_contact_events(
+        &mut self,
+        manifolds: &[collision::ContactManifold],
+        ctx: &mut SolverContext,
+    ) {
+        let current_pairs: HashSet<(usize, usize)> =
+            manifolds.iter().map(|m| (m.body_a, m.body_b)).collect();
+        let source_id = |a: usize, b: usize| SourceId(((a as u64) << 32) | b as u64);
+        for &(a, b) in current_pairs.difference(&self.contact_pairs) {
+            ctx.events.push(Event {
+                step: 0,
+                source: source_id(a, b),
+                kind: EventKind::ContactStarted,
+            });
+        }
+        for &(a, b) in self.contact_pairs.difference(&current_pairs) {
+            ctx.events.push(Event {
+                step: 0,
+                source: source_id(a, b),
+                kind: EventKind::ContactEnded,
+            });
+        }
+        self.contact_pairs = current_pairs;
+    }
 }
 
 impl Solver for MechanicsSolver {
@@ -171,11 +247,14 @@ impl Solver for MechanicsSolver {
 
     fn step(&mut self, dt: f64, ctx: &mut SolverContext) {
         self.apply_forces();
+        joint::apply_hinge_motors(&self.hinge_motors, &mut self.bodies, dt);
         self.integrate_velocities(dt);
         // 処理順「ジョイント→接触」(設計 docs/10-mechanics/05-joints-constraints.md §4.1)。
         joint::resolve_distance(&self.joints, &mut self.bodies, dt);
         joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
+        joint::resolve_slider(&self.slider_joints, &mut self.bodies, dt);
         let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
+        self.emit_contact_events(&manifolds, ctx);
         // 両側の dynamic body が全て asleep な接触は再解決しない(収束済みで変化が無いのに
         // 毎ステップ再解決すると warm start・split impulse の数値的な揺らぎで再起床してしまう
         // ことを実装検証中に発見した — 「積分を停止」だけでは不十分で、接触解決自体も
@@ -185,6 +264,7 @@ impl Solver for MechanicsSolver {
             .filter(|m| self.manifold_is_active(m))
             .cloned()
             .collect();
+        let ke_before_contact = self.total_energy().kinetic;
         contact::resolve(
             &active_manifolds,
             &mut self.bodies,
@@ -192,6 +272,13 @@ impl Solver for MechanicsSolver {
             self.restitution_velocity_threshold,
             &mut self.contact_cache,
         );
+        let ke_after_contact = self.total_energy().kinetic;
+        debug_assert!(
+            ke_after_contact <= ke_before_contact + 1e-6 * ke_before_contact.max(1.0),
+            "contact resolution must not increase kinetic energy beyond numerical noise: \
+             before={ke_before_contact} after={ke_after_contact}"
+        );
+        self.last_contact_dissipation = ke_before_contact - ke_after_contact;
         // 接触解決後(post-solve)の速度で静止判定する(解決前は重力積分直後でまだ抗力が
         // 相殺していないため静止判定に使えない)。島判定には(スキップした分も含め)
         // 全マニフォールドを使う。
@@ -248,7 +335,7 @@ mod tests {
     use super::*;
     use crate::shape::Shape;
     use sim_core::{EventQueue, MaterialDb};
-    use sim_math::{SimRng, Vec3};
+    use sim_math::{Quat, SimRng, Vec3};
 
     fn make_ctx<'a>(
         materials: &'a MaterialDb,
@@ -361,5 +448,232 @@ mod tests {
             hasher.finish()
         };
         assert_eq!(run(), run());
+    }
+
+    /// エンティティ層の受け入れテスト(docs/20-integration/03-entity-layer.md §7
+    /// 「静的姿勢維持: 関節PDのみで外乱なしのしゃがみ姿勢を60秒維持(転倒しない、
+    /// 関節角ドリフト<5°)」)。倒立平衡(バランス制御)を含まない設計の指示どおり、
+    /// 完全な15剛体の人体骨格ではなく、ワールド固定ピボット(股関節)に`BallJoint`で
+    /// 繋がれた単一の脚リンクが、地面(`Plane`)に足先で接地しつつ`HingeMotorPd`が
+    /// 45°のしゃがみ角を保持する縮約構成(モジュールdocの`joint::HingeMotorPd`参照)で
+    /// 検証する — 「関節PD × 接触ソルバの結合」という設計が明記する検証対象そのものは、
+    /// この縮約構成でも(ピボット+接地の両方が同時に働くため)保たれる。設計§4.5既定の
+    /// PDゲイン(kp=20 s⁻¹, kd=2)をそのまま使用したところ、60秒間の最大ドリフトは
+    /// 約3.8°(基準5°以内)、足先接地点は地面にめり込まず(min_tip_yが正、接触ソルバが
+    /// 支えている)であることを実装検証中に確認した。
+    #[test]
+    fn entity_layer_hinge_motor_maintains_crouch_pose_for_60s_with_ground_contact() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(3, 3);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            steel,
+        );
+        ground.body_type = BodyType::Static;
+        solver.create_body(ground, &materials);
+
+        let theta_target = std::f64::consts::FRAC_PI_4; // 45°(しゃがみ角)
+        let half_extents = Vec3::new(0.05, 0.4, 0.05);
+        let anchor_local_top = Vec3::new(0.0, half_extents.y, 0.0);
+        let anchor_local_bottom = Vec3::new(0.0, -half_extents.y, 0.0);
+        let rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), theta_target);
+
+        // 45°姿勢で足先(anchor_local_bottom)がちょうど地面(y=0)に接地するようピボットを選ぶ
+        // (プログラム的に算出、手計算の符号取り違えを避ける)。
+        let bottom_offset_from_pivot =
+            rotation.rotate(anchor_local_bottom) - rotation.rotate(anchor_local_top);
+        let pivot = Vec3::new(0.0, -bottom_offset_from_pivot.y, 0.0);
+        let body_center = pivot - rotation.rotate(anchor_local_top);
+
+        let mut leg_desc = RigidBodyDesc::dynamic(Shape::Box { half_extents }, steel);
+        leg_desc.transform.position = body_center;
+        leg_desc.transform.rotation = rotation;
+        leg_desc.mass_override = Some(5.0);
+        let leg = solver.create_body(leg_desc, &materials);
+
+        solver.add_ball_joint(BallJoint {
+            body_a: leg,
+            anchor_a: anchor_local_top,
+            body_b: None,
+            anchor_b: pivot,
+            disabled: false,
+        });
+        solver.add_hinge_motor(HingeMotorPd {
+            body: leg,
+            axis: Vec3::new(0.0, 0.0, 1.0),
+            reference_rotation: Quat::IDENTITY,
+            theta_target,
+            kp: 20.0,
+            kd: 2.0,
+            torque_max: 50.0,
+        });
+
+        let dt = 1.0 / 120.0;
+        let steps = 60 * 120;
+        let mut max_drift: f64 = 0.0;
+        let mut min_tip_y: f64 = f64::INFINITY;
+        for _ in 0..steps {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+
+            assert!(
+                solver.bodies.position[leg].x.is_finite()
+                    && solver.bodies.position[leg].y.is_finite()
+                    && solver.bodies.position[leg].z.is_finite(),
+                "solver diverged: position={:?}",
+                solver.bodies.position[leg]
+            );
+
+            let theta = solver.hinge_motors[0].measure_angle(&solver.bodies);
+            max_drift = max_drift.max((theta - theta_target).abs());
+
+            let tip = solver.bodies.position[leg]
+                + solver.bodies.rotation[leg].rotate(anchor_local_bottom);
+            min_tip_y = min_tip_y.min(tip.y);
+        }
+
+        let max_drift_deg = max_drift.to_degrees();
+        assert!(
+            max_drift_deg < 5.0,
+            "joint angle drift too large: {max_drift_deg:.3} deg"
+        );
+        assert!(
+            min_tip_y > -0.02,
+            "foot penetrated the ground beyond contact slop: min_tip_y={min_tip_y:.5}"
+        );
+    }
+
+    /// `SliderJoint`(設計 §4.4「Slider | 5 | 軸直交並進2 + 相対回転固定3」)の受け入れ:
+    /// ワールドx軸に沿って自由に滑る「ピストンロッド」(ワールド固定シリンダー、
+    /// `body_b=None`)が、(1)重力下でも軸に直交するy/zへ落下・ドリフトしない
+    /// (直交並進2行が拘束)、(2)姿勢が生成時の基準(恒等回転)から傾かない
+    /// (相対回転固定3行が拘束)、(3)軸方向(x)には初速のまま自由に(抵抗なく)進み続ける
+    /// (拘束されない1自由度)ことを確認する — 断熱圧縮の`PistonGas`結合が前提とする
+    /// 「シリンダー壁は軸直交方向・回転を拘束し、軸方向のみ自由」という構成そのもの。
+    #[test]
+    fn slider_joint_constrains_perpendicular_translation_and_rotation_but_frees_the_axis() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(11, 11);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        desc.linear_velocity = Vec3::new(2.0, 0.0, 0.0);
+        let piston = solver.create_body(desc, &materials);
+
+        solver.add_slider_joint(SliderJoint::new(
+            &solver.bodies,
+            piston,
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            None,
+            Vec3::ZERO,
+        ));
+
+        let dt = 1.0 / 120.0;
+        let steps = 240; // 2秒: 軸方向に2.0*2.0=4.0m進む間の直交ドリフト/姿勢ドリフトを見る
+        let mut max_perp: f64 = 0.0;
+        let mut max_tilt_deg: f64 = 0.0;
+        for _ in 0..steps {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            let pos = solver.bodies.position[piston];
+            max_perp = max_perp.max(pos.y.abs()).max(pos.z.abs());
+            let rot = solver.bodies.rotation[piston];
+            // 恒等回転からの角度 = 2*acos(|w|)(最短経路、二重被覆を考慮)。
+            let tilt = 2.0 * rot.w.abs().min(1.0).acos();
+            max_tilt_deg = max_tilt_deg.max(tilt.to_degrees());
+        }
+
+        assert!(
+            max_perp < 0.01,
+            "slider should not drift perpendicular to its axis under gravity: max_perp={max_perp:.5}"
+        );
+        assert!(
+            max_tilt_deg < 1.0,
+            "slider should not rotate relative to its fixed reference orientation: max_tilt_deg={max_tilt_deg:.3}"
+        );
+        let expected_x = 2.0 * (steps as f64 * dt);
+        let actual_x = solver.bodies.position[piston].x;
+        assert!(
+            (actual_x - expected_x).abs() / expected_x < 0.01,
+            "slider's free axis should move ballistically at the initial velocity: actual_x={actual_x} expected_x={expected_x}"
+        );
+    }
+
+    /// 接触イベント(`emit_contact_events`、`World`最初のイベント生産者、設計
+    /// docs/00-foundation/04-architecture.md §1.1.2(5))。反発係数の高い球を落下させ、
+    /// 着地時に`ContactStarted`が、跳ね上がって離れた時に`ContactEnded`が
+    /// (前stepとの接触ペア集合の差分として)発行されることを確認する。
+    #[test]
+    fn bouncing_ball_emits_contact_started_and_ended_events() {
+        let mut materials = MaterialDb::standard();
+        let bouncy = materials.push(sim_core::Material {
+            name: "test-bouncy-for-contact-events",
+            density: 1000.0,
+            friction: 0.0,
+            restitution: 0.8,
+            youngs_modulus: None,
+            specific_heat: 1000.0,
+            conductivity: 1.0,
+            emissivity: 0.5,
+            melting: None,
+            resistivity: None,
+            relative_permittivity: 1.0,
+            refractive_index: None,
+            source: "test fixture",
+            uncertainty: 0.0,
+        });
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        solver.restitution_velocity_threshold = 0.0;
+        let mut floor = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            bouncy,
+        );
+        floor.body_type = BodyType::Static;
+        solver.create_body(floor, &materials);
+
+        let mut ball_desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.5 }, bouncy);
+        ball_desc.transform.position = Vec3::new(0.0, 2.0, 0.0);
+        solver.create_body(ball_desc, &materials);
+
+        let dt = 1.0 / 120.0;
+        let mut started_count = 0;
+        let mut ended_count = 0;
+        for _ in 0..300 {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            for e in events.drain_sorted() {
+                match e.kind {
+                    sim_core::EventKind::ContactStarted => started_count += 1,
+                    sim_core::EventKind::ContactEnded => ended_count += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(
+            started_count >= 1,
+            "should observe at least one ContactStarted when the ball lands"
+        );
+        assert!(
+            ended_count >= 1,
+            "should observe at least one ContactEnded when the ball bounces back up"
+        );
     }
 }

@@ -1,10 +1,46 @@
 //! ドメイン間結合行列・排他結合の静的検査。設計: docs/20-integration/01-coupling-matrix.md。
 //!
-//! Phase Cスコープの縮約実装: シーン設定における排他結合(同じ物理を2経路で計算しない、
-//! 設計§2規則2)の静的検査のみを実装する。結合行列本体の各Coupling実装(`BuoyancyDrag`・
-//! `GridFluidRigid`等、設計§3)・sub-iteration剛性閾値表(設計§2規則3)は、`World`/各
-//! ドメインSolverの統合を待つため未実装(Phase A型スケルトンも導入していない — 本crateは
-//! これまで空だったため、実装可能な範囲から先に実体を持たせた)。
+//! シーン設定における排他結合(同じ物理を2経路で計算しない、設計§2規則2)の静的検査
+//! (`validate_exclusive_couplings`)に加え、`Coupling`トレイト + `DomainStates`
+//! (設計docs/00-foundation/04-architecture.md §1.3「保存量の橋」、`domain_states`
+//! モジュールdoc参照)と、具体的な実装12種(`DissipationToHeat`・`JouleHeat`・
+//! `BrownianForce`・`LorentzForce`・`InductionCoupling`・`MotorCoupling`・`PistonGas`・
+//! `BoussinesqBuoyancy`・`ConvectionLink`・`SphRigid`・`GridFluidRigid`・
+//! `ImageChargeForce`、各モジュールdoc参照)を実装する。これで設計§3が挙げる元の12種の
+//! Couplingのうち11種(`BuoyancyDrag`を除く全て)+ D26「帯電風船」向けに設計
+//! docs/13-electromagnetism/01-electrostatics-magnetostatics.md §2が別途要求する
+//! 「鏡像力」である追加実装の`ImageChargeForce`が出揃った。残る`BuoyancyDrag`(既存の
+//! `MechanicsSolver`埋め込み実装の切り出しリスクで別枠)・sub-iteration剛性閾値表
+//! (設計§2規則3、`GridFluidRigid`自身は現状固定的な単一適用で、`sim_fluid::
+//! GridFluidRigidBox2D`(X2)が持つ閾値ベースのsub-iteration機構までは踏襲していない)は
+//! 後続増分で追加する。
+
+mod boussinesq_buoyancy;
+mod brownian_force;
+mod convection_link;
+mod dissipation_to_heat;
+mod domain_states;
+mod grid_fluid_rigid;
+mod image_charge_force;
+mod induction_coupling;
+mod joule_heat;
+mod lorentz_force;
+mod motor_coupling;
+mod piston_gas;
+mod sph_rigid;
+pub use boussinesq_buoyancy::BoussinesqBuoyancy;
+pub use brownian_force::BrownianForce;
+pub use convection_link::ConvectionLink;
+pub use dissipation_to_heat::DissipationToHeat;
+pub use domain_states::{Coupling, DomainStates};
+pub use grid_fluid_rigid::GridFluidRigid;
+pub use image_charge_force::ImageChargeForce;
+pub use induction_coupling::InductionCoupling;
+pub use joule_heat::JouleHeat;
+pub use lorentz_force::LorentzForce;
+pub use motor_coupling::MotorCoupling;
+pub use piston_gas::PistonGas;
+pub use sph_rigid::SphRigid;
 
 /// シーンの結合設定(設計§2規則2が列挙する3組の排他結合、設定は各ドメインシーンJSON相当)。
 #[derive(Clone, Copy, Debug, Default)]

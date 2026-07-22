@@ -7,6 +7,7 @@
 
 /// residual(t) = |E_total(t) - E_total(0) - W_injected(t)| / max(E_scale, |E_total(0)|)
 /// (docs/21-verification/02-conservation-laws.md §2)。
+#[derive(Clone)]
 pub struct EnergyLedger {
     initial_energy: f64,
     injected_work: f64,

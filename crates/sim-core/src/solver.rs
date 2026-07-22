@@ -98,7 +98,7 @@ fn event_order_key(e: &Event) -> (u64, u64, u8) {
 
 /// イベントの一時保管。ステップ末尾でまとめて全順序化して配送する
 /// (docs/00-foundation/04-architecture.md §3「イベントは push 型」)。
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct EventQueue {
     pending: Vec<Event>,
 }

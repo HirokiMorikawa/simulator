@@ -24,6 +24,12 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test (全ドメインの解析解テスト・決定論テスト)
         run: cargo test --workspace
+      - name: cargo bench --test (ホットパスベンチの動作確認、性能ベンチ回帰ゲートの前段)
+        # `--test`は統計的サンプリングをせず1回だけ実行してパニックしないことのみ
+        # 検証する(高速・CI向け)。実測値の履歴比較による真の回帰検知は、ベースライン
+        # 永続化の仕組み(直近mainブランチの実行結果をキャッシュ/アーティファクト化
+        # する等)が未導入のため後続増分(docs/22-roadmap/02-feature-checklist.md参照)。
+        run: cargo bench --workspace -- --test
 
   wasm:
     name: wasm-pack build (sim-wasm)

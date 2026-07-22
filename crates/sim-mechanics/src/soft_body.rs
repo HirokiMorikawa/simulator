@@ -8,6 +8,7 @@
 use sim_math::Vec3;
 
 /// 距離拘束(設計 §2.2)。`lambda` は XPBD の累積ラグランジュ乗数(各サブステップ冒頭で0に戻す)。
+#[derive(Clone)]
 pub struct DistanceConstraint {
     pub i: usize,
     pub j: usize,
@@ -23,6 +24,7 @@ pub const DEFAULT_ITERATIONS: u32 = 2;
 pub const DEFAULT_DAMPING: f64 = 0.1;
 
 /// 設計 §3 `SoftBody`。粒子集合 + 距離拘束。`inv_mass=0` はピン留め(固定点)。
+#[derive(Clone)]
 pub struct SoftBody {
     pub position: Vec<Vec3>,
     pub prev_position: Vec<Vec3>,
