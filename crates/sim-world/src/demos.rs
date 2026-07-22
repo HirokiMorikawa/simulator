@@ -1020,6 +1020,83 @@ mod tests {
         );
     }
 
+    /// D26 帯電風船(docs/21-verification/03-demo-scenarios.md Phase 4表)。
+    /// 「こすって壁につける」「合格基準: 鏡像力の定性 + 逆二乗の測定」。設計
+    /// docs/13-electromagnetism/01-electrostatics-magnetostatics.md §2が明記する
+    /// 鏡像力の近似式($F=-q^2/(16\pi\varepsilon_0 d^2)$、平板近傍の点電荷、風船が壁に
+    /// 貼りつくデモ用に限定提供)を新規実装した`sim_coupling::ImageChargeForce`で、
+    /// 帯電した風船(球剛体)が垂直な壁(平面、法線=x軸)に引き寄せられて実際に到達する
+    /// (定性)ことと、離れた位置ほど引力が弱まる逆二乗則(2倍の距離で1/4の初期加速度)を
+    /// 確認する。
+    #[test]
+    fn d26_charged_balloon_sticks_to_wall_via_image_charge_force_matching_inverse_square_law() {
+        let charge = 1.0e-7; // 摩擦帯電した風船オーダー
+        let wall_normal = Vec3::new(1.0, 0.0, 0.0);
+
+        // 定性: 壁から離れた位置で静止(初速ゼロ)させた帯電風船(軽量な発泡材、実際の
+        // ゴム風船オーダーの質量に近づける)が、鏡像力のみ(重力なし・空気抵抗なし)で
+        // 壁(x=0)へ実際に引き寄せられて到達すること。
+        let mut world = World::new(WorldOptions {
+            gravity: 0.0,
+            ..WorldOptions::default()
+        });
+        let foam = foam_material(&mut world, "test-d26-balloon");
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.02 }, foam);
+        desc.transform.position = Vec3::new(0.2, 0.0, 0.0);
+        let balloon = world.create_body(desc);
+        world.add_coupling(Box::new(sim_coupling::ImageChargeForce {
+            body_index: balloon.index as usize,
+            charge,
+            plane_normal: wall_normal,
+            plane_d: 0.0,
+        }));
+
+        let mut reached_wall = false;
+        for _ in 0..6000 {
+            world.step();
+            if world.body_position(balloon).unwrap().x <= 0.03 {
+                reached_wall = true;
+                break;
+            }
+        }
+        assert!(
+            reached_wall,
+            "D26 pass criterion (image charge qualitative): charged balloon should be pulled \
+             to the wall by the image charge force"
+        );
+
+        // 逆二乗則: 初期距離を2倍にすると初期加速度(=1step目の速度変化/dt)は1/4になる。
+        let initial_acceleration_at = |initial_x: f64| -> f64 {
+            let mut world = World::new(WorldOptions {
+                gravity: 0.0,
+                ..WorldOptions::default()
+            });
+            let rubber = world.materials().find_by_name("木材(松)").unwrap();
+            let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.01 }, rubber);
+            desc.transform.position = Vec3::new(initial_x, 0.0, 0.0);
+            let balloon = world.create_body(desc);
+            world.add_coupling(Box::new(sim_coupling::ImageChargeForce {
+                body_index: balloon.index as usize,
+                charge,
+                plane_normal: wall_normal,
+                plane_d: 0.0,
+            }));
+            let dt = WorldOptions::default().dt;
+            world.step();
+            world.body_velocity(balloon).unwrap().x / dt
+        };
+
+        let a_near = initial_acceleration_at(0.1);
+        let a_far = initial_acceleration_at(0.2);
+        let ratio = a_near / a_far;
+        let rel_err = (ratio - 4.0).abs() / 4.0;
+        assert!(
+            rel_err < 1e-6,
+            "D26 pass criterion (inverse square): doubling distance should quarter the initial \
+             acceleration: a_near={a_near} a_far={a_far} ratio={ratio}"
+        );
+    }
+
     /// D34 太陽系儀(docs/21-verification/03-demo-scenarios.md Pα表)。「8惑星の公転、
     /// 会合周期、時間加速スライダー」「合格基準: A1(ケプラー第3法則)、A2(保存)、
     /// 時間加速の切替を跨ぐリプレイ一致」。天体ドメイン(`sim_astro::NBodySystem`)は
