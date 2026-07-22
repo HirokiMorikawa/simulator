@@ -614,10 +614,22 @@
   保存則residualゲートとして既に機能していると判断し、チェックリストの該当項目を
   実装済みに更新した(新規コード変更は無し、状況確認とチェックリスト訂正のみ)。
   性能ベンチ回帰ゲートのみ、`criterion`ベンチ自体が未導入のため引き続き未実装。
+  続けて性能ベンチ回帰CIゲート(設計docs/00-foundation/05-rust-wasm-platform.md §5)に
+  着手。`sim-mechanics`に`criterion`(dev-dependency)を追加し、接触ソルバの
+  ベンチマークを実装した — `contact::resolve()`単体ではなく`MechanicsSolver::
+  step()`全体(ブロードフェーズ検出+PGS接触解決を含む)を、20段の箱を積み重ねた
+  スタック(典型的な多点接触・warm starting・摩擦を伴う負荷)でエンドツーエンド計測
+  する(`ContactManifold`は通常`collision::detect()`が内部生成するため、手動構築
+  より公開APIをエンドツーエンドで計測する方が実際のシーンに近い回帰検知になる)。
+  `.github/workflows/ci.yml`の`native`ジョブに`cargo bench --workspace -- --test`
+  ステップを追加した(統計的サンプリングをせず1回だけ実行してパニックしないことのみ
+  検証、高速・CI向け)。実測値の履歴比較による真の回帰検知(閾値超過でCI失敗)は、
+  ベースライン永続化の仕組みが未導入のため後続増分 — 現時点では「ベンチが壊れて
+  いないことの確認」のみ。PCG・SPH近傍探索のベンチマークは同じパターンで後続増分。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
   (イベント購読/sample_fluid等のクエリ、ただしイベント購読は現状どのドメインソルバも
-  イベントを発行していないため後回し)、性能ベンチ回帰CIゲート(`criterion`導入)、
-  または残り7種のCoupling(いずれも前提工事を要する)。
+  イベントを発行していないため後回し)、性能ベンチ回帰ゲートの拡充(PCG・SPH近傍探索
+  ベンチ・ベースライン永続化)、または残り7種のCoupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1135,9 +1147,16 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `brake_heat_scenario_keeps_world_energy_ledger_residual_small`等の
       residual閾値アサーションが毎回検証される。ドメイン別の保存則テスト
       (docs/21-verification/02-conservation-laws.md)も同じ仕組みで既に運用中
-- [ ] CI ゲート: 性能ベンチ回帰(構成規則)— `criterion`ベンチが未導入
-      (ホットパス候補: 接触ソルバ・PCG・SPH近傍探索)、CIでの回帰検知の
-      仕組み自体が無いため引き続き未実装
+- [ ] CI ゲート: 性能ベンチ回帰(構成規則)— `sim-mechanics`に`criterion`を導入し
+      接触ソルバ(`MechanicsSolver::step()`をエンドツーエンドで計測、20段の箱の
+      スタックという典型的な多点接触・warm starting負荷)のベンチマークを追加、
+      `.github/workflows/ci.yml`の`native`ジョブに`cargo bench --workspace --
+      --test`(統計的サンプリングをせず1回だけ実行してパニックしないことのみ
+      検証、高速・CI向け)ステップを追加した。PCG・SPH近傍探索のベンチマークは
+      同じパターンで後続増分。実測値の履歴比較による真の回帰検知(閾値超過で
+      CI失敗)は、ベースライン永続化の仕組み(直近mainブランチの実行結果を
+      キャッシュ/アーティファクト化する等)が未導入のため引き続き未実装 —
+      現時点では「ベンチが壊れていないことの確認」のみ
 - [ ] 全デモ D1–D39 合格([§7](#7-デモ合格管理表-d1d43))
 
 ## 5. Phase D — レンダリング

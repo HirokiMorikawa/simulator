@@ -8,3 +8,10 @@ publish.workspace = true
 sim-math = { path = "../sim-math" }
 sim-core = { path = "../sim-core" }
 sim-fluid = { path = "../sim-fluid" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "contact_solver"
+harness = false
