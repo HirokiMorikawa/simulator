@@ -527,9 +527,26 @@
   回転した箱(ローカル空間クランプの検証)・平面(剛体transformとは独立にワールド
   座標の`normal`/`d`で判定)の3本の単体テスト+`World::overlap_sphere`が正しい
   `BodyId`集合を返すことを確認する結合テストで検証し、初回実装で一発Green化した。
+  続けて`World`公開API拡張の一環として`Probe`/`ProbeTarget`(設計docs/20-integration/
+  04-world-api.md §2.1「測って遊ぶの中心機能」)を実装。まず`RingBuffer<T>`
+  (`VecDeque`裏付けのFIFO固定容量バッファ)を`sim-math`に追加(汎用プリミティブとして
+  Vec3/SimRng等と同じ置き場所)。`ProbeTarget`は設計の例示6種のうち、`NodeId`/
+  `CircuitId`型が未整備なため`NodeTemp`は熱ドメインの`ThermalNode`index、
+  `CircuitCurrent`は回路の電圧源indexへ縮約(現時点で単一の熱/回路ドメインしか
+  無いため実害なし)、`LedgerKinetic`はエネルギー台帳が種別別内訳を持たないため
+  `mechanics`ドメインの運動エネルギーと解釈、`StateHashDigest`は`state_hash()`を
+  `f64`へ変換したグラフ表示用ダイジェストとした。`BodySpeed`用に`World::
+  body_velocity`アクセサも新規追加(`body_position`と同じ不変条件)。`add_probe`
+  で登録したプローブを`step()`末尾で毎step全件サンプルする(不変借用でサンプル値を
+  先に集め、その後可変借用で`history`へ積む2段階方式 — `self`全体への不変・可変
+  借用が重ならないようにするため)。箱の自由落下の`BodyPosY`が単調減少しリング
+  バッファの容量制限(古いサンプルの破棄)が効くこと、`LedgerKinetic`/
+  `StateHashDigest`が常時有効なmechanicsドメインのみでパニックなくサンプルできる
+  ことの2本のテストで検証し、初回実装で一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
-  (Scenario/Probe/イベント購読/sample_fluid/circuit_probe等のクエリ)、または
-  残り7種のCoupling(いずれも前提工事を要する)。
+  (Scenario/イベント購読/sample_fluid/circuit_probe等のクエリ、ただしイベント購読は
+  現状どのドメインソルバもイベントを発行していないため後回し)、または残り7種の
+  Coupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1015,9 +1032,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `command_log`、`ApplyForce{body, force, point}`のみ実装、他4種
       (`SetMotorTarget`・`SetSwitch`・`SetHeatSource`・`Grab`系)は未実装)・
       `raycast`・`overlap_sphere`(いずれも`Sphere`/`Box`/`Plane`のみ、`filter`引数
-      未実装、`Capsule`/`Compound`/`ConvexMesh`はP2/P5未実装のため対象外)を実装済み。
-      `Scenario`/`from_scenario`(シーンJSON、validator接続)・`Probe`・`subscribe`/
-      `drain_events`・`sample_fluid`/`circuit_probe`等のクエリは未実装
+      未実装、`Capsule`/`Compound`/`ConvexMesh`はP2/P5未実装のため対象外)・
+      `Probe`/`ProbeTarget`(`sim_math::RingBuffer`を新規実装、6種のターゲットのうち
+      `NodeTemp`/`CircuitCurrent`は単一ドメイン前提の縮約index、他は設計どおり)を
+      実装済み。`Scenario`/`from_scenario`(シーンJSON、validator接続)・`subscribe`/
+      `drain_events`(現状どのドメインソルバもイベントを発行していないため後回し)・
+      `sample_fluid`/`circuit_probe`等のクエリは未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
 - [ ] 統合シナリオ: 氷と飲み物

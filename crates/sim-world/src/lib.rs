@@ -95,6 +95,45 @@ pub struct RayHit {
     pub distance: f64,
 }
 
+/// `Probe`が毎stepサンプルする観測対象(設計docs/20-integration/04-world-api.md §2.1
+/// `ProbeTarget`)。
+///
+/// **縮約実装の理由**: 設計の例示(`BodyPosY`・`Bodyspeed`・`NodeTemp`・
+/// `CircuitCurrent`・`LedgerKinetic`・`StateHashDigest`)のうち、`NodeTemp`は
+/// `NodeId`型が未整備なため熱ドメインの`ThermalNode`indexへ、`CircuitCurrent`は
+/// `CircuitId`型が未整備なため回路の電圧源indexへ、それぞれ縮約する(いずれも
+/// 現時点で`World`が単一の熱/回路ドメインしか保持しないため実害はない)。
+/// `LedgerKinetic`はエネルギー台帳自体が種別別の内訳を持たないため、
+/// `mechanics`ドメインの運動エネルギー(`EnergyBreakdown::kinetic`)と解釈する。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ProbeTarget {
+    BodyPosY(BodyId),
+    BodySpeed(BodyId),
+    /// 熱ドメインの`ThermalNode`index(モジュールdoc「縮約実装の理由」参照)。
+    NodeTemp(usize),
+    /// 回路の電圧源index(モジュールdoc「縮約実装の理由」参照)。
+    CircuitCurrent(usize),
+    LedgerKinetic,
+    /// `state_hash()`をグラフ表示用に`f64`へ変換した値(厳密な数値変換ではなく、
+    /// UI上でハッシュの変化を視覚化するためのダイジェスト、設計§2.1「UIのグラフ」)。
+    StateHashDigest,
+}
+
+/// 任意の観測量を毎stepサンプルして`history`(`RingBuffer`)に積む軽量プローブ
+/// (設計docs/20-integration/04-world-api.md §2.1「測って遊ぶの中心機能」)。
+#[derive(Clone)]
+pub struct Probe {
+    pub target: ProbeTarget,
+    history: sim_math::RingBuffer<f64>,
+}
+
+impl Probe {
+    /// 古い順(サンプル順)の観測履歴。
+    pub fn history(&self) -> impl Iterator<Item = &f64> {
+        self.history.iter()
+    }
+}
+
 /// シミュレートされた環境そのもの。世界時刻の一意性は `clock`
 /// (docs/00-foundation/04-architecture.md §1.1.2(4))、状態オーナーシップの一意性は
 /// `mechanics`(正典状態)が保持することで満たす(同 §1.1.2(1))。
@@ -132,6 +171,8 @@ pub struct World {
     /// 適用済みコマンドの記録(`step_count`と対、リプレイ検証用、設計§2「記録されリプレイ
     /// 可能」)。
     command_log: Vec<(u64, Command)>,
+    /// 登録済みプローブ(`Probe`のdoc参照)。`step()`末尾で毎step全プローブをサンプルする。
+    probes: Vec<Probe>,
 }
 
 const STREAM_DIAG: u64 = 0;
@@ -180,6 +221,41 @@ impl World {
             generations: Vec::new(),
             pending_commands: Vec::new(),
             command_log: Vec::new(),
+            probes: Vec::new(),
+        }
+    }
+
+    /// プローブを登録する(`Probe`のdoc参照)。返すハンドルは`probe`/`probe_history`が
+    /// 使う(現時点では単なるベクタindex、`Vec`が縮まないため安定)。
+    pub fn add_probe(&mut self, target: ProbeTarget, capacity: usize) -> usize {
+        self.probes.push(Probe {
+            target,
+            history: sim_math::RingBuffer::new(capacity),
+        });
+        self.probes.len() - 1
+    }
+
+    pub fn probe(&self, handle: usize) -> Option<&Probe> {
+        self.probes.get(handle)
+    }
+
+    /// `target`が指す観測量の現在値を読む(`step()`末尾の毎stepサンプルと同じロジック)。
+    /// 対象が無効(削除済み`BodyId`・未有効化ドメインのインデックス範囲外)の場合は`0.0`
+    /// (パニックしない、設計の不変条件)。
+    fn sample_probe_target(&self, target: ProbeTarget) -> f64 {
+        match target {
+            ProbeTarget::BodyPosY(id) => self.body_position(id).map_or(0.0, |p| p.y),
+            ProbeTarget::BodySpeed(id) => self.body_velocity(id).map_or(0.0, |v| v.length()),
+            ProbeTarget::NodeTemp(idx) => self
+                .thermal
+                .as_ref()
+                .and_then(|t| t.nodes.get(idx))
+                .map_or(0.0, |n| n.temperature),
+            ProbeTarget::CircuitCurrent(idx) => {
+                self.circuit.as_ref().map_or(0.0, |c| c.source_current(idx))
+            }
+            ProbeTarget::LedgerKinetic => self.mechanics.total_energy().kinetic,
+            ProbeTarget::StateHashDigest => self.state_hash() as f64,
         }
     }
 
@@ -370,6 +446,20 @@ impl World {
             .expect("initialized above")
             .record(total, ENERGY_SCALE_FLOOR);
         self.clock.advance();
+
+        // 登録済み全プローブを毎stepサンプルする(設計§2.1「測って遊ぶの中心機能」)。
+        // まず不変借用でサンプル値を集め(`self.probes.iter()`と`self.sample_probe_target`
+        // はどちらも共有借用なので同時に成立する)、その後で可変借用に切り替えて
+        // `history`へ積む(`self`全体への不変・可変借用が重ならないようにするため2段階
+        // にしている)。
+        let samples: Vec<f64> = self
+            .probes
+            .iter()
+            .map(|p| self.sample_probe_target(p.target))
+            .collect();
+        for (probe, sample) in self.probes.iter_mut().zip(samples) {
+            probe.history.push(sample);
+        }
     }
 
     /// 直近の記帳残差(設計 docs/21-verification/02-conservation-laws.md §2)。
@@ -412,6 +502,14 @@ impl World {
             return None;
         }
         Some(self.mechanics.bodies.position[id.index as usize])
+    }
+
+    /// `body_position`と同じ不変条件の速度版(`Probe::BodySpeed`が読む)。
+    pub fn body_velocity(&self, id: BodyId) -> Option<Vec3> {
+        if !self.is_valid(id) {
+            return None;
+        }
+        Some(self.mechanics.bodies.linear_velocity[id.index as usize])
     }
 
     /// レイキャストクエリ(設計docs/20-integration/04-world-api.md §2、`raycast`
@@ -883,5 +981,69 @@ mod tests {
 
         let far_hits = world.overlap_sphere(position + Vec3::new(1000.0, 0.0, 0.0), 0.1);
         assert!(far_hits.is_empty());
+    }
+
+    /// `Probe`(設計docs/20-integration/04-world-api.md §2.1「測って遊ぶの中心機能」):
+    /// `BodyPosY`が箱の自由落下を毎stepサンプルし、履歴が単調減少することを確認する。
+    /// リングバッファの容量制限(古いサンプルが捨てられること)も併せて検証する。
+    #[test]
+    fn probe_body_pos_y_samples_falling_box_every_step_within_ring_buffer_capacity() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        let handle = world.add_probe(ProbeTarget::BodyPosY(box_id), 10);
+
+        for _ in 0..30 {
+            world.step();
+        }
+
+        let probe = world.probe(handle).unwrap();
+        let history: Vec<f64> = probe.history().copied().collect();
+        // 容量10なので30step分のうち最新10個だけが残る。
+        assert_eq!(history.len(), 10);
+        // 単調減少(自由落下、接触前)。
+        for pair in history.windows(2) {
+            assert!(
+                pair[0] > pair[1],
+                "history should be monotonically decreasing: {history:?}"
+            );
+        }
+        // 最後のサンプルは直近のbody_position()と一致するはず。
+        let final_y = world.body_position(box_id).unwrap().y;
+        assert!((history.last().unwrap() - final_y).abs() < 1e-12);
+    }
+
+    /// `ProbeTarget::LedgerKinetic`・`StateHashDigest`が無効なindex/id無しでも
+    /// パニックせず妥当な値をサンプルすることを確認する(常時有効なmechanicsドメイン
+    /// のみに依存するターゲット)。
+    #[test]
+    fn probe_ledger_kinetic_and_state_hash_digest_sample_without_panicking() {
+        let mut world = World::new(WorldOptions::default());
+        create_falling_box(&mut world);
+        let kinetic_handle = world.add_probe(ProbeTarget::LedgerKinetic, 5);
+        let hash_handle = world.add_probe(ProbeTarget::StateHashDigest, 5);
+
+        for _ in 0..5 {
+            world.step();
+        }
+
+        let kinetic_history: Vec<f64> = world
+            .probe(kinetic_handle)
+            .unwrap()
+            .history()
+            .copied()
+            .collect();
+        assert_eq!(kinetic_history.len(), 5);
+        assert!(
+            kinetic_history.last().unwrap() > &0.0,
+            "falling box should have kinetic energy"
+        );
+
+        let hash_history: Vec<f64> = world
+            .probe(hash_handle)
+            .unwrap()
+            .history()
+            .copied()
+            .collect();
+        assert_eq!(hash_history.len(), 5);
     }
 }

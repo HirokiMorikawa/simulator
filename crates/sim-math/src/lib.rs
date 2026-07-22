@@ -12,6 +12,7 @@ mod integrators;
 mod particles;
 mod pcg;
 mod random;
+mod ring_buffer;
 pub use complex::Complex64;
 pub use fft::{fft, ifft};
 pub use grid::{
@@ -25,6 +26,7 @@ pub use integrators::{
 pub use particles::{ParticleSet, SpatialHash};
 pub use pcg::{pcg, PcgResult, Preconditioner};
 pub use random::SimRng;
+pub use ring_buffer::RingBuffer;
 
 use std::ops::{Add, Mul, Neg, Sub};
 
