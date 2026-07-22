@@ -1250,6 +1250,46 @@ mod tests {
         );
     }
 
+    /// `ConvectionLink`をレジストリ経由で`grid_fluid`+`thermal`に接続し、流速のある
+    /// 流体ノードから受熱面ノードへ熱が移動する(受熱面の温度が単調に上昇する)ことを
+    /// `World`経由で確認する。
+    #[test]
+    fn convection_link_coupling_warms_surface_node_from_flowing_fluid_via_world() {
+        let mut world = World::new(WorldOptions::default());
+        let mut thermal = sim_thermal::ThermalSolver::new(293.15);
+        let fluid_node = thermal.add_node(sim_thermal::ThermalNode::new(350.0, 1000.0));
+        let surface_node = thermal.add_node(sim_thermal::ThermalNode::new(293.15, 1000.0));
+        world.enable_thermal(thermal);
+
+        let mut fluid = sim_fluid::GridFluid2D::new(8, 8, 0.1);
+        for u in fluid.u.iter_mut() {
+            *u = 2.0;
+        }
+        world.enable_grid_fluid(fluid);
+
+        world.add_coupling(Box::new(sim_coupling::ConvectionLink {
+            fluid_node,
+            surface_node,
+            area: 0.05,
+            characteristic_length: 0.2,
+            fluid_thermal_conductivity: 0.026,
+            kinematic_viscosity: 1.5e-5,
+            prandtl_number: 0.71,
+        }));
+
+        let surface_temp_before = world.thermal().unwrap().nodes[surface_node].temperature;
+        for _ in 0..10 {
+            world.step();
+        }
+        let surface_temp_after = world.thermal().unwrap().nodes[surface_node].temperature;
+
+        assert!(
+            surface_temp_after > surface_temp_before,
+            "surface node should warm up from the flowing hot fluid via ConvectionLink: \
+             before={surface_temp_before} after={surface_temp_after}"
+        );
+    }
+
     /// `add_coupling`で登録した`Coupling`が`step()`ごとに自動適用され(呼び出し側が
     /// `apply_coupling`を手動で呼ばなくても)、`snapshot`/`restore`(`#[derive(Clone)]`
     /// 経由)を跨いでもレジストリごと正しく複製・継続することを確認する

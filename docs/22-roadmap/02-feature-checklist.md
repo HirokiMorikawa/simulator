@@ -906,14 +906,30 @@
   という形で単体テスト2本(暖かい熱源で解析式どおりの一様加速度・同温ならゼロ)を追加し、
   `World`経由(`add_coupling`+`enable_grid_fluid`)でも熱源近傍の格子流体の平均鉛直速度が
   単調に上昇することを確認する統合テストも追加した。初回実装で一発Green化した。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り3種のCoupling本体
-  (`GridFluidRigid`・`ConvectionLink`・`SphRigid`、いずれも流体`Solver`統合・
-  Coupling registryという前提工事は完了したが、剛体/熱ドメインとの具体的な
-  相互作用力の設計は未着手 — `ConvectionLink`は`GridFluid2D`/`SphFluid`が温度場を
-  持たないため、`BoussinesqBuoyancy`と同様「対流先も単一`ThermalNode`」という
-  縮約が必要になる見込み)、または`PhaseChangeMorph`(イベント駆動の剛体/流体生成)・
-  `BuoyancyDrag`(既存の`MechanicsSolver`埋め込み実装の切り出しリスク)、あるいは
-  シーンJSON`couplings`セクション+排他結合検査のWorld接続。
+  続けて9種目の`Coupling``ConvectionLink`(設計§3「P3: 流体/媒質 ⇔ ThermalNode
+  (相関式h)」、docs/12-thermal/02-heat-transfer.md §2.2のニュートンの冷却則
+  $\dot Q=hA(T_{fluid}-T_{surf})$、§4.2の強制対流(平板・Blasius解)相関式
+  $\overline{Nu}=0.664\,Re^{1/2}Pr^{1/3}$)に着手した。設計の相関式表は状況ごとに
+  複数の式を挙げるが、「hと流速」という設計表の趣旨(流体ドメインの流速に依存する
+  結合)を素直に反映できる強制対流・平板の式のみを採用し(自然対流は温度差自体が
+  駆動源で流速に依存しないため`BoussinesqBuoyancy`が担う範疇と役割分担)、特性速度は
+  `GridFluid2D`速度場全体のRMS速度で代表させた。プラントル数・熱伝導率・動粘性係数は
+  `sim_thermal`にまだ流体物性DBが無いため`ConvectionLink`自身が物性定数として保持する
+  縮約とした。熱源側・受熱側をともに単一`ThermalNode`として表す(`BoussinesqBuoyancy`と
+  同じ制約)ことで、取り出した熱量をそのまま反対側へ注入する厳密な対記帳(2ノード間で
+  丸め誤差を除き完全にゼロ和)を実現できた——既存のいくつかのCoupling
+  (`DissipationToHeat`等)が近似的な対記帳にとどまっていたのに対し、より厳密な形。
+  単体テスト2本(流速ゼロなら熱伝達係数もゼロで無変化・一様流速でBlasius解の解析式
+  どおりの熱移動+2ノード間のエネルギー厳密保存)と、`World`経由(`add_coupling`+
+  `enable_grid_fluid`)で流速のある流体から受熱面ノードへ実際に熱が移動することを
+  確認する統合テストを追加した。初回実装で一発Green化した。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り2種のCoupling本体
+  (`GridFluidRigid`・`SphRigid`、いずれも流体`Solver`統合・Coupling registryという
+  前提工事は完了したが、剛体との具体的な相互作用力(ボクセル化境界・圧力積分/
+  境界粒子)の設計は未着手で、他のCouplingより実装コストが高い)、または
+  `PhaseChangeMorph`(イベント駆動の剛体/流体生成)・`BuoyancyDrag`(既存の
+  `MechanicsSolver`埋め込み実装の切り出しリスク)、あるいはシーンJSON`couplings`
+  セクション+排他結合検査のWorld接続。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1404,13 +1420,16 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       シナリオ3本を`add_coupling`ベースに書き換えて検証済み)。8種目の`Coupling`
       `BoussinesqBuoyancy`(温度→流体運動量、単一`ThermalNode`と周囲温度の差から
       `GridFluid2D`速度場全体に一様浮力加速度を加える縮約、`GridFluid2D`が温度場を
-      持たないための単純化)を追加済み。残り4種(`BuoyancyDrag`・`GridFluidRigid`・
-      `ConvectionLink`・`SphRigid`)自体は未実装(`BuoyancyDrag`は既存の
-      `MechanicsSolver`埋め込み実装の切り出しリスクで別枠、他3種は前提だった`SphFluid`・
-      `GridFluid2D`双方への`Solver`トレイト統合(決定的sub-step・状態ハッシュ)は完了)。
-      シーンJSON`couplings`セクションからの自動解決・排他結合検査
-      (`validate_exclusive_couplings`)との接続、design上のpre/post 2相分離、
-      sub-iteration剛性閾値表は未実装
+      持たないための単純化)、9種目の`ConvectionLink`(流体/媒質⇔`ThermalNode`、
+      強制対流(平板・Blasius解)相関式$\overline{Nu}=0.664Re^{1/2}Pr^{1/3}$、特性速度は
+      `GridFluid2D`速度場のRMS速度、熱源側・受熱面側とも単一`ThermalNode`で2ノード間
+      厳密対記帳)を追加済み。残り3種(`BuoyancyDrag`・`GridFluidRigid`・`SphRigid`)
+      自体は未実装(`BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の切り出し
+      リスクで別枠、他2種は前提だった`SphFluid`・`GridFluid2D`双方への`Solver`トレイト
+      統合(決定的sub-step・状態ハッシュ)は完了しているが剛体との相互作用力(ボクセル化
+      境界・圧力積分/境界粒子)の設計自体が未着手)。シーンJSON`couplings`セクションから
+      の自動解決・排他結合検査(`validate_exclusive_couplings`)との接続、design上の
+      pre/post 2相分離、sub-iteration剛性閾値表は未実装
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
