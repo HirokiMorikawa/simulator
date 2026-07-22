@@ -34,8 +34,13 @@
 //! kinetic_and_gas_internal_energy`がT5(断熱圧縮)を既に検証済みのため重複実装
 //! しない(等温圧縮側は対象外 — `GasCompartment::isothermal_heat_for_volume_change`
 //! は解析検証用の閉形式ヘルパのみで、`PistonGas`結合が使う実際のstep単位の圧力
-//! フィードバックには未接続)。残りのPhase 2〜3(D12–D15・D18)・Phase 4
-//! (D19–D33)は後続増分。Pα(天体ウェーブ)は天体ドメイン(`sim_astro::NBodySystem`)
+//! フィードバックには未接続)。続けてワークストリームBでCoupling registry
+//! (`World::add_coupling`)+`BoussinesqBuoyancy`(温度→格子流体浮力)が実装されたことで
+//! D15(対流)が可能になったため実装した — `grid_fluid`+`thermal`ドメインを
+//! `BoussinesqBuoyancy`で結合し、熱源(ろうそく相当)近傍で格子流体の平均鉛直速度が
+//! 単調に上昇すること(Boussinesqの定性)+エネルギー台帳残差が有界であることを確認する。
+//! 残りのPhase 2〜3(D12–D14・D18)・Phase 4(D19–D33)は後続増分。Pα(天体ウェーブ)は
+//! 天体ドメイン(`sim_astro::NBodySystem`)
 //! が既に`World`の常時合成ドメインとして接続済み(`enable_astro`、`step()`が
 //! 自動sub-stepする)ため、Phase 4より先にD34(太陽系儀)を実装した — 8惑星ではなく
 //! 1惑星(円軌道)への縮約で、`sim-astro`のA1(ケプラー第3法則)・A2(エネルギー・
@@ -741,6 +746,60 @@ mod tests {
             run_double_pendulum(),
             run_double_pendulum(),
             "double pendulum replay should be bit-identical despite chaotic sensitivity (D11 pass criterion)"
+        );
+    }
+
+    /// D15 対流(同docs Phase 2〜3表)。「ろうそく(熱源)上の上昇気流」
+    /// 「合格基準: Boussinesqの定性 + 台帳」。`grid_fluid`ドメイン
+    /// (`sim_fluid::GridFluid2D`、`Solver`統合済み)+`thermal`ドメインを
+    /// `sim_coupling::BoussinesqBuoyancy`(Coupling registry経由、`add_coupling`)で
+    /// 結合し、熱源(ろうそく相当の`ThermalNode`)が周囲より暖かいと格子流体の平均鉛直
+    /// 速度が単調に上昇すること(定性的な上昇気流)を確認する。「台帳」はエネルギー
+    /// 台帳残差(`energy_residual`)が発散しないことで満たす — `BoussinesqBuoyancy`は
+    /// 速度場に外部から加速度を注入する(外力)ため、注入されたエネルギー自体は
+    /// 台帳の基準にはならない(既存の`brake_heat_scenario_keeps_world_energy_ledger_
+    /// residual_small`と同様、残差が有界に留まることを確認する趣旨)。
+    #[test]
+    fn d15_convection_matches_boussinesq_qualitative_upward_flow_and_bounded_ledger() {
+        let mut world = World::new(WorldOptions::default());
+        let ambient = 293.15;
+        let mut thermal = sim_thermal::ThermalSolver::new(ambient);
+        let candle_node = thermal.add_node(sim_thermal::ThermalNode::new(300.0, 1000.0));
+        world.enable_thermal(thermal);
+        world.enable_grid_fluid(sim_fluid::GridFluid2D::new(16, 16, 0.05));
+        world.add_coupling(Box::new(sim_coupling::BoussinesqBuoyancy {
+            thermal_node: candle_node,
+            ambient_temperature: ambient,
+            thermal_expansion_coefficient: 3.4e-3,
+        }));
+
+        let mean_v = |w: &World| -> f64 {
+            let fluid = w.grid_fluid().unwrap();
+            fluid.v.iter().sum::<f64>() / fluid.v.len() as f64
+        };
+        let v0 = mean_v(&world);
+        let mut previous = v0;
+        for _ in 0..60 {
+            world.step();
+            let current = mean_v(&world);
+            assert!(
+                current >= previous - 1e-12,
+                "mean upward velocity should rise monotonically under the candle's constant \
+                 buoyancy forcing: previous={previous} current={current}"
+            );
+            previous = current;
+        }
+        assert!(
+            previous > v0,
+            "D15 pass criterion (Boussinesq qualitative behavior): mean vertical velocity \
+             should have risen above the candle: v0={v0} final={previous}"
+        );
+
+        let residual = world.energy_residual();
+        assert!(
+            residual.is_finite() && residual < 1.0e6,
+            "D15 pass criterion (ledger): energy ledger residual should stay bounded \
+             (no divergence): residual={residual}"
         );
     }
 

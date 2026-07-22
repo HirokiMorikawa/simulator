@@ -923,13 +923,24 @@
   どおりの熱移動+2ノード間のエネルギー厳密保存)と、`World`経由(`add_coupling`+
   `enable_grid_fluid`)で流速のある流体から受熱面ノードへ実際に熱が移動することを
   確認する統合テストを追加した。初回実装で一発Green化した。
+  `BoussinesqBuoyancy`+`grid_fluid`+Coupling registryが揃ったことで、D15(対流、
+  「ろうそく(熱源)上の上昇気流」「合格基準: Boussinesqの定性 + 台帳」)が新規物理
+  実装なしで可能になったため、`demos.rs`にD15を追加した(D11–D16の並びに合わせ
+  D15をD16の直前に挿入)。熱源1つ(`ThermalNode`)+`grid_fluid`+
+  `BoussinesqBuoyancy`を`add_coupling`で結合し、格子流体の平均鉛直速度が
+  (熱源からの一定の浮力強制のもとで)単調に上昇すること(定性的な上昇気流)と、
+  `energy_residual()`が有界(発散しない)ことを確認する。台帳残差そのものの数値目標は
+  設計に無い(`BoussinesqBuoyancy`は外部から加速度を注入する外力であり、注入エネルギー
+  自体は保存則の対象ではない)ため、既存の`brake_heat_scenario_...`と同じ「残差が
+  発散しないことの確認」という趣旨で有限性のみを検証する。初回実装で一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は残り2種のCoupling本体
   (`GridFluidRigid`・`SphRigid`、いずれも流体`Solver`統合・Coupling registryという
   前提工事は完了したが、剛体との具体的な相互作用力(ボクセル化境界・圧力積分/
   境界粒子)の設計は未着手で、他のCouplingより実装コストが高い)、または
   `PhaseChangeMorph`(イベント駆動の剛体/流体生成)・`BuoyancyDrag`(既存の
   `MechanicsSolver`埋め込み実装の切り出しリスク)、あるいはシーンJSON`couplings`
-  セクション+排他結合検査のWorld接続。
+  セクション+排他結合検査のWorld接続、あるいは残りのヘッドレスデモ
+  (D12–D14・D18・D19–D33・D36–D39)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1618,7 +1629,12 @@ Phase 2〜3:
 - [ ] D12 ラグドール階段
 - [ ] D13 ロープと旗
 - [ ] D14 煙と渦
-- [ ] D15 対流
+- [ ] D15 対流(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
+      ワークストリームD未着手のため保留。`grid_fluid`+`thermal`ドメインを
+      `sim_coupling::BoussinesqBuoyancy`(Coupling registry経由)で結合し、熱源
+      (ろうそく相当の`ThermalNode`)近傍で格子流体の平均鉛直速度が単調に上昇すること
+      (合格基準「Boussinesqの定性」)+エネルギー台帳残差が有界であること(合格基準
+      「台帳」)を確認)
 - [ ] D16 熱伝導レース(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
       目視チェックはワークストリームD未着手のため保留。`World`に新設した
       `conduction_rod`ドメイン(`ConductionRod1D`、`gas`と同じ縮約)経由で銅・鋼・
