@@ -695,10 +695,21 @@
   `ThermalNode::heat_accum`が毎step末尾でクリアされる既存の設計(T4テストが同じ
   パターンを使用済み)にそのまま乗せられるため追加の永続状態は不要だった。1回のpushで
   $Q=watts\cdot dt$だけ温度が上昇し、再pushなしでは2step目以降温度が変化しないことを
-  確認、初回実装で一発Green化。残り2種(`SetMotorTarget`・`Grab`系)は、`World`に
-  JointId管理が無くヒンジモーターが`MechanicsSolver`の生indexである点(前者)・
-  動く目標点へのばね拘束の永続状態管理が必要な点(後者)がそれぞれ前提未整備のため
-  後続増分。
+  確認、初回実装で一発Green化。
+  続けて`SetMotorTarget{hinge_motor_index, theta_target}`も追加実装した(設計の例示
+  `{joint, velocity}`ではなく実装済みの`HingeMotorPd`が実際に持つ角度目標パラメータを
+  そのまま公開、`SetSwitch`と同じ「生indexを直接引数に取る」縮約)。受け入れテスト
+  作成中、目標角度を変更しても剛体の角度が全く変化しないという形でバグを発見した —
+  原因は`sleep::update_sleep_state`が0.5秒静止した剛体を自動的にasleep化し力適用・
+  速度積分を止める既存の設計に対し、`Command::ApplyForce`/`SetMotorTarget`のどちらも
+  適用時に対象剛体のasleepフラグを解除していなかったため、休眠中の剛体へ送った
+  Commandが(黙って無視されるのと同じ結果で)一切反映されていなかったこと。両方の
+  Command適用箇所でasleepフラグを明示的に解除する修正を行い(外力・新しい目標角度は
+  「新情報」であり休眠状態を解除すべき、という理屈)、テストが一発Green化した
+  (この修正は`ApplyForce`にも及ぶため、既存のApplyForceの受け入れ済み挙動に対する
+  静かな改善でもある — 既存テストは全て休眠に至る前の短いstep数で検証していたため
+  この潜在バグを踏んでいなかった)。残り1種(`Grab`系)は、動く目標点へのばね拘束の
+  永続状態管理が前提未整備のため後続増分。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの残り
   (イベント購読/sample_fluid等のクエリ、ただしイベント購読は現状どのドメインソルバも
   イベントを発行していないため後回し、`sample_fluid`は解像流体ドメインが`World`に
@@ -1196,14 +1207,24 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
-      `command_log`、`ApplyForce{body, force, point}`・`SetSwitch{switch_index,
+      `command_log`、`ApplyForce{body, force, point}`・`SetMotorTarget{
+      hinge_motor_index, theta_target}`(設計の例示`{joint, velocity}`ではなく、
+      実装済みの`HingeMotorPd`が実際に持つ角度目標パラメータをそのまま公開する縮約、
+      `JointId`型は未整備なので生indexを直接引数に取る)・`SetSwitch{switch_index,
       closed}`(`sim_em::Circuit`に新規実装した理想スイッチ(2値抵抗近似、
       `SWITCH_ON_RESISTANCE`/`SWITCH_OFF_RESISTANCE`)を操作)・`SetHeatSource{node,
       watts}`(`ApplyForce`と同じ「1step分だけ効く」縮約セマンティクス、
       `ThermalNode::heat_accum`が毎step末尾でクリアされる既存挙動にそのまま乗せる)を
-      実装。残り2種(`SetMotorTarget`・`Grab`系)は未実装(`SetMotorTarget`は`World`に
-      JointId管理が無くヒンジモーターが`MechanicsSolver`の生indexである点が前提未整備、
-      `Grab`系は動く目標点へのばね拘束の永続状態管理が必要))・
+      実装。**実装検証中に発見したバグ**: `Command::ApplyForce`/`SetMotorTarget`が
+      対象剛体を起こさずに力・トルク目標を適用していたため、`sleep::
+      update_sleep_state`によりasleepになった剛体(0.5秒静止で自動的にasleep化、
+      力適用・速度積分が停止する既存の設計)に対してこれらのCommandを送っても一切
+      反映されない(黙って無視されるのと同じ結果になる)潜在バグがあった —
+      `SetMotorTarget`の受け入れテスト作成中に「目標角度を変えても剛体が全く動かない」
+      という形で顕在化して発見し、両Commandの適用時に対象剛体の`asleep`フラグを
+      明示的に解除する修正を行った(外力・新しい目標角度は「新情報」であり休眠状態を
+      解除すべき、という理屈)。残り1種(`Grab`系)は動く目標点へのばね拘束の永続状態
+      管理が前提未整備のため未実装)・
       `raycast`・`overlap_sphere`(いずれも`Sphere`/`Box`/`Plane`のみ、`filter`引数
       未実装、`Capsule`/`Compound`/`ConvexMesh`はP2/P5未実装のため対象外)・
       `Probe`/`ProbeTarget`(`sim_math::RingBuffer`を新規実装、6種のターゲットのうち

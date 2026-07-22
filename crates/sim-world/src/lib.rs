@@ -81,15 +81,24 @@ impl Default for WorldOptions {
 /// §2)。次`step()`の先頭で適用され、`command_log()`に記録される(リプレイ検証用)。
 ///
 /// **縮約実装の理由**: 設計が例示する5種(`ApplyForce`・`SetMotorTarget`・`SetSwitch`・
-/// `SetHeatSource`・`Grab`/`MoveGrab`/`Release`)のうち、`ApplyForce`・`SetSwitch`・
-/// `SetHeatSource`の3種を実装する。`SetMotorTarget`(`World`にJointId管理が無く
-/// ヒンジモーターは`sim_mechanics::MechanicsSolver`が直接保持する生indexのため
-/// ジョイント参照APIの整備が先に必要)・`Grab`系(マウスでつかむ = 動く目標点への
-/// ばね拘束、専用の永続状態管理が必要)は後続増分。`SetHeatSource`は`ApplyForce`と
-/// 同じ「1step分だけ効く」縮約セマンティクス(設計が意図する可能性のある「変更する
-/// まで持続するダイヤル」ではない、継続加熱には毎stepの再push が必要)を採る —
-/// `ThermalNode::heat_accum`が毎step末尾でクリアされる既存の設計(`sim-thermal`の
-/// T4テスト参照)にそのまま乗せられるため。
+/// `SetHeatSource`・`Grab`/`MoveGrab`/`Release`)のうち、`ApplyForce`・`SetMotorTarget`・
+/// `SetSwitch`・`SetHeatSource`の4種を実装する。`SetMotorTarget`・`SetSwitch`は
+/// `World`にJointId/CircuitId管理が無く、`sim_mechanics::MechanicsSolver::hinge_motors`・
+/// `sim_em::Circuit`の switches が生indexで管理されている(削除操作が無くID再利用の
+/// 懸念が無いため`BodyId`のような世代管理までは導入していない)ことを踏まえ、
+/// `hinge_motor_index`/`switch_index`という生indexを直接引数に取る縮約版とする。
+/// `Grab`系(マウスでつかむ = 動く目標点へのばね拘束、専用の永続状態管理が必要)は
+/// 後続増分。`SetHeatSource`は`ApplyForce`と同じ「1step分だけ効く」縮約セマンティクス
+/// (設計が意図する可能性のある「変更するまで持続するダイヤル」ではない、継続加熱には
+/// 毎stepの再push が必要)を採る — `ThermalNode::heat_accum`が毎step末尾でクリア
+/// される既存の設計(`sim-thermal`のT4テスト参照)にそのまま乗せられるため。
+/// `SetMotorTarget`は設計の例示(`{joint, velocity}`)とは異なり`theta_target`(角度)を
+/// 設定する — 実装済みの`HingeMotorPd`が速度ではなく角度目標のPD位置サーボ
+/// (`joint`モジュールdoc参照)であるため、設計の例示する変数名ではなく実装済みの
+/// モーターが実際に持つパラメータをそのまま公開する(こちらも継続的な状態変更、
+/// 一度設定すると次に変更するまで持続する — `HingeMotorPd`自体が`MechanicsSolver::
+/// step()`内で毎step自動適用される永続的な構成要素であるため、`SetHeatSource`とは
+/// 異なり1step限りの効果ではない)。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
     /// 剛体`body`のワールド座標`point`(`None`なら重心、トルクなし)に`force`を加える。
@@ -97,6 +106,12 @@ pub enum Command {
         body: BodyId,
         force: Vec3,
         point: Option<Vec3>,
+    },
+    /// ヒンジモーター(`MechanicsSolver::add_hinge_motor`を呼んだ順のindex)の目標角度を
+    /// 変更する(モジュールdoc参照、設計の`velocity`ではなく実装済みの`theta_target`)。
+    SetMotorTarget {
+        hinge_motor_index: usize,
+        theta_target: f64,
     },
     /// 回路のスイッチ(`sim_em::Circuit::add_switch`が返すindex)の開閉を変更する
     /// (`World`は単一`circuit`ドメイン前提のため`CircuitId`引数は省略、`circuit_probe`
@@ -307,6 +322,10 @@ impl World {
                 Command::ApplyForce { body, force, point } => {
                     if self.is_valid(body) {
                         let idx = body.index as usize;
+                        // 外力は「新情報」なのでasleep状態を解除する(そうしないと
+                        // `sleep::update_sleep_state`が力適用・速度積分ごと止めており、
+                        // 力を積んでも一切反映されない、実装検証中に発見)。
+                        self.mechanics.bodies.asleep[idx] = false;
                         self.mechanics.bodies.force_accum[idx] =
                             self.mechanics.bodies.force_accum[idx] + force;
                         if let Some(p) = point {
@@ -314,6 +333,18 @@ impl World {
                             self.mechanics.bodies.torque_accum[idx] =
                                 self.mechanics.bodies.torque_accum[idx] + r.cross(force);
                         }
+                    }
+                }
+                Command::SetMotorTarget {
+                    hinge_motor_index,
+                    theta_target,
+                } => {
+                    if let Some(motor) = self.mechanics.hinge_motors.get_mut(hinge_motor_index) {
+                        motor.theta_target = theta_target;
+                        // ApplyForceと同じ理由でasleep状態を解除する(新しい目標角度は
+                        // 新情報であり、休眠中の剛体はPDトルクを適用しても速度積分が
+                        // 止まっているため一切動かない)。
+                        self.mechanics.bodies.asleep[motor.body] = false;
                     }
                 }
                 Command::SetSwitch {
@@ -672,7 +703,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim_math::Transform;
+    use sim_math::{Quat, Transform};
     use sim_mechanics::{BodyType, Shape};
 
     const INITIAL_HEIGHT: f64 = 10.0;
@@ -1024,6 +1055,73 @@ mod tests {
         assert!(
             omega.length() > 0.0,
             "off-center force should induce rotation: omega={omega:?}"
+        );
+    }
+
+    /// `Command::SetMotorTarget`(設計§2「`SetMotorTarget{joint, velocity}`」、モジュールdoc
+    /// 「実装済みの`theta_target`を公開する」参照)。ヒンジモーターの目標角度を実行中に
+    /// 変更すると、PD制御(`HingeMotorPd::apply`)により剛体の角度が新しい目標へ収束する
+    /// ことを確認する(`sim-mechanics`のPD位置サーボ自体は別途単体テスト済み、ここでは
+    /// `World`経由のCommandが正しく`hinge_motors[i].theta_target`まで届くことを検証)。
+    #[test]
+    fn set_motor_target_command_changes_hinge_motor_target_angle_at_runtime() {
+        let mut world = World::new(WorldOptions {
+            gravity: 0.0,
+            ..WorldOptions::default()
+        });
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        // `entity_layer_hinge_motor_maintains_crouch_pose_for_60s_with_ground_contact`
+        // (crates/sim-mechanics/src/solver.rs)と同じ形状・質量(kp/kd/torque_maxの既定値は
+        // この慣性モーメントで検証済み — 小さい球のような軽い慣性だとPD制御が過大な角速度を
+        // 要求し発振するため合わせる)。
+        let mut desc = sim_mechanics::RigidBodyDesc::dynamic(
+            sim_mechanics::Shape::Box {
+                half_extents: Vec3::new(0.05, 0.4, 0.05),
+            },
+            steel,
+        );
+        desc.mass_override = Some(5.0);
+        world.create_body(desc);
+
+        world
+            .mechanics_mut()
+            .add_hinge_motor(sim_mechanics::HingeMotorPd {
+                body: 0,
+                axis: Vec3::new(0.0, 0.0, 1.0),
+                reference_rotation: Quat::IDENTITY,
+                theta_target: 0.0,
+                kp: 20.0,
+                kd: 2.0,
+                torque_max: 50.0,
+            });
+
+        for _ in 0..60 {
+            world.step();
+        }
+        let theta_before = {
+            let mechanics = world.mechanics_mut();
+            mechanics.hinge_motors[0].measure_angle(&mechanics.bodies)
+        };
+        assert!(
+            theta_before.abs() < 0.05,
+            "should stay near the initial target 0: theta_before={theta_before}"
+        );
+
+        let new_target = std::f64::consts::FRAC_PI_4;
+        world.push_command(Command::SetMotorTarget {
+            hinge_motor_index: 0,
+            theta_target: new_target,
+        });
+        for _ in 0..300 {
+            world.step();
+        }
+        let theta_after = {
+            let mechanics = world.mechanics_mut();
+            mechanics.hinge_motors[0].measure_angle(&mechanics.bodies)
+        };
+        assert!(
+            (theta_after - new_target).abs() < 0.05,
+            "should converge to the new target: theta_after={theta_after} new_target={new_target}"
         );
     }
 
