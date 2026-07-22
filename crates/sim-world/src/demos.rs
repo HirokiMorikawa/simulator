@@ -43,8 +43,14 @@
 //! `conduction_rod`と同じ「呼び出し側が明示的に`step`する」縮約)経由でD13(ロープと旗)
 //! のM13(カテナリー静止形状)部分を実装した — 「旗のはためき」は`SoftBody`が距離拘束
 //! (ロープ用途)のみで曲げ拘束・布を持たないため対象外、M14(ロープの伸び)は
-//! `sim-mechanics`側で既にGreenのため重複実装しない。残りのPhase 2〜3(D12・D14・D18)・
-//! Phase 4(D19–D33)は後続増分。Pα(天体ウェーブ)は
+//! `sim-mechanics`側で既にGreenのため重複実装しない。続けてPhase 4からD19(電気工作台)
+//! を実装した — `circuit`ドメイン(既に`World`の常時合成ドメイン)は分圧・コンデンサ・
+//! ダイオード・理想スイッチを全て素子として持つため、新規物理実装なしで「自由配線」
+//! (分圧回路+コンデンサ放電回路+スイッチ付きLED回路を単一`Circuit`に同時配線)を
+//! 構築できた。E5(分圧、機械精度)・E3(放電形、rel<1%)・`Command::SetSwitch`による
+//! 実行中のLED分岐の開閉・`JouleHeat`(Coupling registry経由)による熱ノード温度上昇を
+//! 確認する。E4(RLC)は`sim-em`側で既にGreenのため重複実装しない。残りのPhase 2〜3
+//! (D12・D14・D18)・Phase 4の残り(D20–D33)は後続増分。Pα(天体ウェーブ)は
 //! 天体ドメイン(`sim_astro::NBodySystem`)
 //! が既に`World`の常時合成ドメインとして接続済み(`enable_astro`、`step()`が
 //! 自動sub-stepする)ため、Phase 4より先にD34(太陽系儀)を実装した — 8惑星ではなく
@@ -60,7 +66,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::{World, WorldOptions};
+    use crate::{Command, World, WorldOptions};
     use sim_core::Solver;
     use sim_math::Vec3;
     use sim_mechanics::{DragModel, RigidBodyDesc, Shape};
@@ -914,6 +920,103 @@ mod tests {
             t_copper > t_steel && t_steel > t_wood,
             "T3 + 材質のk比: higher thermal diffusivity should warm the midpoint faster: \
              t_copper={t_copper:.4} t_steel={t_steel:.4} t_wood={t_wood:.4}"
+        );
+    }
+
+    /// D19 電気工作台(docs/21-verification/03-demo-scenarios.md Phase 4表)。
+    /// 「電池・抵抗・LED・コンデンサ・スイッチの自由配線」「合格基準: E3/E4/E5、
+    /// ジュール熱→温度」。`circuit`ドメイン(`sim_em::Circuit`、既に`World`の常時合成
+    /// ドメインとして接続済み)を使い、電池1つから分岐する3つの部分回路 —
+    /// (1)分圧回路(E5、node1→R1→node2→R2→GND)、(2)コンデンサの放電回路
+    /// (E3の放電形、node1とは独立にnode3をV0で予め充電しR3経由でGNDへ接続)、
+    /// (3)スイッチ+LED(ダイオード)回路(node1→スイッチ→node4→ダイオード→GND、
+    /// `Command::SetSwitch`で開閉可能) — を同一`Circuit`に自由配線する。E4(RLC)は
+    /// `sim-em`側で既にGreenのため重複実装しない(このデモの主眼は複数素子の自由配線と
+    /// Coupling registry経由のジュール熱→温度の組み合わせ検証)。
+    #[test]
+    fn d19_electric_workbench_matches_divider_and_rc_discharge_and_switch_controls_led_and_joule_heats_node(
+    ) {
+        let v0 = 9.0; // 「電池」相当
+        let r1 = 1000.0;
+        let r2 = 2000.0;
+        let r3 = 500.0;
+        let c = 1.0e-3;
+
+        let mut circuit = sim_em::Circuit::new(5);
+        circuit.add_voltage_source(1, sim_em::GROUND, v0); // index 0
+        circuit.add_resistor(1, 2, r1);
+        circuit.add_resistor(2, sim_em::GROUND, r2);
+        circuit.add_resistor(3, sim_em::GROUND, r3);
+        circuit.add_capacitor(3, sim_em::GROUND, c, v0); // 予め充電済み、node1とは独立
+        let switch_index = circuit.add_switch(1, 4, true);
+        circuit.add_diode(4, sim_em::GROUND, 1.0e-12, 0.02585);
+
+        let mut world = World::new(WorldOptions::default());
+        world.enable_circuit(circuit);
+        let mut thermal = sim_thermal::ThermalSolver::new(293.15);
+        let heat_node = thermal.add_node(sim_thermal::ThermalNode::new(293.15, 1000.0));
+        world.enable_thermal(thermal);
+        world.add_coupling(Box::new(sim_coupling::JouleHeat {
+            thermal_node: heat_node,
+        }));
+
+        world.step();
+
+        // E5: 分圧比(理想電圧源からの純抵抗分圧、機械精度)。
+        let expected_divider = v0 * r2 / (r1 + r2);
+        let measured_divider = world.circuit().unwrap().node_voltage(2);
+        assert!(
+            (measured_divider - expected_divider).abs() < 1e-9,
+            "E5 divider: measured={measured_divider} expected={expected_divider}"
+        );
+
+        // スイッチが閉じている間はLED(ダイオード)分岐に電流が流れ、node4がダイオードの
+        // 順方向電圧程度まで持ち上がる。
+        let led_on_voltage = world.circuit().unwrap().node_voltage(4);
+        assert!(
+            led_on_voltage > 0.1,
+            "closed switch should forward-bias the LED branch: led_on_voltage={led_on_voltage}"
+        );
+
+        // `Command::SetSwitch`でスイッチを開くと、LED分岐への電流路がほぼ絶たれ node4は
+        // 閉時より大幅に下がる(スイッチの開放抵抗`SWITCH_OFF_RESISTANCE`は有限(理想
+        // スイッチの近似)なので、ダイオードの指数特性により微小な漏れ電流でも数百mV
+        // 程度の電圧が残りうる — 完全な0Vではなく「閉時より十分低い」ことで検証する、
+        // D19「自由配線」の主眼: 実行中にスイッチを操作できること)。
+        world.push_command(Command::SetSwitch {
+            switch_index,
+            closed: false,
+        });
+        for _ in 0..5 {
+            world.step();
+        }
+        let led_off_voltage = world.circuit().unwrap().node_voltage(4);
+        assert!(
+            led_off_voltage < led_on_voltage * 0.5,
+            "open switch should substantially reduce the LED branch voltage: \
+             led_on_voltage={led_on_voltage} led_off_voltage={led_off_voltage}"
+        );
+
+        // E3(放電形): コンデンサが予め充電した電圧V0からR3経由で指数減衰する
+        // (V(t)=V0*e^{-t/(R3*C)})。
+        let dt = WorldOptions::default().dt;
+        let steps_so_far = 6u32; // 上のworld.step()呼び出し回数(1 + 5)
+        let tau = r3 * c;
+        let t = steps_so_far as f64 * dt;
+        let expected_v3 = v0 * (-t / tau).exp();
+        let measured_v3 = world.circuit().unwrap().node_voltage(3);
+        let rel_err = (measured_v3 - expected_v3).abs() / expected_v3;
+        assert!(
+            rel_err < 0.01,
+            "E3 discharge: measured_v3={measured_v3} expected_v3={expected_v3} rel_err={rel_err:.4}"
+        );
+
+        // ジュール熱→温度: 回路の抵抗損失がCoupling registry経由で熱ノードへ注入され続け、
+        // 温度が初期値から上昇していること。
+        let final_temp = world.thermal().unwrap().nodes[heat_node].temperature;
+        assert!(
+            final_temp > 293.15,
+            "Joule heat should have raised the thermal node's temperature: final_temp={final_temp}"
         );
     }
 
