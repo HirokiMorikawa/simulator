@@ -11,12 +11,12 @@
 //! 参照)のため、初速や抗力比較が必要なデモ(D2等)はJSON経由ではなく`World`公開API
 //! (`create_body`・`mechanics_mut()`)を直接使って構築する。D1–D39のうち、まず
 //! Phase 1スモーク(既存の解析解テストとほぼ1対1対応、新規物理実装が不要なもの)から
-//! D1(落下時計)・D2(弾道)・D3(バウンド比べ)・D8(散乱の再現)の4本を実装する。
-//! D10(摩擦の熱)は`crates/sim-world/src/integration_scenarios.rs`の
-//! `brake_heat_scenario_keeps_world_energy_ledger_residual_small`が既に同じ内容
-//! (鋼のブレーキ板+鋼の箱、運動エネルギー→熱の変換対応表)を検証済みのため、本モジュール
-//! への重複実装はしない(D10のヘッドレス部分は既存テストでカバー済みと見なす)。
-//! 残りは後続増分。
+//! D1(落下時計)・D2(弾道)・D3(バウンド比べ)・D5(斜面)・D8(散乱の再現)・
+//! D9(冷めるコーヒー)の6本を実装する。D10(摩擦の熱)は`crates/sim-world/src/
+//! integration_scenarios.rs`の`brake_heat_scenario_keeps_world_energy_ledger_residual_small`
+//! が既に同じ内容(鋼のブレーキ板+鋼の箱、運動エネルギー→熱の変換対応表)を検証済み
+//! のため、本モジュールへの重複実装はしない(D10のヘッドレス部分は既存テストで
+//! カバー済みと見なす)。残りは後続増分。
 
 #[cfg(test)]
 mod tests {
@@ -268,6 +268,109 @@ mod tests {
             run(seed),
             run(seed),
             "same seed should reproduce an identical state_hash (D8 pass criterion)"
+        );
+    }
+
+    /// D5 斜面(同docs Phase 2〜3表 — Phase 1の項目だが表の掲載順どおり参照)。
+    /// 「角度スライダー+素材切替」「合格基準: M7/M8(滑り出し角 = $\arctan\mu_s$)」。
+    /// `sim-mechanics`のM7/M8解析解テストと同じ傾斜面構成(箱のローカル+y面が斜面法線に
+    /// 一致する回転)を`World`経由で再現し、(1)静止摩擦角未満では静止し続けること(M7)、
+    /// (2)静止摩擦角を超えると$a=g(\sin\theta-\mu_k\cos\theta)$で滑り出すこと(M8)を
+    /// 確認する。
+    #[test]
+    fn d5_incline_stays_static_below_friction_angle_and_slides_matching_formula_above() {
+        let steel_friction = {
+            let world = World::new(WorldOptions::default());
+            let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+            world.materials().friction_pair(steel, steel)
+        };
+        assert!((10.0_f64).to_radians().tan() < steel_friction);
+        assert!((45.0_f64).to_radians().tan() > steel_friction);
+
+        let build_incline = |theta: f64| -> (World, crate::BodyId) {
+            let mut world = World::new(WorldOptions::default());
+            let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+            let normal = Vec3::new(-theta.sin(), theta.cos(), 0.0);
+            let half_extent = 0.5;
+
+            let mut plane = RigidBodyDesc::dynamic(Shape::Plane { normal, d: 0.0 }, steel);
+            plane.body_type = sim_mechanics::BodyType::Static;
+            world.create_body(plane);
+
+            let mut desc = RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(half_extent, half_extent, half_extent),
+                },
+                steel,
+            );
+            desc.transform.position = normal.scale(half_extent);
+            desc.transform.rotation =
+                sim_math::Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), theta);
+            let body = world.create_body(desc);
+            (world, body)
+        };
+
+        // (1) M7: 静止摩擦角未満(10°)では静止し続ける。
+        let (mut world_static, body_static) = build_incline(10.0_f64.to_radians());
+        for _ in 0..600 {
+            world_static.step(); // 5s
+        }
+        let speed = world_static.body_velocity(body_static).unwrap().length();
+        assert!(speed < 1e-4, "M7: body should stay at rest, speed={speed}");
+
+        // (2) M8: 静止摩擦角を超える(45°)と解析解どおりの加速度で滑り出す。
+        let theta = 45.0_f64.to_radians();
+        let downhill = Vec3::new(-theta.cos(), -theta.sin(), 0.0);
+        let (mut world_slide, body_slide) = build_incline(theta);
+        let dt = WorldOptions::default().dt;
+        for _ in 0..60 {
+            world_slide.step(); // 0.5s
+        }
+        let speed_downhill = world_slide.body_velocity(body_slide).unwrap().dot(downhill);
+        let elapsed = 60.0 * dt;
+        let measured_accel = speed_downhill / elapsed;
+        let expected_accel = 9.80665 * (theta.sin() - steel_friction * theta.cos());
+        let rel_err = (measured_accel - expected_accel).abs() / expected_accel;
+        assert!(
+            rel_err < 0.05,
+            "M8: measured_accel={measured_accel} expected_accel={expected_accel} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// D9 冷めるコーヒー(同docs Phase 1表)。「カップの冷却曲線と指数フィット」
+    /// 「合格基準: T1」。単一の熱ノード(対流のみ、放射なし)を`enable_thermal`経由で
+    /// `World`に接続し、ニュートン冷却の指数減衰$T=T_{env}+(T_0-T_{env})e^{-t/\tau}$
+    /// (`sim-thermal`のT1解析解テストと同じ式・パラメータ)に一致することを確認する。
+    #[test]
+    fn d9_cooling_coffee_matches_newton_cooling_exponential_decay() {
+        let mut world = World::new(WorldOptions::default());
+        let ambient = 293.15;
+        let c = 100.0;
+        let h = 10.0;
+        let area = 1.0;
+        let t0 = 350.0; // 約77°C(熱いコーヒー相当)
+
+        let mut thermal = sim_thermal::ThermalSolver::new(ambient);
+        let mut node = sim_thermal::ThermalNode::new(t0, c);
+        node.convection_coefficient = h;
+        node.area = area;
+        let node_id = thermal.add_node(node);
+        world.enable_thermal(thermal);
+
+        let tau = c / (h * area);
+        let dt = WorldOptions::default().dt;
+        let steps = (2.0 * tau / dt) as u32;
+        for _ in 0..steps {
+            world.step();
+        }
+
+        let t_elapsed = steps as f64 * dt;
+        let analytic = ambient + (t0 - ambient) * (-t_elapsed / tau).exp();
+        let measured = world.thermal().unwrap().nodes[node_id].temperature;
+        let rel_err = (measured - analytic).abs() / (t0 - ambient);
+        assert!(
+            rel_err < 0.01,
+            "T1: measured={measured} analytic={analytic} rel_err={rel_err:.4}"
         );
     }
 }
