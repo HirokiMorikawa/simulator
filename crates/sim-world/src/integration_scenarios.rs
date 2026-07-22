@@ -1,12 +1,13 @@
 //! 統合シナリオ(複数`Coupling`を通しで検証、設計docs/20-integration/01-coupling-matrix.md
 //! §5「統合シナリオテスト」)。
 //!
-//! **縮約実装の理由**: 5本のうち現時点で実装済みの`Coupling`(`DissipationToHeat`)
-//! だけで構成できる「1. ブレーキ: 運動 → 摩擦熱 → 温度上昇」のみを実装する。
-//! 「手回し発電」(`JouleHeat`+モーター、モーターがヒンジ関節に未接続)・「氷と飲み物」
-//! (相変化、`PhaseChangeMorph`未実装)・「断熱圧縮」(`PistonGas`、Sliderジョイント
-//! 未実装)・「再突入」(天体レジーム切替との結合、`World`未接続)は前提未実装のため
-//! 後続増分。
+//! **縮約実装の理由**: 5本のうち現時点で実装済みの`Coupling`で構成できる
+//! 「1. ブレーキ: 運動 → 摩擦熱 → 温度上昇」(`DissipationToHeat`)と
+//! 「2. 手回し発電: 機械仕事 → 電気 → ジュール熱」(`MotorCoupling`+`JouleHeat`、
+//! 「光」(LED等の発光)部分は光学ドメインとの結合が別途必要なため対象外)を実装する。
+//! 「氷と飲み物」(相変化、`PhaseChangeMorph`未実装)・「断熱圧縮」(`PistonGas`、
+//! Sliderジョイント未実装)・「再突入」(天体レジーム切替との結合、`World`未接続)は
+//! 前提未実装のため後続増分。
 //!
 //! `Coupling`はまだ`World::step()`のパイプラインに自動接続されていない
 //! (`World::apply_coupling`のdoc参照)ため、本テストは`world.step()`の直後に
@@ -91,6 +92,70 @@ mod tests {
         assert!(
             residual < 0.08,
             "brake heat scenario ledger residual too large: {residual}"
+        );
+    }
+
+    /// 設計§5「2. 手回し発電: 機械仕事 → 電気 → ジュール熱 + 光(効率の収支)」。
+    /// 「光」(LED等の発光)は光学ドメインとの結合が別途必要なため対象外、機械仕事→
+    /// 電気→ジュール熱の核となる部分のみ検証する。
+    ///
+    /// 一定回転数(`Kinematic`剛体、モジュールdoc「理想化された手回し」参照)で回る
+    /// クランク軸を`MotorCoupling`で回路に接続し、抵抗負荷の消費電力を`JouleHeat`で
+    /// 熱ノードへ注入する。定常状態でのジュール熱の注入率が理論値$(k\omega)^2/R$と
+    /// 一致することを確認する(実測rel_err約0.2%、`MotorCoupling`単体テストと
+    /// 同じ設定)。
+    #[test]
+    fn hand_crank_generator_scenario_converts_mechanical_work_to_joule_heat() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world
+            .materials()
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+
+        let omega0 = 10.0; // rad/s、一定回転数(理想化された手回し)
+        let k = 0.05; // N·m/A = V·s/rad
+        let r = 10.0;
+
+        let mut crank_desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        crank_desc.body_type = BodyType::Kinematic;
+        crank_desc.angular_velocity = Vec3::new(0.0, omega0, 0.0);
+        world.create_body(crank_desc);
+
+        let mut circuit = sim_em::Circuit::new(2);
+        circuit.add_voltage_source(1, sim_em::GROUND, 0.0); // index 0、MotorCouplingが駆動
+        circuit.add_resistor(1, sim_em::GROUND, r);
+        world.enable_circuit(circuit);
+
+        let mut thermal = ThermalSolver::new(293.15);
+        let heat_node = thermal.add_node(ThermalNode::new(293.15, 1000.0));
+        world.enable_thermal(thermal);
+
+        let mut motor = sim_coupling::MotorCoupling {
+            body_index: 0,
+            axis: Vec3::new(0.0, 1.0, 0.0),
+            voltage_source_index: 0,
+            torque_constant: k,
+        };
+        let mut joule_heat = sim_coupling::JouleHeat {
+            thermal_node: heat_node,
+        };
+
+        let dt = WorldOptions::default().dt;
+        let steps = 500u32;
+        for _ in 0..steps {
+            world.step();
+            world.apply_coupling(&mut motor, dt);
+            world.apply_coupling(&mut joule_heat, dt);
+        }
+
+        let expected_power = (k * omega0) * (k * omega0) / r;
+        let final_temp = world.thermal().unwrap().nodes[heat_node].temperature;
+        let heat_gained = 1000.0 * (final_temp - 293.15);
+        let expected_heat = expected_power * dt * steps as f64;
+        let rel_err = (heat_gained - expected_heat).abs() / expected_heat;
+        assert!(
+            rel_err < 0.02,
+            "heat_gained={heat_gained} expected_heat={expected_heat} rel_err={rel_err:.4}"
         );
     }
 }

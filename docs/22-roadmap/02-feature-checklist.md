@@ -626,10 +626,27 @@
   検証、高速・CI向け)。実測値の履歴比較による真の回帰検知(閾値超過でCI失敗)は、
   ベースライン永続化の仕組みが未導入のため後続増分 — 現時点では「ベンチが壊れて
   いないことの確認」のみ。PCG・SPH近傍探索のベンチマークは同じパターンで後続増分。
+  続けて6種目の`Coupling`実装`MotorCoupling`(設計§3「P4: 回路 ⇔ ヒンジ ⇔ 熱」、
+  「手回し発電」統合シナリオの核)に着手。`sim_em::DcMotor`は既にこの物理(逆起電力・
+  トルク定数)を自己完結した専用型として実装済みだが、`InductionRod`と同様
+  `sim_mechanics`の剛体・`sim_em::Circuit`の回路網とは独立なミニ統合クラスである
+  ため、`InductionCoupling`(並進版)の回転版として実装し直した — 固定軸`axis`まわりの
+  1自由度回転(正式なHingeジョイント未実装、`HingeMotorPd`の縮約と同じ精神)、
+  `InductionCoupling`と同じ1step遅れの縮約(単一`apply`内で反作用トルクを
+  `torque_accum`に積みつつ次の回路stepへの起電力を設定)。一定回転数(`Kinematic`
+  剛体、反作用トルクの影響を受けない — 「手回し発電」で手が任意の負荷に対して
+  一定回転数を保つ理想化)で回る軸のEMFが理論値$k\omega$と一致し、抵抗負荷の定常
+  電力が$V^2/R$と厳密に一致する(EMF自体がkinematicな入力で確定的なため
+  `InductionCoupling`のような1step遅れ誤差がそもそも生じない)ことを確認、初回実装で
+  一発Green化した。これを使って統合シナリオ「2. 手回し発電: 機械仕事 → 電気 →
+  ジュール熱 + 光」を実装(「光」は光学ドメインとの結合が別途必要なため対象外) —
+  `MotorCoupling`+`JouleHeat`を`apply_coupling`経由で結合し、定常状態でのジュール熱
+  注入率が理論値$(k\omega)^2/R$と一致することを確認(実測rel_err約0.2%)、初回実装で
+  一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
   (イベント購読/sample_fluid等のクエリ、ただしイベント購読は現状どのドメインソルバも
   イベントを発行していないため後回し)、性能ベンチ回帰ゲートの拡充(PCG・SPH近傍探索
-  ベンチ・ベースライン永続化)、または残り7種のCoupling(いずれも前提工事を要する)。
+  ベンチ・ベースライン永続化)、または残り6種のCoupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1097,18 +1114,18 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       が列挙する3組(浮力: 静的水域×SPH/格子流体、空気抗力: 集中定数×格子結合、
       コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出)を実装済み。`Coupling`
       トレイト + `DomainStates`(現時点でmechanics・thermal・em_circuit・
-      em_electrostaticsの4ドメイン)、具体的な実装5種(`DissipationToHeat`: 接触散逸→熱、
+      em_electrostaticsの4ドメイン)、具体的な実装6種(`DissipationToHeat`: 接触散逸→熱、
       `JouleHeat`: 回路I²R→熱、`BrownianForce`: 温度・粘性→微小剛体のランダム力、
-      `LorentzForce`: 静場→帯電剛体、`InductionCoupling`: 導体棒・渦電流)を実装済み
-      (前2種は単一`ThermalNode`への縮約実装で厳密な対記帳、`BrownianForce`はゆらぎ散逸
-      定理に基づく統計的結合のため長時間平均のエネルギー等分配則収束で検証、
-      `LorentzForce`は点電荷群との対ごとの反作用で運動量を厳密に対記帳、
-      `InductionCoupling`は1step遅れの縮約(design上`MotorCoupling`同様pre/post
-      両方に置かれるべき結合を単一`apply`に統合)でE7の解析解に収束、剛体/抵抗↔熱ノード
-      対応表・剛体の電荷フィールドは未実装)。`World`にも`circuit`ドメインを追加済み。
-      残り7種の`Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`
-      パイプラインへのCoupling接続(registry相当の仕組みが必要)・sub-iteration
-      剛性閾値表は未実装
+      `LorentzForce`: 静場→帯電剛体、`InductionCoupling`: 導体棒・渦電流、
+      `MotorCoupling`: 回路⇔ヒンジ)を実装済み(前2種は単一`ThermalNode`への縮約実装で
+      厳密な対記帳、`BrownianForce`はゆらぎ散逸定理に基づく統計的結合のため長時間平均の
+      エネルギー等分配則収束で検証、`LorentzForce`は点電荷群との対ごとの反作用で運動量を
+      厳密に対記帳、`InductionCoupling`・`MotorCoupling`は1step遅れの縮約(design上
+      pre/post両方に置かれるべき結合を単一`apply`に統合)でそれぞれE7の解析解・
+      理論EMFに収束、剛体/抵抗↔熱ノード対応表・剛体の電荷フィールド・正式なHinge
+      ジョイントは未実装)。`World`にも`circuit`ドメインを追加済み。残り6種の
+      `Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`パイプラインへの
+      Coupling接続(registry相当の仕組みが必要)・sub-iteration剛性閾値表は未実装
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
@@ -1130,7 +1147,9 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [x] 統合シナリオ: ブレーキ発熱(核となる運動→摩擦熱→温度上昇のみ、P5(温度依存
       抵抗変化)は対象外。台帳residual実測約4.3%、設計目標<10⁻³には届かないが
       `DissipationToHeat`既知のBaumgarte系統誤差起因、余裕を持たせた<8%で検証)
-- [ ] 統合シナリオ: 手回し発電
+- [x] 統合シナリオ: 手回し発電(機械仕事→電気→ジュール熱の核のみ、「光」(LED等の
+      発光)は光学ドメインとの結合が別途必要なため対象外。`MotorCoupling`+
+      `JouleHeat`、定常電力・ジュール熱注入率とも実測rel_err<1%で一致)
 - [ ] 統合シナリオ: 氷と飲み物
 - [ ] 統合シナリオ: 断熱圧縮
 - [ ] 統合シナリオ: 再突入
