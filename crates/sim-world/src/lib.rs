@@ -26,23 +26,23 @@
 //! (`sim_em::Circuit`、回路のMNAソルバ。`Solver`トレイト実装は`sim-coupling::JouleHeat`
 //! 増分で追加済み)は`Option`として追加した(シーンが使う分だけ`enable_*`で有効化、設計
 //! 「Solverトレイトの共通契約」docs/00-foundation/04-architecture.md §1.2に既に準拠している
-//! 型をそのまま接続)。`sim_fluid::SphFluid`にも`Solver`トレイトを実装し`sph`ドメインとして
-//! 同様に接続した(モジュールdoc「sub-step数のCFL自動決定は未実装」の解消、`sph.rs`の
-//! `Solver`実装のdoc参照)。`step()`は有効なドメインを固定順(mechanics→thermal→em→
-//! astro→circuit→sph、`state_hash`も同順)で順に進める。各ドメインは
+//! 型をそのまま接続)。`sim_fluid::SphFluid`・`sim_fluid::GridFluid2D`にも`Solver`トレイトを
+//! 実装し`sph`/`grid_fluid`ドメインとして同様に接続した(`sph.rs`/`grid_fluid.rs`の
+//! `Solver`実装のdoc参照。これで`GridFluidRigid`/`ConvectionLink`/`BoussinesqBuoyancy`/
+//! `SphRigid`各Couplingが要求する「決定的sub-step経由での流体状態進行」の前提が揃った)。
+//! `step()`は有効なドメインを固定順(mechanics→thermal→em→
+//! astro→circuit→sph→grid_fluid、`state_hash`も同順)で順に進める。各ドメインは
 //! `orchestrator::sub_step_count`(設計§1.3の
 //! 決定的sub-step数算出、`max_stable_dt()`から算出)に従いsub-stepする — Lie-Trotter
 //! operator splitting自体(pre/post couplingを挟むパイプライン、
 //! docs/20-integration/01-coupling-matrix.md §4)は、`Coupling`実装(`sim-coupling`の
 //! `DissipationToHeat`・`JouleHeat`)がまだ`World`に接続されていない(各Couplingは
 //! `sim-coupling`crate内で単体検証済みだが、`World::step()`のパイプラインへの組み込みは
-//! Coupling registry相当の仕組みが必要で後続増分)ため未実装。`fluid`(`sim-fluid`の
-//! GridFluid系・SPH)は`Solver`トレイトを未実装のため今回は見送る(各流体型に`Solver`実装を
-//! 追加するか専用の接続方式を検討する必要があり、後続増分)。`quantum`/`statistical`は
-//! 専用シーンでのみ有効化する設計方針のため同様に見送る。`gas`
+//! Coupling registry相当の仕組みが必要で後続増分)ため未実装。`quantum`/`statistical`は
+//! 専用シーンでのみ有効化する設計方針のため見送る。`gas`
 //! (`sim_thermal::GasCompartment`、断熱圧縮の`PistonGas`結合が使う)・`conduction_rod`
-//! (`sim_thermal::ConductionRod1D`、D16「熱伝導レース」が使う)も同じ理由で
-//! `Solver`を実装しない — `step()`の自動走査対象ではなく、呼び出し側が
+//! (`sim_thermal::ConductionRod1D`、D16「熱伝導レース」が使う)は`Solver`を実装しない —
+//! `step()`の自動走査対象ではなく、呼び出し側が
 //! `apply_coupling`/`conduction_rod_mut().step(dt)`を明示的に呼んで状態を進める。
 
 mod demos;
@@ -244,6 +244,10 @@ pub struct World {
     /// `thermal`/`em_electrostatics`/`astro`/`circuit`と同じ固定順で`step()`が
     /// 自動的にsub-stepする。
     sph: Option<sim_fluid::SphFluid>,
+    /// 格子(Eulerian)流体ドメイン(シーンが使う場合のみ`Some`)。`sim_fluid::GridFluid2D`に
+    /// `Solver`トレイトを実装済み(モジュールdoc「全ドメイン合成」参照)のため、`sph`と
+    /// 同じ固定順で`step()`が自動的にsub-stepする。
+    grid_fluid: Option<sim_fluid::GridFluid2D>,
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
@@ -315,6 +319,7 @@ impl World {
             gas: None,
             conduction_rod: None,
             sph: None,
+            grid_fluid: None,
             materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
@@ -563,6 +568,19 @@ impl World {
         self.sph.as_mut()
     }
 
+    /// 格子流体ドメインを有効化する(`step()`が自動的にsub-stepする、モジュールdoc参照)。
+    pub fn enable_grid_fluid(&mut self, grid_fluid: sim_fluid::GridFluid2D) {
+        self.grid_fluid = Some(grid_fluid);
+    }
+
+    pub fn grid_fluid(&self) -> Option<&sim_fluid::GridFluid2D> {
+        self.grid_fluid.as_ref()
+    }
+
+    pub fn grid_fluid_mut(&mut self) -> Option<&mut sim_fluid::GridFluid2D> {
+        self.grid_fluid.as_mut()
+    }
+
     /// 流体場の点`p`での観測(設計docs/20-integration/04-world-api.md §2
     /// `sample_fluid(p) -> FluidSample`)。
     ///
@@ -657,6 +675,9 @@ impl World {
         if let Some(s) = &self.sph {
             total = total + s.total_energy();
         }
+        if let Some(g) = &self.grid_fluid {
+            total = total + g.total_energy();
+        }
         total
     }
 
@@ -689,6 +710,9 @@ impl World {
         }
         if let Some(s) = &mut self.sph {
             run_domain_substeps(s, dt, &self.materials, &mut self.rng, &mut self.events);
+        }
+        if let Some(g) = &mut self.grid_fluid {
+            run_domain_substeps(g, dt, &self.materials, &mut self.rng, &mut self.events);
         }
         // このstepで発行された全イベントを排出し、Event::step(発行元ドメインは
         // ワールド全体のstep_countを知らないため0で埋めている、`sim-mechanics::
@@ -881,6 +905,10 @@ impl World {
         hasher.write_u64(self.sph.is_some() as u64);
         if let Some(s) = &self.sph {
             s.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.grid_fluid.is_some() as u64);
+        if let Some(g) = &self.grid_fluid {
+            g.state_hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -1106,6 +1134,50 @@ mod tests {
             (sample.velocity.y - measured_vy).abs() < 1e-9,
             "sample_fluid should read the nearest particle's velocity"
         );
+    }
+
+    /// 格子流体ドメインが`step()`で自動的にsub-stepされ、粘性拡散により運動エネルギーが
+    /// 単調に減衰すること(`total_energy`にも反映されること)。
+    #[test]
+    fn grid_fluid_domain_steps_automatically_and_dissipates_kinetic_energy() {
+        let mut world = World::new(WorldOptions::default());
+        let nx = 8;
+        let ny = 8;
+        let h = 1.0 / nx as f64;
+        let mut fluid = sim_fluid::GridFluid2D::new(nx, ny, h);
+        fluid.kinematic_viscosity = 0.05;
+        let k = 2.0 * std::f64::consts::PI;
+        for j in 0..ny as i64 {
+            for i in 0..=nx as i64 {
+                let idx =
+                    (i.rem_euclid(nx as i64)) as usize + nx * (j.rem_euclid(ny as i64)) as usize;
+                let x = i as f64 * h;
+                let y = (j as f64 + 0.5) * h;
+                fluid.u[idx] = -(k * x).cos() * (k * y).sin();
+            }
+        }
+        for j in 0..=ny as i64 {
+            for i in 0..nx as i64 {
+                let idx =
+                    (i.rem_euclid(nx as i64)) as usize + nx * (j.rem_euclid(ny as i64)) as usize;
+                let x = (i as f64 + 0.5) * h;
+                let y = j as f64 * h;
+                fluid.v[idx] = (k * x).sin() * (k * y).cos();
+            }
+        }
+        world.enable_grid_fluid(fluid);
+
+        let energy_before = world.total_energy().total();
+        for _ in 0..30 {
+            world.step();
+        }
+        let energy_after = world.total_energy().total();
+
+        assert!(
+            energy_after < energy_before,
+            "viscous grid fluid should lose kinetic energy: before={energy_before} after={energy_after}"
+        );
+        assert!(world.grid_fluid().is_some());
     }
 
     /// 決定論テスト(階層1): 同一初期条件 → 同数ステップ後のハッシュが一致する。

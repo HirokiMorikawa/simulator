@@ -10,15 +10,23 @@
 //! `u` は x面 $(ih,(j+\tfrac12)h)$、`v` は y面 $((i+\tfrac12)h,jh)$ に置く。周期境界のため
 //! 各成分の格子点数はセル数と同じ($n_x\times n_y$、境界の重複層を持たない)。
 
+use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::Vec3;
 
 /// 周期境界の2D格子流体。`u`・`v` は共に長さ `nx*ny`(staggered配置、モジュールdoc参照)。
+#[derive(Clone)]
 pub struct GridFluid2D {
     pub nx: usize,
     pub ny: usize,
     pub h: f64,
     pub u: Vec<f64>,
     pub v: Vec<f64>,
+    /// `Solver::step`が使う既定密度(既存の`project(dt, density)`は引数で個別指定可能、
+    /// このフィールドは`World`経由の自動ステップでのみ使われる)。
+    pub density: f64,
+    /// `Solver::step`が使う既定動粘性係数。0.0なら陽的粘性拡散をスキップする
+    /// (設計§4.3: 粘性が無視できるほど小さい場合の既定分岐)。
+    pub kinematic_viscosity: f64,
 }
 
 fn wrap(i: i64, n: usize) -> usize {
@@ -33,6 +41,8 @@ impl GridFluid2D {
             h,
             u: vec![0.0; nx * ny],
             v: vec![0.0; nx * ny],
+            density: 1.0,
+            kinematic_viscosity: 0.0,
         }
     }
 
@@ -101,6 +111,8 @@ impl GridFluid2D {
             h: self.h,
             u: old_u,
             v: old_v,
+            density: self.density,
+            kinematic_viscosity: self.kinematic_viscosity,
         };
 
         for j in 0..self.ny as i64 {
@@ -221,6 +233,78 @@ impl GridFluid2D {
             }
         }
     }
+
+    /// 全格子点での速度の最大値(`max_stable_dt`の移流CFL項が使う)。
+    fn max_speed(&self) -> f64 {
+        let mut max_sq: f64 = 0.0;
+        for i in 0..self.u.len() {
+            let speed_sq = self.u[i] * self.u[i] + self.v[i] * self.v[i];
+            max_sq = max_sq.max(speed_sq);
+        }
+        max_sq.sqrt()
+    }
+
+    /// `Solver::step`が呼ぶ1ステップ分の処理(設計§4.6のステップまとめから、
+    /// このモジュールが実装する範囲——移流+粘性拡散+投影——のみを抜き出したもの)。
+    /// 外力・煙/温度移流・固体境界(§4.2, §4.6)はこの縮約実装の対象外。
+    pub fn step(&mut self, dt: f64) {
+        self.advect_velocity(dt);
+        if self.kinematic_viscosity > 0.0 {
+            self.diffuse_explicit(dt, self.kinematic_viscosity);
+        }
+        self.project(dt, self.density);
+    }
+}
+
+impl Solver for GridFluid2D {
+    /// 設計§4.3の陽的粘性の安定限界 $\nu\Delta t/h^2 \le 0.25$ と、§4.6が定める
+    /// 移流のCFL規約(CFL≦5)の両方から決まる、より厳しい方を返す。半Lagrangian移流
+    /// 自体は無条件安定(§4.1)なのでCFL項は「妥当な補間精度を保つための目安」であり、
+    /// 厳密な安定限界ではないが、`Orchestrator`のsub-step決定に使う値として一貫させる。
+    fn max_stable_dt(&self) -> f64 {
+        const ADVECTION_CFL: f64 = 5.0;
+        let speed = self.max_speed();
+        let dt_adv = if speed > 0.0 {
+            ADVECTION_CFL * self.h / speed
+        } else {
+            f64::INFINITY
+        };
+        let dt_visc = if self.kinematic_viscosity > 0.0 {
+            0.25 * self.h * self.h / self.kinematic_viscosity
+        } else {
+            f64::INFINITY
+        };
+        dt_adv.min(dt_visc)
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        // inherent メソッド(1引数版、上の`impl GridFluid2D`ブロック)が同名のトレイト
+        // メソッドより優先されるため無限再帰しない(`sim_em::Circuit`・`SphFluid`と同じ
+        // パターン)。
+        self.step(dt);
+    }
+
+    /// 運動エネルギーのみ(非圧縮流は圧力によるポテンシャルエネルギーを持たず、
+    /// 外力由来のポテンシャルはこの縮約実装が外力自体を扱わないため対象外)。
+    fn total_energy(&self) -> EnergyBreakdown {
+        let cell_mass = self.density * self.h * self.h;
+        let mut kinetic = 0.0;
+        for i in 0..self.u.len() {
+            kinetic += 0.5 * cell_mass * (self.u[i] * self.u[i] + self.v[i] * self.v[i]);
+        }
+        EnergyBreakdown {
+            kinetic,
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.u.len() as u64);
+        for i in 0..self.u.len() {
+            hasher.write_f64(self.u[i]);
+            hasher.write_f64(self.v[i]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -329,5 +413,52 @@ mod tests {
             rel_err < 0.05,
             "measured_rate={measured_rate:.6} analytic_rate={analytic_rate:.6} rel_err={rel_err:.4}"
         );
+    }
+
+    /// `Solver`トレイト統合: `max_stable_dt`が粘性・移流双方の安定限界の厳しい方を
+    /// 返し、`Solver::step`経由でも`step(dt)`と同じ状態遷移になること。
+    #[test]
+    fn solver_trait_max_stable_dt_reflects_viscous_and_advective_limits_and_step_advances_state() {
+        let nx = 8;
+        let ny = 8;
+        let h = 1.0 / nx as f64;
+        let mut fluid = GridFluid2D::new(nx, ny, h);
+        fluid.kinematic_viscosity = 0.2;
+        fluid.u[0] = 3.0;
+
+        let expected_visc = 0.25 * h * h / fluid.kinematic_viscosity;
+        let expected_adv = 5.0 * h / 3.0;
+        let expected = expected_visc.min(expected_adv);
+        assert!(
+            (fluid.max_stable_dt() - expected).abs() < 1e-12,
+            "max_stable_dt={} expected={}",
+            fluid.max_stable_dt(),
+            expected
+        );
+
+        let mut via_step = fluid.clone();
+        via_step.step(0.001);
+
+        let mut via_trait = fluid.clone();
+        let materials = sim_core::MaterialDb::standard();
+        let mut rng = sim_math::SimRng::new(1, 1);
+        let mut events = sim_core::EventQueue::new();
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        Solver::step(&mut via_trait, 0.001, &mut ctx);
+
+        assert_eq!(via_step.u, via_trait.u);
+        assert_eq!(via_step.v, via_trait.v);
+    }
+
+    /// 静止状態(速度ゼロ・粘性ゼロ)では移流・拡散いずれも安定限界を持たないため
+    /// `max_stable_dt`は`INFINITY`(`Orchestrator::sub_step_count`はこれを1に解釈する)。
+    #[test]
+    fn solver_trait_max_stable_dt_is_infinite_at_rest_with_no_viscosity() {
+        let fluid = GridFluid2D::new(8, 8, 0.1);
+        assert_eq!(fluid.max_stable_dt(), f64::INFINITY);
     }
 }

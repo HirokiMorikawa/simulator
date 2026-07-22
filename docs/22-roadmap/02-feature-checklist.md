@@ -843,12 +843,35 @@
   この`SphFluid`の`Solver`化は、残るCoupling5種のうち`SphRigid`(SPH流体⇔剛体)の
   前提の一つも満たしたことになる(もう一方の前提である剛体側との相互作用力の
   設計はまだ未着手)。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り5種のCoupling
+  続けて`GridFluidRigid`/`ConvectionLink`/`BoussinesqBuoyancy`の前提だった
+  `GridFluid2D`の`Solver`統合に着手した。`max_stable_dt`は設計§4.3の陽的粘性の
+  安定限界$\nu\Delta t/h^2\le0.25$と、設計§4.6の移流CFL規約(CFL≦5)の両方から
+  決まるより厳しい方を返す(半Lagrangian移流自体は無条件安定なため後者は
+  厳密な安定限界ではなく目安だが、`Orchestrator`のsub-step決定に使う値として
+  一貫させた)。既存の`advect_velocity`/`diffuse_explicit`/`project`(いずれも
+  引数で密度・粘性を個別指定可能)はそのまま残し、`Solver::step`専用に
+  `density`/`kinematic_viscosity`フィールドと、両者を固定値として使う
+  `step(dt)`(1引数版inherentメソッド)を新設した。`SphFluid`と同じ「inherent
+  メソッドが同名のトレイトメソッドより優先される」パターンで
+  `Solver::step(dt, ctx)`から`self.step(dt)`に委譲する。`GridFluid2D`に
+  `#[derive(Clone)]`を追加(`World`全体の`Clone`導出に必要)。`World`に
+  `grid_fluid`ドメインを新設し、`sph`と同じ固定順(末尾)で`step()`が自動的に
+  sub-stepするよう接続した。粘性を持つTaylor-Green類似の速度場を`World`経由で
+  数十ステップ進め、運動エネルギーが単調減衰することを確認し、初回実装で
+  一発Green化した。
+  なお、この増分で`sim-fluid::sph`モジュールdocに残っていた「sub-step数の
+  CFL自動決定は未実装」という記述(前回`SphFluid`の`Solver`化増分で実装済みに
+  なったにもかかわらず更新し忘れていた)と、`sim-world::lib`モジュールdocに
+  残っていた「`fluid`は`Solver`トレイト未実装のため見送る」という記述(同じく
+  `SphFluid`接続で既に古くなっていた)も合わせて修正した。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り4種のCoupling
   (いずれも本格的な前提工事を要する: `GridFluidRigid`/`ConvectionLink`/
-  `BoussinesqBuoyancy`は`GridFluid2D`側の`Solver`トレイト統合、`SphRigid`は
-  `SphFluid`側の`Solver`統合は完了したが剛体との相互作用力の設計が未着手、
-  `PhaseChangeMorph`はイベント駆動の剛体/流体生成、`BuoyancyDrag`は既存の
-  `MechanicsSolver`埋め込み実装の切り出しリスク)。
+  `BoussinesqBuoyancy`は`GridFluid2D`側の`Solver`統合が完了したため、あとは
+  `World::step()`のCoupling registry相当の仕組みと剛体/熱ドメインとの
+  相互作用力の設計が必要、`SphRigid`は`SphFluid`側の`Solver`統合は完了したが
+  剛体との相互作用力の設計が未着手、`PhaseChangeMorph`はイベント駆動の
+  剛体/流体生成、`BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の
+  切り出しリスク)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1333,8 +1356,10 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       (実測rel_err最大約1.4%)で検証、剛体/抵抗↔熱ノード対応表・剛体の電荷フィールド・
       正式なHingeジョイントは未実装)。`World`にも`circuit`・`gas`ドメインを追加済み。
       残り5種の`Coupling`(`BuoyancyDrag`・`GridFluidRigid`・`ConvectionLink`・
-      `BoussinesqBuoyancy`・`SphRigid`)・`World::step()`パイプラインへのCoupling接続
-      (registry相当の仕組みが必要)・sub-iteration剛性閾値表は未実装
+      `BoussinesqBuoyancy`・`SphRigid`)自体は未実装だが、前提だった`SphFluid`・
+      `GridFluid2D`双方への`Solver`トレイト統合(決定的sub-step・状態ハッシュ)は
+      完了した。`World::step()`パイプラインへのCoupling接続(registry相当の仕組みが
+      必要)・sub-iteration剛性閾値表は未実装
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
