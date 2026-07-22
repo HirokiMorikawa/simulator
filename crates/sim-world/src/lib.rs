@@ -41,6 +41,11 @@
 mod orchestrator;
 mod overlap;
 mod raycast;
+mod scenario;
+
+pub use scenario::{
+    BodyScenarioDesc, MaterialOverride, Scenario, SceneError, ShapeJson, WorldScenarioOptions,
+};
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_math::{SimRng, Vec3};
@@ -349,6 +354,12 @@ impl World {
     /// `MaterialId` の解決に使う。
     pub fn materials(&self) -> &MaterialDb {
         &self.materials
+    }
+
+    /// 材料DBへの可変アクセス(`from_scenario`の`extends`派生材料の追加用、設計§1
+    /// 「シーン構築時の設定はコマンド規律の対象外」)。
+    pub fn materials_mut(&mut self) -> &mut MaterialDb {
+        &mut self.materials
     }
 
     /// 剛体を追加する。設計 docs/20-integration/04-world-api.md §2 の `create_body`。

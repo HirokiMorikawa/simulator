@@ -549,10 +549,28 @@
   (複数回路対応時に`CircuitId`を導入して拡張する)。回路ドメイン未有効化なら`None`、
   有効化後は`Circuit::node_voltage`と一致することをテストで確認し、初回実装で
   一発Green化した。
+  続けて`World::from_scenario`(シーンJSON、設計docs/20-integration/04-world-api.md §3)
+  を実装。`serde`/`serde_json`をsim-worldの新規依存として追加した(本セッション初の
+  外部crate依存追加 — wasm向けビルドでも問題なくコンパイルできることを確認済み)。
+  設計例示のJSONスキーマ(`world`/`materials`/`bodies`/`fluids`/`couplings`/`probes`)
+  のうち、`world`・`materials`(`extends`派生)・`bodies`のみを実装(`fluids`は流体
+  ドメインが`World`未接続、`couplings`は`Coupling` registryが`World::step()`に
+  未接続、`probes`はシーンJSON上の文字列ターゲット解決が必要なため、いずれも
+  対応する`World`側の機能自体がまだ限定的で後続増分)。`extends`派生材料は
+  `Material::name`が`&'static str`(既存の`MaterialDb::standard()`のコンパイル時
+  定数群と型を揃えるため)なので、シーンJSON由来の動的な名前を`Box::leak`で
+  `'static`化する設計にした(シーンロードは低頻度操作なのでリークは無視できる規模)。
+  `World::materials_mut()`アクセサを新規追加(派生材料の追加用)。validator
+  (参照整合検査)はこの縮約版が対象とする範囲(材料参照: `materials[].extends`・
+  `bodies[].material`)のみ実装、排他結合検査は`couplings`セクション未実装のため
+  未接続。設計docs/20-integration/04-world-api.md §3の例示JSON(浮力デモの縮約版)を
+  実際にパースして`World`を構築し、派生材料・剛体(位置・種別)が正しく反映される
+  ことと、両方の未知材料参照エラーが正しく報告されることの3本のテストで検証し、
+  初回実装で一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
-  (Scenario/イベント購読/sample_fluid等のクエリ、ただしイベント購読は
-  現状どのドメインソルバもイベントを発行していないため後回し)、または残り7種の
-  Coupling(いずれも前提工事を要する)。
+  (fluids/couplings/probesセクションのシーンJSON対応・イベント購読/sample_fluid等の
+  クエリ、ただしイベント購読は現状どのドメインソルバもイベントを発行していないため
+  後回し)、または残り7種のCoupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1041,8 +1059,10 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       未実装、`Capsule`/`Compound`/`ConvexMesh`はP2/P5未実装のため対象外)・
       `Probe`/`ProbeTarget`(`sim_math::RingBuffer`を新規実装、6種のターゲットのうち
       `NodeTemp`/`CircuitCurrent`は単一ドメイン前提の縮約index、他は設計どおり)・
-      `circuit_probe`(単一`circuit`ドメイン前提、`CircuitId`引数は省略)を実装済み。
-      `Scenario`/`from_scenario`(シーンJSON、validator接続)・`subscribe`/
+      `circuit_probe`(単一`circuit`ドメイン前提、`CircuitId`引数は省略)・
+      `Scenario`/`from_scenario`(`serde`/`serde_json`を新規依存として追加、
+      `world`・`materials`(`extends`派生)・`bodies`のみ実装、`fluids`/`couplings`/
+      `probes`セクションと排他結合検査への接続は未実装)を実装済み。`subscribe`/
       `drain_events`(現状どのドメインソルバもイベントを発行していないため後回し)・
       `sample_fluid`等のクエリは未実装
 - [ ] 統合シナリオ: ブレーキ発熱
