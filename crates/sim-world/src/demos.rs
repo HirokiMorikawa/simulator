@@ -34,12 +34,19 @@
 //! kinetic_and_gas_internal_energy`がT5(断熱圧縮)を既に検証済みのため重複実装
 //! しない(等温圧縮側は対象外 — `GasCompartment::isothermal_heat_for_volume_change`
 //! は解析検証用の閉形式ヘルパのみで、`PistonGas`結合が使う実際のstep単位の圧力
-//! フィードバックには未接続)。残りのPhase 2〜3(D12–D15・D18)・Phase 4以降
-//! (D19–D39)は後続増分。
+//! フィードバックには未接続)。残りのPhase 2〜3(D12–D15・D18)・Phase 4
+//! (D19–D33)は後続増分。Pα(天体ウェーブ)は天体ドメイン(`sim_astro::NBodySystem`)
+//! が既に`World`の常時合成ドメインとして接続済み(`enable_astro`、`step()`が
+//! 自動sub-stepする)ため、Phase 4より先にD34(太陽系儀)を実装した — 8惑星ではなく
+//! 1惑星(円軌道)への縮約で、`sim-astro`のA1(ケプラー第3法則)・A2(エネルギー・
+//! 角運動量保存)解析解テストと同じ物理を`World`経由で再現する。「時間加速の切替を
+//! 跨ぐリプレイ一致」はレジーム切替機構が`World`に未接続のため対象外。残りのPα
+//! (D35–D39)は後続増分。
 
 #[cfg(test)]
 mod tests {
     use crate::{World, WorldOptions};
+    use sim_core::Solver;
     use sim_math::Vec3;
     use sim_mechanics::{DragModel, RigidBodyDesc, Shape};
 
@@ -767,6 +774,69 @@ mod tests {
             t_copper > t_steel && t_steel > t_wood,
             "T3 + 材質のk比: higher thermal diffusivity should warm the midpoint faster: \
              t_copper={t_copper:.4} t_steel={t_steel:.4} t_wood={t_wood:.4}"
+        );
+    }
+
+    /// D34 太陽系儀(docs/21-verification/03-demo-scenarios.md Pα表)。「8惑星の公転、
+    /// 会合周期、時間加速スライダー」「合格基準: A1(ケプラー第3法則)、A2(保存)、
+    /// 時間加速の切替を跨ぐリプレイ一致」。天体ドメイン(`sim_astro::NBodySystem`)は
+    /// 既に`World`の常時合成ドメインとして接続済み(`enable_astro`、`step()`が自動的に
+    /// sub-stepする)ため、`sim-astro`のA1/A2解析解テストと同じ物理を`World`経由で
+    /// 再現する — 8惑星ではなく1惑星(円軌道)への縮約とする(テスト実行時間を抑えつつ
+    /// 同じ核心の物理を検証、`sim-astro`側のA1テスト自体は8惑星規模で既に検証済み)。
+    /// 「時間加速の切替を跨ぐリプレイ一致」はレジーム切替(`docs/20-integration/
+    /// 06-regime-switching.md`)機構が`World`に未接続のため対象外(後続増分)。
+    #[test]
+    fn d34_solar_system_single_planet_matches_keplers_third_law_and_conserves_energy_and_angular_momentum(
+    ) {
+        let mass_sun = 1.989e30;
+        let r: f64 = 1.496e11; // 1 AU相当
+        let g = sim_astro::GRAVITATIONAL_CONSTANT;
+
+        let period = 2.0 * std::f64::consts::PI * (r.powi(3) / (g * mass_sun)).sqrt();
+        let steps_per_orbit = 1000u32;
+        let dt = period / steps_per_orbit as f64;
+        let orbits = 20u32;
+
+        let mut world = World::new(WorldOptions {
+            dt,
+            ..WorldOptions::default()
+        });
+        let mut sys = sim_astro::NBodySystem::new(0.0);
+        sys.add_body(Vec3::ZERO, Vec3::ZERO, mass_sun);
+        let v_circ = (g * mass_sun / r).sqrt();
+        let planet = sys.add_body(Vec3::new(r, 0.0, 0.0), Vec3::new(0.0, v_circ, 0.0), 1.0);
+        world.enable_astro(sys);
+
+        let e0 = world.astro().unwrap().total_energy().total();
+        let l0 = world.astro().unwrap().position[planet]
+            .cross(world.astro().unwrap().velocity[planet])
+            .length();
+
+        for _ in 0..(steps_per_orbit * orbits) {
+            world.step();
+        }
+
+        // A1: 1周期後、惑星は出発点付近(円軌道)へ戻っているはず。
+        let final_pos = world.astro().unwrap().position[planet];
+        let final_r = final_pos.length();
+        let rel_r_err = (final_r - r).abs() / r;
+        assert!(
+            rel_r_err < 0.01,
+            "A1: circular orbit radius should be preserved: final_r={final_r} r={r} rel_err={rel_r_err:.4}"
+        );
+
+        // A2: エネルギー・角運動量が多数周回後もほぼ保存されている。
+        let e1 = world.astro().unwrap().total_energy().total();
+        let l1 = world.astro().unwrap().position[planet]
+            .cross(world.astro().unwrap().velocity[planet])
+            .length();
+        let e_drift = (e1 - e0).abs() / e0.abs();
+        let l_drift = (l1 - l0).abs() / l0;
+        assert!(e_drift < 1e-4, "A2: energy drift too large: {e_drift}");
+        assert!(
+            l_drift < 1e-6,
+            "A2: angular momentum drift too large: {l_drift}"
         );
     }
 }
