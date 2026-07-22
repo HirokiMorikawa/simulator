@@ -41,6 +41,7 @@
 //! `Solver`を実装しない — `step()`の自動走査対象ではなく、`apply_coupling`経由での
 //! みピストンの変位から体積・温度が更新される。
 
+mod demos;
 mod integration_scenarios;
 mod orchestrator;
 mod overlap;
