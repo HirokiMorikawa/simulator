@@ -6,8 +6,11 @@
 //! 剛体・`sim_em::Circuit`の回路網とは独立な「自前でmass/velocityを持つミニ統合クラス」
 //! である。本`Coupling`は同じ物理を、実際の`MechanicsSolver`の剛体 + `Circuit`の抵抗回路
 //! という2つの正典ドメイン間の橋として実装し直す。剛体の運動は簡略化してレール方向を
-//! ワールドX軸に固定した1自由度(`linear_velocity.x`)として扱う(3軸姿勢・レール方向の
-//! 一般化は対象外、設計§2.2の縮約と同じ精神)。
+//! ワールド座標の固定軸`axis`(単位ベクトル、`MotorCoupling::axis`と同じパターン)に
+//! 沿う1自由度として扱う(3軸姿勢の一般化は対象外、設計§2.2の縮約と同じ精神)。
+//! レンツ則の制動ループ(v→EMF→I→制動力→v)は軸の向きによらず自己無撞着に安定
+//! (減衰)するため、`axis`をワールドX軸以外(例: 鉛直方向)に選んでも符号の
+//! 再調整は不要(D21「銅管落下」の終端速度デモが利用する)。
 //!
 //! 設計§4の実行順序表は`MotorCoupling`を pre(電気→トルク)と post(ω→逆起電力)の
 //! 両方に置いており、この種の双方向結合が本質的に2箇所で作用することを示す。しかし
@@ -21,8 +24,9 @@
 
 use crate::domain_states::{Coupling, DomainStates};
 use sim_core::DomainId;
+use sim_math::Vec3;
 
-/// レール上を滑る導体棒(`body_index`、レール方向はワールドX軸に固定)と回路の電圧源
+/// レール上を滑る導体棒(`body_index`、レール方向は`axis`)と回路の電圧源
 /// (`voltage_source_index`)を結ぶ(モジュールdoc参照)。
 #[derive(Clone)]
 pub struct InductionCoupling {
@@ -32,6 +36,8 @@ pub struct InductionCoupling {
     pub length: f64,
     /// 磁束密度 $B$(レール面に垂直、一様)。
     pub magnetic_field: f64,
+    /// ワールド座標のレール方向(固定、単位ベクトル)。
+    pub axis: Vec3,
 }
 
 impl Coupling for InductionCoupling {
@@ -53,10 +59,12 @@ impl Coupling for InductionCoupling {
         // 確認した(制動(速度と逆向き)になる符号を採用)。
         let current = circuit.source_current(self.voltage_source_index);
         let force = self.magnetic_field * current * self.length;
-        world.mechanics.bodies.linear_velocity[self.body_index].x += force / mass * dt;
+        let idx = self.body_index;
+        world.mechanics.bodies.linear_velocity[idx] =
+            world.mechanics.bodies.linear_velocity[idx] + self.axis.scale(force / mass * dt);
 
         // ファラデー則の起電力(今step確定した速度、次の回路stepで使われる)。
-        let v = world.mechanics.bodies.linear_velocity[self.body_index].x;
+        let v = world.mechanics.bodies.linear_velocity[idx].dot(self.axis);
         let emf = self.magnetic_field * self.length * v;
         circuit.set_voltage_source_voltage(self.voltage_source_index, emf);
     }
@@ -104,6 +112,7 @@ mod tests {
             voltage_source_index: 0,
             length,
             magnetic_field: b,
+            axis: Vec3::new(1.0, 0.0, 0.0),
         };
 
         let tau = mass * r / (b * length).powi(2);

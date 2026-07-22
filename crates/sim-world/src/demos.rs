@@ -49,8 +49,17 @@
 //! (分圧回路+コンデンサ放電回路+スイッチ付きLED回路を単一`Circuit`に同時配線)を
 //! 構築できた。E5(分圧、機械精度)・E3(放電形、rel<1%)・`Command::SetSwitch`による
 //! 実行中のLED分岐の開閉・`JouleHeat`(Coupling registry経由)による熱ノード温度上昇を
-//! 確認する。E4(RLC)は`sim-em`側で既にGreenのため重複実装しない。残りのPhase 2〜3
-//! (D12・D14・D18)・Phase 4の残り(D20–D33)は後続増分。Pα(天体ウェーブ)は
+//! 確認する。E4(RLC)は`sim-em`側で既にGreenのため重複実装しない。続けてD21
+//! (磁石遊び)の「銅管落下」部分を実装した — `sim_coupling::InductionCoupling`の
+//! レール方向を(元々ワールドX軸に固定だったのを)`MotorCoupling`と同じ`axis: Vec3`
+//! パラメータへ一般化し(レンツ則の制動ループは軸の向きによらず自己無撞着に安定する
+//! ため符号の再調整は不要だった)、重力下で導体棒が渦電流ブレーキにより解析的な
+//! 終端速度$v_{term}=mgR/(B\ell)^2$へ収束することを確認した。「磁石の吸引反発・
+//! 方位磁針」は既存実装の別側面のため対象外。続けてD26(帯電風船)を、設計が明示的に
+//! 許容する鏡像力の近似式($F=-q^2/(16\pi\varepsilon_0d^2)$)を新規実装した
+//! `sim_coupling::ImageChargeForce`経由で実装した(定性的な壁への吸着+逆二乗則)。
+//! 残りのPhase 2〜3(D12・D14・D18)・Phase 4の残り(D20・D22–D25・D27–D33)は
+//! 後続増分。Pα(天体ウェーブ)は
 //! 天体ドメイン(`sim_astro::NBodySystem`)
 //! が既に`World`の常時合成ドメインとして接続済み(`enable_astro`、`step()`が
 //! 自動sub-stepする)ため、Phase 4より先にD34(太陽系儀)を実装した — 8惑星ではなく
@@ -1017,6 +1026,65 @@ mod tests {
         assert!(
             final_temp > 293.15,
             "Joule heat should have raised the thermal node's temperature: final_temp={final_temp}"
+        );
+    }
+
+    /// D21 磁石遊び(docs/21-verification/03-demo-scenarios.md Phase 4表)。「磁石の吸引
+    /// 反発・方位磁針・銅管落下」「合格基準: E1系、渦電流の終端速度」。「磁石の吸引反発」
+    /// (磁気双極子間の力、`sim_em::magnetism`)・「方位磁針」は既存実装の別側面のため
+    /// 対象外とし、新規物理を要する「銅管落下」(渦電流ブレーキによる終端速度)に絞る。
+    /// `sim_coupling::InductionCoupling`(E7の解析解で既に検証済み)は元々レール方向が
+    /// ワールドX軸に固定されていたが、モジュールdocが説明するとおりレンツ則の制動ループ
+    /// (v→EMF→I→制動力→v)は軸の向きによらず自己無撞着に安定するため、`MotorCoupling`
+    /// と同じ`axis: Vec3`パラメータへ一般化した(既存のE7テストはaxis=(1,0,0)を明示的に
+    /// 渡すよう更新、数値結果は変化なし)。この一般化により、重力下(axis=鉛直上向き)での
+    /// 「導体棒が落下しつつ渦電流で制動され、重力と制動力が釣り合う終端速度に収束する」
+    /// という新しい物理レジームを検証できるようになった。自由減衰(E7)の時定数
+    /// $\tau=mR/(B\ell)^2$から導かれる実効粘性減衰係数$k=(B\ell)^2/R$($F=-kv$)を使うと、
+    /// 終端速度は解析的に$v_{term}=mgR/(B\ell)^2$(重力と制動力の釣り合い)となり、
+    /// 十分な時間(5τ)後の測定速度がこの解析値とrel<2%で一致することを確認する。
+    #[test]
+    fn d21_magnet_play_copper_tube_drop_reaches_analytic_terminal_velocity() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+
+        let mass = 0.01;
+        let length = 0.1;
+        let b = 0.5;
+        let r = 1.0;
+        let gravity = WorldOptions::default().gravity;
+
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.01 }, steel);
+        desc.mass_override = Some(mass);
+        let body_id = world.create_body(desc);
+
+        let mut circuit = sim_em::Circuit::new(2);
+        circuit.add_voltage_source(1, sim_em::GROUND, 0.0); // index 0、棒のEMFで毎stepドライブする
+        circuit.add_resistor(1, sim_em::GROUND, r);
+        world.enable_circuit(circuit);
+
+        world.add_coupling(Box::new(sim_coupling::InductionCoupling {
+            body_index: body_id.index as usize,
+            voltage_source_index: 0,
+            length,
+            magnetic_field: b,
+            axis: Vec3::new(0.0, 1.0, 0.0), // 鉛直上向き(重力の逆向き)
+        }));
+
+        let tau = mass * r / (b * length).powi(2);
+        let dt = 0.001;
+        let steps = (5.0 * tau / dt) as u32;
+        for _ in 0..steps {
+            world.step();
+        }
+
+        let expected_v_term = -mass * gravity * r / (b * length).powi(2); // 落下方向=負のy
+        let measured_v = world.body_velocity(body_id).unwrap().y;
+        let rel_err = (measured_v - expected_v_term).abs() / expected_v_term.abs();
+        assert!(
+            rel_err < 0.02,
+            "D21 pass criterion (eddy current terminal velocity): measured_v={measured_v} \
+             expected_v_term={expected_v_term} rel_err={rel_err:.4}"
         );
     }
 
