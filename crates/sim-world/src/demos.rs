@@ -21,7 +21,12 @@
 //! `brake_heat_scenario_keeps_world_energy_ledger_residual_small`が既に同じ内容
 //! (鋼のブレーキ板+鋼の箱、運動エネルギー→熱の変換対応表)を検証済みのため、本モジュール
 //! への重複実装はしない(D10のヘッドレス部分は既存テストでカバー済みと見なす)。
-//! Phase 2以降(D11–D39)は後続増分。
+//! Phase 2〜3からはD11(振り子と時計)を実装した — M3(小振幅周期)を`World`経由で
+//! 確認しつつ、二重振り子(`DistanceJoint`を2本連鎖、大振幅でカオス的軌道)を同一
+//! 初期条件で2回実行し`state_hash()`が一致することを確認する(M4の楕円積分解析式
+//! 自体は`sim-mechanics`の専用テストで重複実装しない、「カオス的な系でも決定論的に
+//! リプレイできる」というデモの主眼を検証)。残りのPhase 2〜3(D12–D18)・
+//! Phase 4以降(D19–D39)は後続増分。
 
 #[cfg(test)]
 mod tests {
@@ -599,5 +604,122 @@ mod tests {
                 "F3: measured={measured} analytic={analytic} rel_err={rel_err:.4}"
             );
         }
+    }
+
+    /// D11 振り子と時計(docs/21-verification/03-demo-scenarios.md Phase 2〜3表)。
+    /// 「単振り子・二重振り子(カオス+決定論)」「合格基準: M3/M4、リプレイ一致」。
+    /// M3(小振幅周期)を`sim-mechanics`のM3解析解テストと同じ構成
+    /// (`DistanceJoint`によるワールド固定点への一定長ピン拘束)で`World`経由で確認
+    /// しつつ、二重振り子(`DistanceJoint`を2本連鎖させ質点2を質点1に接続、大振幅で
+    /// カオス的軌道になる構成)を同一初期条件で2回実行し`state_hash()`が一致する
+    /// ことを確認する(M4の楕円積分解析式自体は`sim-mechanics`の専用テストで既に
+    /// 検証済みのため重複実装しない — ここでは「カオス的な系でも決定論的にリプレイ
+    /// できる」というデモの主眼を検証する)。
+    #[test]
+    fn d11_pendulum_matches_small_amplitude_period_and_double_pendulum_replay_is_deterministic() {
+        let length = 1.0;
+        let theta0: f64 = 0.05; // 小振幅(rad)
+        let dt = 1.0 / 2000.0;
+
+        let mut world = World::new(WorldOptions {
+            dt,
+            ..WorldOptions::default()
+        });
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let pivot = Vec3::ZERO;
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.01 }, steel);
+        desc.mass_override = Some(1.0);
+        desc.transform.position =
+            pivot + Vec3::new(theta0.sin() * length, -theta0.cos() * length, 0.0);
+        let bob = world.create_body(desc);
+        world
+            .mechanics_mut()
+            .add_distance_joint(sim_mechanics::DistanceJoint {
+                body_a: bob.index as usize,
+                anchor_a: Vec3::ZERO,
+                body_b: None,
+                anchor_b: pivot,
+                length,
+            });
+
+        let analytic_period = 2.0 * std::f64::consts::PI * (length / 9.80665_f64).sqrt();
+        let steps = (1.2 * analytic_period / dt) as u32;
+        let angle = |pos: Vec3| -> f64 { (pos.x - pivot.x).atan2(pivot.y - pos.y) };
+        let mut prev_angle = angle(world.body_position(bob).unwrap());
+        let mut prev_t = 0.0;
+        let mut crossings = Vec::new();
+        for step in 0..steps {
+            world.step();
+            let t = (step + 1) as f64 * dt;
+            let a = angle(world.body_position(bob).unwrap());
+            if prev_angle.signum() != a.signum() && prev_angle != 0.0 {
+                let frac = -prev_angle / (a - prev_angle);
+                crossings.push(prev_t + frac * (t - prev_t));
+                if crossings.len() >= 2 {
+                    break;
+                }
+            }
+            prev_angle = a;
+            prev_t = t;
+        }
+        assert!(crossings.len() >= 2, "should observe two zero crossings");
+        let measured_period = 2.0 * (crossings[1] - crossings[0]);
+        let rel_err = (measured_period - analytic_period).abs() / analytic_period;
+        assert!(
+            rel_err < 0.01,
+            "M3: measured_period={measured_period} analytic_period={analytic_period} rel_err={rel_err:.4}"
+        );
+
+        // 二重振り子: 同一初期条件を2回実行し、カオス的軌道でもstate_hash()が一致する
+        // (リプレイ一致、設計docs/20-integration/02-determinism-replay.md)ことを確認。
+        let run_double_pendulum = || -> u64 {
+            let mut world = World::new(WorldOptions::default());
+            let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+            let l1 = 1.0;
+            let l2 = 1.0;
+            let theta1 = std::f64::consts::FRAC_PI_2; // 90°(大振幅、カオス的挙動域)
+            let theta2 = std::f64::consts::FRAC_PI_2 + 0.3;
+
+            let mut desc1 = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.01 }, steel);
+            desc1.mass_override = Some(1.0);
+            desc1.transform.position = Vec3::new(theta1.sin() * l1, -theta1.cos() * l1, 0.0);
+            let bob1 = world.create_body(desc1);
+            world
+                .mechanics_mut()
+                .add_distance_joint(sim_mechanics::DistanceJoint {
+                    body_a: bob1.index as usize,
+                    anchor_a: Vec3::ZERO,
+                    body_b: None,
+                    anchor_b: Vec3::ZERO,
+                    length: l1,
+                });
+
+            let pos1 = world.body_position(bob1).unwrap();
+            let mut desc2 = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.01 }, steel);
+            desc2.mass_override = Some(1.0);
+            desc2.transform.position = pos1 + Vec3::new(theta2.sin() * l2, -theta2.cos() * l2, 0.0);
+            let bob2 = world.create_body(desc2);
+            world
+                .mechanics_mut()
+                .add_distance_joint(sim_mechanics::DistanceJoint {
+                    body_a: bob2.index as usize,
+                    anchor_a: Vec3::ZERO,
+                    body_b: Some(bob1.index as usize),
+                    anchor_b: Vec3::ZERO,
+                    length: l2,
+                });
+
+            for _ in 0..2000 {
+                // 約17秒(既定dt=1/120)、カオス的な発散が進む十分な時間
+                world.step();
+            }
+            world.state_hash()
+        };
+
+        assert_eq!(
+            run_double_pendulum(),
+            run_double_pendulum(),
+            "double pendulum replay should be bit-identical despite chaotic sensitivity (D11 pass criterion)"
+        );
     }
 }
