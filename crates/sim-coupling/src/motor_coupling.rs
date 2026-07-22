@@ -25,6 +25,7 @@ use sim_math::Vec3;
 /// 固定軸`axis`まわりに回転する剛体(`body_index`)と回路の電圧源
 /// (`voltage_source_index`)を、トルク定数`torque_constant`($k=k_e=k_t$)で結ぶ
 /// (モジュールdoc参照)。
+#[derive(Clone)]
 pub struct MotorCoupling {
     pub body_index: usize,
     /// ワールド座標の回転軸(固定、単位ベクトル)。

@@ -20,6 +20,7 @@ use sim_core::DomainId;
 /// 接触解決による運動エネルギー散逸を単一の`ThermalNode`(`thermal_node`インデックス)に
 /// 注入する(設計§1「保存量の橋は必ず対で書く」— 取り出した量(`last_contact_dissipation`)を
 /// そのまま注入し、消費済みとしてリセットする)。
+#[derive(Clone)]
 pub struct DissipationToHeat {
     pub thermal_node: usize,
 }

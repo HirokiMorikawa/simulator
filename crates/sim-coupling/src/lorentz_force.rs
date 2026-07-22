@@ -21,6 +21,7 @@ use sim_math::Vec3;
 
 /// 対象剛体(`body_index`)に電荷`charge`を持たせ、`em_electrostatics`の電場からの
 /// ローレンツ力を注入する(モジュールdoc参照)。
+#[derive(Clone)]
 pub struct LorentzForce {
     pub body_index: usize,
     pub charge: f64,

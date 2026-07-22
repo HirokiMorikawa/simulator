@@ -35,10 +35,13 @@
 //! `orchestrator::sub_step_count`(設計§1.3の
 //! 決定的sub-step数算出、`max_stable_dt()`から算出)に従いsub-stepする — Lie-Trotter
 //! operator splitting自体(pre/post couplingを挟むパイプライン、
-//! docs/20-integration/01-coupling-matrix.md §4)は、`Coupling`実装(`sim-coupling`の
-//! `DissipationToHeat`・`JouleHeat`)がまだ`World`に接続されていない(各Couplingは
-//! `sim-coupling`crate内で単体検証済みだが、`World::step()`のパイプラインへの組み込みは
-//! Coupling registry相当の仕組みが必要で後続増分)ため未実装。`quantum`/`statistical`は
+//! docs/20-integration/01-coupling-matrix.md §4)のうち、pre/postの2相分離は未実装
+//! (現状は全て単一の`apply`、各`sim-coupling`実装のモジュールdoc「1step遅れの縮約」
+//! 参照)だが、登録済み`Coupling`(`add_coupling`)を毎stepの全ドメインsub-step完了後に
+//! 自動適用するレジストリ自体は実装済み(`couplings`フィールド、`apply_coupling`の
+//! doc参照)。シーンJSON`couplings`セクションからの自動解決・排他結合検査
+//! (`sim-coupling::validate_exclusive_couplings`)との接続は未実装(`scenario`モジュール
+//! doc参照)。`quantum`/`statistical`は
 //! 専用シーンでのみ有効化する設計方針のため見送る。`gas`
 //! (`sim_thermal::GasCompartment`、断熱圧縮の`PistonGas`結合が使う)・`conduction_rod`
 //! (`sim_thermal::ConductionRod1D`、D16「熱伝導レース」が使う)は`Solver`を実装しない —
@@ -271,6 +274,9 @@ pub struct World {
     grab_joints: std::collections::HashMap<u32, usize>,
     /// `step()`が排出した全イベントの履歴(`drain_events`のdoc参照)。
     event_log: sim_math::RingBuffer<sim_core::Event>,
+    /// `add_coupling`で登録され、`step()`が毎フレーム自動的に`.apply()`を呼ぶ
+    /// `Coupling`のレジストリ(`apply_coupling`のdoc参照。登録順=決定論的な適用順)。
+    couplings: Vec<Box<dyn sim_coupling::Coupling>>,
 }
 
 /// `event_log`の容量(設計は`subscribe`/`drain_events`の容量を規定しないため、
@@ -330,6 +336,7 @@ impl World {
             probes: Vec::new(),
             grab_joints: std::collections::HashMap::new(),
             event_log: sim_math::RingBuffer::new(EVENT_LOG_CAPACITY),
+            couplings: Vec::new(),
         }
     }
 
@@ -714,6 +721,20 @@ impl World {
         if let Some(g) = &mut self.grid_fluid {
             run_domain_substeps(g, dt, &self.materials, &mut self.rng, &mut self.events);
         }
+        // 登録済み全Couplingを1回ずつ適用する(登録順、`apply_coupling`のdocが説明する
+        // 「post」型結合(前stepで確定した量を読む)と同じタイミング — 呼び出し側が
+        // 毎stepの後に手動で`apply_coupling`を呼んでいた既存の使い方をそのまま
+        // `World`内部に移しただけで、タイミング上の意味は変えていない)。
+        for coupling in self.couplings.iter_mut() {
+            let mut states = sim_coupling::DomainStates {
+                mechanics: &mut self.mechanics,
+                thermal: self.thermal.as_mut(),
+                em_circuit: self.circuit.as_mut(),
+                em_electrostatics: self.em_electrostatics.as_mut(),
+                gas: self.gas.as_mut(),
+            };
+            coupling.apply(&mut states, dt);
+        }
         // このstepで発行された全イベントを排出し、Event::step(発行元ドメインは
         // ワールド全体のstep_countを知らないため0で埋めている、`sim-mechanics::
         // MechanicsSolver::emit_contact_events`のdoc参照)を正しい値へ上書きしてから
@@ -850,15 +871,17 @@ impl World {
     ///
     /// **縮約実装の理由**: 設計は`Coupling`を`World::step()`内部のLie-Trotter
     /// operator splittingパイプライン(pre/postの2相、docs/20-integration/
-    /// 01-coupling-matrix.md §4)へ自動的に組み込む想定だが、そのためのCoupling
-    /// registry(シーンJSON`couplings`セクションからの自動解決・実行順序決定を含む)は
-    /// まだ実装していない(`from_scenario`のモジュールdoc、各`sim-coupling`実装の
-    /// モジュールdoc参照)。本メソッドは、登録・自動実行の仕組みより前に必要な
-    /// 「`World`が保持する実ドメイン(`mechanics`・`thermal`・`circuit`・
-    /// `em_electrostatics`)に対して外部から`Coupling`を適用する経路」を先に提供する
-    /// 縮約版 — 呼び出し側(統合シナリオテスト・将来のCoupling registry自体)が
-    /// 呼び出し頻度・タイミング(`step()`の前か後か、design上のpre/post区別)を
-    /// 明示的に管理する。`step()`の後に呼ぶ場合、`DissipationToHeat`・`JouleHeat`の
+    /// 01-coupling-matrix.md §4)へ自動的に組み込む想定であり、プログラムから登録した
+    /// `Coupling`を毎stepの後に自動適用するレジストリ自体は`add_coupling`/`couplings`
+    /// フィールドとして実装済み(このメソッドのdoc下部参照)。ただしシーンJSON
+    /// `couplings`セクションからの自動解決・排他結合検査(`sim-coupling::
+    /// validate_exclusive_couplings`)との接続、pre/post 2相への分離(現状は全て
+    /// post相当のタイミングで単一`apply`済み、各`sim-coupling`実装のモジュールdoc
+    /// 「1step遅れの縮約」参照)は未実装(`from_scenario`のモジュールdoc参照)。
+    /// 本メソッドは、`add_coupling`によるレジストリ登録より前から存在する、呼び出し側が
+    /// 呼び出し頻度・タイミングを明示的に管理する下位のプリミティブとして残している
+    /// (統合シナリオテストの一部・レジストリ自体の内部実装が使う)。`step()`の後に
+    /// 呼ぶ場合、`DissipationToHeat`・`JouleHeat`の
     /// ように直近stepで確定した量(`last_contact_dissipation`・`resistor_power`等)を
     /// 読むCoupling(design上の"post")は正しく機能するが、`BrownianForce`・
     /// `LorentzForce`のように力・速度を注入し同stepの位置積分に反映されるべき
@@ -874,6 +897,16 @@ impl World {
             gas: self.gas.as_mut(),
         };
         coupling.apply(&mut states, dt);
+    }
+
+    /// `Coupling`をレジストリに登録する。以後`step()`が毎フレーム自動的に、登録順で
+    /// 1回ずつ`.apply()`を呼ぶ(`apply_coupling`のdocが説明する「post」型タイミングと
+    /// 同じ — `step()`内の全ドメインsub-step完了後)。呼び出し側が毎stepの後に手動で
+    /// `apply_coupling`を呼ぶ手間を無くす、Coupling registryの縮約版(シーンJSON
+    /// `couplings`セクションからの自動解決・排他結合検査との接続は後続増分、
+    /// `scenario`モジュールdoc参照)。
+    pub fn add_coupling(&mut self, coupling: Box<dyn sim_coupling::Coupling>) {
+        self.couplings.push(coupling);
     }
 
     /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:
@@ -1178,6 +1211,82 @@ mod tests {
             "viscous grid fluid should lose kinetic energy: before={energy_before} after={energy_after}"
         );
         assert!(world.grid_fluid().is_some());
+    }
+
+    /// `add_coupling`で登録した`Coupling`が`step()`ごとに自動適用され(呼び出し側が
+    /// `apply_coupling`を手動で呼ばなくても)、`snapshot`/`restore`(`#[derive(Clone)]`
+    /// 経由)を跨いでもレジストリごと正しく複製・継続することを確認する
+    /// (`sim-coupling::Coupling`にdyn-safeな`CouplingClone`を追加した増分の検証)。
+    #[test]
+    fn add_coupling_is_applied_automatically_every_step_and_survives_snapshot_restore() {
+        let build = |world: &mut World| {
+            let steel = world
+                .materials()
+                .find_by_name("鋼(炭素鋼)")
+                .expect("standard DB has steel");
+            let mut floor_desc = RigidBodyDesc::dynamic(
+                Shape::Plane {
+                    normal: Vec3::new(0.0, 1.0, 0.0),
+                    d: 0.0,
+                },
+                steel,
+            );
+            floor_desc.body_type = BodyType::Static;
+            world.create_body(floor_desc);
+
+            let mut box_desc = RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(0.5, 0.5, 0.5),
+                },
+                steel,
+            );
+            box_desc.transform = Transform {
+                position: Vec3::new(0.0, 0.5, 0.0),
+                rotation: Quat::IDENTITY,
+            };
+            box_desc.linear_velocity = Vec3::new(3.0, 0.0, 0.0);
+            world.create_body(box_desc);
+
+            let mut thermal = sim_thermal::ThermalSolver::new(293.15);
+            let node = thermal.add_node(sim_thermal::ThermalNode::new(293.15, 1000.0));
+            world.enable_thermal(thermal);
+            world.add_coupling(Box::new(sim_coupling::DissipationToHeat {
+                thermal_node: node,
+            }));
+        };
+
+        let mut world = World::new(WorldOptions::default());
+        build(&mut world);
+        for _ in 0..60 {
+            world.step();
+        }
+        let initial_temp = world.thermal().unwrap().nodes[0].temperature;
+        assert!(
+            initial_temp > 293.15,
+            "registered DissipationToHeat coupling should have raised the thermal node's \
+             temperature without any manual apply_coupling call: initial_temp={initial_temp}"
+        );
+
+        let straight_run_hash = {
+            let mut w = world.clone();
+            for _ in 0..60 {
+                w.step();
+            }
+            w.state_hash()
+        };
+
+        let snapshot = world.snapshot();
+        let mut restored = World::new(WorldOptions::default());
+        restored.restore(&snapshot);
+        for _ in 0..60 {
+            restored.step();
+        }
+        assert_eq!(
+            straight_run_hash,
+            restored.state_hash(),
+            "restored world's coupling registry should keep applying identically to the \
+             original after restore"
+        );
     }
 
     /// 決定論テスト(階層1): 同一初期条件 → 同数ステップ後のハッシュが一致する。

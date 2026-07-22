@@ -864,14 +864,39 @@
   なったにもかかわらず更新し忘れていた)と、`sim-world::lib`モジュールdocに
   残っていた「`fluid`は`Solver`トレイト未実装のため見送る」という記述(同じく
   `SphFluid`接続で既に古くなっていた)も合わせて修正した。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り4種のCoupling
-  (いずれも本格的な前提工事を要する: `GridFluidRigid`/`ConvectionLink`/
-  `BoussinesqBuoyancy`は`GridFluid2D`側の`Solver`統合が完了したため、あとは
-  `World::step()`のCoupling registry相当の仕組みと剛体/熱ドメインとの
-  相互作用力の設計が必要、`SphRigid`は`SphFluid`側の`Solver`統合は完了したが
-  剛体との相互作用力の設計が未着手、`PhaseChangeMorph`はイベント駆動の
-  剛体/流体生成、`BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の
-  切り出しリスク)。
+  続けて、既存7種のCouplingが`World::step()`のパイプラインにまだ自動接続
+  されていなかった問題(`World::apply_coupling`が呼び出し側に毎stepの手動呼び出しを
+  要求していた)に着手し、Coupling registryを実装した。`sim_coupling::Coupling`は
+  `dyn`トレイトオブジェクト(`Box<dyn Coupling>`)として`World`に保持する必要がある一方、
+  `World`は`snapshot`/`restore`のため`#[derive(Clone)]`を要求する — トレイトオブジェクトは
+  素のままでは`Clone`を導出できないため、`CouplingClone`という補助トレイト
+  (`T: Coupling + Clone`へのblanket impl経由で`clone_box`を提供し、
+  `impl Clone for Box<dyn Coupling>`に配線する、いわゆる「dyn-safeなclone」の
+  標準的なイディオム)を追加し、`Coupling: CouplingClone`をスーパートレイトにした。
+  既存7種の実装済みCoupling(`DissipationToHeat`・`JouleHeat`・`BrownianForce`・
+  `LorentzForce`・`MotorCoupling`・`PistonGas`・`InductionCoupling`)は全フィールドが
+  `usize`/`f64`/`Vec3`/`SimRng`(いずれも既に`Clone`)のみのため、`#[derive(Clone)]`を
+  追加するだけで対応できた。`World`に`couplings: Vec<Box<dyn Coupling>>`フィールドと
+  `add_coupling(Box<dyn Coupling>)`を追加し、`step()`が全ドメインのsub-step完了後
+  (`apply_coupling`のdocが説明する「post」型タイミングと同じ、既存の統合シナリオ
+  テストが「`world.step()`の直後に手動で`apply_coupling`」としていたのと同じ相対位置)
+  に登録順で1回ずつ自動適用するよう配線した。3本の統合シナリオテスト
+  (ブレーキ発熱・手回し発電・断熱圧縮)を実際に`add_coupling`+ループ内`world.step()`のみ
+  という新しい使い方に書き換え、タイミングが変わらないことをもって既存の数値許容誤差
+  (閾値変更なし)がそのまま通ることを確認した。加えて、登録済みCouplingが
+  `snapshot`/`restore`(`World`全体の`Clone`)を跨いでも複製され機能し続けることを
+  検証する専用テストも追加した。初回実装で一発Green化した。
+  これで残る`GridFluidRigid`/`ConvectionLink`/`BoussinesqBuoyancy`/`SphRigid`4種の
+  Coupling実装自体に取り組める土台(流体側`Solver`統合・Coupling registry・
+  `World`への自動接続)が出揃った。シーンJSON`couplings`セクションからの自動解決・
+  排他結合検査(`validate_exclusive_couplings`)との接続、design上のpre/post 2相分離は
+  引き続き未実装(各Coupling実装のモジュールdoc「1step遅れの縮約」を参照)。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り4種のCoupling本体
+  (`GridFluidRigid`・`ConvectionLink`・`BoussinesqBuoyancy`・`SphRigid`、いずれも
+  流体`Solver`統合・Coupling registryという前提工事は完了したが、剛体/熱ドメインとの
+  具体的な相互作用力の設計は未着手)、または`PhaseChangeMorph`(イベント駆動の
+  剛体/流体生成)・`BuoyancyDrag`(既存の`MechanicsSolver`埋め込み実装の切り出し
+  リスク)、あるいはシーンJSON`couplings`セクション+排他結合検査のWorld接続。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1358,8 +1383,13 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       残り5種の`Coupling`(`BuoyancyDrag`・`GridFluidRigid`・`ConvectionLink`・
       `BoussinesqBuoyancy`・`SphRigid`)自体は未実装だが、前提だった`SphFluid`・
       `GridFluid2D`双方への`Solver`トレイト統合(決定的sub-step・状態ハッシュ)は
-      完了した。`World::step()`パイプラインへのCoupling接続(registry相当の仕組みが
-      必要)・sub-iteration剛性閾値表は未実装
+      完了した。`World::step()`パイプラインへのCoupling接続(`sim_coupling::Coupling`に
+      dyn-safeな`CouplingClone`を追加し`Box<dyn Coupling>`を`World`が`#[derive(Clone)]`
+      のまま保持できるようにした上で、`couplings`フィールド+`add_coupling`によるregistry、
+      `step()`が全ドメインsub-step完了後に登録順で自動適用)は実装済み(既存の統合
+      シナリオ3本を`add_coupling`ベースに書き換えて検証済み)。シーンJSON`couplings`
+      セクションからの自動解決・排他結合検査(`validate_exclusive_couplings`)との接続、
+      design上のpre/post 2相分離、sub-iteration剛性閾値表は未実装
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/

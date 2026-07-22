@@ -37,6 +37,7 @@ const BOLTZMANN_CONSTANT: f64 = 1.380649e-23;
 /// 温度・粘性から微小剛体へランジュバン方程式のランダム力(+ストークス抵抗)を注入する
 /// (設計§1「保存量の橋」— ただしモジュールdoc参照のとおり統計的な釣り合いであり、
 /// 1step毎の厳密な対記帳ではない)。
+#[derive(Clone)]
 pub struct BrownianForce {
     /// 対象剛体(`sim_mechanics::RigidBodySet`のindex)。
     pub body_index: usize,

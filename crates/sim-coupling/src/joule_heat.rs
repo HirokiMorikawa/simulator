@@ -15,6 +15,7 @@ use sim_core::DomainId;
 
 /// 回路の全抵抗の瞬時消費電力(ΣV²/R)を`dt`で積分し、単一の`ThermalNode`
 /// (`thermal_node`インデックス)へ注入する(設計§1「保存量の橋は必ず対で書く」)。
+#[derive(Clone)]
 pub struct JouleHeat {
     pub thermal_node: usize,
 }

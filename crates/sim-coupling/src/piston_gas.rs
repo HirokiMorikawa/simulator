@@ -19,6 +19,7 @@ use sim_mechanics::RigidBodySet;
 
 /// ピストン(`body_index`)を、軸`axis`(ワールド座標、固定、単位ベクトル、
 /// `SliderJoint::axis_a`と同じ想定)に沿って気体区画へ結合する(モジュールdoc参照)。
+#[derive(Clone)]
 pub struct PistonGas {
     pub body_index: usize,
     pub axis: Vec3,

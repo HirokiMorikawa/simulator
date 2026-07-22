@@ -24,6 +24,7 @@ use sim_core::DomainId;
 
 /// レール上を滑る導体棒(`body_index`、レール方向はワールドX軸に固定)と回路の電圧源
 /// (`voltage_source_index`)を結ぶ(モジュールdoc参照)。
+#[derive(Clone)]
 pub struct InductionCoupling {
     pub body_index: usize,
     pub voltage_source_index: usize,

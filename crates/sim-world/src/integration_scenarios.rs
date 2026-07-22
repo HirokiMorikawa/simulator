@@ -9,9 +9,12 @@
 //! 「氷と飲み物」(相変化、`PhaseChangeMorph`未実装)・「再突入」(天体レジーム切替との
 //! 結合、`World`未接続)は前提未実装のため後続増分。
 //!
-//! `Coupling`はまだ`World::step()`のパイプラインに自動接続されていない
-//! (`World::apply_coupling`のdoc参照)ため、本テストは`world.step()`の直後に
-//! `world.apply_coupling(&mut coupling, dt)`を明示的に呼ぶ構成を取る。
+//! `World::add_coupling`(`World::apply_coupling`のdoc参照)でレジストリに登録し、
+//! `world.step()`が毎フレーム自動的に適用する構成を取る(以前は`world.step()`の
+//! 直後に`world.apply_coupling(&mut coupling, dt)`を明示的に呼んでいたが、`add_coupling`
+//! 導入によりレジストリ登録1回で済むようになった — タイミングは変わらないため
+//! (`step()`内でも旧来と同じ「全ドメインsub-step完了後」の位置で適用)、既存の
+//! 数値許容誤差はそのまま成立する)。
 
 #[cfg(test)]
 mod tests {
@@ -65,16 +68,14 @@ mod tests {
         let brake_node = thermal.add_node(ThermalNode::new(293.15, 1000.0));
         world.enable_thermal(thermal);
 
-        let mut coupling = DissipationToHeat {
+        world.add_coupling(Box::new(DissipationToHeat {
             thermal_node: brake_node,
-        };
+        }));
 
-        let dt = WorldOptions::default().dt;
         for _ in 0..1200 {
             // 10秒: 摩擦(鋼-鋼)で確実に静止するのに十分な時間
             // (sim-coupling::DissipationToHeatの単体テストと同じ設定)。
             world.step();
-            world.apply_coupling(&mut coupling, dt);
         }
 
         assert!(
@@ -130,22 +131,20 @@ mod tests {
         let heat_node = thermal.add_node(ThermalNode::new(293.15, 1000.0));
         world.enable_thermal(thermal);
 
-        let mut motor = sim_coupling::MotorCoupling {
+        world.add_coupling(Box::new(sim_coupling::MotorCoupling {
             body_index: 0,
             axis: Vec3::new(0.0, 1.0, 0.0),
             voltage_source_index: 0,
             torque_constant: k,
-        };
-        let mut joule_heat = sim_coupling::JouleHeat {
+        }));
+        world.add_coupling(Box::new(sim_coupling::JouleHeat {
             thermal_node: heat_node,
-        };
+        }));
 
         let dt = WorldOptions::default().dt;
         let steps = 500u32;
         for _ in 0..steps {
             world.step();
-            world.apply_coupling(&mut motor, dt);
-            world.apply_coupling(&mut joule_heat, dt);
         }
 
         let expected_power = (k * omega0) * (k * omega0) / r;
@@ -212,16 +211,15 @@ mod tests {
         let heat_capacity_at_constant_volume = gas.heat_capacity_at_constant_volume();
         world.enable_gas(gas);
 
-        let mut piston_gas =
+        let piston_gas =
             sim_coupling::PistonGas::new(&world.mechanics_mut().bodies, piston_idx, axis, area, v1);
+        world.add_coupling(Box::new(piston_gas));
 
-        let dt = WorldOptions::default().dt;
         let initial_energy = 0.5 * mass * v0 * v0 + heat_capacity_at_constant_volume * t1;
         let mut min_volume = v1;
         let mut max_energy_rel_err: f64 = 0.0;
         for _ in 0..600 {
             world.step();
-            world.apply_coupling(&mut piston_gas, dt);
 
             let v = world.body_velocity(piston_id).unwrap();
             let gas = world.gas().unwrap();
