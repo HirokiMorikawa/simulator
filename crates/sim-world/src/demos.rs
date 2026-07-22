@@ -10,13 +10,18 @@
 //! (初速)・`atmosphere`(抗力)フィールドを持たない縮約スキーマ(`scenario`モジュールdoc
 //! 参照)のため、初速や抗力比較が必要なデモ(D2等)はJSON経由ではなく`World`公開API
 //! (`create_body`・`mechanics_mut()`)を直接使って構築する。D1–D39のうち、まず
-//! Phase 1スモーク(既存の解析解テストとほぼ1対1対応、新規物理実装が不要なもの)から
-//! D1(落下時計)・D2(弾道)・D3(バウンド比べ)・D5(斜面)・D8(散乱の再現)・
-//! D9(冷めるコーヒー)の6本を実装する。D10(摩擦の熱)は`crates/sim-world/src/
-//! integration_scenarios.rs`の`brake_heat_scenario_keeps_world_energy_ledger_residual_small`
-//! が既に同じ内容(鋼のブレーキ板+鋼の箱、運動エネルギー→熱の変換対応表)を検証済み
-//! のため、本モジュールへの重複実装はしない(D10のヘッドレス部分は既存テストで
-//! カバー済みと見なす)。残りは後続増分。
+//! Phase 1スモーク10本(既存の解析解テストとほぼ1対1対応、新規物理実装が不要なもの)を
+//! 全て実装した: D1(落下時計)・D2(弾道)・D3(バウンド比べ)・D4(積み木)・
+//! D5(斜面)・D6(浮き沈み)・D7(風と終端速度)・D8(散乱の再現)・D9(冷めるコーヒー)・
+//! D10(摩擦の熱、後述)。D4の「反復回数スライダーで崩れる観察」は
+//! `JOINT_VELOCITY_ITERATIONS`が公開APIとして調整可能ではない(内部定数)ため対象外
+//! (客観的に検証できる「既定の反復数で10秒静止」のみ実装)。D7の「F2(雨粒の実測値)」
+//! はF1と同じ物理を別パラメータで示すのみのため対象外(F1・F3の2レジームを実装)。
+//! D10(摩擦の熱)は`crates/sim-world/src/integration_scenarios.rs`の
+//! `brake_heat_scenario_keeps_world_energy_ledger_residual_small`が既に同じ内容
+//! (鋼のブレーキ板+鋼の箱、運動エネルギー→熱の変換対応表)を検証済みのため、本モジュール
+//! への重複実装はしない(D10のヘッドレス部分は既存テストでカバー済みと見なす)。
+//! Phase 2以降(D11–D39)は後続増分。
 
 #[cfg(test)]
 mod tests {
@@ -372,5 +377,227 @@ mod tests {
             rel_err < 0.01,
             "T1: measured={measured} analytic={analytic} rel_err={rel_err:.4}"
         );
+    }
+
+    /// D4 積み木(同docs Phase 1表)。「箱スタック+ドミノ。反復回数スライダー」
+    /// 「合格基準: M12(10 s静止)、反復を減らすと崩れる観察」。反復回数スライダー
+    /// (`JOINT_VELOCITY_ITERATIONS`相当)は現時点でソルバの公開APIとして調整可能では
+    /// ない(内部定数)ため、ヘッドレスで客観的に検証できる前半(M12: 既定の反復数で
+    /// 4段の箱スタックが10秒静止し続ける)のみを`sim-mechanics`のM12解析解テストと
+    /// 同じ構成で`World`経由で確認する。
+    #[test]
+    fn d4_box_stack_settles_below_velocity_threshold_within_10s() {
+        let mut world = World::new(WorldOptions::default());
+        let wood = world.materials().find_by_name("木材(松)").unwrap();
+        let half = 0.5;
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            wood,
+        );
+        ground.body_type = sim_mechanics::BodyType::Static;
+        world.create_body(ground);
+
+        let mut box_ids = Vec::new();
+        for level in 0..4 {
+            let mut desc = RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(half, half, half),
+                },
+                wood,
+            );
+            // ちょうど接した状態(隙間0)から開始し、初期落下による大きな衝撃を避ける
+            // (M12テストと同じセットアップ)。
+            desc.transform.position = Vec3::new(0.0, half + level as f64 * 2.0 * half, 0.0);
+            box_ids.push(world.create_body(desc));
+        }
+
+        for _ in 0..1200 {
+            // 10秒
+            world.step();
+        }
+
+        for (level, &id) in box_ids.iter().enumerate() {
+            let speed = world.body_velocity(id).unwrap().length();
+            assert!(
+                speed < 0.01,
+                "M12: box at level {level} should have settled, speed={speed}"
+            );
+        }
+    }
+
+    /// D6 浮き沈み(同docs Phase 1表)。「密度スライダー付きの箱を水域へ」
+    /// 「合格基準: F4(喫水)、F5(振動周期)」。`sim-mechanics`のF4/F5解析解テストと
+    /// 同じ構成(`StaticWaterRegion`、密度比0.6/0.5の箱)を`World`経由で再現し、
+    /// (1)平衡喫水深さが密度比どおりであること(F4)、(2)平衡点から変位させた箱が
+    /// 解析解の周期で上下振動すること(F5)の両方を確認する。
+    #[test]
+    fn d6_floating_box_matches_waterline_depth_and_heave_period() {
+        let water_density = 998.2;
+        let half = 0.5;
+        let side = 2.0 * half;
+
+        let floating_body_material = |world: &mut World, density: f64| -> sim_core::MaterialId {
+            world.materials_mut().push(sim_core::Material {
+                name: "test-d6-floating-body",
+                density,
+                friction: 0.0,
+                restitution: 0.0,
+                youngs_modulus: None,
+                specific_heat: 1000.0,
+                conductivity: 1.0,
+                emissivity: 0.5,
+                melting: None,
+                resistivity: None,
+                relative_permittivity: 1.0,
+                refractive_index: None,
+                source: "test fixture",
+                uncertainty: 0.0,
+            })
+        };
+
+        // (1) F4: 喫水深さが密度比どおりで釣り合う。
+        {
+            let ratio = 0.6;
+            let mut world = World::new(WorldOptions::default());
+            world.mechanics_mut().water =
+                Some(sim_fluid::StaticWaterRegion::new(0.0, water_density));
+            let body = floating_body_material(&mut world, ratio * water_density);
+            let h_sub = ratio * side;
+            let equilibrium_y = -h_sub + half;
+            let mut desc = RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(half, half, half),
+                },
+                body,
+            );
+            desc.transform.position = Vec3::new(0.0, equilibrium_y, 0.0);
+            let box_id = world.create_body(desc);
+
+            for _ in 0..120 {
+                world.step();
+            }
+            let drift = (world.body_position(box_id).unwrap().y - equilibrium_y).abs();
+            assert!(
+                drift / side < 0.01,
+                "F4: drift={drift} equilibrium_y={equilibrium_y}"
+            );
+        }
+
+        // (2) F5: 平衡点から変位させると解析解の周期で振動する。
+        {
+            let ratio = 0.5;
+            let mut world = World::new(WorldOptions::default());
+            world.mechanics_mut().water =
+                Some(sim_fluid::StaticWaterRegion::new(0.0, water_density));
+            let body = floating_body_material(&mut world, ratio * water_density);
+            let equilibrium_y = -(ratio * side) + half;
+            let amplitude = 0.1;
+            let mut desc = RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(half, half, half),
+                },
+                body,
+            );
+            desc.transform.position = Vec3::new(0.0, equilibrium_y + amplitude, 0.0);
+            let box_id = world.create_body(desc);
+
+            let dt = WorldOptions::default().dt;
+            let mut t = 0.0;
+            let mut period = None;
+            let mut prev_v = 0.0;
+            for _ in 0..400 {
+                world.step();
+                t += dt;
+                let v = world.body_velocity(box_id).unwrap().y;
+                // 下降方向のゼロ交差(prev_v>0→v<=0)を1周期の終端とする(M6/F5の
+                // 既存テストと同じ判定 — 上昇方向の交差だと半周期で誤検出する)。
+                if prev_v > 0.0 && v <= 0.0 && t > dt {
+                    period = Some(t);
+                    break;
+                }
+                prev_v = v;
+            }
+            let measured_period = period.expect("should observe at least one full cycle");
+            // 単振動近似: T=2π√(m/k)、k=ρ_f g・断面積(設計docs/11-fluid/04参照)。
+            let mass = ratio * water_density * side * side * side;
+            let k = water_density * 9.80665 * side * side;
+            let analytic_period = 2.0 * std::f64::consts::PI * (mass / k).sqrt();
+            let rel_err = (measured_period - analytic_period).abs() / analytic_period;
+            assert!(
+                rel_err < 0.05,
+                "F5: measured_period={measured_period} analytic_period={analytic_period} rel_err={rel_err:.4}"
+            );
+        }
+    }
+
+    /// D7 風と終端速度(同docs Phase 1表)。「発泡球〜鋼球を落とす、風スライダー」
+    /// 「合格基準: F1/F2/F3」。`sim-mechanics`のF1(高Re二次抗力)・F3(低Reストークス
+    /// 抗力)解析解テストと同じ構成を`World`経由で再現する — F2(雨粒の実測値との比較、
+    /// F1と同じ物理を別パラメータで示すのみ)は本デモでは対象外とする(F1で高Re域の
+    /// 終端速度式自体は確認済みのため)。
+    #[test]
+    fn d7_wind_and_terminal_velocity_matches_high_and_low_reynolds_formulas() {
+        // F1: 高Re(鋼球、Cd=0.47の二次抗力)。
+        {
+            let mut world = World::new(WorldOptions::default());
+            let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+            let atmosphere = sim_fluid::Atmosphere::still(1.225, 1.81e-5);
+            world.mechanics_mut().atmosphere = Some(atmosphere);
+
+            let radius = 0.005;
+            let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, steel);
+            desc.drag = DragModel::Sphere { radius };
+            let body = world.create_body(desc);
+
+            for _ in 0..3600 {
+                // 30秒
+                world.step();
+            }
+
+            let mass = 7850.0 * (4.0 / 3.0) * std::f64::consts::PI * radius.powi(3);
+            let area = std::f64::consts::PI * radius * radius;
+            let cd = 0.47;
+            let analytic_vt = (2.0 * mass * 9.80665 / (atmosphere.density * cd * area)).sqrt();
+            let measured = -world.body_velocity(body).unwrap().y;
+            let rel_err = (measured - analytic_vt).abs() / analytic_vt;
+            assert!(
+                rel_err < 0.01,
+                "F1: measured={measured} analytic_vt={analytic_vt} rel_err={rel_err:.4}"
+            );
+        }
+
+        // F3: 低Re(ストークス沈降、v=2r²Δρg/(9μ))。
+        {
+            let mut world = World::new(WorldOptions::default());
+            let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+            let steel_density = 7850.0;
+            let fluid_density = 0.5;
+            let viscosity = 1.0;
+            world.mechanics_mut().atmosphere =
+                Some(sim_fluid::Atmosphere::still(fluid_density, viscosity));
+
+            let radius = 0.01;
+            let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, steel);
+            desc.drag = DragModel::Sphere { radius };
+            let body = world.create_body(desc);
+
+            for _ in 0..240 {
+                // 2秒
+                world.step();
+            }
+
+            let delta_rho = steel_density - fluid_density;
+            let analytic = 2.0 * radius * radius * delta_rho * 9.80665 / (9.0 * viscosity);
+            let measured = -world.body_velocity(body).unwrap().y;
+            let rel_err = (measured - analytic).abs() / analytic;
+            assert!(
+                rel_err < 0.02,
+                "F3: measured={measured} analytic={analytic} rel_err={rel_err:.4}"
+            );
+        }
     }
 }
