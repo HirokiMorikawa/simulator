@@ -117,6 +117,7 @@ mod tests {
                 em_circuit: Some(&mut circuit),
                 em_electrostatics: None,
                 gas: None,
+                grid_fluid: None,
             };
             coupling.apply(&mut states, dt);
             circuit.step(dt);

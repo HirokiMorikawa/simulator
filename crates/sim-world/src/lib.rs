@@ -732,6 +732,7 @@ impl World {
                 em_circuit: self.circuit.as_mut(),
                 em_electrostatics: self.em_electrostatics.as_mut(),
                 gas: self.gas.as_mut(),
+                grid_fluid: self.grid_fluid.as_mut(),
             };
             coupling.apply(&mut states, dt);
         }
@@ -895,6 +896,7 @@ impl World {
             em_circuit: self.circuit.as_mut(),
             em_electrostatics: self.em_electrostatics.as_mut(),
             gas: self.gas.as_mut(),
+            grid_fluid: self.grid_fluid.as_mut(),
         };
         coupling.apply(&mut states, dt);
     }
@@ -1211,6 +1213,41 @@ mod tests {
             "viscous grid fluid should lose kinetic energy: before={energy_before} after={energy_after}"
         );
         assert!(world.grid_fluid().is_some());
+    }
+
+    /// `BoussinesqBuoyancy`をレジストリ経由(`add_coupling`)で`grid_fluid`ドメインに
+    /// 接続し、暖かい熱源によって格子流体の平均鉛直速度が単調に上昇することを確認する
+    /// (`sim_coupling::BoussinesqBuoyancy`単体テストの解析的挙動が`World`経由でも
+    /// 機能することの確認)。
+    #[test]
+    fn boussinesq_buoyancy_coupling_raises_grid_fluid_mean_vertical_velocity_via_world() {
+        let mut world = World::new(WorldOptions::default());
+        let ambient = 293.15;
+        let mut thermal = sim_thermal::ThermalSolver::new(ambient);
+        let node = thermal.add_node(sim_thermal::ThermalNode::new(313.15, 1000.0));
+        world.enable_thermal(thermal);
+        world.enable_grid_fluid(sim_fluid::GridFluid2D::new(8, 8, 0.1));
+        world.add_coupling(Box::new(sim_coupling::BoussinesqBuoyancy {
+            thermal_node: node,
+            ambient_temperature: ambient,
+            thermal_expansion_coefficient: 3.4e-3,
+        }));
+
+        let mean_v = |w: &World| -> f64 {
+            let fluid = w.grid_fluid().unwrap();
+            fluid.v.iter().sum::<f64>() / fluid.v.len() as f64
+        };
+        let v_before = mean_v(&world);
+        for _ in 0..10 {
+            world.step();
+        }
+        let v_after = mean_v(&world);
+
+        assert!(
+            v_after > v_before,
+            "warm thermal node should raise grid_fluid's mean vertical velocity via \
+             BoussinesqBuoyancy: v_before={v_before} v_after={v_after}"
+        );
     }
 
     /// `add_coupling`で登録した`Coupling`が`step()`ごとに自動適用され(呼び出し側が

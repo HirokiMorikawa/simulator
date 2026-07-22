@@ -135,6 +135,7 @@ mod tests {
                     em_circuit: None,
                     em_electrostatics: None,
                     gas: Some(&mut gas),
+                    grid_fluid: None,
                 },
                 dt,
             );

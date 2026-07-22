@@ -123,6 +123,7 @@ mod tests {
                     em_circuit: None,
                     em_electrostatics: None,
                     gas: None,
+                    grid_fluid: None,
                 };
                 coupling.apply(&mut states, dt);
             }

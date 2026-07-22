@@ -3,11 +3,13 @@
 //! シーン設定における排他結合(同じ物理を2経路で計算しない、設計§2規則2)の静的検査
 //! (`validate_exclusive_couplings`)に加え、`Coupling`トレイト + `DomainStates`
 //! (設計docs/00-foundation/04-architecture.md §1.3「保存量の橋」、`domain_states`
-//! モジュールdoc参照)と、具体的な実装7種(`DissipationToHeat`・`JouleHeat`・
-//! `BrownianForce`・`LorentzForce`・`InductionCoupling`・`MotorCoupling`・`PistonGas`、
-//! 各モジュールdoc参照)を実装する。残る5種(`BuoyancyDrag`・`GridFluidRigid`等、設計§3)・
+//! モジュールdoc参照)と、具体的な実装8種(`DissipationToHeat`・`JouleHeat`・
+//! `BrownianForce`・`LorentzForce`・`InductionCoupling`・`MotorCoupling`・`PistonGas`・
+//! `BoussinesqBuoyancy`、各モジュールdoc参照)を実装する。残る4種
+//! (`BuoyancyDrag`・`GridFluidRigid`・`ConvectionLink`・`SphRigid`、設計§3)・
 //! sub-iteration剛性閾値表(設計§2規則3)は後続増分で追加する。
 
+mod boussinesq_buoyancy;
 mod brownian_force;
 mod dissipation_to_heat;
 mod domain_states;
@@ -16,6 +18,7 @@ mod joule_heat;
 mod lorentz_force;
 mod motor_coupling;
 mod piston_gas;
+pub use boussinesq_buoyancy::BoussinesqBuoyancy;
 pub use brownian_force::BrownianForce;
 pub use dissipation_to_heat::DissipationToHeat;
 pub use domain_states::{Coupling, DomainStates};

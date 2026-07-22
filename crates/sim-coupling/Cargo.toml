@@ -10,3 +10,4 @@ sim-math = { path = "../sim-math" }
 sim-mechanics = { path = "../sim-mechanics" }
 sim-thermal = { path = "../sim-thermal" }
 sim-em = { path = "../sim-em" }
+sim-fluid = { path = "../sim-fluid" }
