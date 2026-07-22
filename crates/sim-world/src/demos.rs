@@ -40,8 +40,13 @@
 //! 自動sub-stepする)ため、Phase 4より先にD34(太陽系儀)を実装した — 8惑星ではなく
 //! 1惑星(円軌道)への縮約で、`sim-astro`のA1(ケプラー第3法則)・A2(エネルギー・
 //! 角運動量保存)解析解テストと同じ物理を`World`経由で再現する。「時間加速の切替を
-//! 跨ぐリプレイ一致」はレジーム切替機構が`World`に未接続のため対象外。残りのPα
-//! (D35–D39)は後続増分。
+//! 跨ぐリプレイ一致」はレジーム切替機構が`World`に未接続のため対象外。続けて
+//! D35(軌道投入)を実装した — `sim-astro`のA3(円軌道速度、vis-viva公式の特殊形)
+//! テストと同じ2体構成に、円軌道速度より遅い初速(楕円軌道)を与え、vis-vivaから
+//! 導いた長半径によるケプラー第3法則の周期分だけ`World`を進めると衛星が出発点
+//! (位置・速度とも)へ戻る(=周期がケプラー則どおり)ことを確認する。残りのPα
+//! (D36–D39、双曲線フライバイ・再突入・潮汐・相対論)は新規物理(スイングバイの
+//! 解析検証・大気抵抗の再突入シナリオ・相対論的補正)を要するため後続増分。
 
 #[cfg(test)]
 mod tests {
@@ -837,6 +842,57 @@ mod tests {
         assert!(
             l_drift < 1e-6,
             "A2: angular momentum drift too large: {l_drift}"
+        );
+    }
+
+    /// D35 軌道投入(同docs Pα表)。「衛星の速度・高度を変えて軌道形状を見る」
+    /// 「合格基準: A3、周期がケプラー則」。`sim-astro`のA3(円軌道速度、vis-viva公式の
+    /// 特殊形)テストと同じ2体構成を使い、円軌道速度より遅い初速(楕円軌道)を与え、
+    /// vis-viva公式から導いた長半径$a$($1/a=2/r_0-v_0^2/(GM)$)によるケプラー第3法則の
+    /// 周期$T=2\pi\sqrt{a^3/(GM)}$分だけ`World`を進めると、衛星が出発点(位置・速度とも)
+    /// 付近に戻る(=軌道が閉じ、周期がケプラー則どおり)ことを確認する。
+    #[test]
+    fn d35_orbital_insertion_elliptical_period_matches_keplers_third_law() {
+        let mass_central = 1.989e30;
+        let r0: f64 = 1.496e11; // 1 AU相当
+        let g = sim_astro::GRAVITATIONAL_CONSTANT;
+        let gm = g * mass_central;
+        let v_circ = (gm / r0).sqrt();
+        let v0 = v_circ * 0.9; // 円軌道より遅い初速 → 楕円軌道(出発点が遠地点)
+
+        // vis-viva: v^2 = GM(2/r - 1/a) → 1/a = 2/r0 - v0^2/GM。
+        let semi_major_axis = 1.0 / (2.0 / r0 - v0 * v0 / gm);
+        let analytic_period = 2.0 * std::f64::consts::PI * (semi_major_axis.powi(3) / gm).sqrt();
+
+        let steps_per_period = 4000u32;
+        let dt = analytic_period / steps_per_period as f64;
+
+        let mut world = World::new(WorldOptions {
+            dt,
+            ..WorldOptions::default()
+        });
+        let mut sys = sim_astro::NBodySystem::new(0.0);
+        sys.add_body(Vec3::ZERO, Vec3::ZERO, mass_central);
+        let satellite = sys.add_body(Vec3::new(r0, 0.0, 0.0), Vec3::new(0.0, v0, 0.0), 1.0);
+        world.enable_astro(sys);
+
+        for _ in 0..steps_per_period {
+            world.step();
+        }
+
+        let final_pos = world.astro().unwrap().position[satellite];
+        let final_vel = world.astro().unwrap().velocity[satellite];
+        let pos_err = (final_pos - Vec3::new(r0, 0.0, 0.0)).length() / r0;
+        let vel_err = (final_vel - Vec3::new(0.0, v0, 0.0)).length() / v0;
+        assert!(
+            pos_err < 0.01,
+            "A3 + Kepler's third law: elliptical orbit should close after the analytic period: \
+             pos_err={pos_err:.4} final_pos={final_pos:?}"
+        );
+        assert!(
+            vel_err < 0.01,
+            "A3 + Kepler's third law: velocity should also return to its initial value: \
+             vel_err={vel_err:.4} final_vel={final_vel:?}"
         );
     }
 }
