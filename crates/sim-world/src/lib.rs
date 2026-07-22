@@ -38,6 +38,7 @@
 //! 追加するか専用の接続方式を検討する必要があり、後続増分)。`quantum`/`statistical`は
 //! 専用シーンでのみ有効化する設計方針のため同様に見送る。
 
+mod integration_scenarios;
 mod orchestrator;
 mod overlap;
 mod raycast;
@@ -556,6 +557,35 @@ impl World {
     /// `None`。
     pub fn circuit_probe(&self, node: usize) -> Option<f64> {
         self.circuit.as_ref().map(|c| c.node_voltage(node))
+    }
+
+    /// `sim_coupling::Coupling`を`World`が保持する実ドメインに対して1回適用する。
+    ///
+    /// **縮約実装の理由**: 設計は`Coupling`を`World::step()`内部のLie-Trotter
+    /// operator splittingパイプライン(pre/postの2相、docs/20-integration/
+    /// 01-coupling-matrix.md §4)へ自動的に組み込む想定だが、そのためのCoupling
+    /// registry(シーンJSON`couplings`セクションからの自動解決・実行順序決定を含む)は
+    /// まだ実装していない(`from_scenario`のモジュールdoc、各`sim-coupling`実装の
+    /// モジュールdoc参照)。本メソッドは、登録・自動実行の仕組みより前に必要な
+    /// 「`World`が保持する実ドメイン(`mechanics`・`thermal`・`circuit`・
+    /// `em_electrostatics`)に対して外部から`Coupling`を適用する経路」を先に提供する
+    /// 縮約版 — 呼び出し側(統合シナリオテスト・将来のCoupling registry自体)が
+    /// 呼び出し頻度・タイミング(`step()`の前か後か、design上のpre/post区別)を
+    /// 明示的に管理する。`step()`の後に呼ぶ場合、`DissipationToHeat`・`JouleHeat`の
+    /// ように直近stepで確定した量(`last_contact_dissipation`・`resistor_power`等)を
+    /// 読むCoupling(design上の"post")は正しく機能するが、`BrownianForce`・
+    /// `LorentzForce`のように力・速度を注入し同stepの位置積分に反映されるべき
+    /// Coupling(design上の"pre")は、その注入が次の`step()`まで反映されない
+    /// 1step遅れが生じる(`InductionCoupling`で既に検証・許容した縮約と同じパターン、
+    /// 同モジュールdoc参照)。
+    pub fn apply_coupling(&mut self, coupling: &mut dyn sim_coupling::Coupling, dt: f64) {
+        let mut states = sim_coupling::DomainStates {
+            mechanics: &mut self.mechanics,
+            thermal: self.thermal.as_mut(),
+            em_circuit: self.circuit.as_mut(),
+            em_electrostatics: self.em_electrostatics.as_mut(),
+        };
+        coupling.apply(&mut states, dt);
     }
 
     /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:

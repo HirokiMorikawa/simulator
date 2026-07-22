@@ -246,6 +246,7 @@ dependencies = [
  "serde_json",
  "sim-astro",
  "sim-core",
+ "sim-coupling",
  "sim-em",
  "sim-fluid",
  "sim-math",
