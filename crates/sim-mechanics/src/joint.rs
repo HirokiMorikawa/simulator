@@ -177,7 +177,10 @@ pub fn resolve_distance(joints: &[DistanceJoint], bodies: &mut RigidBodySet, dt:
 }
 
 /// アンカー一致拘束(設計 §2.1)。`body_b = None` はワールド固定点(独楽の支点等、
-/// M10)を表す — 剛体はその点を中心に自由に回転できる。
+/// M10。`sim-world::Command::Grab`が動く目標点への拘束としても使う — ワールド座標軸
+/// 沿いの3本の独立スカラー拘束はゼロ距離でも(`DistanceJoint`の方向ベクトル
+/// 正規化と異なり)退化しないため、掴んだ対象を目標点ぴったりまで引き寄せる用途に
+/// 適する)を表す — 剛体はその点を中心に自由に回転できる。
 #[derive(Clone, Copy)]
 pub struct BallJoint {
     pub body_a: usize,
@@ -186,6 +189,11 @@ pub struct BallJoint {
     pub body_b: Option<usize>,
     /// `body_b` が `Some` ならそのローカル座標、`None` ならワールド座標(固定点)。
     pub anchor_b: Vec3,
+    /// `true`なら`resolve_ball`が解決対象から除外する(削除操作の代替、
+    /// `sim-world::Command::Release`が使う — 密な`Vec`から実際に取り除くと他の
+    /// ジョイントのindexがずれるため、`RigidBodySet`の削除と同じ「無効化に留める」
+    /// 方針)。
+    pub disabled: bool,
 }
 
 struct PreparedBallAxis {
@@ -251,7 +259,11 @@ pub fn resolve_ball(joints: &[BallJoint], bodies: &mut RigidBodySet, dt: f64) {
     if joints.is_empty() {
         return;
     }
-    let prepared: Vec<PreparedBallJoint> = joints.iter().map(|j| j.prepare(bodies, dt)).collect();
+    let prepared: Vec<PreparedBallJoint> = joints
+        .iter()
+        .filter(|j| !j.disabled)
+        .map(|j| j.prepare(bodies, dt))
+        .collect();
     for _ in 0..JOINT_VELOCITY_ITERATIONS {
         for p in &prepared {
             solve_velocity_ball(p, bodies);

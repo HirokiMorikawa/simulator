@@ -81,24 +81,35 @@ impl Default for WorldOptions {
 /// §2)。次`step()`の先頭で適用され、`command_log()`に記録される(リプレイ検証用)。
 ///
 /// **縮約実装の理由**: 設計が例示する5種(`ApplyForce`・`SetMotorTarget`・`SetSwitch`・
-/// `SetHeatSource`・`Grab`/`MoveGrab`/`Release`)のうち、`ApplyForce`・`SetMotorTarget`・
-/// `SetSwitch`・`SetHeatSource`の4種を実装する。`SetMotorTarget`・`SetSwitch`は
-/// `World`にJointId/CircuitId管理が無く、`sim_mechanics::MechanicsSolver::hinge_motors`・
-/// `sim_em::Circuit`の switches が生indexで管理されている(削除操作が無くID再利用の
-/// 懸念が無いため`BodyId`のような世代管理までは導入していない)ことを踏まえ、
-/// `hinge_motor_index`/`switch_index`という生indexを直接引数に取る縮約版とする。
-/// `Grab`系(マウスでつかむ = 動く目標点へのばね拘束、専用の永続状態管理が必要)は
-/// 後続増分。`SetHeatSource`は`ApplyForce`と同じ「1step分だけ効く」縮約セマンティクス
-/// (設計が意図する可能性のある「変更するまで持続するダイヤル」ではない、継続加熱には
-/// 毎stepの再push が必要)を採る — `ThermalNode::heat_accum`が毎step末尾でクリア
-/// される既存の設計(`sim-thermal`のT4テスト参照)にそのまま乗せられるため。
-/// `SetMotorTarget`は設計の例示(`{joint, velocity}`)とは異なり`theta_target`(角度)を
-/// 設定する — 実装済みの`HingeMotorPd`が速度ではなく角度目標のPD位置サーボ
-/// (`joint`モジュールdoc参照)であるため、設計の例示する変数名ではなく実装済みの
-/// モーターが実際に持つパラメータをそのまま公開する(こちらも継続的な状態変更、
-/// 一度設定すると次に変更するまで持続する — `HingeMotorPd`自体が`MechanicsSolver::
-/// step()`内で毎step自動適用される永続的な構成要素であるため、`SetHeatSource`とは
-/// 異なり1step限りの効果ではない)。
+/// `SetHeatSource`・`Grab`/`MoveGrab`/`Release`)を全て実装する。`SetMotorTarget`・
+/// `SetSwitch`は`World`にJointId/CircuitId管理が無く、`sim_mechanics::
+/// MechanicsSolver::hinge_motors`・`sim_em::Circuit`の switches が生indexで管理
+/// されている(削除操作が無くID再利用の懸念が無いため`BodyId`のような世代管理までは
+/// 導入していない)ことを踏まえ、`hinge_motor_index`/`switch_index`という生indexを
+/// 直接引数に取る縮約版とする。`SetHeatSource`は`ApplyForce`と同じ「1step分だけ効く」
+/// 縮約セマンティクス(設計が意図する可能性のある「変更するまで持続するダイヤル」では
+/// ない、継続加熱には毎stepの再push が必要)を採る — `ThermalNode::heat_accum`が
+/// 毎step末尾でクリアされる既存の設計(`sim-thermal`のT4テスト参照)にそのまま
+/// 乗せられるため。`SetMotorTarget`は設計の例示(`{joint, velocity}`)とは異なり
+/// `theta_target`(角度)を設定する — 実装済みの`HingeMotorPd`が速度ではなく角度目標の
+/// PD位置サーボ(`joint`モジュールdoc参照)であるため、設計の例示する変数名ではなく
+/// 実装済みのモーターが実際に持つパラメータをそのまま公開する(こちらも継続的な状態
+/// 変更、一度設定すると次に変更するまで持続する — `HingeMotorPd`自体が
+/// `MechanicsSolver::step()`内で毎step自動適用される永続的な構成要素であるため、
+/// `SetHeatSource`とは異なり1step限りの効果ではない)。`Grab`/`MoveGrab`/`Release`
+/// (マウスでつかむ)は、設計が示唆する「ばね拘束」ではなく`sim_mechanics::
+/// BallJoint`(動く目標点へのワールド固定点、`joint`モジュールdoc参照)による
+/// 剛な(rigid)ピン拘束として実装する — `DistanceJoint`(`length=0`)は方向ベクトルの
+/// 正規化がゼロ距離近傍で退化し目標点付近で拘束が効かなくなる(実装検証中に
+/// 発見、掴んだ対象が目標点周りで収束せず振動し続ける形で顕在化した)ため使わず、
+/// ワールド座標軸沿いの3本の独立スカラー拘束(ゼロ距離でも退化しない)を持つ
+/// `BallJoint`を採用した。専用のばね(soft constraint、未実装)ではなく既存の
+/// Baumgarte安定化されたPGS拘束をそのまま流用する縮約(掴んだ瞬間に対象が目標点へ
+/// 強く引き寄せられる、真のばねより硬い挙動になりうることを承知の上での簡略化)。
+/// 1剛体につき同時に1つのgrabを想定し(`grab_joints`マップで剛体index→
+/// `mechanics.ball_joints`indexを対応付け)、`Release`は`BallJoint::disabled`を
+/// 立てて無効化する(密な`Vec`からの実削除はしない、`RigidBodySet`の削除と同じ
+/// 「無効化に留める」方針、`joint`モジュールdoc参照)。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
     /// 剛体`body`のワールド座標`point`(`None`なら重心、トルクなし)に`force`を加える。
@@ -120,6 +131,18 @@ pub enum Command {
     /// 熱ノード`node`に`watts`ワットの熱源を1step分だけ与える(モジュールdoc「1step分
     /// だけ効く」縮約参照)。
     SetHeatSource { node: usize, watts: f64 },
+    /// 剛体`body`のローカル座標`anchor_local`をワールド座標`target`へピン拘束する
+    /// (モジュールdoc「`Grab`系」参照)。既に同じ`body`をgrab中なら前のgrabを
+    /// 無効化してから新設する。
+    Grab {
+        body: BodyId,
+        anchor_local: Vec3,
+        target: Vec3,
+    },
+    /// `body`の既存grabの目標点を`target`へ更新する(grab中でなければ無視)。
+    MoveGrab { body: BodyId, target: Vec3 },
+    /// `body`の既存grabを解除する(grab中でなければ無視)。
+    Release { body: BodyId },
 }
 
 /// `raycast`の結果(`raycast`モジュールdoc参照)。生の`RigidBodySet`indexではなく
@@ -214,6 +237,11 @@ pub struct World {
     command_log: Vec<(u64, Command)>,
     /// 登録済みプローブ(`Probe`のdoc参照)。`step()`末尾で毎step全プローブをサンプルする。
     probes: Vec<Probe>,
+    /// `Command::Grab`が作った`BallJoint`の、剛体index→`mechanics.ball_joints`
+    /// indexの対応(`Command::MoveGrab`/`Release`が同じ剛体を再度参照するために使う、
+    /// `Command`のdoc参照)。1剛体につき同時に1つのgrabのみを想定する(再`Grab`は
+    /// 前のgrabを`disabled`化してから新設)。
+    grab_joints: std::collections::HashMap<u32, usize>,
 }
 
 const STREAM_DIAG: u64 = 0;
@@ -264,6 +292,7 @@ impl World {
             pending_commands: Vec::new(),
             command_log: Vec::new(),
             probes: Vec::new(),
+            grab_joints: std::collections::HashMap::new(),
         }
     }
 
@@ -359,6 +388,50 @@ impl World {
                     if let Some(thermal) = &mut self.thermal {
                         if let Some(n) = thermal.nodes.get_mut(node) {
                             n.heat_accum += watts * dt;
+                        }
+                    }
+                }
+                Command::Grab {
+                    body,
+                    anchor_local,
+                    target,
+                } => {
+                    if self.is_valid(body) {
+                        let idx = body.index as usize;
+                        // 既存grabがあれば先に無効化してから新設する(モジュールdoc
+                        // 「1剛体につき同時に1つのgrab」参照)。
+                        if let Some(&old_joint_index) = self.grab_joints.get(&body.index) {
+                            self.mechanics.ball_joints[old_joint_index].disabled = true;
+                        }
+                        self.mechanics.bodies.asleep[idx] = false;
+                        self.mechanics.ball_joints.push(sim_mechanics::BallJoint {
+                            body_a: idx,
+                            anchor_a: anchor_local,
+                            body_b: None,
+                            anchor_b: target,
+                            disabled: false,
+                        });
+                        let new_joint_index = self.mechanics.ball_joints.len() - 1;
+                        self.grab_joints.insert(body.index, new_joint_index);
+                    }
+                }
+                Command::MoveGrab { body, target } => {
+                    if let Some(&joint_index) = self.grab_joints.get(&body.index) {
+                        self.mechanics.ball_joints[joint_index].anchor_b = target;
+                        if self.is_valid(body) {
+                            let idx = body.index as usize;
+                            self.mechanics.bodies.asleep[idx] = false;
+                        }
+                    }
+                }
+                Command::Release { body } => {
+                    if let Some(joint_index) = self.grab_joints.remove(&body.index) {
+                        self.mechanics.ball_joints[joint_index].disabled = true;
+                        // grab中に静止し続けていた剛体はasleep化している可能性が高く、
+                        // 起こさないと重力も含め力適用・速度積分ごと止まったまま
+                        // (`ApplyForce`/`SetMotorTarget`と同じ理由、実装検証中に発見)。
+                        if self.is_valid(body) {
+                            self.mechanics.bodies.asleep[body.index as usize] = false;
                         }
                     }
                 }
@@ -1203,6 +1276,59 @@ mod tests {
         assert!(
             (t2 - t1).abs() < 1e-9,
             "temperature must not keep rising without re-pushing the command: t1={t1} t2={t2}"
+        );
+    }
+
+    /// `Command::Grab`/`MoveGrab`/`Release`(設計§2「マウスでつかむ」、モジュールdoc
+    /// 「`length=0`のピン拘束」参照)。落下中の箱を`Grab`すると重力に反して目標点付近に
+    /// 保持され、`MoveGrab`で目標点を動かすと追従し、`Release`すると再び自由落下する
+    /// (重力で加速し始める)ことを確認する。
+    #[test]
+    fn grab_move_grab_release_pin_and_release_a_falling_body() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        let start_y = world.body_position(box_id).unwrap().y;
+
+        let target1 = Vec3::new(0.0, start_y, 0.0);
+        world.push_command(Command::Grab {
+            body: box_id,
+            anchor_local: Vec3::ZERO,
+            target: target1,
+        });
+        for _ in 0..120 {
+            world.step();
+        }
+        let pos_grabbed = world.body_position(box_id).unwrap();
+        assert!(
+            (pos_grabbed - target1).length() < 0.05,
+            "grab should pin the body near the target despite gravity: pos_grabbed={pos_grabbed:?} target1={target1:?}"
+        );
+
+        let target2 = Vec3::new(2.0, start_y, 0.0);
+        world.push_command(Command::MoveGrab {
+            body: box_id,
+            target: target2,
+        });
+        for _ in 0..300 {
+            world.step();
+        }
+        let pos_moved = world.body_position(box_id).unwrap();
+        assert!(
+            (pos_moved - target2).length() < 0.05,
+            "move_grab should pull the body to the new target: pos_moved={pos_moved:?} target2={target2:?}"
+        );
+
+        world.push_command(Command::Release { body: box_id });
+        world.step();
+        let v_after_one_step = world.body_velocity(box_id).unwrap();
+        for _ in 0..30 {
+            world.step();
+        }
+        let v_after_more_steps = world.body_velocity(box_id).unwrap();
+        assert!(
+            v_after_more_steps.y < v_after_one_step.y - 0.1,
+            "released body should resume free fall (accelerating downward): \
+             v_after_one_step={v_after_one_step:?} v_after_more_steps={v_after_more_steps:?}"
         );
     }
 

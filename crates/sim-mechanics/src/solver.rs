@@ -463,6 +463,7 @@ mod tests {
             anchor_a: anchor_local_top,
             body_b: None,
             anchor_b: pivot,
+            disabled: false,
         });
         solver.add_hinge_motor(HingeMotorPd {
             body: leg,

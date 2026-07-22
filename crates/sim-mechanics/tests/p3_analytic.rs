@@ -164,6 +164,7 @@ fn m10_top_precession_rate_matches_mgr_over_i_omega() {
         anchor_a,
         body_b: None,
         anchor_b: pivot,
+        disabled: false,
     });
 
     let dt = 1.0 / 20_000.0;
