@@ -1057,11 +1057,21 @@
   `sim-world`テストを追加した(`grid_fluid_rigid_coupling_pushes_a_light_body_
   downstream_via_world`、一発Green)。これで設計§3が挙げる元の12種のCouplingが
   (`BuoyancyDrag`を除き)全て出揃った。
+  続けて残りのヘッドレスデモを棚卸しし、合格基準が新規の物理・World状態を要さず
+  既存の解析解テストそのものである2件(D10・D17と同じ「既にカバー済みと見なす」
+  パターン)を発見した。D14(煙と渦)は合格基準が「F11(St数)、渦度強化OFFで検証
+  モード」のみで「煙」自体は可視化(ワークストリームD)の領域のため、
+  `sim-fluid::karman`のF11テストが既にカバー済みと見なした。D22(光学ベンチ)は
+  合格基準が「E9–E12(焦点・分光・全反射)」のみで、これらは設計の解析解テスト表
+  自体が「—(レイ・代数検算)」と明記するとおり時間発展を伴わない静的な幾何光学
+  計算であり`World`のドメイン合成・時間積分を必要としないため、`sim-em::optics`の
+  E9–E12テストが既にカバー済みと見なした(いずれも新規コードなし、§7の該当行に
+  根拠を記載)。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は残り1種
   (`BuoyancyDrag`、既存の`MechanicsSolver`埋め込み実装の切り出しリスクで要判断)、
   `PhaseChangeMorph`(イベント駆動の剛体/流体生成)、あるいはシーンJSON
   `couplings`セクション+排他結合検査のWorld接続、あるいは残りのヘッドレスデモ
-  (D12・D14・D18・D20・D22–D24・D27–D33・D36–D39)。
+  (D12・D18・D20・D23・D24・D27–D33・D36–D39)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1776,7 +1786,12 @@ Phase 2〜3:
       経由でM13(カテナリー静止形状)を再現(`sim-mechanics`側のM13単体テストと同じ
       構成・許容誤差)。M14(ロープの伸び)は`sim-mechanics`側で既にGreenのため
       重複実装しない)
-- [ ] D14 煙と渦
+- [ ] D14 煙と渦(合格基準は「F11(St数)、渦度強化OFFで検証モード」のみで、「煙」自体は
+      可視化(ワークストリームD)の領域であり新規の物理・World状態を要しない。
+      `crates/sim-fluid/src/karman.rs::tests::f11_karman_vortex_shedding_matches_analytic_strouhal_number`
+      が既にカバー済みと見なす(設計§4.5が明記する代替経路(検証モードでも渦度強化を
+      許容し強化係数を合格条件として記録する、ε=1.0)を採用した経緯は同テストのdoc
+      参照)。目視チェック保留)
 - [ ] D15 対流(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
       ワークストリームD未着手のため保留。`grid_fluid`+`thermal`ドメインを
       `sim_coupling::BoussinesqBuoyancy`(Coupling registry経由)で結合し、熱源
@@ -1811,7 +1826,16 @@ Phase 4:
       自己無撞着に安定するため符号の再調整は不要だった、既存のE7テストは
       axis=(1,0,0)を渡すよう更新、数値結果は変化なし)し、重力下で導体棒が渦電流
       ブレーキにより解析的終端速度$v_{term}=mgR/(B\ell)^2$へrel<2%で収束することを確認)
-- [ ] D22 光学ベンチ
+- [ ] D22 光学ベンチ(合格基準は「E9–E12(焦点・分光・全反射)」のみで、これらは設計の
+      解析解テスト表(docs/21-verification/01-analytic-tests.md)自体が「—(レイ・代数検算)」
+      と明記するとおり時間発展を伴わない静的な幾何光学計算であり、`World`のドメイン
+      合成・時間積分を必要としない(レンズ・鏡・プリズムの配置自体は可視化
+      (ワークストリームD)の領域)。`crates/sim-em/src/optics.rs`のE9
+      (`e9_fresnel_normal_incidence_and_brewster_angle`)・E10
+      (`e10_snell_law_and_critical_angle_totally_internally_reflect`)・E11
+      (`e11_thin_lens_focal_length_matches_paraxial_ray_trace`)・E12
+      (`e12_prism_minimum_deviation_index_round_trip`)が既にカバー済みと見なす。
+      目視チェック保留)
 - [ ] D23 注ぐ水(SPH)
 - [ ] D24 車の実験場
 - [ ] D25 ブラウン運動(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視
