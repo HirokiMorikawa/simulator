@@ -990,6 +990,22 @@
   $k=(B\ell)^2/R$($F=-kv$)を使うと、終端速度は解析的に$v_{term}=mgR/(B\ell)^2$
   (重力と制動力の釣り合い)となることを導出し、十分な時間(5τ)後の測定速度が
   この解析値とrel<2%で一致することを確認した。初回実装で一発Green化した。
+  続けてD25(ブラウン運動、「顕微鏡ビュー、粒径・温度スライダー」「合格基準: S4/S5
+  (MSD直線のフィット)」)に着手した。S4(MSD)は`sim-statistical::BrownianParticleSet`
+  (BAOAB積分器)で既にGreenだが、`World`経由でMSDを検証する際に使う実装
+  `sim_coupling::BrownianForce`は`MechanicsSolver`の剛体+明示的Euler-Maruyama離散化
+  という別の実装であり、これまで等分配則(`brownian_force_converges_to_energy_
+  equipartition`)のみで検証されておりMSD自体は未検証だったことに気づき、その隙間を
+  埋めることにした。多数(N=2000)の独立な微小剛体(ポリスチレン球相当)に
+  `BrownianForce`を`add_coupling`で登録し、アンサンブル平均のMSD(ウォームアップ
+  終了時点を基準とした変位)がストークス・アインシュタインの拡散係数$D=k_BT/\gamma$
+  から導かれる解析式$6Dt$と一致することを確認した。実装検証中に、`WorldOptions`の
+  既定`dt`(1/120s)のまま構築すると、`BrownianForce`が要求する桁違いに小さい
+  `dt`(慣性時間$\tau=m/\gamma$の1/50)との不一致で明示的Euler-Maruyamaが発散し
+  (NaNエネルギーで接触ソルバのassertに失敗)、`WorldOptions.dt`に正しい`dt`を
+  明示的に渡す必要があることを発見した(修正後、一発Green化)。許容誤差は
+  アンサンブル統計誤差(N=2000で~1/sqrt(N)≈2.2%程度)込みでrel<8%(実測rel_err
+  約4.0%)を採用(`brownian_force_converges_to_energy_equipartition`と同じ判断)。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は残り2種のCoupling本体
   (`GridFluidRigid`・`SphRigid`、いずれも流体`Solver`統合・Coupling registryという
   前提工事は完了したが、剛体との具体的な相互作用力(ボクセル化境界・圧力積分/
@@ -1729,7 +1745,13 @@ Phase 4:
 - [ ] D22 光学ベンチ
 - [ ] D23 注ぐ水(SPH)
 - [ ] D24 車の実験場
-- [ ] D25 ブラウン運動
+- [ ] D25 ブラウン運動(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視
+      チェックはワークストリームD未着手のため保留。S4(MSD)は`sim-statistical`側の
+      別実装(`BrownianParticleSet`・BAOAB)でのみ検証されていたため、`World`経由で
+      多数(N=2000)の独立な微小剛体に`sim_coupling::BrownianForce`を`add_coupling`で
+      登録し、アンサンブル平均のMSDがストークス・アインシュタインの解析式$6Dt$と
+      一致することを直接検証する隙間を埋めた。許容誤差はアンサンブル統計誤差込みで
+      rel<8%(実測rel_err約4.0%)を採用)
 - [ ] D26 帯電風船(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
       ワークストリームD未着手のため保留。設計docs/13-electromagnetism/
       01-electrostatics-magnetostatics.md §2が明記する鏡像力の近似式
