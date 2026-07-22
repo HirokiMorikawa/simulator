@@ -3,20 +3,24 @@
 //! シーン設定における排他結合(同じ物理を2経路で計算しない、設計§2規則2)の静的検査
 //! (`validate_exclusive_couplings`)に加え、`Coupling`トレイト + `DomainStates`
 //! (設計docs/00-foundation/04-architecture.md §1.3「保存量の橋」、`domain_states`
-//! モジュールdoc参照)と、具体的な実装11種(`DissipationToHeat`・`JouleHeat`・
+//! モジュールdoc参照)と、具体的な実装12種(`DissipationToHeat`・`JouleHeat`・
 //! `BrownianForce`・`LorentzForce`・`InductionCoupling`・`MotorCoupling`・`PistonGas`・
-//! `BoussinesqBuoyancy`・`ConvectionLink`・`SphRigid`・`ImageChargeForce`、各モジュール
-//! doc参照)を実装する。残る2種(`BuoyancyDrag`・`GridFluidRigid`、設計§3の元の12種
-//! リストには含まれるが、`ImageChargeForce`はD26「帯電風船」向けに設計
+//! `BoussinesqBuoyancy`・`ConvectionLink`・`SphRigid`・`GridFluidRigid`・
+//! `ImageChargeForce`、各モジュールdoc参照)を実装する。これで設計§3が挙げる元の12種の
+//! Couplingのうち11種(`BuoyancyDrag`を除く全て)+ D26「帯電風船」向けに設計
 //! docs/13-electromagnetism/01-electrostatics-magnetostatics.md §2が別途要求する
-//! 「鏡像力」であり元の12種カウントには含まれない追加実装)・sub-iteration剛性閾値表
-//! (設計§2規則3)は後続増分で追加する。
+//! 「鏡像力」である追加実装の`ImageChargeForce`が出揃った。残る`BuoyancyDrag`(既存の
+//! `MechanicsSolver`埋め込み実装の切り出しリスクで別枠)・sub-iteration剛性閾値表
+//! (設計§2規則3、`GridFluidRigid`自身は現状固定的な単一適用で、`sim_fluid::
+//! GridFluidRigidBox2D`(X2)が持つ閾値ベースのsub-iteration機構までは踏襲していない)は
+//! 後続増分で追加する。
 
 mod boussinesq_buoyancy;
 mod brownian_force;
 mod convection_link;
 mod dissipation_to_heat;
 mod domain_states;
+mod grid_fluid_rigid;
 mod image_charge_force;
 mod induction_coupling;
 mod joule_heat;
@@ -29,6 +33,7 @@ pub use brownian_force::BrownianForce;
 pub use convection_link::ConvectionLink;
 pub use dissipation_to_heat::DissipationToHeat;
 pub use domain_states::{Coupling, DomainStates};
+pub use grid_fluid_rigid::GridFluidRigid;
 pub use image_charge_force::ImageChargeForce;
 pub use induction_coupling::InductionCoupling;
 pub use joule_heat::JouleHeat;

@@ -24,7 +24,7 @@ pub use aero::{
 pub use buoyancy::{
     buoyancy_force, hydrostatic_pressure, submerged_box_axis_aligned, StaticWaterRegion,
 };
-pub use grid_fluid::GridFluid2D;
+pub use grid_fluid::{GridFluid2D, GridSolidBox};
 pub use grid_fluid_rigid::GridFluidRigidBox2D;
 pub use karman::KarmanChannel2D;
 pub use poiseuille::PoiseuilleChannel1D;

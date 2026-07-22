@@ -1314,6 +1314,73 @@ mod tests {
         );
     }
 
+    /// `GridFluidRigid`をレジストリ経由で`mechanics`+`grid_fluid`に接続し、一様な流れ
+    /// (u=1.0)の中に置いた軽い剛体が、流れと同じ+x方向に押し流されることを`World`経由で
+    /// 確認する(圧力積分によるマスキング手法自体の定量的な物理的妥当性は
+    /// `sim_fluid::GridFluidRigidBox2D`(X2)の既存テストが既に検証済みなので、ここでは
+    /// `World`のCouplingレジストリ経由での配線 — mechanicsボディの位置・速度が
+    /// `grid_fluid`の`solid`マスクに反映され、圧力反力がボディに戻ってくること — を
+    /// 定性的に確認する、`SphRigid`実装検証時に確立した「動的な定量検証はSPH/格子流体
+    /// 特有の縁効果に弱い」という教訓を踏まえた判断)。
+    #[test]
+    fn grid_fluid_rigid_coupling_pushes_a_light_body_downstream_via_world() {
+        let mut world = World::new(WorldOptions {
+            gravity: 0.0,
+            ..WorldOptions::default()
+        });
+
+        let mut fluid = sim_fluid::GridFluid2D::new(16, 16, 0.1);
+        for u in fluid.u.iter_mut() {
+            *u = 1.0;
+        }
+        world.enable_grid_fluid(fluid);
+
+        let steel = world
+            .materials()
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        desc.mass_override = Some(0.02);
+        desc.transform.position = Vec3::new(0.8, 0.8, 0.0);
+        let body = world.create_body(desc);
+
+        world.add_coupling(Box::new(sim_coupling::GridFluidRigid::new(
+            body.index as usize,
+            0.15,
+            0.15,
+        )));
+
+        let x_before = world.body_position(body).unwrap().x;
+        for _ in 0..20 {
+            world.step();
+        }
+        let x_after = world.body_position(body).unwrap().x;
+        let vx_after = world.body_velocity(body).unwrap().x;
+
+        assert!(
+            x_after > x_before,
+            "body should be pushed in the +x direction by the uniform +x flow: \
+             x_before={x_before} x_after={x_after}"
+        );
+        assert!(
+            vx_after.is_finite() && vx_after > 0.0,
+            "body's x-velocity should be finite and positive (downstream): vx_after={vx_after}"
+        );
+
+        let solid = world
+            .grid_fluid()
+            .unwrap()
+            .solid
+            .expect("GridFluidRigid should have set the solid mask by now");
+        let body_pos = world.body_position(body).unwrap();
+        assert!(
+            (solid.center.0 - body_pos.x).abs() < 1e-9,
+            "solid mask should track the body's x position: solid.center.0={} body_pos.x={}",
+            solid.center.0,
+            body_pos.x
+        );
+    }
+
     /// `add_coupling`で登録した`Coupling`が`step()`ごとに自動適用され(呼び出し側が
     /// `apply_coupling`を手動で呼ばなくても)、`snapshot`/`restore`(`#[derive(Clone)]`
     /// 経由)を跨いでもレジストリごと正しく複製・継続することを確認する

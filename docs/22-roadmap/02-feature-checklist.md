@@ -1028,13 +1028,40 @@
   (`boundary_force`自体の物理的妥当性は上記の`sim-fluid`側テストが既に担う)。
   これで設計§3が挙げる元の12種のCouplingのうち11種(`BuoyancyDrag`を除く全て)+
   追加実装の`ImageChargeForce`が出揃った。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り2種
-  (`GridFluidRigid`・`BuoyancyDrag`、前者は`GridFluidRigidBox2D`(X2)のような専用
-  シナリオではなく汎用Couplingとして実装する場合`GridFluid2D`への固体境界セル
-  導入が前提になり本格的な前提工事を要する、後者は既存の`MechanicsSolver`埋め込み
-  実装の切り出しリスク)、`PhaseChangeMorph`(イベント駆動の剛体/流体生成)、
-  あるいはシーンJSON`couplings`セクション+排他結合検査のWorld接続、あるいは
-  残りのヘッドレスデモ(D12・D14・D18・D20・D22–D24・D27–D33・D36–D39)。
+  続けて12種目(最後の1種、`BuoyancyDrag`を除く)の`GridFluidRigid`(格子流体⇔剛体、
+  ボクセル化境界・圧力積分)に着手した。前提として`sim_fluid::GridFluid2D`に
+  単一矩形剛体のマスキング機構を追加した: `solid: Option<GridSolidBox>`
+  (中心・半幅・半高・速度)フィールドと、`GridFluidRigidBox2D`(X2)が既に採用済みの
+  マスキング方式(cut-cell法ではない、投影の前後両方でマスク領域内のセル速度を
+  剛体速度へ強制)をそのまま踏襲した`apply_solid_mask`。剛体表面の圧力積分による
+  流体力抽出用に`pressure_force_on_solid`を追加し(左右・上下4面の圧力差積分、
+  X2の`pressure_force_on_box`は鉛直方向のみだったがこちらは剛体が2自由度で自由
+  運動できる一般結合のため両方向を計算)、そのために`project`が投影後の圧力場を
+  `last_pressure`として返す(戻り値なし→`Vec<f64>`へのシグネチャ変更、既存の
+  呼び出し元3箇所(2つの解析解テスト+benchmark)は戻り値を無視するだけで無変更で
+  済んだ)よう変更した。`last_pressure`は次の`step`呼び出しの冒頭で必ず上書きされる
+  派生キャッシュのため`state_hash`には含めない一方、`solid`自体は次stepの挙動を
+  左右する状態なので`state_hash`に含めた(決定論replayの一部)。
+  続けて`sim_coupling::GridFluidRigid`を実装した。`SphRigid`・`InductionCoupling`と
+  同じ1step遅れの縮約(前stepの`GridFluid2D::step`が計算した圧力場からの
+  `pressure_force_on_solid`を剛体速度へ注入→剛体の今stepの位置・速度を`solid`
+  マスクへ書き込み、次stepの`GridFluid2D::step`のマスキングに反映)で双方向結合を
+  実現。`SphRigid`実装検証時に確立したパターンを踏襲し、`pressure_force_on_solid`
+  自体の物理的妥当性(マスキング+圧力積分手法)は同じ手法を使う
+  `GridFluidRigidBox2D`(X2)の既存テストが既に検証済みとして、`GridFluidRigid`
+  自身のテストは既知の(手で設定した)圧力場・`solid`値を使った決定論的な配線検証
+  (圧力積分力の注入・`solid`マスクの位置/速度追従)にとどめた(密な剛体をバルク
+  流体に沈める動的定量シナリオが`SphRigid`実装検証時に招いたSPH特有の縁効果の
+  再発を避ける判断)。加えて`World`経由の配線確認として、一様な流れ(u=1.0)の中に
+  置いた軽い剛体が流れと同じ+x方向に押し流されることを定性的に確認する
+  `sim-world`テストを追加した(`grid_fluid_rigid_coupling_pushes_a_light_body_
+  downstream_via_world`、一発Green)。これで設計§3が挙げる元の12種のCouplingが
+  (`BuoyancyDrag`を除き)全て出揃った。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り1種
+  (`BuoyancyDrag`、既存の`MechanicsSolver`埋め込み実装の切り出しリスクで要判断)、
+  `PhaseChangeMorph`(イベント駆動の剛体/流体生成)、あるいはシーンJSON
+  `couplings`セクション+排他結合検査のWorld接続、あるいは残りのヘッドレスデモ
+  (D12・D14・D18・D20・D22–D24・D27–D33・D36–D39)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1531,15 +1558,31 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       厳密対記帳)、11種目の`SphRigid`(SPH⇔剛体、境界粒子。`SphFluid`に新設した
       `boundary_force`(境界粒子が流体から受ける反作用力、Newton第3法則)を使い、
       球剛体のみ対象(フィボナッチ格子の境界粒子群、回転は反映しない)・
-      `InductionCoupling`と同じ1step遅れの縮約で双方向結合)を追加済み(10種目の
-      `ImageChargeForce`は元の12種カウント外の追加実装、D26の項目参照)。残り2種
-      (`BuoyancyDrag`・`GridFluidRigid`)自体は未実装(`BuoyancyDrag`は既存の
-      `MechanicsSolver`埋め込み実装の切り出しリスクで別枠、`GridFluidRigid`は
-      `GridFluid2D`側の`Solver`トレイト統合は完了しているが、汎用Couplingとして
-      実装するには`GridFluid2D`への固体境界セル導入が前提になり本格的な前提工事を
-      要する)。シーンJSON`couplings`セクションからの自動解決・排他結合検査
+      `InductionCoupling`と同じ1step遅れの縮約で双方向結合)、12種目の
+      `GridFluidRigid`(格子流体⇔剛体、ボクセル化境界・圧力積分)を追加済み(10種目の
+      `ImageChargeForce`は元の12種カウント外の追加実装、D26の項目参照)。
+      `GridFluidRigid`の実装に先立ち`GridFluid2D`に単一矩形剛体のマスキング機構
+      (`solid: Option<GridSolidBox>`、`GridFluidRigidBox2D`(X2)と同じマスキング方式、
+      cut-cell法ではない)+ 剛体表面の圧力積分(`pressure_force_on_solid`、
+      左右・上下4面の圧力差を積分、X2は鉛直方向のみだったがこちらは剛体が2自由度で
+      自由運動する一般結合のため両方向を計算)を追加した(`project`の戻り値を
+      `last_pressure`として保持するようシグネチャ変更、既存呼び出し元は戻り値を
+      無視するだけで済み無変更)。`SphRigid`と同じ1step遅れの縮約(前stepの圧力場から
+      抽出した力を剛体へ適用→剛体の今stepの位置・速度を`solid`マスクへ書き込み)で
+      双方向結合を実現。これで設計§3が挙げる元の12種のCouplingが(`BuoyancyDrag`を
+      除き)全て出揃った。`SphRigid`実装検証時に確立したパターンを踏襲し、
+      `pressure_force_on_solid`自体の物理的妥当性は`GridFluidRigidBox2D`(X2)の
+      既存テストが検証済みとして、`GridFluidRigid`のテストは既知の圧力場を使った
+      決定論的な配線検証にとどめた。加えて`World`経由の配線確認として、一様な流れの
+      中に置いた軽い剛体が流れと同じ方向に押し流されることを定性的に確認する
+      `sim-world`テストも追加(`grid_fluid_rigid_coupling_pushes_a_light_body_
+      downstream_via_world`、一発Greenで動的な定量検証の再度の缶詰め回避に成功)。
+      残る`BuoyancyDrag`(既存の`MechanicsSolver`埋め込み実装の切り出しリスクで別枠)・
+      シーンJSON`couplings`セクションからの自動解決・排他結合検査
       (`validate_exclusive_couplings`)との接続、design上のpre/post 2相分離、
-      sub-iteration剛性閾値表は未実装
+      sub-iteration剛性閾値表(`GridFluidRigid`自身は現状固定的な単一適用で、
+      `GridFluidRigidBox2D`が持つ閾値ベースのsub-iteration機構までは踏襲していない)
+      は未実装
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
