@@ -37,6 +37,7 @@
 //! `hydrostatic_pressure_matches_rho_g_h_within_wcsph_boundary_approximation`
 //! (静水圧平衡)で代替的に満たされるものとする。
 
+use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{SpatialHash, Vec3};
 
 /// cubic splineカーネル(Monaghan 1992、3D正規化)。設計§2.1。
@@ -69,6 +70,7 @@ fn kernel_gradient(r_vec: Vec3, h: f64) -> Vec3 {
 }
 
 /// WCSPH流体。設計§3 `SphFluid` の縮約版。
+#[derive(Clone)]
 pub struct SphFluid {
     pub position: Vec<Vec3>,
     pub velocity: Vec<Vec3>,
@@ -81,6 +83,10 @@ pub struct SphFluid {
     pub c_s: f64,
     /// 人工粘性係数(設計§9、既定0.08)。
     pub viscosity_alpha: f64,
+    /// 重力加速度(下向き、m/s^2)。`Solver`トレイト実装(`step(dt, ctx)`)が使う
+    /// (既定9.80665、`sim_mechanics::MechanicsSolver::gravity`と同じ既定値)。
+    /// 呼び出し側が直接`step(dt, gravity)`を呼ぶ既存の使い方には影響しない。
+    pub gravity: f64,
     /// 静的境界粒子(壁・床)。積分されない。密度和・圧力反発力にのみ参加する
     /// (実効質量・反発力の詳細はモジュールdoc参照)。
     pub boundary_position: Vec<Vec3>,
@@ -102,6 +108,7 @@ impl SphFluid {
             rho0,
             c_s,
             viscosity_alpha: 0.08,
+            gravity: 9.80665,
             boundary_position: Vec::new(),
             boundary_effective_mass: None,
             hash: SpatialHash::new(h, 4096),
@@ -266,6 +273,51 @@ impl SphFluid {
     }
 }
 
+impl Solver for SphFluid {
+    /// CFL条件(設計§9、モジュールdoc「sub-step数のCFL自動決定は未実装」の解消)。
+    /// 人工音速`c_s`に対するクーラン数0.25(既存の全テスト・ベンチマークが手動で
+    /// 使ってきた係数、`hydrostatic_pressure_matches_rho_g_h_within_wcsph_boundary_
+    /// approximation`等を参照)をそのまま採用する。
+    fn max_stable_dt(&self) -> f64 {
+        0.25 * self.h / self.c_s
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        // 同名の inherent メソッド(2引数版、上の`impl SphFluid`ブロック)を呼ぶ —
+        // Rustのメソッド解決規則により inherent メソッドが同名のトレイトメソッドより
+        // 優先されるため、トレイト実装内から`self.step(dt, self.gravity)`と書いても
+        // 無限再帰しない(`sim-em::Circuit`のSolver実装と同じパターン)。
+        self.step(dt, self.gravity);
+    }
+
+    /// 運動エネルギー+重力ポテンシャル(基準y=0)。WCSPHの人工音速による弾性
+    /// ポテンシャルエネルギーは対象外(`sim_mechanics::MechanicsSolver::total_energy`と
+    /// 同じ「保存力+運動エネルギーのみ」という縮約方針)。
+    fn total_energy(&self) -> EnergyBreakdown {
+        let mut kinetic = 0.0;
+        let mut potential = 0.0;
+        for (pos, vel) in self.position.iter().zip(self.velocity.iter()) {
+            kinetic += 0.5 * self.mass * vel.length_sq();
+            potential += self.mass * self.gravity * pos.y;
+        }
+        EnergyBreakdown {
+            kinetic,
+            potential,
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.position.len() as u64);
+        for i in 0..self.position.len() {
+            hasher.write_vec3(self.position[i]);
+            hasher.write_vec3(self.velocity[i]);
+            hasher.write_f64(self.density[i]);
+            hasher.write_f64(self.pressure[i]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +475,54 @@ mod tests {
                 "y={y_check}: measured_p={measured_p:.2} expected_p={expected_p:.2} rel_err={rel_err:.4}"
             );
         }
+    }
+
+    /// `Solver`トレイト実装(`sim-coupling`の`SphRigid`等が`World`経由で駆動するための
+    /// 窓口、モジュールdoc「sub-step数のCFL自動決定は未実装」の解消)。`max_stable_dt`が
+    /// 既存テスト・ベンチが手動で使ってきたCFL係数(0.25)と一致し、`Solver::step`経由の
+    /// 進行が inherent`step(dt, gravity)`を直接呼ぶのと同じ軌道を再現し(無限再帰しない
+    /// ことも含めて確認)、`total_energy`が孤立粒子1個の運動エネルギーと厳密に一致する
+    /// ことを確認する。
+    #[test]
+    fn solver_trait_max_stable_dt_matches_established_cfl_factor_and_step_advances_state() {
+        let h = 0.04;
+        let rho0 = 1000.0;
+        let c_s = 20.0;
+        let mut fluid = SphFluid::new(h, rho0, c_s);
+        fluid.mass = 1.0;
+        fluid.add_particle(Vec3::new(0.0, 10.0, 0.0), Vec3::ZERO);
+
+        assert!(
+            (fluid.max_stable_dt() - 0.25 * h / c_s).abs() < 1e-12,
+            "max_stable_dt should match the established CFL factor 0.25*h/c_s"
+        );
+
+        let materials = sim_core::MaterialDb::standard();
+        let mut rng = sim_math::SimRng::new(1, 1);
+        let mut events = sim_core::EventQueue::new();
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        let dt = fluid.max_stable_dt();
+        Solver::step(&mut fluid, dt, &mut ctx);
+
+        // 1step後、重力で速度がgravity*dt分だけ変化しているはず(等加速度落下の1次近似、
+        // 孤立粒子なので圧力・粘性項は寄与しない)。
+        let expected_vy = -fluid.gravity * dt;
+        let measured_vy = fluid.velocity[0].y;
+        assert!(
+            (measured_vy - expected_vy).abs() / expected_vy.abs() < 1e-6,
+            "Solver::step should advance the same physics as the inherent step(dt, gravity): \
+             measured_vy={measured_vy} expected_vy={expected_vy}"
+        );
+
+        let expected_ke = 0.5 * fluid.mass * measured_vy * measured_vy;
+        let measured_energy = fluid.total_energy();
+        assert!(
+            (measured_energy.kinetic - expected_ke).abs() / expected_ke < 1e-9,
+            "total_energy().kinetic should match 0.5*m*v^2 for the single isolated particle"
+        );
     }
 }

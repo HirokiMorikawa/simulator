@@ -44,6 +44,7 @@ const HASH_PZ: i64 = 83492791;
 
 /// 空間ハッシュによる近傍探索。設計 §6.1。
 /// セル幅は相互作用半径(SPH のカーネル半径・分子の衝突判定半径)に合わせる規約。
+#[derive(Clone)]
 pub struct SpatialHash {
     cell: f64,
     table_size: usize,

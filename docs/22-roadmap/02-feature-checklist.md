@@ -822,13 +822,33 @@
   実装で一発Green化した。残りのPhase 2〜3(D12–D15・D18)・Phase 4(D19–D33)・
   Pα残り(D36–D39、双曲線フライバイ・再突入・潮汐・相対論)は新規物理を要するため
   後続増分。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの残り
-  (`sample_fluid`は解像流体ドメインが`World`に未接続のため後回し)、性能ベンチ回帰
-  ゲートのベースライン永続化、または残り5種のCoupling(いずれも本格的な前提工事を
-  要する:
-  `GridFluidRigid`/`ConvectionLink`/`BoussinesqBuoyancy`/`SphRigid`は流体
-  `Solver`トレイト統合、`PhaseChangeMorph`はイベント駆動の剛体/流体生成、
-  `BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の切り出しリスク)。
+  続けて`World`公開APIの残りだった`sample_fluid`に着手。従来「解像流体ドメインが
+  `World`に未接続のため後回し」としていたが、`sim_fluid::SphFluid`に`Solver`
+  トレイトを新規実装すれば前進できると判断した。`max_stable_dt`はモジュールdoc
+  「sub-step数のCFL自動決定は未実装」を解消する形で、既存の全テスト・ベンチが
+  手動で使ってきたCFL係数(0.25、$dt=0.25h/c_s$)をそのまま採用し、`step`は
+  `sim-em::Circuit`と同じ「inherentメソッドが同名のトレイトメソッドより優先される」
+  パターンで既存の2引数版(`step(dt, gravity)`)に委譲した(`gravity`は新設した
+  `pub gravity: f64`フィールド、既定9.80665、呼び出し側が直接2引数版を呼ぶ既存の
+  使い方には影響しない)。`World`に`sph`ドメインを新設し、`thermal`/
+  `em_electrostatics`/`astro`/`circuit`と同じ固定順で`step()`が自動的にsub-step
+  するよう接続した(`SphFluid`・`sim_math::SpatialHash`に`#[derive(Clone)]`を追加、
+  `World`全体の`Clone`導出に必要)。`sample_fluid(p) -> Option<FluidSample>`
+  (`velocity`・`pressure`、設計の`temperature`はSPHが温度場を持たないため対象外)は
+  カーネル補間ではなく最近傍粒子の値を返す縮約(真のカーネル補間は後続増分)とした。
+  孤立した1粒子が`World::step()`経由で重力落下すること・`sample_fluid`が最近傍粒子の
+  速度を正しく返すことを確認し、初回実装で一発Green化した。これで`sample_fluid`が
+  `World`公開APIの最後の未実装項目だった(`subscribe`/`drain_events`は前段の増分で
+  縮約実装済み)。
+  この`SphFluid`の`Solver`化は、残るCoupling5種のうち`SphRigid`(SPH流体⇔剛体)の
+  前提の一つも満たしたことになる(もう一方の前提である剛体側との相互作用力の
+  設計はまだ未着手)。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り5種のCoupling
+  (いずれも本格的な前提工事を要する: `GridFluidRigid`/`ConvectionLink`/
+  `BoussinesqBuoyancy`は`GridFluid2D`側の`Solver`トレイト統合、`SphRigid`は
+  `SphFluid`側の`Solver`統合は完了したが剛体との相互作用力の設計が未着手、
+  `PhaseChangeMorph`はイベント駆動の剛体/流体生成、`BuoyancyDrag`は既存の
+  `MechanicsSolver`埋め込み実装の切り出しリスク)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1370,7 +1390,16 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       知らないためプレースホルダ`0`で埋め、`World::step()`が排出時に正しい値へ
       上書きする)を実装済み。残りの`EventKind`(`JointBroken`・`PhaseChanged`・
       `Discharge`・`FuseBlown`・`SolverDiverged`)は対応する生産者が未実装のため
-      後続増分。`sample_fluid`は解像流体ドメインが`World`に未接続のため未実装
+      後続増分。`sample_fluid(p) -> Option<FluidSample>`(`velocity`・`pressure`、
+      設計の`temperature`はSPHが温度場を持たないため対象外)を実装済み — 前提として
+      `sim_fluid::SphFluid`に`Solver`トレイトを新規実装(`max_stable_dt`はモジュール
+      doc「sub-step数のCFL自動決定は未実装」を解消する形で既存テスト・ベンチが手動で
+      使ってきたCFL係数0.25を採用、`step`は`sim-em::Circuit`と同じ「inherentメソッド
+      優先」パターンで既存の2引数版に委譲)、`World`に`sph`ドメインとして
+      `thermal`/`em_electrostatics`/`astro`/`circuit`と同じ固定順で自動sub-step
+      するよう接続した(`SphFluid`・`sim_math::SpatialHash`に`#[derive(Clone)]`を
+      追加)。`sample_fluid`自体はカーネル補間ではなく最近傍粒子の値を返す縮約
+      (真のカーネル補間は後続増分)
 - [x] 統合シナリオ: ブレーキ発熱(核となる運動→摩擦熱→温度上昇のみ、P5(温度依存
       抵抗変化)は対象外。台帳residual実測約4.3%、設計目標<10⁻³には届かないが
       `DissipationToHeat`既知のBaumgarte系統誤差起因、余裕を持たせた<8%で検証)

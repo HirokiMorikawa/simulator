@@ -26,8 +26,11 @@
 //! (`sim_em::Circuit`、回路のMNAソルバ。`Solver`トレイト実装は`sim-coupling::JouleHeat`
 //! 増分で追加済み)は`Option`として追加した(シーンが使う分だけ`enable_*`で有効化、設計
 //! 「Solverトレイトの共通契約」docs/00-foundation/04-architecture.md §1.2に既に準拠している
-//! 型をそのまま接続)。`step()`は有効なドメインを固定順(mechanics→thermal→em→astro→circuit、
-//! `state_hash`も同順)で順に進める。各ドメインは`orchestrator::sub_step_count`(設計§1.3の
+//! 型をそのまま接続)。`sim_fluid::SphFluid`にも`Solver`トレイトを実装し`sph`ドメインとして
+//! 同様に接続した(モジュールdoc「sub-step数のCFL自動決定は未実装」の解消、`sph.rs`の
+//! `Solver`実装のdoc参照)。`step()`は有効なドメインを固定順(mechanics→thermal→em→
+//! astro→circuit→sph、`state_hash`も同順)で順に進める。各ドメインは
+//! `orchestrator::sub_step_count`(設計§1.3の
 //! 決定的sub-step数算出、`max_stable_dt()`から算出)に従いsub-stepする — Lie-Trotter
 //! operator splitting自体(pre/post couplingを挟むパイプライン、
 //! docs/20-integration/01-coupling-matrix.md §4)は、`Coupling`実装(`sim-coupling`の
@@ -157,6 +160,15 @@ pub struct RayHit {
     pub distance: f64,
 }
 
+/// `World::sample_fluid`の結果(設計docs/20-integration/04-world-api.md §2)。
+/// 縮約実装の理由は`sample_fluid`のdoc参照(SPHは温度場を持たないため`temperature`は
+/// 対象外)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FluidSample {
+    pub velocity: Vec3,
+    pub pressure: f64,
+}
+
 /// `Probe`が毎stepサンプルする観測対象(設計docs/20-integration/04-world-api.md §2.1
 /// `ProbeTarget`)。
 ///
@@ -227,6 +239,11 @@ pub struct World {
     /// `gas`と同じ理由(`Solver`トレイト未実装)で`step()`の自動走査対象ではなく、
     /// `conduction_rod_mut().step(dt)`を呼び出し側が明示的に呼ぶ必要がある。
     conduction_rod: Option<sim_thermal::ConductionRod1D>,
+    /// SPH流体ドメイン(シーンが使う場合のみ`Some`)。`sim_fluid::SphFluid`に
+    /// `Solver`トレイトを実装済み(モジュールdoc「全ドメイン合成」参照)のため、
+    /// `thermal`/`em_electrostatics`/`astro`/`circuit`と同じ固定順で`step()`が
+    /// 自動的にsub-stepする。
+    sph: Option<sim_fluid::SphFluid>,
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
@@ -297,6 +314,7 @@ impl World {
             circuit: None,
             gas: None,
             conduction_rod: None,
+            sph: None,
             materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
@@ -532,6 +550,40 @@ impl World {
         self.conduction_rod.as_mut()
     }
 
+    /// SPH流体ドメインを有効化する(`step()`が自動的にsub-stepする、モジュールdoc参照)。
+    pub fn enable_sph(&mut self, sph: sim_fluid::SphFluid) {
+        self.sph = Some(sph);
+    }
+
+    pub fn sph(&self) -> Option<&sim_fluid::SphFluid> {
+        self.sph.as_ref()
+    }
+
+    pub fn sph_mut(&mut self) -> Option<&mut sim_fluid::SphFluid> {
+        self.sph.as_mut()
+    }
+
+    /// 流体場の点`p`での観測(設計docs/20-integration/04-world-api.md §2
+    /// `sample_fluid(p) -> FluidSample`)。
+    ///
+    /// **縮約実装の理由**: 設計は速度・圧力・温度を返すが、SPHは温度場を持たない
+    /// (`温度`は対象外)。カーネル補間ではなく最近傍粒子の値をそのまま返す縮約
+    /// (`p`が粒子分布から離れているほど代表性が下がる点に注意、真のカーネル補間は
+    /// 後続増分)。SPHドメインが未有効化、または粒子が1つも無い場合は`None`。
+    pub fn sample_fluid(&self, p: Vec3) -> Option<FluidSample> {
+        let sph = self.sph.as_ref()?;
+        let (nearest_idx, _) = sph
+            .position
+            .iter()
+            .enumerate()
+            .map(|(i, &pos)| (i, (pos - p).length_sq()))
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        Some(FluidSample {
+            velocity: sph.velocity[nearest_idx],
+            pressure: sph.pressure[nearest_idx],
+        })
+    }
+
     /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す
     /// `MaterialId` の解決に使う。
     pub fn materials(&self) -> &MaterialDb {
@@ -602,6 +654,9 @@ impl World {
         if let Some(c) = &self.circuit {
             total = total + c.total_energy();
         }
+        if let Some(s) = &self.sph {
+            total = total + s.total_energy();
+        }
         total
     }
 
@@ -631,6 +686,9 @@ impl World {
         }
         if let Some(c) = &mut self.circuit {
             run_domain_substeps(c, dt, &self.materials, &mut self.rng, &mut self.events);
+        }
+        if let Some(s) = &mut self.sph {
+            run_domain_substeps(s, dt, &self.materials, &mut self.rng, &mut self.events);
         }
         // このstepで発行された全イベントを排出し、Event::step(発行元ドメインは
         // ワールド全体のstep_countを知らないため0で埋めている、`sim-mechanics::
@@ -820,6 +878,10 @@ impl World {
         if let Some(c) = &self.circuit {
             c.state_hash(&mut hasher);
         }
+        hasher.write_u64(self.sph.is_some() as u64);
+        if let Some(s) = &self.sph {
+            s.state_hash(&mut hasher);
+        }
         hasher.finish()
     }
 }
@@ -1005,6 +1067,44 @@ mod tests {
         assert!(
             (measured_v - expected_v).abs() / v0 < 1e-3,
             "measured_v={measured_v} expected_v={expected_v}"
+        );
+    }
+
+    /// SPH流体ドメイン(`sim_fluid::SphFluid`の`Solver`実装、モジュールdoc「全ドメイン
+    /// 合成」参照): 他ドメインと同様に`step()`が自動的にsub-stepし、孤立した1粒子が
+    /// 重力で落下することを確認する。`sample_fluid`が最近傍粒子の速度・圧力を返す
+    /// ことも合わせて確認する。
+    #[test]
+    fn sph_domain_steps_automatically_and_sample_fluid_reads_nearest_particle() {
+        let mut world = World::new(WorldOptions::default());
+        let mut sph = sim_fluid::SphFluid::new(0.04, 1000.0, 20.0);
+        sph.mass = 1.0;
+        let particle_start = Vec3::new(0.0, 10.0, 0.0);
+        sph.add_particle(particle_start, Vec3::ZERO);
+        world.enable_sph(sph);
+
+        let dt = WorldOptions::default().dt;
+        for _ in 0..60 {
+            world.step();
+        }
+
+        let particle_now = world.sph().unwrap().position[0];
+        assert!(
+            particle_now.y < particle_start.y,
+            "isolated SPH particle should fall under gravity: particle_now={particle_now:?}"
+        );
+        let expected_vy = -9.80665 * 60.0 * dt;
+        let measured_vy = world.sph().unwrap().velocity[0].y;
+        let rel_err = (measured_vy - expected_vy).abs() / expected_vy.abs();
+        assert!(
+            rel_err < 0.01,
+            "measured_vy={measured_vy} expected_vy={expected_vy} rel_err={rel_err:.4}"
+        );
+
+        let sample = world.sample_fluid(particle_now).unwrap();
+        assert!(
+            (sample.velocity.y - measured_vy).abs() < 1e-9,
+            "sample_fluid should read the nearest particle's velocity"
         );
     }
 
