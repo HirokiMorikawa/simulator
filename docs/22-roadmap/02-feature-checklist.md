@@ -683,10 +683,27 @@
   ワークフロー自体への追加ステップは不要だった。これで設計が挙げる3つのホットパス
   候補(接触ソルバ・PCG・SPH近傍探索)全てにベンチマークが揃った(ベースライン
   永続化による真の回帰検知は引き続き未実装)。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
+  続けて`World`公開APIの`Command`キューを拡張 — `SetSwitch{switch_index, closed}`と
+  `SetHeatSource{node, watts}`を追加実装した。`SetSwitch`の前提として`sim_em::Circuit`
+  に理想スイッチ(モジュールdoc「モーター・スイッチは未実装」の解消)を新規実装 —
+  専用の未知数(電圧源のような)を追加せず、閉:低抵抗(`1e-6`Ω、ほぼ短絡)・開:高抵抗
+  (`1e9`Ω、ほぼ開放)の2値抵抗として既存の抵抗と同じ`stamp_conductance`経路でスタンプ
+  する最小実装とした。分圧回路の負荷抵抗と並列に置いたスイッチを閉じると分圧点電圧が
+  ほぼ0まで落ちることを確認、初回実装で一発Green化。`SetHeatSource`は`ApplyForce`と
+  同じ「1step分だけ効く」縮約セマンティクスを採用した(設計が意図する可能性のある
+  「変更するまで持続するダイヤル」ではなく、継続加熱には毎stepの再pushが必要) —
+  `ThermalNode::heat_accum`が毎step末尾でクリアされる既存の設計(T4テストが同じ
+  パターンを使用済み)にそのまま乗せられるため追加の永続状態は不要だった。1回のpushで
+  $Q=watts\cdot dt$だけ温度が上昇し、再pushなしでは2step目以降温度が変化しないことを
+  確認、初回実装で一発Green化。残り2種(`SetMotorTarget`・`Grab`系)は、`World`に
+  JointId管理が無くヒンジモーターが`MechanicsSolver`の生indexである点(前者)・
+  動く目標点へのばね拘束の永続状態管理が必要な点(後者)がそれぞれ前提未整備のため
+  後続増分。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの残り
   (イベント購読/sample_fluid等のクエリ、ただしイベント購読は現状どのドメインソルバも
-  イベントを発行していないため後回し)、性能ベンチ回帰ゲートのベースライン永続化、
-  または残り5種のCoupling(いずれも本格的な前提工事を要する:
+  イベントを発行していないため後回し、`sample_fluid`は解像流体ドメインが`World`に
+  未接続のため後回し)、性能ベンチ回帰ゲートのベースライン永続化、または残り5種の
+  Coupling(いずれも本格的な前提工事を要する:
   `GridFluidRigid`/`ConvectionLink`/`BoussinesqBuoyancy`/`SphRigid`は流体
   `Solver`トレイト統合、`PhaseChangeMorph`はイベント駆動の剛体/流体生成、
   `BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の切り出しリスク)。
@@ -1179,8 +1196,14 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
-      `command_log`、`ApplyForce{body, force, point}`のみ実装、他4種
-      (`SetMotorTarget`・`SetSwitch`・`SetHeatSource`・`Grab`系)は未実装)・
+      `command_log`、`ApplyForce{body, force, point}`・`SetSwitch{switch_index,
+      closed}`(`sim_em::Circuit`に新規実装した理想スイッチ(2値抵抗近似、
+      `SWITCH_ON_RESISTANCE`/`SWITCH_OFF_RESISTANCE`)を操作)・`SetHeatSource{node,
+      watts}`(`ApplyForce`と同じ「1step分だけ効く」縮約セマンティクス、
+      `ThermalNode::heat_accum`が毎step末尾でクリアされる既存挙動にそのまま乗せる)を
+      実装。残り2種(`SetMotorTarget`・`Grab`系)は未実装(`SetMotorTarget`は`World`に
+      JointId管理が無くヒンジモーターが`MechanicsSolver`の生indexである点が前提未整備、
+      `Grab`系は動く目標点へのばね拘束の永続状態管理が必要))・
       `raycast`・`overlap_sphere`(いずれも`Sphere`/`Box`/`Plane`のみ、`filter`引数
       未実装、`Capsule`/`Compound`/`ConvexMesh`はP2/P5未実装のため対象外)・
       `Probe`/`ProbeTarget`(`sim_math::RingBuffer`を新規実装、6種のターゲットのうち

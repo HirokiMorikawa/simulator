@@ -81,9 +81,15 @@ impl Default for WorldOptions {
 /// §2)。次`step()`の先頭で適用され、`command_log()`に記録される(リプレイ検証用)。
 ///
 /// **縮約実装の理由**: 設計が例示する5種(`ApplyForce`・`SetMotorTarget`・`SetSwitch`・
-/// `SetHeatSource`・`Grab`/`MoveGrab`/`Release`)のうち、剛体に外力を加える
-/// `ApplyForce`のみを実装する(他は対象のジョイント/回路/熱ノードAPIが本crateの
-/// 薄いラッパーとして未整備なため後続増分)。
+/// `SetHeatSource`・`Grab`/`MoveGrab`/`Release`)のうち、`ApplyForce`・`SetSwitch`・
+/// `SetHeatSource`の3種を実装する。`SetMotorTarget`(`World`にJointId管理が無く
+/// ヒンジモーターは`sim_mechanics::MechanicsSolver`が直接保持する生indexのため
+/// ジョイント参照APIの整備が先に必要)・`Grab`系(マウスでつかむ = 動く目標点への
+/// ばね拘束、専用の永続状態管理が必要)は後続増分。`SetHeatSource`は`ApplyForce`と
+/// 同じ「1step分だけ効く」縮約セマンティクス(設計が意図する可能性のある「変更する
+/// まで持続するダイヤル」ではない、継続加熱には毎stepの再push が必要)を採る —
+/// `ThermalNode::heat_accum`が毎step末尾でクリアされる既存の設計(`sim-thermal`の
+/// T4テスト参照)にそのまま乗せられるため。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
     /// 剛体`body`のワールド座標`point`(`None`なら重心、トルクなし)に`force`を加える。
@@ -92,6 +98,13 @@ pub enum Command {
         force: Vec3,
         point: Option<Vec3>,
     },
+    /// 回路のスイッチ(`sim_em::Circuit::add_switch`が返すindex)の開閉を変更する
+    /// (`World`は単一`circuit`ドメイン前提のため`CircuitId`引数は省略、`circuit_probe`
+    /// と同じ縮約)。
+    SetSwitch { switch_index: usize, closed: bool },
+    /// 熱ノード`node`に`watts`ワットの熱源を1step分だけ与える(モジュールdoc「1step分
+    /// だけ効く」縮約参照)。
+    SetHeatSource { node: usize, watts: f64 },
 }
 
 /// `raycast`の結果(`raycast`モジュールdoc参照)。生の`RigidBodySet`indexではなく
@@ -288,6 +301,7 @@ impl World {
     /// コマンドは黙って無視する(削除済みIDへのアクセスは`None`、設計の不変条件)。
     fn apply_pending_commands(&mut self) {
         let step = self.clock.step_count();
+        let dt = self.clock.dt();
         for cmd in std::mem::take(&mut self.pending_commands) {
             match cmd {
                 Command::ApplyForce { body, force, point } => {
@@ -299,6 +313,21 @@ impl World {
                             let r = p - self.mechanics.bodies.position[idx];
                             self.mechanics.bodies.torque_accum[idx] =
                                 self.mechanics.bodies.torque_accum[idx] + r.cross(force);
+                        }
+                    }
+                }
+                Command::SetSwitch {
+                    switch_index,
+                    closed,
+                } => {
+                    if let Some(circuit) = &mut self.circuit {
+                        circuit.set_switch_closed(switch_index, closed);
+                    }
+                }
+                Command::SetHeatSource { node, watts } => {
+                    if let Some(thermal) = &mut self.thermal {
+                        if let Some(n) = thermal.nodes.get_mut(node) {
+                            n.heat_accum += watts * dt;
                         }
                     }
                 }
@@ -1013,6 +1042,70 @@ mod tests {
         });
         world.step(); // パニックしないことの確認そのものがテスト。
         assert_eq!(world.command_log().len(), 1);
+    }
+
+    /// `Command::SetSwitch`(設計§2「`SetSwitch{circuit, element, closed}`」、`World`は
+    /// 単一`circuit`ドメイン前提のため`circuit`引数は省略)。分圧回路の負荷抵抗と並列に
+    /// 置いたスイッチを閉じると、`sim_em::circuit`の単体テストと同じ理屈で分圧点の電圧が
+    /// ほぼ0まで落ちることを確認する。
+    #[test]
+    fn set_switch_command_closes_switch_and_changes_circuit_state() {
+        let mut world = World::new(WorldOptions::default());
+        let mut circuit = sim_em::Circuit::new(3); // 0=GND, 1=電源, 2=分圧点
+        circuit.add_voltage_source(1, sim_em::GROUND, 10.0);
+        circuit.add_resistor(1, 2, 100.0);
+        let switch = circuit.add_switch(2, sim_em::GROUND, false);
+        circuit.add_resistor(2, sim_em::GROUND, 200.0);
+        world.enable_circuit(circuit);
+
+        world.step();
+        let v_open = world.circuit_probe(2).unwrap();
+        assert!(
+            (v_open - 10.0 * 200.0 / 300.0).abs() / (10.0 * 200.0 / 300.0) < 0.01,
+            "switch open: v_open={v_open}"
+        );
+
+        world.push_command(Command::SetSwitch {
+            switch_index: switch,
+            closed: true,
+        });
+        world.step();
+        let v_closed = world.circuit_probe(2).unwrap();
+        assert!(
+            v_closed.abs() < 1e-3,
+            "switch closed should short node 2 to GND, got {v_closed}"
+        );
+    }
+
+    /// `Command::SetHeatSource`(設計§2「`SetHeatSource{node, watts}`」)。モジュールdoc
+    /// 「1step分だけ効く」縮約(`ApplyForce`と同じ)どおり、1回のpushで1step分の
+    /// $Q=watts \cdot dt$ だけ温度が上昇し、2step目以降は追加のpushなしには温度が
+    /// 変化しない(外部熱源が持続しない)ことを確認する。
+    #[test]
+    fn set_heat_source_command_raises_temperature_for_one_step_only() {
+        let mut world = World::new(WorldOptions::default());
+        let mut thermal = sim_thermal::ThermalSolver::new(293.15);
+        let node = thermal.add_node(sim_thermal::ThermalNode::new(293.15, 10.0));
+        world.enable_thermal(thermal);
+
+        let watts = 500.0;
+        let dt = WorldOptions::default().dt;
+        world.push_command(Command::SetHeatSource { node, watts });
+        world.step();
+
+        let expected_t1 = 293.15 + watts * dt / 10.0;
+        let t1 = world.thermal().unwrap().nodes[node].temperature;
+        assert!(
+            (t1 - expected_t1).abs() < 1e-6,
+            "t1={t1} expected_t1={expected_t1}"
+        );
+
+        world.step(); // 追加のpushなし。
+        let t2 = world.thermal().unwrap().nodes[node].temperature;
+        assert!(
+            (t2 - t1).abs() < 1e-9,
+            "temperature must not keep rising without re-pushing the command: t1={t1} t2={t2}"
+        );
     }
 
     /// `World::raycast`(設計docs/20-integration/04-world-api.md §2、`raycast`

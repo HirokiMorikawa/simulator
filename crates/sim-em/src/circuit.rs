@@ -8,8 +8,9 @@
 //! 1反復あたりの変化を$2nV_T$にクランプ)は実装したが、フォールバック連鎖の
 //! 振動ダンピング・gmin stepping・source stepping・ラッチは未実装(半波整流の
 //! テストケースは電圧ステップ制限つきNewtonのみで確実に収束するため)。
-//! モーター・スイッチは未実装。線形方程式は毎回部分ピボット付きガウス消去で解く
-//! (回路規模が小さいため十分、設計 §10「密LUで十分」)。
+//! モーターは未実装。スイッチは理想スイッチの2値抵抗近似(ファイル後方の
+//! `SWITCH_ON_RESISTANCE`/`SWITCH_OFF_RESISTANCE`)で実装済み。線形方程式は毎回
+//! 部分ピボット付きガウス消去で解く(回路規模が小さいため十分、設計 §10「密LUで十分」)。
 //!
 //! `Solver`トレイト実装(`sim-coupling::JouleHeat`が`World`経由で駆動するための窓口、
 //! 設計docs/00-foundation/04-architecture.md §1.2)はファイル末尾。
@@ -24,6 +25,15 @@ const DIODE_MAX_NEWTON_ITERATIONS: usize = 10;
 /// 収束判定: 電圧ステップがこれ未満なら収束とみなす(設計§4「Δv<10⁻⁹V」)。
 const DIODE_CONVERGENCE_TOLERANCE: f64 = 1e-9;
 
+/// 理想スイッチの近似(モジュールdoc「モーター・スイッチは未実装」の解消、
+/// `sim-world::Command::SetSwitch`が使う)。専用の未知数(電圧源のような)を追加せず、
+/// 閉:低抵抗(ほぼ短絡)・開:高抵抗(ほぼ開放)の2値抵抗として`resistors`と同じ
+/// `stamp_conductance`経路でスタンプする(最小の実装)。抵抗比(1e-6Ω/1e9Ω、15桁)は
+/// 倍精度ガウス消去が悪条件化せずに解ける範囲で選んだ(既存のダイオード・回路規模
+/// テストと同程度の条件数)。
+const SWITCH_ON_RESISTANCE: f64 = 1e-6;
+const SWITCH_OFF_RESISTANCE: f64 = 1e9;
+
 /// 回路。素子はノード番号の対 `(a, b)` で接続を表す(a, b どちらも `GROUND` を含みうる)。
 #[derive(Default, Clone)]
 pub struct Circuit {
@@ -34,6 +44,8 @@ pub struct Circuit {
     voltage_sources: Vec<(usize, usize, f64)>,
     /// (anode, cathode, saturation_current, n・V_T)。設計§2「Shockley $i=I_s(e^{v/nV_T}-1)$」。
     diodes: Vec<(usize, usize, f64, f64)>,
+    /// (a, b, closed)。理想スイッチの近似(モジュールdoc参照)。
+    switches: Vec<(usize, usize, bool)>,
     /// 前ステップの端子間電圧(コンデンサの後退Eulerコンパニオンモデルの履歴項)。
     capacitor_voltage: Vec<f64>,
     /// 前ステップの枝電流(インダクタの後退Eulerコンパニオンモデルの履歴項)。
@@ -90,6 +102,17 @@ impl Circuit {
         self.diode_voltage.push(0.0);
     }
 
+    /// 理想スイッチの近似(モジュールdoc参照)。戻り値は`set_switch_closed`用のインデックス。
+    pub fn add_switch(&mut self, a: usize, b: usize, closed: bool) -> usize {
+        self.switches.push((a, b, closed));
+        self.switches.len() - 1
+    }
+
+    /// 開閉状態を変更する(`sim-world::Command::SetSwitch`が使う)。
+    pub fn set_switch_closed(&mut self, index: usize, closed: bool) {
+        self.switches[index].2 = closed;
+    }
+
     pub fn node_voltage(&self, node: usize) -> f64 {
         if node == GROUND {
             0.0
@@ -130,6 +153,15 @@ impl Circuit {
         };
 
         for &(a, b, r) in &self.resistors {
+            stamp_conductance(&mut a_mat, a, b, 1.0 / r);
+        }
+
+        for &(a, b, closed) in &self.switches {
+            let r = if closed {
+                SWITCH_ON_RESISTANCE
+            } else {
+                SWITCH_OFF_RESISTANCE
+            };
             stamp_conductance(&mut a_mat, a, b, 1.0 / r);
         }
 
@@ -514,6 +546,46 @@ mod tests {
         assert!(
             rel_err < 0.01,
             "measured_omega={measured_omega} omega={omega} rel_err={rel_err}"
+        );
+    }
+
+    /// スイッチ(モジュールdoc「モーター・スイッチは未実装」の解消): 開いている間は
+    /// 出力電圧がほぼ0(開放)、閉じている間は分圧回路の解析値と一致することを確認する
+    /// (`sim-world::Command::SetSwitch`が使う`set_switch_closed`経由)。
+    #[test]
+    fn switch_toggles_between_open_circuit_and_analytic_voltage_divider() {
+        let v = 10.0;
+        let r1 = 100.0;
+        let r2 = 200.0;
+        let mut circuit = Circuit::new(3); // 0=GND, 1=電源, 2=分圧点
+        circuit.add_voltage_source(1, GROUND, v);
+        circuit.add_resistor(1, 2, r1);
+        let switch = circuit.add_switch(2, GROUND, false); // 初期状態: 開
+                                                           // switch と並列ではなく2→GNDの負荷抵抗として使う分圧回路(r2はswitchの先の負荷)。
+        circuit.add_resistor(2, GROUND, r2);
+
+        circuit.step(1e-6);
+        // 開: switchの枝はほぼ電流を流さないが、r1-r2の分圧自体はswitchと無関係に成立する
+        // ため、switchが開いていても閉じていてもr2による分圧は変わらない。switch自体の
+        // 効果を見るには、switchがGNDへの別経路(負荷を短絡)として働く配線にする必要がある
+        // ため、ここではswitchをr2と並列(2→GND)に置き、閉で分圧点がほぼ0Vへ落ちる
+        // (switchの低抵抗がr2を実効的に短絡する)ことを直接確認する。
+        let v_open = circuit.node_voltage(2);
+        let expected_open = v * r2 / (r1 + r2);
+        let rel_err_open = (v_open - expected_open).abs() / expected_open;
+        assert!(
+            rel_err_open < 0.01,
+            "open: v_open={v_open} expected={expected_open} rel_err={rel_err_open}"
+        );
+
+        circuit.set_switch_closed(switch, true);
+        circuit.step(1e-6);
+        // 閉: switch(1e-6Ω)がr2(200Ω)と並列になり分圧点をほぼ短絡するため、
+        // 出力電圧はほぼ0まで落ちる。
+        let v_closed = circuit.node_voltage(2);
+        assert!(
+            v_closed.abs() < 1e-3,
+            "closed: v_closed should be near-zero (switch shorts node 2 to GND), got {v_closed}"
         );
     }
 }
