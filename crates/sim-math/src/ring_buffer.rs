@@ -43,6 +43,11 @@ impl<T> RingBuffer<T> {
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.buffer.iter()
     }
+
+    /// 全要素を古い順に取り出しつつ空にする(`sim-world::World::drain_events`が使う)。
+    pub fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
+        self.buffer.drain(..)
+    }
 }
 
 #[cfg(test)]
@@ -74,5 +79,15 @@ mod tests {
         let buf: RingBuffer<f64> = RingBuffer::new(5);
         assert!(buf.is_empty());
         assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn drain_yields_all_elements_in_order_and_empties_the_buffer() {
+        let mut buf = RingBuffer::new(3);
+        buf.push(1);
+        buf.push(2);
+        buf.push(3);
+        assert_eq!(buf.drain().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert!(buf.is_empty());
     }
 }

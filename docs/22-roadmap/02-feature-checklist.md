@@ -720,11 +720,28 @@
   静止し続けた剛体がasleep化しており起こさないと重力が働かず永久に静止したままに
   なる、同種の潜在バグを追加で発見・修正した。落下中の箱をgrabで保持→`MoveGrab`で
   追従→`Release`で自由落下再開、という受け入れテストで確認、Green化した。
+  続けて`World`公開APIのイベント購読(設計§2「`subscribe`/`drain_events`」)に着手。
+  従来「現状どのドメインソルバもイベントを発行していないため後回し」としていたが、
+  最初の生産者を実際に作れば前進できると判断し、`sim_mechanics::MechanicsSolver`に
+  `emit_contact_events`(前stepの接触ペア集合との差分から`ContactStarted`/
+  `ContactEnded`を`ctx.events`へ発行、`contact_pairs: HashSet<(usize,usize)>`
+  フィールドで前stepの集合を保持)を新設した。`Event::step`は発行元ドメインが
+  ワールド全体のstep_countを知らないため`0`で埋め、`World::step()`が
+  `self.events.drain_sorted()`排出時に正しい値へ上書きしてから新設の`event_log`
+  (固定容量`RingBuffer<Event>`、`sim_math::RingBuffer`に`drain()`メソッドを追加)
+  へ記録する設計にした(ドメイン側にワールドのstep_countを知らせるための
+  `SolverContext`拡張(23箇所の構築サイトに影響する広い変更になる)を避けつつ
+  正しい値を実現できる、ローリスクな設計判断)。`World::drain_events()`を追加 —
+  設計の複数購読者(`SubscriberId`ごとの独立カーソル+`EventKind`フィルタ)は
+  消費者が存在しない現時点では作らず、単一の共有履歴を丸ごと取り出す縮約版とした。
+  跳ねる球(反発係数0.6の鋼球)でContactStarted(着地時)→ContactEnded(跳ね上がり時)
+  の順に発行されることを`sim-mechanics`単体テスト+`World`経由の統合テストの両方で
+  確認、初回実装で一発Green化した。残りの`EventKind`(JointBroken・PhaseChanged・
+  Discharge・FuseBlown・SolverDiverged)は対応する生産者が未実装のため後続増分。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの残り
-  (イベント購読/sample_fluid等のクエリ、ただしイベント購読は現状どのドメインソルバも
-  イベントを発行していないため後回し、`sample_fluid`は解像流体ドメインが`World`に
-  未接続のため後回し)、性能ベンチ回帰ゲートのベースライン永続化、または残り5種の
-  Coupling(いずれも本格的な前提工事を要する:
+  (`sample_fluid`は解像流体ドメインが`World`に未接続のため後回し)、性能ベンチ回帰
+  ゲートのベースライン永続化、または残り5種のCoupling(いずれも本格的な前提工事を
+  要する:
   `GridFluidRigid`/`ConvectionLink`/`BoussinesqBuoyancy`/`SphRigid`は流体
   `Solver`トレイト統合、`PhaseChangeMorph`はイベント駆動の剛体/流体生成、
   `BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の切り出しリスク)。
@@ -1259,9 +1276,17 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `water_level`+`density`の縮約表現)・`probes`(`body_pos_y`/`body_speed`のみ、
       `bodies[].name`名前解決)を実装、`couplings`セクションと排他結合検査への接続は
       `Coupling` registry未接続のため未実装)・`apply_coupling`(`Coupling`を実ドメイン
-      に対して1回適用する低レベルAPI、自動registryへの前段)を実装済み。`subscribe`/
-      `drain_events`(現状どのドメインソルバもイベントを発行していないため後回し)・
-      `sample_fluid`等のクエリは未実装
+      に対して1回適用する低レベルAPI、自動registryへの前段)・`drain_events`(設計の
+      `subscribe(kind, sub)`+`drain_events(sub)`の縮約版 — 消費者が複数存在しない
+      現時点では`SubscriberId`/`Subscription`型を導入せず、単一の共有履歴
+      (`event_log`、固定容量`RingBuffer<Event>`)を`drain_events()`で丸ごと取り出す
+      形にした。`sim_mechanics::MechanicsSolver`に`World`最初のイベント生産者
+      `emit_contact_events`を新設(前stepとの接触ペア集合の差分から`ContactStarted`/
+      `ContactEnded`を発行、`Event::step`はドメイン側がワールド全体のstep_countを
+      知らないためプレースホルダ`0`で埋め、`World::step()`が排出時に正しい値へ
+      上書きする)を実装済み。残りの`EventKind`(`JointBroken`・`PhaseChanged`・
+      `Discharge`・`FuseBlown`・`SolverDiverged`)は対応する生産者が未実装のため
+      後続増分。`sample_fluid`は解像流体ドメインが`World`に未接続のため未実装
 - [x] 統合シナリオ: ブレーキ発熱(核となる運動→摩擦熱→温度上昇のみ、P5(温度依存
       抵抗変化)は対象外。台帳residual実測約4.3%、設計目標<10⁻³には届かないが
       `DissipationToHeat`既知のBaumgarte系統誤差起因、余裕を持たせた<8%で検証)

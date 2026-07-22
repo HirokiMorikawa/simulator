@@ -10,8 +10,11 @@ use crate::body::{BodyType, DragModel, RigidBodySet};
 use crate::joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint};
 use crate::shape::Shape;
 use crate::{ccd, collision, contact, joint, sleep, RigidBodyDesc};
-use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
+use sim_core::{
+    EnergyBreakdown, Event, EventKind, MaterialDb, Solver, SolverContext, SourceId, StateHasher,
+};
 use sim_fluid::{Atmosphere, StaticWaterRegion};
+use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct MechanicsSolver {
@@ -60,6 +63,11 @@ pub struct MechanicsSolver {
     /// 要するため本増分では見送り、`sim-coupling::DissipationToHeat`の受け入れテスト側で
     /// この系統誤差を踏まえた許容誤差(rel<15%)を設定して対応する。
     pub last_contact_dissipation: f64,
+    /// 直近stepで検出された接触ペア(`(body_a, body_b)`、`ContactManifold`と同じ正規化
+    /// 順序)。今stepの検出結果との差分から`EventKind::ContactStarted`/`ContactEnded`
+    /// (設計docs/00-foundation/04-architecture.md §1.1.2(5))を`ctx.events`へ発行する
+    /// (`World`最初のイベント生産者、`subscribe`/`drain_events`のdoc参照)。
+    contact_pairs: HashSet<(usize, usize)>,
 }
 
 impl MechanicsSolver {
@@ -77,6 +85,7 @@ impl MechanicsSolver {
             slider_joints: Vec::new(),
             hinge_motors: Vec::new(),
             last_contact_dissipation: 0.0,
+            contact_pairs: HashSet::new(),
         }
     }
 
@@ -196,6 +205,37 @@ impl MechanicsSolver {
             self.bodies.body_type[m.body_b] == BodyType::Dynamic && !self.bodies.asleep[m.body_b];
         a_awake_dynamic || b_awake_dynamic
     }
+
+    /// 前stepの接触ペア集合との差分から`ContactStarted`/`ContactEnded`イベントを
+    /// `ctx.events`へ発行する(`contact_pairs`フィールドdoc参照)。`Event::step`は
+    /// このソルバがワールド全体のstep_countを知らないため`0`で埋め、呼び出し側
+    /// (`World::step`)がイベント排出時に正しい値へ上書きする(設計上の全体順序は
+    /// 「同一stepの排出集合」として保たれるため、ここでは各イベントに一貫した
+    /// プレースホルダを入れておけば十分)。
+    fn emit_contact_events(
+        &mut self,
+        manifolds: &[collision::ContactManifold],
+        ctx: &mut SolverContext,
+    ) {
+        let current_pairs: HashSet<(usize, usize)> =
+            manifolds.iter().map(|m| (m.body_a, m.body_b)).collect();
+        let source_id = |a: usize, b: usize| SourceId(((a as u64) << 32) | b as u64);
+        for &(a, b) in current_pairs.difference(&self.contact_pairs) {
+            ctx.events.push(Event {
+                step: 0,
+                source: source_id(a, b),
+                kind: EventKind::ContactStarted,
+            });
+        }
+        for &(a, b) in self.contact_pairs.difference(&current_pairs) {
+            ctx.events.push(Event {
+                step: 0,
+                source: source_id(a, b),
+                kind: EventKind::ContactEnded,
+            });
+        }
+        self.contact_pairs = current_pairs;
+    }
 }
 
 impl Solver for MechanicsSolver {
@@ -214,6 +254,7 @@ impl Solver for MechanicsSolver {
         joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
         joint::resolve_slider(&self.slider_joints, &mut self.bodies, dt);
         let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
+        self.emit_contact_events(&manifolds, ctx);
         // 両側の dynamic body が全て asleep な接触は再解決しない(収束済みで変化が無いのに
         // 毎ステップ再解決すると warm start・split impulse の数値的な揺らぎで再起床してしまう
         // ことを実装検証中に発見した — 「積分を停止」だけでは不十分で、接触解決自体も
@@ -566,6 +607,73 @@ mod tests {
         assert!(
             (actual_x - expected_x).abs() / expected_x < 0.01,
             "slider's free axis should move ballistically at the initial velocity: actual_x={actual_x} expected_x={expected_x}"
+        );
+    }
+
+    /// 接触イベント(`emit_contact_events`、`World`最初のイベント生産者、設計
+    /// docs/00-foundation/04-architecture.md §1.1.2(5))。反発係数の高い球を落下させ、
+    /// 着地時に`ContactStarted`が、跳ね上がって離れた時に`ContactEnded`が
+    /// (前stepとの接触ペア集合の差分として)発行されることを確認する。
+    #[test]
+    fn bouncing_ball_emits_contact_started_and_ended_events() {
+        let mut materials = MaterialDb::standard();
+        let bouncy = materials.push(sim_core::Material {
+            name: "test-bouncy-for-contact-events",
+            density: 1000.0,
+            friction: 0.0,
+            restitution: 0.8,
+            youngs_modulus: None,
+            specific_heat: 1000.0,
+            conductivity: 1.0,
+            emissivity: 0.5,
+            melting: None,
+            resistivity: None,
+            relative_permittivity: 1.0,
+            refractive_index: None,
+            source: "test fixture",
+            uncertainty: 0.0,
+        });
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        solver.restitution_velocity_threshold = 0.0;
+        let mut floor = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            bouncy,
+        );
+        floor.body_type = BodyType::Static;
+        solver.create_body(floor, &materials);
+
+        let mut ball_desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.5 }, bouncy);
+        ball_desc.transform.position = Vec3::new(0.0, 2.0, 0.0);
+        solver.create_body(ball_desc, &materials);
+
+        let dt = 1.0 / 120.0;
+        let mut started_count = 0;
+        let mut ended_count = 0;
+        for _ in 0..300 {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            for e in events.drain_sorted() {
+                match e.kind {
+                    sim_core::EventKind::ContactStarted => started_count += 1,
+                    sim_core::EventKind::ContactEnded => ended_count += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(
+            started_count >= 1,
+            "should observe at least one ContactStarted when the ball lands"
+        );
+        assert!(
+            ended_count >= 1,
+            "should observe at least one ContactEnded when the ball bounces back up"
         );
     }
 }

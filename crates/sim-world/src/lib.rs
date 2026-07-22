@@ -242,7 +242,13 @@ pub struct World {
     /// `Command`のdoc参照)。1剛体につき同時に1つのgrabのみを想定する(再`Grab`は
     /// 前のgrabを`disabled`化してから新設)。
     grab_joints: std::collections::HashMap<u32, usize>,
+    /// `step()`が排出した全イベントの履歴(`drain_events`のdoc参照)。
+    event_log: sim_math::RingBuffer<sim_core::Event>,
 }
+
+/// `event_log`の容量(設計は`subscribe`/`drain_events`の容量を規定しないため、
+/// `Probe`の`DEFAULT_PROBE_CAPACITY`(`scenario`モジュール)と同オーダーの値を採用)。
+const EVENT_LOG_CAPACITY: usize = 1024;
 
 const STREAM_DIAG: u64 = 0;
 /// エネルギー台帳の代表エネルギー(ゼロ初期エネルギー対策の下限)。設計
@@ -293,6 +299,7 @@ impl World {
             command_log: Vec::new(),
             probes: Vec::new(),
             grab_joints: std::collections::HashMap::new(),
+            event_log: sim_math::RingBuffer::new(EVENT_LOG_CAPACITY),
         }
     }
 
@@ -605,7 +612,15 @@ impl World {
         if let Some(c) = &mut self.circuit {
             run_domain_substeps(c, dt, &self.materials, &mut self.rng, &mut self.events);
         }
-        let _ = self.events.drain_sorted(); // Phase A: 購読者未実装のため排出のみ。
+        // このstepで発行された全イベントを排出し、Event::step(発行元ドメインは
+        // ワールド全体のstep_countを知らないため0で埋めている、`sim-mechanics::
+        // MechanicsSolver::emit_contact_events`のdoc参照)を正しい値へ上書きしてから
+        // `event_log`に記録する(`drain_events`のdoc参照)。
+        let step_count = self.clock.step_count();
+        for mut e in self.events.drain_sorted() {
+            e.step = step_count;
+            self.event_log.push(e);
+        }
         let total = self.total_energy().total();
         self.ledger
             .as_mut()
@@ -711,6 +726,22 @@ impl World {
     /// `None`。
     pub fn circuit_probe(&self, node: usize) -> Option<f64> {
         self.circuit.as_ref().map(|c| c.node_voltage(node))
+    }
+
+    /// `step()`が排出した全イベントを取り出しつつ`event_log`を空にする(設計
+    /// docs/20-integration/04-world-api.md §2「イベント購読」)。
+    ///
+    /// **縮約実装の理由**: 設計の`subscribe(kind, sub) -> Subscription` +
+    /// `drain_events(sub) -> Vec<Event>`は複数の独立した購読者(`SubscriberId`ごとに
+    /// 別々の未読カーソル・`EventKind`フィルタ)を想定するが、現時点でイベントの
+    /// 消費者(フロントエンド等)が存在しないため、`SubscriberId`/`Subscription`型は
+    /// まだ導入せず、単一の共有履歴(`event_log`、固定容量`RingBuffer`)を全消費者が
+    /// 共有する縮約版とする(`kind`によるフィルタも呼び出し側が`Vec`をフィルタする)。
+    /// 複数購読者・フィルタ登録が必要になった時点で`SubscriberId`ごとの独立カーソルへ
+    /// 拡張する。イベントの生産者は現時点で`sim_mechanics::MechanicsSolver::
+    /// emit_contact_events`(`ContactStarted`/`ContactEnded`)のみ。
+    pub fn drain_events(&mut self) -> Vec<sim_core::Event> {
+        self.event_log.drain().collect()
     }
 
     /// `sim_coupling::Coupling`を`World`が保持する実ドメインに対して1回適用する。
@@ -1246,6 +1277,58 @@ mod tests {
             v_closed.abs() < 1e-3,
             "switch closed should short node 2 to GND, got {v_closed}"
         );
+    }
+
+    /// `World::drain_events`(設計docs/20-integration/04-world-api.md §2「イベント
+    /// 購読」、モジュールdoc「縮約実装の理由」参照)。跳ねる球の`ContactStarted`/
+    /// `ContactEnded`(`sim_mechanics::MechanicsSolver::emit_contact_events`が
+    /// 発行する`World`最初のイベント)が、`World::step()`経由でも正しい`step`値
+    /// (発行元ドメインが埋めた`0`ではなく、実際に発生した`World`のstep_count)で
+    /// 排出されることを確認する。
+    #[test]
+    fn drain_events_surfaces_contact_started_and_ended_with_correct_step() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+
+        let mut floor = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            steel,
+        );
+        floor.body_type = BodyType::Static;
+        world.create_body(floor);
+
+        let mut ball = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.5 }, steel);
+        ball.transform.position = Vec3::new(0.0, 2.0, 0.0);
+        world.create_body(ball);
+
+        let mut all_events = Vec::new();
+        let mut max_step_seen = 0u64;
+        for _ in 0..300 {
+            world.step();
+            max_step_seen = world.step_count();
+            all_events.extend(world.drain_events());
+        }
+
+        let started = all_events
+            .iter()
+            .filter(|e| e.kind == sim_core::EventKind::ContactStarted)
+            .count();
+        let ended = all_events
+            .iter()
+            .filter(|e| e.kind == sim_core::EventKind::ContactEnded)
+            .count();
+        assert!(started >= 1, "should observe at least one ContactStarted");
+        assert!(ended >= 1, "should observe at least one ContactEnded");
+        for e in &all_events {
+            assert!(
+                e.step >= 1 && e.step <= max_step_seen,
+                "event step should be a real World step_count, not the domain's placeholder 0: e.step={} max_step_seen={max_step_seen}",
+                e.step
+            );
+        }
     }
 
     /// `Command::SetHeatSource`(設計§2「`SetHeatSource{node, watts}`」)。モジュールdoc
