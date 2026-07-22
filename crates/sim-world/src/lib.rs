@@ -538,6 +538,15 @@ impl World {
             .collect()
     }
 
+    /// 回路ノード`node`の電位(電圧計、設計docs/20-integration/04-world-api.md §2
+    /// `circuit_probe(id, node)`)。設計は複数回路を`CircuitId`で選ぶが、`World`は
+    /// 現時点で単一の`circuit`ドメインしか持たないため`id`引数は省略する(縮約実装、
+    /// 複数回路対応時に`CircuitId`を導入して拡張する)。回路ドメインが未有効化なら
+    /// `None`。
+    pub fn circuit_probe(&self, node: usize) -> Option<f64> {
+        self.circuit.as_ref().map(|c| c.node_voltage(node))
+    }
+
     /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:
     /// mechanics→thermal→em→astro→circuit、
     /// 設計docs/20-integration/02-determinism-replay.md §3)で
@@ -1045,5 +1054,29 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(hash_history.len(), 5);
+    }
+
+    /// `World::circuit_probe`(設計docs/20-integration/04-world-api.md §2
+    /// `circuit_probe(id, node)`、`World`単一回路への縮約は同メソッドのdoc参照):
+    /// 回路ドメイン未有効化なら`None`、有効化後は`Circuit::node_voltage`と一致することを
+    /// 確認する。
+    #[test]
+    fn circuit_probe_reads_node_voltage_when_circuit_domain_enabled() {
+        let mut world = World::new(WorldOptions::default());
+        assert_eq!(
+            world.circuit_probe(1),
+            None,
+            "no circuit domain enabled yet"
+        );
+
+        let mut circuit = sim_em::Circuit::new(2);
+        circuit.add_voltage_source(1, sim_em::GROUND, 5.0);
+        circuit.add_resistor(1, sim_em::GROUND, 100.0);
+        world.enable_circuit(circuit);
+        world.step();
+
+        let probed = world.circuit_probe(1).unwrap();
+        let expected = world.circuit().unwrap().node_voltage(1);
+        assert_eq!(probed, expected);
     }
 }

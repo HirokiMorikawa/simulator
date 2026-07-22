@@ -543,8 +543,14 @@
   バッファの容量制限(古いサンプルの破棄)が効くこと、`LedgerKinetic`/
   `StateHashDigest`が常時有効なmechanicsドメインのみでパニックなくサンプルできる
   ことの2本のテストで検証し、初回実装で一発Green化した。
+  続けて`World::circuit_probe`(設計docs/20-integration/04-world-api.md §2
+  `circuit_probe(id, node)`)を実装。設計は複数回路を`CircuitId`で選ぶが、`World`は
+  現時点で単一の`circuit`ドメインしか持たないため`id`引数を省略する縮約実装とした
+  (複数回路対応時に`CircuitId`を導入して拡張する)。回路ドメイン未有効化なら`None`、
+  有効化後は`Circuit::node_voltage`と一致することをテストで確認し、初回実装で
+  一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
-  (Scenario/イベント購読/sample_fluid/circuit_probe等のクエリ、ただしイベント購読は
+  (Scenario/イベント購読/sample_fluid等のクエリ、ただしイベント購読は
   現状どのドメインソルバもイベントを発行していないため後回し)、または残り7種の
   Coupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
@@ -1034,10 +1040,11 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `raycast`・`overlap_sphere`(いずれも`Sphere`/`Box`/`Plane`のみ、`filter`引数
       未実装、`Capsule`/`Compound`/`ConvexMesh`はP2/P5未実装のため対象外)・
       `Probe`/`ProbeTarget`(`sim_math::RingBuffer`を新規実装、6種のターゲットのうち
-      `NodeTemp`/`CircuitCurrent`は単一ドメイン前提の縮約index、他は設計どおり)を
-      実装済み。`Scenario`/`from_scenario`(シーンJSON、validator接続)・`subscribe`/
+      `NodeTemp`/`CircuitCurrent`は単一ドメイン前提の縮約index、他は設計どおり)・
+      `circuit_probe`(単一`circuit`ドメイン前提、`CircuitId`引数は省略)を実装済み。
+      `Scenario`/`from_scenario`(シーンJSON、validator接続)・`subscribe`/
       `drain_events`(現状どのドメインソルバもイベントを発行していないため後回し)・
-      `sample_fluid`/`circuit_probe`等のクエリは未実装
+      `sample_fluid`等のクエリは未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
 - [ ] 統合シナリオ: 氷と飲み物
