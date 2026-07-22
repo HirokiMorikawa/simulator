@@ -9,7 +9,7 @@
 //! (コレスキー分解)ではなく、ワールド座標系のx/y/z軸に沿った3本の独立スカラー拘束として
 //! PGS反復で解く(接触ソルバの摩擦円錐を2本の独立スカラー制約で近似する「箱近似」と同じ
 //! 簡略化方針、docs/10-mechanics/04-friction.md §2.1)。
-//! Hinge の軸直交拘束行(設計§4.4「+2」)・Slider/Fixed/Wheel・limit・ソフト拘束・
+//! Hinge の軸直交拘束行(設計§4.4「+2」)・Fixed/Wheel・limit・ソフト拘束・
 //! 真のブロックソルバは Phase 3 の残りとして未実装。
 //!
 //! `HingeMotorPd`(設計§4.5 位置サーボ+モーター行)は、上記の軸直交拘束行を持つ正式な
@@ -24,6 +24,12 @@
 //! 過負荷でτ_maxに飽和)。PD自体(ω_target = kp(θ_target-θ) - kd・θ̇)は設計§4.5が
 //! 「制御ループはエンティティ層」と定めるが、`sim-entity` crateが未実装のため、この
 //! 縮約実装では暫定的に物理モーターと同じ場所(本crate)に置く。
+//!
+//! `SliderJoint`(設計§4.4表「Slider | 5 | 軸直交並進2 + 相対回転固定3」)は、軸直交
+//! 並進2行を`BallJoint`と同じ箱近似(ワールド座標軸沿いの独立スカラー拘束)で、相対回転
+//! 固定3行を新設の`relative_rotation_error`(生成時の相対姿勢を基準に取り、クォータニオン
+//! のベクトル部を誤差として使う小角近似)で解く。断熱圧縮(`PistonGas`結合)のピストン
+//! ロッドのような、1軸並進のみを許し他の5自由度を固定する用途を対象とする。
 
 use crate::body::RigidBodySet;
 use sim_math::{Quat, Vec3};
@@ -304,5 +310,215 @@ impl HingeMotorPd {
 pub fn apply_hinge_motors(motors: &[HingeMotorPd], bodies: &mut RigidBodySet, dt: f64) {
     for motor in motors {
         motor.apply(bodies, dt);
+    }
+}
+
+/// 純角速度拘束(r×項なし)の有効質量。`Ball`/`Distance`の並進版`effective_mass`と対に
+/// なる回転版(設計§4.2の$K=JM^{-1}J^T$を単一方向`dir`に射影、`body_b=None`は
+/// ワールド固定=寄与0として扱う点も並進版と同じ)。
+fn angular_effective_mass(
+    bodies: &RigidBodySet,
+    body_a: usize,
+    body_b: Option<usize>,
+    dir: Vec3,
+) -> f64 {
+    let inv_ia = bodies.inv_inertia_world[body_a];
+    let term_a = dir.dot(inv_ia.mul_vec(dir));
+    let term_b = match body_b {
+        Some(b) => {
+            let inv_ib = bodies.inv_inertia_world[b];
+            dir.dot(inv_ib.mul_vec(dir))
+        }
+        None => 0.0,
+    };
+    let k = term_a + term_b;
+    if k > 0.0 {
+        1.0 / k
+    } else {
+        0.0
+    }
+}
+
+/// 角速度への直接インパルス印加(`apply_impulse`の回転版、r×項もトルクへの変換も無い —
+/// 純粋な角運動量インパルス、`contact::solve_rolling_friction`と同じ経路)。
+fn apply_angular_impulse(bodies: &mut RigidBodySet, body: usize, impulse: Vec3, sign: f64) {
+    let inv_i = bodies.inv_inertia_world[body];
+    bodies.angular_velocity[body] =
+        bodies.angular_velocity[body] + inv_i.mul_vec(impulse).scale(sign);
+}
+
+/// `body_a`/`body_b`間の相対回転の、生成時基準からのズレ(誤差ベクトル)。
+/// `HingeMotorPd::measure_angle`と同じ「クォータニオンのベクトル部は小角では
+/// (角度/2)*軸に近似できる」性質を使うが、ここでは正確な角度への逆変換(atan2)はせず
+/// ベクトル部をそのままBaumgarteバイアスの誤差項として使う(位置ドリフト補正という
+/// 用途では十分、`DistanceJoint`/`BallJoint`のバイアス項も同様に厳密解ではなく
+/// 線形近似)。`w<0`のとき符号反転して最短回転経路を選ぶ(二重被覆の回避)。
+fn relative_rotation_error(
+    bodies: &RigidBodySet,
+    body_a: usize,
+    body_b: Option<usize>,
+    reference_relative_rotation: Quat,
+) -> Vec3 {
+    let rot_a = bodies.rotation[body_a];
+    let rot_b = body_b.map(|b| bodies.rotation[b]).unwrap_or(Quat::IDENTITY);
+    let rel = rot_b.mul(rot_a.conjugate());
+    let mut err = rel.mul(reference_relative_rotation.conjugate());
+    if err.w < 0.0 {
+        err = Quat {
+            x: -err.x,
+            y: -err.y,
+            z: -err.z,
+            w: -err.w,
+        };
+    }
+    Vec3::new(err.x, err.y, err.z)
+}
+
+/// スライダー拘束(設計 §4.4 表「Slider | 5 | 軸直交並進2 + 相対回転固定3」)。
+/// `axis_a`(body_aローカル座標、単位ベクトル)に沿った並進1自由度のみを自由とし、
+/// それに直交する並進2自由度(`Vec3::orthonormal_basis`で決定的に選ぶ接線基底、
+/// 接触ソルバの摩擦基底と同じ手法)+ 相対回転3自由度(生成時の相対姿勢を基準として
+/// 固定、`relative_rotation_error`)を拘束する — 合計5行、`BallJoint`(3行)と同じ
+/// 「ワールド座標軸沿いの独立スカラー拘束のPGS反復」という簡略化方針(箱近似)を
+/// 踏襲する。`body_b=None`はワールド固定(シリンダー側が静止、ピストンのみ動く構成、
+/// 断熱圧縮の`PistonGas`結合で使う想定)を表す。
+#[derive(Clone, Copy)]
+pub struct SliderJoint {
+    pub body_a: usize,
+    /// body_a ローカル座標のアンカー点。
+    pub anchor_a: Vec3,
+    /// スライド軸(body_a ローカル座標、単位ベクトル)。
+    pub axis_a: Vec3,
+    pub body_b: Option<usize>,
+    /// `body_b` が `Some` ならそのローカル座標、`None` ならワールド座標(固定点)。
+    pub anchor_b: Vec3,
+    /// 生成時点の相対回転(角度0の基準)。`SliderJoint::new`で自動算出する。
+    reference_relative_rotation: Quat,
+}
+
+impl SliderJoint {
+    /// 現在の姿勢(`body_a`/`body_b`の相対回転)を基準(角度0)として`SliderJoint`を
+    /// 生成する(`HingeMotorPd::reference_rotation`と同じ「生成時点の姿勢を基準に取る」
+    /// 方針)。
+    pub fn new(
+        bodies: &RigidBodySet,
+        body_a: usize,
+        anchor_a: Vec3,
+        axis_a: Vec3,
+        body_b: Option<usize>,
+        anchor_b: Vec3,
+    ) -> SliderJoint {
+        let rot_a = bodies.rotation[body_a];
+        let rot_b = body_b.map(|b| bodies.rotation[b]).unwrap_or(Quat::IDENTITY);
+        SliderJoint {
+            body_a,
+            anchor_a,
+            axis_a,
+            body_b,
+            anchor_b,
+            reference_relative_rotation: rot_b.mul(rot_a.conjugate()),
+        }
+    }
+}
+
+struct PreparedSliderJoint {
+    body_a: usize,
+    body_b: Option<usize>,
+    r_a: Vec3,
+    r_b: Vec3,
+    /// スライド軸に直交する並進2軸(`BallJoint`の`axes`と同じ`PreparedBallAxis`を流用)。
+    linear_axes: [PreparedBallAxis; 2],
+    /// 相対回転を固定する3軸(ワールドx/y/z、`BallJoint`と同じ箱近似)。
+    angular_axes: [PreparedBallAxis; 3],
+}
+
+impl SliderJoint {
+    fn prepare(&self, bodies: &RigidBodySet, dt: f64) -> PreparedSliderJoint {
+        let (world_a, r_a) = world_anchor(bodies, self.body_a, self.anchor_a);
+        let (world_b, r_b) = world_anchor_or_fixed(bodies, self.body_b, self.anchor_b);
+        let axis_world = bodies.rotation[self.body_a]
+            .to_mat3()
+            .mul_vec(self.axis_a)
+            .normalize_or_zero();
+        let (t1, t2) = axis_world.orthonormal_basis();
+        // 拘束誤差(スライド軸に直交する成分のみ) C = (p_B-p_A) - ((p_B-p_A)・axis)axis。
+        // 軸方向の並進は自由なのでバイアスは直交2軸への射影のみで良い。
+        let c = world_b - world_a;
+        let linear_axes = [t1, t2].map(|dir| {
+            let mass = effective_mass(bodies, self.body_a, r_a, self.body_b, r_b, dir);
+            let bias = BAUMGARTE_BETA / dt * c.dot(dir);
+            PreparedBallAxis { dir, mass, bias }
+        });
+
+        let err = relative_rotation_error(
+            bodies,
+            self.body_a,
+            self.body_b,
+            self.reference_relative_rotation,
+        );
+        let dirs = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ];
+        let angular_axes = dirs.map(|dir| {
+            let mass = angular_effective_mass(bodies, self.body_a, self.body_b, dir);
+            // `HingeMotorPd::measure_angle`と同じ2倍係数(ベクトル部 ≈ (角度/2)*軸)。
+            let bias = 2.0 * BAUMGARTE_BETA / dt * err.dot(dir);
+            PreparedBallAxis { dir, mass, bias }
+        });
+
+        PreparedSliderJoint {
+            body_a: self.body_a,
+            body_b: self.body_b,
+            r_a,
+            r_b,
+            linear_axes,
+            angular_axes,
+        }
+    }
+}
+
+fn solve_velocity_slider(p: &PreparedSliderJoint, bodies: &mut RigidBodySet) {
+    for axis in &p.linear_axes {
+        let v_a = point_velocity(bodies, p.body_a, p.r_a);
+        let v_b = match p.body_b {
+            Some(b) => point_velocity(bodies, b, p.r_b),
+            None => Vec3::ZERO,
+        };
+        let c_dot = axis.dir.dot(v_b - v_a);
+        let lambda = -(c_dot + axis.bias) * axis.mass;
+        let impulse = axis.dir.scale(lambda);
+        apply_impulse(bodies, p.body_a, impulse, p.r_a, -1.0);
+        if let Some(b) = p.body_b {
+            apply_impulse(bodies, b, impulse, p.r_b, 1.0);
+        }
+    }
+    for axis in &p.angular_axes {
+        let omega_a = bodies.angular_velocity[p.body_a];
+        let omega_b = match p.body_b {
+            Some(b) => bodies.angular_velocity[b],
+            None => Vec3::ZERO,
+        };
+        let c_dot = axis.dir.dot(omega_b - omega_a);
+        let lambda = -(c_dot + axis.bias) * axis.mass;
+        let impulse = axis.dir.scale(lambda);
+        apply_angular_impulse(bodies, p.body_a, impulse, -1.0);
+        if let Some(b) = p.body_b {
+            apply_angular_impulse(bodies, b, impulse, 1.0);
+        }
+    }
+}
+
+/// `resolve_distance`のSliderジョイント版。
+pub fn resolve_slider(joints: &[SliderJoint], bodies: &mut RigidBodySet, dt: f64) {
+    if joints.is_empty() {
+        return;
+    }
+    let prepared: Vec<PreparedSliderJoint> = joints.iter().map(|j| j.prepare(bodies, dt)).collect();
+    for _ in 0..JOINT_VELOCITY_ITERATIONS {
+        for p in &prepared {
+            solve_velocity_slider(p, bodies);
+        }
     }
 }

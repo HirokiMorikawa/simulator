@@ -109,6 +109,7 @@ mod tests {
                 thermal: None,
                 em_circuit: None,
                 em_electrostatics: Some(&mut em),
+                gas: None,
             };
             coupling.apply(&mut states, dt);
             // Couplingは速度のみを更新する(モジュールdoc参照)ため、位置積分は

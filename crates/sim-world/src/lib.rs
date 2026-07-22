@@ -36,7 +36,10 @@
 //! Coupling registry相当の仕組みが必要で後続増分)ため未実装。`fluid`(`sim-fluid`の
 //! GridFluid系・SPH)は`Solver`トレイトを未実装のため今回は見送る(各流体型に`Solver`実装を
 //! 追加するか専用の接続方式を検討する必要があり、後続増分)。`quantum`/`statistical`は
-//! 専用シーンでのみ有効化する設計方針のため同様に見送る。
+//! 専用シーンでのみ有効化する設計方針のため同様に見送る。`gas`
+//! (`sim_thermal::GasCompartment`、断熱圧縮の`PistonGas`結合が使う)も同じ理由で
+//! `Solver`を実装しない — `step()`の自動走査対象ではなく、`apply_coupling`経由での
+//! みピストンの変位から体積・温度が更新される。
 
 mod integration_scenarios;
 mod orchestrator;
@@ -163,6 +166,10 @@ pub struct World {
     astro: Option<sim_astro::NBodySystem>,
     /// 回路ドメイン(モジュールdoc参照、シーンが使う場合のみ`Some`)。
     circuit: Option<sim_em::Circuit>,
+    /// 気体区画ドメイン(`sim_coupling::PistonGas`が読み書きする、シーンが使う場合のみ
+    /// `Some`)。`Solver`トレイトを実装しないため`step()`のドメイン走査対象ではなく、
+    /// `apply_coupling`経由でのみ状態が変化する。
+    gas: Option<sim_thermal::GasCompartment>,
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
@@ -220,6 +227,7 @@ impl World {
             em_electrostatics: None,
             astro: None,
             circuit: None,
+            gas: None,
             materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
@@ -349,6 +357,19 @@ impl World {
 
     pub fn circuit_mut(&mut self) -> Option<&mut sim_em::Circuit> {
         self.circuit.as_mut()
+    }
+
+    /// 気体区画ドメインを有効化する(`sim_coupling::PistonGas`が使う、断熱圧縮シナリオ)。
+    pub fn enable_gas(&mut self, gas: sim_thermal::GasCompartment) {
+        self.gas = Some(gas);
+    }
+
+    pub fn gas(&self) -> Option<&sim_thermal::GasCompartment> {
+        self.gas.as_ref()
+    }
+
+    pub fn gas_mut(&mut self) -> Option<&mut sim_thermal::GasCompartment> {
+        self.gas.as_mut()
     }
 
     /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す
@@ -584,6 +605,7 @@ impl World {
             thermal: self.thermal.as_mut(),
             em_circuit: self.circuit.as_mut(),
             em_electrostatics: self.em_electrostatics.as_mut(),
+            gas: self.gas.as_mut(),
         };
         coupling.apply(&mut states, dt);
     }

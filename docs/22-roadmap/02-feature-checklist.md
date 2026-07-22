@@ -643,10 +643,45 @@
   `MotorCoupling`+`JouleHeat`を`apply_coupling`経由で結合し、定常状態でのジュール熱
   注入率が理論値$(k\omega)^2/R$と一致することを確認(実測rel_err約0.2%)、初回実装で
   一発Green化した。
+  続けて`sim-mechanics::joint`にSliderジョイント(設計§4.4表「Slider | 5 |
+  軸直交並進2 + 相対回転固定3」)を新規実装した — `BallJoint`の3軸並進拘束(箱近似:
+  ワールド座標軸沿いの独立スカラー拘束のPGS反復)と同じ手法を、(1)スライド軸に直交する
+  並進2軸(`Vec3::orthonormal_basis`で決定的に選ぶ、接触ソルバの摩擦接線基底と同じ手法)、
+  (2)相対回転を固定する3軸(新設の`relative_rotation_error`: 生成時の相対姿勢を基準に、
+  クォータニオンのベクトル部を誤差として使う小角近似、`HingeMotorPd::measure_angle`と
+  同じ「ベクトル部≈(角度/2)*軸」の性質を利用)に適用する形で実装した(合計5行)。
+  受け入れテストとして、ワールド固定シリンダー(`body_b=None`)に沿って軸方向のみ自由な
+  「ピストンロッド」が、重力下でも軸直交方向へ落下せず(直交並進2行)・姿勢も傾かず
+  (相対回転3行)・軸方向には初速のまま自由に(抵抗なく)進み続けることを確認、初回実装で
+  一発Green化した。
+  Sliderジョイントの完成を受けて、7種目の`Coupling`実装`PistonGas`(設計§3「P6: 気体
+  区画 ⇔ 剛体」、「断熱圧縮」統合シナリオの核)に着手。`sim_thermal::GasCompartment`は
+  既存の「準静的体積変化」検証ヘルパー(`adiabatic_quasi_static_volume_change`、
+  目標体積へNステップで細分して近づける形式)しか持たず、1シミュレーションstepごとに
+  呼べるインターフェースが無かったため、その1反復版として`apply_step_volume_change`を
+  追加した。`PistonGas`はSliderジョイントで1自由度に拘束されたピストンの軸方向変位から
+  気体体積を算出してこれを呼び、更新後の圧力から力$F=pA$をピストンに印加する
+  (`DomainStates`に`gas: Option<&mut GasCompartment>`フィールドを追加、`World`にも
+  `gas: Option<GasCompartment>`フィールド+`enable_gas`/`gas`/`gas_mut`を追加。
+  `GasCompartment`は`Solver`トレイトを実装しないため`step()`の自動走査対象ではなく、
+  `apply_coupling`経由でのみ状態が変化する点は`Circuit`等と異なる)。単体テストは
+  T5(断熱圧縮、`sim-thermal::gas`と同じ合格基準)を実際の`MechanicsSolver`剛体
+  (`Kinematic`ピストン、`MotorCoupling`と同じ理由で反作用力の影響を受けない構成)+
+  `GasCompartment`という2つの正典ドメイン間の結合経由で再現し、初回実装で一発Green化
+  した。これを使って統合シナリオ「4. 断熱圧縮: 機械運動 → 気体内部エネルギー」を実装
+  — 今度は`Dynamic`ピストン(初速で気体を圧縮する自由運動、ばねに衝突する物体と同型)を
+  使い、ピストン運動エネルギー+気体内部エネルギー($C_v T$)の合計が保存される
+  (断熱系、重力0)ことを確認(実測rel_err最大約1.4%、閾値<2%)、初回実装で一発Green化
+  した。統合シナリオは5本中3本(ブレーキ発熱・手回し発電・断熱圧縮)が完了、残り2本
+  (氷と飲み物・再突入)は`PhaseChangeMorph`/天体レジーム切替との`World`接続がそれぞれ
+  未実装のため後続増分。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
   (イベント購読/sample_fluid等のクエリ、ただしイベント購読は現状どのドメインソルバも
   イベントを発行していないため後回し)、性能ベンチ回帰ゲートの拡充(PCG・SPH近傍探索
-  ベンチ・ベースライン永続化)、または残り6種のCoupling(いずれも前提工事を要する)。
+  ベンチ・ベースライン永続化)、または残り5種のCoupling(いずれも本格的な前提工事を
+  要する: `GridFluidRigid`/`ConvectionLink`/`BoussinesqBuoyancy`/`SphRigid`は流体
+  `Solver`トレイト統合、`PhaseChangeMorph`はイベント駆動の剛体/流体生成、
+  `BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の切り出しリスク)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -862,13 +897,17 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 ### P3 — 拘束・流体・熱
 
 - [x] ジョイント・拘束(ヤコビアン)— `crates/sim-mechanics/src/joint.rs::{DistanceJoint,
-      BallJoint}`。設計 §4.4 表の Distance(1行、$|\mathbf{p}_B-\mathbf{p}_A|=L$)と
-      Ball(3行、アンカー一致 $\mathbf{p}_B=\mathbf{p}_A$、§2.1のヤコビアン導出)を実装、
-      どちらも `body_b=None` でワールド固定点への接続(振り子の支点・独楽の支点等)を表せる。
-      Ball の3行は真の3×3ブロックソルバ(コレスキー)ではなくワールドx/y/z軸に沿った
-      3本の独立スカラー拘束として簡略化(接触ソルバの摩擦「箱近似」と同じ方針)。
-      Hinge(limit・motor)/Slider/Fixed/Wheel・ソフト拘束は未実装 — Baumgarte速度バイアス
-      (β=0.2、設計§9)は使うが接触ソルバのような split impulse化はしていない
+      BallJoint, SliderJoint}`。設計 §4.4 表の Distance(1行、$|\mathbf{p}_B-\mathbf{p}_A|=L$)、
+      Ball(3行、アンカー一致 $\mathbf{p}_B=\mathbf{p}_A$、§2.1のヤコビアン導出)、
+      Slider(5行、軸直交並進2 + 相対回転固定3)を実装、いずれも `body_b=None` で
+      ワールド固定点への接続(振り子の支点・独楽の支点・シリンダー壁等)を表せる。
+      Ball の3行・Sliderの並進2行は真の3×3ブロックソルバ(コレスキー)ではなくワールド
+      x/y/z軸(Sliderは軸直交な2軸)に沿った独立スカラー拘束として簡略化(接触ソルバの
+      摩擦「箱近似」と同じ方針)。Sliderの相対回転固定3行は生成時の相対姿勢を基準とした
+      クォータニオンのベクトル部を誤差とする小角近似(`relative_rotation_error`、
+      `HingeMotorPd::measure_angle`と同じ性質を利用)。Hinge(limit・motor)/Fixed/Wheel・
+      ソフト拘束は未実装 — Baumgarte速度バイアス(β=0.2、設計§9)は使うが接触ソルバの
+      ような split impulse化はしていない
 - [x] XPBD(ロープのみ、布は未実装)— `crates/sim-mechanics/src/soft_body.rs::{SoftBody,
       rope}`。距離拘束(設計§2.2)のみ実装、`MechanicsSolver` とは独立に動作する
       (`sim_statistical::BrownianParticleSet` と同様のパターン)。曲げ拘束・体積拘束・
@@ -1114,18 +1153,21 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       が列挙する3組(浮力: 静的水域×SPH/格子流体、空気抗力: 集中定数×格子結合、
       コンデンサ電場エネルギー: 回路×静電場)の二重計上を検出)を実装済み。`Coupling`
       トレイト + `DomainStates`(現時点でmechanics・thermal・em_circuit・
-      em_electrostaticsの4ドメイン)、具体的な実装6種(`DissipationToHeat`: 接触散逸→熱、
+      em_electrostatics・gasの5ドメイン)、具体的な実装7種(`DissipationToHeat`: 接触散逸→熱、
       `JouleHeat`: 回路I²R→熱、`BrownianForce`: 温度・粘性→微小剛体のランダム力、
       `LorentzForce`: 静場→帯電剛体、`InductionCoupling`: 導体棒・渦電流、
-      `MotorCoupling`: 回路⇔ヒンジ)を実装済み(前2種は単一`ThermalNode`への縮約実装で
+      `MotorCoupling`: 回路⇔ヒンジ、`PistonGas`: 気体区画⇔ピストン剛体(`SliderJoint`で
+      1自由度に拘束))を実装済み(前2種は単一`ThermalNode`への縮約実装で
       厳密な対記帳、`BrownianForce`はゆらぎ散逸定理に基づく統計的結合のため長時間平均の
       エネルギー等分配則収束で検証、`LorentzForce`は点電荷群との対ごとの反作用で運動量を
       厳密に対記帳、`InductionCoupling`・`MotorCoupling`は1step遅れの縮約(design上
       pre/post両方に置かれるべき結合を単一`apply`に統合)でそれぞれE7の解析解・
-      理論EMFに収束、剛体/抵抗↔熱ノード対応表・剛体の電荷フィールド・正式なHinge
-      ジョイントは未実装)。`World`にも`circuit`ドメインを追加済み。残り6種の
-      `Coupling`(`BuoyancyDrag`・`GridFluidRigid`等)・`World::step()`パイプラインへの
-      Coupling接続(registry相当の仕組みが必要)・sub-iteration剛性閾値表は未実装
+      理論EMFに収束、`PistonGas`はピストン運動エネルギー+気体内部エネルギーの保存
+      (実測rel_err最大約1.4%)で検証、剛体/抵抗↔熱ノード対応表・剛体の電荷フィールド・
+      正式なHingeジョイントは未実装)。`World`にも`circuit`・`gas`ドメインを追加済み。
+      残り5種の`Coupling`(`BuoyancyDrag`・`GridFluidRigid`・`ConvectionLink`・
+      `BoussinesqBuoyancy`・`SphRigid`)・`World::step()`パイプラインへのCoupling接続
+      (registry相当の仕組みが必要)・sub-iteration剛性閾値表は未実装
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/
@@ -1151,7 +1193,10 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       発光)は光学ドメインとの結合が別途必要なため対象外。`MotorCoupling`+
       `JouleHeat`、定常電力・ジュール熱注入率とも実測rel_err<1%で一致)
 - [ ] 統合シナリオ: 氷と飲み物
-- [ ] 統合シナリオ: 断熱圧縮
+- [x] 統合シナリオ: 断熱圧縮(`SliderJoint`(新規実装)で1自由度に拘束した`Dynamic`
+      ピストンが初速で気体を圧縮する自由運動。`PistonGas`結合経由でピストン運動
+      エネルギー+気体内部エネルギー($C_v T$)の合計が保存される(断熱系)ことを
+      実測rel_err最大約1.4%(閾値<2%)で確認)
 - [ ] 統合シナリオ: 再突入
 - [x] CI ゲート: 決定論(階層1: 2 回実行一致・スナップショット再開一致)— 既存の
       `.github/workflows/ci.yml`の`native`ジョブが`cargo test --workspace`を実行

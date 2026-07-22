@@ -2,12 +2,12 @@
 //! §5「統合シナリオテスト」)。
 //!
 //! **縮約実装の理由**: 5本のうち現時点で実装済みの`Coupling`で構成できる
-//! 「1. ブレーキ: 運動 → 摩擦熱 → 温度上昇」(`DissipationToHeat`)と
+//! 「1. ブレーキ: 運動 → 摩擦熱 → 温度上昇」(`DissipationToHeat`)、
 //! 「2. 手回し発電: 機械仕事 → 電気 → ジュール熱」(`MotorCoupling`+`JouleHeat`、
-//! 「光」(LED等の発光)部分は光学ドメインとの結合が別途必要なため対象外)を実装する。
-//! 「氷と飲み物」(相変化、`PhaseChangeMorph`未実装)・「断熱圧縮」(`PistonGas`、
-//! Sliderジョイント未実装)・「再突入」(天体レジーム切替との結合、`World`未接続)は
-//! 前提未実装のため後続増分。
+//! 「光」(LED等の発光)部分は光学ドメインとの結合が別途必要なため対象外)、
+//! 「4. 断熱圧縮: 機械運動 ⇔ 気体内部エネルギー」(`PistonGas`+`SliderJoint`)を実装する。
+//! 「氷と飲み物」(相変化、`PhaseChangeMorph`未実装)・「再突入」(天体レジーム切替との
+//! 結合、`World`未接続)は前提未実装のため後続増分。
 //!
 //! `Coupling`はまだ`World::step()`のパイプラインに自動接続されていない
 //! (`World::apply_coupling`のdoc参照)ため、本テストは`world.step()`の直後に
@@ -156,6 +156,93 @@ mod tests {
         assert!(
             rel_err < 0.02,
             "heat_gained={heat_gained} expected_heat={expected_heat} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// 設計§5「4. 断熱圧縮: 機械運動 → 気体内部エネルギー(ピストン)。TVᵞ⁻¹=const、
+    /// エネルギー保存」。ピストン(`Dynamic`剛体)を`SliderJoint`(モジュールdoc「Sliderジョイント
+    /// 未実装」が解消済み、`sim_mechanics::joint`モジュールdoc参照)でシリンダー軸1自由度に
+    /// 拘束し、初速で気体を圧縮する自由運動(ばねに衝突する物体と同型: 気体反力
+    /// (`PistonGas`)がピストンを減速させ、運動エネルギーが気体の内部エネルギーへ移る)を
+    /// シミュレートする。重力0(垂直方向の運動が無い設定、`SliderJoint`自体の直交拘束は
+    /// 別途`sim_mechanics::joint`の単体テストが重力下での保持を検証済み)として、
+    /// ピストン運動エネルギー+気体内部エネルギー(定積熱容量 C_v ×T)の合計が保存される
+    /// (系の外に熱もエネルギーも逃げない断熱系)ことを確認する。
+    #[test]
+    fn adiabatic_compression_scenario_conserves_piston_kinetic_and_gas_internal_energy() {
+        let mut world = World::new(WorldOptions {
+            gravity: 0.0,
+            ..WorldOptions::default()
+        });
+        let steel = world
+            .materials()
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+
+        let axis = Vec3::new(1.0, 0.0, 0.0);
+        let v0 = 0.5; // m/s、圧縮方向(-axis)への初速
+        let mass = 1.0; // kg
+
+        let mut piston_desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        piston_desc.mass_override = Some(mass);
+        piston_desc.linear_velocity = axis.scale(-v0);
+        let piston_id = world.create_body(piston_desc);
+        let piston_idx = piston_id.index as usize;
+
+        let slider = sim_mechanics::SliderJoint::new(
+            &world.mechanics_mut().bodies,
+            piston_idx,
+            Vec3::ZERO,
+            axis,
+            None,
+            Vec3::ZERO,
+        );
+        world.mechanics_mut().add_slider_joint(slider);
+
+        let n_moles = 1.0e-4;
+        let t1 = 300.0;
+        let v1 = 1.0e-3; // m^3
+        let area = 0.01; // m^2
+        let gas = sim_thermal::GasCompartment {
+            n_moles,
+            volume: v1,
+            temperature: t1,
+            gas: sim_thermal::GasSpecies::AIR,
+        };
+        let heat_capacity_at_constant_volume = gas.heat_capacity_at_constant_volume();
+        world.enable_gas(gas);
+
+        let mut piston_gas =
+            sim_coupling::PistonGas::new(&world.mechanics_mut().bodies, piston_idx, axis, area, v1);
+
+        let dt = WorldOptions::default().dt;
+        let initial_energy = 0.5 * mass * v0 * v0 + heat_capacity_at_constant_volume * t1;
+        let mut min_volume = v1;
+        let mut max_energy_rel_err: f64 = 0.0;
+        for _ in 0..600 {
+            world.step();
+            world.apply_coupling(&mut piston_gas, dt);
+
+            let v = world.body_velocity(piston_id).unwrap();
+            let gas = world.gas().unwrap();
+            min_volume = min_volume.min(gas.volume);
+            let energy =
+                0.5 * mass * v.length_sq() + heat_capacity_at_constant_volume * gas.temperature;
+            max_energy_rel_err =
+                max_energy_rel_err.max((energy - initial_energy).abs() / initial_energy);
+        }
+
+        assert!(
+            min_volume < v1 * 0.95,
+            "piston should have meaningfully compressed the gas: min_volume={min_volume} v1={v1}"
+        );
+        // 実装検証中の実測: 600step(5秒)中の最大rel_errは約1.4%(準静的近似
+        // (`GasCompartment::apply_step_volume_change`)+ semi-implicit Eulerの離散化誤差、
+        // `sim-mechanics`の他のBaumgarte系ソルバと同オーダー)。設計目標に近い値として
+        // rel<2%を採用する。
+        assert!(
+            max_energy_rel_err < 0.02,
+            "piston KE + gas internal energy should be conserved (adiabatic, no external heat/work): max_energy_rel_err={max_energy_rel_err:.4}"
         );
     }
 }

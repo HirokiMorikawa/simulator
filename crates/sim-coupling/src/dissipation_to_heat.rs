@@ -121,6 +121,7 @@ mod tests {
                     thermal: Some(&mut thermal),
                     em_circuit: None,
                     em_electrostatics: None,
+                    gas: None,
                 };
                 coupling.apply(&mut states, dt);
             }

@@ -7,7 +7,7 @@
 //! (docs/22-roadmap/01-phases.md P1/P2 ウェーブ)。
 
 use crate::body::{BodyType, DragModel, RigidBodySet};
-use crate::joint::{BallJoint, DistanceJoint, HingeMotorPd};
+use crate::joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint};
 use crate::shape::Shape;
 use crate::{ccd, collision, contact, joint, sleep, RigidBodyDesc};
 use sim_core::{EnergyBreakdown, MaterialDb, Solver, SolverContext, StateHasher};
@@ -36,6 +36,8 @@ pub struct MechanicsSolver {
     pub joints: Vec<DistanceJoint>,
     /// Ball ジョイント一覧(設計 docs/10-mechanics/05-joints-constraints.md §3)。
     pub ball_joints: Vec<BallJoint>,
+    /// Slider ジョイント一覧(設計 §4.4表「Slider」、`joint`モジュールdoc参照)。
+    pub slider_joints: Vec<SliderJoint>,
     /// PD位置サーボ付きヒンジモーター一覧(設計 §4.5、`joint`モジュールdoc参照)。
     pub hinge_motors: Vec<HingeMotorPd>,
     /// 直近stepの接触解決(摩擦+反発)による運動エネルギー散逸量(設計
@@ -72,6 +74,7 @@ impl MechanicsSolver {
             axis_cache: collision::AxisCache::new(),
             joints: Vec::new(),
             ball_joints: Vec::new(),
+            slider_joints: Vec::new(),
             hinge_motors: Vec::new(),
             last_contact_dissipation: 0.0,
         }
@@ -87,6 +90,10 @@ impl MechanicsSolver {
 
     pub fn add_ball_joint(&mut self, joint: BallJoint) {
         self.ball_joints.push(joint);
+    }
+
+    pub fn add_slider_joint(&mut self, joint: SliderJoint) {
+        self.slider_joints.push(joint);
     }
 
     pub fn add_hinge_motor(&mut self, motor: HingeMotorPd) {
@@ -205,6 +212,7 @@ impl Solver for MechanicsSolver {
         // 処理順「ジョイント→接触」(設計 docs/10-mechanics/05-joints-constraints.md §4.1)。
         joint::resolve_distance(&self.joints, &mut self.bodies, dt);
         joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
+        joint::resolve_slider(&self.slider_joints, &mut self.bodies, dt);
         let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
         // 両側の dynamic body が全て asleep な接触は再解決しない(収束済みで変化が無いのに
         // 毎ステップ再解決すると warm start・split impulse の数値的な揺らぎで再起床してしまう
@@ -498,6 +506,65 @@ mod tests {
         assert!(
             min_tip_y > -0.02,
             "foot penetrated the ground beyond contact slop: min_tip_y={min_tip_y:.5}"
+        );
+    }
+
+    /// `SliderJoint`(設計 §4.4「Slider | 5 | 軸直交並進2 + 相対回転固定3」)の受け入れ:
+    /// ワールドx軸に沿って自由に滑る「ピストンロッド」(ワールド固定シリンダー、
+    /// `body_b=None`)が、(1)重力下でも軸に直交するy/zへ落下・ドリフトしない
+    /// (直交並進2行が拘束)、(2)姿勢が生成時の基準(恒等回転)から傾かない
+    /// (相対回転固定3行が拘束)、(3)軸方向(x)には初速のまま自由に(抵抗なく)進み続ける
+    /// (拘束されない1自由度)ことを確認する — 断熱圧縮の`PistonGas`結合が前提とする
+    /// 「シリンダー壁は軸直交方向・回転を拘束し、軸方向のみ自由」という構成そのもの。
+    #[test]
+    fn slider_joint_constrains_perpendicular_translation_and_rotation_but_frees_the_axis() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(11, 11);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        desc.linear_velocity = Vec3::new(2.0, 0.0, 0.0);
+        let piston = solver.create_body(desc, &materials);
+
+        solver.add_slider_joint(SliderJoint::new(
+            &solver.bodies,
+            piston,
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            None,
+            Vec3::ZERO,
+        ));
+
+        let dt = 1.0 / 120.0;
+        let steps = 240; // 2秒: 軸方向に2.0*2.0=4.0m進む間の直交ドリフト/姿勢ドリフトを見る
+        let mut max_perp: f64 = 0.0;
+        let mut max_tilt_deg: f64 = 0.0;
+        for _ in 0..steps {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            let pos = solver.bodies.position[piston];
+            max_perp = max_perp.max(pos.y.abs()).max(pos.z.abs());
+            let rot = solver.bodies.rotation[piston];
+            // 恒等回転からの角度 = 2*acos(|w|)(最短経路、二重被覆を考慮)。
+            let tilt = 2.0 * rot.w.abs().min(1.0).acos();
+            max_tilt_deg = max_tilt_deg.max(tilt.to_degrees());
+        }
+
+        assert!(
+            max_perp < 0.01,
+            "slider should not drift perpendicular to its axis under gravity: max_perp={max_perp:.5}"
+        );
+        assert!(
+            max_tilt_deg < 1.0,
+            "slider should not rotate relative to its fixed reference orientation: max_tilt_deg={max_tilt_deg:.3}"
+        );
+        let expected_x = 2.0 * (steps as f64 * dt);
+        let actual_x = solver.bodies.position[piston].x;
+        assert!(
+            (actual_x - expected_x).abs() / expected_x < 0.01,
+            "slider's free axis should move ballistically at the initial velocity: actual_x={actual_x} expected_x={expected_x}"
         );
     }
 }
