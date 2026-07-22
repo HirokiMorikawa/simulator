@@ -933,6 +933,19 @@
   設計に無い(`BoussinesqBuoyancy`は外部から加速度を注入する外力であり、注入エネルギー
   自体は保存則の対象ではない)ため、既存の`brake_heat_scenario_...`と同じ「残差が
   発散しないことの確認」という趣旨で有限性のみを検証する。初回実装で一発Green化した。
+  続けて`sim_mechanics::SoftBody`(XPBDロープ、M13/M14で既にGreen)が`World`に
+  未接続だったことに気づき、`gas`・`conduction_rod`と同じ「`Solver`未実装、呼び出し側が
+  明示的に`step(dt, gravity, n_sub, n_iter, damping)`を呼ぶ」縮約パターンで
+  `soft_body`ドメインを新設した(`SoftBody`・`DistanceConstraint`に`#[derive(Clone)]`を
+  追加、`World`全体の`Clone`導出に必要)。これによりD13(ロープと旗)のうちM13
+  (カテナリー静止形状)部分が新規物理実装なしで可能になったため`demos.rs`に追加した
+  (D11とD15の間、番号順)。「旗のはためき」は`SoftBody`が距離拘束のみ(布・曲げ拘束は
+  `sim_mechanics::soft_body`モジュールdocが明記するとおり未実装)のため対象外とし、
+  M14(ロープの伸び)は`sim-mechanics`側で既にGreenのため重複実装しない(D10/D17と
+  同じ「既存テストで検証済みの部分は参照に留める」方針)。`sim-mechanics`側のM13単体
+  テストと全く同じ構成(端点間1m・全長1.2m・20分割・非伸縮コンプライアンス・2400step)を
+  `World`経由で再現し、カテナリー解析解との最大偏差rel<2%を確認、初回実装で一発
+  Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は残り2種のCoupling本体
   (`GridFluidRigid`・`SphRigid`、いずれも流体`Solver`統合・Coupling registryという
   前提工事は完了したが、剛体との具体的な相互作用力(ボクセル化境界・圧力積分/
@@ -1627,7 +1640,13 @@ Phase 2〜3:
       できることの実演)を確認。M4(楕円積分解析式)自体は`sim-mechanics`で検証済みの
       ため重複実装せず)
 - [ ] D12 ラグドール階段
-- [ ] D13 ロープと旗
+- [ ] D13 ロープと旗(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
+      ワークストリームD未着手のため保留。「旗のはためき」は`SoftBody`(XPBDロープ)が
+      距離拘束のみ(布・曲げ拘束は未実装)のため対象外。`World`に新設した`soft_body`
+      ドメイン(`gas`・`conduction_rod`と同じ「呼び出し側が明示的に`step`する」縮約)
+      経由でM13(カテナリー静止形状)を再現(`sim-mechanics`側のM13単体テストと同じ
+      構成・許容誤差)。M14(ロープの伸び)は`sim-mechanics`側で既にGreenのため
+      重複実装しない)
 - [ ] D14 煙と渦
 - [ ] D15 対流(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
       ワークストリームD未着手のため保留。`grid_fluid`+`thermal`ドメインを

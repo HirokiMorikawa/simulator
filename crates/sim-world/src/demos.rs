@@ -39,7 +39,12 @@
 //! D15(対流)が可能になったため実装した — `grid_fluid`+`thermal`ドメインを
 //! `BoussinesqBuoyancy`で結合し、熱源(ろうそく相当)近傍で格子流体の平均鉛直速度が
 //! 単調に上昇すること(Boussinesqの定性)+エネルギー台帳残差が有界であることを確認する。
-//! 残りのPhase 2〜3(D12–D14・D18)・Phase 4(D19–D33)は後続増分。Pα(天体ウェーブ)は
+//! さらに`World`に新設した`soft_body`ドメイン(`sim_mechanics::SoftBody`、`gas`・
+//! `conduction_rod`と同じ「呼び出し側が明示的に`step`する」縮約)経由でD13(ロープと旗)
+//! のM13(カテナリー静止形状)部分を実装した — 「旗のはためき」は`SoftBody`が距離拘束
+//! (ロープ用途)のみで曲げ拘束・布を持たないため対象外、M14(ロープの伸び)は
+//! `sim-mechanics`側で既にGreenのため重複実装しない。残りのPhase 2〜3(D12・D14・D18)・
+//! Phase 4(D19–D33)は後続増分。Pα(天体ウェーブ)は
 //! 天体ドメイン(`sim_astro::NBodySystem`)
 //! が既に`World`の常時合成ドメインとして接続済み(`enable_astro`、`step()`が
 //! 自動sub-stepする)ため、Phase 4より先にD34(太陽系儀)を実装した — 8惑星ではなく
@@ -746,6 +751,77 @@ mod tests {
             run_double_pendulum(),
             run_double_pendulum(),
             "double pendulum replay should be bit-identical despite chaotic sensitivity (D11 pass criterion)"
+        );
+    }
+
+    /// D13 ロープと旗(同docs Phase 2〜3表)。「カテナリー測定、旗のはためき(風)」
+    /// 「合格基準: M13/M14」。`SoftBody`(XPBDロープ)は距離拘束のみの「ロープ用途」
+    /// (`sim_mechanics::soft_body`モジュールdoc参照)で、曲げ拘束・布(旗)は未実装のため
+    /// 「旗のはためき」部分は対象外(D7のF2省略等と同じ、既存の実装範囲に絞る方針)。
+    /// M13(カテナリー静止形状)を`World`に新設した`soft_body`ドメイン(`gas`・
+    /// `conduction_rod`と同じ「呼び出し側が明示的に`step`する」縮約)経由で再現する
+    /// (`sim_mechanics::soft_body`のM13単体テストと同じ構成・許容誤差、パラメータの
+    /// 重複は避けつつ`World`経由でも同じ物理が動くことを確認するのがこのデモの主眼)。
+    /// M14(ロープの伸び)は`sim-mechanics`側で既にGreenのため重複実装しない
+    /// (D10/D17と同じ「既存テストで検証済みの部分は参照に留める」方針)。
+    #[test]
+    fn d13_rope_and_flag_settles_into_catenary_shape_matching_m13() {
+        let span = 1.0;
+        let total_length = 1.2;
+        let segments = 20;
+        let mass_per_particle = 0.01;
+
+        let mut world = World::new(WorldOptions::default());
+        let from = Vec3::new(-span / 2.0, 0.0, 0.0);
+        let to = Vec3::new(span / 2.0, 0.0, 0.0);
+        let mut rope =
+            sim_mechanics::rope(from, to, segments, mass_per_particle, total_length, 1e-10);
+        rope.pin(0);
+        rope.pin(segments);
+        world.enable_soft_body(rope);
+
+        let dt = 1.0 / 120.0;
+        let gravity = Vec3::new(0.0, -9.80665, 0.0);
+        for _ in 0..2400 {
+            world.soft_body_mut().unwrap().step(
+                dt,
+                gravity,
+                sim_mechanics::DEFAULT_SUBSTEPS,
+                sim_mechanics::DEFAULT_ITERATIONS,
+                2.0,
+            );
+        }
+
+        // M13と同じ二分法(懸垂線パラメータaを全長・スパンから逆算)。
+        let solve_catenary_a = |length: f64, span: f64| -> f64 {
+            let f = |a: f64| 2.0 * a * (span / (2.0 * a)).sinh() - length;
+            let (mut lo, mut hi) = (span * 1e-3, span * 1000.0);
+            for _ in 0..200 {
+                let mid = 0.5 * (lo + hi);
+                if f(mid) > 0.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            0.5 * (lo + hi)
+        };
+        let a = solve_catenary_a(total_length, span);
+        let y_at = |x: f64| a * (x / a).cosh();
+        let y_endpoint = y_at(span / 2.0);
+
+        let soft_body = world.soft_body().unwrap();
+        let mut max_dev: f64 = 0.0;
+        for k in 0..=segments {
+            let x = soft_body.position[k].x;
+            let y_theory = y_at(x) - y_endpoint;
+            let y_sim = soft_body.position[k].y;
+            max_dev = max_dev.max((y_sim - y_theory).abs());
+        }
+        let rel_dev = max_dev / span;
+        assert!(
+            rel_dev < 0.02,
+            "D13 pass criterion (M13 catenary): max_dev={max_dev} rel_dev={rel_dev:.4}"
         );
     }
 

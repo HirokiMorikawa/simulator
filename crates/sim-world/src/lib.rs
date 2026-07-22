@@ -251,6 +251,12 @@ pub struct World {
     /// `Solver`トレイトを実装済み(モジュールdoc「全ドメイン合成」参照)のため、`sph`と
     /// 同じ固定順で`step()`が自動的にsub-stepする。
     grid_fluid: Option<sim_fluid::GridFluid2D>,
+    /// ソフトボディ(XPBDロープ、D13「ロープと旗」が使う、シーンが使う場合のみ`Some`)。
+    /// `gas`・`conduction_rod`と同じ理由(`Solver`トレイト未実装、`step`が複数引数
+    /// (`dt, gravity, n_sub, n_iter, damping`)を取るため`Solver::step(dt, ctx)`の
+    /// シグネチャに素直に適合しない)で`step()`の自動走査対象ではなく、
+    /// `soft_body_mut().step(...)`を呼び出し側が明示的に呼ぶ必要がある。
+    soft_body: Option<sim_mechanics::SoftBody>,
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
@@ -326,6 +332,7 @@ impl World {
             conduction_rod: None,
             sph: None,
             grid_fluid: None,
+            soft_body: None,
             materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
@@ -586,6 +593,21 @@ impl World {
 
     pub fn grid_fluid_mut(&mut self) -> Option<&mut sim_fluid::GridFluid2D> {
         self.grid_fluid.as_mut()
+    }
+
+    /// ソフトボディ(XPBDロープ)ドメインを有効化する(`conduction_rod_mut().step(dt)`と
+    /// 同じ理由で呼び出し側が明示的に`soft_body_mut().step(...)`を呼ぶ必要がある、
+    /// モジュールdoc参照)。
+    pub fn enable_soft_body(&mut self, soft_body: sim_mechanics::SoftBody) {
+        self.soft_body = Some(soft_body);
+    }
+
+    pub fn soft_body(&self) -> Option<&sim_mechanics::SoftBody> {
+        self.soft_body.as_ref()
+    }
+
+    pub fn soft_body_mut(&mut self) -> Option<&mut sim_mechanics::SoftBody> {
+        self.soft_body.as_mut()
     }
 
     /// 流体場の点`p`での観測(設計docs/20-integration/04-world-api.md §2
