@@ -111,6 +111,7 @@ mod tests {
                     em_electrostatics: None,
                     gas: None,
                     grid_fluid: None,
+                    sph: None,
                 },
                 dt,
             );

@@ -88,8 +88,15 @@ pub struct SphFluid {
     /// 呼び出し側が直接`step(dt, gravity)`を呼ぶ既存の使い方には影響しない。
     pub gravity: f64,
     /// 静的境界粒子(壁・床)。積分されない。密度和・圧力反発力にのみ参加する
-    /// (実効質量・反発力の詳細はモジュールdoc参照)。
+    /// (実効質量・反発力の詳細はモジュールdoc参照)。呼び出し側(`sim_coupling::SphRigid`)
+    /// が`compute_acceleration`呼び出しの間に位置を書き換えれば、キネマティックに
+    /// 駆動される動的境界(剛体表面)としても使える — `boundary_effective_mass`の
+    /// 較正は位置に依存しないため、位置を動かしても再較正は不要。
     pub boundary_position: Vec<Vec3>,
+    /// 各境界粒子が(直前の`compute_acceleration`呼び出しで)近傍の流体粒子から受けた
+    /// 反作用力の合計(Newton第3法則、`compute_acceleration`内で流体粒子への力の
+    /// 符号を反転して積算)。`sim_coupling::SphRigid`が剛体への反作用力として読む。
+    pub boundary_force: Vec<Vec3>,
     /// 較正済み境界粒子実効質量(`compute_density_and_pressure`内で遅延計算・キャッシュ)。
     boundary_effective_mass: Option<f64>,
     hash: SpatialHash,
@@ -110,6 +117,7 @@ impl SphFluid {
             viscosity_alpha: 0.08,
             gravity: 9.80665,
             boundary_position: Vec::new(),
+            boundary_force: Vec::new(),
             boundary_effective_mass: None,
             hash: SpatialHash::new(h, 4096),
             boundary_hash: SpatialHash::new(h, 4096),
@@ -127,6 +135,10 @@ impl SphFluid {
 
     pub fn add_boundary_particle(&mut self, position: Vec3) {
         self.boundary_position.push(position);
+        // `boundary_force`を常に`boundary_position`と同じ長さに保つ(`compute_acceleration`
+        // が呼ばれる前に追加された境界粒子(`sim_coupling::SphRigid`が`step`の合間に
+        // 追加する場合等)への読み出しがpanicしないようにするため)。
+        self.boundary_force.push(Vec3::ZERO);
     }
 
     /// Tait状態方程式(設計§2.2)。$k_{eos}=\rho_0c_s^2/7$、負圧はクランプ(表面凝集防止)。
@@ -203,12 +215,15 @@ impl SphFluid {
 
     /// 圧力項(対称形、Monaghan)+ 人工粘性 + 重力(設計§2.3)。境界粒子との相互作用は
     /// モジュールdoc参照。
-    fn compute_acceleration(&self, gravity: f64) -> Vec<Vec3> {
+    fn compute_acceleration(&mut self, gravity: f64) -> Vec<Vec3> {
         let n = self.position.len();
         let mut accel = vec![Vec3::new(0.0, -gravity, 0.0); n];
         let m_b = self.boundary_effective_mass.unwrap_or(0.0);
         let mut neighbors = Vec::new();
         let mut boundary_neighbors = Vec::new();
+        self.boundary_force.clear();
+        self.boundary_force
+            .resize(self.boundary_position.len(), Vec3::ZERO);
 
         for (i, &pi) in self.position.iter().enumerate() {
             let rho_i = self.density[i];
@@ -260,7 +275,13 @@ impl SphFluid {
                 // 半分になり、静水圧試験で底面の粒子が支えきれず過圧縮する(圧力が最大30%
                 // 過大評価される)ことを実験的に確認したため、対称形を採用する。
                 let pressure_term = 2.0 * p_i / (rho_i * rho_i);
-                accel[i] = accel[i] - grad_w.scale(m_b * pressure_term);
+                let accel_contribution = grad_w.scale(m_b * pressure_term);
+                accel[i] = accel[i] - accel_contribution;
+                // Newton第3法則: 流体粒子iが境界粒子jから受ける力は
+                // -accel_contribution*self.mass(上のaccel更新)なので、jがiから受ける
+                // 反作用力はその逆向き(+accel_contribution*self.mass)。
+                self.boundary_force[j] =
+                    self.boundary_force[j] + accel_contribution.scale(self.mass);
             }
         }
         accel
@@ -523,6 +544,113 @@ mod tests {
         assert!(
             (measured_energy.kinetic - expected_ke).abs() / expected_ke < 1e-9,
             "total_energy().kinetic should match 0.5*m*v^2 for the single isolated particle"
+        );
+    }
+
+    /// `boundary_force`(`sim_coupling::SphRigid`が剛体への反作用力として読む新設
+    /// フィールド)がNewton第3法則を正しく反映していることを、静止した流体柱が容器の
+    /// 境界粒子群(床+側壁)に及ぼす下向きの合力の総和が流体全体の重量
+    /// ($n_{particles}\cdot m\cdot g$)と概ね一致することで確認する
+    /// (`hydrostatic_pressure_matches_rho_g_h_within_wcsph_boundary_approximation`と
+    /// 同じ静水圧平衡の物理・同じ箱型容器構成の縮小版だが、圧力そのものではなく
+    /// 境界粒子への反作用力の合計を検証対象とする)。`boundary_force`は「境界粒子が
+    /// 流体から受ける力」なので、静止した流体は容器を下向きに押す
+    /// (`boundary_force`のy成分の合計は負)ことに注意。
+    #[test]
+    fn boundary_force_sums_to_resting_fluid_columns_weight_on_the_container() {
+        let h = 0.04;
+        let dx = h / 2.0;
+        let rho0 = 1000.0;
+        let column_h: f64 = 0.08;
+        let gravity = 9.80665;
+        let u_max = (2.0 * gravity * column_h).sqrt();
+        let c_s = 10.0 * u_max;
+        let mut fluid = SphFluid::new(h, rho0, c_s);
+        fluid.mass = rho0 * dx.powi(3);
+        fluid.viscosity_alpha = 0.5;
+
+        let nx = 4;
+        let ny = (column_h / dx).round() as i32;
+        let nz = 4;
+        for ix in 0..nx {
+            for iy in 0..ny {
+                for iz in 0..nz {
+                    let pos = Vec3::new(
+                        0.02 + ix as f64 * dx,
+                        0.02 + iy as f64 * dx,
+                        0.02 + iz as f64 * dx,
+                    );
+                    fluid.add_particle(pos, Vec3::ZERO);
+                }
+            }
+        }
+        let n_particles = fluid.position.len();
+
+        // 床+4側壁、3層(設計§4.1・§9既定、`hydrostatic_pressure_matches_...`と
+        // 同じ箱型容器構成の縮小版 — 側壁が無いと流体が水平方向へ広がり境界粒子群の
+        // 有効footprintから外れてしまう、実装検証中に発見)。
+        let domain_x = nx as f64 * dx + 0.04;
+        let domain_z = nz as f64 * dx + 0.04;
+        let layers = 3;
+        let mut ix = -0.02;
+        while ix < domain_x {
+            let mut iz = -0.02;
+            while iz < domain_z {
+                for l in 0..layers {
+                    fluid.add_boundary_particle(Vec3::new(ix, 0.02 - (l as f64 + 1.0) * dx, iz));
+                }
+                iz += dx;
+            }
+            ix += dx;
+        }
+        let mut iy = 0.0;
+        while iy < column_h + 0.1 {
+            let mut iz = -0.02;
+            while iz < domain_z {
+                for l in 0..layers {
+                    fluid.add_boundary_particle(Vec3::new(0.02 - (l as f64 + 1.0) * dx, iy, iz));
+                    fluid.add_boundary_particle(Vec3::new(domain_x - 0.02 + l as f64 * dx, iy, iz));
+                }
+                iz += dx;
+            }
+            let mut ixw = -0.02;
+            while ixw < domain_x {
+                for l in 0..layers {
+                    fluid.add_boundary_particle(Vec3::new(ixw, iy, 0.02 - (l as f64 + 1.0) * dx));
+                    fluid.add_boundary_particle(Vec3::new(
+                        ixw,
+                        iy,
+                        domain_z - 0.02 + l as f64 * dx,
+                    ));
+                }
+                ixw += dx;
+            }
+            iy += dx;
+        }
+
+        let dt = 0.25 * h / c_s;
+        let steps = 3000;
+        let avg_window = 500;
+        let mut sum_force_y = 0.0;
+        let mut sample_count = 0u64;
+        for step in 0..steps {
+            fluid.step(dt, gravity);
+            if step >= steps - avg_window {
+                sum_force_y += fluid.boundary_force.iter().map(|f| f.y).sum::<f64>();
+                sample_count += 1;
+            }
+        }
+
+        let total_boundary_force_y = sum_force_y / sample_count as f64;
+        let expected_weight = n_particles as f64 * fluid.mass * gravity;
+        let rel_err = (total_boundary_force_y.abs() - expected_weight).abs() / expected_weight;
+        // 実装検証中の実測rel_errは約0.4%(Newton第3法則は代数的な恒等式なので、
+        // 静水圧平衡テストの圧力そのもの(rel<30%)よりずっと厳密に一致する)。
+        assert!(
+            rel_err < 0.02,
+            "boundary_force should sum to (minus) the resting fluid column's weight \
+             (Newton's third law): total_boundary_force_y={total_boundary_force_y:.6} \
+             expected_weight={expected_weight:.6} rel_err={rel_err:.4}"
         );
     }
 }

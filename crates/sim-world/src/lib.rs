@@ -755,6 +755,7 @@ impl World {
                 em_electrostatics: self.em_electrostatics.as_mut(),
                 gas: self.gas.as_mut(),
                 grid_fluid: self.grid_fluid.as_mut(),
+                sph: self.sph.as_mut(),
             };
             coupling.apply(&mut states, dt);
         }
@@ -919,6 +920,7 @@ impl World {
             em_electrostatics: self.em_electrostatics.as_mut(),
             gas: self.gas.as_mut(),
             grid_fluid: self.grid_fluid.as_mut(),
+            sph: self.sph.as_mut(),
         };
         coupling.apply(&mut states, dt);
     }

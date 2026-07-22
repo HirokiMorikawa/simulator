@@ -137,6 +137,7 @@ mod tests {
             em_electrostatics: None,
             gas: None,
             grid_fluid: Some(&mut fluid),
+            sph: None,
         };
         coupling.apply(&mut states, 0.01);
 
@@ -186,6 +187,7 @@ mod tests {
             em_electrostatics: None,
             gas: None,
             grid_fluid: Some(&mut fluid),
+            sph: None,
         };
         coupling.apply(&mut states, dt);
 

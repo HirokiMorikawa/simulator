@@ -7,17 +7,18 @@
 //! 持つ具体的な構造体として定義する(汎用的な型消去レジストリではない)。
 //! `DissipationToHeat`はmechanics + thermal、`JouleHeat`はem_circuit + thermal、
 //! `LorentzForce`はem_electrostatics + mechanics、`PistonGas`はmechanics + gas、
-//! `BoussinesqBuoyancy`はthermal + grid_fluidを使う。他のCouplingが必要とする組み合わせは、
-//! そのCouplingを実装する増分で`DomainStates`にフィールドを追加する。
+//! `BoussinesqBuoyancy`はthermal + grid_fluid、`SphRigid`はmechanics + sphを使う。
+//! 他のCouplingが必要とする組み合わせは、そのCouplingを実装する増分で`DomainStates`に
+//! フィールドを追加する。
 
 use sim_core::DomainId;
 use sim_em::{Circuit, PointChargeSystem};
-use sim_fluid::GridFluid2D;
+use sim_fluid::{GridFluid2D, SphFluid};
 use sim_mechanics::MechanicsSolver;
 use sim_thermal::{GasCompartment, ThermalSolver};
 
 /// Couplingが読み書きできる各ドメインの可変ビュー(モジュールdoc参照、現時点では
-/// mechanics・thermal・em_circuit・em_electrostatics・gas・grid_fluidのみ)。
+/// mechanics・thermal・em_circuit・em_electrostatics・gas・grid_fluid・sphのみ)。
 pub struct DomainStates<'a> {
     pub mechanics: &'a mut MechanicsSolver,
     pub thermal: Option<&'a mut ThermalSolver>,
@@ -27,6 +28,8 @@ pub struct DomainStates<'a> {
     pub gas: Option<&'a mut GasCompartment>,
     /// 格子流体(設計 docs/11-fluid/02-eulerian-grid.md §4.2、`BoussinesqBuoyancy`が使う)。
     pub grid_fluid: Option<&'a mut GridFluid2D>,
+    /// SPH流体(設計 docs/11-fluid/03-sph.md、`SphRigid`が使う)。
+    pub sph: Option<&'a mut SphFluid>,
 }
 
 /// ドメイン間結合(設計 docs/00-foundation/04-architecture.md §1.3「保存量の橋」)。

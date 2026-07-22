@@ -1006,14 +1006,35 @@
   明示的に渡す必要があることを発見した(修正後、一発Green化)。許容誤差は
   アンサンブル統計誤差(N=2000で~1/sqrt(N)≈2.2%程度)込みでrel<8%(実測rel_err
   約4.0%)を採用(`brownian_force_converges_to_energy_equipartition`と同じ判断)。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り2種のCoupling本体
-  (`GridFluidRigid`・`SphRigid`、いずれも流体`Solver`統合・Coupling registryという
-  前提工事は完了したが、剛体との具体的な相互作用力(ボクセル化境界・圧力積分/
-  境界粒子)の設計は未着手で、他のCouplingより実装コストが高い)、または
-  `PhaseChangeMorph`(イベント駆動の剛体/流体生成)・`BuoyancyDrag`(既存の
-  `MechanicsSolver`埋め込み実装の切り出しリスク)、あるいはシーンJSON`couplings`
-  セクション+排他結合検査のWorld接続、あるいは残りのヘッドレスデモ
-  (D12–D14・D18・D19–D33・D36–D39)。
+  続けてSphRigid(SPH⇔剛体、境界粒子)に着手した。前提として`sim_fluid::SphFluid`に
+  `boundary_force: Vec<Vec3>`フィールドを新設し(`compute_acceleration`内で流体粒子
+  への力の符号を反転して境界粒子ごとに積算、Newton第3法則)、既存の静的境界粒子
+  (壁・床)の物理を変えずに「境界粒子が流体から受ける反作用力」を読み出せるように
+  した。この新設フィールドは`sim-fluid::sph`側の単体テスト
+  (`boundary_force_sums_to_resting_fluid_columns_weight_on_the_container`、静止した
+  流体柱が容器に及ぼす力の総和が重量と一致、実測rel_err約0.4%)で検証済み。
+  `add_boundary_particle`は`boundary_force`も同時に(ゼロで)伸長するよう修正した
+  (`compute_acceleration`が呼ばれる前に境界粒子を追加した場合の範囲外アクセスを
+  実装検証中に発見)。続けて11種目のCoupling`SphRigid`を実装した — 球剛体のみ対象
+  (フィボナッチ格子で球面上に均一配置した境界粒子群、回転は反映しない、球は回転
+  対称なので中心位置だけ追従すれば十分)、`InductionCoupling`等と同じ1step遅れの
+  縮約(前stepの`boundary_force`合計を反作用力として適用→境界粒子群の位置を今step
+  の剛体位置へ更新)。当初は密な球状剛体をバルク流体に沈めてアルキメデスの浮力を
+  再現する動的シナリオでテストしようとしたが、境界粒子群と既存流体粒子の重なり
+  (桁違いの過大反発)・空洞境界での密度不連続(符号反転)などSPH特有の縁効果に
+  阻まれ安定した定量検証が難しいことを実装検証中に発見し、`SphRigid`自身の配管
+  ロジック(境界粒子の確保・反作用力の合計・剛体への注入・位置追従)を既知の
+  (手で設定した)`boundary_force`値で決定論的に検証するテストに切り替えた
+  (`boundary_force`自体の物理的妥当性は上記の`sim-fluid`側テストが既に担う)。
+  これで設計§3が挙げる元の12種のCouplingのうち11種(`BuoyancyDrag`を除く全て)+
+  追加実装の`ImageChargeForce`が出揃った。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り2種
+  (`GridFluidRigid`・`BuoyancyDrag`、前者は`GridFluidRigidBox2D`(X2)のような専用
+  シナリオではなく汎用Couplingとして実装する場合`GridFluid2D`への固体境界セル
+  導入が前提になり本格的な前提工事を要する、後者は既存の`MechanicsSolver`埋め込み
+  実装の切り出しリスク)、`PhaseChangeMorph`(イベント駆動の剛体/流体生成)、
+  あるいはシーンJSON`couplings`セクション+排他結合検査のWorld接続、あるいは
+  残りのヘッドレスデモ(D12・D14・D18・D20・D22–D24・D27–D33・D36–D39)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1507,13 +1528,18 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       持たないための単純化)、9種目の`ConvectionLink`(流体/媒質⇔`ThermalNode`、
       強制対流(平板・Blasius解)相関式$\overline{Nu}=0.664Re^{1/2}Pr^{1/3}$、特性速度は
       `GridFluid2D`速度場のRMS速度、熱源側・受熱面側とも単一`ThermalNode`で2ノード間
-      厳密対記帳)を追加済み。残り3種(`BuoyancyDrag`・`GridFluidRigid`・`SphRigid`)
-      自体は未実装(`BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装の切り出し
-      リスクで別枠、他2種は前提だった`SphFluid`・`GridFluid2D`双方への`Solver`トレイト
-      統合(決定的sub-step・状態ハッシュ)は完了しているが剛体との相互作用力(ボクセル化
-      境界・圧力積分/境界粒子)の設計自体が未着手)。シーンJSON`couplings`セクションから
-      の自動解決・排他結合検査(`validate_exclusive_couplings`)との接続、design上の
-      pre/post 2相分離、sub-iteration剛性閾値表は未実装
+      厳密対記帳)、11種目の`SphRigid`(SPH⇔剛体、境界粒子。`SphFluid`に新設した
+      `boundary_force`(境界粒子が流体から受ける反作用力、Newton第3法則)を使い、
+      球剛体のみ対象(フィボナッチ格子の境界粒子群、回転は反映しない)・
+      `InductionCoupling`と同じ1step遅れの縮約で双方向結合)を追加済み(10種目の
+      `ImageChargeForce`は元の12種カウント外の追加実装、D26の項目参照)。残り2種
+      (`BuoyancyDrag`・`GridFluidRigid`)自体は未実装(`BuoyancyDrag`は既存の
+      `MechanicsSolver`埋め込み実装の切り出しリスクで別枠、`GridFluidRigid`は
+      `GridFluid2D`側の`Solver`トレイト統合は完了しているが、汎用Couplingとして
+      実装するには`GridFluid2D`への固体境界セル導入が前提になり本格的な前提工事を
+      要する)。シーンJSON`couplings`セクションからの自動解決・排他結合検査
+      (`validate_exclusive_couplings`)との接続、design上のpre/post 2相分離、
+      sub-iteration剛性閾値表は未実装
 - [ ] `World`公開API拡張(docs/20-integration/04-world-api.md §2)—
       `snapshot()`/`restore()`(`World`全体への`#[derive(Clone)]`を使う縮約実装、
       各ドメインcrateの型に`Clone`を導出済み)・`Command`キュー(`push_command`/

@@ -159,6 +159,7 @@ mod tests {
                 em_electrostatics: None,
                 gas: None,
                 grid_fluid: None,
+                sph: None,
             };
             coupling.apply(&mut states, dt);
             if step >= warmup_steps {

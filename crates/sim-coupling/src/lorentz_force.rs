@@ -112,6 +112,7 @@ mod tests {
                 em_electrostatics: Some(&mut em),
                 gas: None,
                 grid_fluid: None,
+                sph: None,
             };
             coupling.apply(&mut states, dt);
             // Couplingは速度のみを更新する(モジュールdoc参照)ため、位置積分は
