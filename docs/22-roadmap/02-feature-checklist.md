@@ -603,10 +603,21 @@
   残り4本(手回し発電・氷と飲み物・断熱圧縮・再突入)はモーター・関節接続/
   `PhaseChangeMorph`/Sliderジョイント/天体レジーム切替との`World`接続がそれぞれ
   未実装のため後続増分。
+  続けてCIゲート(決定論・保存則residual)の状況を確認したところ、既存の
+  `.github/workflows/ci.yml`の`native`ジョブが`cargo test --workspace`を実行して
+  おり、決定論テスト(`determinism_same_scenario_twice_matches_hash`・
+  `determinism_snapshot_restore_replay_matches_uninterrupted_run`、いずれも
+  テスト自身が2回実行/スナップショット比較を行う)・保存則residualテスト
+  (`energy_ledger_residual_matches_analytic_symplectic_drift`・
+  `brake_heat_scenario_keeps_world_energy_ledger_residual_small`等)が毎回
+  検証されるため、専用のCIステップを別途追加せずとも階層1の決定論ゲート・
+  保存則residualゲートとして既に機能していると判断し、チェックリストの該当項目を
+  実装済みに更新した(新規コード変更は無し、状況確認とチェックリスト訂正のみ)。
+  性能ベンチ回帰ゲートのみ、`criterion`ベンチ自体が未導入のため引き続き未実装。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
   (イベント購読/sample_fluid等のクエリ、ただしイベント購読は現状どのドメインソルバも
-  イベントを発行していないため後回し)、または残り7種のCoupling(いずれも前提工事を
-  要する)。
+  イベントを発行していないため後回し)、性能ベンチ回帰CIゲート(`criterion`導入)、
+  または残り7種のCoupling(いずれも前提工事を要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1111,13 +1122,22 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [ ] 統合シナリオ: 氷と飲み物
 - [ ] 統合シナリオ: 断熱圧縮
 - [ ] 統合シナリオ: 再突入
-- [ ] CI ゲート: 決定論(2 回実行一致・スナップショット再開一致 = 階層 1、スレッド数変更・wasm⇔ネイティブは許容誤差 = 階層 2 — C-1 案 1)。
-      `World`の2回実行ハッシュ一致・スナップショット再開一致自体はテストとして実装
-      済み(`determinism_same_scenario_twice_matches_hash`・
-      `determinism_snapshot_restore_replay_matches_uninterrupted_run`)だが、
-      CIワークフロー(`.github/workflows/ci.yml`)への正式なゲート組み込みは未実装
-- [ ] CI ゲート: 保存則 residual
-- [ ] CI ゲート: 性能ベンチ回帰(構成規則)
+- [x] CI ゲート: 決定論(階層1: 2 回実行一致・スナップショット再開一致)— 既存の
+      `.github/workflows/ci.yml`の`native`ジョブが`cargo test --workspace`を実行
+      しており、`determinism_same_scenario_twice_matches_hash`・
+      `determinism_snapshot_restore_replay_matches_uninterrupted_run`(いずれも
+      テスト自身が2回実行/スナップショット比較を行う)がこの中で毎回検証される
+      ため、専用のCIステップを別途追加せずとも階層1のゲートとして機能している。
+      階層2(スレッド数変更・wasm⇔ネイティブの許容誤差、C-1案1)は並列化・
+      wasm側の決定論比較の仕組み自体が未導入のため引き続き未実装
+- [x] CI ゲート: 保存則 residual — 同様に`cargo test --workspace`経由で
+      `energy_ledger_residual_matches_analytic_symplectic_drift`・
+      `brake_heat_scenario_keeps_world_energy_ledger_residual_small`等の
+      residual閾値アサーションが毎回検証される。ドメイン別の保存則テスト
+      (docs/21-verification/02-conservation-laws.md)も同じ仕組みで既に運用中
+- [ ] CI ゲート: 性能ベンチ回帰(構成規則)— `criterion`ベンチが未導入
+      (ホットパス候補: 接触ソルバ・PCG・SPH近傍探索)、CIでの回帰検知の
+      仕組み自体が無いため引き続き未実装
 - [ ] 全デモ D1–D39 合格([§7](#7-デモ合格管理表-d1d43))
 
 ## 5. Phase D — レンダリング
