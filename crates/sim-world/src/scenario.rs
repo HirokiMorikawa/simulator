@@ -1,19 +1,29 @@
 //! シーン記述(JSON)。設計 docs/20-integration/04-world-api.md §3。
 //!
 //! **縮約実装の理由**: 設計例示のJSONスキーマ(`world`/`materials`/`bodies`/`fluids`/
-//! `couplings`/`probes`)のうち、`world`・`materials`(`extends`派生)・`bodies`のみを
-//! 実装する。`fluids`(静的水域/SPH等の流体ドメイン)・`couplings`(`Coupling` registry
-//! がまだ`World::step()`に接続されていない、各`sim-coupling`実装のモジュールdoc参照)・
-//! `probes`(シーンJSON上の文字列ターゲット解決)は、対応する`World`側の機能自体が
-//! まだ限定的なため後続増分で追加する。validator(参照整合検査)は、この縮約版が
-//! 対象とする範囲(材料参照)のみ実装する — 排他結合検査(`sim-coupling::
+//! `couplings`/`probes`)のうち、`couplings`(`Coupling` registryがまだ`World::step()`
+//! に接続されていない、各`sim-coupling`実装のモジュールdoc参照)以外は実装する。
+//! `fluids`は`sim_mechanics::MechanicsSolver::water`(P1スコープの単一`static_water`
+//! 領域、`sim_fluid::buoyancy`冒頭の注記参照)のみ対応 — 設計例示のAABB表現ではなく
+//! `water_level`(水平面の高さ)+`density`の縮約表現とする(現在の`StaticWaterRegion`
+//! 自体がAABBではなく単一の水位面のみを表すため)。`temperature`(水温、熱ドメインとの
+//! 結合)は未対応。`probes`は`body_pos_y`/`body_speed`のみ(`bodies[].name`で名前
+//! 解決)対応 — 設計例示の`{"ledger": "thermal"}`のような`ProbeTarget::LedgerKinetic`
+//! に素直に対応しない形は後続増分。validator(参照整合検査)はこの縮約版が対象とする
+//! 範囲(材料参照・剛体名参照)のみ実装する — 排他結合検査(`sim-coupling::
 //! validate_exclusive_couplings`)は`couplings`セクション未実装のため接続できない
 //! (後続増分)。
 
-use crate::{World, WorldOptions};
+use crate::{BodyId, ProbeTarget, World, WorldOptions};
 use serde::Deserialize;
+use sim_fluid::StaticWaterRegion;
 use sim_math::Vec3;
 use sim_mechanics::{BodyType, RigidBodyDesc, Shape};
+use std::collections::HashMap;
+
+/// `probes`セクションで名前解決を経ずにプローブ履歴の容量を指定する仕組みが設計JSONに
+/// 無いため、この縮約実装では固定容量を使う(600サンプル、既定`dt`(1/120)で5秒相当)。
+const DEFAULT_PROBE_CAPACITY: usize = 600;
 
 /// シーンロードの失敗(設計§3「validator: 参照整合(名前解決)…を位置つきエラーで返す」
 /// の縮約版 — 位置情報は持たず、エラー種別と関連する名前のみ)。
@@ -26,6 +36,8 @@ pub enum SceneError {
     /// `bodies[].material`が(`materials`セクションで派生したものを含め)既存の材料名を
     /// 指していない。
     UnknownMaterial(String),
+    /// `probes[].body_pos_y`等が`bodies[].name`のいずれとも一致しない。
+    UnknownBodyName(String),
 }
 
 #[derive(Deserialize)]
@@ -38,6 +50,10 @@ pub struct Scenario {
     pub materials: Vec<MaterialOverride>,
     #[serde(default)]
     pub bodies: Vec<BodyScenarioDesc>,
+    #[serde(default)]
+    pub fluids: Vec<FluidJson>,
+    #[serde(default)]
+    pub probes: Vec<ProbeJson>,
 }
 
 impl Scenario {
@@ -84,6 +100,23 @@ pub enum ShapeJson {
     Plane { normal: [f64; 3], d: f64 },
 }
 
+/// モジュールdoc「縮約実装の理由」参照 — 設計例示のAABBではなく`water_level`+
+/// `density`の縮約表現。
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FluidJson {
+    StaticWater { water_level: f64, density: f64 },
+}
+
+/// モジュールdoc「縮約実装の理由」参照 — `body_pos_y`/`body_speed`のみ、
+/// `bodies[].name`による名前解決。
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeJson {
+    BodyPosY(String),
+    BodySpeed(String),
+}
+
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
@@ -117,6 +150,7 @@ impl World {
             world.materials_mut().push(derived);
         }
 
+        let mut body_ids_by_name: HashMap<String, BodyId> = HashMap::new();
         for body in &scenario.bodies {
             let material_id = world
                 .materials()
@@ -139,7 +173,33 @@ impl World {
                 Some("kinematic") => BodyType::Kinematic,
                 _ => BodyType::Dynamic,
             };
-            world.create_body(desc);
+            let id = world.create_body(desc);
+            if let Some(name) = &body.name {
+                body_ids_by_name.insert(name.clone(), id);
+            }
+        }
+
+        for fluid in &scenario.fluids {
+            match fluid {
+                FluidJson::StaticWater {
+                    water_level,
+                    density,
+                } => {
+                    world.mechanics_mut().water =
+                        Some(StaticWaterRegion::new(*water_level, *density));
+                }
+            }
+        }
+
+        for probe in &scenario.probes {
+            let (name, make_target): (&str, fn(BodyId) -> ProbeTarget) = match probe {
+                ProbeJson::BodyPosY(name) => (name, ProbeTarget::BodyPosY),
+                ProbeJson::BodySpeed(name) => (name, ProbeTarget::BodySpeed),
+            };
+            let id = body_ids_by_name
+                .get(name)
+                .ok_or_else(|| SceneError::UnknownBodyName(name.to_string()))?;
+            world.add_probe(make_target(*id), DEFAULT_PROBE_CAPACITY);
         }
 
         Ok(world)
@@ -230,6 +290,61 @@ mod tests {
         assert!(matches!(
             result,
             Err(SceneError::UnknownMaterial(ref name)) if name == "unobtainium"
+        ));
+    }
+
+    /// `fluids`(縮約: `water_level`+`density`、モジュールdoc参照)+`probes`
+    /// (`body_pos_y`、`bodies[].name`による名前解決)を実際にパースして
+    /// `World`を構築し、浮力が働くこと(木箱が沈み込みつつも自由落下より遅く
+    /// 沈む)とプローブ履歴がサンプルされることを確認する。
+    #[test]
+    fn from_scenario_wires_static_water_fluid_and_body_pos_y_probe() {
+        let json = r#"
+        {
+          "name": "buoyancy-full",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "materials": [ { "extends": "木材(松)", "name": "light-wood", "density": 400.0 } ],
+          "bodies": [
+            { "shape": { "box": { "half": [0.1, 0.1, 0.1] } }, "material": "light-wood",
+              "position": [0, 0.5, 0], "name": "crate" }
+          ],
+          "fluids": [ { "static_water": { "water_level": 1.0, "density": 1000.0 } } ],
+          "probes": [ { "body_pos_y": "crate" } ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).expect("valid JSON");
+        let mut world =
+            World::from_scenario(&scenario).expect("should build without validation errors");
+
+        assert!(world.mechanics_mut().water.is_some());
+
+        for _ in 0..10 {
+            world.step();
+        }
+
+        let history: Vec<f64> = world.probe(0).unwrap().history().copied().collect();
+        assert_eq!(history.len(), 10);
+    }
+
+    /// `probes[].body_pos_y`が`bodies[].name`のいずれとも一致しない場合は
+    /// `SceneError::UnknownBodyName`。
+    #[test]
+    fn from_scenario_rejects_unknown_body_name_in_probe() {
+        let json = r#"
+        {
+          "name": "broken",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [
+            { "shape": { "sphere": { "radius": 1.0 } }, "material": "コンクリート", "name": "crate" }
+          ],
+          "probes": [ { "body_pos_y": "nonexistent" } ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).unwrap();
+        let result = World::from_scenario(&scenario);
+        assert!(matches!(
+            result,
+            Err(SceneError::UnknownBodyName(ref name)) if name == "nonexistent"
         ));
     }
 }

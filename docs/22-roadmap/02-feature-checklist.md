@@ -567,10 +567,24 @@
   実際にパースして`World`を構築し、派生材料・剛体(位置・種別)が正しく反映される
   ことと、両方の未知材料参照エラーが正しく報告されることの3本のテストで検証し、
   初回実装で一発Green化した。
+  続けてシーンJSONの`fluids`/`probes`セクションを実装した(`couplings`セクションは
+  `Coupling` registry未接続のため引き続き見送り)。`fluids`は
+  `sim_mechanics::MechanicsSolver::water`(P1スコープの単一`static_water`領域)のみ
+  対応 — 設計例示のAABB表現ではなく`water_level`(水平面の高さ)+`density`の縮約
+  表現とした(現在の`StaticWaterRegion`自体がAABBではなく単一の水位面のみを表す
+  ため)。`temperature`(水温、熱ドメインとの結合)は未対応。`probes`は`body_pos_y`/
+  `body_speed`のみ対応(`bodies[].name`による名前解決、シーン構築中に
+  `HashMap<String, BodyId>`を組み立てて使用) — 設計例示の`{"ledger": "thermal"}`の
+  ような`ProbeTarget::LedgerKinetic`に素直に対応しない形は後続増分。プローブ履歴の
+  容量を指定する仕組みが設計JSONに無いため固定容量(600サンプル、既定dt(1/120)で
+  5秒相当)を使う縮約実装とした。`SceneError::UnknownBodyName`を新規追加(probe名前
+  解決失敗用)。`sim-fluid`をsim-worldの依存に追加。静的水域+`body_pos_y`プローブを
+  実際にパースして浮力・プローブサンプリングが機能すること、未知の剛体名参照が
+  正しくエラー報告されることの2本のテストで検証し、初回実装で一発Green化した。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの拡張継続
-  (fluids/couplings/probesセクションのシーンJSON対応・イベント購読/sample_fluid等の
-  クエリ、ただしイベント購読は現状どのドメインソルバもイベントを発行していないため
-  後回し)、または残り7種のCoupling(いずれも前提工事を要する)。
+  (イベント購読/sample_fluid等のクエリ、ただしイベント購読は現状どのドメインソルバも
+  イベントを発行していないため後回し)、または残り7種のCoupling(いずれも前提工事を
+  要する)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1061,10 +1075,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `NodeTemp`/`CircuitCurrent`は単一ドメイン前提の縮約index、他は設計どおり)・
       `circuit_probe`(単一`circuit`ドメイン前提、`CircuitId`引数は省略)・
       `Scenario`/`from_scenario`(`serde`/`serde_json`を新規依存として追加、
-      `world`・`materials`(`extends`派生)・`bodies`のみ実装、`fluids`/`couplings`/
-      `probes`セクションと排他結合検査への接続は未実装)を実装済み。`subscribe`/
-      `drain_events`(現状どのドメインソルバもイベントを発行していないため後回し)・
-      `sample_fluid`等のクエリは未実装
+      `world`・`materials`(`extends`派生)・`bodies`・`fluids`(`static_water`のみ、
+      `water_level`+`density`の縮約表現)・`probes`(`body_pos_y`/`body_speed`のみ、
+      `bodies[].name`名前解決)を実装、`couplings`セクションと排他結合検査への接続は
+      `Coupling` registry未接続のため未実装)を実装済み。`subscribe`/`drain_events`
+      (現状どのドメインソルバもイベントを発行していないため後回し)・`sample_fluid`等の
+      クエリは未実装
 - [ ] 統合シナリオ: ブレーキ発熱
 - [ ] 統合シナリオ: 手回し発電
 - [ ] 統合シナリオ: 氷と飲み物
