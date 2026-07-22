@@ -37,9 +37,10 @@
 //! GridFluid系・SPH)は`Solver`トレイトを未実装のため今回は見送る(各流体型に`Solver`実装を
 //! 追加するか専用の接続方式を検討する必要があり、後続増分)。`quantum`/`statistical`は
 //! 専用シーンでのみ有効化する設計方針のため同様に見送る。`gas`
-//! (`sim_thermal::GasCompartment`、断熱圧縮の`PistonGas`結合が使う)も同じ理由で
-//! `Solver`を実装しない — `step()`の自動走査対象ではなく、`apply_coupling`経由での
-//! みピストンの変位から体積・温度が更新される。
+//! (`sim_thermal::GasCompartment`、断熱圧縮の`PistonGas`結合が使う)・`conduction_rod`
+//! (`sim_thermal::ConductionRod1D`、D16「熱伝導レース」が使う)も同じ理由で
+//! `Solver`を実装しない — `step()`の自動走査対象ではなく、呼び出し側が
+//! `apply_coupling`/`conduction_rod_mut().step(dt)`を明示的に呼んで状態を進める。
 
 mod demos;
 mod integration_scenarios;
@@ -222,6 +223,10 @@ pub struct World {
     /// `Some`)。`Solver`トレイトを実装しないため`step()`のドメイン走査対象ではなく、
     /// `apply_coupling`経由でのみ状態が変化する。
     gas: Option<sim_thermal::GasCompartment>,
+    /// 1D格子熱伝導ドメイン(D16「熱伝導レース」が使う、シーンが使う場合のみ`Some`)。
+    /// `gas`と同じ理由(`Solver`トレイト未実装)で`step()`の自動走査対象ではなく、
+    /// `conduction_rod_mut().step(dt)`を呼び出し側が明示的に呼ぶ必要がある。
+    conduction_rod: Option<sim_thermal::ConductionRod1D>,
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
@@ -291,6 +296,7 @@ impl World {
             astro: None,
             circuit: None,
             gas: None,
+            conduction_rod: None,
             materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
@@ -511,6 +517,19 @@ impl World {
 
     pub fn gas_mut(&mut self) -> Option<&mut sim_thermal::GasCompartment> {
         self.gas.as_mut()
+    }
+
+    /// 1D格子熱伝導ドメインを有効化する(D16「熱伝導レース」が使う)。
+    pub fn enable_conduction_rod(&mut self, rod: sim_thermal::ConductionRod1D) {
+        self.conduction_rod = Some(rod);
+    }
+
+    pub fn conduction_rod(&self) -> Option<&sim_thermal::ConductionRod1D> {
+        self.conduction_rod.as_ref()
+    }
+
+    pub fn conduction_rod_mut(&mut self) -> Option<&mut sim_thermal::ConductionRod1D> {
+        self.conduction_rod.as_mut()
     }
 
     /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す

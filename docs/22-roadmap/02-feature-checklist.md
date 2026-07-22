@@ -791,8 +791,20 @@
   `state_hash()`が一致することを確認した — M4(大振幅周期の楕円積分解析式)自体は
   `sim-mechanics`の専用テストで既に検証済みのため重複実装せず、代わりに「カオス的な
   系でも決定論的にリプレイできる」というデモの主眼(設計の「カオス+決定論」)を
-  検証する構成にした。初回実装で一発Green化した。残りのPhase 2〜3(D12–D18)・
-  Phase 4以降(D19–D39)は後続増分。
+  検証する構成にした。初回実装で一発Green化した。
+  続けてD16(熱伝導レース)を実装した。`sim_thermal::ConductionRod1D`(既存の
+  `gas`ドメインと同じ「`Solver`未実装、呼び出し側が明示的に`step(dt)`する」縮約)を
+  `conduction_rod`ドメインとして`World`に新設(`enable_conduction_rod`/
+  `conduction_rod`/`conduction_rod_mut`、`ConductionRod1D`に`#[derive(Clone)]`を
+  追加)し、銅・鋼・木材の3本の棒(同じ境界条件・同じ経過時間)を構築して、熱拡散率
+  $\alpha=k/(\rho c_p)$の大小関係どおりに中点温度の立ち上がりが速い(銅>鋼>木材)
+  ことを確認した。T3(1D棒の過渡伝導)自体は`sim-thermal`の専用テストで既に検証
+  済みのため、ここでは3素材の相対比較(デモの主眼)のみを追加検証する構成にし、
+  初回実装で一発Green化した。D17(ピストン)は`integration_scenarios.rs`の
+  `adiabatic_compression_scenario_conserves_piston_kinetic_and_gas_internal_energy`
+  がT5(断熱圧縮)を既に検証済みと判断し、重複実装せずヘッドレス部分(断熱側のみ、
+  等温圧縮側は`PistonGas`結合が対応していないため対象外)をカバー済みと見なした。
+  残りのPhase 2〜3(D12–D15・D18)・Phase 4以降(D19–D39)は後続増分。
 - **作業中**: ワークストリームB(Phase C)継続中 — 次は`World`公開APIの残り
   (`sample_fluid`は解像流体ドメインが`World`に未接続のため後回し)、性能ベンチ回帰
   ゲートのベースライン永続化、または残り5種のCoupling(いずれも本格的な前提工事を
@@ -1466,8 +1478,14 @@ Phase 2〜3:
 - [ ] D13 ロープと旗
 - [ ] D14 煙と渦
 - [ ] D15 対流
-- [ ] D16 熱伝導レース
-- [ ] D17 ピストン
+- [ ] D16 熱伝導レース(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
+      目視チェックはワークストリームD未着手のため保留。`World`に新設した
+      `conduction_rod`ドメイン(`ConductionRod1D`、`gas`と同じ縮約)経由で銅・鋼・
+      木材の3本の棒を構築し、熱拡散率どおりの立ち上がり順(銅>鋼>木材)を確認)
+- [ ] D17 ピストン(ヘッドレス部分(T5、断熱圧縮)は`integration_scenarios.rs`の
+      `adiabatic_compression_scenario_conserves_piston_kinetic_and_gas_internal_energy`
+      が既にカバー済みと見なす。等温圧縮側は`PistonGas`結合が対応していないため
+      対象外。目視チェック保留)
 - [ ] D18 氷と飲み物
 
 Phase 4:

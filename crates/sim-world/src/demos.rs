@@ -21,12 +21,21 @@
 //! `brake_heat_scenario_keeps_world_energy_ledger_residual_small`が既に同じ内容
 //! (鋼のブレーキ板+鋼の箱、運動エネルギー→熱の変換対応表)を検証済みのため、本モジュール
 //! への重複実装はしない(D10のヘッドレス部分は既存テストでカバー済みと見なす)。
-//! Phase 2〜3からはD11(振り子と時計)を実装した — M3(小振幅周期)を`World`経由で
-//! 確認しつつ、二重振り子(`DistanceJoint`を2本連鎖、大振幅でカオス的軌道)を同一
-//! 初期条件で2回実行し`state_hash()`が一致することを確認する(M4の楕円積分解析式
-//! 自体は`sim-mechanics`の専用テストで重複実装しない、「カオス的な系でも決定論的に
-//! リプレイできる」というデモの主眼を検証)。残りのPhase 2〜3(D12–D18)・
-//! Phase 4以降(D19–D39)は後続増分。
+//! Phase 2〜3からはD11(振り子と時計)・D16(熱伝導レース)を実装した。D11は
+//! M3(小振幅周期)を`World`経由で確認しつつ、二重振り子(`DistanceJoint`を2本連鎖、
+//! 大振幅でカオス的軌道)を同一初期条件で2回実行し`state_hash()`が一致することを
+//! 確認する(M4の楕円積分解析式自体は`sim-mechanics`の専用テストで重複実装しない、
+//! 「カオス的な系でも決定論的にリプレイできる」というデモの主眼を検証)。D16は
+//! `World`に新設した`conduction_rod`ドメイン(`sim_thermal::ConductionRod1D`、`gas`
+//! と同じ「`Solver`未実装、呼び出し側が明示的に`step(dt)`する」縮約)経由で銅・鋼・
+//! 木材の3本の棒を構築し、熱拡散率の大小関係どおりに中点温度の立ち上がりが速い
+//! (銅>鋼>木材)ことを確認する。D17(ピストン)は`crates/sim-world/src/
+//! integration_scenarios.rs`の`adiabatic_compression_scenario_conserves_piston_
+//! kinetic_and_gas_internal_energy`がT5(断熱圧縮)を既に検証済みのため重複実装
+//! しない(等温圧縮側は対象外 — `GasCompartment::isothermal_heat_for_volume_change`
+//! は解析検証用の閉形式ヘルパのみで、`PistonGas`結合が使う実際のstep単位の圧力
+//! フィードバックには未接続)。残りのPhase 2〜3(D12–D15・D18)・Phase 4以降
+//! (D19–D39)は後続増分。
 
 #[cfg(test)]
 mod tests {
@@ -720,6 +729,44 @@ mod tests {
             run_double_pendulum(),
             run_double_pendulum(),
             "double pendulum replay should be bit-identical despite chaotic sensitivity (D11 pass criterion)"
+        );
+    }
+
+    /// D16 熱伝導レース(同docs Phase 2〜3表)。「銅/鋼/木の棒の熱の伝わり比べ」
+    /// 「合格基準: T3、材質の$k$比」。`sim-thermal`のT3解析解テスト
+    /// (`ConductionRod1D`、フーリエ級数解)と同じ1D棒モデルを`World`経由(`enable_
+    /// conduction_rod`)で3素材(銅・鋼・木材)分構築し、同じ境界条件(左端高温・
+    /// 右端低温)・同じ経過時間で、熱拡散率($\alpha=k/(\rho c_p)$)が大きい素材ほど
+    /// 中点温度がより高温側(定常のランプ分布)に近づいている(銅>鋼>木材)ことを
+    /// 確認する — レースの「速さ」の定性比較そのもの。
+    #[test]
+    fn d16_thermal_conduction_race_orders_materials_by_thermal_diffusivity() {
+        let midpoint_temperature_after = |material_name: &str| -> f64 {
+            let mut world = World::new(WorldOptions::default());
+            let material_id = world.materials().find_by_name(material_name).unwrap();
+            let material = world.materials().get(material_id);
+            let alpha = material.conductivity / (material.density * material.specific_heat);
+
+            let node_count = 41;
+            let mut rod = sim_thermal::ConductionRod1D::new(node_count, 1.0, 0.0, alpha);
+            rod.set_boundary_temperatures(100.0, 0.0);
+            world.enable_conduction_rod(rod);
+
+            let dt = 1.0;
+            for _ in 0..60 {
+                world.conduction_rod_mut().unwrap().step(dt);
+            }
+            world.conduction_rod().unwrap().temperature[node_count / 2]
+        };
+
+        let t_copper = midpoint_temperature_after("銅");
+        let t_steel = midpoint_temperature_after("鋼(炭素鋼)");
+        let t_wood = midpoint_temperature_after("木材(松)");
+
+        assert!(
+            t_copper > t_steel && t_steel > t_wood,
+            "T3 + 材質のk比: higher thermal diffusivity should warm the midpoint faster: \
+             t_copper={t_copper:.4} t_steel={t_steel:.4} t_wood={t_wood:.4}"
         );
     }
 }

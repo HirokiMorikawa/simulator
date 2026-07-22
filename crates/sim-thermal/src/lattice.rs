@@ -8,6 +8,7 @@
 use sim_math::{pcg, Preconditioner};
 
 /// 1D棒の格子熱伝導ソルバ。両端(`temperature[0]`・`temperature[n-1]`)はDirichlet境界。
+#[derive(Clone)]
 pub struct ConductionRod1D {
     pub temperature: Vec<f64>,
     pub dx: f64,
