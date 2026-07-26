@@ -927,6 +927,13 @@ async function setUpSceneView(
   // 済みなので、フロントエンドは切替のみを担う。HUDの`circuit V`行が
   // 実際の分圧点電圧(開: 約6.67V、閉: 約0V)を毎フレーム表示する。
   const circuitSwitchToggle = document.getElementById("toggle-circuit-switch") as HTMLInputElement;
+  // ヒーター(`Command::SetHeatSource`実証用)。モジュールdoc「1step分だけ効く」
+  // 縮約セマンティクスのとおり、継続加熱するには毎stepの直前に再度
+  // `push_heat_source`を呼ぶ必要がある(`frame()`ループ内、`world.step()`の
+  // 直前で呼ぶ)。HUDの`heater T`行が熱ノードの現在温度(ニュートン冷却あり、
+  // 時定数τ=10s)を毎フレーム表示する。
+  const HEATER_WATTS = 2000.0;
+  const heaterToggle = document.getElementById("toggle-heater") as HTMLInputElement;
   const undoButton = document.getElementById("btn-undo") as HTMLButtonElement;
   const redoButton = document.getElementById("btn-redo") as HTMLButtonElement;
 
@@ -960,6 +967,7 @@ async function setUpSceneView(
     nudgeButton.disabled = mode === "edit";
     motorToggleButton.disabled = mode === "edit" || !motorArmBodies.has(selectedBodyIndex);
     circuitSwitchToggle.disabled = mode === "edit";
+    heaterToggle.disabled = mode === "edit";
     undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
     redoButton.disabled = mode !== "edit" || editRedoStack.length === 0;
     modeEditButton.classList.toggle("active", mode === "edit");
@@ -1305,6 +1313,7 @@ async function setUpSceneView(
       `step = ${world.step_count().toString()}`,
       `y = ${p[1].toFixed(4)} m`,
       `circuit V = ${world.circuit_divider_voltage().toFixed(3)} V`,
+      `heater T = ${world.heater_node_temperature().toFixed(2)} K`,
     ].join("\n");
     timelineTime.textContent = `t = ${world.time().toFixed(3)} s`;
     timelineStep.textContent = `step = ${world.step_count().toString()}`;
@@ -1335,6 +1344,7 @@ async function setUpSceneView(
       accumulator += frameSeconds * timeScale;
       let steps = 0;
       while (accumulator >= DT && steps < MAX_STEPS_PER_FRAME) {
+        if (heaterToggle.checked) world.push_heat_source(HEATER_WATTS);
         world.step();
         accumulator -= DT;
         steps += 1;

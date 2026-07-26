@@ -542,6 +542,7 @@ dependencies = [
  "sim-em",
  "sim-math",
  "sim-mechanics",
+ "sim-thermal",
  "sim-world",
  "wasm-bindgen",
 ]

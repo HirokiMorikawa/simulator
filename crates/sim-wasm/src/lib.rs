@@ -38,6 +38,10 @@ const SNAPSHOT_RING_CAPACITY: usize = 8;
 /// 分圧回路(`Command::SetSwitch`実証用、`WasmWorld::new`参照)の分圧点ノード番号。
 const CIRCUIT_DIVIDER_NODE: usize = 2;
 
+/// 熱ノード(`Command::SetHeatSource`実証用、`WasmWorld::new`参照)のindex
+/// (単一ノードのみのため常に0)。
+const THERMAL_HEATER_NODE: usize = 0;
+
 /// スポーンパレット(設計docs/23-frontend/01-editor.md §6「形状×材質を選んで
 /// クリック配置」)で追加したボディの記録。Shapeは`World::mechanics().bodies.
 /// shape_of`で実クエリできるが(`body_shape_label_at`参照)、Materialは`World`が
@@ -128,6 +132,19 @@ impl WasmWorld {
         let circuit_switch_index = circuit.add_switch(CIRCUIT_DIVIDER_NODE, sim_em::GROUND, false);
         circuit.add_resistor(CIRCUIT_DIVIDER_NODE, sim_em::GROUND, 200.0);
         inner.enable_circuit(circuit);
+
+        // 熱ノード(`Command::SetHeatSource`の実証用、`sim-world`の
+        // `set_heat_source_command_raises_temperature_for_one_step_only`と
+        // 同じ「1step分だけ効く」縮約セマンティクス)。ニュートン冷却
+        // (`sim-thermal`のT1テストと同じc=100J/K・h=10W/(m^2K)・area=1m^2、
+        // 時定数τ=c/(hA)=10s)ありの単一ノード、初期温度=周囲温度。
+        let ambient_temperature = 293.15;
+        let mut thermal = sim_thermal::ThermalSolver::new(ambient_temperature);
+        let mut heater_node = sim_thermal::ThermalNode::new(ambient_temperature, 100.0);
+        heater_node.convection_coefficient = 10.0;
+        heater_node.area = 1.0;
+        thermal.add_node(heater_node);
+        inner.enable_thermal(thermal);
 
         let snapshot_interval_steps = (1.0 / dt).round().max(1.0) as u64;
         WasmWorld {
@@ -470,6 +487,22 @@ impl WasmWorld {
         self.inner.push_command(Command::SetSwitch {
             switch_index: self.circuit_switch_index,
             closed,
+        });
+    }
+
+    /// 熱ノード(`WasmWorld::new`参照)の現在温度[K]。
+    pub fn heater_node_temperature(&self) -> f64 {
+        self.inner.thermal().unwrap().nodes[THERMAL_HEATER_NODE].temperature
+    }
+
+    /// `Command::SetHeatSource`——熱ノードへ`watts`ワットの熱源を1step分だけ
+    /// 与える(モジュールdoc「1step分だけ効く」縮約セマンティクス参照)。
+    /// 継続加熱するには呼び出し側が毎stepの直前に再度呼ぶ必要がある
+    /// (`main.ts`の`frame()`ループ参照)。
+    pub fn push_heat_source(&mut self, watts: f64) {
+        self.inner.push_command(Command::SetHeatSource {
+            node: THERMAL_HEATER_NODE,
+            watts,
         });
     }
 

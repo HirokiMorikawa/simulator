@@ -89,8 +89,12 @@
   ピン留めしたアームをToolbarの「モーター切替」ボタンで0°/90°角度制御)。
   SetSwitchも配線済み(分圧回路を`WasmWorld::new`で常設、Toolbarの
   「回路スイッチ」チェックボックス→`Command::SetSwitch`、分圧点電圧を
-  HUDに表示)。残りは流体場/フレーム軸オーバーレイ・SetHeatSource・回路
-  エディタ(専用パネルUI)等。
+  HUDに表示)。SetHeatSourceも配線済み(熱ノード(ニュートン冷却あり)を
+  `WasmWorld::new`で常設、「ヒーター」チェックボックスがオンの間`frame()`
+  ループが毎stepの直前に`Command::SetHeatSource`を送り続ける、温度をHUDに
+  表示)——これでCommand系5種(ApplyForce/Grab系/SetMotorTarget/SetSwitch/
+  SetHeatSource)全てが配線済みになった。残りは流体場/フレーム軸
+  オーバーレイ・回路エディタ(専用パネルUI)等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
   機を見て並行して進める。優先順位の詳細は
@@ -1155,8 +1159,19 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       スイッチが開の状態では理論値どおり6.667V(10V×200/300)、閉じると
       0.000V、再度開くと6.667Vに戻ることを確認した(既存の`sim-world`テスト
       `set_switch_command_closes_switch_and_changes_circuit_state`と同じ
-      回路構成を再利用)。SetHeatSource(`sim_world::Command`には既存)の配線・
-      入力列記録は未実装)
+      回路構成を再利用)。
+      SetHeatSourceも配線済み——`WasmWorld::new`で熱ノード(`sim_thermal::
+      ThermalSolver`、ニュートン冷却あり: c=100J/K・h=10W/(m^2K)・area=1m^2、
+      時定数τ=10s、初期温度=周囲温度293.15K)を`World::enable_thermal`で
+      有効化し、Toolbarの「ヒーター」チェックボックスがオンの間、
+      `frame()`ループの各sub-stepの直前に`push_heat_source`→
+      `Command::SetHeatSource`(2000W)を送り続ける(モジュールdoc「1step分
+      だけ効く」縮約セマンティクスのとおり、継続加熱には毎stepの再送が必要、
+      フロントエンドがまさにそれを行う設計)。熱ノードの現在温度
+      (`heater_node_temperature`)をHUDに毎フレーム表示する。Playwrightで、
+      ヒーターをオンにすると実際に温度が293.15K→約332K相当まで連続的に
+      上昇し続け、オフにすると上昇が止まり(ニュートン冷却によりわずかに
+      下降し始める)ことを確認した。入力列記録は未実装)
 - [ ] レイアウトプリセット(Default / Physics-focus / Circuit-focus / Astro)
       (Default(標準比率)・Physics-focus(コンソール行を拡大)・Astro(タイムライン行を
       固定の大きな高さにしその分コンソール行を縮小)の3種を実装済み(`demo/src/
