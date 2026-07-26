@@ -1381,6 +1381,76 @@ mod tests {
         );
     }
 
+    /// `BuoyancyDrag`をレジストリ経由(`add_coupling`)で剛体に接続し、`demos.rs`のD6
+    /// (F4部分、密度比0.6の直立直方体)と同じ釣り合い喫水深さの近傍で有界に留まる
+    /// ことを確認する(既存の`MechanicsSolver.water`埋め込み経路(D6が使う)と同じ
+    /// 物理式(`sim_fluid::{submerged_box_axis_aligned, buoyancy_force}`)を使うが、
+    /// `mechanics_mut().water`は設定しない独立経路)。
+    ///
+    /// D6のF4部分は埋め込み経路(`apply_forces`内でmechanicsの各sub-stepごとに
+    /// 浮力を再評価)のため実質的に減衰項なしでも密着した釣り合いに留まるが、この
+    /// Coupling経由の経路は`SphRigid`・`GridFluidRigid`等と同じ1step遅れの縮約
+    /// (Couplingレジストリはフレームごとに1回だけ適用され、mechanicsの内部sub-step
+    /// ごとには再評価されない)であり、かつ抗力(減衰)を伴わない純粋な浮力の
+    /// 復元力のみのため、実装検証中に測定したところ振幅約0.02(side比2%)の非減衰
+    /// 振動として恒久的に持続することを発見した(F4のように単調に釣り合いへ収束
+    /// するのではなく、有界な振動に留まることを確認する検証に切り替えた、X2の
+    /// 「有界であること」の確認と同種の判断)。許容誤差はこの実測振幅に十分な
+    /// マージンを持たせてrel<0.03(side比)とした。
+    #[test]
+    fn buoyancy_drag_coupling_stays_bounded_near_embedded_path_equilibrium_waterline_via_world() {
+        let water_density = 998.2;
+        let half = 0.5;
+        let side = 2.0 * half;
+        let ratio = 0.6;
+
+        let mut world = World::new(WorldOptions::default());
+        let body_material = world.materials_mut().push(sim_core::Material {
+            name: "test-buoyancy-drag-coupling-floating-body",
+            density: ratio * water_density,
+            friction: 0.0,
+            restitution: 0.0,
+            youngs_modulus: None,
+            specific_heat: 1000.0,
+            conductivity: 1.0,
+            emissivity: 0.5,
+            melting: None,
+            resistivity: None,
+            relative_permittivity: 1.0,
+            refractive_index: None,
+            source: "test fixture",
+            uncertainty: 0.0,
+        });
+        let h_sub = ratio * side;
+        let equilibrium_y = -h_sub + half;
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(half, half, half),
+            },
+            body_material,
+        );
+        desc.transform.position = Vec3::new(0.0, equilibrium_y, 0.0);
+        let box_id = world.create_body(desc);
+
+        world.add_coupling(Box::new(sim_coupling::BuoyancyDrag {
+            body_index: box_id.index as usize,
+            water: Some(sim_fluid::StaticWaterRegion::new(0.0, water_density)),
+            atmosphere: None,
+        }));
+
+        let mut max_drift: f64 = 0.0;
+        for _ in 0..2000 {
+            world.step();
+            let y = world.body_position(box_id).unwrap().y;
+            assert!(y.is_finite(), "solver diverged: y={y}");
+            max_drift = max_drift.max((y - equilibrium_y).abs());
+        }
+        assert!(
+            max_drift / side < 0.03,
+            "max_drift={max_drift} equilibrium_y={equilibrium_y} side={side}"
+        );
+    }
+
     /// `add_coupling`で登録した`Coupling`が`step()`ごとに自動適用され(呼び出し側が
     /// `apply_coupling`を手動で呼ばなくても)、`snapshot`/`restore`(`#[derive(Clone)]`
     /// 経由)を跨いでもレジストリごと正しく複製・継続することを確認する

@@ -3,20 +3,23 @@
 //! シーン設定における排他結合(同じ物理を2経路で計算しない、設計§2規則2)の静的検査
 //! (`validate_exclusive_couplings`)に加え、`Coupling`トレイト + `DomainStates`
 //! (設計docs/00-foundation/04-architecture.md §1.3「保存量の橋」、`domain_states`
-//! モジュールdoc参照)と、具体的な実装12種(`DissipationToHeat`・`JouleHeat`・
-//! `BrownianForce`・`LorentzForce`・`InductionCoupling`・`MotorCoupling`・`PistonGas`・
-//! `BoussinesqBuoyancy`・`ConvectionLink`・`SphRigid`・`GridFluidRigid`・
+//! モジュールdoc参照)と、具体的な実装13種(`DissipationToHeat`・`BuoyancyDrag`・
+//! `JouleHeat`・`BrownianForce`・`LorentzForce`・`InductionCoupling`・`MotorCoupling`・
+//! `PistonGas`・`BoussinesqBuoyancy`・`ConvectionLink`・`SphRigid`・`GridFluidRigid`・
 //! `ImageChargeForce`、各モジュールdoc参照)を実装する。これで設計§3が挙げる元の12種の
-//! Couplingのうち11種(`BuoyancyDrag`を除く全て)+ D26「帯電風船」向けに設計
-//! docs/13-electromagnetism/01-electrostatics-magnetostatics.md §2が別途要求する
-//! 「鏡像力」である追加実装の`ImageChargeForce`が出揃った。残る`BuoyancyDrag`(既存の
-//! `MechanicsSolver`埋め込み実装の切り出しリスクで別枠)・sub-iteration剛性閾値表
+//! Couplingが全て出揃った(`BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装を
+//! 置き換えるものではなく、同じ物理式を剛体単位でCoupling登録経由から選択的に適用する
+//! 独立した追加経路として実装した、`buoyancy_drag`モジュールdoc参照)+ D26「帯電風船」
+//! 向けに設計docs/13-electromagnetism/01-electrostatics-magnetostatics.md §2が別途
+//! 要求する「鏡像力」である追加実装の`ImageChargeForce`。sub-iteration剛性閾値表
 //! (設計§2規則3、`GridFluidRigid`自身は現状固定的な単一適用で、`sim_fluid::
-//! GridFluidRigidBox2D`(X2)が持つ閾値ベースのsub-iteration機構までは踏襲していない)は
+//! GridFluidRigidBox2D`(X2)が持つ閾値ベースのsub-iteration機構までは踏襲していない)・
+//! シーンJSON`couplings`セクションからの自動解決・design上のpre/post 2相分離は
 //! 後続増分で追加する。
 
 mod boussinesq_buoyancy;
 mod brownian_force;
+mod buoyancy_drag;
 mod convection_link;
 mod dissipation_to_heat;
 mod domain_states;
@@ -30,6 +33,7 @@ mod piston_gas;
 mod sph_rigid;
 pub use boussinesq_buoyancy::BoussinesqBuoyancy;
 pub use brownian_force::BrownianForce;
+pub use buoyancy_drag::BuoyancyDrag;
 pub use convection_link::ConvectionLink;
 pub use dissipation_to_heat::DissipationToHeat;
 pub use domain_states::{Coupling, DomainStates};

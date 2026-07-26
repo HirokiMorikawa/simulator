@@ -1067,11 +1067,34 @@
   計算であり`World`のドメイン合成・時間積分を必要としないため、`sim-em::optics`の
   E9–E12テストが既にカバー済みと見なした(いずれも新規コードなし、§7の該当行に
   根拠を記載)。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は残り1種
-  (`BuoyancyDrag`、既存の`MechanicsSolver`埋め込み実装の切り出しリスクで要判断)、
-  `PhaseChangeMorph`(イベント駆動の剛体/流体生成)、あるいはシーンJSON
-  `couplings`セクション+排他結合検査のWorld接続、あるいは残りのヘッドレスデモ
-  (D12・D18・D20・D23・D24・D27–D33・D36–D39)。
+  続けて最後の1種、`BuoyancyDrag`(静的媒質→剛体力、浮力・抗力)に着手した。既存の
+  `sim_mechanics::MechanicsSolver`は`water: Option<StaticWaterRegion>`・
+  `atmosphere: Option<Atmosphere>`フィールドを持ち、`apply_forces`内で該当形状
+  (直立直方体の浮力・球の抗力)全てに無条件で同じ物理式を適用する埋め込み実装が
+  既にあり(多数の既存テスト・デモが依存)、これを切り出す(削除して置き換える)のは
+  高リスクな変更になるため終始見送ってきた。今回、切り出しではなく**独立した追加の
+  Coupling**として実装する方針に転換して解決した — 既存の埋め込みフィールドは一切
+  変更せず、`sim_coupling::BuoyancyDrag{body_index, water, atmosphere}`が
+  同じ物理式(`sim_fluid::{submerged_box_axis_aligned, buoyancy_force,
+  drag_force_sphere}`)を剛体単位でCouplingレジストリ経由から選択的に適用する
+  (`LorentzForce`・`BrownianForce`と同じ「剛体ごとの明示的な結合登録」パターン)。
+  同一剛体で両方の経路を同時に有効にすると二重計上になる点はモジュールdocに明記した
+  (設計§2規則2、`SceneCouplingConfig.static_water_buoyancy`が表す区別と同じ)。
+  テストは`sim_fluid`側の解析式(`buoyancy_force`・`drag_force_sphere`)を直接呼んで
+  期待値を作る形式的な配線検証(動的な定量シナリオ特有の縁効果を経由しないため
+  `SphRigid`のような沼にはまらず一発Green)。`World`経由の配線確認として、
+  D6(F4部分)と同じ密度比0.6の直立直方体をこのCoupling経由で浮かせる検証も追加
+  したが、実装検証中に発見: 埋め込み経路はmechanicsの内部sub-stepごとに浮力を
+  再評価するため実質的に釣り合いへ密着するのに対し、Coupling経由は`SphRigid`等と
+  同じ1step遅れの縮約(フレームごとに1回だけ適用)かつ抗力を伴わない浮力のみのため、
+  振幅約2%(side比)の非減衰振動として恒久的に持続することを発見した。単調収束では
+  なく有界振動であることを確認する検証(X2の「有界であること」の確認と同種)に
+  切り替えて解決した(rel<0.03)。これで設計§3が挙げる元の12種のCouplingが全て
+  出揃った。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次は`PhaseChangeMorph`
+  (イベント駆動の剛体/流体生成)、あるいはシーンJSON`couplings`セクション+
+  排他結合検査のWorld接続、design上のpre/post 2相分離・sub-iteration剛性閾値表、
+  あるいは残りのヘッドレスデモ(D12・D18・D20・D23・D24・D27–D33・D36–D39)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
