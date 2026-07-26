@@ -16,6 +16,8 @@
 //! (シーンJSON経由で任意個のボディを構築できるようになれば、`from_scenario`の
 //! ボディリストをそのまま列挙する形に置き換える)。
 
+use std::collections::VecDeque;
+
 use js_sys::{Float32Array, Float64Array};
 use sim_mechanics::{BodyType, RigidBodyDesc, Shape};
 use sim_world::{BodyId, Command, ProbeTarget, World, WorldOptions};
@@ -26,12 +28,20 @@ use wasm_bindgen::prelude::*;
 /// step分(≈`PROBE_HISTORY_CAPACITY*dt`秒)のスクロールウィンドウになる。
 const PROBE_HISTORY_CAPACITY: usize = 600;
 
+/// Timelineパネルのスナップショットリングバッファ(設計docs/00-foundation/
+/// 04-architecture.md §「巻き戻しのスナップショット予算」: 既定1s間隔・
+/// リングバッファN=8面・直近8s分)。1s間隔は`dt`から算出する
+/// (`WasmWorld::new`で`1.0/dt`を四捨五入)。
+const SNAPSHOT_RING_CAPACITY: usize = 8;
+
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
     ground_body: BodyId,
     box_body: BodyId,
     y_probe: usize,
+    snapshot_interval_steps: u64,
+    snapshots: VecDeque<World>,
 }
 
 #[wasm_bindgen]
@@ -71,11 +81,14 @@ impl WasmWorld {
         desc.transform.position = sim_math::Vec3::new(0.0, initial_height, 0.0);
         let box_body = inner.create_body(desc);
         let y_probe = inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY);
+        let snapshot_interval_steps = (1.0 / dt).round().max(1.0) as u64;
         WasmWorld {
             inner,
             ground_body,
             box_body,
             y_probe,
+            snapshot_interval_steps,
+            snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
         }
     }
 
@@ -138,9 +151,36 @@ impl WasmWorld {
         out
     }
 
-    /// 1 world step。
+    /// 1 world step。1s相当のstep数ごとにTimelineスナップショットを
+    /// リングバッファへ記録する(モジュールdoc「スナップショットリングバッファ」
+    /// 参照、既存の`World::snapshot`をそのまま使う)。
     pub fn step(&mut self) {
         self.inner.step();
+        if self.inner.step_count().is_multiple_of(self.snapshot_interval_steps) {
+            if self.snapshots.len() >= SNAPSHOT_RING_CAPACITY {
+                self.snapshots.pop_front();
+            }
+            self.snapshots.push_back(self.inner.snapshot());
+        }
+    }
+
+    /// Timelineスクラバが表示できるスナップショット数(モジュールdoc参照)。
+    pub fn snapshot_count(&self) -> usize {
+        self.snapshots.len()
+    }
+
+    /// `index`番目のスナップショットの記録時刻(秒、古い順)。
+    pub fn snapshot_time_at(&self, index: usize) -> f64 {
+        self.snapshots[index].time()
+    }
+
+    /// Timelineスクラバ操作: `index`番目のスナップショットへ巻き戻す(既存の
+    /// `World::restore`をそのまま使う)。巻き戻した時点より後のスナップショットは
+    /// もはや実際の未来を表さないため破棄する(新しいタイムラインがそこから
+    /// 再開する、設計の「直前スナップショットへの巻き戻し」と同じ発想)。
+    pub fn restore_snapshot(&mut self, index: usize) {
+        self.inner.restore(&self.snapshots[index]);
+        self.snapshots.truncate(index + 1);
     }
 
     pub fn time(&self) -> f64 {

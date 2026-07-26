@@ -374,6 +374,26 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
     }
   });
 
+  // Timeline スクラバ(設計docs/00-foundation/04-architecture.md「巻き戻しの
+  // スナップショット予算」既定1s間隔・リングバッファN=8面)。ドラッグ中
+  // (`scrubbing`)は`render()`側からスクラバのmax/valueを触らない——そうしないと
+  // 毎フレームの「最新に追従」更新がユーザーのドラッグ位置を上書きしてしまう。
+  const scrubber = document.getElementById("timeline-scrubber") as HTMLInputElement;
+  const playModeBadge = document.getElementById("play-mode-badge")!;
+  let scrubbing = false;
+  scrubber.addEventListener("pointerdown", () => {
+    scrubbing = true;
+    playing = false;
+    playButton.textContent = "▶";
+  });
+  scrubber.addEventListener("input", () => {
+    world.restore_snapshot(Number(scrubber.value));
+    render();
+  });
+  scrubber.addEventListener("pointerup", () => {
+    scrubbing = false;
+  });
+
   // 設計§4「Playモードでの介入は全てCommandとしてキューに積まれ、次ステップ先頭で
   // 適用される」の最小デモ: 直接オブジェクトの状態を書き換えるのではなく、
   // `push_apply_force`(Command::ApplyForceをキューに積む`sim-wasm`側の新API)を
@@ -425,6 +445,13 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
     timelineStep.textContent = `step = ${world.step_count().toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
     hashDisplay.title = hashFull;
+    playModeBadge.textContent = playing ? "Playing" : "Paused";
+
+    if (!scrubbing) {
+      const latestIndex = Math.max(world.snapshot_count() - 1, 0);
+      scrubber.max = String(latestIndex);
+      scrubber.value = String(latestIndex);
+    }
 
     renderer.render(scene, camera);
   }

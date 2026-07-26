@@ -42,8 +42,10 @@
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
   Grab/MoveGrab/Releaseによるドラッグ操作+速度ベクトルオーバーレイ)+
   Toolbar(再生/Nudge Command)+ Hierarchy/Inspector(複数ボディ列挙・
-  Scene View双方向選択連動、実Transformデータ)+ Probe Graphs(1系列)まで
-  実装(詳細は§6参照)。大部分(正式なGizmo・残りのオーバーレイ種別・
+  Scene View双方向選択連動、実Transformデータ)+ Probe Graphs(1系列)+
+  Timeline(既存の`World::snapshot`/`restore`によるスナップショットリング
+  バッファ(1s間隔・N=8面)で実際にスクラブ・巻き戻しできる)まで実装
+  (詳細は§6参照)。大部分(正式なGizmo・残りのオーバーレイ種別・
   Edit/Playモード分離・回路エディタ等)は未着手。
 - **次**: ワークストリームDの継続(Hierarchy/Inspectorの複数ボディ対応、Gizmo等)を軸に、
   ワークストリームB残り2シナリオ・ワークストリームC残り(R4・R3完全化)は機を見て並行して
@@ -873,6 +875,16 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       ため固定のルックアップテーブルのまま(World API-only制約、`main.ts`の
       `BODY_META`参照)。Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジは未実装)
 - [ ] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク
+      (再生スクラバは設計docs/00-foundation/04-architecture.md「巻き戻しの
+      スナップショット予算」(既定1s間隔・リングバッファN=8面)どおりに実装済み
+      ——`sim-wasm`が既存の`World::snapshot`/`restore`をそのまま使い1s相当の
+      step数ごとに記録、`snapshot_count`/`snapshot_time_at`/`restore_snapshot`を
+      公開。ドラッグ中は自動一時停止し、離した時点の状態(過去の状態を復元した
+      場合はその時点、それより後のスナップショットは新しいタイムラインとして
+      破棄)に留まる。Playwrightで実際にマウスドラッグでスクラブし、位置・速度・
+      Probe Graphs履歴が過去の値に正しく復元され、離した後も時間が進まない
+      (真に一時停止する)ことを確認した。Play モードバッジはPlaying/Pausedの
+      2状態のみ実装(Edit/Replayingは未実装)。ブックマークは未実装)
       (時刻・step表示は配線済み、スクラバ操作・スナップショット巻き戻し・
       ブックマークは未実装)
 - [ ] Console: イベント・診断ログ(発散・CFL 警告・シーンクラス/スロー再生バッジ)+ フィルタ + クリック→時刻/オブジェクト連動
