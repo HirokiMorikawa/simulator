@@ -283,6 +283,22 @@ pub struct World {
     /// `add_coupling`で登録され、`step()`が毎フレーム自動的に`.apply()`を呼ぶ
     /// `Coupling`のレジストリ(`apply_coupling`のdoc参照。登録順=決定論的な適用順)。
     couplings: Vec<Box<dyn sim_coupling::Coupling>>,
+    /// 時間加速の2レジーム(設計docs/20-integration/06-regime-switching.md §2、
+    /// `sim_astro::TimeRegime`をそのまま使う)。既定`Local`は「これまでの`step()`の
+    /// 挙動(有効な全ドメインを毎stepまとめて進める)」と完全に一致するため、この
+    /// フィールド追加自体は既存シナリオの挙動を一切変えない。`Astro`に切り替えると
+    /// `astro`ドメインのみを独立時間軸`dt_astro`で進め、他の全ドメイン(`mechanics`
+    /// 含む)は凍結する(設計§1「天体レンジ…ローカル物理ソルバは停止」)。
+    ///
+    /// **縮約実装の理由**: 設計が定めるプロトコル全体(切替のCommand化・ヒステリシス付き
+    /// 自動切替・World時刻の天体時刻への従属化・Astro中のスナップショット間隔の天体時間
+    /// 基準化・切替を跨ぐリプレイ一致のCIゲート)はここでは実装しない。本増分は
+    /// 「レジームがWorldの状態として存在し、`step()`がそれに応じて正しくドメインの
+    /// 進行/凍結を分岐する」という土台のみを提供する(`set_time_regime`は直接呼び出し、
+    /// Command経由ではない)。`Local`の`steps_per_frame`(通常レンジの時間倍率)も
+    /// まだ`step()`から参照されない(フロントエンド側の`MAX_STEPS_PER_FRAME`相当の
+    /// responsibilityは既に呼び出し側にあるため)。
+    time_regime: sim_astro::TimeRegime,
 }
 
 /// `event_log`の容量(設計は`subscribe`/`drain_events`の容量を規定しないため、
@@ -344,7 +360,20 @@ impl World {
             grab_joints: std::collections::HashMap::new(),
             event_log: sim_math::RingBuffer::new(EVENT_LOG_CAPACITY),
             couplings: Vec::new(),
+            time_regime: sim_astro::TimeRegime::Local { steps_per_frame: 1 },
         }
+    }
+
+    /// 現在のレジーム(設計docs/20-integration/06-regime-switching.md §2)。
+    pub fn time_regime(&self) -> sim_astro::TimeRegime {
+        self.time_regime
+    }
+
+    /// レジームを切り替える(`time_regime`フィールドdoc参照。直接呼び出しであり、
+    /// Command経由での記録・リプレイは未実装——設計が求める「加速率の変更はコマンド」
+    /// (§1)自体は後続増分)。
+    pub fn set_time_regime(&mut self, regime: sim_astro::TimeRegime) {
+        self.time_regime = regime;
     }
 
     /// プローブを登録する(`Probe`のdoc参照)。返すハンドルは`probe`/`probe_history`が
@@ -718,30 +747,54 @@ impl World {
         }
         self.apply_pending_commands();
         let dt = self.clock.dt();
-        run_domain_substeps(
-            &mut self.mechanics,
-            dt,
-            &self.materials,
-            &mut self.rng,
-            &mut self.events,
-        );
-        if let Some(t) = &mut self.thermal {
-            run_domain_substeps(t, dt, &self.materials, &mut self.rng, &mut self.events);
-        }
-        if let Some(e) = &mut self.em_electrostatics {
-            run_domain_substeps(e, dt, &self.materials, &mut self.rng, &mut self.events);
-        }
-        if let Some(a) = &mut self.astro {
-            run_domain_substeps(a, dt, &self.materials, &mut self.rng, &mut self.events);
-        }
-        if let Some(c) = &mut self.circuit {
-            run_domain_substeps(c, dt, &self.materials, &mut self.rng, &mut self.events);
-        }
-        if let Some(s) = &mut self.sph {
-            run_domain_substeps(s, dt, &self.materials, &mut self.rng, &mut self.events);
-        }
-        if let Some(g) = &mut self.grid_fluid {
-            run_domain_substeps(g, dt, &self.materials, &mut self.rng, &mut self.events);
+        match self.time_regime {
+            sim_astro::TimeRegime::Local { .. } => {
+                run_domain_substeps(
+                    &mut self.mechanics,
+                    dt,
+                    &self.materials,
+                    &mut self.rng,
+                    &mut self.events,
+                );
+                if let Some(t) = &mut self.thermal {
+                    run_domain_substeps(t, dt, &self.materials, &mut self.rng, &mut self.events);
+                }
+                if let Some(e) = &mut self.em_electrostatics {
+                    run_domain_substeps(e, dt, &self.materials, &mut self.rng, &mut self.events);
+                }
+                if let Some(a) = &mut self.astro {
+                    run_domain_substeps(a, dt, &self.materials, &mut self.rng, &mut self.events);
+                }
+                if let Some(c) = &mut self.circuit {
+                    run_domain_substeps(c, dt, &self.materials, &mut self.rng, &mut self.events);
+                }
+                if let Some(s) = &mut self.sph {
+                    run_domain_substeps(s, dt, &self.materials, &mut self.rng, &mut self.events);
+                }
+                if let Some(g) = &mut self.grid_fluid {
+                    run_domain_substeps(g, dt, &self.materials, &mut self.rng, &mut self.events);
+                }
+            }
+            // 天体レンジ(設計docs/20-integration/06-regime-switching.md §1「天体専用
+            // レジームに切り替え、天体状態のみを独立時間軸で進める…ローカル物理ソルバは
+            // 停止(状態は凍結保存)」)。`astro`以外の全ドメインはこのstep呼び出しを
+            // 完全にスキップする(状態はそのまま保持され、次にLocalへ戻ったときの
+            // 初期条件になる)。
+            sim_astro::TimeRegime::Astro {
+                dt_astro,
+                steps_per_frame,
+            } => {
+                if let Some(a) = &mut self.astro {
+                    for _ in 0..steps_per_frame {
+                        let mut ctx = SolverContext {
+                            materials: &self.materials,
+                            rng: &mut self.rng,
+                            events: &mut self.events,
+                        };
+                        a.step(dt_astro, &mut ctx);
+                    }
+                }
+            }
         }
         // 登録済み全Couplingを1回ずつ適用する(登録順、`apply_coupling`のdocが説明する
         // 「post」型結合(前stepで確定した量を読む)と同じタイミング — 呼び出し側が
@@ -988,6 +1041,20 @@ impl World {
         hasher.write_u64(self.grid_fluid.is_some() as u64);
         if let Some(g) = &self.grid_fluid {
             g.state_hash(&mut hasher);
+        }
+        match self.time_regime {
+            sim_astro::TimeRegime::Local { steps_per_frame } => {
+                hasher.write_u64(0);
+                hasher.write_u64(steps_per_frame as u64);
+            }
+            sim_astro::TimeRegime::Astro {
+                dt_astro,
+                steps_per_frame,
+            } => {
+                hasher.write_u64(1);
+                hasher.write_f64(dt_astro);
+                hasher.write_u64(steps_per_frame as u64);
+            }
         }
         hasher.finish()
     }
@@ -2100,5 +2167,114 @@ mod tests {
         let probed = world.circuit_probe(1).unwrap();
         let expected = world.circuit().unwrap().node_voltage(1);
         assert_eq!(probed, expected);
+    }
+
+    /// レジーム切替(設計docs/20-integration/06-regime-switching.md §1)の土台:
+    /// `Astro`レジーム中は`mechanics`が完全に凍結され(1step たりとも進まない)、
+    /// `Local`へ戻すと再び進行することを確認する。
+    #[test]
+    fn astro_regime_freezes_mechanics_and_local_regime_resumes_it() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.5 }, steel);
+        desc.transform.position = Vec3::new(0.0, 50.0, 0.0);
+        desc.linear_velocity = Vec3::new(1.0, 0.0, 0.0);
+        let body = world.create_body(desc);
+
+        world.enable_astro(sim_astro::NBodySystem::new(0.0));
+        world.set_time_regime(sim_astro::TimeRegime::Astro {
+            dt_astro: 0.1,
+            steps_per_frame: 1,
+        });
+
+        let frozen_position = world.body_position(body).unwrap();
+        let frozen_velocity = world.body_velocity(body).unwrap();
+        for _ in 0..10 {
+            world.step();
+        }
+        assert_eq!(
+            world.body_position(body).unwrap(),
+            frozen_position,
+            "mechanics must not advance at all while in Astro regime"
+        );
+        assert_eq!(world.body_velocity(body).unwrap(), frozen_velocity);
+
+        world.set_time_regime(sim_astro::TimeRegime::Local { steps_per_frame: 1 });
+        for _ in 0..10 {
+            world.step();
+        }
+        assert_ne!(
+            world.body_position(body).unwrap(),
+            frozen_position,
+            "mechanics must resume advancing once back in Local regime"
+        );
+    }
+
+    /// 再突入(D37)の最小骨格: 天体ドメイン(`NBodySystem`)で周回するカプセルの
+    /// 軌道状態を、既存の`sim_astro::astro_to_local_state`(設計§3.2、フレーム変換)で
+    /// 地表フレームのローカル座標・速度に変換し、その状態でLocal物理側に
+    /// `RigidBody`を新設して引き継がせる。数値は現実の軌道力学の再現を狙った
+    /// ものではなく(縮約実装、実際のD37合格基準は後続増分)、レジーム切替+
+    /// フレーム変換+ローカル物理再開という一連の配線が実際に機能することの検証。
+    #[test]
+    fn switching_from_astro_to_local_hands_off_orbital_state_via_frame_conversion() {
+        let mut world = World::new(WorldOptions::default());
+
+        let mut astro = sim_astro::NBodySystem::new(0.0);
+        astro.add_body(Vec3::ZERO, Vec3::ZERO, 1.0e15);
+        let capsule_index =
+            astro.add_body(Vec3::new(1000.0, 0.0, 0.0), Vec3::new(0.0, 10.0, 0.0), 1.0);
+        world.enable_astro(astro);
+        world.set_time_regime(sim_astro::TimeRegime::Astro {
+            dt_astro: 1.0,
+            steps_per_frame: 5,
+        });
+        for _ in 0..5 {
+            world.step();
+        }
+
+        let (orbital_position, orbital_velocity) = {
+            let a = world.astro().expect("astro enabled above");
+            (a.position[capsule_index], a.velocity[capsule_index])
+        };
+
+        let mut frames = sim_core::FrameTree::new();
+        let surface_frame = frames.add_frame(
+            sim_core::FrameId::ROOT,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 7.292e-5),
+        );
+        let (local_position, local_velocity) = sim_astro::astro_to_local_state(
+            &frames,
+            surface_frame,
+            orbital_position,
+            orbital_velocity,
+        );
+
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 1.0 }, steel);
+        desc.transform.position = local_position;
+        desc.linear_velocity = local_velocity;
+        let capsule_body = world.create_body(desc);
+
+        world.set_time_regime(sim_astro::TimeRegime::Local { steps_per_frame: 1 });
+
+        assert_eq!(
+            world.body_position(capsule_body).unwrap(),
+            local_position,
+            "handed-off body must start exactly at the frame-converted position"
+        );
+        assert_eq!(world.body_velocity(capsule_body).unwrap(), local_velocity);
+
+        for _ in 0..10 {
+            world.step();
+        }
+        assert_ne!(
+            world.body_position(capsule_body).unwrap(),
+            local_position,
+            "local physics must continue evolving the handed-off body"
+        );
     }
 }

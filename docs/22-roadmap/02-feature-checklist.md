@@ -30,8 +30,11 @@
   Probe・circuit_probe・`from_scenario`(bodies/materials/fluids/probesセクション))・
   決定論/保存則CIゲート(既存test suiteで充足済みと確認)・性能ベンチ(criterion、3ホット
   パス)・統合シナリオ4本中3本(ブレーキ発熱・手回し発電・断熱圧縮、+氷と飲み物は
-  既存のD18デモテストがcross-referenceで充足)。
-  残り: 統合シナリオ1本(再突入、天体レジーム切替との`World`結合が前提)、
+  既存のD18デモテストがcross-referenceで充足)。`World`へのレジーム切替接続
+  (`time_regime`フィールド、Astro/Local分岐、frame変換によるAstro→Localの
+  ハンドオフ)も実装済み(詳細§2参照)。
+  残り: 統合シナリオ1本(再突入本体——上記のレジーム切替土台の上に、閾値ベースの
+  自動切替・実際の大気減速/加熱モデルを組んだ本格シナリオが必要)、
   シーンJSON`couplings`セクション(スキーマ未確定のため保留、§4参照)、
   D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)。
 - **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R3・R5・R6・R7完全Green、GGX
@@ -500,9 +503,23 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       transform_state`をAstro⇄Local双方向に適用する`astro_to_local_state`/
       `local_to_astro_state`)を実装。`astro_to_local_round_trip_preserves_root_frame_energy_and_momentum`
       (自転+公転する惑星地表フレームへの再突入模擬、往復変換前後でROOT換算の運動量・
-      運動エネルギー・位置がrel<1e-9で一致、設計§4の基準そのまま)がGreen。切替時刻の
-      量子化・切替を跨ぐリプレイ一致・巻き戻しは`World`のスナップショット・コマンド
-      キュー・イベント順序に依存するため未実装(§3・§4、Phase C)
+      運動エネルギー・位置がrel<1e-9で一致、設計§4の基準そのまま)がGreen。
+      **`World`への接続(本増分で追加)**: `World`に`time_regime: sim_astro::TimeRegime`
+      フィールド(既定`Local`、既存挙動と完全互換)+`time_regime`/`set_time_regime`を
+      追加し、`step()`を`Local`(従来どおり全有効ドメインを進める)/`Astro`(`astro`
+      ドメインのみ独立時間軸`dt_astro`で進め、`mechanics`含む他の全ドメインを完全に
+      凍結)で分岐させた。`state_hash`にも含めた(スナップショット/`Clone`は`World`の
+      `#[derive(Clone)]`が自動的に含める)。
+      `astro_regime_freezes_mechanics_and_local_regime_resumes_it`(Astro中は
+      mechanicsが1step たりとも進まず、Localに戻すと再び進むことを確認)・
+      `switching_from_astro_to_local_hands_off_orbital_state_via_frame_conversion`
+      (`NBodySystem`で周回する仮想カプセルの軌道状態を`astro_to_local_state`で
+      変換し、その状態で新設した`RigidBody`にLocal物理を引き継がせる一連の配線が
+      機能することを確認、軌道力学の値自体は現実の再現を狙わない縮約シナリオ)を
+      追加。切替のCommand化・ヒステリシス付き自動切替・World時刻の天体時刻への
+      従属化・Astro中のスナップショット間隔の天体時間基準化・切替を跨ぐリプレイ
+      一致のCIゲートは未実装(§1・§3・§4、統合シナリオ「再突入」本体もこの土台の
+      上に別途必要)
 - [x] 1PN 補正(オプトイン、A8・A9・A10。`RelativitySettings`構造体・`NBodySystem`への
       完全統合は未実装)—
       `crates/sim-astro/src/relativity.rs::{pn1_acceleration, pn1_precession_per_orbit,
