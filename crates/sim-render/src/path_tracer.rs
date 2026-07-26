@@ -3,23 +3,25 @@
 //!
 //! **縮約実装の理由**: 設計の実装順序(§8)「BVH + 拡散/鏡面BSDF + NEE(基本パストレ)」の
 //! うち、本増分は拡散(Lambertian)+誘電体(`Dielectric`)BSDF + 一様環境光 + 複数物体の
-//! シーン(`SceneObject`のリスト、線形探索で最近傍交差を選ぶ)を実装する。BVH(加速
-//! 構造)自体は、物体数が線形探索では性能上問題になる規模のシーンが実際に必要になる
-//! 増分まで導入を見送る(線形探索は正しさは損なわないため、`sim-fluid::grid_fluid`が
-//! 固体境界セルを「必要になってから」導入したのと同じ判断)。NEE(光源の明示サンプル)
-//! も、本増分の検証対象(環境光が方向に依らず一様、専用の離散光源が無い)には不要
-//! (環境全体が光源であり、BSDFサンプリングで到達した方向は常に同じ環境放射輝度を
-//! 返すため、明示的な光源サンプルによる分散低減の恩恵がない)なので、離散光源が実際に
-//! 追加される増分まで残す。分光(波長ごとのレンダリング)も後続増分(モノクロの放射
-//! 輝度スカラーのみを扱う)。
+//! シーン(`SceneObject`のリスト、線形探索で最近傍交差を選ぶ)+ NEE(`PointLight`の
+//! 明示サンプル)を実装する。BVH(加速構造)自体は、物体数が線形探索では性能上問題に
+//! なる規模のシーンが実際に必要になる増分まで導入を見送る(線形探索は正しさは損なわ
+//! ないため、`sim-fluid::grid_fluid`が固体境界セルを「必要になってから」導入したのと
+//! 同じ判断)。分光(波長ごとのレンダリング)は後続増分(モノクロの放射輝度スカラー
+//! のみを扱う)。
 //!
-//! シーンは`sim_fluid::grid_fluid`等と同じ「対象を絞って正直に文書化する」縮約で、
-//! 複数の解析球 + 一様環境放射輝度のみを表現する(平面・三角形メッシュは未実装)。
+//! `PointLight`は幾何を持たない抽象的な光源(シーンの`objects`には含まれない)とする
+//! ため、BSDFサンプリングで到達したレイが誤って光源自体に「衝突」してNEEの寄与と
+//! 二重計上する心配がない(設計§4の疑似コードが`sample_lights`と`environment`/BSDF
+//! 再帰を単純に加算できるのは、光源が可視物体でない場合に限られる——可視な面光源
+//! (エリアライト)を扱うには多重重点サンプリング(MIS)が必要になるため後続増分)。
+//! 拡散(Lambertian)面のみNEEを適用する(鏡面/誘電体は反射/屈折方向がデルタ関数の
+//! ため光源の直接サンプルと意味を成さない、標準的な扱い)。
 
 use crate::bsdf::{Dielectric, Lambertian};
 use crate::ray::Ray;
 use crate::sphere::{Hit, Sphere};
-use sim_math::SimRng;
+use sim_math::{SimRng, Vec3};
 
 /// このシーンが表現できるBSDF(`bsdf`モジュールdoc「縮約実装の理由」参照、
 /// 金属・粗面透過は未実装)。
@@ -36,9 +38,18 @@ pub struct SceneObject {
     pub material: Material,
 }
 
-/// 複数の球 + BSDF + 一様環境放射輝度からなるシーン。
+/// 点光源(幾何を持たない抽象光源、モジュールdoc参照)。逆二乗則の点光源として
+/// 放射強度`intensity`[W/sr相当、モノクロスカラー]を持つ。
+#[derive(Clone, Copy, Debug)]
+pub struct PointLight {
+    pub position: Vec3,
+    pub intensity: f64,
+}
+
+/// 複数の球 + BSDF + 一様環境放射輝度 + 点光源からなるシーン。
 pub struct Scene {
     pub objects: Vec<SceneObject>,
+    pub lights: Vec<PointLight>,
     /// 環境放射輝度(方向によらず一定、モノクロスカラー、設計§5「大気散乱等は後続」)。
     pub environment_radiance: f64,
 }
@@ -59,6 +70,38 @@ impl Scene {
             .min_by(|(a, _), (b, _)| a.t.total_cmp(&b.t))
     }
 
+    /// NEE(Next Event Estimation、設計§4「直接光: 光源を明示サンプル」)。全ての
+    /// 点光源について、シャドウレイで遮蔽を確認した上で逆二乗則の直接照明
+    /// $L_o \mathrel{+}= f_r \cdot (I/d^2) \cdot \cos\theta$を合算する
+    /// (モジュールdoc「光源は幾何を持たない」参照、遮蔽判定のみ`closest_hit`を使う)。
+    /// `pub(crate)`はテストから直接呼ぶため(`trace`経由だと、複数物体シーンでは
+    /// 間接項(BSDFサンプリングの再帰)が他の物体に当たり得るため、直接照明単体の
+    /// 値と混ざってしまう——`closest_hit`のテストで踏んだのと同じ落とし穴)。
+    pub(crate) fn direct_lighting(&self, point: Vec3, normal: Vec3, bsdf: f64) -> f64 {
+        let mut total = 0.0;
+        for light in &self.lights {
+            let to_light = light.position - point;
+            let distance = to_light.length();
+            if distance < 1e-9 {
+                continue;
+            }
+            let direction = to_light.scale(1.0 / distance);
+            let cos_theta = direction.dot(normal);
+            if cos_theta <= 0.0 {
+                continue; // 光源が面の裏側。
+            }
+            let shadow_ray = Ray::new(point, direction);
+            if let Some((hit, _)) = self.closest_hit(&shadow_ray, 1e-6) {
+                if hit.t < distance - 1e-6 {
+                    continue; // 光源との間に別の物体があり遮蔽される。
+                }
+            }
+            let irradiance = light.intensity / (distance * distance);
+            total += bsdf * irradiance * cos_theta;
+        }
+        total
+    }
+
     /// レイを追跡し、方向によらず一様な環境からの放射輝度を経路積分で推定する
     /// (設計§4の`trace`のうち、本増分が実装する範囲——拡散/誘電体BSDFの再帰的
     /// サンプリングのみ——を抜き出したもの)。`max_depth`はロシアンルーレット無しの
@@ -75,12 +118,15 @@ impl Scene {
 
         match material {
             Material::Lambertian(lambertian) => {
+                let direct = self.direct_lighting(hit.point, hit.normal, lambertian.eval());
+
                 let (direction, pdf) = lambertian.sample(hit.normal, rng);
                 let cos_theta = direction.dot(hit.normal);
                 let bsdf = lambertian.eval();
                 let next_ray = Ray::new(hit.point, direction);
-                let incoming = self.trace(&next_ray, rng, max_depth - 1);
-                incoming * bsdf * cos_theta / pdf
+                let indirect = self.trace(&next_ray, rng, max_depth - 1) * bsdf * cos_theta / pdf;
+
+                direct + indirect
             }
             Material::Dielectric(dielectric) => {
                 // オリエンテーション補正: 外向き法線に対してレイが向かってくる側
@@ -124,7 +170,6 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim_math::Vec3;
 
     /// R1: 白色炉テスト(docs/21-verification/01-analytic-tests.md、
     /// docs/17-rendering/02-path-tracing.md §7)。完全拡散面(ρ=1)が一様環境放射輝度の
@@ -149,6 +194,7 @@ mod tests {
                 },
                 material: Material::Lambertian(Lambertian { albedo: 1.0 }),
             }],
+            lights: vec![],
             environment_radiance,
         };
         let camera_origin = Vec3::ZERO;
@@ -183,6 +229,7 @@ mod tests {
                 },
                 material: Material::Lambertian(Lambertian { albedo }),
             }],
+            lights: vec![],
             environment_radiance,
         };
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
@@ -204,6 +251,7 @@ mod tests {
                 },
                 material: Material::Lambertian(Lambertian { albedo: 1.0 }),
             }],
+            lights: vec![],
             environment_radiance: 9.0,
         };
         let ray = Ray::new(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
@@ -234,6 +282,7 @@ mod tests {
                 },
                 material: Material::Dielectric(Dielectric { ior: 1.5 }),
             }],
+            lights: vec![],
             environment_radiance,
         };
         let camera_origin = Vec3::ZERO;
@@ -278,6 +327,7 @@ mod tests {
         };
         let scene = Scene {
             objects: vec![near, far],
+            lights: vec![],
             environment_radiance: 1.0,
         };
 
@@ -305,6 +355,7 @@ mod tests {
         // (線形探索は登録順に依存しない`t`最小選択であることの確認)。
         let scene_reordered = Scene {
             objects: vec![far, near],
+            lights: vec![],
             environment_radiance: 1.0,
         };
         let (hit_reordered, _) = scene_reordered
@@ -315,5 +366,134 @@ mod tests {
         // レイが両方の球を外れる場合は`None`。
         let missing_ray = Ray::new(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
         assert!(scene.closest_hit(&missing_ray, 1e-6).is_none());
+    }
+
+    /// NEE: 点光源からの直接照明が解析式$f_r \cdot (I/d^2) \cdot \cos\theta$に厳密に
+    /// 一致すること(遮蔽物が無い場合)。
+    #[test]
+    fn direct_lighting_matches_the_inverse_square_point_light_formula() {
+        let light = PointLight {
+            position: Vec3::new(0.0, 0.0, -1.0),
+            intensity: 12.0,
+        };
+        let scene = Scene {
+            objects: vec![SceneObject {
+                sphere: Sphere {
+                    center: Vec3::new(0.0, 0.0, -5.0),
+                    radius: 1.0,
+                },
+                material: Material::Lambertian(Lambertian { albedo: 0.8 }),
+            }],
+            lights: vec![light],
+            environment_radiance: 0.0,
+        };
+        let point = Vec3::new(0.0, 0.0, -4.0); // 球の手前(原点側)の頂点。
+        let normal = Vec3::new(0.0, 0.0, 1.0); // 外向き法線(光源の方向と一致)。
+        let bsdf = 0.8 / std::f64::consts::PI;
+
+        let measured = scene.direct_lighting(point, normal, bsdf);
+        let distance = (light.position - point).length();
+        let cos_theta = 1.0; // 光源は法線の真正面。
+        let expected = bsdf * (light.intensity / (distance * distance)) * cos_theta;
+        let rel_err = (measured - expected).abs() / expected;
+        assert!(rel_err < 1e-9, "measured={measured} expected={expected}");
+    }
+
+    /// NEE: 光源と着目点の間に別の物体があると、直接照明への寄与が0になる
+    /// (シャドウレイによる遮蔽判定)。
+    #[test]
+    fn direct_lighting_is_zero_when_the_light_is_occluded() {
+        let light = PointLight {
+            position: Vec3::new(0.0, 0.0, -1.0),
+            intensity: 12.0,
+        };
+        let occluder = SceneObject {
+            sphere: Sphere {
+                center: Vec3::new(0.0, 0.0, -2.5),
+                radius: 0.3,
+            },
+            material: Material::Lambertian(Lambertian { albedo: 0.5 }),
+        };
+        let main_sphere = SceneObject {
+            sphere: Sphere {
+                center: Vec3::new(0.0, 0.0, -5.0),
+                radius: 1.0,
+            },
+            material: Material::Lambertian(Lambertian { albedo: 0.8 }),
+        };
+        let scene = Scene {
+            objects: vec![occluder, main_sphere],
+            lights: vec![light],
+            environment_radiance: 0.0,
+        };
+        let point = Vec3::new(0.0, 0.0, -4.0);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let bsdf = 0.8 / std::f64::consts::PI;
+
+        let measured = scene.direct_lighting(point, normal, bsdf);
+        assert_eq!(
+            measured, 0.0,
+            "the occluder sitting between the point and the light should block all direct \
+             lighting"
+        );
+    }
+
+    /// NEE: 光源が面の裏側(法線との内積が0以下)にある場合は寄与しない。
+    #[test]
+    fn direct_lighting_ignores_lights_behind_the_surface() {
+        let light = PointLight {
+            position: Vec3::new(0.0, 0.0, -6.0), // 法線の反対側。
+            intensity: 12.0,
+        };
+        let scene = Scene {
+            objects: vec![SceneObject {
+                sphere: Sphere {
+                    center: Vec3::new(0.0, 0.0, -5.0),
+                    radius: 1.0,
+                },
+                material: Material::Lambertian(Lambertian { albedo: 0.8 }),
+            }],
+            lights: vec![light],
+            environment_radiance: 0.0,
+        };
+        let point = Vec3::new(0.0, 0.0, -4.0);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let bsdf = 0.8 / std::f64::consts::PI;
+
+        assert_eq!(scene.direct_lighting(point, normal, bsdf), 0.0);
+    }
+
+    /// `trace`自体がNEEを正しく配線していること: 環境放射輝度0・孤立した球1個の
+    /// シーンでは、間接項(BSDFサンプリングの再帰)は常に環境(0)へ抜けるため
+    /// (凸形状の自己遮蔽なし)、`trace`の結果は`direct_lighting`単体の値と厳密に
+    /// 一致するはず。
+    #[test]
+    fn trace_wires_direct_lighting_in_for_an_isolated_sphere_with_no_environment() {
+        let light = PointLight {
+            position: Vec3::new(0.0, 0.0, -1.0),
+            intensity: 12.0,
+        };
+        let albedo = 0.8;
+        let scene = Scene {
+            objects: vec![SceneObject {
+                sphere: Sphere {
+                    center: Vec3::new(0.0, 0.0, -5.0),
+                    radius: 1.0,
+                },
+                material: Material::Lambertian(Lambertian { albedo }),
+            }],
+            lights: vec![light],
+            environment_radiance: 0.0,
+        };
+        let point = Vec3::new(0.0, 0.0, -4.0);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let bsdf = albedo / std::f64::consts::PI;
+        let expected = scene.direct_lighting(point, normal, bsdf);
+
+        let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+        let mut rng = SimRng::new(6, 6);
+        let measured = scene.trace(&ray, &mut rng, 4);
+        let rel_err = (measured - expected).abs() / expected;
+        assert!(rel_err < 1e-9, "measured={measured} expected={expected}");
     }
 }
