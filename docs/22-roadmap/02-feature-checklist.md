@@ -87,8 +87,10 @@
   も実装済み。Command系のSetMotorTargetも配線済み(スポーンパレットに
   「+ モーター」ボタン、`BallJoint`+`HingeMotorPd`でワールド固定点に
   ピン留めしたアームをToolbarの「モーター切替」ボタンで0°/90°角度制御)。
-  残りは流体場/フレーム軸オーバーレイ・SetSwitch/SetHeatSource・回路
-  エディタ等。
+  SetSwitchも配線済み(分圧回路を`WasmWorld::new`で常設、Toolbarの
+  「回路スイッチ」チェックボックス→`Command::SetSwitch`、分圧点電圧を
+  HUDに表示)。残りは流体場/フレーム軸オーバーレイ・SetHeatSource・回路
+  エディタ(専用パネルUI)等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
   機を見て並行して進める。優先順位の詳細は
@@ -1144,7 +1146,16 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       のみ有効)。Playwrightで、目標を90°に切替えると実際に剛体の姿勢が
       約89°まで回転し、0°に戻すと約0°まで戻ること、モーターを持たない
       ボディ(床・箱)を選択するとボタンが無効化されることを確認した。
-      SetSwitch/SetHeatSource(いずれも`sim_world::Command`には既存)の配線・
+      SetSwitchも配線済み——`WasmWorld::new`で分圧回路(`sim_em::Circuit`、
+      電源10V→100Ω→分圧点→200Ω→GND、分圧点↔GNDにスイッチ)を`World::
+      enable_circuit`で有効化し、Toolbarの「回路スイッチ」チェックボックスで
+      `set_circuit_switch_closed`→`Command::SetSwitch`を送る。分圧点電圧
+      (`circuit_divider_voltage`)をHUDに毎フレーム表示する(回路専用の
+      パネル/エディタは未実装、縮約実装としてHUD読み取りのみ)。Playwrightで、
+      スイッチが開の状態では理論値どおり6.667V(10V×200/300)、閉じると
+      0.000V、再度開くと6.667Vに戻ることを確認した(既存の`sim-world`テスト
+      `set_switch_command_closes_switch_and_changes_circuit_state`と同じ
+      回路構成を再利用)。SetHeatSource(`sim_world::Command`には既存)の配線・
       入力列記録は未実装)
 - [ ] レイアウトプリセット(Default / Physics-focus / Circuit-focus / Astro)
       (Default(標準比率)・Physics-focus(コンソール行を拡大)・Astro(タイムライン行を

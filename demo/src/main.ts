@@ -921,6 +921,12 @@ async function setUpSceneView(
   const stepButton = document.getElementById("btn-step") as HTMLButtonElement;
   const nudgeButton = document.getElementById("btn-nudge") as HTMLButtonElement;
   const motorToggleButton = document.getElementById("btn-motor-toggle") as HTMLButtonElement;
+  // 分圧回路のスイッチ(`Command::SetSwitch`実証用、設計docs/20-integration/
+  // 04-world-api.md §2「Commandキュー」)。`WasmWorld::new`が既に分圧回路
+  // (電源10V→100Ω→分圧点、分圧点→200Ω→GND、分圧点↔GNDにスイッチ)を構築
+  // 済みなので、フロントエンドは切替のみを担う。HUDの`circuit V`行が
+  // 実際の分圧点電圧(開: 約6.67V、閉: 約0V)を毎フレーム表示する。
+  const circuitSwitchToggle = document.getElementById("toggle-circuit-switch") as HTMLInputElement;
   const undoButton = document.getElementById("btn-undo") as HTMLButtonElement;
   const redoButton = document.getElementById("btn-redo") as HTMLButtonElement;
 
@@ -953,6 +959,7 @@ async function setUpSceneView(
     stepButton.disabled = mode === "edit";
     nudgeButton.disabled = mode === "edit";
     motorToggleButton.disabled = mode === "edit" || !motorArmBodies.has(selectedBodyIndex);
+    circuitSwitchToggle.disabled = mode === "edit";
     undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
     redoButton.disabled = mode !== "edit" || editRedoStack.length === 0;
     modeEditButton.classList.toggle("active", mode === "edit");
@@ -1196,6 +1203,10 @@ async function setUpSceneView(
     currentMotorTarget.set(selectedBodyIndex, next);
   });
 
+  circuitSwitchToggle.addEventListener("change", () => {
+    world.set_circuit_switch_closed(circuitSwitchToggle.checked);
+  });
+
   const inspectorPosition = new THREE.Vector3();
   const inspectorRotationQuat = new THREE.Quaternion();
   const inspectorRotation = new THREE.Euler();
@@ -1293,6 +1304,7 @@ async function setUpSceneView(
       `t = ${world.time().toFixed(3)} s`,
       `step = ${world.step_count().toString()}`,
       `y = ${p[1].toFixed(4)} m`,
+      `circuit V = ${world.circuit_divider_voltage().toFixed(3)} V`,
     ].join("\n");
     timelineTime.textContent = `t = ${world.time().toFixed(3)} s`;
     timelineStep.textContent = `step = ${world.step_count().toString()}`;

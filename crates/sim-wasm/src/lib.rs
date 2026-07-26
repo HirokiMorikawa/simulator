@@ -35,6 +35,9 @@ const PROBE_HISTORY_CAPACITY: usize = 600;
 /// (`WasmWorld::new`で`1.0/dt`を四捨五入)。
 const SNAPSHOT_RING_CAPACITY: usize = 8;
 
+/// 分圧回路(`Command::SetSwitch`実証用、`WasmWorld::new`参照)の分圧点ノード番号。
+const CIRCUIT_DIVIDER_NODE: usize = 2;
+
 /// スポーンパレット(設計docs/23-frontend/01-editor.md §6「形状×材質を選んで
 /// クリック配置」)で追加したボディの記録。Shapeは`World::mechanics().bodies.
 /// shape_of`で実クエリできるが(`body_shape_label_at`参照)、Materialは`World`が
@@ -68,6 +71,9 @@ pub struct WasmWorld {
     spawned: Vec<SpawnedBodyMeta>,
     y_probe: usize,
     speed_probe: usize,
+    /// 分圧回路のスイッチ(`sim_em::Circuit::add_switch`が返すindex、
+    /// `set_circuit_switch_closed`参照)。
+    circuit_switch_index: usize,
     snapshot_interval_steps: u64,
     snapshots: VecDeque<World>,
     bookmarks: Vec<(String, World)>,
@@ -111,6 +117,18 @@ impl WasmWorld {
         let box_body = inner.create_body(desc);
         let y_probe = inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY);
         let speed_probe = inner.add_probe(ProbeTarget::BodySpeed(box_body), PROBE_HISTORY_CAPACITY);
+
+        // 分圧回路(`Command::SetSwitch`の実証用、`sim-world`の
+        // `set_switch_command_closes_switch_and_changes_circuit_state`と同じ
+        // 構成)。node 0=GND、1=電源(10V)、2=分圧点。スイッチは負荷抵抗(200Ω)と
+        // 並列に接続し、閉じると分圧点をGNDへ短絡する(開: 6.67V、閉: 0V)。
+        let mut circuit = sim_em::Circuit::new(3);
+        circuit.add_voltage_source(1, sim_em::GROUND, 10.0);
+        circuit.add_resistor(1, CIRCUIT_DIVIDER_NODE, 100.0);
+        let circuit_switch_index = circuit.add_switch(CIRCUIT_DIVIDER_NODE, sim_em::GROUND, false);
+        circuit.add_resistor(CIRCUIT_DIVIDER_NODE, sim_em::GROUND, 200.0);
+        inner.enable_circuit(circuit);
+
         let snapshot_interval_steps = (1.0 / dt).round().max(1.0) as u64;
         WasmWorld {
             inner,
@@ -119,6 +137,7 @@ impl WasmWorld {
             spawned: Vec::new(),
             y_probe,
             speed_probe,
+            circuit_switch_index,
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             bookmarks: Vec::new(),
@@ -434,6 +453,23 @@ impl WasmWorld {
         self.inner.push_command(Command::SetMotorTarget {
             hinge_motor_index,
             theta_target,
+        });
+    }
+
+    /// 分圧回路(`WasmWorld::new`参照)の分圧点電圧[V]。`Command::SetSwitch`の
+    /// 効果をUIから確認するための読み取り専用クエリ。
+    pub fn circuit_divider_voltage(&self) -> f64 {
+        self.inner
+            .circuit_probe(CIRCUIT_DIVIDER_NODE)
+            .unwrap_or(0.0)
+    }
+
+    /// `Command::SetSwitch`——分圧回路のスイッチの開閉を変更する。閉じると
+    /// 分圧点がGNDへ短絡され`circuit_divider_voltage`がほぼ0になる。
+    pub fn set_circuit_switch_closed(&mut self, closed: bool) {
+        self.inner.push_command(Command::SetSwitch {
+            switch_index: self.circuit_switch_index,
+            closed,
         });
     }
 
