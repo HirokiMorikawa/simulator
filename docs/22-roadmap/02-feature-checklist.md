@@ -42,8 +42,12 @@
   R3はプリズム最小偏角・虹の偏角を、レンダラ自身の幾何プリミティブ(`Dielectric::
   refract`/`reflect`・`Sphere::intersect`)で実際にレイ追跡し、独立な閉形式
   (`prism_min_deviation`・古典的Descartes虹公式)とrel<1e-9で一致することを確認。
+  球群向けBVH(`bvh`モジュール、最長軸中央値分割+スラブ法レイ-AABB交差)も
+  実装済み——多数の乱数シーンで総当たりと厳密一致し、実際に遠方クラスタを
+  刈って総当たりよりテスト数が少ないことを確認(`Scene::closest_hit`への配線は
+  多数物体デモがまだ無いため後続増分)。
   残り: R4(コーネルボックス、参照解データ未入手)、完全な分光レンダリング
-  (hero wavelength法)・BVH・コースティクス・マルチスキャッタリング・
+  (hero wavelength法)・コースティクス・マルチスキャッタリング・
   トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
@@ -723,13 +727,23 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 
 ## 5. Phase D — レンダリング
 
-- [ ] BVH(レイ交差)——`Scene`は複数の解析球(`SceneObject`のリスト)を保持できるよう
+- [x] BVH(レイ交差)——`Scene`は複数の解析球(`SceneObject`のリスト)を保持できるよう
       一般化し、`closest_hit`(線形探索で`t`最小の交差を選ぶ)を実装した。加速構造
-      (BVH)自体は、線形探索が性能上問題になる規模のシーンが実際に必要になるまで
-      未着手(正しさは線形探索でも損なわれないため、モジュールdoc「縮約実装の理由」
-      参照)。レイ-球交差(`sphere::Sphere::intersect`)・最近傍選択とも実装済み
-      (`closest_hit_picks_the_nearer_object_when_two_spheres_overlap_along_the_ray`
-      で登録順に依らない`t`最小選択・欠側`None`を確認)。三角形メッシュ・平面は未実装。
+      本体は新設の`crates/sim-render/src/bvh.rs`(`Bvh`、最長軸の重心中央値
+      (median split)によるトップダウン構築+スラブ法のレイ-AABB交差によるレイの
+      最近傍ヒット再帰探索)として実装した。`closest_hit_matches_brute_force_
+      across_random_scenes_and_rays`(20シーン×60球×50レイの乱数組み合わせで、
+      ヒットindex・距離が総当たりとrel<1e-9で厳密一致)・
+      `closest_hit_prunes_the_far_cluster_and_tests_fewer_spheres_than_brute_force`
+      (近傍・遠方2クラスタ(計60球)を用意し、近傍クラスタだけを通るレイが実際に
+      遠方クラスタの部分木を刈って総当たり(60回)より少ない交差テスト回数で
+      最近傍ヒットを見つけることを診断カウンタ`BvhDiagnostics`で確認)がGreen。
+      既存の`Scene::closest_hit`(線形探索)への配線は、対象になり得る多数物体
+      デモ(D40–D43)がまだ無いため後続増分(モジュールdoc「縮約実装の理由」
+      参照)。三角形メッシュ・平面・SAH分割は未実装。レイ-球交差
+      (`sphere::Sphere::intersect`)・`Scene::closest_hit`の最近傍選択とも
+      実装済み(`closest_hit_picks_the_nearer_object_when_two_spheres_overlap_
+      along_the_ray`で登録順に依らない`t`最小選択・欠側`None`を確認)。
 - [x] BSDF・NEE——拡散(Lambertian)+誘電体(`Dielectric`、実屈折率のみ、`sim_em::
       fresnel_reflectance`(E9/E10で既に検証済み)を再利用、完全鏡面のみ)+金属
       (`Metal`、複素屈折率$n+ik$、`sim_em::conductor_reflectance`を再利用、

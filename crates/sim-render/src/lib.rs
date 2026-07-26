@@ -24,11 +24,17 @@
 //! シーンでR7(モンテカルロ収束O(1/√N)・決定論)も検証した。さらにGGXマイクロ
 //! ファセット分布(`RoughConductor`、`microfacet`モジュールdoc参照、粗い金属のみ)
 //! を追加した。
-//! BVH・GGX粗い誘電体・完全な分光レンダリング(hero wavelength法)・
-//! マルチスキャッタリング・ミー散乱・煙/水の体積散乱・コーネルボックス(R4)は
-//! 後続増分(各モジュールdoc「縮約実装の理由」参照)。
+//! 球群向けのBVH(`bvh`モジュールdoc参照、最長軸中央値分割のトップダウン構築)を
+//! 追加し、多数の乱数シーン・乱数レイで最近傍ヒットが総当たりと厳密一致すること、
+//! かつ実際に遠いクラスタの部分木を刈って総当たりよりテスト数が少ないことを
+//! 検証した。既存の`Scene::closest_hit`(現状は少数物体のR1–R7検証シーンのみで
+//! 十分)への配線は、対象になり得る多数物体デモ(D40–D43)がまだ無いため後続増分。
+//! GGX粗い誘電体・完全な分光レンダリング(hero wavelength法)・マルチスキャッ
+//! タリング・ミー散乱・煙/水の体積散乱・コーネルボックス(R4)は後続増分
+//! (各モジュールdoc「縮約実装の理由」参照)。
 
 mod bsdf;
+mod bvh;
 mod camera;
 mod medium;
 mod microfacet;
@@ -38,6 +44,7 @@ mod ray;
 mod sphere;
 
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal, RoughConductor};
+pub use bvh::{Bvh, BvhDiagnostics};
 pub use camera::Camera;
 pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
 pub use microfacet::{ggx_distribution, sample_ggx_half_vector, smith_g, smith_g1};
