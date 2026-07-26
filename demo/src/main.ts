@@ -171,11 +171,15 @@ function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => voi
   };
 }
 
-// Hierarchyパネル(設計docs/23-frontend/01-editor.md §1.1)。`world.body_count`/
+// Hierarchyパネル(設計docs/23-frontend/01-editor.md §1.1「シーングラフツリー
+// (Bodies/Joints/Circuits/Fluids/Probes/Frames)」)。`world.body_count`/
 // `body_label_at`から実際のボディ一覧を組み立て、クリックで`onSelect`を呼ぶ
 // (選択はInspector・Scene Viewと連動、設計が求める双方向選択)。戻り値の関数は
 // Scene Viewピッキング(`onSelect`を経由せず見た目のハイライトだけ更新したい
 // 場合)向けに、外部からハイライトだけを同期させる手段として公開する。
+// Bodiesの兄弟としてJointsサブツリーも実装済み(振り子スポーンが追加した
+// DistanceJointのみが対象、`constraint_anchor_points_at`で判定)。
+// Circuits/Fluids/Probes/Framesはこれらのドメインが未接続のため未対応。
 function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): (index: number) => void {
   const tree = document.getElementById("hierarchy-tree")!;
   tree.innerHTML = "";
@@ -210,6 +214,34 @@ function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): (i
 
   bodyItem.appendChild(list);
   bodies.appendChild(bodyItem);
+
+  // Joints(設計§1.1「シーングラフツリー(Bodies/Joints/Circuits/Fluids/
+  // Probes/Frames)」)。振り子スポーン(`spawn_pendulum`)が追加した
+  // DistanceJointのみが対象(`constraint_anchor_points_at`が空でないボディ)。
+  // クリックすると対応するボディを選択する(Joints専用のInspector表示は
+  // 未実装のため、現状はBodies側の選択と同じ経路を再利用する)。
+  const jointList = document.createElement("ul");
+  jointList.className = "tree-nested";
+  let jointCount = 0;
+  for (let i = 0; i < count; i++) {
+    if (world.constraint_anchor_points_at(i).length < 6) continue;
+    jointCount += 1;
+    const item = document.createElement("li");
+    item.textContent = `DistanceJoint (${world.body_label_at(i)})`;
+    item.classList.add("tree-selectable");
+    item.addEventListener("click", () => {
+      highlight(i);
+      onSelect(i);
+    });
+    jointList.appendChild(item);
+  }
+  if (jointCount > 0) {
+    const jointItem = document.createElement("li");
+    jointItem.textContent = "Joints";
+    jointItem.appendChild(jointList);
+    bodies.appendChild(jointItem);
+  }
+
   root.appendChild(bodies);
   tree.appendChild(root);
   return highlight;

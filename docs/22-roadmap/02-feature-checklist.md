@@ -1029,9 +1029,15 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       オーバーレイは未実装)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
       (Bodies配下は`sim-wasm`に新設した`body_count`/`body_label_at`経由で実際の
-      World状態(床の静的平面+箱)を列挙・クリックでInspector及びScene
-      Viewピックと双方向に連動(共通の`selectBody`経由)。Joints/Circuits/
-      Fluids/Probes/Framesは未対応)
+      World状態(床の静的平面+箱+スポーンしたボディ)を列挙・クリックでInspector
+      及びScene Viewピックと双方向に連動(共通の`selectBody`経由)。Bodiesの
+      兄弟としてJointsサブツリーも実装済み——振り子スポーンが追加した
+      DistanceJointのみが対象(`constraint_anchor_points_at`が空でない
+      ボディを`DistanceJoint (ラベル)`として列挙、クリックで対応するボディを
+      選択)。Playwrightで、振り子をスポーンする前はHierarchyに"Joints"が
+      現れず、スポーン後に実際に現れてクリックで対応するPendulumボディへ
+      選択が切り替わることを確認した。Circuits/Fluids/Probes/Framesはこれら
+      のドメインが未接続のため未対応)
 - [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
       (選択中ボディのTransform(Position/Rotation/Velocity)は`sim-wasm`に新設した
       `body_position_at_f32`/`body_rotation_at_f32`/`body_velocity_at_f32`
