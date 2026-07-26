@@ -10,6 +10,28 @@ use sim_math::Vec3;
 /// 万有引力定数 [N m^2/kg^2]。設計 §2、CODATA 値。
 pub const GRAVITATIONAL_CONSTANT: f64 = 6.674e-11;
 
+/// 大気抗力設定(再突入シナリオの土台、設計docs/16-astro/02-orbital-mechanics.md §2.3
+/// 「大気圏再突入」)。`exponential_atmosphere_density`(既にA6検証で単体テスト済み)を
+/// `central_body`からの距離(=高度、`planet_radius`基準)で評価し、`ballistic_coefficient`
+/// (抗力係数×断面積/質量)が設定された他の各ボディへ抗力を適用する。**縮約実装の理由**:
+/// 大気は`central_body`と共回転する前提を置かず(実際は地表に対する相対風速が正しいが、
+/// ここでは中心天体に対する相対速度をそのまま使う)。抗力は非保存力のため、この力が
+/// 働く間はleapfrogの厳密なシンプレクティック性(エネルギー誤差の有界振動)は失われる
+/// (物理的に正しい散逸なので許容する、設計が求める「レジーム切替時の自動微細刻み」・
+/// 空力加熱・アブレーションは未実装、`atmosphere`モジュールdoc参照)。ボディは
+/// `enable_atmospheric_drag`を呼ぶ前に全て`add_body`しておく必要がある
+/// (`ballistic_coefficient`はその時点のボディ数で初期化するため)。
+#[derive(Clone)]
+pub struct AtmosphericDragConfig {
+    pub central_body: usize,
+    pub surface_density: f64,
+    pub scale_height: f64,
+    pub planet_radius: f64,
+    /// ボディごとの弾道係数(抗力係数×断面積/質量)。`None`なら抗力を受けない
+    /// (中心天体自身や無関係な他の天体に使う)。
+    pub ballistic_coefficient: Vec<Option<f64>>,
+}
+
 /// N体系。設計 §3 の `NBodySystem` から、Barnes-Hut ツリー・積分器種別の選択機構を除いた
 /// P0 スコープ(総当たり + leapfrog 固定)。
 #[derive(Clone)]
@@ -19,6 +41,8 @@ pub struct NBodySystem {
     pub mass: Vec<f64>,
     /// 近接特異点の緩和(設計 §2)。既定 0(実天体は接触を剛体/再突入に委ねる)。
     pub softening: f64,
+    /// 大気抗力(`AtmosphericDragConfig`のdoc参照)。既定`None`(抗力無し)。
+    pub atmospheric_drag: Option<AtmosphericDragConfig>,
 }
 
 impl NBodySystem {
@@ -28,6 +52,7 @@ impl NBodySystem {
             velocity: Vec::new(),
             mass: Vec::new(),
             softening,
+            atmospheric_drag: None,
         }
     }
 
@@ -37,6 +62,34 @@ impl NBodySystem {
         self.velocity.push(velocity);
         self.mass.push(mass);
         idx
+    }
+
+    /// `central_body`を中心とする指数大気モデルによる抗力を有効化する。この時点で
+    /// 既に`add_body`済みの全ボディに対して`ballistic_coefficient`を`None`
+    /// (抗力無し)で初期化する(`AtmosphericDragConfig`のdoc「呼ぶ前に全て
+    /// `add_body`しておく必要がある」参照)。
+    pub fn enable_atmospheric_drag(
+        &mut self,
+        central_body: usize,
+        surface_density: f64,
+        scale_height: f64,
+        planet_radius: f64,
+    ) {
+        self.atmospheric_drag = Some(AtmosphericDragConfig {
+            central_body,
+            surface_density,
+            scale_height,
+            planet_radius,
+            ballistic_coefficient: vec![None; self.len()],
+        });
+    }
+
+    /// `body`の弾道係数(抗力係数×断面積/質量)を設定する。`enable_atmospheric_drag`が
+    /// 未呼び出しなら何もしない。
+    pub fn set_ballistic_coefficient(&mut self, body: usize, value: f64) {
+        if let Some(drag) = &mut self.atmospheric_drag {
+            drag.ballistic_coefficient[body] = Some(value);
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -62,6 +115,30 @@ impl NBodySystem {
                 let dist = dist_sq.sqrt();
                 let factor = GRAVITATIONAL_CONSTANT * self.mass[j] / (dist_sq * dist);
                 *acc_i = acc_i.addcarry_scaled(d, factor);
+            }
+        }
+        if let Some(drag) = &self.atmospheric_drag {
+            for (i, acc_i) in acc.iter_mut().enumerate() {
+                if i == drag.central_body {
+                    continue;
+                }
+                let Some(Some(beta)) = drag.ballistic_coefficient.get(i).copied() else {
+                    continue;
+                };
+                let r_rel = self.position[i] - self.position[drag.central_body];
+                let altitude = r_rel.length() - drag.planet_radius;
+                let v_rel = self.velocity[i] - self.velocity[drag.central_body];
+                let speed = v_rel.length();
+                if speed < 1e-9 {
+                    continue;
+                }
+                let density = crate::atmosphere::exponential_atmosphere_density(
+                    altitude,
+                    drag.surface_density,
+                    drag.scale_height,
+                );
+                let drag_accel_magnitude = 0.5 * density * speed * speed * beta;
+                *acc_i = acc_i.addcarry_scaled(v_rel, -drag_accel_magnitude / speed);
             }
         }
         acc
@@ -371,6 +448,55 @@ mod tests {
         assert!(
             rel_err_v2 < 0.005,
             "final_speed={final_speed} v2_circ={v2_circ} rel_err={rel_err_v2}"
+        );
+    }
+
+    /// 再突入シナリオの土台(ワークストリームB): `atmosphere`モジュールdocが
+    /// 指摘していた「抗力摂動はNBodySystem本体には未統合」というギャップを埋める。
+    /// 地球相当の中心天体+低軌道衛星を`enable_atmospheric_drag`/
+    /// `set_ballistic_coefficient`で構成し、実際の`NBodySystem::step()`
+    /// (leapfrog)経由で、弾道係数を設定した衛星が設定しない場合より明確に速く
+    /// 高度を失うことを確認する(既存のA6検証(`atmosphere.rs`、直接組んだ
+    /// velocity Verlet風ループ)と同じ物理・同じ大気パラメータだが、今回は
+    /// `NBodySystem`本体の`accelerations()`に統合された経路で検証する)。
+    #[test]
+    fn atmospheric_drag_integrated_into_nbody_step_decays_low_orbit_faster_than_without_drag() {
+        let gm_earth = 3.986_004_418e14;
+        let r_earth = 6.371e6;
+        let mass_earth = gm_earth / GRAVITATIONAL_CONSTANT;
+        let altitude0 = 180e3;
+        let r0 = r_earth + altitude0;
+        let v_circ = (gm_earth / r0).sqrt();
+        let period = 2.0 * std::f64::consts::PI * (r0.powi(3) / gm_earth).sqrt();
+        let steps_per_orbit = 2000u32;
+        let dt = period / steps_per_orbit as f64;
+        let orbits = 40u32;
+        let steps = steps_per_orbit * orbits;
+
+        let mut with_drag = NBodySystem::new(0.0);
+        let central = with_drag.add_body(Vec3::ZERO, Vec3::ZERO, mass_earth);
+        let sat = with_drag.add_body(Vec3::new(r0, 0.0, 0.0), Vec3::new(0.0, v_circ, 0.0), 1.0);
+        with_drag.enable_atmospheric_drag(central, 1.225, 8500.0, r_earth);
+        with_drag.set_ballistic_coefficient(sat, 2.2 * 1e-4); // Cd=2.2, area/mass=1e-4 (atmosphere.rsのA6高抗力と同値)
+
+        let mut without_drag = with_drag.clone();
+        without_drag.atmospheric_drag = None;
+
+        step_n(&mut with_drag, dt, steps);
+        step_n(&mut without_drag, dt, steps);
+
+        let final_altitude_with_drag = with_drag.position[sat].length() - r_earth;
+        let final_altitude_without_drag = without_drag.position[sat].length() - r_earth;
+
+        assert!(
+            final_altitude_with_drag < altitude0,
+            "drag must cause net altitude loss: final={final_altitude_with_drag} initial={altitude0}"
+        );
+        assert!(
+            final_altitude_with_drag < final_altitude_without_drag - 1000.0,
+            "drag-enabled satellite must lose meaningfully more altitude than the \
+             drag-free control: with_drag={final_altitude_with_drag} \
+             without_drag={final_altitude_without_drag}"
         );
     }
 }

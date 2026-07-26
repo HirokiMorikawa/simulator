@@ -33,10 +33,18 @@
   既存のD18デモテストがcross-referenceで充足)。`World`へのレジーム切替接続
   (`time_regime`フィールド、Astro/Local分岐、frame変換によるAstro→Localの
   ハンドオフ)も実装済み(詳細§2参照)。
-  残り: 統合シナリオ1本(再突入本体——上記のレジーム切替土台の上に、閾値ベースの
-  自動切替・実際の大気減速/加熱モデルを組んだ本格シナリオが必要)、
-  シーンJSON`couplings`セクション(スキーマ未確定のため保留、§4参照)、
-  D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)。
+  再突入シナリオの土台として、大気抗力(`sim_astro::atmosphere::
+  exponential_atmosphere_density`、既にA6検証で単体テスト済み)を
+  `NBodySystem`本体へ実際に統合した(`enable_atmospheric_drag`/
+  `set_ballistic_coefficient`、`accelerations()`内で中心天体からの相対速度・
+  高度により抗力加速度を加算、大気は中心天体と共回転しない縮約実装)。
+  leapfrog経由の実際の`step()`で、弾道係数を設定した低軌道衛星が設定しない
+  場合より明確に速く高度を失うことをテストで確認済み(`atmosphere.rs`が
+  以前指摘していた「NBodySystem本体には未統合」というギャップを解消)。
+  残り: 統合シナリオ1本(再突入本体——上記の抗力統合+レジーム切替土台の
+  上に、閾値ベースの自動切替・空力加熱/アブレーションモデルを組んだ
+  本格シナリオが必要)、シーンJSON`couplings`セクション(スキーマ未確定の
+  ため保留、§4参照)、D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)。
 - **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R3・R5・R6・R7完全Green、GGX
   マイクロファセット(`RoughConductor`)実装済み(詳細・各テスト名は§5/§8参照)。
   R3はプリズム最小偏角・虹の偏角を、レンダラ自身の幾何プリミティブ(`Dielectric::
@@ -528,7 +536,17 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `atmosphere::exponential_atmosphere_density`(A6)は重力+抗力の直接ループで
       低軌道衛星を80周回積分 — 面積/質量比を大きくしすぎると固定刻み幅では再突入直前の
       急激な力学変化に追従できず数値発散することを発見し、発散しない範囲の弾道係数・
-      周回数を事前にPythonで数値実験して選定して解決(詳細は§3参照)
+      周回数を事前にPythonで数値実験して選定して解決(詳細は§3参照)。
+      **再突入シナリオ増分で追加**: A6検証時点では大気抗力が`NBodySystem`本体には
+      未統合(直接組んだ検証専用ループのみ)だったが、`NBodySystem::
+      enable_atmospheric_drag`/`set_ballistic_coefficient`を新設し、
+      `accelerations()`内で中心天体からの相対速度・高度により抗力加速度を
+      加算するよう統合した(大気は中心天体と共回転しない縮約実装、抗力は
+      非保存力のためleapfrogの厳密なシンプレクティック性はこの力の分だけ
+      失われる——物理的に正しい散逸として許容)。
+      `atmospheric_drag_integrated_into_nbody_step_decays_low_orbit_faster_
+      than_without_drag`で、実際の`step()`(leapfrog)経由でも弾道係数を
+      設定した衛星が設定しない場合より明確に速く高度を失うことを確認済み
 - [x] フレーム階層・floating origin(木構造・フレーム間変換・非慣性項までを`sim_core::frame`
       (`FrameTree`)に実装。§7の単体テストのうち跨ぎ判定を要さない2本 —
       `round_trip_transform_between_frames_is_identity`(往復変換恒等、abs<1e-12)・
