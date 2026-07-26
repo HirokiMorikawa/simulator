@@ -38,8 +38,11 @@ import "./style.css";
 // Scene Viewオーバーレイ(設計§1.2)は
 // 選択中ボディの速度ベクトル(矢印)+ 接触点(既存の`World::contact_points`が
 // 返す直近stepの接触点ワールド座標に小球マーカーを表示、この2体デモでは
-// 着地/跳ね返りのたびに実際に現れる)を実装(切替可、Toolbarのチェック
-// ボックス。力・拘束・流体場・フレーム軸のオーバーレイは対象外)。Consoleは
+// 着地/跳ね返りのたびに実際に現れる)+ 力(Nudgeボタンでキューに積む
+// `Command::ApplyForce`の力ベクトルを、クリックした瞬間だけ短時間矢印表示——
+// 一般の力の可視化(接触力・拘束反力の継続的な蓄積)には対応するWorld側の
+// クエリが無いため対象外)を実装(いずれも切替可、Toolbarのチェックボックス。
+// 拘束・流体場・フレーム軸のオーバーレイは対象外)。Consoleは
 // `World::drain_events`(既存API)が返す実イベント(この2体デモでは箱の着地/
 // 跳ね返りのたびに発生する`ContactStarted`/`ContactEnded`)をAll/Errors/
 // Warnings/Infoタブでフィルタ表示し(設計§1.5)、イベント行(step番号を含む)を
@@ -382,6 +385,31 @@ async function setUpSceneView(
     marker.visible = false;
     scene.add(marker);
     contactMarkers.push(marker);
+  }
+
+  // 力オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「力」、切替可)。
+  // 縮約実装の理由: 一般の力の可視化(接触力・拘束反力等の継続的な蓄積量)には
+  // `World`側の対応するクエリが無いため対象外。Nudgeボタン(`Command::
+  // ApplyForce`、1step分だけ効く既知の力)をクリックした瞬間にだけ、その
+  // 力ベクトルを短時間(`FORCE_OVERLAY_DURATION_MS`)矢印表示する——実際に
+  // Commandとして適用される値をそのまま可視化するため、UIの見た目と実際の
+  // 物理入力が一致する。
+  const FORCE_OVERLAY_DURATION_MS = 500;
+  const FORCE_OVERLAY_SCALE = 1.0 / 300_000.0; // 矢印長 = 力[N] * この係数[m]。
+  const forceOverlayToggle = document.getElementById("toggle-force-overlay") as HTMLInputElement;
+  const forceArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(), 1, 0xff8800);
+  forceArrow.visible = false;
+  scene.add(forceArrow);
+  let forceOverlayHideAtMs = 0;
+
+  function showForceOverlay(origin: THREE.Vector3, force: THREE.Vector3) {
+    const magnitude = force.length();
+    if (magnitude < 1e-6) return;
+    forceArrow.position.copy(origin);
+    forceArrow.setDirection(force.clone().divideScalar(magnitude));
+    const length = magnitude * FORCE_OVERLAY_SCALE;
+    forceArrow.setLength(Math.max(length, 0.3), Math.min(0.3, length * 0.3), Math.min(0.2, length * 0.2));
+    forceOverlayHideAtMs = performance.now() + FORCE_OVERLAY_DURATION_MS;
   }
 
   // 正式なGizmo(設計docs/23-frontend/01-editor.md §1.2「Gizmo: 選択中オブジェクトの
@@ -871,6 +899,10 @@ async function setUpSceneView(
   const NUDGE_FORCE_NEWTONS = 400_000.0;
   nudgeButton.addEventListener("click", () => {
     world.push_apply_force(0.0, NUDGE_FORCE_NEWTONS, 0.0);
+    if (forceOverlayToggle.checked) {
+      const p = world.body_position_at_f32(BODY_INDEX_BOX);
+      showForceOverlay(new THREE.Vector3(p[0], p[1], p[2]), new THREE.Vector3(0.0, NUDGE_FORCE_NEWTONS, 0.0));
+    }
   });
 
   const inspectorPosition = new THREE.Vector3();
@@ -930,6 +962,8 @@ async function setUpSceneView(
     } else {
       for (const marker of contactMarkers) marker.visible = false;
     }
+
+    forceArrow.visible = forceOverlayToggle.checked && performance.now() < forceOverlayHideAtMs;
 
     const showGizmo = mode === "edit" && !world.body_is_static_at(selectedBodyIndex);
     gizmoGroup.visible = showGizmo;

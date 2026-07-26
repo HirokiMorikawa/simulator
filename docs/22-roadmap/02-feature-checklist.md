@@ -52,7 +52,7 @@
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
   Translate/Rotate Gizmo(X/Y/Z軸ハンドル・軸周りリング、Editモード限定)+
-  速度ベクトル/接触点オーバーレイ)+
+  速度ベクトル/接触点/力オーバーレイ)+
   Toolbar(再生/Nudge Command + Edit/Playモードトグル)+ Hierarchy/Inspector
   (複数ボディ列挙・Scene View双方向選択連動、実Transformデータ)+
   Probe Graphs(1系列)+ Timeline(既存の`World::snapshot`/`restore`による
@@ -67,7 +67,9 @@
   (単純スタック、Redoは対象外)・InspectorへのRotation表示・スポーンパレット
   (球/箱×4材質、`spawn_sphere`/`spawn_box`でボディ数が動的に増える、これにより
   `BODY_META`固定ルックアップテーブルを廃止しShape/Materialを実クエリ化)も
-  実装済み。残りはGizmoのスケールハンドル・残りのオーバーレイ種別・回路エディタ等。
+  実装済み。力オーバーレイ(既知のNudge `Command::ApplyForce`のみを500ms表示、
+  縮約実装)も実装済み。残りはGizmoのスケールハンドル・拘束/流体場/フレーム軸
+  オーバーレイ・回路エディタ等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
   機を見て並行して進める。優先順位の詳細は
@@ -957,7 +959,15 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       落下中は速度矢印が下向きに表示されチェックを外すと非表示になり静止後は
       速度0で自動的に隠れること、箱が着地して静止した後は接触点マーカーが
       箱底面の2隅に実際に表示され続けチェックを外すと消えることを確認した。
-      力・拘束・流体場・フレーム軸のオーバーレイは未実装)
+      力オーバーレイも実装済み——`World`には汎用の力蓄積クエリが無いため、
+      Nudgeボタンが送る既知の`Command::ApplyForce`ベクトルのみをオレンジ色の
+      `THREE.ArrowHelper`として`FORCE_OVERLAY_DURATION_MS`(500ms)だけ表示する
+      縮約実装(継続的/一般の力は対象外、正直にこの制約を明記)。Toolbarの
+      チェックボックスで切替可能。Playwrightで、Nudgeクリック直後(50ms後)に
+      矢印が箱の位置から上向きに表示され、500ms経過後(700ms後に確認)には
+      自動的に非表示になること、チェックを外した状態でNudgeを押しても矢印が
+      表示されないことを確認した。拘束・流体場・フレーム軸のオーバーレイは
+      未実装)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
       (Bodies配下は`sim-wasm`に新設した`body_count`/`body_label_at`経由で実際の
       World状態(床の静的平面+箱)を列挙・クリックでInspector及びScene
