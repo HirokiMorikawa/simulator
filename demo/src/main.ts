@@ -734,6 +734,17 @@ async function setUpSceneView(
   const undoButton = document.getElementById("btn-undo") as HTMLButtonElement;
   const redoButton = document.getElementById("btn-redo") as HTMLButtonElement;
 
+  // 時間倍率(設計docs/23-frontend/01-editor.md §1.1「Toolbar: 時間倍率スライダー」)。
+  // dt自体は固定(`DT`、物理の決定論性はステップ幅に依存するため)のまま、
+  // 1描画フレームあたりに進める実時間(`frameSeconds`)をこの倍率でスケールする
+  // ことで、シミュレーションの見かけの再生速度のみを変える(縮約実装:
+  // スライダーではなくセレクトボックス、離散値×0.5/×1/×2/×5のみ)。
+  const timescaleSelect = document.getElementById("select-timescale") as HTMLSelectElement;
+  let timeScale = Number.parseFloat(timescaleSelect.value);
+  timescaleSelect.addEventListener("change", () => {
+    timeScale = Number.parseFloat(timescaleSelect.value);
+  });
+
   // Edit/Play モードの分離(設計§4「Edit モード: シーンの直接編集が可能…Play を
   // 押した瞬間の状態が実行の初期条件になる」「Play モード: 直接編集は不可。
   // 介入は全て Command」)。既定はEditモード(Unityと同じ起動時挙動、Playを
@@ -1060,7 +1071,7 @@ async function setUpSceneView(
     lastTimeMs = nowMs;
 
     if (mode === "play" && playing) {
-      accumulator += frameSeconds;
+      accumulator += frameSeconds * timeScale;
       let steps = 0;
       while (accumulator >= DT && steps < MAX_STEPS_PER_FRAME) {
         world.step();
