@@ -2124,6 +2124,14 @@ Toolbarに「Nudge」ボタンを新設した。ボタンクリックは直接�
 Playwrightで、一時停止中にNudgeを押してから1step進めると、Inspectorの速度表示が
 力・質量(鋼1m^3、約7850kg)・dt(1/120s)から期待される量(重力による減速分を
 差し引いてもΔv≈0.34m/s上向き)だけ正しく変化することを確認した。
+続けてProbe Graphsパネル(設計§1.4)の最小デモとして、`World::add_probe`+
+`ProbeTarget::BodyPosY`(既にワークストリームBで実装済み、`step()`内で毎step
+自動サンプルされる仕組みをそのまま利用)を`WasmWorld::new`内で1本登録し、
+`y_probe_history_f64`として履歴を公開した。Console行を分割してProbe Graphsパネル
+を新設し(CSS Grid、`console probes`の2列)、canvas 2Dで単一系列の自動スケーリング
+折れ線を描画した。Playwrightで、実際に箱の落下曲線(初期値10.00から時間とともに
+下降)が正しく表示されることを確認した(複数系列の重ね描き・対数軸・CSV
+エクスポートは未実装)。
 
 - [ ] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
       (再生/一時停止/1stepの骨格配線は実装済み、時間倍率スライダー・シーン選択・
@@ -2145,6 +2153,12 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
 - [ ] Console: イベント・診断ログ(発散・CFL 警告・シーンクラス/スロー再生バッジ)+ フィルタ + クリック→時刻/オブジェクト連動
       (タブ切替UIの骨格のみ、`SolverDiagnostics`への実接続は未実装)
 - [ ] Probe Graphs パネル: 複数系列・対数軸・CSV エクスポート
+      (単一系列(箱のy座標、`sim_world::World::add_probe`+`ProbeTarget::BodyPosY`を
+      `sim-wasm`に`y_probe_history_f64`として公開、既存のProbeが`step()`内で
+      毎step自動サンプルされる仕組みをそのまま利用)の自動スケーリング折れ線を
+      canvas 2Dで描画済み。Playwrightで実際に落下曲線(max=10.00→min低下)が
+      正しく表示されることを確認した。複数系列の重ね描き・対数軸・CSV
+      エクスポートは未実装)
 - [ ] Project ドロワー: Scenes/Materials/Prefabs/Replays
       (タブ切替UIの骨格(静的プレースホルダ内容)のみ実装済み)
 - [ ] Edit / Play モードの切替と編集ロック

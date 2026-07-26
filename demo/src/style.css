@@ -27,7 +27,7 @@ body {
     "toolbar   toolbar     toolbar"
     "hierarchy sceneview   inspector"
     "timeline  timeline    timeline"
-    "console   console     console"
+    "console   console     probes"
     "project   project     project";
 }
 
@@ -225,6 +225,23 @@ body {
   overflow: auto;
   font-family: monospace;
   font-size: 12px;
+}
+
+#probe-graphs {
+  grid-area: probes;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+#probe-graphs h2 {
+  margin: 0 0 4px;
+}
+
+#probe-canvas {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
 }
 
 #project-drawer {

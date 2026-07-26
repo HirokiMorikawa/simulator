@@ -104,6 +104,50 @@ function setUpProjectDrawer() {
   show("scenes");
 }
 
+// Probe Graphsパネル(設計docs/23-frontend/01-editor.md §1.4「Probeグラフ:
+// シーン定義の観測量を時系列表示」)の最小デモ。1系列(箱のy座標)の折れ線を
+// canvas 2Dで描画する。縮約実装の理由: 複数系列の重ね描き・対数軸・CSV
+// エクスポート(design§1.4のフル仕様)は後続増分、ここでは単一系列の自動
+// スケーリング折れ線のみ。
+function setUpProbeGraph(): (history: Float64Array) => void {
+  const canvas = document.getElementById("probe-canvas") as HTMLCanvasElement;
+  const ctx = canvas.getContext("2d")!;
+
+  return (history: Float64Array) => {
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    ctx.clearRect(0, 0, w, h);
+    if (history.length < 2) return;
+
+    let min = Infinity;
+    let max = -Infinity;
+    for (const v of history) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    const range = max - min > 1e-9 ? max - min : 1.0;
+
+    ctx.strokeStyle = "#9cf";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < history.length; i++) {
+      const x = (i / (history.length - 1)) * w;
+      const y = h - ((history[i] - min) / range) * h;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = "#888";
+    ctx.font = "11px monospace";
+    ctx.fillText(`BodyPosY: max=${max.toFixed(2)} min=${min.toFixed(2)}`, 4, 12);
+  };
+}
+
 function setUpConsoleTabs() {
   const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
   tabs.forEach((tab) => {
@@ -113,7 +157,10 @@ function setUpConsoleTabs() {
   });
 }
 
-async function setUpSceneView(updateInspectorTransform: (position: THREE.Vector3, velocity: THREE.Vector3) => void) {
+async function setUpSceneView(
+  updateInspectorTransform: (position: THREE.Vector3, velocity: THREE.Vector3) => void,
+  updateProbeGraph: (history: Float64Array) => void,
+) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
 
@@ -199,6 +246,7 @@ async function setUpSceneView(updateInspectorTransform: (position: THREE.Vector3
     inspectorPosition.set(p[0], p[1], p[2]);
     inspectorVelocity.set(v[0], v[1], v[2]);
     updateInspectorTransform(inspectorPosition, inspectorVelocity);
+    updateProbeGraph(world.y_probe_history_f64());
 
     const hashFull = world.state_hash();
     hud.textContent = [
@@ -245,10 +293,11 @@ function main() {
   setUpLayoutPresetSwitcher();
   setUpHierarchyPlaceholder();
   const updateInspectorTransform = setUpInspectorSkeleton();
+  const updateProbeGraph = setUpProbeGraph();
   setUpConsolePlaceholder();
   setUpConsoleTabs();
   setUpProjectDrawer();
-  setUpSceneView(updateInspectorTransform).catch((err) => {
+  setUpSceneView(updateInspectorTransform, updateProbeGraph).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);

@@ -6,15 +6,21 @@
 //! 観測値JSONはシーン記述(docs/20-integration/04-world-api.md §3)が実装され次第、
 //! Phase A 以降で追加する。
 
-use js_sys::Float32Array;
+use js_sys::{Float32Array, Float64Array};
 use sim_mechanics::{RigidBodyDesc, Shape};
-use sim_world::{BodyId, Command, World, WorldOptions};
+use sim_world::{BodyId, Command, ProbeTarget, World, WorldOptions};
 use wasm_bindgen::prelude::*;
+
+/// `docs/23-frontend/01-editor.md`のProbe Graphsパネル(§1.4「複数系列」)デモ用に、
+/// 箱のy座標を毎step記録するプローブの履歴長。1step=dt秒、`PROBE_HISTORY_CAPACITY`
+/// step分(≈`PROBE_HISTORY_CAPACITY*dt`秒)のスクロールウィンドウになる。
+const PROBE_HISTORY_CAPACITY: usize = 600;
 
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
     box_body: BodyId,
+    y_probe: usize,
 }
 
 #[wasm_bindgen]
@@ -39,7 +45,12 @@ impl WasmWorld {
         );
         desc.transform.position = sim_math::Vec3::new(0.0, initial_height, 0.0);
         let box_body = inner.create_body(desc);
-        WasmWorld { inner, box_body }
+        let y_probe = inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY);
+        WasmWorld {
+            inner,
+            box_body,
+            y_probe,
+        }
     }
 
     /// 1 world step。
@@ -87,6 +98,17 @@ impl WasmWorld {
     /// 決定論検証・UI 表示用の状態ハッシュ(16進文字列)。
     pub fn state_hash(&self) -> String {
         format!("{:016x}", self.inner.state_hash())
+    }
+
+    /// 箱のy座標プローブの観測履歴(古い順)。エディタのProbe Graphsパネル
+    /// (設計docs/23-frontend/01-editor.md §1.4)デモ用。
+    pub fn y_probe_history_f64(&self) -> Float64Array {
+        let probe = self
+            .inner
+            .probe(self.y_probe)
+            .expect("y_probe is registered in new() and never removed");
+        let values: Vec<f64> = probe.history().copied().collect();
+        Float64Array::from(values.as_slice())
     }
 
     /// エディタのPlayモード操作(設計docs/23-frontend/01-editor.md §4「介入は全て
