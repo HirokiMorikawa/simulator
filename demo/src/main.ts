@@ -16,12 +16,16 @@ import "./style.css";
 // Scene Viewに選択中(かつ非静的)ボディのTranslate Gizmo(X赤/Y緑/Z青の
 // 3軸ハンドル)が表示され、軸ハンドルをドラッグするとその軸方向にのみ
 // `WasmWorld::set_body_position_at`(Commandキューを経由しない、
-// `RigidBodySet`位置の直接書き換え)で位置を編集できる(回転/スケールの
-// ハンドルは、この2体デモに意味のある対象が無いため未実装)。Gizmoドラッグ
-// 開始のたびに直前の位置をUndoスタックへ積み、ToolbarのUndoボタン(Editモード
-// かつスタックが空でない場合のみ有効)で1件ずつ取り消せる(設計§6「Undo/Redo:
-// Editモードのみ」、縮約実装によりシーンJSON差分ではなく単純な位置スタック、
-// Redoは対象外)。再生/ステップ/Nudgeボタンは無効化される(シミュレーションは
+// `RigidBodySet`位置の直接書き換え)で位置を編集できる。同時にRotate Gizmo
+// (X/Y/Z軸周りのリングハンドル)も表示され、リングをドラッグするとドラッグ
+// 開始点からの画面上の角度差をそのままワールド軸周りの回転角として
+// `WasmWorld::set_body_rotation_at`で適用する(Blenderのようなビュー平面
+// トラックボールではなく単純な単一軸回転、スケールハンドルはこの2体デモに
+// 意味のある対象が無いため未実装)。Gizmoドラッグ(位置のみ)開始のたびに
+// 直前の位置をUndoスタックへ積み、ToolbarのUndoボタン(Editモードかつスタックが
+// 空でない場合のみ有効)で1件ずつ取り消せる(設計§6「Undo/Redo: Editモードのみ」、
+// 縮約実装によりシーンJSON差分ではなく単純な位置スタック、回転のUndo・Redoは
+// 対象外)。再生/ステップ/Nudgeボタンは無効化される(シミュレーションは
 // 進行しない)。Playモードでは
 // Gizmoは非表示になり、箱への直接ドラッグがCommandキュー経由
 // (`Command::Grab/MoveGrab/Release`、`push_grab`/`push_move_grab`/
@@ -42,8 +46,8 @@ import "./style.css";
 // プレースホルダ内容のまま。TimelineはWorld::snapshot/restoreによる
 // スナップショットリングバッファ(1s間隔・N=8面)でスクラブ・巻き戻しができ、
 // 任意時点をブックマーク(`add_bookmark`/`restore_bookmark`、リングバッファの
-// 退避を受けない別領域)として名前付きで保存・復元できる。Gizmoの回転/
-// スケールハンドル・残りのオーバーレイ種別(力・拘束・流体場・フレーム軸)・
+// 退避を受けない別領域)として名前付きで保存・復元できる。Gizmoのスケール
+// ハンドル・回転のUndo・残りのオーバーレイ種別(力・拘束・流体場・フレーム軸)・
 // Commandキュー残り(SetMotorTarget/SetSwitch/SetHeatSource未配線)・
 // 回路サブモードは全て後続増分。
 
@@ -203,6 +207,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     <div class="inspector-component">
       <h3>Transform</h3>
       <div class="inspector-field"><span>Position</span><span id="inspector-position">—</span></div>
+      <div class="inspector-field"><span>Rotation</span><span id="inspector-rotation">—</span></div>
       <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
     </div>
     <div class="inspector-component">
@@ -212,11 +217,18 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   `;
 }
 
-function updateInspectorTransformFields(position: THREE.Vector3, velocity: THREE.Vector3): void {
+function updateInspectorTransformFields(
+  position: THREE.Vector3,
+  rotation: THREE.Euler,
+  velocity: THREE.Vector3,
+): void {
   const positionField = document.getElementById("inspector-position");
+  const rotationField = document.getElementById("inspector-rotation");
   const velocityField = document.getElementById("inspector-velocity");
-  if (!positionField || !velocityField) return; // 選択切替の再描画中は一時的に無い。
+  if (!positionField || !rotationField || !velocityField) return; // 選択切替の再描画中は一時的に無い。
   positionField.textContent = `${position.x.toFixed(3)}, ${position.y.toFixed(3)}, ${position.z.toFixed(3)}`;
+  const toDeg = (rad: number) => THREE.MathUtils.radToDeg(rad).toFixed(1);
+  rotationField.textContent = `${toDeg(rotation.x)}°, ${toDeg(rotation.y)}°, ${toDeg(rotation.z)}°`;
   velocityField.textContent = `${velocity.x.toFixed(3)}, ${velocity.y.toFixed(3)}, ${velocity.z.toFixed(3)}`;
 }
 
@@ -406,6 +418,30 @@ async function setUpSceneView(
   gizmoGroup.visible = false;
   scene.add(gizmoGroup);
 
+  // Rotate Gizmo(設計§1.2「Gizmo: 移動/回転/スケール」の回転部分)。X(赤)/Y(緑)/
+  // Z(青)の3本のリングを選択中ボディの位置に表示し、Translate Gizmoと同じく
+  // Editモードかつ非静的ボディ選択時のみ表示・操作可能。縮約実装の理由: スケール
+  // ハンドルはこの2体デモに意味のある対象が無い(箱のサイズ変更は物理形状と
+  // 一致しなくなるため)ため未実装。リングをドラッグすると、ドラッグ開始点との
+  // 画面上の角度差をそのままワールド軸周りの回転角として適用する単純な実装
+  // (Blenderのようなビュー平面トラックボールではなく、選択軸周りの単純回転)。
+  const ROTATION_RING_RADIUS = 1.0;
+  const ROTATION_RING_TUBE_RADIUS = 0.03;
+  const rotationGizmoGroup = new THREE.Group();
+  const rotationHandleMeshes: { mesh: THREE.Mesh; axisName: "x" | "y" | "z" }[] = [];
+  for (const { axis, color, name } of GIZMO_AXES) {
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(ROTATION_RING_RADIUS, ROTATION_RING_TUBE_RADIUS, 8, 48),
+      new THREE.MeshBasicMaterial({ color }),
+    );
+    // TorusGeometryは既定でXY平面上(穴の軸はZ)にあるため、穴の軸を`axis`へ合わせる。
+    ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), axis);
+    rotationGizmoGroup.add(ring);
+    rotationHandleMeshes.push({ mesh: ring, axisName: name });
+  }
+  rotationGizmoGroup.visible = false;
+  scene.add(rotationGizmoGroup);
+
   let selectedBodyIndex = BODY_INDEX_BOX;
   function selectBody(index: number) {
     selectedBodyIndex = index;
@@ -461,6 +497,16 @@ async function setUpSceneView(
     return handle ? handle.axisName : null;
   }
 
+  function hitRotationGizmo(event: PointerEvent): "x" | "y" | "z" | null {
+    if (!rotationGizmoGroup.visible) return null;
+    updatePointerNdc(event);
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hits = raycaster.intersectObjects(rotationHandleMeshes.map((h) => h.mesh));
+    if (!hits.length) return null;
+    const handle = rotationHandleMeshes.find((h) => h.mesh === hits[0].object);
+    return handle ? handle.axisName : null;
+  }
+
   const AXIS_VECTORS: Record<"x" | "y" | "z", THREE.Vector3> = {
     x: new THREE.Vector3(1, 0, 0),
     y: new THREE.Vector3(0, 1, 0),
@@ -470,18 +516,33 @@ async function setUpSceneView(
   let dragStartScreen: { x: number; y: number } | null = null;
   let pointerDownHit: ReturnType<typeof hitTest> = null;
   let pointerDownGizmoAxis: "x" | "y" | "z" | null = null;
+  let pointerDownRotationAxis: "x" | "y" | "z" | null = null;
   let isDragging = false;
-  let dragMode: "grab" | "gizmo" | null = null;
+  let dragMode: "grab" | "gizmo" | "rotate" | null = null;
   const gizmoAxisDir = new THREE.Vector3();
   const gizmoDragStartPosition = new THREE.Vector3();
   let gizmoDragStartScalar = 0;
+  let rotateAxisDir = new THREE.Vector3();
+  let rotateStartQuat = new THREE.Quaternion();
+  let rotateCenterScreen = { x: 0, y: 0 };
+  let rotateStartAngle = 0;
 
   // Undo(Editモードのみ、設計docs/23-frontend/01-editor.md §6「Undo/Redo:
   // Editモードのみ。編集操作はシーンJSONの差分として保持」)。縮約実装の理由:
   // シーンJSON差分ではなく、Gizmoドラッグ開始直前の位置を積むだけの単純な
-  // スタック(Redoは対象外)。ドラッグ開始のたびに直前の位置を1件積む。
+  // スタック(Redoは対象外)。ドラッグ開始のたびに直前の位置を1件積む。回転
+  // ドラッグのUndoは未対応(後続増分)。
   const EDIT_UNDO_STACK_CAPACITY = 20;
   const editUndoStack: { bodyIndex: number; position: THREE.Vector3 }[] = [];
+
+  function projectToScreen(worldPos: THREE.Vector3): { x: number; y: number } {
+    const ndc = worldPos.clone().project(camera);
+    const rect = renderer.domElement.getBoundingClientRect();
+    return {
+      x: rect.left + ((ndc.x + 1) / 2) * rect.width,
+      y: rect.top + ((1 - ndc.y) / 2) * rect.height,
+    };
+  }
 
   renderer.domElement.addEventListener("pointerdown", (event) => {
     dragStartScreen = { x: event.clientX, y: event.clientY };
@@ -489,9 +550,12 @@ async function setUpSceneView(
     dragMode = null;
     if (mode === "edit") {
       pointerDownGizmoAxis = hitGizmo(event);
-      pointerDownHit = pointerDownGizmoAxis ? null : hitTest(event, event.altKey);
+      pointerDownRotationAxis = pointerDownGizmoAxis ? null : hitRotationGizmo(event);
+      pointerDownHit =
+        pointerDownGizmoAxis || pointerDownRotationAxis ? null : hitTest(event, event.altKey);
     } else {
       pointerDownGizmoAxis = null;
+      pointerDownRotationAxis = null;
       pointerDownHit = hitTest(event, event.altKey);
     }
   });
@@ -502,7 +566,18 @@ async function setUpSceneView(
     const dy = event.clientY - dragStartScreen.y;
     if (!isDragging) {
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
-      if (pointerDownGizmoAxis) {
+      if (pointerDownRotationAxis) {
+        isDragging = true;
+        dragMode = "rotate";
+        rotateAxisDir.copy(AXIS_VECTORS[pointerDownRotationAxis]);
+        const r = world.body_rotation_at_f32(selectedBodyIndex);
+        rotateStartQuat.set(r[0], r[1], r[2], r[3]);
+        rotateCenterScreen = projectToScreen(rotationGizmoGroup.position);
+        rotateStartAngle = Math.atan2(
+          event.clientY - rotateCenterScreen.y,
+          event.clientX - rotateCenterScreen.x,
+        );
+      } else if (pointerDownGizmoAxis) {
         isDragging = true;
         dragMode = "gizmo";
         gizmoAxisDir.copy(AXIS_VECTORS[pointerDownGizmoAxis]);
@@ -533,6 +608,19 @@ async function setUpSceneView(
         world.push_grab(p[0], p[1], p[2]);
       }
     }
+    if (dragMode === "rotate") {
+      // 回転はドラッグ平面ではなく画面上の角度差(中心=Gizmo位置の画面投影)を
+      // そのままワールド軸周りの回転角として使う(モジュールdoc参照)。
+      const currentAngle = Math.atan2(
+        event.clientY - rotateCenterScreen.y,
+        event.clientX - rotateCenterScreen.x,
+      );
+      const deltaAngle = currentAngle - rotateStartAngle;
+      const deltaQuat = new THREE.Quaternion().setFromAxisAngle(rotateAxisDir, deltaAngle);
+      const newQuat = deltaQuat.multiply(rotateStartQuat);
+      world.set_body_rotation_at(selectedBodyIndex, newQuat.x, newQuat.y, newQuat.z, newQuat.w);
+      return;
+    }
     updatePointerNdc(event);
     raycaster.setFromCamera(pointerNdc, camera);
     if (!raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)) return;
@@ -559,6 +647,7 @@ async function setUpSceneView(
     dragStartScreen = null;
     pointerDownHit = null;
     pointerDownGizmoAxis = null;
+    pointerDownRotationAxis = null;
   });
 
   const hud = document.getElementById("hud")!;
@@ -705,17 +794,24 @@ async function setUpSceneView(
   });
 
   const inspectorPosition = new THREE.Vector3();
+  const inspectorRotationQuat = new THREE.Quaternion();
+  const inspectorRotation = new THREE.Euler();
   const inspectorVelocity = new THREE.Vector3();
 
   function render() {
     const p = world.body_position_at_f32(BODY_INDEX_BOX);
     box.position.set(p[0], p[1], p[2]);
+    const boxRotation = world.body_rotation_at_f32(BODY_INDEX_BOX);
+    box.quaternion.set(boxRotation[0], boxRotation[1], boxRotation[2], boxRotation[3]);
 
     const selectedPosition = world.body_position_at_f32(selectedBodyIndex);
+    const selectedRotation = world.body_rotation_at_f32(selectedBodyIndex);
     const selectedVelocity = world.body_velocity_at_f32(selectedBodyIndex);
     inspectorPosition.set(selectedPosition[0], selectedPosition[1], selectedPosition[2]);
+    inspectorRotationQuat.set(selectedRotation[0], selectedRotation[1], selectedRotation[2], selectedRotation[3]);
+    inspectorRotation.setFromQuaternion(inspectorRotationQuat);
     inspectorVelocity.set(selectedVelocity[0], selectedVelocity[1], selectedVelocity[2]);
-    updateInspectorTransformFields(inspectorPosition, inspectorVelocity);
+    updateInspectorTransformFields(inspectorPosition, inspectorRotation, inspectorVelocity);
     updateProbeGraph(world.y_probe_history_f64());
 
     const speed = inspectorVelocity.length();
@@ -750,8 +846,10 @@ async function setUpSceneView(
 
     const showGizmo = mode === "edit" && !world.body_is_static_at(selectedBodyIndex);
     gizmoGroup.visible = showGizmo;
+    rotationGizmoGroup.visible = showGizmo;
     if (showGizmo) {
       gizmoGroup.position.copy(inspectorPosition);
+      rotationGizmoGroup.position.copy(inspectorPosition);
     }
 
     const hashFull = world.state_hash();

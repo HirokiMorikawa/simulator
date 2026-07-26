@@ -840,6 +840,14 @@ impl World {
         Some(self.mechanics.bodies.linear_velocity[id.index as usize])
     }
 
+    /// `body_position`と同じ不変条件の姿勢(クォータニオン)版。
+    pub fn body_rotation(&self, id: BodyId) -> Option<sim_math::Quat> {
+        if !self.is_valid(id) {
+            return None;
+        }
+        Some(self.mechanics.bodies.rotation[id.index as usize])
+    }
+
     /// 直近stepで検出された接触点のワールド座標一覧(設計docs/23-frontend/
     /// 01-editor.md §1.2 Scene View オーバーレイ「接触点」向け)。法線・貫入量は
     /// このオーバーレイの用途(接触位置のマーカー表示)には不要なため座標のみ返す

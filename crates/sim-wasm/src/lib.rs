@@ -153,6 +153,29 @@ impl WasmWorld {
         out
     }
 
+    /// `index`番目のボディの姿勢クォータニオン [x, y, z, w](f32)。
+    pub fn body_rotation_at_f32(&self, index: usize) -> Float32Array {
+        let id = self.body_id_at(index);
+        let q = self
+            .inner
+            .body_rotation(id)
+            .expect("body is created in new() and never removed");
+        let out = Float32Array::new_with_length(4);
+        out.set_index(0, q.x as f32);
+        out.set_index(1, q.y as f32);
+        out.set_index(2, q.z as f32);
+        out.set_index(3, q.w as f32);
+        out
+    }
+
+    /// Editモードの回転Gizmo向けの直接編集(`set_body_position_at`の姿勢版、
+    /// 同じくCommandキューを経由しない直接書き換え)。
+    pub fn set_body_rotation_at(&mut self, index: usize, x: f64, y: f64, z: f64, w: f64) {
+        let id = self.body_id_at(index);
+        self.inner.mechanics_mut().bodies.rotation[id.index as usize] =
+            sim_math::Quat { x, y, z, w };
+    }
+
     /// 1 world step。1s相当のstep数ごとにTimelineスナップショットを
     /// リングバッファへ記録する(モジュールdoc「スナップショットリングバッファ」
     /// 参照、既存の`World::snapshot`をそのまま使う)。
