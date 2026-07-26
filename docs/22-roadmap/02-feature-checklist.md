@@ -69,8 +69,11 @@
   (球/箱×4材質、`spawn_sphere`/`spawn_box`でボディ数が動的に増える、これにより
   `BODY_META`固定ルックアップテーブルを廃止しShape/Materialを実クエリ化)も
   実装済み。力オーバーレイ(既知のNudge `Command::ApplyForce`のみを500ms表示、
-  縮約実装)も実装済み。残りはGizmoのスケールハンドル・拘束/流体場/フレーム軸
-  オーバーレイ・回路エディタ等。
+  縮約実装)・Probe Graphsの2系列化(y座標・速さ、独立正規化)・時間倍率
+  (×0.5/×1/×2/×5)・Project ドロワーMaterialsタブの実データ接続
+  (`MaterialDb`から密度・摩擦・反発・比熱・熱伝導率を実クエリ)も実装済み。
+  残りはGizmoのスケールハンドル・拘束/流体場/フレーム軸オーバーレイ・
+  回路エディタ等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
   機を見て並行して進める。優先順位の詳細は
@@ -1039,7 +1042,18 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       max≈13.65まで上昇し着地後min=0.00へ収束)が同一canvasに重ねて正しく
       表示されることを確認した。対数軸・CSVエクスポートは未実装)
 - [ ] Project ドロワー: Scenes/Materials/Prefabs/Replays
-      (タブ切替UIの骨格(静的プレースホルダ内容)のみ実装済み)
+      (タブ切替UIの骨格は実装済み。Materialsタブは実データ接続済み——
+      `sim-wasm`に新設した`material_properties_f64(name)`(`World::materials()`
+      (`MaterialDb`)から`find_by_name`+`get`で実物性値を取得、`spawn_sphere`と
+      同じ「未知の名前ならパニック」設計)を、スポーンパレットが対応する
+      4材質(鋼/アルミ/木材/ゴム)について呼び出し、密度・摩擦係数・反発係数・
+      比熱・熱伝導率の表として描画する。世界(`world`)より先にパネルが構築
+      されるため、Console/`jumpToStepRef`と同じ「可変の参照オブジェクト
+      (`materialsRef`)越しに`setUpSceneView`がworld生成後にコールバックを
+      配線する」パターンを踏襲した。Playwrightで、Materialsタブをクリックすると
+      実際に4行×6列の表(鋼の密度7850.0 kg/m^3等、物理的に妥当な値)が
+      表示され、他のタブへ切り替えると表が消えて静的プレースホルダに
+      戻ることを確認した。Scenes/Prefabs/Replaysは引き続き静的プレースホルダ)
 - [x] Edit / Play モードの切替と編集ロック
       (Toolbarのセグメントトグル(`#btn-mode-edit`/`#btn-mode-play`)で切替。
       既定はEditモード(Unityと同じ起動時挙動、設計§4「Play を押した瞬間の

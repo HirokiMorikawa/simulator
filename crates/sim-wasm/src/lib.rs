@@ -187,6 +187,29 @@ impl WasmWorld {
         }
     }
 
+    /// Projectドロワー Materials タブ(設計docs/23-frontend/01-editor.md §1.6
+    /// 「Materials: MaterialDbプリセット一覧」)向けに、指定した材質名の主要物性値を
+    /// `[density, friction, restitution, specific_heat, conductivity]`の順で返す。
+    /// 未知の名前ならパニックする(呼び出し側UIが`SPAWN_MATERIALS`等の既知の名前だけを
+    /// 渡す前提、`spawn_sphere`と同じ設計)。
+    pub fn material_properties_f64(&self, name: String) -> Float64Array {
+        let id = self
+            .inner
+            .materials()
+            .find_by_name(&name)
+            .unwrap_or_else(|| panic!("unknown material: {name}"));
+        let m = self.inner.materials().get(id);
+        Float64Array::from(
+            &[
+                m.density,
+                m.friction,
+                m.restitution,
+                m.specific_heat,
+                m.conductivity,
+            ][..],
+        )
+    }
+
     /// スポーンパレット(設計docs/23-frontend/01-editor.md §6)——球を`material_name`
     /// (`MaterialDb::standard`が持つ名前)で`(x,y,z)`に配置する。新しいボディの
     /// index(`body_count`と同じ体系)を返す。未知の材質名ならパニックする

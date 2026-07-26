@@ -100,6 +100,19 @@ const CONSOLE_LOG_CAPACITY = 200;
 // 直接コールバックを渡せず可変の参照オブジェクト越しに後から配線する。
 type JumpToStepRef = { current: ((step: number) => void) | null };
 
+// Projectドロワー Materials タブ(設計§1.6「Materials: MaterialDbプリセット一覧」)向け。
+// Console/jumpToStepRefと同じ理由(worldより先にパネルが構築される)で、
+// 可変の参照オブジェクト越しに`setUpSceneView`がworld生成後にコールバックを配線する。
+type MaterialProperties = {
+  name: string;
+  density: number;
+  friction: number;
+  restitution: number;
+  specificHeat: number;
+  conductivity: number;
+};
+type MaterialsRef = { current: (() => MaterialProperties[]) | null };
+
 function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
@@ -241,18 +254,54 @@ function updateInspectorTransformFields(
   velocityField.textContent = `${velocity.x.toFixed(3)}, ${velocity.y.toFixed(3)}, ${velocity.z.toFixed(3)}`;
 }
 
-function setUpProjectDrawer() {
+function setUpProjectDrawer(materialsRef: MaterialsRef) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
-  const contentByTab: Record<string, string> = {
+  const staticContentByTab: Record<string, string> = {
     scenes: "Scenes: (D1–D43 サンプルシーンの読み込みは後続増分)",
-    materials: "Materials: MaterialDb プリセット一覧は後続増分",
     prefabs: "Prefabs: 未実装",
     replays: "Replays: 未実装",
   };
+
+  function renderMaterialsTab() {
+    if (!materialsRef.current) {
+      body.textContent = "Materials: 読み込み中...";
+      return;
+    }
+    const props = materialsRef.current();
+    body.innerHTML = "";
+    const table = document.createElement("table");
+    table.className = "materials-table";
+    const header = table.insertRow();
+    for (const label of ["Material", "density [kg/m^3]", "friction", "restitution", "specific heat [J/(kg・K)]", "conductivity [W/(m・K)]"]) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      header.appendChild(th);
+    }
+    for (const p of props) {
+      const row = table.insertRow();
+      for (const value of [
+        p.name,
+        p.density.toFixed(1),
+        p.friction.toFixed(3),
+        p.restitution.toFixed(3),
+        p.specificHeat.toFixed(1),
+        p.conductivity.toFixed(3),
+      ]) {
+        const td = row.insertCell();
+        td.textContent = value;
+      }
+    }
+    body.appendChild(table);
+  }
+
   function show(tab: string) {
-    body.textContent = contentByTab[tab] ?? "";
     tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
+    if (tab === "materials") {
+      renderMaterialsTab();
+      return;
+    }
+    body.textContent = staticContentByTab[tab] ?? "";
   }
   tabs.forEach((tab) => {
     tab.addEventListener("click", () => show(tab.dataset.tab!));
@@ -316,9 +365,15 @@ async function setUpSceneView(
   updateProbeGraph: (series: ProbeSeries[]) => void,
   appendConsoleEntries: (eventsText: string) => void,
   jumpToStepRef: JumpToStepRef,
+  materialsRef: MaterialsRef,
 ) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
+  materialsRef.current = () =>
+    SPAWN_MATERIALS.map((name) => {
+      const [density, friction, restitution, specificHeat, conductivity] = world.material_properties_f64(name);
+      return { name, density, friction, restitution, specificHeat, conductivity };
+    });
 
   const host = document.getElementById("scene-view-canvas-host")!;
 
@@ -1093,8 +1148,9 @@ function main() {
   const updateProbeGraph = setUpProbeGraph();
   const jumpToStepRef: JumpToStepRef = { current: null };
   const appendConsoleEntries = setUpConsole(jumpToStepRef);
-  setUpProjectDrawer();
-  setUpSceneView(updateProbeGraph, appendConsoleEntries, jumpToStepRef).catch((err) => {
+  const materialsRef: MaterialsRef = { current: null };
+  setUpProjectDrawer(materialsRef);
+  setUpSceneView(updateProbeGraph, appendConsoleEntries, jumpToStepRef, materialsRef).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);
