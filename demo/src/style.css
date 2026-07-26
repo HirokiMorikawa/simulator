@@ -1,0 +1,239 @@
+/* 統合エディタのドッキングレイアウト骨格。設計 docs/23-frontend/01-editor.md §1。
+ * 縮約実装の理由: ドラッグによるパネルリサイズ・タブ化・切り離し(§1「リサイズ・
+ * タブ化・切り離しができる」)は本増分の対象外。CSS Grid による固定比率の6パネル
+ * 骨格 + 3レイアウトプリセット(Default/Physics-focus/Astro、§2の4種のうち
+ * Circuit-focusは回路サブモード(§3)自体が未実装のため後続増分に残す)のみを
+ * 実装する。 */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #111;
+  color: #eee;
+  font-family:
+    system-ui,
+    -apple-system,
+    sans-serif;
+  font-size: 13px;
+}
+
+#app {
+  display: grid;
+  height: 100vh;
+  grid-template-columns: 220px 1fr 260px;
+  grid-template-rows: auto 1fr auto 160px 28px;
+  grid-template-areas:
+    "toolbar   toolbar     toolbar"
+    "hierarchy sceneview   inspector"
+    "timeline  timeline    timeline"
+    "console   console     console"
+    "project   project     project";
+}
+
+#app[data-layout="physics-focus"] {
+  grid-template-rows: auto 1fr auto 320px 28px;
+}
+
+/* Astro(タイムライン重視、設計§2「Astro(タイムライン重視)」): タイムライン行を
+ * 固定の大きな高さにし、その分コンソール行を縮める。 */
+#app[data-layout="astro"] {
+  grid-template-rows: auto 1fr 140px 120px 28px;
+}
+
+.panel {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.panel h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #888;
+  margin: 8px 10px;
+}
+
+#toolbar {
+  grid-area: toolbar;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 10px;
+  overflow: visible;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.toolbar-spacer {
+  flex: 1;
+}
+
+#toolbar button,
+#toolbar select {
+  background: #2a2a2a;
+  color: #eee;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+#hash-display {
+  font-family: monospace;
+  cursor: pointer;
+  color: #9cf;
+}
+
+#hierarchy {
+  grid-area: hierarchy;
+}
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: 0 10px 10px;
+}
+
+.tree li {
+  padding: 2px 0;
+  white-space: nowrap;
+}
+
+.tree .tree-nested {
+  padding-left: 14px;
+}
+
+#scene-view {
+  grid-area: sceneview;
+  position: relative;
+  padding: 0;
+}
+
+#scene-view-canvas-host {
+  position: absolute;
+  inset: 0;
+}
+
+#scene-view-canvas-host canvas {
+  display: block;
+}
+
+#hud {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  pointer-events: none;
+  font-family: monospace;
+}
+
+#inspector {
+  grid-area: inspector;
+}
+
+#inspector-body {
+  padding: 0 10px 10px;
+}
+
+.inspector-component {
+  margin-bottom: 10px;
+  border-top: 1px solid #2a2a2a;
+  padding-top: 6px;
+}
+
+.inspector-component h3 {
+  font-size: 12px;
+  margin: 0 0 4px;
+}
+
+.inspector-field {
+  display: flex;
+  justify-content: space-between;
+  padding: 1px 0;
+  color: #ccc;
+}
+
+#timeline {
+  grid-area: timeline;
+  padding: 6px 10px;
+}
+
+.timeline-header {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  font-family: monospace;
+  margin-bottom: 4px;
+}
+
+.badge {
+  margin-left: auto;
+  background: #2a2a2a;
+  border-radius: 3px;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+#timeline-scrubber {
+  width: 100%;
+}
+
+#console-panel {
+  grid-area: console;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.console-tabs,
+.project-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.console-tab,
+.project-tab {
+  background: transparent;
+  color: #999;
+  border: none;
+  padding: 3px 8px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.console-tab.active,
+.project-tab.active {
+  background: #2a2a2a;
+  color: #eee;
+}
+
+#console-log {
+  list-style: none;
+  margin: 0;
+  padding: 4px 10px;
+  overflow: auto;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+#project-drawer {
+  grid-area: project;
+  display: flex;
+  flex-direction: column;
+}
+
+#project-body {
+  padding: 4px 10px;
+  color: #888;
+}

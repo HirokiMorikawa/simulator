@@ -2089,18 +2089,46 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 
 Unity 風統合エディタ:
 
+**現在地**: `demo/`はPhase 0の最小スタブ(箱1個が落ちるだけ、`main.ts`99行)から、
+6パネルドッキングレイアウトの骨格(CSS Grid、`demo/src/style.css`)+ 3レイアウト
+プリセット(Default/Physics-focus/Astro、Circuit-focusは回路サブモード(§3)自体が
+未実装のため後続増分)へ進んだ。Scene View(既存のThree.js箱落下デモをパネル内に
+再配線、リサイズ対応)・Toolbar(再生/一時停止/1step——`sim-wasm`側の新規APIを
+要さないため配線可能、時間倍率・状態ハッシュ表示は静的プレースホルダ)・Hierarchy/
+Inspector/Console/Project(いずれも静的なプレースホルダ内容、`sim-wasm`が
+`body_transforms`以外のクエリAPIをまだ持たないため実データ接続は後続増分)を
+実装した。ドラッグによるパネルリサイズ・タブ化・切り離し(§1)・Gizmo・
+オーバーレイ・ピック・Command キュー・Edit/Playモードの分離(§4)は全て未実装
+(各機能が実データに接続されるにはワークストリームB由来のWorld API拡張
+(`Scenario`/`Probe`/`subscribe`/`raycast`等)が前提になる)。Playwright(pre-
+installed)でレイアウトプリセット切替・再生/一時停止/1stepボタン・Projectドロワー
+タブ切替の動作を目視確認済み(コンソールエラー無し)。
+
 - [ ] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
+      (再生/一時停止/1stepの骨格配線は実装済み、時間倍率スライダー・シーン選択・
+      Settingsは未実装、上記「現在地」参照)
 - [ ] Scene View: Three.js 3D ビューポート + Gizmo(移動/回転/スケール)+ ピック
+      (ビューポート自体はパネル内に配線済み、Gizmo・オーバーレイ・ピックは未実装)
 - [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
+      (骨格(静的プレースホルダツリー)のみ、World APIへの実データ接続・選択連動は未実装)
 - [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
+      (骨格(静的プレースホルダ)のみ、実データ接続は未実装)
 - [ ] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク
+      (時刻・step表示は配線済み、スクラバ操作・スナップショット巻き戻し・
+      ブックマークは未実装)
 - [ ] Console: イベント・診断ログ(発散・CFL 警告・シーンクラス/スロー再生バッジ)+ フィルタ + クリック→時刻/オブジェクト連動
+      (タブ切替UIの骨格のみ、`SolverDiagnostics`への実接続は未実装)
 - [ ] Probe Graphs パネル: 複数系列・対数軸・CSV エクスポート
 - [ ] Project ドロワー: Scenes/Materials/Prefabs/Replays
+      (タブ切替UIの骨格(静的プレースホルダ内容)のみ実装済み)
 - [ ] Edit / Play モードの切替と編集ロック
 - [ ] Command 系(Grab/MoveGrab/Release/SetMotorTarget/…)と入力列記録
 - [ ] レイアウトプリセット(Default / Physics-focus / Circuit-focus / Astro)
+      (Default(標準比率)・Physics-focus(コンソール行を拡大)・Astro(タイムライン行を
+      固定の大きな高さにしその分コンソール行を縮小)の3種を実装済み(`demo/src/
+      style.css`のCSS Grid行テンプレート切替)。Circuit-focusは回路サブモード自体が
+      無いため未実装)
 - [ ] 回路エディタ(Scene View サブモード、D19 自由配線)
 - [ ] フレームサブモード(L5 ドリルイン)
 - [ ] 予測→実験ミニパネル(シーン側オプトイン)

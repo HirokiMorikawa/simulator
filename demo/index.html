@@ -3,29 +3,79 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>物理エンジン Phase 0 デモ — 落下する箱</title>
-    <style>
-      html,
-      body {
-        margin: 0;
-        height: 100%;
-        background: #111;
-        color: #eee;
-        font-family: monospace;
-      }
-      #hud {
-        position: absolute;
-        top: 8px;
-        left: 8px;
-        font-size: 14px;
-        line-height: 1.5;
-        white-space: pre;
-        pointer-events: none;
-      }
-    </style>
+    <title>物理エンジン統合エディタ</title>
   </head>
   <body>
-    <div id="hud">読み込み中...</div>
+    <div id="app" data-layout="default">
+      <header id="toolbar" class="panel">
+        <div class="toolbar-group">
+          <button id="btn-play" title="再生/一時停止">▶</button>
+          <button id="btn-step" title="1 step 進める">⏭</button>
+        </div>
+        <div class="toolbar-group">
+          <label for="select-timescale">時間倍率</label>
+          <select id="select-timescale">
+            <option value="1">×1</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <label for="select-layout">Layout</label>
+          <select id="select-layout">
+            <option value="default">Default</option>
+            <option value="physics-focus">Physics-focus</option>
+            <option value="astro">Astro</option>
+          </select>
+        </div>
+        <div class="toolbar-group toolbar-spacer"></div>
+        <div class="toolbar-group">
+          <span id="hash-display" title="状態ハッシュ(クリックでコピー)">hash: --------</span>
+        </div>
+      </header>
+
+      <aside id="hierarchy" class="panel">
+        <h2>Hierarchy</h2>
+        <ul id="hierarchy-tree" class="tree"></ul>
+      </aside>
+
+      <main id="scene-view" class="panel">
+        <div id="scene-view-canvas-host"></div>
+        <div id="hud"></div>
+      </main>
+
+      <aside id="inspector" class="panel">
+        <h2>Inspector</h2>
+        <div id="inspector-body"></div>
+      </aside>
+
+      <section id="timeline" class="panel">
+        <div class="timeline-header">
+          <span id="timeline-time">t = 0.000 s</span>
+          <span id="timeline-step">step = 0</span>
+          <span id="play-mode-badge" class="badge">Play</span>
+        </div>
+        <input id="timeline-scrubber" type="range" min="0" max="100" value="0" disabled />
+      </section>
+
+      <section id="console-panel" class="panel">
+        <div class="console-tabs">
+          <button class="console-tab active" data-tab="all">All</button>
+          <button class="console-tab" data-tab="errors">Errors</button>
+          <button class="console-tab" data-tab="warnings">Warnings</button>
+          <button class="console-tab" data-tab="info">Info</button>
+        </div>
+        <ul id="console-log"></ul>
+      </section>
+
+      <footer id="project-drawer" class="panel">
+        <div class="project-tabs">
+          <button class="project-tab active" data-tab="scenes">Scenes</button>
+          <button class="project-tab" data-tab="materials">Materials</button>
+          <button class="project-tab" data-tab="prefabs">Prefabs</button>
+          <button class="project-tab" data-tab="replays">Replays</button>
+        </div>
+        <div id="project-body"></div>
+      </footer>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
