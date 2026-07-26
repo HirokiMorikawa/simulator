@@ -15,20 +15,21 @@
 //! 二重計上する心配がない(設計§4の疑似コードが`sample_lights`と`environment`/BSDF
 //! 再帰を単純に加算できるのは、光源が可視物体でない場合に限られる——可視な面光源
 //! (エリアライト)を扱うには多重重点サンプリング(MIS)が必要になるため後続増分)。
-//! 拡散(Lambertian)面のみNEEを適用する(鏡面/誘電体は反射/屈折方向がデルタ関数の
-//! ため光源の直接サンプルと意味を成さない、標準的な扱い)。
+//! 拡散(Lambertian)面のみNEEを適用する(鏡面/誘電体/金属は反射/屈折方向がデルタ
+//! 関数のため光源の直接サンプルと意味を成さない、標準的な扱い)。
 
-use crate::bsdf::{Dielectric, Lambertian};
+use crate::bsdf::{Dielectric, Lambertian, Metal};
 use crate::ray::Ray;
 use crate::sphere::{Hit, Sphere};
 use sim_math::{SimRng, Vec3};
 
 /// このシーンが表現できるBSDF(`bsdf`モジュールdoc「縮約実装の理由」参照、
-/// 金属・粗面透過は未実装)。
+/// 粗面透過は未実装)。
 #[derive(Clone, Copy, Debug)]
 pub enum Material {
     Lambertian(Lambertian),
     Dielectric(Dielectric),
+    Metal(Metal),
 }
 
 /// シーン中の1物体(球 + BSDF)。
@@ -162,6 +163,17 @@ impl Scene {
                         self.trace(&next_ray, rng, max_depth - 1)
                     }
                 }
+            }
+            Material::Metal(metal) => {
+                // 金属は不透明(透過が無い)ため、誘電体のような反射/透過の確率的
+                // 分岐は不要——鏡面反射方向1つだけを追跡し、フレネル反射率で振幅を
+                // スケールする(吸収された分(1-R)は失われる、`bsdf.rs`モジュールdoc
+                // 参照)。
+                let cos_theta_i = -ray.direction.dot(hit.normal);
+                let r = metal.reflectance(cos_theta_i);
+                let direction = Dielectric::reflect(ray.direction, hit.normal);
+                let next_ray = Ray::new(hit.point, direction);
+                self.trace(&next_ray, rng, max_depth - 1) * r
             }
         }
     }
@@ -304,6 +316,34 @@ mod tests {
         }
     }
 
+    /// 金属球(不透明・完全鏡面)を一様環境放射輝度の中に置くと、放射輝度は
+    /// フレネル反射率でスケールされた環境放射輝度に厳密に一致する(白色炉テストの
+    /// 金属版——誘電体と異なり反射/透過の確率的分岐が無い単一経路のため、統計誤差
+    /// ゼロで解析値に一致する、`sub_unity_albedo_scales_radiance_by_albedo_exactly`
+    /// と同種の判断)。
+    #[test]
+    fn metal_furnace_test_matches_fresnel_scaled_background_radiance_exactly() {
+        let environment_radiance = 5.0;
+        let gold = Metal { n: 0.47, k: 2.4 };
+        let scene = Scene {
+            objects: vec![SceneObject {
+                sphere: Sphere {
+                    center: Vec3::new(0.0, 0.0, -5.0),
+                    radius: 1.0,
+                },
+                material: Material::Metal(gold),
+            }],
+            lights: vec![],
+            environment_radiance,
+        };
+        let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0)); // 垂直入射。
+        let mut rng = SimRng::new(7, 7);
+        let radiance = scene.trace(&ray, &mut rng, 4);
+        let expected = gold.reflectance(1.0) * environment_radiance;
+        let rel_err = (radiance - expected).abs() / expected;
+        assert!(rel_err < 1e-9, "radiance={radiance} expected={expected}");
+    }
+
     /// 複数物体: 2つの球が同一レイ上に重なる場合、`closest_hit`が正しく手前の
     /// (`t`が小さい)物体を選ぶこと。`trace`経由だとBSDFの再帰的サンプリングの結果
     /// (どちらの物体に当たっても最終的にほぼ同じ放射輝度に収束し得る、特に両方が
@@ -348,7 +388,7 @@ mod tests {
                     "should pick the near sphere's material"
                 )
             }
-            Material::Dielectric(_) => panic!("expected Lambertian"),
+            other => panic!("expected Lambertian, got {other:?}"),
         }
 
         // 物体を除いた登録順で試しても(奥→手前)、結果は変わらず手前が選ばれる

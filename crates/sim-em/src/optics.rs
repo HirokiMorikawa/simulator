@@ -82,6 +82,27 @@ pub fn prism_index_from_min_deviation(apex_angle: f64, min_deviation: f64) -> f6
     ((apex_angle + min_deviation) / 2.0).sin() / (apex_angle / 2.0).sin()
 }
 
+/// 導体(金属)のフレネル反射率(非偏光平均、複素屈折率 $n+ik$、設計
+/// docs/17-rendering/03-materials-camera.md §2「金属/誘電体: 複素屈折率で分岐」)。
+/// 標準的な閉形式(Born & Wolf等の教科書公式、`k=0`のとき`fresnel_reflectance(1.0,
+/// n, theta_i)`と厳密に一致する——導体固有の吸収項が消えて通常の誘電体反射率に
+/// 帰着することの解析的な自己無撞着性チェック、実装検証中に確認した)。全反射の
+/// 概念は無い(吸収媒質は常に実数の透過角を持つ)ため`Option`は返さない。
+pub fn conductor_reflectance(n: f64, k: f64, theta_i: f64) -> f64 {
+    let cos_i = theta_i.cos();
+    let sin2_i = 1.0 - cos_i * cos_i;
+    let t0 = n * n - k * k - sin2_i;
+    let a2_plus_b2 = (t0 * t0 + 4.0 * n * n * k * k).sqrt();
+    let a2 = 0.5 * (a2_plus_b2 + t0);
+    let a = a2.max(0.0).sqrt();
+    let cos2_i = cos_i * cos_i;
+    let r_s = (a2_plus_b2 - 2.0 * a * cos_i + cos2_i) / (a2_plus_b2 + 2.0 * a * cos_i + cos2_i);
+    let sin2_i_sq = sin2_i * sin2_i;
+    let r_p = r_s * (cos2_i * a2_plus_b2 - 2.0 * a * cos_i * sin2_i + sin2_i_sq)
+        / (cos2_i * a2_plus_b2 + 2.0 * a * cos_i * sin2_i + sin2_i_sq);
+    0.5 * (r_s + r_p)
+}
+
 /// Cauchy式(分散、設計§2.2): $n(\lambda)=A+B/\lambda^2$(可視域で十分な近似)。
 /// `wavelength_nm`はナノメートル単位。`B>0`なら短波長(青)ほど屈折率が大きい
 /// (可視光分散の標準的な符号、プリズムの虹・R3の検証対象)。
@@ -202,5 +223,46 @@ mod tests {
             n_blue > n_red,
             "n_blue={n_blue} should exceed n_red={n_red} (normal dispersion)"
         );
+    }
+
+    /// R2(金属側): 垂直入射での導体フレネル反射率が閉形式$((n-1)^2+k^2)/((n+1)^2+k^2)$
+    /// に厳密に一致すること。金(Au、550nm)の複素屈折率(設計§9パラメータ表)を使う。
+    #[test]
+    fn conductor_reflectance_at_normal_incidence_matches_closed_form() {
+        let (n, k) = (0.47, 2.4); // 金、550nm(設計docs/17-rendering/03-materials-camera.md §9)。
+        let measured = conductor_reflectance(n, k, 0.0);
+        let expected = ((n - 1.0).powi(2) + k * k) / ((n + 1.0).powi(2) + k * k);
+        let rel_err = (measured - expected).abs() / expected;
+        assert!(rel_err < 1e-9, "measured={measured} expected={expected}");
+    }
+
+    /// 自己無撞着性チェック: 消光係数k=0(吸収の無い理想導体)では、導体反射率の
+    /// 式が通常の誘電体フレネル反射率(`fresnel_reflectance(1.0, n, theta_i)`、
+    /// 既にE9/E10で検証済み)に複数の入射角で厳密に一致すること(この一致は導体
+    /// 反射率の式自体の正しさの独立な裏付けになる、モジュールdoc参照)。
+    #[test]
+    fn conductor_reflectance_reduces_to_dielectric_fresnel_when_extinction_is_zero() {
+        let n = 1.5;
+        for i in 0..10 {
+            let theta_i = i as f64 * 0.08; // 0 〜 0.72 rad(臨界角の心配が無い範囲)。
+            let measured = conductor_reflectance(n, 0.0, theta_i);
+            let expected = fresnel_reflectance(1.0, n, theta_i).unwrap().r_unpolarized;
+            let rel_err = (measured - expected).abs() / expected;
+            assert!(
+                rel_err < 1e-9,
+                "theta_i={theta_i}: measured={measured} expected={expected}"
+            );
+        }
+    }
+
+    /// 反射率は常に[0,1]の範囲(エネルギー保存)。グレージング角(θ→90°)では
+    /// 全ての材質で反射率が1へ近づく(標準的なフレネルの性質)。
+    #[test]
+    fn conductor_reflectance_approaches_total_reflection_at_grazing_angle() {
+        let (n, k) = (0.47, 2.4);
+        let grazing = std::f64::consts::FRAC_PI_2 - 0.001;
+        let r = conductor_reflectance(n, k, grazing);
+        assert!((0.0..=1.0).contains(&r), "r={r} out of [0,1]");
+        assert!(r > 0.99, "r={r} should approach 1 at grazing incidence");
     }
 }

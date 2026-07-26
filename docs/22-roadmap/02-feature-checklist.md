@@ -1245,6 +1245,21 @@
   ことを同時に確認した(既存コードの再利用のみで新たな検証コストが小さい設計)。
   R3のチェックボックス自体は、分光レンダリング全体への波長の配線(hero
   wavelength法)・コースティクスが未実装のため完了とは見なさない。
+  続けて設計の実装順序(拡散→誘電体→金属→粗面透過)どおり金属BSDFを実装し、
+  R2を完了させた。導体(金属)のフレネル反射率(複素屈折率$n+ik$)の標準的な
+  閉形式(Born & Wolf等の教科書公式)を`sim_em::optics::conductor_reflectance`
+  として実装し、消光係数k=0のとき通常の誘電体フレネル反射率
+  (`fresnel_reflectance(1.0, n, theta_i)`、既にE9/E10で検証済み)に複数の入射角で
+  厳密に帰着することを確認した(この一致自体が導体反射率の式の独立な裏付けになる、
+  実装検証中に確認)。`sim_render::Metal`(完全鏡面)は、誘電体と異なり透過が無い
+  (不透明)ため反射/透過の確率的分岐が不要——鏡面反射方向1つだけを追跡し
+  フレネル反射率で振幅をスケールする(既存の`Dielectric::reflect`をそのまま
+  再利用、反射則自体は材質に依らない幾何なので重複させない)。金(Au、550nm、
+  n≈0.47+2.4i、設計docs/17-rendering/03-materials-camera.md §9)の垂直入射反射率
+  が閉形式と厳密に一致することと、金属球の白色炉テスト(単一経路のため確率的分岐が
+  無くrel<1e-9で厳密一致、`sub_unity_albedo`と同種の判断)を確認し、R2(誘電体+
+  金属の両方)を完了とした。GGXマイクロファセット分布(粗さ)は設計が本来求める
+  モデルだが対象外(完全鏡面(粗さ0)のみ、`bsdf.rs`モジュールdoc参照)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1892,17 +1907,21 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       参照)。レイ-球交差(`sphere::Sphere::intersect`)・最近傍選択とも実装済み
       (`closest_hit_picks_the_nearer_object_when_two_spheres_overlap_along_the_ray`
       で登録順に依らない`t`最小選択・欠側`None`を確認)。三角形メッシュ・平面は未実装。
-- [ ] BSDF・NEE——拡散(Lambertian)+誘電体(`Dielectric`、実屈折率のみ、`sim_em::
-      fresnel_reflectance`(E9/E10で既に検証済み)を再利用)を実装済み。NEE
+- [x] BSDF・NEE——拡散(Lambertian)+誘電体(`Dielectric`、実屈折率のみ、`sim_em::
+      fresnel_reflectance`(E9/E10で既に検証済み)を再利用)+金属(`Metal`、複素
+      屈折率$n+ik$、`sim_em::conductor_reflectance`を再利用、完全鏡面のみ——GGX
+      マイクロファセット分布(粗さ)は対象外)を実装済み。金属は透過が無い不透明な
+      単一経路(鏡面反射方向のみ、フレネル反射率で振幅をスケール)のため、誘電体
+      のような反射/透過の確率的分岐が不要(`bsdf.rs`モジュールdoc参照)。NEE
       (`PointLight`、逆二乗則の点光源、シャドウレイによる遮蔽判定)も実装済み——
-      拡散面のみに適用(鏡面/誘電体は反射/屈折方向がデルタ関数のため光源の直接
-      サンプルと意味を成さない、標準的な扱い)。光源は幾何を持たない抽象光源
+      拡散面のみに適用(鏡面/誘電体/金属は反射/屈折方向がデルタ関数のため光源の
+      直接サンプルと意味を成さない、標準的な扱い)。光源は幾何を持たない抽象光源
       (`Scene::objects`に含まれない)としたため、BSDFサンプリングで到達したレイが
       光源自体に衝突してNEEの寄与と二重計上する心配が無い(可視な面光源(エリア
       ライト)を扱うには多重重点サンプリング(MIS)が必要になるため後続増分)。
-      金属(複素屈折率$n+ik$)・粗面透過は未実装。`sim_em::raytracer`(光学ドメインの
-      決定論的パワー分岐トレース、E9–E12のエネルギー収支検証用)とは目的が異なる
-      別実装として意図的に型を共有しない(`bsdf.rs`モジュールdoc参照)。
+      粗面透過は未実装。`sim_em::raytracer`(光学ドメインの決定論的パワー分岐
+      トレース、E9–E12のエネルギー収支検証用)とは目的が異なる別実装として意図的に
+      型を共有しない(`bsdf.rs`モジュールdoc参照)。
 - [ ] 分光・屈折・コースティクス——分散(`CauchyDielectric`、Cauchy式
       $n(\lambda)=A+B/\lambda^2$、`sim_em::cauchy_refractive_index`を再利用)を
       実装済み。既存の`Dielectric::refract`(Snellの法則)を波長ごとに具体化した
@@ -1920,7 +1939,21 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       albedo=1のとき統計的収束を待たずに1バウンスで解析値と厳密に一致する
       (rel<1e-9、設計が要求するrel0.1%を大きく上回る精度)ことを実装検証中に発見し、
       そのまま検証方針として採用した。
-- [ ] R2(誘電体側のみGreen、金属側は未実装——詳細は§8のR2行参照)。
+- [x] R2 — 誘電体側は`crates/sim-render/src/bsdf.rs::tests::
+      r2_fresnel_reflectance_at_normal_incidence_matches_closed_form`・
+      `r2_dielectric_reflectance_is_total_at_grazing_angle_beyond_critical_angle`。
+      金属側は`crates/sim-em/src/optics.rs::tests::
+      conductor_reflectance_at_normal_incidence_matches_closed_form`(金Au、
+      550nm、垂直入射反射率が閉形式と厳密に一致)・
+      `conductor_reflectance_reduces_to_dielectric_fresnel_when_extinction_is_zero`
+      (消光係数k=0で通常の誘電体フレネル反射率に厳密に帰着する自己無撞着性
+      チェック、複数角度で確認)・
+      `conductor_reflectance_approaches_total_reflection_at_grazing_angle`、
+      `crates/sim-render/src/bsdf.rs::tests::
+      metal_reflectance_matches_conductor_closed_form_at_normal_incidence`・
+      `crates/sim-render/src/path_tracer.rs::tests::
+      metal_furnace_test_matches_fresnel_scaled_background_radiance_exactly`
+      (金属球の白色炉テスト、単一経路(確率的分岐なし)のためrel<1e-9で厳密一致)。
 - [ ] R3(分散側のみ実装・Green——`crates/sim-em/src/optics.rs::tests::
       cauchy_refractive_index_matches_bk7_catalog_value_at_the_d_line`・
       `cauchy_refractive_index_is_larger_for_shorter_wavelengths`、
@@ -1931,7 +1964,7 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       大きく屈折角が小さい(各波長でSnell則も厳密に成り立つ)ことを確認。分光
       レンダリング全体への波長の配線(hero wavelength法)・コースティクスは未実装
       のため、チェックボックス自体はR3完了とは見なさない)。
-- [ ] 担当テスト Green: R4–R7(R1完全Green、R2/R3は部分実装——詳細は上記各行参照)
+- [ ] 担当テスト Green: R4–R7(R1・R2完全Green、R3は分散側のみ部分実装——詳細は上記各行参照)
 - [ ] デモ D40–D43 合格
 
 ## 6. フロントエンド(設計は [../23-frontend/01-editor.md](../23-frontend/01-editor.md) が正)
@@ -2382,7 +2415,7 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
       シーンで、`bsdf*cosθ/pdf=albedo`の恒等式(重要度サンプリングの完全な相殺)と
       凸形状の自己遮蔽なしから、albedo=1のとき統計的収束を待たずrel<1e-9で厳密一致
       (設計が要求するrel0.1%を大きく上回る精度)。
-- [ ] R2(誘電体側のみ実装・Green — `crates/sim-render/src/bsdf.rs::tests::
+- [x] R2 — `crates/sim-render/src/bsdf.rs::tests::
       r2_fresnel_reflectance_at_normal_incidence_matches_closed_form`・
       `r2_dielectric_reflectance_is_total_at_grazing_angle_beyond_critical_angle`。
       `sim_em::fresnel_reflectance`(E9/E10で既に検証済み)を再利用する`Dielectric`
@@ -2398,9 +2431,22 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
       ($\text{ior}$)とで厳密に相殺することから、統計誤差ゼロで環境放射輝度と一致
       することを実装検証中に発見し検証方針として採用した(臨界角を超えるグレージング
       角は全反射による球内部への閉じ込めで`max_depth`打ち切りが起こるため本テストの
-      対象外、後続増分の既知の限界として記録)。金属(複素屈折率$n+ik$)側は未実装の
-      ため、チェックボックス自体はR2完了とは見なさない)
-- [ ] R3
+      対象外、後続増分の既知の限界として記録)。続けて金属側(複素屈折率$n+ik$)を
+      `sim_em::optics::conductor_reflectance`(標準的な導体フレネル反射率の閉形式、
+      k=0で通常の誘電体フレネル反射率に厳密に帰着する自己無撞着性チェックで正しさを
+      確認)として実装し、`sim_render::Metal`(完全鏡面、透過が無いため誘電体のような
+      確率的分岐は不要、単一の鏡面反射経路をフレネル反射率でスケールするのみ)へ
+      配線した。金(Au、550nm、n≈0.47+2.4i)の垂直入射反射率が閉形式と厳密に一致・
+      金属球の白色炉テスト(`metal_furnace_test_matches_fresnel_scaled_background_
+      radiance_exactly`、単一経路のためrel<1e-9で厳密一致)を確認し、R2完了とした
+      (GGXマイクロファセット分布(粗さ)は対象外、`bsdf.rs`モジュールdoc参照)。
+- [ ] R3(分散側のみ実装・Green——`crates/sim-em/src/optics.rs::tests::
+      cauchy_refractive_index_matches_bk7_catalog_value_at_the_d_line`・
+      `cauchy_refractive_index_is_larger_for_shorter_wavelengths`、
+      `crates/sim-render/src/bsdf.rs::tests::cauchy_dielectric_disperses_
+      different_wavelengths_into_different_refraction_angles`。完全な分光
+      レンダリング(hero wavelength法、`Scene`/`trace`全体への波長の配線)・
+      コースティクスは未実装のため、チェックボックス自体はR3完了とは見なさない)
 - [ ] R4
 - [ ] R5
 - [ ] R6

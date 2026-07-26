@@ -1,8 +1,10 @@
 //! BSDF。設計 docs/17-rendering/02-path-tracing.md §8「BVH + 拡散/鏡面BSDF + NEE(基本パストレ)」、
 //! docs/17-rendering/03-materials-camera.md §8「BSDF(拡散→誘電体→金属→粗面透過)」。
-//! **縮約実装の理由**: 拡散(Lambertian)+誘電体(`Dielectric`、実屈折率)のみを実装する
-//! (金属(複素屈折率 $n+ik$)・粗面透過は後続増分、設計§8の実装順序どおり)。分光
-//! (波長ごとの反射率)は未実装のため、`albedo`・屈折率はいずれもモノクロのスカラーとする。
+//! **縮約実装の理由**: 拡散(Lambertian)+誘電体(`Dielectric`、実屈折率)+金属
+//! (`Metal`、複素屈折率$n+ik$、完全鏡面——設計が本来求めるGGXマイクロファセット
+//! 分布(粗さ)は対象外、`roughness=0`の鏡面反射のみ)を実装する。粗面透過は後続増分。
+//! 分光(波長ごとの反射率)は未実装のため、`albedo`・屈折率はいずれもモノクロの
+//! スカラーとする。
 //!
 //! `sim_em::raytracer`(光学ドメイン)が既に持つ`Ray`/`SurfaceGeom`/`OpticalSurface`は
 //! 目的が異なる別実装として意図的に区別する: あちらは決定論的なパワー分岐トレース
@@ -101,6 +103,28 @@ impl CauchyDielectric {
         Dielectric {
             ior: self.ior_at(wavelength_nm),
         }
+    }
+}
+
+/// 金属(複素屈折率$n+ik$、完全鏡面——設計のGGXマイクロファセット分布(粗さ)は
+/// 対象外、モジュールdoc参照)。誘電体と異なり透過が無い(不透明)ため、鏡面反射
+/// 方向(`Dielectric::reflect`を再利用、反射則自体は材質に依らない幾何なので
+/// 重複させない)のみを持ち、その振幅がフレネル反射率でスケールされる
+/// (吸収された分(1-R)はエネルギーとして失われる、誘電体のような反射/透過の
+/// 確率的分岐は不要——透過という代替経路自体が存在しないため)。
+#[derive(Clone, Copy, Debug)]
+pub struct Metal {
+    pub n: f64,
+    pub k: f64,
+}
+
+impl Metal {
+    /// 非偏光平均のフレネル反射率。`sim_em::conductor_reflectance`(既に
+    /// 「k=0で誘電体反射率に厳密に帰着する」ことを検証済みの解析式)をそのまま
+    /// 再利用する。
+    pub fn reflectance(&self, cos_theta_i: f64) -> f64 {
+        let theta_i = cos_theta_i.clamp(-1.0, 1.0).acos();
+        sim_em::conductor_reflectance(self.n, self.k, theta_i)
     }
 }
 
@@ -311,5 +335,19 @@ mod tests {
             "blue (higher n) should refract closer to the normal than red: \
              theta_t_blue={theta_t_blue} theta_t_red={theta_t_red}"
         );
+    }
+
+    /// R2(金属側): `Metal::reflectance`が`sim_em::conductor_reflectance`(既に
+    /// 検証済みの解析式)をそのまま呼んでいることの配線確認。金(Au、550nm、設計
+    /// docs/17-rendering/03-materials-camera.md §9)の垂直入射反射率を閉形式と
+    /// 直接比較する。
+    #[test]
+    fn metal_reflectance_matches_conductor_closed_form_at_normal_incidence() {
+        let gold = Metal { n: 0.47, k: 2.4 };
+        let measured = gold.reflectance(1.0); // cosθ=1 → 垂直入射。
+        let expected =
+            ((gold.n - 1.0).powi(2) + gold.k * gold.k) / ((gold.n + 1.0).powi(2) + gold.k * gold.k);
+        let rel_err = (measured - expected).abs() / expected;
+        assert!(rel_err < 1e-9, "measured={measured} expected={expected}");
     }
 }

@@ -5,18 +5,19 @@
 //! のうち、本増分は拡散(Lambertian)+誘電体(`Dielectric`、実屈折率のみ)BSDF + 一様
 //! 環境放射輝度 + 複数物体シーン + NEE(`PointLight`)による経路追跡(`path_tracer`
 //! モジュールdoc参照)を実装し、R1(白色炉テスト)+R2(誘電体側)をGreen化した。
-//! さらに分散(`CauchyDielectric`、Cauchy式、`bsdf`モジュールdoc参照)を追加し、
-//! R3(分光/屈折の分散側)の核となる物理(波長ごとに屈折角が異なること)を検証した
-//! (`Scene`/`trace`全体への波長の配線(hero wavelength法)自体は後続増分)。
-//! BVH・金属BSDF・完全な分光レンダリング・参加媒質・物理カメラは後続増分(各
-//! モジュールdoc「縮約実装の理由」参照)。
+//! さらに分散(`CauchyDielectric`、Cauchy式、`bsdf`モジュールdoc参照)+金属BSDF
+//! (`Metal`、複素屈折率$n+ik$の完全鏡面、GGX粗さは対象外)を追加し、R3(分光/屈折の
+//! 分散側)の核となる物理(波長ごとに屈折角が異なること)を検証した(`Scene`/
+//! `trace`全体への波長の配線(hero wavelength法)自体は後続増分)。
+//! BVH・GGXマイクロファセット(粗さ)・完全な分光レンダリング・参加媒質・物理
+//! カメラは後続増分(各モジュールdoc「縮約実装の理由」参照)。
 
 mod bsdf;
 mod path_tracer;
 mod ray;
 mod sphere;
 
-pub use bsdf::{CauchyDielectric, Dielectric, Lambertian};
+pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal};
 pub use path_tracer::{Material, PointLight, Scene, SceneObject};
 pub use ray::Ray;
 pub use sphere::{Hit, Sphere};
