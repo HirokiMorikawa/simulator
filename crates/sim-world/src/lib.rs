@@ -840,6 +840,18 @@ impl World {
         Some(self.mechanics.bodies.linear_velocity[id.index as usize])
     }
 
+    /// 直近stepで検出された接触点のワールド座標一覧(設計docs/23-frontend/
+    /// 01-editor.md §1.2 Scene View オーバーレイ「接触点」向け)。法線・貫入量は
+    /// このオーバーレイの用途(接触位置のマーカー表示)には不要なため座標のみ返す
+    /// 縮約実装(`sim_mechanics::MechanicsSolver::last_manifolds`をそのまま使う)。
+    pub fn contact_points(&self) -> Vec<Vec3> {
+        self.mechanics
+            .last_manifolds
+            .iter()
+            .flat_map(|m| m.points.iter().map(|p| p.world_point))
+            .collect()
+    }
+
     /// レイキャストクエリ(設計docs/20-integration/04-world-api.md §2、`raycast`
     /// モジュールdoc参照。`filter`引数は未実装、同モジュールdoc参照)。
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_distance: f64) -> Option<RayHit> {

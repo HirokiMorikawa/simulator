@@ -68,6 +68,11 @@ pub struct MechanicsSolver {
     /// (設計docs/00-foundation/04-architecture.md §1.1.2(5))を`ctx.events`へ発行する
     /// (`World`最初のイベント生産者、`subscribe`/`drain_events`のdoc参照)。
     contact_pairs: HashSet<(usize, usize)>,
+    /// 直近stepで検出された接触マニフォールド(sleep判定に使う`manifolds`と同じもの、
+    /// スリープ中でスキップされたペアも含む)。エディタのScene Viewオーバーレイ
+    /// (設計docs/23-frontend/01-editor.md §1.2「接触点」)向けに、外部から読み取れる
+    /// ようそのまま保持しておく——物理解には影響しない読み取り専用のキャッシュ。
+    pub last_manifolds: Vec<collision::ContactManifold>,
 }
 
 impl MechanicsSolver {
@@ -86,6 +91,7 @@ impl MechanicsSolver {
             hinge_motors: Vec::new(),
             last_contact_dissipation: 0.0,
             contact_pairs: HashSet::new(),
+            last_manifolds: Vec::new(),
         }
     }
 
@@ -255,6 +261,7 @@ impl Solver for MechanicsSolver {
         joint::resolve_slider(&self.slider_joints, &mut self.bodies, dt);
         let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
         self.emit_contact_events(&manifolds, ctx);
+        self.last_manifolds = manifolds.clone();
         // 両側の dynamic body が全て asleep な接触は再解決しない(収束済みで変化が無いのに
         // 毎ステップ再解決すると warm start・split impulse の数値的な揺らぎで再起床してしまう
         // ことを実装検証中に発見した — 「積分を停止」だけでは不十分で、接触解決自体も

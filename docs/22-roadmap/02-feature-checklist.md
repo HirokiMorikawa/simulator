@@ -40,7 +40,8 @@
   BVH・コースティクス・マルチスキャッタリング・トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
-  Translate Gizmo(X/Y/Z軸ハンドル、Editモード限定)+速度ベクトルオーバーレイ)+
+  Translate Gizmo(X/Y/Z軸ハンドル、Editモード限定)+速度ベクトル/接触点
+  オーバーレイ)+
   Toolbar(再生/Nudge Command + Edit/Playモードトグル)+ Hierarchy/Inspector
   (複数ボディ列挙・Scene View双方向選択連動、実Transformデータ)+
   Probe Graphs(1系列)+ Timeline(既存の`World::snapshot`/`restore`による
@@ -871,14 +872,19 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       ラスタスキャンで実測してからPlaywrightシナリオを組んだ——見た目の矢印
       位置と実際の当たり判定はカメラ透視の前景短縮でずれるため、目視座標の
       当てずっぽうでは安定して当たらないという実装上の発見)。オーバーレイは
-      速度ベクトルのみ)
+      速度ベクトル・接触点)
 - [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
-      (速度ベクトルのみ`THREE.ArrowHelper`で実装済み——選択中ボディの実速度
+      (速度ベクトルは`THREE.ArrowHelper`で実装済み——選択中ボディの実速度
       (`body_velocity_at_f32`)を毎フレーム矢印として表示し、Toolbarのチェック
-      ボックスで切替可能。速さがほぼ0(静止)なら矢印を隠す。Playwrightで、
-      落下中は矢印が下向きに表示され、チェックを外すと非表示になり、静止後は
-      速度0で自動的に隠れることを確認した。接触点・力・拘束・流体場・
-      フレーム軸のオーバーレイは未実装)
+      ボックスで切替可能。速さがほぼ0(静止)なら矢印を隠す。接触点は新設の
+      `World::contact_points`(`MechanicsSolver::last_manifolds`をそのまま
+      公開、物理解には影響しない読み取り専用キャッシュ)を`sim-wasm`に
+      `contact_points_f32`として配線し、直近stepの接触点ワールド座標に固定
+      プール(8個)の小球マーカーを重ねて表示・切替可能にした。Playwrightで、
+      落下中は速度矢印が下向きに表示されチェックを外すと非表示になり静止後は
+      速度0で自動的に隠れること、箱が着地して静止した後は接触点マーカーが
+      箱底面の2隅に実際に表示され続けチェックを外すと消えることを確認した。
+      力・拘束・流体場・フレーム軸のオーバーレイは未実装)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
       (Bodies配下は`sim-wasm`に新設した`body_count`/`body_label_at`経由で実際の
       World状態(床の静的平面+箱)を列挙・クリックでInspector及びScene

@@ -297,6 +297,20 @@ impl WasmWorld {
             sim_math::Vec3::new(x, y, z);
     }
 
+    /// Scene View オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「接触点」)向けに、
+    /// 直近stepの接触点ワールド座標を`[x0,y0,z0,x1,y1,z1,...]`のフラット配列で返す
+    /// (既存の`World::contact_points`をそのまま使う)。
+    pub fn contact_points_f32(&self) -> Float32Array {
+        let points = self.inner.contact_points();
+        let out = Float32Array::new_with_length((points.len() * 3) as u32);
+        for (i, p) in points.iter().enumerate() {
+            out.set_index((i * 3) as u32, p.x as f32);
+            out.set_index((i * 3 + 1) as u32, p.y as f32);
+            out.set_index((i * 3 + 2) as u32, p.z as f32);
+        }
+        out
+    }
+
     /// Consoleパネル(設計docs/23-frontend/01-editor.md §1.5「`SolverDiagnostics`の
     /// 発散警告・…イベントをフィルタ表示」)向けに、前回呼び出し以降に発生した
     /// イベント(既存の`World::drain_events`)を1行1件のテキストへ整形して返す

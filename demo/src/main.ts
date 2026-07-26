@@ -25,8 +25,10 @@ import "./style.css";
 // 有効になる。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため
 // (World API-only制約)、Phase 0デモが実際に構築する内容と一致させた固定の
 // ルックアップテーブル(`BODY_META`)を使う。Scene Viewオーバーレイ(設計§1.2)は
-// 選択中ボディの速度ベクトルを矢印表示するもの(切替可、Toolbarのチェック
-// ボックス)のみ実装(接触点・力・拘束・流体場・フレーム軸は対象外)。Consoleは
+// 選択中ボディの速度ベクトル(矢印)+ 接触点(既存の`World::contact_points`が
+// 返す直近stepの接触点ワールド座標に小球マーカーを表示、この2体デモでは
+// 着地/跳ね返りのたびに実際に現れる)を実装(切替可、Toolbarのチェック
+// ボックス。力・拘束・流体場・フレーム軸のオーバーレイは対象外)。Consoleは
 // `World::drain_events`(既存API)が返す実イベント(この2体デモでは箱の着地/
 // 跳ね返りのたびに発生する`ContactStarted`/`ContactEnded`)をAll/Errors/
 // Warnings/Infoタブでフィルタ表示する(設計§1.5)。Projectは静的な
@@ -34,8 +36,9 @@ import "./style.css";
 // スナップショットリングバッファ(1s間隔・N=8面)でスクラブ・巻き戻しができ、
 // 任意時点をブックマーク(`add_bookmark`/`restore_bookmark`、リングバッファの
 // 退避を受けない別領域)として名前付きで保存・復元できる。Gizmoの回転/
-// スケールハンドル・オーバーレイ残り・Commandキュー残り(SetMotorTarget/
-// SetSwitch/SetHeatSource未配線)・回路サブモードは全て後続増分。
+// スケールハンドル・残りのオーバーレイ種別(力・拘束・流体場・フレーム軸)・
+// Commandキュー残り(SetMotorTarget/SetSwitch/SetHeatSource未配線)・
+// 回路サブモードは全て後続増分。
 
 const GRAVITY = 9.80665;
 const DT = 1.0 / 120.0;
@@ -316,6 +319,24 @@ async function setUpSceneView(
   scene.add(velocityArrow);
   const velocityOverlayToggle = document.getElementById("toggle-velocity-overlay") as HTMLInputElement;
   const velocityDirection = new THREE.Vector3();
+
+  // 接触点オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「接触点」、切替可)。
+  // `World::contact_points`(既存の`MechanicsSolver::last_manifolds`をそのまま
+  // 使う)が返す直近stepの接触点ワールド座標に、小さな球マーカーを重ねて表示する。
+  // 縮約実装の理由: マーカーの固定プール(`CONTACT_MARKER_POOL_SIZE`個)を使い回す
+  // だけで、法線・貫入量の可視化(矢印やインパルス強度の色分け等)は対象外。
+  const CONTACT_MARKER_POOL_SIZE = 8;
+  const CONTACT_MARKER_RADIUS = 0.06;
+  const contactOverlayToggle = document.getElementById("toggle-contact-overlay") as HTMLInputElement;
+  const contactMarkerGeometry = new THREE.SphereGeometry(CONTACT_MARKER_RADIUS, 10, 8);
+  const contactMarkerMaterial = new THREE.MeshBasicMaterial({ color: 0xff2222 });
+  const contactMarkers: THREE.Mesh[] = [];
+  for (let i = 0; i < CONTACT_MARKER_POOL_SIZE; i++) {
+    const marker = new THREE.Mesh(contactMarkerGeometry, contactMarkerMaterial);
+    marker.visible = false;
+    scene.add(marker);
+    contactMarkers.push(marker);
+  }
 
   // 正式なGizmo(設計docs/23-frontend/01-editor.md §1.2「Gizmo: 選択中オブジェクトの
   // Transformを直接ドラッグで編集」、§4「Scene View gizmo ドラッグ」)。縮約実装の
@@ -636,6 +657,21 @@ async function setUpSceneView(
       velocityArrow.visible = true;
     } else {
       velocityArrow.visible = false;
+    }
+
+    if (contactOverlayToggle.checked) {
+      const contactPoints = world.contact_points_f32();
+      const count = Math.min(contactPoints.length / 3, CONTACT_MARKER_POOL_SIZE);
+      for (let i = 0; i < CONTACT_MARKER_POOL_SIZE; i++) {
+        if (i < count) {
+          contactMarkers[i].position.set(contactPoints[i * 3], contactPoints[i * 3 + 1], contactPoints[i * 3 + 2]);
+          contactMarkers[i].visible = true;
+        } else {
+          contactMarkers[i].visible = false;
+        }
+      }
+    } else {
+      for (const marker of contactMarkers) marker.visible = false;
     }
 
     const showGizmo = mode === "edit" && !world.body_is_static_at(selectedBodyIndex);
