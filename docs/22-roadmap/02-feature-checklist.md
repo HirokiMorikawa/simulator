@@ -1119,9 +1119,38 @@
   応じて浮いた氷の喫水深さが浅くなること(アルキメデス統合)を確認する。「水位不変」
   (氷が融けても水位が変わらないという古典的事実)は自由表面を追跡しない本実装の
   対象外(D10/D17と同じ、本実装が持たない機構への依存はしない判断)。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次はシーンJSON`couplings`
-  セクション+排他結合検査のWorld接続、design上のpre/post 2相分離・sub-iteration
-  剛性閾値表、あるいは残りのヘッドレスデモ(D12・D20・D23・D24・D27–D33・D36–D39)。
+  続けてシーンJSON`couplings`セクション+排他結合検査(`validate_exclusive_couplings`)の
+  `World`接続を検討したが、実装を見送った——設計例示のJSON(docs/20-integration/
+  04-world-api.md §3)は`"couplings": ["buoyancy_drag", "dissipation_to_heat",
+  "convection"]`という素のタグ文字列リストのみで、各タグがボディ/ノードのどの組へ
+  結び付くかの詳細(パラメータ)を持たない。かつ`sim_coupling::SceneCouplingConfig`の
+  6個の排他フラグ(浮力2種・空気抗力2種・コンデンサ電場エネルギー2種)のうち、現在の
+  縮約`Scenario`スキーマ(`fluids`は`StaticWater`のみ、`atmosphere`・`circuit`・
+  `grid_fluid`・`sph`セクション自体が未実装)では実質的に「排他ペアの両方が同時に
+  真になる」状況を作ることが原理的にできない(半分のドメインがそもそもシーンJSON
+  経由で構築不可能なため)。この状態で`couplings`セクションのパースだけを実装しても
+  常に無違反(何も検出できない)validatorになってしまい、実質的に空疎な実装になる
+  と判断した。設計に忠実な形で価値を持たせるには、まず`atmosphere`/`circuit`等の
+  不足しているシーンJSONセクションを先に拡張する必要があり、それ自体が本増分の
+  スコープを超える判断(設計書に明記のない具体的なJSONタグ↔排他フラグの対応表を
+  独自に決める必要もある)であるため、後続の実質的な検討機会(あるいはユーザーへの
+  確認)に委ねることにした。
+  代わりに、確度の高い成果としてD20(モーターと発電)の「手回し発電」部分を
+  棚卸しした——`integration_scenarios.rs`の`hand_crank_generator_scenario_
+  converts_mechanical_work_to_joule_heat`が、`MotorCoupling`を発電機モードで
+  使い同じk/R定数から求まる発電電力を`JouleHeat`経由の熱台帳とrel<2%で照合済み
+  (「台帳(効率)」に対応)、E6(モーター無負荷/ストール)自体も`sim-em::motor`側で
+  既にGreenであることを確認し、D10/D17と同じ「既にカバー済みと見なす」パターンで
+  チェックリストに記載した(新規コードなし)。「モーターで物を巻き上げ」部分は
+  巻き上げ/滑車機構が未実装のため対象外。
+- **作業中**: ワークストリームB(Phase C)の残りは(a)design上のpre/post 2相分離・
+  sub-iteration剛性閾値表、(b)シーンJSONの`atmosphere`/`circuit`等セクション拡張
+  (`couplings`セクション接続の前提)、(c)残りのヘッドレスデモ(D12・D23・D24・
+  D27–D33・D36–D39、いずれも新規物理(関節可動域・成熟したSPH/剛体結合・タイヤ
+  モデル・量子/統計の`World`ドメイン・相対論等)を要する)——現実的な到達点に近い
+  ため、設計書どおりの厳密なフェーズ順(A→B→C→D)に従い、ワークストリームC
+  (Phase D: パストレースレンダラ、現状`sim-render`は4行の空crate)に着手する。
+  ワークストリームBの残タスクは後続で機会があれば追加する。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1878,7 +1907,16 @@ Phase 4:
       `Command::SetSwitch`によるLED分岐の実行中開閉・`JouleHeat`(Coupling registry
       経由)による熱ノード温度上昇を確認。E4(RLC)は`sim-em`側で既にGreenのため
       重複実装しない)
-- [ ] D20 モーターと発電
+- [ ] D20 モーターと発電(合格基準「E6、台帳(効率)」のうち、「手回し発電」部分は
+      `crates/sim-world/src/integration_scenarios.rs`の
+      `hand_crank_generator_scenario_converts_mechanical_work_to_joule_heat`が既に
+      カバー済みと見なす(`MotorCoupling`をキネマティックに回転駆動する発電機モードで
+      使い、E6が使うのと同じk/R定数から求まる発電電力を`JouleHeat`経由の熱台帳と
+      rel<2%で照合、「台帳(効率)」に対応)。E6(モーター無負荷/ストール)自体は
+      `crates/sim-em/src/motor.rs`の`e6_no_load_speed_matches_v_over_k`・
+      `e6_stall_torque_matches_kv_over_ra`で既にGreenのため重複実装しない。
+      「モーターで物を巻き上げ」部分は巻き上げ/滑車機構(ヒンジモーターへの負荷として
+      重量物を吊るす構成)が未実装のため対象外(後続増分)。目視チェック保留)
 - [ ] D21 磁石遊び(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
       ワークストリームD未着手のため保留。「磁石の吸引反発・方位磁針」は既存実装の別側面
       のため対象外、「銅管落下」(渦電流の終端速度)のみ実装。`sim_coupling::
