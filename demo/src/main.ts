@@ -6,15 +6,16 @@ import "./style.css";
 //
 // **縮約実装の理由**: このファイルはドッキングレイアウトの骨格(§1)と、既存の
 // Phase 0 デモ(床の上に箱が落ちて静止する)を Scene View パネルへ配線するところ
-// までを扱う。Hierarchy/Inspectorは`WasmWorld`の複数ボディ列挙API
+// までを扱う。Hierarchy/Inspector/Scene Viewは`WasmWorld`の複数ボディ列挙API
 // (`body_count`/`body_label_at`/`body_position_at_f32`/`body_velocity_at_f32`)に
-// 接続済みで、Hierarchyでのクリックがそのボディの実データをInspectorに表示する
-// (双方向選択のうちHierarchy→Inspector側のみ、Scene Viewピッキングは後続増分)。
-// Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため(World API-only
-// 制約)、Phase 0デモが実際に構築する内容と一致させた固定のルックアップテーブル
-// (`BODY_META`)を使う。Console/Projectは静的なプレースホルダ内容のまま。
-// Gizmo・オーバーレイ・Scene Viewピック・Command キュー全種・Edit/Playモードの
-// 分離(§4)・回路サブモード(§3)は全て後続増分。
+// 接続済みで、Hierarchyでのクリック・Scene Viewでのクリックピック(`THREE.
+// Raycaster`、Alt-クリックで裏側を選択)のどちらからでも同じ選択状態
+// (`selectBody`)を通じてInspectorが更新される(設計§1.2/§1.3が求める双方向
+// 選択)。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため(World
+// API-only制約)、Phase 0デモが実際に構築する内容と一致させた固定のルックアップ
+// テーブル(`BODY_META`)を使う。Console/Projectは静的なプレースホルダ内容のまま。
+// Gizmo・オーバーレイ・Command キュー全種・Edit/Playモードの分離(§4)・
+// 回路サブモード(§3)は全て後続増分。
 
 const GRAVITY = 9.80665;
 const DT = 1.0 / 120.0;
@@ -49,8 +50,10 @@ function setUpConsolePlaceholder() {
 
 // Hierarchyパネル(設計docs/23-frontend/01-editor.md §1.1)。`world.body_count`/
 // `body_label_at`から実際のボディ一覧を組み立て、クリックで`onSelect`を呼ぶ
-// (選択はInspectorと連動、設計が求める双方向選択のうちHierarchy→Inspector側)。
-function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): void {
+// (選択はInspector・Scene Viewと連動、設計が求める双方向選択)。戻り値の関数は
+// Scene Viewピッキング(`onSelect`を経由せず見た目のハイライトだけ更新したい
+// 場合)向けに、外部からハイライトだけを同期させる手段として公開する。
+function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): (index: number) => void {
   const tree = document.getElementById("hierarchy-tree")!;
   tree.innerHTML = "";
   const root = document.createElement("li");
@@ -64,24 +67,29 @@ function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): vo
 
   const count = world.body_count();
   const items: HTMLLIElement[] = [];
+
+  function highlight(index: number) {
+    items.forEach((it, i) => it.classList.toggle("selected", i === index));
+  }
+
   for (let i = 0; i < count; i++) {
     const item = document.createElement("li");
     item.textContent = world.body_label_at(i);
     item.classList.add("tree-selectable");
-    if (i === BODY_INDEX_BOX) item.classList.add("selected");
     item.addEventListener("click", () => {
-      items.forEach((it) => it.classList.remove("selected"));
-      item.classList.add("selected");
+      highlight(i);
       onSelect(i);
     });
     items.push(item);
     list.appendChild(item);
   }
+  highlight(BODY_INDEX_BOX);
 
   bodyItem.appendChild(list);
   bodies.appendChild(bodyItem);
   root.appendChild(bodies);
   tree.appendChild(root);
+  return highlight;
 }
 
 // Inspectorパネル(設計docs/23-frontend/01-editor.md §1.3)。選択中ボディの
@@ -238,11 +246,36 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
   scene.add(grid);
 
   let selectedBodyIndex = BODY_INDEX_BOX;
-  setUpHierarchy(world, (index) => {
+  function selectBody(index: number) {
     selectedBodyIndex = index;
-    renderInspectorFor(world, selectedBodyIndex);
-  });
+    renderInspectorFor(world, index);
+    highlightHierarchy(index);
+  }
+  const highlightHierarchy = setUpHierarchy(world, selectBody);
   renderInspectorFor(world, selectedBodyIndex);
+
+  // Scene Viewピック(設計docs/23-frontend/01-editor.md §1.2「クリックでbody/
+  // joint/probeを選択。Alt-クリックで下層(重なった裏)を選択」)。手前から
+  // 交差した順にソートされる`Raycaster.intersectObjects`の結果配列を使い、
+  // 通常クリックは先頭(最前面)、Alt-クリックは2番目(その裏)を選ぶ。
+  const pickables: { mesh: THREE.Object3D; bodyIndex: number }[] = [
+    { mesh: ground, bodyIndex: BODY_INDEX_GROUND },
+    { mesh: box, bodyIndex: BODY_INDEX_BOX },
+  ];
+  const raycaster = new THREE.Raycaster();
+  const pointer = new THREE.Vector2();
+  renderer.domElement.addEventListener("click", (event) => {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const hits = raycaster.intersectObjects(pickables.map((p) => p.mesh));
+    const hitIndex = event.altKey && hits.length > 1 ? 1 : 0;
+    const hit = hits[hitIndex];
+    if (!hit) return;
+    const picked = pickables.find((p) => p.mesh === hit.object);
+    if (picked) selectBody(picked.bodyIndex);
+  });
 
   const hud = document.getElementById("hud")!;
   const hashDisplay = document.getElementById("hash-display")!;
