@@ -22,10 +22,12 @@ import "./style.css";
 // `WasmWorld::set_body_rotation_at`で適用する(Blenderのようなビュー平面
 // トラックボールではなく単純な単一軸回転、スケールハンドルはこの2体デモに
 // 意味のある対象が無いため未実装)。Gizmoドラッグ(位置のみ)開始のたびに
-// 直前の位置をUndoスタックへ積み、ToolbarのUndoボタン(Editモードかつスタックが
-// 空でない場合のみ有効)で1件ずつ取り消せる(設計§6「Undo/Redo: Editモードのみ」、
-// 縮約実装によりシーンJSON差分ではなく単純な位置スタック、回転のUndo・Redoは
-// 対象外)。再生/ステップ/Nudgeボタンは無効化される(シミュレーションは
+// 直前の位置/姿勢をUndoスタックへ積み、ToolbarのUndoボタン(Editモードかつ
+// スタックが空でない場合のみ有効)で1件ずつ取り消せる(設計§6「Undo/Redo:
+// Editモードのみ」、縮約実装によりシーンJSON差分ではなく単純な位置/姿勢スタック)。
+// Redoボタンも実装済み(Undo時に取り消し前の値をRedoスタックへ積み、新規の
+// Gizmoドラッグ開始でRedoスタックは破棄する標準的な意味論)。再生/ステップ/
+// Nudgeボタンは無効化される(シミュレーションは
 // 進行しない)。Playモードでは
 // Gizmoは非表示になり、箱への直接ドラッグがCommandキュー経由
 // (`Command::Grab/MoveGrab/Release`、`push_grab`/`push_move_grab`/
@@ -562,16 +564,27 @@ async function setUpSceneView(
   let rotateCenterScreen = { x: 0, y: 0 };
   let rotateStartAngle = 0;
 
-  // Undo(Editモードのみ、設計docs/23-frontend/01-editor.md §6「Undo/Redo:
+  // Undo/Redo(Editモードのみ、設計docs/23-frontend/01-editor.md §6「Undo/Redo:
   // Editモードのみ。編集操作はシーンJSONの差分として保持」)。縮約実装の理由:
   // シーンJSON差分ではなく、Gizmoドラッグ開始直前の位置/姿勢を積むだけの単純な
-  // スタック(Redoは対象外)。ドラッグ(Translate/Rotateいずれも)開始のたびに
-  // 直前の値を1件積む。
+  // 2本のスタック(Undo/Redo双方)。ドラッグ(Translate/Rotateいずれも)開始の
+  // たびに直前の値をUndoスタックへ1件積み、新規ドラッグはRedoスタックを破棄する
+  // (標準的なUndo/Redoの意味論)。
   const EDIT_UNDO_STACK_CAPACITY = 20;
   type EditUndoEntry =
     | { bodyIndex: number; kind: "position"; position: THREE.Vector3 }
     | { bodyIndex: number; kind: "rotation"; rotation: THREE.Quaternion };
   const editUndoStack: EditUndoEntry[] = [];
+  const editRedoStack: EditUndoEntry[] = [];
+
+  function captureCurrentEntry(bodyIndex: number, kind: "position" | "rotation"): EditUndoEntry {
+    if (kind === "position") {
+      const p = world.body_position_at_f32(bodyIndex);
+      return { bodyIndex, kind: "position", position: new THREE.Vector3(p[0], p[1], p[2]) };
+    }
+    const r = world.body_rotation_at_f32(bodyIndex);
+    return { bodyIndex, kind: "rotation", rotation: new THREE.Quaternion(r[0], r[1], r[2], r[3]) };
+  }
 
   function projectToScreen(worldPos: THREE.Vector3): { x: number; y: number } {
     const ndc = worldPos.clone().project(camera);
@@ -621,7 +634,9 @@ async function setUpSceneView(
           rotation: rotateStartQuat.clone(),
         });
         if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+        editRedoStack.length = 0;
         undoButton.disabled = mode !== "edit";
+        redoButton.disabled = true;
       } else if (pointerDownGizmoAxis) {
         isDragging = true;
         dragMode = "gizmo";
@@ -634,7 +649,9 @@ async function setUpSceneView(
           position: gizmoDragStartPosition.clone(),
         });
         if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+        editRedoStack.length = 0;
         undoButton.disabled = mode !== "edit";
+        redoButton.disabled = true;
         camera.getWorldDirection(cameraDirection);
         let planeNormal = cameraDirection
           .clone()
@@ -707,6 +724,7 @@ async function setUpSceneView(
   const stepButton = document.getElementById("btn-step") as HTMLButtonElement;
   const nudgeButton = document.getElementById("btn-nudge") as HTMLButtonElement;
   const undoButton = document.getElementById("btn-undo") as HTMLButtonElement;
+  const redoButton = document.getElementById("btn-redo") as HTMLButtonElement;
 
   // Edit/Play モードの分離(設計§4「Edit モード: シーンの直接編集が可能…Play を
   // 押した瞬間の状態が実行の初期条件になる」「Play モード: 直接編集は不可。
@@ -726,6 +744,7 @@ async function setUpSceneView(
     stepButton.disabled = mode === "edit";
     nudgeButton.disabled = mode === "edit";
     undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
+    redoButton.disabled = mode !== "edit" || editRedoStack.length === 0;
     modeEditButton.classList.toggle("active", mode === "edit");
     modePlayButton.classList.toggle("active", mode === "play");
   }
@@ -737,6 +756,8 @@ async function setUpSceneView(
     if (mode !== "edit") return;
     const entry = editUndoStack.pop();
     if (!entry) return;
+    editRedoStack.push(captureCurrentEntry(entry.bodyIndex, entry.kind));
+    if (editRedoStack.length > EDIT_UNDO_STACK_CAPACITY) editRedoStack.shift();
     if (entry.kind === "position") {
       world.set_body_position_at(entry.bodyIndex, entry.position.x, entry.position.y, entry.position.z);
     } else {
@@ -748,6 +769,29 @@ async function setUpSceneView(
         entry.rotation.w,
       );
     }
+    undoButton.disabled = editUndoStack.length === 0;
+    redoButton.disabled = editRedoStack.length === 0;
+    render();
+  });
+
+  redoButton.addEventListener("click", () => {
+    if (mode !== "edit") return;
+    const entry = editRedoStack.pop();
+    if (!entry) return;
+    editUndoStack.push(captureCurrentEntry(entry.bodyIndex, entry.kind));
+    if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+    if (entry.kind === "position") {
+      world.set_body_position_at(entry.bodyIndex, entry.position.x, entry.position.y, entry.position.z);
+    } else {
+      world.set_body_rotation_at(
+        entry.bodyIndex,
+        entry.rotation.x,
+        entry.rotation.y,
+        entry.rotation.z,
+        entry.rotation.w,
+      );
+    }
+    redoButton.disabled = editRedoStack.length === 0;
     undoButton.disabled = editUndoStack.length === 0;
     render();
   });

@@ -63,8 +63,9 @@
   イベント行クリックで最寄りのTimelineスナップショットへジャンプ)まで実装済み。
   設計§4のEdit/Playモード分離も実装(既定Edit、Editモードの
   Scene ViewドラッグはGizmo経由の直接編集のみ、PlayモードではGizmoが非表示に
-  なり`Command::Grab`系に切り替わる、詳細§6参照)。Gizmoドラッグの位置Undo
-  (単純スタック、Redoは対象外)・InspectorへのRotation表示・スポーンパレット
+  なり`Command::Grab`系に切り替わる、詳細§6参照)。Gizmoドラッグの位置/姿勢
+  Undo・Redo(単純スタック2本、新規ドラッグでRedoスタックを破棄する標準的な
+  意味論)・InspectorへのRotation表示・スポーンパレット
   (球/箱×4材質、`spawn_sphere`/`spawn_box`でボディ数が動的に増える、これにより
   `BODY_META`固定ルックアップテーブルを廃止しShape/Materialを実クエリ化)も
   実装済み。力オーバーレイ(既知のNudge `Command::ApplyForce`のみを500ms表示、
@@ -1080,18 +1081,27 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       ContactEndedが各ボディのsourceで個別に発生することを確認した。カプセル
       形状・右クリックメニュー・材料派生・シーンJSON経由の永続化は未実装)
 - [ ] シーン + Replay + ブックマークのエクスポート/インポート
-- [ ] Undo / Redo(Edit モードのみ)
-      (Undoのみ実装済み——Gizmoドラッグ(Translate/Rotateいずれも)開始のたびに
-      直前の位置/姿勢を単純なスタック(判別共用体、上限20件)へ積み、Toolbarの
+- [x] Undo / Redo(Edit モードのみ)
+      (Gizmoドラッグ(Translate/Rotateいずれも)開始のたびに直前の位置/姿勢を
+      単純なスタック(判別共用体、上限20件)へ積み、Toolbarの
       Undoボタン(Editモードかつスタックが空でない場合のみ有効)クリックで
       1件ずつ`set_body_position_at`/`set_body_rotation_at`により復元する
       (LIFO順、種類混在でも正しく復元)。設計が定める「編集操作をシーンJSONの
-      差分として保持」ではなく縮約実装(位置・姿勢のみ、Redoは対象外)。
+      差分として保持」ではなく縮約実装(位置・姿勢のみ)。
+      Redoも実装済み——Undo時に取り消し前の値(`captureCurrentEntry`で現在の
+      Worldから直接読み直す)をRedoスタックへ積み、Toolbarの
+      Redoボタン(Editモードかつスタックが空でない場合のみ有効)クリックで
+      1件ずつ復元する。新規のGizmoドラッグが開始されるとRedoスタックは
+      破棄される(標準的なUndo/Redoの意味論)。
       Playwrightで、位置ドラッグ・回転ドラッグそれぞれについてドラッグ前は
       無効・ドラッグ後は有効になり、クリックすると実際にドラッグ前の値へ
       正確に戻ること・連続2回の回転ドラッグをLIFO順で正しく2回Undoできる
       こと・スタックを使い切ると再び無効になること・Playモードへ切替えると
-      スタックに履歴が残っていても無効になることを確認した)
+      スタックに履歴が残っていても無効になることを確認済み(既存)。今回追加で、
+      位置ドラッグ→Undo→Redoを行うと(1) Undo直後はUndo無効/Redo有効、
+      (2) Undoで元位置に正確に戻る、(3) Redoでドラッグ後の位置に正確に戻り
+      Redo無効/Undo有効に切り替わることをPlaywrightで確認した(Gizmoハンドルの
+      実クリック可能座標は既存のラスタスキャン手法で実測した上でテストを組んだ)。
 - [ ] ヘッドレスランナー(Probe assert・CI 基盤)
 
 ## 7. デモ合格管理表(D1–D43)
