@@ -93,8 +93,11 @@
   `WasmWorld::new`で常設、「ヒーター」チェックボックスがオンの間`frame()`
   ループが毎stepの直前に`Command::SetHeatSource`を送り続ける、温度をHUDに
   表示)——これでCommand系5種(ApplyForce/Grab系/SetMotorTarget/SetSwitch/
-  SetHeatSource)全てが配線済みになった。残りは流体場/フレーム軸
-  オーバーレイ・回路エディタ(専用パネルUI)等。
+  SetHeatSource)全てが配線済みになった。入力列記録(`commandLog`)+
+  Project ドロワーReplaysタブでの一覧表示・JSONエクスポートも実装済み
+  (再生実行は未実装)。残りは流体場/フレーム軸オーバーレイ・回路エディタ
+  (専用パネルUI)・シーン/ブックマークのエクスポート/インポート・Replay
+  再生実行等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
   機を見て並行して進める。優先順位の詳細は
@@ -1112,7 +1115,16 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       配線する」パターンを踏襲した。Playwrightで、Materialsタブをクリックすると
       実際に4行×6列の表(鋼の密度7850.0 kg/m^3等、物理的に妥当な値)が
       表示され、他のタブへ切り替えると表が消えて静的プレースホルダに
-      戻ることを確認した。Scenes/Prefabs/Replaysは引き続き静的プレースホルダ)
+      戻ることを確認した。Replaysタブも実データ接続済み——入力列記録
+      (`commandLog`、Commandをキューへ積む離散的なUI操作(Nudge・Grab開始/
+      Release・モーター目標切替・回路スイッチ切替・ヒーター切替)のたびに
+      1件記録、ヒーターの毎step再送そのものは記録しない)を一覧表示し、
+      「Export」ボタンでJSONファイルとしてダウンロードできる(入力列の
+      再生実行(replay)自体は未実装、エクスポートのみ)。Playwrightで、
+      Nudge/回路スイッチ切替/ヒーター切替を行うと実際に3件記録され、
+      Exportボタンをクリックすると正しい内容(記録した3件のkindが順に
+      一致)のJSONファイルがダウンロードされることを確認した。
+      Scenes/Prefabsは引き続き静的プレースホルダ)
 - [x] Edit / Play モードの切替と編集ロック
       (Toolbarのセグメントトグル(`#btn-mode-edit`/`#btn-mode-play`)で切替。
       既定はEditモード(Unityと同じ起動時挙動、設計§4「Play を押した瞬間の
@@ -1171,7 +1183,12 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       (`heater_node_temperature`)をHUDに毎フレーム表示する。Playwrightで、
       ヒーターをオンにすると実際に温度が293.15K→約332K相当まで連続的に
       上昇し続け、オフにすると上昇が止まり(ニュートン冷却によりわずかに
-      下降し始める)ことを確認した。入力列記録は未実装)
+      下降し始める)ことを確認した。
+      入力列記録も実装済み——Nudge・Grab開始/Release・モーター目標切替・
+      回路スイッチ切替・ヒーター切替のたびに`commandLog`へ1件記録し
+      (`step`/`t`/`kind`/`detail`)、Project ドロワーのReplaysタブで一覧
+      表示・JSONエクスポートできる(記録した入力列の再生実行は未実装、
+      エクスポートのみ)。詳細は下記Project ドロワー項目参照)
 - [ ] レイアウトプリセット(Default / Physics-focus / Circuit-focus / Astro)
       (Default(標準比率)・Physics-focus(コンソール行を拡大)・Astro(タイムライン行を
       固定の大きな高さにしその分コンソール行を縮小)の3種を実装済み(`demo/src/
@@ -1202,6 +1219,10 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       ContactEndedが各ボディのsourceで個別に発生することを確認した。カプセル
       形状・右クリックメニュー・材料派生・シーンJSON経由の永続化は未実装)
 - [ ] シーン + Replay + ブックマークのエクスポート/インポート
+      (Replay(入力列)のエクスポートのみ実装済み——Project ドロワーの
+      Replaysタブ「Export」ボタンで`commandLog`をJSONダウンロード。
+      シーン自体のエクスポート/インポート・ブックマークのエクスポート・
+      Replayのインポート/再生実行は未実装)
 - [x] Undo / Redo(Edit モードのみ)
       (Gizmoドラッグ(Translate/Rotateいずれも)開始のたびに直前の位置/姿勢を
       単純なスタック(判別共用体、上限20件)へ積み、Toolbarの

@@ -288,13 +288,25 @@ function updateInspectorTransformFields(
   velocityField.textContent = `${velocity.x.toFixed(3)}, ${velocity.y.toFixed(3)}, ${velocity.z.toFixed(3)}`;
 }
 
+// 入力列記録(設計docs/23-frontend/01-editor.md §1.6「Replays」、Command系の
+// 実行記録)。Commandをキューへ積む離散的なUI操作(Nudge・Grab開始/Release・
+// モーター目標切替・回路スイッチ切替)のたびに1件記録する。ヒーターは毎step
+// 再送する継続的な内部動作(縮約実装、モジュールdoc参照)のため、切替の
+// 瞬間だけを記録し、各subStepの再送そのものは記録しない(記録が単調に
+// 膨れ上がるのを避ける、ユーザーの実際の操作単位に対応させる設計)。
+type CommandLogEntry = { t: number; step: number; kind: string; detail: string };
+const commandLog: CommandLogEntry[] = [];
+
+function logCommand(world: WasmWorld, kind: string, detail: string) {
+  commandLog.push({ t: world.time(), step: Number(world.step_count()), kind, detail });
+}
+
 function setUpProjectDrawer(materialsRef: MaterialsRef) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
   const staticContentByTab: Record<string, string> = {
     scenes: "Scenes: (D1–D43 サンプルシーンの読み込みは後続増分)",
     prefabs: "Prefabs: 未実装",
-    replays: "Replays: 未実装",
   };
 
   function renderMaterialsTab() {
@@ -329,10 +341,37 @@ function setUpProjectDrawer(materialsRef: MaterialsRef) {
     body.appendChild(table);
   }
 
+  function renderReplaysTab() {
+    body.innerHTML = "";
+    const exportButton = document.createElement("button");
+    exportButton.textContent = `Export (${commandLog.length}件, JSON)`;
+    exportButton.addEventListener("click", () => {
+      const blob = new Blob([JSON.stringify(commandLog, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "command_log.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+    body.appendChild(exportButton);
+    const list = document.createElement("ul");
+    for (const entry of commandLog) {
+      const item = document.createElement("li");
+      item.textContent = `[step ${entry.step}, t=${entry.t.toFixed(3)}s] ${entry.kind}: ${entry.detail}`;
+      list.appendChild(item);
+    }
+    body.appendChild(list);
+  }
+
   function show(tab: string) {
     tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
     if (tab === "materials") {
       renderMaterialsTab();
+      return;
+    }
+    if (tab === "replays") {
+      renderReplaysTab();
       return;
     }
     body.textContent = staticContentByTab[tab] ?? "";
@@ -852,6 +891,7 @@ async function setUpSceneView(
         dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
         const p = world.body_position_at_f32(BODY_INDEX_BOX);
         world.push_grab(p[0], p[1], p[2]);
+        logCommand(world, "Grab", `body=Box_1 anchor=(${p[0].toFixed(3)},${p[1].toFixed(3)},${p[2].toFixed(3)})`);
       }
     }
     if (dragMode === "rotate") {
@@ -900,6 +940,7 @@ async function setUpSceneView(
     if (isDragging) {
       if (dragMode === "grab") {
         world.push_release();
+        logCommand(world, "Release", "body=Box_1");
       }
     } else if (pointerDownHit) {
       selectBody(pointerDownHit.picked.bodyIndex);
@@ -1197,6 +1238,7 @@ async function setUpSceneView(
   const NUDGE_FORCE_NEWTONS = 400_000.0;
   nudgeButton.addEventListener("click", () => {
     world.push_apply_force(0.0, NUDGE_FORCE_NEWTONS, 0.0);
+    logCommand(world, "ApplyForce", `body=Box_1 force=(0,${NUDGE_FORCE_NEWTONS},0)`);
     if (forceOverlayToggle.checked) {
       const p = world.body_position_at_f32(BODY_INDEX_BOX);
       showForceOverlay(new THREE.Vector3(p[0], p[1], p[2]), new THREE.Vector3(0.0, NUDGE_FORCE_NEWTONS, 0.0));
@@ -1209,10 +1251,23 @@ async function setUpSceneView(
     const next = current === MOTOR_TARGET_LOW ? MOTOR_TARGET_HIGH : MOTOR_TARGET_LOW;
     world.set_motor_target_at(selectedBodyIndex, next);
     currentMotorTarget.set(selectedBodyIndex, next);
+    logCommand(
+      world,
+      "SetMotorTarget",
+      `body=${world.body_label_at(selectedBodyIndex)} theta_target=${next.toFixed(3)}`,
+    );
   });
 
   circuitSwitchToggle.addEventListener("change", () => {
     world.set_circuit_switch_closed(circuitSwitchToggle.checked);
+    logCommand(world, "SetSwitch", `closed=${circuitSwitchToggle.checked}`);
+  });
+
+  heaterToggle.addEventListener("change", () => {
+    // ヒーター自体の`Command::SetHeatSource`は`frame()`ループが毎subStep
+    // 再送する(モジュールdoc「1step分だけ効く」縮約セマンティクス参照)ため
+    // ここでは記録しない——ユーザーが行った「切替」という離散操作のみ記録する。
+    logCommand(world, "SetHeatSource", `toggled ${heaterToggle.checked ? "on" : "off"} (${HEATER_WATTS}W)`);
   });
 
   const inspectorPosition = new THREE.Vector3();
