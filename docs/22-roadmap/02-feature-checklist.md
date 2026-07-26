@@ -1260,6 +1260,27 @@
   無くrel<1e-9で厳密一致、`sub_unity_albedo`と同種の判断)を確認し、R2(誘電体+
   金属の両方)を完了とした。GGXマイクロファセット分布(粗さ)は設計が本来求める
   モデルだが対象外(完全鏡面(粗さ0)のみ、`bsdf.rs`モジュールdoc参照)。
+  続けて設計の実装順序最後の項目「被写界深度・モーションブラー」に取り組み、
+  薄レンズモデルの物理カメラ(`sim_render::Camera`)を実装しR6を完了させた。
+  `sim_math::SimRng`に単位円板上一様分布のサンプリング(`unit_disk`、既存の
+  `unit_sphere`と同じ棄却法)を追加し、レンズ円板サンプリングに使用した。
+  `Camera`は設計§4.1のカメラ方程式全体(実センサー・結像距離)ではなく、Ray
+  Tracing in One Weekend等で標準的な縮約(`focus_distance`(完全に合焦する
+  ワールド空間上の距離)+`lens_radius`(開口半径)を直接パラメータとする)を採用
+  (`camera.rs`モジュールdoc「縮約実装の理由」参照)。ピンホール方向のレイに
+  対応する焦点面上の点(`focus_point`)を求め、レンズ円板上のランダムな点から
+  同じ`focus_point`へ向けてレイを再構成することでボケを再現する。検証は、
+  (1)レンズ半径0では常にピンホールカメラに厳密一致すること、(2)焦点面ちょうど
+  の点はレンズ上のどこから出たレイでも同一点を通ること(合焦、乱数使用でも
+  rel<1e-9)、(3)最重要の検証として、薄レンズの相似三角形から直接導出できる
+  錯乱円径の閉形式($\text{offset}=\text{lens\_offset}\cdot(1-d_{obj}/f_{dist})$)
+  が、乱数を使わない既知のレンズサンプル点に対してrel<1e-9で厳密一致すること
+  (このセッションで一貫している「解析恒等式があれば統計的収束を待たず厳密比較
+  する」方針をここでも適用)、を確認した。$r=f/(2N)$(絞りから開口半径)の式も
+  別途検証した。これによりPhase Dのメイン増分(R1–R2完了、R3部分完了、R6完了)
+  はGGXマイクロファセット・参加媒質・完全な分光レンダリング・コースティクス・
+  コーネルボックス(R4)・大気レイリー(R5)・モンテカルロ収束検証(R7)を残す
+  段階に到達した。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1931,7 +1952,10 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       関数でRGBへ変換、`Scene`/`trace`全体への波長の配線)・コースティクスは
       未実装(モジュールdoc「縮約実装の理由」参照)。
 - [ ] 参加媒質(大気・水・煙)
-- [ ] 物理カメラ・トーンマッピング
+- [ ] 物理カメラ・トーンマッピング(薄レンズモデルの物理カメラ`sim_render::Camera`は
+      実装済み——焦点距離・開口半径(絞りF値から`r=f/(2N)`)・レンズ円板サンプリング
+      による被写界深度(R6、下記参照)。トーンマッピング・露出・シャッター速度・
+      モーションブラーは未実装、`camera.rs`モジュールdoc「縮約実装の理由」参照)
 - [x] R1 — `crates/sim-render/src/path_tracer.rs::tests::r1_white_furnace_diffuse_surface_matches_background_radiance_exactly`。
       Lambertian BSDFをコサイン重み付き半球サンプリング(pdf=cosθ/π)と対にすると
       `bsdf*cosθ/pdf=albedo`が方向によらず恒等的に成り立つ(重要度サンプリングの
@@ -1964,7 +1988,13 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       大きく屈折角が小さい(各波長でSnell則も厳密に成り立つ)ことを確認。分光
       レンダリング全体への波長の配線(hero wavelength法)・コースティクスは未実装
       のため、チェックボックス自体はR3完了とは見なさない)。
-- [ ] 担当テスト Green: R4–R7(R1・R2完全Green、R3は分散側のみ部分実装——詳細は上記各行参照)
+- [x] R6 — `crates/sim-render/src/camera.rs::tests::
+      blur_circle_offset_matches_the_thin_lens_similar_triangles_formula`(薄レンズの
+      相似三角形から導出した錯乱円径の閉形式に、乱数を使わない既知のレンズサンプル点で
+      rel<1e-9で厳密一致)・`rays_converge_exactly_at_the_focus_plane_regardless_of_lens_
+      sample`(合焦面では乱数使用でもrel<1e-9)・`zero_lens_radius_produces_a_pinhole_ray`・
+      `aperture_radius_from_f_number_matches_the_formula`。
+- [ ] 担当テスト Green: R4・R5・R7(R1・R2・R6完全Green、R3は分散側のみ部分実装——詳細は上記各行参照)
 - [ ] デモ D40–D43 合格
 
 ## 6. フロントエンド(設計は [../23-frontend/01-editor.md](../23-frontend/01-editor.md) が正)
@@ -2449,7 +2479,14 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
       コースティクスは未実装のため、チェックボックス自体はR3完了とは見なさない)
 - [ ] R4
 - [ ] R5
-- [ ] R6
+- [x] R6(`crates/sim-render/src/camera.rs::tests::
+      blur_circle_offset_matches_the_thin_lens_similar_triangles_formula`——
+      薄レンズの相似三角形から導出した錯乱円径の閉形式に、乱数を使わない既知の
+      レンズサンプル点でrel<1e-9で厳密一致。`rays_converge_exactly_at_the_focus_
+      plane_regardless_of_lens_sample`(合焦面では乱数使用でもrel<1e-9で厳密
+      一致)・`zero_lens_radius_produces_a_pinhole_ray`(レンズ半径0でピンホール
+      カメラに厳密一致)・`aperture_radius_from_f_number_matches_the_formula`
+      ($r=f/(2N)$)も参照)
 - [ ] R7
 
 結合 stiff 検出(X、担当: P4/Phase C):

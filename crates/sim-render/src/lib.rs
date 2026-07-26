@@ -9,15 +9,19 @@
 //! (`Metal`、複素屈折率$n+ik$の完全鏡面、GGX粗さは対象外)を追加し、R3(分光/屈折の
 //! 分散側)の核となる物理(波長ごとに屈折角が異なること)を検証した(`Scene`/
 //! `trace`全体への波長の配線(hero wavelength法)自体は後続増分)。
-//! BVH・GGXマイクロファセット(粗さ)・完全な分光レンダリング・参加媒質・物理
-//! カメラは後続増分(各モジュールdoc「縮約実装の理由」参照)。
+//! さらに薄レンズモデルの物理カメラ(`Camera`、`camera`モジュールdoc参照)を追加し、
+//! R6(被写界深度: 錯乱円径が薄レンズ公式と一致)を検証した。
+//! BVH・GGXマイクロファセット(粗さ)・完全な分光レンダリング・参加媒質は
+//! 後続増分(各モジュールdoc「縮約実装の理由」参照)。
 
 mod bsdf;
+mod camera;
 mod path_tracer;
 mod ray;
 mod sphere;
 
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal};
+pub use camera::Camera;
 pub use path_tracer::{Material, PointLight, Scene, SceneObject};
 pub use ray::Ray;
 pub use sphere::{Hit, Sphere};
