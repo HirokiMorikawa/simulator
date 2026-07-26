@@ -54,7 +54,13 @@ function setUpHierarchyPlaceholder() {
   tree.appendChild(root);
 }
 
-function setUpInspectorPlaceholder() {
+/// Inspector骨格を組み立てる。Transformの位置/速度は`updateInspectorTransform`で
+/// 毎フレーム実データ(`WasmWorld::body_position_f32`/`body_velocity_f32`)へ
+/// 更新される。Shape/Materialは`sim-wasm`側にまだ対応するクエリAPIが無いため
+/// (設計上、World APIに無い機能はエディタ側からも追加できない——「World API-only
+/// 制約」docs/23-frontend/01-editor.md §1.3)、Phase 0デモが実際に構築する内容と
+/// 一致させた固定値のまま(後続増分でAPIが追加され次第、実データに置き換える)。
+function setUpInspectorSkeleton(): (position: THREE.Vector3, velocity: THREE.Vector3) => void {
   const body = document.getElementById("inspector-body")!;
   body.innerHTML = `
     <div class="inspector-component">
@@ -62,10 +68,21 @@ function setUpInspectorPlaceholder() {
       <div class="inspector-field"><span>Shape</span><span>Box(0.5,0.5,0.5)</span></div>
     </div>
     <div class="inspector-component">
+      <h3>Transform</h3>
+      <div class="inspector-field"><span>Position</span><span id="inspector-position">—</span></div>
+      <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
+    </div>
+    <div class="inspector-component">
       <h3>RigidBody</h3>
       <div class="inspector-field"><span>Material</span><span>鋼(炭素鋼)</span></div>
     </div>
   `;
+  const positionField = document.getElementById("inspector-position")!;
+  const velocityField = document.getElementById("inspector-velocity")!;
+  return (position, velocity) => {
+    positionField.textContent = `${position.x.toFixed(3)}, ${position.y.toFixed(3)}, ${position.z.toFixed(3)}`;
+    velocityField.textContent = `${velocity.x.toFixed(3)}, ${velocity.y.toFixed(3)}, ${velocity.z.toFixed(3)}`;
+  };
 }
 
 function setUpProjectDrawer() {
@@ -96,7 +113,7 @@ function setUpConsoleTabs() {
   });
 }
 
-async function setUpSceneView() {
+async function setUpSceneView(updateInspectorTransform: (position: THREE.Vector3, velocity: THREE.Vector3) => void) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
 
@@ -158,9 +175,17 @@ async function setUpSceneView() {
     }
   });
 
+  const inspectorPosition = new THREE.Vector3();
+  const inspectorVelocity = new THREE.Vector3();
+
   function render() {
     const p = world.body_position_f32();
     box.position.set(p[0], p[1], p[2]);
+
+    const v = world.body_velocity_f32();
+    inspectorPosition.set(p[0], p[1], p[2]);
+    inspectorVelocity.set(v[0], v[1], v[2]);
+    updateInspectorTransform(inspectorPosition, inspectorVelocity);
 
     const hashFull = world.state_hash();
     hud.textContent = [
@@ -206,11 +231,11 @@ async function setUpSceneView() {
 function main() {
   setUpLayoutPresetSwitcher();
   setUpHierarchyPlaceholder();
-  setUpInspectorPlaceholder();
+  const updateInspectorTransform = setUpInspectorSkeleton();
   setUpConsolePlaceholder();
   setUpConsoleTabs();
   setUpProjectDrawer();
-  setUpSceneView().catch((err) => {
+  setUpSceneView(updateInspectorTransform).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);

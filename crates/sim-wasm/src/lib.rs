@@ -70,6 +70,20 @@ impl WasmWorld {
         out
     }
 
+    /// 剛体速度 [vx, vy, vz] のビュー(エディタInspectorのTransform/RigidBody
+    /// 表示用、f32)。既存の`World::body_velocity`をそのまま公開する。
+    pub fn body_velocity_f32(&self) -> Float32Array {
+        let v = self
+            .inner
+            .body_velocity(self.box_body)
+            .expect("box_body is created in new() and never removed");
+        let out = Float32Array::new_with_length(3);
+        out.set_index(0, v.x as f32);
+        out.set_index(1, v.y as f32);
+        out.set_index(2, v.z as f32);
+        out
+    }
+
     /// 決定論検証・UI 表示用の状態ハッシュ(16進文字列)。
     pub fn state_hash(&self) -> String {
         format!("{:016x}", self.inner.state_hash())

@@ -2098,11 +2098,22 @@ Unity 風統合エディタ:
 Inspector/Console/Project(いずれも静的なプレースホルダ内容、`sim-wasm`が
 `body_transforms`以外のクエリAPIをまだ持たないため実データ接続は後続増分)を
 実装した。ドラッグによるパネルリサイズ・タブ化・切り離し(§1)・Gizmo・
-オーバーレイ・ピック・Command キュー・Edit/Playモードの分離(§4)は全て未実装
-(各機能が実データに接続されるにはワークストリームB由来のWorld API拡張
-(`Scenario`/`Probe`/`subscribe`/`raycast`等)が前提になる)。Playwright(pre-
-installed)でレイアウトプリセット切替・再生/一時停止/1stepボタン・Projectドロワー
-タブ切替の動作を目視確認済み(コンソールエラー無し)。
+オーバーレイ・ピック・Command キュー・Edit/Playモードの分離(§4)は全て未実装。
+Playwright(pre-installed)でレイアウトプリセット切替・再生/一時停止/1stepボタン・
+Projectドロワータブ切替の動作を目視確認済み(コンソールエラー無し)。
+続けて、`sim_world::World`自体は(`crates/sim-world/src/lib.rs`を確認したところ)
+`add_probe`/`push_command`/`snapshot`/`restore`/`raycast`/`overlap_sphere`/
+`sample_fluid`/`circuit_probe`/`drain_events`等、ワークストリームBで既にかなり
+豊富なクエリ/コマンドAPIを備えていることが判明した——実際のボトルネックは
+`sim-wasm`のwasm-bindgenバインディングがPhase 0の縮小版(`step`/`time`/
+`step_count`/`body_position_f32`/`state_hash`のみ)のままで、この豊富なWorld API
+を全く公開していないことにあった。まず`body_velocity_f32`(既存の`World::
+body_velocity`をそのまま公開)を追加し、InspectorのTransformコンポーネント
+(Position/Velocity)を毎フレーム実データで更新するよう配線した——エディタ側から
+実際にWorld状態を読んで表示する初めての接続。Playwrightで、時間経過とともに
+Position/Velocityの表示値が実際の物理(重力加速度)どおりに変化することを確認した。
+Shape/Materialは対応するクエリAPIがまだ`sim-wasm`に無いため固定値のまま
+(World API-only制約)。
 
 - [ ] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
       (再生/一時停止/1stepの骨格配線は実装済み、時間倍率スライダー・シーン選択・
@@ -2113,7 +2124,11 @@ installed)でレイアウトプリセット切替・再生/一時停止/1stepボ
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
       (骨格(静的プレースホルダツリー)のみ、World APIへの実データ接続・選択連動は未実装)
 - [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
-      (骨格(静的プレースホルダ)のみ、実データ接続は未実装)
+      (Transform(Position/Velocity)は`sim-wasm`に新設した`body_velocity_f32`
+      (既存の`World::body_velocity`をそのまま公開)経由で実データ接続済み、毎フレーム
+      実際のWorld状態を表示する。Shape/Materialは`sim-wasm`側に対応するクエリAPIが
+      無いため固定値のまま(World API-only制約、`main.ts`のコメント参照)。Joint/
+      Circuit/FluidRegion/Coupling/Probe/近似バッジは未実装)
 - [ ] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク
       (時刻・step表示は配線済み、スクラバ操作・スナップショット巻き戻し・
       ブックマークは未実装)
