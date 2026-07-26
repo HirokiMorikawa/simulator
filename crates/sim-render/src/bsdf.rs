@@ -40,6 +40,36 @@ impl Dielectric {
     pub fn sample_is_reflected(&self, cos_theta_i: f64, rng: &mut SimRng) -> bool {
         rng.next_f64() < self.reflectance(cos_theta_i)
     }
+
+    /// 一般形のフレネル反射率(入射側媒質`n1`→透過側媒質`n2`)。`reflectance`は
+    /// 「真空から本材質へ入射する」場合(`n1=1.0, n2=self.ior`固定)の特殊形だが、
+    /// 誘電体球から外へ抜ける場合は逆向き(`n1=self.ior, n2=1.0`)の反射率が必要
+    /// なため、この一般形を`Scene::trace`(入射/透過の両方向を扱う)から使う。
+    /// 全反射(TIR)なら1.0(モジュールdoc「呼び出し側の判断」を踏襲)。
+    pub fn reflectance_between(cos_theta_i: f64, n1: f64, n2: f64) -> f64 {
+        let theta_i = cos_theta_i.clamp(-1.0, 1.0).acos();
+        sim_em::fresnel_reflectance(n1, n2, theta_i)
+            .map(|r| r.r_unpolarized)
+            .unwrap_or(1.0)
+    }
+
+    /// 鏡面反射方向: $d - 2(d\cdot n)n$(`n`は入射側から見て外向き、標準公式)。
+    pub fn reflect(direction: Vec3, normal: Vec3) -> Vec3 {
+        direction - normal.scale(2.0 * direction.dot(normal))
+    }
+
+    /// Snellの法則のベクトル形による屈折方向。`normal`は入射側から見て外向き
+    /// ($d\cdot n<0$)、`eta`は相対屈折率$n_1/n_2$(入射側媒質/透過側媒質)。
+    /// 全反射(TIR、$\sin^2\theta_t>1$)なら`None`。
+    pub fn refract(direction: Vec3, normal: Vec3, eta: f64) -> Option<Vec3> {
+        let cos_theta_i = -direction.dot(normal);
+        let sin2_theta_t = eta * eta * (1.0 - cos_theta_i * cos_theta_i).max(0.0);
+        if sin2_theta_t > 1.0 {
+            return None;
+        }
+        let cos_theta_t = (1.0 - sin2_theta_t).sqrt();
+        Some(direction.scale(eta) + normal.scale(eta * cos_theta_i - cos_theta_t))
+    }
 }
 
 /// 完全拡散(Lambertian)BSDF。$f_r = \rho/\pi$(設計§2.1のレンダリング方程式のBSDF項)。
@@ -157,5 +187,53 @@ mod tests {
             rel_err < 0.02,
             "measured_r={measured_r} expected_r={expected_r} rel_err={rel_err}"
         );
+    }
+
+    /// `reflect`は入射角=反射角(鏡映反射の定義そのもの)を厳密に満たす。
+    #[test]
+    fn reflect_preserves_the_angle_of_incidence() {
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let direction = Vec3::new(0.6, -0.8, 0.0); // 正規化済み(0.6²+0.8²=1)。
+        let reflected = Dielectric::reflect(direction, normal);
+        assert!((reflected.length() - 1.0).abs() < 1e-9);
+        // 反射則: 法線方向の成分は反転、接線方向の成分は不変。
+        assert!((reflected.x - 0.6).abs() < 1e-9);
+        assert!((reflected.y - 0.8).abs() < 1e-9);
+    }
+
+    /// `refract`はSnellの法則$n_1\sin\theta_1=n_2\sin\theta_2$を厳密に満たす
+    /// (R3「分光/屈折」が要求する屈折方向の正確さの、単一波長版の検証)。
+    #[test]
+    fn refract_satisfies_snells_law() {
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let theta_i = 0.4_f64; // ラジアン、臨界角より十分小さい。
+        let direction = Vec3::new(theta_i.sin(), -theta_i.cos(), 0.0);
+        let n1 = 1.0;
+        let n2 = 1.5;
+        let eta = n1 / n2;
+        let refracted =
+            Dielectric::refract(direction, normal, eta).expect("should not TIR at this angle");
+        assert!((refracted.length() - 1.0).abs() < 1e-9);
+
+        let theta_t = (-refracted.dot(normal)).acos();
+        let lhs = n1 * theta_i.sin();
+        let rhs = n2 * theta_t.sin();
+        assert!(
+            (lhs - rhs).abs() < 1e-9,
+            "Snell's law violated: n1 sinθ1={lhs} n2 sinθ2={rhs}"
+        );
+    }
+
+    /// 臨界角を超える入射では`refract`が`None`(全反射)を返す。
+    #[test]
+    fn refract_returns_none_beyond_the_critical_angle() {
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let n1 = 1.5;
+        let n2 = 1.0;
+        let eta = n1 / n2;
+        // 臨界角 = asin(n2/n1) = asin(1/1.5) ≈ 0.7297 rad(≈41.8°)。
+        let steep_theta_i = 1.3_f64; // ≈74.5°、臨界角より大きい。
+        let direction = Vec3::new(steep_theta_i.sin(), -steep_theta_i.cos(), 0.0);
+        assert!(Dielectric::refract(direction, normal, eta).is_none());
     }
 }

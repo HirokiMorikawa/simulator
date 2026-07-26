@@ -1180,6 +1180,25 @@
   ことは両立する判断、`bsdf.rs`モジュールdocに記録)。金属(複素屈折率$n+ik$)は
   設計の実装順序(拡散→誘電体→金属→粗面透過)どおり後続増分に残したため、R2の
   チェックボックス自体は誘電体側のみの部分達成として保留した。
+  続けて誘電体の屈折(透過)方向を実装した。`Dielectric::reflect`(鏡面反射公式)・
+  `refract`(Snellの法則のベクトル形、全反射ならNone)を追加し、`Scene`の
+  `material`フィールドを`Lambertian`固定から`Material`列挙型(`Lambertian`/
+  `Dielectric`)へ一般化して`Scene::trace`に配線した(オリエンテーション補正:
+  レイが球へ入射するか内部から出射するかを法線との内積の符号で判定し、n1/n2を
+  入れ替える標準的な実装)。`refract_satisfies_snells_law`でSnell則を機械精度で
+  確認した後、白色炉テスト(R1)の誘電体版として、吸収の無い誘電体球(ガラス相当)が
+  一様環境放射輝度の中で環境放射輝度と統計誤差ゼロで一致することを検証した
+  (`dielectric_furnace_test_non_absorbing_glass_sphere_matches_background_
+  radiance_exactly`、rel<1e-6)。この厳密一致は、(1)反射/屈折の確率的分岐が
+  フレネル反射率どおりの確率でサンプリングされ、選ばれた経路の重みにR/(1-R)による
+  追加の除算を伴わない(サンプリング確率と物理確率が一致し相殺、Lambertianの
+  bsdf/pdf相殺と同じ構造)ことと、(2)屈折時の放射輝度スケール因子$(n_1/n_2)^2$
+  (幾何光学の放射輝度不変量$L/n^2=$const由来、標準的なBTDFの因子)が、球へ入る際
+  ($\eta=1/\text{ior}$)と出る際($\eta=\text{ior}$)とで厳密に相殺する
+  ($1/\text{ior}^2\times\text{ior}^2=1$)ことの2点から成り立つことを実装検証中に
+  導出し、検証方針として採用した。臨界角を超えるグレージング角では全反射により
+  球内部に閉じ込められ`max_depth`で打ち切られるため本テストでは避けた(厳密一致が
+  崩れる既知の限界、ロシアンルーレット等での対応は後続増分)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -2298,8 +2317,19 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
       `r2_dielectric_reflectance_is_total_at_grazing_angle_beyond_critical_angle`。
       `sim_em::fresnel_reflectance`(E9/E10で既に検証済み)を再利用する`Dielectric`
       BSDFで、垂直入射の閉形式一致(rel<1e-9)・臨界角超えの全反射(反射率1.0)を確認。
-      金属(複素屈折率$n+ik$)側は未実装のため、チェックボックス自体はR2完了とは
-      見なさない)
+      続けて`Dielectric::reflect`/`refract`(Snellの法則のベクトル形)を実装し
+      `Scene::trace`(`Material`列挙型に一般化)へ配線した。`refract_satisfies_
+      snells_law`でSnell則を機械精度で確認、さらに吸収の無い誘電体球(ガラス相当)を
+      白色炉テストの誘電体版として検証(`dielectric_furnace_test_non_absorbing_
+      glass_sphere_matches_background_radiance_exactly`、rel<1e-6)——反射/屈折の
+      確率的分岐がフレネル反射率どおりの確率でサンプリングされる(サンプリング確率と
+      物理確率が一致し相殺、Lambertianのbsdf/pdf相殺と同じ構造)ことと、屈折時の
+      放射輝度スケール因子$(n_1/n_2)^2$が球へ入る際($1/\text{ior}$)と出る際
+      ($\text{ior}$)とで厳密に相殺することから、統計誤差ゼロで環境放射輝度と一致
+      することを実装検証中に発見し検証方針として採用した(臨界角を超えるグレージング
+      角は全反射による球内部への閉じ込めで`max_depth`打ち切りが起こるため本テストの
+      対象外、後続増分の既知の限界として記録)。金属(複素屈折率$n+ik$)側は未実装の
+      ため、チェックボックス自体はR2完了とは見なさない)
 - [ ] R3
 - [ ] R4
 - [ ] R5
