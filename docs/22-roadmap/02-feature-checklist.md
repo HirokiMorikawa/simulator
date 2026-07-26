@@ -45,7 +45,9 @@
   Scene View双方向選択連動、実Transformデータ)+ Probe Graphs(1系列)+
   Timeline(既存の`World::snapshot`/`restore`によるスナップショットリング
   バッファ(1s間隔・N=8面)で実際にスクラブ・巻き戻しできる、名前付き
-  ブックマークの記録/復元も可能)まで実装
+  ブックマークの記録/復元も可能)+ Console(既存の`World::drain_events`を
+  実際のログとして表示、着地/跳ね返りのContactStarted/ContactEndedが
+  実際に流れ、All/Errors/Warnings/Infoタブが実際に機能する)まで実装
   (詳細は§6参照)。大部分(正式なGizmo・残りのオーバーレイ種別・
   Edit/Playモード分離・回路エディタ等)は未着手。
 - **次**: ワークストリームDの継続(Hierarchy/Inspectorの複数ボディ対応、Gizmo等)を軸に、
@@ -890,7 +892,16 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       され、復元後も時間が進まない(真に一時停止する)ことを確認した。Play
       モードバッジはPlaying/Pausedの2状態のみ実装(Edit/Replayingは未実装))
 - [ ] Console: イベント・診断ログ(発散・CFL 警告・シーンクラス/スロー再生バッジ)+ フィルタ + クリック→時刻/オブジェクト連動
-      (タブ切替UIの骨格のみ、`SolverDiagnostics`への実接続は未実装)
+      (既存の`World::drain_events`(`sim_core::EventKind`)をそのまま`sim-wasm`に
+      `drain_events_text`として公開し、実際のイベントログとして表示するように
+      実装済み——この2体デモでは箱が床に着地/跳ね返るたびに`ContactStarted`/
+      `ContactEnded`が実際に発生する。All/Errors/Warnings/Infoタブのフィルタも
+      実際に機能する(`FuseBlown`/`SolverDiverged`/`JointBroken`はwarnings、
+      それ以外はinfoに分類)。Playwrightで実際にボールが着地→数回跳ね返って
+      静止する間、対応するContactStarted/ContactEndedイベントがログに現れ、
+      タブでlevel別に絞り込めることを確認した。発散/CFL警告バッジ・クリックで
+      Timeline/Scene Viewと連動する機能・Contacts/Eventsタブ(設計は6タブ)は
+      未実装)
 - [ ] Probe Graphs パネル: 複数系列・対数軸・CSV エクスポート
       (単一系列(箱のy座標、`sim_world::World::add_probe`+`ProbeTarget::BodyPosY`を
       `sim-wasm`に`y_probe_history_f64`として公開、既存のProbeが`step()`内で

@@ -19,12 +19,15 @@ import "./style.css";
 // Phase 0デモが実際に構築する内容と一致させた固定のルックアップテーブル
 // (`BODY_META`)を使う。Scene Viewオーバーレイ(設計§1.2)は選択中ボディの
 // 速度ベクトルを矢印表示するもの(切替可、Toolbarのチェックボックス)のみ実装
-// (接触点・力・拘束・流体場・フレーム軸は対象外)。Console/Projectは静的な
-// プレースホルダ内容のまま。TimelineはWorld::snapshot/restoreによるスナップ
-// ショットリングバッファ(1s間隔・N=8面)でスクラブ・巻き戻しができ、任意時点を
-// ブックマーク(`add_bookmark`/`restore_bookmark`、リングバッファの退避を
-// 受けない別領域)として名前付きで保存・復元できる。正式なGizmo・オーバーレイ
-// 残り・Command キュー残り(SetMotorTarget/SetSwitch/SetHeatSource未配線)・
+// (接触点・力・拘束・流体場・フレーム軸は対象外)。Consoleは`World::
+// drain_events`(既存API)が返す実イベント(この2体デモでは箱の着地/跳ね返り
+// のたびに発生する`ContactStarted`/`ContactEnded`)をAll/Errors/Warnings/Info
+// タブでフィルタ表示する(設計§1.5)。Projectは静的なプレースホルダ内容のまま。
+// TimelineはWorld::snapshot/restoreによるスナップショットリングバッファ
+// (1s間隔・N=8面)でスクラブ・巻き戻しができ、任意時点をブックマーク
+// (`add_bookmark`/`restore_bookmark`、リングバッファの退避を受けない別領域)
+// として名前付きで保存・復元できる。正式なGizmo・オーバーレイ残り・Command
+// キュー残り(SetMotorTarget/SetSwitch/SetHeatSource未配線)・
 // Edit/Playモードの分離(§4)・回路サブモードは全て後続増分。
 
 const GRAVITY = 9.80665;
@@ -50,12 +53,55 @@ function setUpLayoutPresetSwitcher() {
   });
 }
 
-function setUpConsolePlaceholder() {
+// Consoleパネル(設計docs/23-frontend/01-editor.md §1.5「SolverDiagnostics の
+// 発散警告・…イベントをフィルタ表示」)。`world.drain_events_text`(既存の
+// `World::drain_events`をそのまま使う、`sim_core::EventKind`)が返す
+// `level::message`形式の行を実際のログとして追記し、タブでlevel別に絞り込む。
+// 縮約実装の理由: クリックでTimeline/Scene Viewと連動させる機能・Contacts/
+// Eventsタブ(設計は6タブだが本デモはAll/Errors/Warnings/Infoの4タブのみ)は
+// 対象外。
+const CONSOLE_LOG_CAPACITY = 200;
+
+function setUpConsole(): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
-  const entry = document.createElement("li");
-  entry.textContent =
-    "[INFO] World API 接続待ち — SolverDiagnostics の配線は後続増分(docs/23-frontend/01-editor.md §1.5)";
-  log.appendChild(entry);
+  const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
+  let activeLevel = "all";
+
+  function applyFilter() {
+    for (const li of log.children) {
+      const level = (li as HTMLElement).dataset.level;
+      (li as HTMLElement).style.display = activeLevel === "all" || level === activeLevel ? "" : "none";
+    }
+  }
+
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      tabs.forEach((t) => t.classList.toggle("active", t === tab));
+      activeLevel = tab.dataset.tab!;
+      applyFilter();
+    });
+  });
+
+  const initial = document.createElement("li");
+  initial.dataset.level = "info";
+  initial.textContent = "[INFO] World起動 — SolverDiagnostics接続済み(ContactStarted/ContactEndedを表示)";
+  log.appendChild(initial);
+
+  return (eventsText: string) => {
+    if (!eventsText) return;
+    for (const line of eventsText.split("\n")) {
+      const [level, message] = line.split("::", 2);
+      const li = document.createElement("li");
+      li.dataset.level = level;
+      li.textContent = `[${level.toUpperCase()}] ${message}`;
+      log.appendChild(li);
+    }
+    while (log.children.length > CONSOLE_LOG_CAPACITY) {
+      log.removeChild(log.firstChild!);
+    }
+    applyFilter();
+    log.scrollTop = log.scrollHeight;
+  };
 }
 
 // Hierarchyパネル(設計docs/23-frontend/01-editor.md §1.1)。`world.body_count`/
@@ -198,16 +244,10 @@ function setUpProbeGraph(): (history: Float64Array) => void {
   };
 }
 
-function setUpConsoleTabs() {
-  const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
-  tabs.forEach((tab) => {
-    tab.addEventListener("click", () => {
-      tabs.forEach((t) => t.classList.toggle("active", t === tab));
-    });
-  });
-}
-
-async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void) {
+async function setUpSceneView(
+  updateProbeGraph: (history: Float64Array) => void,
+  appendConsoleEntries: (eventsText: string) => void,
+) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
 
@@ -373,6 +413,7 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
   stepButton.addEventListener("click", () => {
     if (!playing) {
       world.step();
+      appendConsoleEntries(world.drain_events_text());
       render();
     }
   });
@@ -509,6 +550,7 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
         accumulator -= DT;
         steps += 1;
       }
+      appendConsoleEntries(world.drain_events_text());
     }
 
     render();
@@ -521,10 +563,9 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
 function main() {
   setUpLayoutPresetSwitcher();
   const updateProbeGraph = setUpProbeGraph();
-  setUpConsolePlaceholder();
-  setUpConsoleTabs();
+  const appendConsoleEntries = setUpConsole();
   setUpProjectDrawer();
-  setUpSceneView(updateProbeGraph).catch((err) => {
+  setUpSceneView(updateProbeGraph, appendConsoleEntries).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);

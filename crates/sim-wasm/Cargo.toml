@@ -8,6 +8,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+sim-core = { path = "../sim-core" }
 sim-math = { path = "../sim-math" }
 sim-mechanics = { path = "../sim-mechanics" }
 sim-world = { path = "../sim-world" }

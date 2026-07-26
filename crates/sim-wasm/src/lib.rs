@@ -280,4 +280,30 @@ impl WasmWorld {
             body: self.box_body,
         });
     }
+
+    /// Consoleパネル(設計docs/23-frontend/01-editor.md §1.5「`SolverDiagnostics`の
+    /// 発散警告・…イベントをフィルタ表示」)向けに、前回呼び出し以降に発生した
+    /// イベント(既存の`World::drain_events`)を1行1件のテキストへ整形して返す
+    /// (空行区切り、`level::message`形式——フロントエンドのフィルタタブが
+    /// levelで分けるための単純な区切り、JSONは使わない縮約実装)。この2体デモでは
+    /// 箱が床に着地/跳ね返るたびに`ContactStarted`/`ContactEnded`が実際に発生する。
+    pub fn drain_events_text(&mut self) -> String {
+        self.inner
+            .drain_events()
+            .iter()
+            .map(|e| {
+                let level = match e.kind {
+                    sim_core::EventKind::FuseBlown
+                    | sim_core::EventKind::SolverDiverged
+                    | sim_core::EventKind::JointBroken => "warnings",
+                    _ => "info",
+                };
+                format!(
+                    "{level}::step={} {:?} (source={})",
+                    e.step, e.kind, e.source.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }

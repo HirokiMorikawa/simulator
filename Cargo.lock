@@ -538,6 +538,7 @@ name = "sim-wasm"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "sim-core",
  "sim-math",
  "sim-mechanics",
  "sim-world",
