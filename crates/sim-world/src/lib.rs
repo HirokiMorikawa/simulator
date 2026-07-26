@@ -921,6 +921,54 @@ impl World {
         Some(self.mechanics.bodies.rotation[id.index as usize])
     }
 
+    /// `body`のローカル座標`anchor_local`をワールド固定点`anchor_world`から
+    /// 距離`length`に保つ`sim_mechanics::DistanceJoint`(`body_b: None`、
+    /// モジュールdoc「Distance は単振り子(質量無しの棒/紐)」)を追加する。
+    /// 振り子スポーン(`sim-wasm::spawn_pendulum`)向け。返り値は
+    /// `distance_joint_anchor_points`で問い合わせる際に使う`joints`内の
+    /// index。無効な`body`でも(`create_body`直後の呼び出しのみを想定して
+    /// いるため)検証はしない。
+    pub fn add_distance_joint_to_world_point(
+        &mut self,
+        body: BodyId,
+        anchor_local: Vec3,
+        anchor_world: Vec3,
+        length: f64,
+    ) -> usize {
+        let index = self.mechanics.joints.len();
+        self.mechanics
+            .add_distance_joint(sim_mechanics::DistanceJoint {
+                body_a: body.index as usize,
+                anchor_a: anchor_local,
+                body_b: None,
+                anchor_b: anchor_world,
+                length,
+            });
+        index
+    }
+
+    /// `joint_index`番目のDistanceJointの現在のワールド座標アンカー点2点
+    /// `(anchor_a_world, anchor_b_world)`を返す(`body_b`が`None`なら
+    /// `anchor_b`はそのままワールド座標)。`sim_mechanics::joint`内部の
+    /// `world_anchor`と同じ式(`position + rotation.rotate(anchor_local)`)を
+    /// 使う。Scene Viewの拘束オーバーレイ(設計docs/23-frontend/01-editor.md
+    /// §1.2)がジョイントを結ぶ線を描くためのクエリ。範囲外の`joint_index`
+    /// なら`None`。
+    pub fn distance_joint_anchor_points(&self, joint_index: usize) -> Option<(Vec3, Vec3)> {
+        let joint = self.mechanics.joints.get(joint_index)?;
+        let body_a = joint.body_a;
+        let anchor_a_world = self.mechanics.bodies.position[body_a]
+            + self.mechanics.bodies.rotation[body_a].rotate(joint.anchor_a);
+        let anchor_b_world = match joint.body_b {
+            Some(body_b) => {
+                self.mechanics.bodies.position[body_b]
+                    + self.mechanics.bodies.rotation[body_b].rotate(joint.anchor_b)
+            }
+            None => joint.anchor_b,
+        };
+        Some((anchor_a_world, anchor_b_world))
+    }
+
     /// 直近stepで検出された接触点のワールド座標一覧(設計docs/23-frontend/
     /// 01-editor.md §1.2 Scene View オーバーレイ「接触点」向け)。法線・貫入量は
     /// このオーバーレイの用途(接触位置のマーカー表示)には不要なため座標のみ返す
@@ -2409,6 +2457,63 @@ mod tests {
             "after enlarging in place, the body must wake up and resettle near the \
              new half_extent=1.5 (not stay frozen at the old half_extent=0.5 rest \
              height), got {resettled_y}"
+        );
+    }
+
+    /// 拘束オーバーレイ(振り子スポーン)向けの検証: ワールド固定点へDistanceJointで
+    /// つないだ球が、鉛直から水平にずらして開始すると重力により振り子運動
+    /// (固定点からの距離をほぼ一定に保ちながら往復)することと、
+    /// `distance_joint_anchor_points`が固定点側は常に一定・可動体側は実際の球の
+    /// 現在位置に一致し続けることを確認する。
+    #[test]
+    fn distance_joint_to_world_point_makes_a_pendulum_that_swings_at_constant_radius() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world
+            .materials()
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.2 }, steel);
+        let pivot = Vec3::new(0.0, 5.0, 0.0);
+        let arm_length = 2.0;
+        // Start displaced 90 degrees from vertical (horizontal arm) so gravity
+        // actually drives a swing rather than leaving it at a trivial equilibrium.
+        desc.transform.position = pivot + Vec3::new(arm_length, 0.0, 0.0);
+        let bob = world.create_body(desc);
+        let joint_index =
+            world.add_distance_joint_to_world_point(bob, Vec3::ZERO, pivot, arm_length);
+
+        let (anchor_a0, anchor_b0) = world.distance_joint_anchor_points(joint_index).unwrap();
+        assert_eq!(anchor_a0, world.body_position(bob).unwrap());
+        assert_eq!(anchor_b0, pivot);
+
+        let mut max_radius_error: f64 = 0.0;
+        for _ in 0..300 {
+            world.step();
+            let (anchor_a, anchor_b) = world.distance_joint_anchor_points(joint_index).unwrap();
+            assert_eq!(
+                anchor_a,
+                world.body_position(bob).unwrap(),
+                "anchor_a must track the swinging body's live position every step"
+            );
+            assert_eq!(
+                anchor_b, pivot,
+                "the fixed world-point anchor must never move"
+            );
+            let radius = (anchor_a - anchor_b).length();
+            max_radius_error = max_radius_error.max((radius - arm_length).abs());
+        }
+        assert!(
+            max_radius_error < 0.05,
+            "distance joint must keep the bob at ~constant radius {arm_length} from the \
+             pivot throughout the swing (max deviation observed: {max_radius_error})"
+        );
+
+        // It must actually have swung (moved substantially from the starting
+        // horizontal displacement), not stayed frozen in place.
+        let final_position = world.body_position(bob).unwrap();
+        assert!(
+            (final_position - (pivot + Vec3::new(arm_length, 0.0, 0.0))).length() > 0.5,
+            "the pendulum must actually swing under gravity, got final position {final_position:?}"
         );
     }
 }

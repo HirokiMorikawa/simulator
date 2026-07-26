@@ -37,11 +37,13 @@
           <select id="select-spawn-material" title="スポーンする材質"></select>
           <button id="btn-spawn-sphere" title="球を配置(Command経由ではなくcreate_body)">+ 球</button>
           <button id="btn-spawn-box" title="箱を配置(Command経由ではなくcreate_body)">+ 箱</button>
+          <button id="btn-spawn-pendulum" title="振り子を配置(DistanceJointでワールド固定点へ拘束)">+ 振り子</button>
         </div>
         <div class="toolbar-group">
           <label><input type="checkbox" id="toggle-velocity-overlay" checked /> 速度オーバーレイ</label>
           <label><input type="checkbox" id="toggle-contact-overlay" checked /> 接触点オーバーレイ</label>
           <label><input type="checkbox" id="toggle-force-overlay" checked /> 力オーバーレイ</label>
+          <label><input type="checkbox" id="toggle-constraint-overlay" checked /> 拘束オーバーレイ</label>
         </div>
         <div class="toolbar-group">
           <label for="select-timescale">時間倍率</label>

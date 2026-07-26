@@ -48,6 +48,10 @@ struct SpawnedBodyMeta {
     /// Scale Gizmo(`set_body_scale_at`参照)がスケール係数を掛ける基準形状
     /// (スポーン時の寸法、以後`World`側の実形状が変わってもこの基準は不変)。
     base_shape: Shape,
+    /// 振り子スポーン(`spawn_pendulum`)が追加したDistanceJointの
+    /// `World::distance_joint_anchor_points`用index。球/箱スポーンでは`None`
+    /// (拘束オーバーレイ対象外)。
+    constraint_joint_index: Option<usize>,
 }
 
 #[wasm_bindgen]
@@ -248,6 +252,7 @@ impl WasmWorld {
             label,
             material_label: material_name,
             base_shape: Shape::Sphere { radius },
+            constraint_joint_index: None,
         });
         index
     }
@@ -284,8 +289,85 @@ impl WasmWorld {
             base_shape: Shape::Box {
                 half_extents: sim_math::Vec3::new(half_extent, half_extent, half_extent),
             },
+            constraint_joint_index: None,
         });
         index
+    }
+
+    /// スポーンパレット——振り子(拘束オーバーレイの実証用)。ワールド固定点
+    /// `(pivot_x, pivot_y, pivot_z)`から`DistanceJoint`(`World::
+    /// add_distance_joint_to_world_point`)で距離`arm_length`に保たれる球を
+    /// 配置する。鉛直から30度傾いた位置(`pivot`から`arm_length`だけ離れた
+    /// 点)を初期位置とすることで、静止した自明な平衡状態ではなく実際に
+    /// 重力で振り子運動が始まる。
+    pub fn spawn_pendulum(
+        &mut self,
+        pivot_x: f64,
+        pivot_y: f64,
+        pivot_z: f64,
+        arm_length: f64,
+        material_name: String,
+    ) -> usize {
+        const BOB_RADIUS: f64 = 0.3;
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(&material_name)
+            .unwrap_or_else(|| panic!("unknown material: {material_name}"));
+        let pivot = sim_math::Vec3::new(pivot_x, pivot_y, pivot_z);
+        let initial_angle_from_vertical = std::f64::consts::PI / 6.0; // 30度
+        let initial_offset = sim_math::Vec3::new(
+            arm_length * initial_angle_from_vertical.sin(),
+            -arm_length * initial_angle_from_vertical.cos(),
+            0.0,
+        );
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: BOB_RADIUS }, material);
+        desc.transform.position = pivot + initial_offset;
+        let id = self.inner.create_body(desc);
+        let joint_index = self.inner.add_distance_joint_to_world_point(
+            id,
+            sim_math::Vec3::ZERO,
+            pivot,
+            arm_length,
+        );
+        let index = self.body_count();
+        let label = format!("Pendulum_{index}");
+        self.spawned.push(SpawnedBodyMeta {
+            id,
+            label,
+            material_label: material_name,
+            base_shape: Shape::Sphere { radius: BOB_RADIUS },
+            constraint_joint_index: Some(joint_index),
+        });
+        index
+    }
+
+    /// Scene Viewの拘束オーバーレイ(設計docs/23-frontend/01-editor.md §1.2
+    /// 「拘束」)向けに、`index`番目のボディが持つ拘束(DistanceJoint)の
+    /// アンカー点2点を`[ax,ay,az,bx,by,bz]`(f32)で返す。拘束を持たない
+    /// ボディ(床・箱・スポーンした球/箱)なら空配列を返す。
+    pub fn constraint_anchor_points_at(&self, index: usize) -> Float32Array {
+        let joint_index = match index {
+            0 | 1 => None,
+            _ => {
+                self.spawned
+                    .get(index - 2)
+                    .unwrap_or_else(|| panic!("body index {index} out of range"))
+                    .constraint_joint_index
+            }
+        };
+        let Some(joint_index) = joint_index else {
+            return Float32Array::new_with_length(0);
+        };
+        let (a, b) = self
+            .inner
+            .distance_joint_anchor_points(joint_index)
+            .expect("constraint_joint_index recorded at spawn time must stay valid");
+        Float32Array::from(
+            &[
+                a.x as f32, a.y as f32, a.z as f32, b.x as f32, b.y as f32, b.z as f32,
+            ][..],
+        )
     }
 
     /// `index`番目のボディの位置 [x, y, z](f32)。

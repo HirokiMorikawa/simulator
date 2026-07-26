@@ -53,7 +53,7 @@
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
   Translate/Rotate/Scale Gizmo(X/Y/Z軸ハンドル・軸周りリング・単一の一様
   スケールハンドル、Editモード限定)+
-  速度ベクトル/接触点/力オーバーレイ)+
+  速度ベクトル/接触点/力/拘束オーバーレイ)+
   Toolbar(再生/Nudge Command + Edit/Playモードトグル)+ Hierarchy/Inspector
   (複数ボディ列挙・Scene View双方向選択連動、実Transformデータ)+
   Probe Graphs(2系列: y座標・速さ、独立正規化で重ね描き)+ Timeline(既存の`World::snapshot`/`restore`による
@@ -79,8 +79,12 @@
   接触が再解決されずに固まる実バグを発見・修正した(`set_shape`が
   `still_time`/`asleep`をリセット、回帰テスト追加済み)。InspectorのShape
   表示もこれに伴い、固定文字列ではなく`World::mechanics().bodies.shape_of`
-  からの実クエリに置き換えた。残りは拘束/流体場/フレーム軸オーバーレイ・
-  回路エディタ等。
+  からの実クエリに置き換えた。拘束オーバーレイ(スポーンパレットに「+ 振り子」
+  ボタンを追加、`sim_mechanics::DistanceJoint`(新設`World::
+  add_distance_joint_to_world_point`/`distance_joint_anchor_points`)で
+  ワールド固定点へ距離一定に拘束した球が実際に重力で往復運動し、拘束を結ぶ
+  線をThree.jsで描画・切替可能)も実装済み。残りは流体場/フレーム軸
+  オーバーレイ・回路エディタ等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
   機を見て並行して進める。優先順位の詳細は
@@ -1011,8 +1015,18 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       チェックボックスで切替可能。Playwrightで、Nudgeクリック直後(50ms後)に
       矢印が箱の位置から上向きに表示され、500ms経過後(700ms後に確認)には
       自動的に非表示になること、チェックを外した状態でNudgeを押しても矢印が
-      表示されないことを確認した。拘束・流体場・フレーム軸のオーバーレイは
-      未実装)
+      表示されないことを確認した。
+      拘束オーバーレイも実装済み——スポーンパレットに「+ 振り子」ボタンを
+      追加し(`sim-wasm::spawn_pendulum`、球をワールド固定点から新設の
+      `sim_mechanics::DistanceJoint`(`World::add_distance_joint_to_world_point`)
+      で距離一定に保つ)、`constraint_anchor_points_at`(`World::
+      distance_joint_anchor_points`をそのまま公開)で得た2アンカー点を結ぶ
+      `THREE.Line`をToolbarのチェックボックスで切替可能な形で表示する。拘束を
+      持たないボディ(床・箱・球/箱スポーン)は対象外。Playwrightで、振り子を
+      スポーンすると実際に重力で往復運動(周期的な位置の往復、初期位置近くへ
+      戻ることを確認)すること、固定点↔球を結ぶ拘束線が正しく追従し続ける
+      こと、チェックを外すと線が消えることを確認した。流体場・フレーム軸の
+      オーバーレイは未実装)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
       (Bodies配下は`sim-wasm`に新設した`body_count`/`body_label_at`経由で実際の
       World状態(床の静的平面+箱)を列挙・クリックでInspector及びScene

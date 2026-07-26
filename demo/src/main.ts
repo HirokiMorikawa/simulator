@@ -74,6 +74,8 @@ const SPAWN_MATERIALS = ["鋼(炭素鋼)", "アルミニウム", "木材(松)", 
 const SPAWN_HEIGHT = 12.0;
 const SPAWN_SPHERE_RADIUS = 0.4;
 const SPAWN_BOX_HALF_EXTENT = 0.4;
+const PENDULUM_PIVOT_HEIGHT = 6.0;
+const PENDULUM_ARM_LENGTH = 2.0;
 
 function setUpLayoutPresetSwitcher() {
   const app = document.getElementById("app")!;
@@ -467,6 +469,13 @@ async function setUpSceneView(
   scene.add(forceArrow);
   let forceOverlayHideAtMs = 0;
 
+  // 拘束オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「拘束」)。振り子
+  // スポーン(`spawn_pendulum`)が追加したDistanceJointの2つのアンカー点
+  // (固定ピボット・可動体側)を結ぶ線を毎フレーム描画する(`render()`内、
+  // `constraintLines`ループ参照)。拘束を持たないボディ(球/箱スポーン・
+  // 床・箱)は対象外。
+  const constraintOverlayToggle = document.getElementById("toggle-constraint-overlay") as HTMLInputElement;
+
   function showForceOverlay(origin: THREE.Vector3, force: THREE.Vector3) {
     const magnitude = force.length();
     if (magnitude < 1e-6) return;
@@ -588,6 +597,10 @@ async function setUpSceneView(
   // スポーンパレット(設計§6)で追加したボディのThree.jsメッシュ(bodyIndexで
   // 引ける、`render()`が毎フレーム位置/姿勢を反映させるために使う)。
   const spawnedMeshes = new Map<number, THREE.Mesh>();
+  // 拘束オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「拘束」)向けの
+  // THREE.Line(振り子スポーンごとに1本、`world.constraint_anchor_points_at`が
+  // 返す2点を毎フレーム反映する)。
+  const constraintLines = new Map<number, THREE.Line>();
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
   const dragPlane = new THREE.Plane();
@@ -996,6 +1009,24 @@ async function setUpSceneView(
     addSpawnedMesh(bodyIndex, mesh);
   });
 
+  document.getElementById("btn-spawn-pendulum")!.addEventListener("click", () => {
+    const { x, z } = nextSpawnPosition();
+    const material = spawnMaterialSelect.value;
+    const bodyIndex = world.spawn_pendulum(x, PENDULUM_PIVOT_HEIGHT, z, PENDULUM_ARM_LENGTH, material);
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.3, 16, 12),
+      new THREE.MeshStandardMaterial({ color: 0xff66cc }),
+    );
+    addSpawnedMesh(bodyIndex, mesh);
+    const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(),
+      new THREE.Vector3(),
+    ]);
+    const line = new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({ color: 0xffaa00 }));
+    scene.add(line);
+    constraintLines.set(bodyIndex, line);
+  });
+
   playButton.addEventListener("click", () => {
     if (mode !== "play") return;
     playing = !playing;
@@ -1118,6 +1149,23 @@ async function setUpSceneView(
       const sr = world.body_rotation_at_f32(bodyIndex);
       mesh.quaternion.set(sr[0], sr[1], sr[2], sr[3]);
       mesh.scale.setScalar(currentScale.get(bodyIndex) ?? 1.0);
+    }
+
+    for (const [bodyIndex, line] of constraintLines) {
+      if (!constraintOverlayToggle.checked) {
+        line.visible = false;
+        continue;
+      }
+      const anchors = world.constraint_anchor_points_at(bodyIndex);
+      if (anchors.length < 6) {
+        line.visible = false;
+        continue;
+      }
+      const positions = line.geometry.attributes.position as THREE.BufferAttribute;
+      positions.setXYZ(0, anchors[0], anchors[1], anchors[2]);
+      positions.setXYZ(1, anchors[3], anchors[4], anchors[5]);
+      positions.needsUpdate = true;
+      line.visible = true;
     }
 
     const selectedPosition = world.body_position_at_f32(selectedBodyIndex);
