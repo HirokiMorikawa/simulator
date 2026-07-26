@@ -177,4 +177,30 @@ impl WasmWorld {
             point: None,
         });
     }
+
+    /// Scene ViewでのドラッグでD&D的に箱をつかむ(設計§1.2「Gizmo」に相当する
+    /// 最小デモ、`Command::Grab`——重心(`anchor_local=Vec3::ZERO`)をワールド座標
+    /// `target`へ剛にピン留めする)。
+    pub fn push_grab(&mut self, target_x: f64, target_y: f64, target_z: f64) {
+        self.inner.push_command(Command::Grab {
+            body: self.box_body,
+            anchor_local: sim_math::Vec3::ZERO,
+            target: sim_math::Vec3::new(target_x, target_y, target_z),
+        });
+    }
+
+    /// ドラッグ中の`Command::MoveGrab`(既存のgrabの目標点をマウス位置へ追従させる)。
+    pub fn push_move_grab(&mut self, target_x: f64, target_y: f64, target_z: f64) {
+        self.inner.push_command(Command::MoveGrab {
+            body: self.box_body,
+            target: sim_math::Vec3::new(target_x, target_y, target_z),
+        });
+    }
+
+    /// ドラッグ終了時の`Command::Release`(grabを解除、以後は通常の物理に戻る)。
+    pub fn push_release(&mut self) {
+        self.inner.push_command(Command::Release {
+            body: self.box_body,
+        });
+    }
 }

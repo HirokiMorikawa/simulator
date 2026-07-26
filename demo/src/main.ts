@@ -11,11 +11,16 @@ import "./style.css";
 // 接続済みで、Hierarchyでのクリック・Scene Viewでのクリックピック(`THREE.
 // Raycaster`、Alt-クリックで裏側を選択)のどちらからでも同じ選択状態
 // (`selectBody`)を通じてInspectorが更新される(設計§1.2/§1.3が求める双方向
-// 選択)。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため(World
-// API-only制約)、Phase 0デモが実際に構築する内容と一致させた固定のルックアップ
-// テーブル(`BODY_META`)を使う。Console/Projectは静的なプレースホルダ内容のまま。
-// Gizmo・オーバーレイ・Command キュー全種・Edit/Playモードの分離(§4)・
-// 回路サブモード(§3)は全て後続増分。
+// 選択)。箱をドラッグすると`Command::Grab/MoveGrab/Release`(`push_grab`/
+// `push_move_grab`/`push_release`)経由で物理的に"つかんで"動かせる(設計§1.2の
+// Gizmoに相当する縮約実装——正式なGizmo(移動/回転/スケールの軸ハンドル、Edit
+// モード限定)ではなく、Playモードのまま動く物理的なドラッグ操作)。Shape/
+// Materialは`sim-wasm`側に対応するクエリAPIが無いため(World API-only制約)、
+// Phase 0デモが実際に構築する内容と一致させた固定のルックアップテーブル
+// (`BODY_META`)を使う。Console/Projectは静的なプレースホルダ内容のまま。
+// 正式なGizmo・オーバーレイ・Command キュー残り(SetMotorTarget/SetSwitch/
+// SetHeatSource未配線)・Edit/Playモードの分離(§4)・回路サブモード(§3)は
+// 全て後続増分。
 
 const GRAVITY = 9.80665;
 const DT = 1.0 / 120.0;
@@ -255,26 +260,78 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
   renderInspectorFor(world, selectedBodyIndex);
 
   // Scene Viewピック(設計docs/23-frontend/01-editor.md §1.2「クリックでbody/
-  // joint/probeを選択。Alt-クリックで下層(重なった裏)を選択」)。手前から
-  // 交差した順にソートされる`Raycaster.intersectObjects`の結果配列を使い、
-  // 通常クリックは先頭(最前面)、Alt-クリックは2番目(その裏)を選ぶ。
+  // joint/probeを選択。Alt-クリックで下層(重なった裏)を選択」)+ Gizmoの最小
+  // デモとしての箱のドラッグ(設計§1.2「Gizmo: 選択中オブジェクトのTransformを
+  // 直接ドラッグで編集」に相当、Play中でも動く分だけ縮約——`Command::Grab/
+  // MoveGrab/Release`(設計§4「ドラッグ系はCommand経由」)でワールド座標の目標点
+  // へ剛にピン留めする物理的な"つかむ"操作として実装した。移動量が閾値未満なら
+  // 通常のクリック選択として扱う(pointerdown/move/upの3イベントで判別)。
   const pickables: { mesh: THREE.Object3D; bodyIndex: number }[] = [
     { mesh: ground, bodyIndex: BODY_INDEX_GROUND },
     { mesh: box, bodyIndex: BODY_INDEX_BOX },
   ];
   const raycaster = new THREE.Raycaster();
-  const pointer = new THREE.Vector2();
-  renderer.domElement.addEventListener("click", (event) => {
+  const pointerNdc = new THREE.Vector2();
+  const dragPlane = new THREE.Plane();
+  const dragPlaneHit = new THREE.Vector3();
+  const cameraDirection = new THREE.Vector3();
+  const DRAG_THRESHOLD_PX = 4;
+
+  function updatePointerNdc(event: PointerEvent) {
     const rect = renderer.domElement.getBoundingClientRect();
-    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(pointer, camera);
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  }
+
+  function hitTest(event: PointerEvent, wantBack: boolean) {
+    updatePointerNdc(event);
+    raycaster.setFromCamera(pointerNdc, camera);
     const hits = raycaster.intersectObjects(pickables.map((p) => p.mesh));
-    const hitIndex = event.altKey && hits.length > 1 ? 1 : 0;
-    const hit = hits[hitIndex];
-    if (!hit) return;
+    const hit = hits[wantBack && hits.length > 1 ? 1 : 0];
+    if (!hit) return null;
     const picked = pickables.find((p) => p.mesh === hit.object);
-    if (picked) selectBody(picked.bodyIndex);
+    return picked ? { picked, worldPoint: hit.point } : null;
+  }
+
+  let dragStartScreen: { x: number; y: number } | null = null;
+  let pointerDownHit: ReturnType<typeof hitTest> = null;
+  let isDragging = false;
+
+  renderer.domElement.addEventListener("pointerdown", (event) => {
+    dragStartScreen = { x: event.clientX, y: event.clientY };
+    isDragging = false;
+    pointerDownHit = hitTest(event, event.altKey);
+  });
+
+  renderer.domElement.addEventListener("pointermove", (event) => {
+    if (!dragStartScreen) return;
+    const dx = event.clientX - dragStartScreen.x;
+    const dy = event.clientY - dragStartScreen.y;
+    if (!isDragging) {
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+      if (!pointerDownHit || pointerDownHit.picked.bodyIndex !== BODY_INDEX_BOX) return;
+      isDragging = true;
+      camera.getWorldDirection(cameraDirection);
+      dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
+      const p = world.body_position_at_f32(BODY_INDEX_BOX);
+      world.push_grab(p[0], p[1], p[2]);
+    }
+    updatePointerNdc(event);
+    raycaster.setFromCamera(pointerNdc, camera);
+    if (raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)) {
+      world.push_move_grab(dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
+    }
+  });
+
+  renderer.domElement.addEventListener("pointerup", () => {
+    if (isDragging) {
+      world.push_release();
+    } else if (pointerDownHit) {
+      selectBody(pointerDownHit.picked.bodyIndex);
+    }
+    isDragging = false;
+    dragStartScreen = null;
+    pointerDownHit = null;
   });
 
   const hud = document.getElementById("hud")!;

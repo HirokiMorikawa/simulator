@@ -39,11 +39,11 @@
   残り: R3の完全化(hero wavelength分光)、R4(コーネルボックス、参照解データ未入手)、
   BVH・コースティクス・マルチスキャッタリング・トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
-  骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック)+
-  Toolbar(再生/Nudge Command)+ Hierarchy/Inspector(複数ボディ列挙・
-  Scene View双方向選択連動、実Transformデータ)+ Probe Graphs(1系列)まで
-  実装(詳細は§6参照)。大部分(Gizmo・オーバーレイ・Edit/Playモード分離・
-  回路エディタ等)は未着手。
+  骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
+  Grab/MoveGrab/Releaseによるドラッグ操作)+ Toolbar(再生/Nudge Command)+
+  Hierarchy/Inspector(複数ボディ列挙・Scene View双方向選択連動、実Transform
+  データ)+ Probe Graphs(1系列)まで実装(詳細は§6参照)。大部分(正式な
+  Gizmo・オーバーレイ・Edit/Playモード分離・回路エディタ等)は未着手。
 - **次**: ワークストリームDの継続(Hierarchy/Inspectorの複数ボディ対応、Gizmo等)を軸に、
   ワークストリームB残り2シナリオ・ワークストリームC残り(R4・R3完全化)は機を見て並行して
   進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
@@ -846,7 +846,11 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       (ビューポート自体はパネル内に配線済み。ピックは`THREE.Raycaster`で実装済み
       (クリックで最前面のボディを選択、Alt-クリックで2番目に手前(裏)のボディを
       選択、`intersectObjects`の距離順ソート済み結果を利用)——Hierarchy/
-      Inspectorと共通の`selectBody`経由で双方向に連動する。Gizmo・オーバーレイは
+      Inspectorと共通の`selectBody`経由で双方向に連動する。正式なGizmo(軸ハンドル
+      による移動/回転/スケール、Editモード限定)は未実装だが、その代わりに
+      箱を直接ドラッグして`Command::Grab/MoveGrab/Release`で物理的に"つかんで"
+      動かせる操作を実装した(移動量が閾値を超えるとドラッグ、超えなければ
+      クリック選択、`main.ts`のpointerdown/move/upハンドラ参照)。オーバーレイは
       未実装)
 - [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
@@ -882,8 +886,14 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       `push_command`でキューに積み、次の`world.step()`が`apply_pending_commands`
       経由で適用する設計§4のパイプラインが実際に動作することをPlaywrightで
       確認(Nudge後のΔvが力・質量・dtから期待される値と整合)。Grab/MoveGrab/
-      Release/SetMotorTarget/SetSwitch/SetHeatSource(いずれも`sim_world::Command`
-      には既存)の配線・入力列記録は未実装)
+      Releaseも`push_grab`/`push_move_grab`/`push_release`として配線し、Scene
+      Viewでの箱のドラッグ(Gizmoの最小デモ、閾値を超える移動でクリック選択と
+      区別)として実演した——ドラッグ中は毎pointermoveで`MoveGrab`をキューに
+      積むだけで、実際の"つかむ"物理(BallJoint的なピン留め)は`World::step()`側が
+      担う。Playwrightで、ドラッグ中にマウスに追従して箱が動き、離すとその時点の
+      速度を保ったまま通常の物理(重力)に戻ることを確認した。SetMotorTarget/
+      SetSwitch/SetHeatSource(いずれも`sim_world::Command`には既存)の配線・
+      入力列記録は未実装)
 - [ ] レイアウトプリセット(Default / Physics-focus / Circuit-focus / Astro)
       (Default(標準比率)・Physics-focus(コンソール行を拡大)・Astro(タイムライン行を
       固定の大きな高さにしその分コンソール行を縮小)の3種を実装済み(`demo/src/
