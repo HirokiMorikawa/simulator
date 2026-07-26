@@ -1167,6 +1167,19 @@
   前提にしているためと考えられ、本実装はこの解析的性質を活かして瞬時にGreen化
   した(このセッションで確立した「まず実測してから許容誤差・実行方針を決める」
   方針の延長)。
+  続けて設計§8の実装順序どおり誘電体BSDF(`Dielectric`)を追加し、R2(フルネル
+  反射率)の誘電体側をGreen化した。フレネル反射率の解析式自体は`sim_em::
+  fresnel_reflectance`(E9/E10で既に検証済み)をそのまま再利用し(sim-renderに
+  sim-em依存を追加)、重複実装しなかった。実装中に、`sim_em::raytracer`が既に
+  独自の`Ray`/`SurfaceGeom`/`OpticalSurface`(決定論的なパワー分岐トレース、
+  フレネル係数で反射/透過の両方の経路をエネルギー分配して追跡、E9–E12のエネルギー
+  収支検証が目的)を持つことを発見したが、`sim_render`はモンテカルロ経路追跡
+  (乱数で1経路を確率的に選び多数サンプルの平均で輸送方程式を推定、画像合成が目的)
+  であり目的・状態表現(スループットの掛け算 vs パワー分配)が本質的に異なるため、
+  型は共有せず意図的に別実装とした(解析式の再利用と、状態表現の型を共有しない
+  ことは両立する判断、`bsdf.rs`モジュールdocに記録)。金属(複素屈折率$n+ik$)は
+  設計の実装順序(拡散→誘電体→金属→粗面透過)どおり後続増分に残したため、R2の
+  チェックボックス自体は誘電体側のみの部分達成として保留した。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1811,9 +1824,13 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       必要な最小構成)のため、加速構造自体は複数物体シーンが必要になるまで未着手
       (線形探索と同義になるため、モジュールdoc「縮約実装の理由」参照)。レイ-球交差
       (`sphere::Sphere::intersect`)自体は実装済み。
-- [ ] BSDF・NEE——拡散(Lambertian、`bsdf::Lambertian`、コサイン重み付き半球サンプリング)
-      のみ実装済み。鏡面・誘電体・金属・NEE(光源の明示サンプル)は未実装(R1検証は
-      環境光が一様なためNEEを要しない、モジュールdoc参照)。
+- [ ] BSDF・NEE——拡散(Lambertian)+誘電体(`Dielectric`、実屈折率のみ、`sim_em::
+      fresnel_reflectance`(E9/E10で既に検証済み)を再利用)を実装済み。金属(複素
+      屈折率$n+ik$)・粗面透過・NEE(光源の明示サンプル)は未実装(R1/R2部分検証は
+      環境光が一様・垂直入射/全反射の閉形式チェックのためNEEを要しない、モジュールdoc
+      参照)。`sim_em::raytracer`(光学ドメインの決定論的パワー分岐トレース、E9–E12の
+      エネルギー収支検証用)とは目的が異なる別実装として意図的に型を共有しない
+      (`bsdf.rs`モジュールdoc参照)。
 - [ ] 分光・屈折・コースティクス
 - [ ] 参加媒質(大気・水・煙)
 - [ ] 物理カメラ・トーンマッピング
@@ -1824,7 +1841,8 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       albedo=1のとき統計的収束を待たずに1バウンスで解析値と厳密に一致する
       (rel<1e-9、設計が要求するrel0.1%を大きく上回る精度)ことを実装検証中に発見し、
       そのまま検証方針として採用した。
-- [ ] 担当テスト Green: R2–R7(R1のみGreen)
+- [ ] R2(誘電体側のみGreen、金属側は未実装——詳細は§8のR2行参照)。
+- [ ] 担当テスト Green: R3–R7(R1のみ完全Green、R2は誘電体側のみ)
 - [ ] デモ D40–D43 合格
 
 ## 6. フロントエンド(設計は [../23-frontend/01-editor.md](../23-frontend/01-editor.md) が正)
@@ -2270,8 +2288,18 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
 
 レンダリング(R、担当: Phase D):
 
-- [ ] R1
-- [ ] R2
+- [x] R1 — `crates/sim-render/src/path_tracer.rs::tests::r1_white_furnace_diffuse_surface_matches_background_radiance_exactly`。
+      Lambertian BSDF(コサイン重み付き半球サンプリング)+一様環境放射輝度の孤立球
+      シーンで、`bsdf*cosθ/pdf=albedo`の恒等式(重要度サンプリングの完全な相殺)と
+      凸形状の自己遮蔽なしから、albedo=1のとき統計的収束を待たずrel<1e-9で厳密一致
+      (設計が要求するrel0.1%を大きく上回る精度)。
+- [ ] R2(誘電体側のみ実装・Green — `crates/sim-render/src/bsdf.rs::tests::
+      r2_fresnel_reflectance_at_normal_incidence_matches_closed_form`・
+      `r2_dielectric_reflectance_is_total_at_grazing_angle_beyond_critical_angle`。
+      `sim_em::fresnel_reflectance`(E9/E10で既に検証済み)を再利用する`Dielectric`
+      BSDFで、垂直入射の閉形式一致(rel<1e-9)・臨界角超えの全反射(反射率1.0)を確認。
+      金属(複素屈折率$n+ik$)側は未実装のため、チェックボックス自体はR2完了とは
+      見なさない)
 - [ ] R3
 - [ ] R4
 - [ ] R5

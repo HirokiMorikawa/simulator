@@ -12,7 +12,7 @@ mod path_tracer;
 mod ray;
 mod sphere;
 
-pub use bsdf::Lambertian;
+pub use bsdf::{Dielectric, Lambertian};
 pub use path_tracer::Scene;
 pub use ray::Ray;
 pub use sphere::{Hit, Sphere};
