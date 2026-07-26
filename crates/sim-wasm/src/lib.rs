@@ -12,9 +12,10 @@
 //! するようになる、以前の「永遠に落下し続ける」挙動からの意図的な変更)。
 //! `sim_world::World`自体は汎用的な「全ボディ列挙」APIを持たないため(`BodyId`は
 //! 世代付きindexで、削除済みスロットとの区別に`World`内部の世代情報が必要)、
-//! `WasmWorld`が自ら構築した2体(床・箱)をindexで列挙する縮約実装とした
-//! (シーンJSON経由で任意個のボディを構築できるようになれば、`from_scenario`の
-//! ボディリストをそのまま列挙する形に置き換える)。
+//! `WasmWorld`が自ら構築した固定2体(床・箱)+スポーンパレット(§6)で動的に
+//! 追加されたボディ(`SpawnedBodyMeta`、`spawn_sphere`/`spawn_box`)をindexで
+//! 列挙する縮約実装とした(シーンJSON経由で任意個のボディを構築できるように
+//! なれば、`from_scenario`のボディリストをそのまま列挙する形に置き換える)。
 
 use std::collections::VecDeque;
 
@@ -34,11 +35,25 @@ const PROBE_HISTORY_CAPACITY: usize = 600;
 /// (`WasmWorld::new`で`1.0/dt`を四捨五入)。
 const SNAPSHOT_RING_CAPACITY: usize = 8;
 
+/// スポーンパレット(設計docs/23-frontend/01-editor.md §6「形状×材質を選んで
+/// クリック配置」)で追加したボディの記録。`sim-wasm`のWorld API-only制約
+/// (`World`自体はShape/Materialのクエリを持たない)を、スポーンした側(この
+/// 構造体)が構築時の値をそのまま覚えておくことで回避する——固定2体(床・箱)の
+/// `BODY_META`ハードコードと同じ発想を、動的に増えるボディにも一般化したもの。
+struct SpawnedBodyMeta {
+    id: BodyId,
+    label: String,
+    shape_label: String,
+    material_label: String,
+}
+
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
     ground_body: BodyId,
     box_body: BodyId,
+    /// スポーンパレットで追加されたボディ(固定2体の後にindex 2, 3, ...として続く)。
+    spawned: Vec<SpawnedBodyMeta>,
     y_probe: usize,
     snapshot_interval_steps: u64,
     snapshots: VecDeque<World>,
@@ -87,6 +102,7 @@ impl WasmWorld {
             inner,
             ground_body,
             box_body,
+            spawned: Vec::new(),
             y_probe,
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
@@ -94,19 +110,27 @@ impl WasmWorld {
         }
     }
 
-    /// Hierarchyパネルが列挙するボディ数(モジュールdoc「複数ボディ対応」参照)。
+    /// Hierarchyパネルが列挙するボディ数(固定2体+スポーンパレットで追加した分、
+    /// モジュールdoc「複数ボディ対応」参照)。
     pub fn body_count(&self) -> usize {
-        2
+        2 + self.spawned.len()
     }
 
     fn body_id_at(&self, index: usize) -> BodyId {
         match index {
             0 => self.ground_body,
             1 => self.box_body,
-            _ => panic!(
-                "body index {index} out of range (body_count={})",
-                self.body_count()
-            ),
+            _ => {
+                self.spawned
+                    .get(index - 2)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "body index {index} out of range (body_count={})",
+                            self.body_count()
+                        )
+                    })
+                    .id
+            }
         }
     }
 
@@ -115,14 +139,114 @@ impl WasmWorld {
         match index {
             0 => "Ground".to_string(),
             1 => "Box_1".to_string(),
-            _ => panic!("body index {index} out of range"),
+            _ => self
+                .spawned
+                .get(index - 2)
+                .unwrap_or_else(|| panic!("body index {index} out of range"))
+                .label
+                .clone(),
         }
     }
 
     /// `index`番目のボディが静的(Static)かどうか。InspectorがTransformの速度欄を
     /// 意味のある形で表示するための補助(静的ボディは速度が常に0で自明なため)。
+    /// スポーンパレットで追加するボディは常にDynamic。
     pub fn body_is_static_at(&self, index: usize) -> bool {
         index == 0
+    }
+
+    /// Inspector表示用のShape文字列(World API-only制約により、スポーン時の
+    /// 値をそのまま返す縮約実装、モジュールdoc「`SpawnedBodyMeta`」参照)。
+    pub fn body_shape_label_at(&self, index: usize) -> String {
+        match index {
+            0 => "Plane(normal=(0,1,0), d=0)".to_string(),
+            1 => "Box(0.5,0.5,0.5)".to_string(),
+            _ => self
+                .spawned
+                .get(index - 2)
+                .unwrap_or_else(|| panic!("body index {index} out of range"))
+                .shape_label
+                .clone(),
+        }
+    }
+
+    /// Inspector表示用の材質名。
+    pub fn body_material_label_at(&self, index: usize) -> String {
+        match index {
+            0 => "コンクリート".to_string(),
+            1 => "鋼(炭素鋼)".to_string(),
+            _ => self
+                .spawned
+                .get(index - 2)
+                .unwrap_or_else(|| panic!("body index {index} out of range"))
+                .material_label
+                .clone(),
+        }
+    }
+
+    /// スポーンパレット(設計docs/23-frontend/01-editor.md §6)——球を`material_name`
+    /// (`MaterialDb::standard`が持つ名前)で`(x,y,z)`に配置する。新しいボディの
+    /// index(`body_count`と同じ体系)を返す。未知の材質名ならパニックする
+    /// (呼び出し側UIが既知の名前だけを選択肢にするため、実行時に到達しない前提)。
+    pub fn spawn_sphere(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f64,
+        material_name: String,
+    ) -> usize {
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(&material_name)
+            .unwrap_or_else(|| panic!("unknown material: {material_name}"));
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, material);
+        desc.transform.position = sim_math::Vec3::new(x, y, z);
+        let id = self.inner.create_body(desc);
+        let index = self.body_count();
+        let label = format!("Sphere_{index}");
+        self.spawned.push(SpawnedBodyMeta {
+            id,
+            label,
+            shape_label: format!("Sphere({radius})"),
+            material_label: material_name,
+        });
+        index
+    }
+
+    /// スポーンパレット——箱(半辺長`half_extent`の立方体)を`material_name`で
+    /// `(x,y,z)`に配置する。`spawn_sphere`と同じ規約。
+    pub fn spawn_box(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        half_extent: f64,
+        material_name: String,
+    ) -> usize {
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(&material_name)
+            .unwrap_or_else(|| panic!("unknown material: {material_name}"));
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: sim_math::Vec3::new(half_extent, half_extent, half_extent),
+            },
+            material,
+        );
+        desc.transform.position = sim_math::Vec3::new(x, y, z);
+        let id = self.inner.create_body(desc);
+        let index = self.body_count();
+        let label = format!("Box_{index}");
+        self.spawned.push(SpawnedBodyMeta {
+            id,
+            label,
+            shape_label: format!("Box({half_extent},{half_extent},{half_extent})"),
+            material_label: material_name,
+        });
+        index
     }
 
     /// `index`番目のボディの位置 [x, y, z](f32)。

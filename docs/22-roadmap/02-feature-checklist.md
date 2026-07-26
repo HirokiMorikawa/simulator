@@ -60,11 +60,14 @@
   設計§4のEdit/Playモード分離も実装(既定Edit、Editモードの
   Scene ViewドラッグはGizmo経由の直接編集のみ、PlayモードではGizmoが非表示に
   なり`Command::Grab`系に切り替わる、詳細§6参照)。Gizmoドラッグの位置Undo
-  (単純スタック、Redoは対象外)・InspectorへのRotation表示も実装済み。残りは
-  Gizmoのスケールハンドル・残りのオーバーレイ種別・回路エディタ等。
+  (単純スタック、Redoは対象外)・InspectorへのRotation表示・スポーンパレット
+  (球/箱×4材質、`spawn_sphere`/`spawn_box`でボディ数が動的に増える、これにより
+  `BODY_META`固定ルックアップテーブルを廃止しShape/Materialを実クエリ化)も
+  実装済み。残りはGizmoのスケールハンドル・残りのオーバーレイ種別・回路エディタ等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
-  ワークストリームB残り2シナリオ・ワークストリームC残り(R4)は機を見て並行して
-  進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
+  ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
+  機を見て並行して進める。優先順位の詳細は
+  `/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -1032,6 +1035,26 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
 - [ ] フレームサブモード(L5 ドリルイン)
 - [ ] 予測→実験ミニパネル(シーン側オプトイン)
 - [ ] シーン編集・スポーン・材料派生
+      (スポーンのみ実装済み——設計§6「Toolbarの「+」…形状(球・箱)×材質を選んで
+      クリック配置(`create_body`)」。`sim-wasm`に`spawn_sphere`/`spawn_box`
+      (`World::create_body`をそのまま使う)を追加し、固定2体(床・箱)の後に
+      index 2,3,...として動的に増える(`body_count`/`body_id_at`/
+      `body_label_at`をこの体系に一般化)。これに伴い、それまでWorld API-only
+      制約の回避として使っていたフロントエンドの固定`BODY_META`ルックアップ
+      テーブルを廃止し、新設の`body_shape_label_at`/`body_material_label_at`
+      (スポーン時の値をそのまま覚えておく`SpawnedBodyMeta`、既存の2体にも
+      同じ経路を通す)へ置き換えた——これにより「Shape/Materialをクエリできない」
+      という制約自体を解消した。Toolbarに材質セレクタ(鋼/アルミ/木材/ゴムの
+      4種)+「+ 球」/「+ 箱」ボタンを追加し、スポーンごとに黄金角ベースで
+      位置をずらして重なりを避ける。スポーン直後は自動選択されるため、既存の
+      Gizmo(Translate/Rotate、`selectedBodyIndex`ベースで実装済みのため
+      スポーンしたボディにもそのまま機能する)・Undo・速度/接触点オーバーレイが
+      追加コードなしでそのまま動作する。Playwrightで、スポーンのたびに
+      Hierarchyの項目数が増え、InspectorのShape/Materialが実際にクエリされた
+      値(例: `Sphere_2`選択時に`Shape(0.4)`)を表示し、Playモードで実際に
+      複数の異なる形状/材質のボディが床に落ちて着地しContactStarted/
+      ContactEndedが各ボディのsourceで個別に発生することを確認した。カプセル
+      形状・右クリックメニュー・材料派生・シーンJSON経由の永続化は未実装)
 - [ ] シーン + Replay + ブックマークのエクスポート/インポート
 - [ ] Undo / Redo(Edit モードのみ)
       (Undoのみ実装済み——Gizmoドラッグ(Translate/Rotateいずれも)開始のたびに

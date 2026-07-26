@@ -30,9 +30,12 @@ import "./style.css";
 // Gizmoは非表示になり、箱への直接ドラッグがCommandキュー経由
 // (`Command::Grab/MoveGrab/Release`、`push_grab`/`push_move_grab`/
 // `push_release`)の物理的な"つかむ"操作になり、再生/ステップ/Nudgeボタンが
-// 有効になる。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため
-// (World API-only制約)、Phase 0デモが実際に構築する内容と一致させた固定の
-// ルックアップテーブル(`BODY_META`)を使う。Scene Viewオーバーレイ(設計§1.2)は
+// 有効になる。Shape/Materialは`world.body_shape_label_at`/
+// `body_material_label_at`(スポーンパレットで追加したボディも含めて実際に
+// クエリできる、`sim-wasm`側が構築時の値を覚えておく縮約実装)で取得する。
+// Toolbarのスポーンパレット(設計§6「形状×材質を選んでクリック配置」)から
+// 球/箱を追加できる(縮約実装によりカプセルは対象外、材質は代表的な4種のみ)。
+// Scene Viewオーバーレイ(設計§1.2)は
 // 選択中ボディの速度ベクトル(矢印)+ 接触点(既存の`World::contact_points`が
 // 返す直近stepの接触点ワールド座標に小球マーカーを表示、この2体デモでは
 // 着地/跳ね返りのたびに実際に現れる)を実装(切替可、Toolbarのチェック
@@ -59,12 +62,13 @@ const MAX_STEPS_PER_FRAME = 240;
 const BODY_INDEX_GROUND = 0;
 const BODY_INDEX_BOX = 1;
 
-// `sim-wasm`のWorld API-only制約(Shape/Materialのクエリが無い)により、
-// `WasmWorld::new`が実際に構築する内容と一致させた固定のルックアップテーブル。
-const BODY_META: Record<number, { shape: string; material: string }> = {
-  [BODY_INDEX_GROUND]: { shape: "Plane(normal=(0,1,0), d=0)", material: "コンクリート" },
-  [BODY_INDEX_BOX]: { shape: `Box(${BOX_HALF_EXTENT},${BOX_HALF_EXTENT},${BOX_HALF_EXTENT})`, material: "鋼(炭素鋼)" },
-};
+// スポーンパレット(設計docs/23-frontend/01-editor.md §6)で選べる材質。
+// `sim_core::MaterialDb::standard`が持つ名前の一部(密度・反発特性が異なる
+// ものを選び、着地の見た目が分かりやすいように)。
+const SPAWN_MATERIALS = ["鋼(炭素鋼)", "アルミニウム", "木材(松)", "ゴム(天然)"];
+const SPAWN_HEIGHT = 12.0;
+const SPAWN_SPHERE_RADIUS = 0.4;
+const SPAWN_BOX_HALF_EXTENT = 0.4;
 
 function setUpLayoutPresetSwitcher() {
   const app = document.getElementById("app")!;
@@ -192,17 +196,17 @@ function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): (i
 }
 
 // Inspectorパネル(設計docs/23-frontend/01-editor.md §1.3)。選択中ボディの
-// Shape/Material(`BODY_META`、World API-only制約により固定値)+ Transform
+// Shape/Material(`world.body_shape_label_at`/`body_material_label_at`、
+// スポーンパレットで追加したボディも含めて実際にクエリできる)+ Transform
 // (毎フレーム実データで更新、`updateInspectorTransformFields`)を表示する。
 function renderInspectorFor(world: WasmWorld, index: number): void {
   const body = document.getElementById("inspector-body")!;
-  const meta = BODY_META[index] ?? { shape: "?", material: "?" };
   const label = world.body_label_at(index);
   const staticBadge = world.body_is_static_at(index) ? ' <span class="badge">Static</span>' : "";
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
-      <div class="inspector-field"><span>Shape</span><span>${meta.shape}</span></div>
+      <div class="inspector-field"><span>Shape</span><span>${world.body_shape_label_at(index)}</span></div>
     </div>
     <div class="inspector-component">
       <h3>Transform</h3>
@@ -212,7 +216,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     </div>
     <div class="inspector-component">
       <h3>RigidBody</h3>
-      <div class="inspector-field"><span>Material</span><span>${meta.material}</span></div>
+      <div class="inspector-field"><span>Material</span><span>${world.body_material_label_at(index)}</span></div>
     </div>
   `;
 }
@@ -448,7 +452,7 @@ async function setUpSceneView(
     renderInspectorFor(world, index);
     highlightHierarchy(index);
   }
-  const highlightHierarchy = setUpHierarchy(world, selectBody);
+  let highlightHierarchy = setUpHierarchy(world, selectBody);
   renderInspectorFor(world, selectedBodyIndex);
 
   // Scene Viewピック(設計docs/23-frontend/01-editor.md §1.2「クリックでbody/
@@ -464,6 +468,9 @@ async function setUpSceneView(
     { mesh: ground, bodyIndex: BODY_INDEX_GROUND },
     { mesh: box, bodyIndex: BODY_INDEX_BOX },
   ];
+  // スポーンパレット(設計§6)で追加したボディのThree.jsメッシュ(bodyIndexで
+  // 引ける、`render()`が毎フレーム位置/姿勢を反映させるために使う)。
+  const spawnedMeshes = new Map<number, THREE.Mesh>();
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
   const dragPlane = new THREE.Plane();
@@ -717,6 +724,55 @@ async function setUpSceneView(
     render();
   });
 
+  // スポーンパレット(設計docs/23-frontend/01-editor.md §6「形状×材質を選んで
+  // クリック配置(`create_body`)」)。Toolbarの「+ 球」/「+ 箱」ボタンで、床の
+  // 中心付近・上空(`SPAWN_HEIGHT`)へ新規ボディを配置する。落下位置が重ならない
+  // よう、配置のたびにx/zを少しずつずらす(スポーン回数から決定的に算出)。
+  const spawnMaterialSelect = document.getElementById("select-spawn-material") as HTMLSelectElement;
+  for (const material of SPAWN_MATERIALS) {
+    const option = document.createElement("option");
+    option.value = material;
+    option.textContent = material;
+    spawnMaterialSelect.appendChild(option);
+  }
+
+  function nextSpawnPosition(): { x: number; z: number } {
+    const n = world.body_count() - 2; // これまでのスポーン数
+    const angle = n * 2.4; // 黄金角に近い値、重ならないようばらけさせる
+    const radius = 1.5 + n * 0.3;
+    return { x: Math.cos(angle) * radius, z: Math.sin(angle) * radius };
+  }
+
+  function addSpawnedMesh(bodyIndex: number, mesh: THREE.Mesh) {
+    scene.add(mesh);
+    pickables.push({ mesh, bodyIndex });
+    spawnedMeshes.set(bodyIndex, mesh);
+    highlightHierarchy = setUpHierarchy(world, selectBody);
+    selectBody(bodyIndex);
+  }
+
+  document.getElementById("btn-spawn-sphere")!.addEventListener("click", () => {
+    const { x, z } = nextSpawnPosition();
+    const material = spawnMaterialSelect.value;
+    const bodyIndex = world.spawn_sphere(x, SPAWN_HEIGHT, z, SPAWN_SPHERE_RADIUS, material);
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(SPAWN_SPHERE_RADIUS, 16, 12),
+      new THREE.MeshStandardMaterial({ color: 0x6699ff }),
+    );
+    addSpawnedMesh(bodyIndex, mesh);
+  });
+
+  document.getElementById("btn-spawn-box")!.addEventListener("click", () => {
+    const { x, z } = nextSpawnPosition();
+    const material = spawnMaterialSelect.value;
+    const bodyIndex = world.spawn_box(x, SPAWN_HEIGHT, z, SPAWN_BOX_HALF_EXTENT, material);
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(SPAWN_BOX_HALF_EXTENT * 2, SPAWN_BOX_HALF_EXTENT * 2, SPAWN_BOX_HALF_EXTENT * 2),
+      new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
+    );
+    addSpawnedMesh(bodyIndex, mesh);
+  });
+
   playButton.addEventListener("click", () => {
     if (mode !== "play") return;
     playing = !playing;
@@ -827,6 +883,13 @@ async function setUpSceneView(
     box.position.set(p[0], p[1], p[2]);
     const boxRotation = world.body_rotation_at_f32(BODY_INDEX_BOX);
     box.quaternion.set(boxRotation[0], boxRotation[1], boxRotation[2], boxRotation[3]);
+
+    for (const [bodyIndex, mesh] of spawnedMeshes) {
+      const sp = world.body_position_at_f32(bodyIndex);
+      mesh.position.set(sp[0], sp[1], sp[2]);
+      const sr = world.body_rotation_at_f32(bodyIndex);
+      mesh.quaternion.set(sr[0], sr[1], sr[2], sr[3]);
+    }
 
     const selectedPosition = world.body_position_at_f32(selectedBodyIndex);
     const selectedRotation = world.body_rotation_at_f32(selectedBodyIndex);
