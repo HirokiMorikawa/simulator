@@ -159,6 +159,7 @@ async function setUpSceneView(updateInspectorTransform: (position: THREE.Vector3
   const timelineStep = document.getElementById("timeline-step")!;
   const playButton = document.getElementById("btn-play") as HTMLButtonElement;
   const stepButton = document.getElementById("btn-step") as HTMLButtonElement;
+  const nudgeButton = document.getElementById("btn-nudge") as HTMLButtonElement;
 
   // Edit/Play モードの正式な分離(設計§4、Command キュー経由の介入)は後続増分。
   // ここでは単に「ステップ実行中かどうか」のトグルとして再生ボタンを配線する。
@@ -173,6 +174,18 @@ async function setUpSceneView(updateInspectorTransform: (position: THREE.Vector3
       world.step();
       render();
     }
+  });
+
+  // 設計§4「Playモードでの介入は全てCommandとしてキューに積まれ、次ステップ先頭で
+  // 適用される」の最小デモ: 直接オブジェクトの状態を書き換えるのではなく、
+  // `push_apply_force`(Command::ApplyForceをキューに積む`sim-wasm`側の新API)を
+  // 呼ぶだけで、実際の力の適用は次の`world.step()`側が担う。
+  // 箱は鋼(炭素鋼)1m^3(密度約7850kg/m^3)相当のため質量が大きく、1step
+  // (dt=1/120s)だけ働く力ではΔv=F*dt/mが小さくなりがち。目視で分かる程度の
+  // 速度変化(1クリックでΔv≈0.4m/s程度)になるよう十分大きな値を選んだ。
+  const NUDGE_FORCE_NEWTONS = 400_000.0;
+  nudgeButton.addEventListener("click", () => {
+    world.push_apply_force(0.0, NUDGE_FORCE_NEWTONS, 0.0);
   });
 
   const inspectorPosition = new THREE.Vector3();

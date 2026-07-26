@@ -8,7 +8,7 @@
 
 use js_sys::Float32Array;
 use sim_mechanics::{RigidBodyDesc, Shape};
-use sim_world::{BodyId, World, WorldOptions};
+use sim_world::{BodyId, Command, World, WorldOptions};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -87,5 +87,16 @@ impl WasmWorld {
     /// 決定論検証・UI 表示用の状態ハッシュ(16進文字列)。
     pub fn state_hash(&self) -> String {
         format!("{:016x}", self.inner.state_hash())
+    }
+
+    /// エディタのPlayモード操作(設計docs/23-frontend/01-editor.md §4「介入は全て
+    /// Commandとしてキューに積まれ、次ステップ先頭で適用される」)の最小デモとして、
+    /// 箱に力を加えるCommandをキューに積む。重心への加力(トルク無し、`point=None`)。
+    pub fn push_apply_force(&mut self, fx: f64, fy: f64, fz: f64) {
+        self.inner.push_command(Command::ApplyForce {
+            body: self.box_body,
+            force: sim_math::Vec3::new(fx, fy, fz),
+            point: None,
+        });
     }
 }

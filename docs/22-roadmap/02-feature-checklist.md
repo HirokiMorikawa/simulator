@@ -2114,6 +2114,16 @@ body_velocity`をそのまま公開)を追加し、InspectorのTransformコン�
 Position/Velocityの表示値が実際の物理(重力加速度)どおりに変化することを確認した。
 Shape/Materialは対応するクエリAPIがまだ`sim-wasm`に無いため固定値のまま
 (World API-only制約)。
+続けて、設計§4「Playモードでの介入は全てCommandとしてキューに積まれ、次ステップ
+先頭で適用される」パイプラインの最小デモとして、`sim-wasm`に`push_apply_force`
+(既存の`World::push_command`+`Command::ApplyForce`をそのまま公開)を追加し、
+Toolbarに「Nudge」ボタンを新設した。ボタンクリックは直接オブジェクトの状態を
+書き換えるのではなく、あくまでCommandをキューに積むだけで、実際の力の適用は
+次の`world.step()`(`apply_pending_commands`)側が担う——設計が求めるEdit/Play
+アーキテクチャの根幹をなす原則を、規模は小さいながら実際に検証する初めての配線。
+Playwrightで、一時停止中にNudgeを押してから1step進めると、Inspectorの速度表示が
+力・質量(鋼1m^3、約7850kg)・dt(1/120s)から期待される量(重力による減速分を
+差し引いてもΔv≈0.34m/s上向き)だけ正しく変化することを確認した。
 
 - [ ] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
       (再生/一時停止/1stepの骨格配線は実装済み、時間倍率スライダー・シーン選択・
@@ -2139,6 +2149,13 @@ Shape/Materialは対応するクエリAPIがまだ`sim-wasm`に無いため固�
       (タブ切替UIの骨格(静的プレースホルダ内容)のみ実装済み)
 - [ ] Edit / Play モードの切替と編集ロック
 - [ ] Command 系(Grab/MoveGrab/Release/SetMotorTarget/…)と入力列記録
+      (`ApplyForce`のみ`sim-wasm`に`push_apply_force`として最小配線し、Toolbarの
+      Nudgeボタンで実演した——直接オブジェクトの状態を書き換えるのではなく
+      `push_command`でキューに積み、次の`world.step()`が`apply_pending_commands`
+      経由で適用する設計§4のパイプラインが実際に動作することをPlaywrightで
+      確認(Nudge後のΔvが力・質量・dtから期待される値と整合)。Grab/MoveGrab/
+      Release/SetMotorTarget/SetSwitch/SetHeatSource(いずれも`sim_world::Command`
+      には既存)の配線・入力列記録は未実装)
 - [ ] レイアウトプリセット(Default / Physics-focus / Circuit-focus / Astro)
       (Default(標準比率)・Physics-focus(コンソール行を拡大)・Astro(タイムライン行を
       固定の大きな高さにしその分コンソール行を縮小)の3種を実装済み(`demo/src/
