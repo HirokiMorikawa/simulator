@@ -42,6 +42,7 @@ pub struct WasmWorld {
     y_probe: usize,
     snapshot_interval_steps: u64,
     snapshots: VecDeque<World>,
+    bookmarks: Vec<(String, World)>,
 }
 
 #[wasm_bindgen]
@@ -89,6 +90,7 @@ impl WasmWorld {
             y_probe,
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
+            bookmarks: Vec::new(),
         }
     }
 
@@ -156,7 +158,11 @@ impl WasmWorld {
     /// 参照、既存の`World::snapshot`をそのまま使う)。
     pub fn step(&mut self) {
         self.inner.step();
-        if self.inner.step_count().is_multiple_of(self.snapshot_interval_steps) {
+        if self
+            .inner
+            .step_count()
+            .is_multiple_of(self.snapshot_interval_steps)
+        {
             if self.snapshots.len() >= SNAPSHOT_RING_CAPACITY {
                 self.snapshots.pop_front();
             }
@@ -181,6 +187,37 @@ impl WasmWorld {
     pub fn restore_snapshot(&mut self, index: usize) {
         self.inner.restore(&self.snapshots[index]);
         self.snapshots.truncate(index + 1);
+    }
+
+    /// Timelineのブックマーク(設計docs/23-frontend/01-editor.md §1.4
+    /// 「ブックマーク: 任意時点にラベル付けし、後で戻れる」)。リングバッファの
+    /// 退避に晒されない別領域へ、現在時点のスナップショットをラベル付きで保存する
+    /// (既存の`World::snapshot`をそのまま使う)。数の上限は設けない(縮約実装、
+    /// シーンJSONと一緒に出す「共有」用途は未実装)。
+    pub fn add_bookmark(&mut self, label: String) {
+        self.bookmarks.push((label, self.inner.snapshot()));
+    }
+
+    pub fn bookmark_count(&self) -> usize {
+        self.bookmarks.len()
+    }
+
+    pub fn bookmark_label_at(&self, index: usize) -> String {
+        self.bookmarks[index].0.clone()
+    }
+
+    pub fn bookmark_time_at(&self, index: usize) -> f64 {
+        self.bookmarks[index].1.time()
+    }
+
+    /// ブックマークへ巻き戻す。`restore_snapshot`と異なり、ブックマーク自体は
+    /// 巻き戻し後も残す(いつでも同じブックマークへ再度戻れるように)。ただし
+    /// リングバッファ側のスナップショットは、もはや実際の未来を表さないため
+    /// 全て破棄する(新しいタイムラインがそこから再開する)。
+    pub fn restore_bookmark(&mut self, index: usize) {
+        let (_, snapshot) = &self.bookmarks[index];
+        self.inner.restore(snapshot);
+        self.snapshots.clear();
     }
 
     pub fn time(&self) -> f64 {

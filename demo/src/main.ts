@@ -20,9 +20,12 @@ import "./style.css";
 // (`BODY_META`)を使う。Scene Viewオーバーレイ(設計§1.2)は選択中ボディの
 // 速度ベクトルを矢印表示するもの(切替可、Toolbarのチェックボックス)のみ実装
 // (接触点・力・拘束・流体場・フレーム軸は対象外)。Console/Projectは静的な
-// プレースホルダ内容のまま。正式なGizmo・オーバーレイ残り・Command キュー残り
-// (SetMotorTarget/SetSwitch/SetHeatSource未配線)・Edit/Playモードの分離(§4)・
-// 回路サブモード(§3)は全て後続増分。
+// プレースホルダ内容のまま。TimelineはWorld::snapshot/restoreによるスナップ
+// ショットリングバッファ(1s間隔・N=8面)でスクラブ・巻き戻しができ、任意時点を
+// ブックマーク(`add_bookmark`/`restore_bookmark`、リングバッファの退避を
+// 受けない別領域)として名前付きで保存・復元できる。正式なGizmo・オーバーレイ
+// 残り・Command キュー残り(SetMotorTarget/SetSwitch/SetHeatSource未配線)・
+// Edit/Playモードの分離(§4)・回路サブモードは全て後続増分。
 
 const GRAVITY = 9.80665;
 const DT = 1.0 / 120.0;
@@ -392,6 +395,38 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
   });
   scrubber.addEventListener("pointerup", () => {
     scrubbing = false;
+  });
+
+  // Timelineブックマーク(設計docs/23-frontend/01-editor.md §1.4「ブックマーク:
+  // 任意時点にラベル付けし、後で戻れる」)。リングバッファの退避を受けない別領域
+  // (`add_bookmark`/`restore_bookmark`)に保存する。縮約実装の理由: シーンJSONと
+  // 一緒に出す「共有」用途(設計の記述)は未実装、ブラウザ内での往復のみ。
+  const bookmarkLabelInput = document.getElementById("bookmark-label") as HTMLInputElement;
+  const addBookmarkButton = document.getElementById("btn-add-bookmark") as HTMLButtonElement;
+  const bookmarkList = document.getElementById("bookmark-list")!;
+
+  function renderBookmarkList() {
+    bookmarkList.innerHTML = "";
+    const count = world.bookmark_count();
+    for (let i = 0; i < count; i++) {
+      const chip = document.createElement("button");
+      chip.className = "bookmark-chip";
+      chip.textContent = `${world.bookmark_label_at(i)} (${world.bookmark_time_at(i).toFixed(1)}s)`;
+      chip.addEventListener("click", () => {
+        playing = false;
+        playButton.textContent = "▶";
+        world.restore_bookmark(i);
+        render();
+      });
+      bookmarkList.appendChild(chip);
+    }
+  }
+
+  addBookmarkButton.addEventListener("click", () => {
+    const label = bookmarkLabelInput.value.trim() || `t=${world.time().toFixed(1)}s`;
+    world.add_bookmark(label);
+    bookmarkLabelInput.value = "";
+    renderBookmarkList();
   });
 
   // 設計§4「Playモードでの介入は全てCommandとしてキューに積まれ、次ステップ先頭で
