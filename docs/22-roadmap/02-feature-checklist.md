@@ -34,10 +34,14 @@
   残り: 統合シナリオ1本(再突入、天体レジーム切替との`World`結合が前提)、
   シーンJSON`couplings`セクション(スキーマ未確定のため保留、§4参照)、
   D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)。
-- **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R5・R6・R7完全Green、GGX
+- **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R3・R5・R6・R7完全Green、GGX
   マイクロファセット(`RoughConductor`)実装済み(詳細・各テスト名は§5/§8参照)。
-  残り: R3の完全化(hero wavelength分光)、R4(コーネルボックス、参照解データ未入手)、
-  BVH・コースティクス・マルチスキャッタリング・トーンマッピング。
+  R3はプリズム最小偏角・虹の偏角を、レンダラ自身の幾何プリミティブ(`Dielectric::
+  refract`/`reflect`・`Sphere::intersect`)で実際にレイ追跡し、独立な閉形式
+  (`prism_min_deviation`・古典的Descartes虹公式)とrel<1e-9で一致することを確認。
+  残り: R4(コーネルボックス、参照解データ未入手)、完全な分光レンダリング
+  (hero wavelength法)・BVH・コースティクス・マルチスキャッタリング・
+  トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
   Translate Gizmo(X/Y/Z軸ハンドル、Editモード限定)+速度ベクトル/接触点
@@ -761,16 +765,37 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       `crates/sim-render/src/path_tracer.rs::tests::
       metal_furnace_test_matches_fresnel_scaled_background_radiance_exactly`
       (金属球の白色炉テスト、単一経路(確率的分岐なし)のためrel<1e-9で厳密一致)。
-- [ ] R3(分散側のみ実装・Green——`crates/sim-em/src/optics.rs::tests::
+- [x] R3(プリズム最小偏角・虹の分散——`crates/sim-render/src/prism.rs`新設。
+      分散の核となる物理(`CauchyDielectric`、Cauchy式、波長ごとに屈折角が異なる
+      こと)は既存の`crates/sim-em/src/optics.rs::tests::
       cauchy_refractive_index_matches_bk7_catalog_value_at_the_d_line`・
-      `cauchy_refractive_index_is_larger_for_shorter_wavelengths`、
       `crates/sim-render/src/bsdf.rs::tests::cauchy_dielectric_disperses_
-      different_wavelengths_into_different_refraction_angles`。BK7ガラスの
-      Cauchy係数(A=1.5046・B=4200nm²、文献の標準的な近似値)がd線(587.6nm)の
-      カタログ値1.5168とrel<0.1%で一致し、青(486.1nm)は赤(656.3nm)より屈折率が
-      大きく屈折角が小さい(各波長でSnell則も厳密に成り立つ)ことを確認。分光
-      レンダリング全体への波長の配線(hero wavelength法)・コースティクスは未実装
-      のため、チェックボックス自体はR3完了とは見なさない)。
+      different_wavelengths_into_different_refraction_angles`で検証済み。
+      本増分ではR3が名指しする受け入れ基準(プリズム最小偏角・虹の分散)自体を、
+      レンダラが経路追跡に実際に使う幾何プリミティブ(`Dielectric::refract`/
+      `reflect`、`Sphere::intersect`)でレイを実際に(プリズムは2面、虹の水滴は
+      屈折→内部反射→屈折の3面)追跡するテストを追加した:
+      `prism_deviation_at_the_symmetric_incidence_matches_the_closed_form_minimum`
+      (独立に導出された閉形式`sim_em::optics::prism_min_deviation`とrel<1e-9で
+      厳密一致)・
+      `prism_deviation_increases_away_from_the_theoretical_minimum_incidence_angle`
+      (前後の入射角で実際に偏角が増えることを確認、閉形式との一致だけでは
+      「最小である」ことまでは検証できないため)・
+      `bk7_dispersion_gives_a_larger_prism_minimum_deviation_for_blue_than_red`
+      (BK7の分散により青の最小偏角が赤より大きい)・
+      `raindrop_deviation_matches_the_descartes_closed_form_across_impact_heights`
+      (古典的なDescartes閉形式$D=\pi+2i-4r$と複数の衝突径数でrel<1e-9一致、
+      水の屈折率1.333は設計の材質表と同じ値)・
+      `raindrop_minimum_deviation_matches_the_classical_forty_two_degree_rainbow_angle`
+      (衝突径数の数値走査で求めた最小偏角が古典的な約42°の虹の角度と一致)・
+      `wavelength_dependent_index_separates_raindrop_deviation_too`(水自体の
+      分散係数が設計の材質表に未収録なため、既に検証済みのBK7の分散係数を代用して
+      波長依存の偏角の違いという分散のメカニズム自体を確認——水の実測分散係数の
+      追加は材質DB拡張を要するため後続増分)。実装中の発見: プリズムの2面の
+      外向き法線を素朴に「二等分線からの傾き角のsin/cos」で割り当てると法線同士の
+      相対角(教科書どおり`π-頂角`であるべき)を誤るバグがあり、閉形式との
+      突き合わせで発見・修正した。分光レンダリング全体への波長の配線(hero
+      wavelength法、`Scene::trace`本体・コースティクス)は未実装のため後続増分)。
 - [ ] R4(コーネルボックス、平面/壁ジオメトリと既知の参照解との収束一致が必要、未着手)
 - [x] R5 — `crates/sim-render/src/medium.rs::tests::
       sky_scattering_is_stronger_for_blue_than_red_and_matches_the_optically_thin_ratio`
@@ -797,7 +822,7 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       O(1/N)分散減衰=O(1/√N)ノイズ減衰)・
       `average_radiance_is_deterministic_given_the_same_seed_and_sample_count`
       (同一シード・同一サンプル数なら平均放射輝度が厳密に同一)。
-- [ ] 担当テスト Green: R4(R1・R2・R5・R6・R7完全Green、R3は分散側のみ部分実装——詳細は上記各行参照)
+- [ ] 担当テスト Green: R4(R1・R2・R3・R5・R6・R7完全Green——詳細は上記各行参照)
 - [ ] デモ D40–D43 合格
 
 ## 6. フロントエンド(設計は [../23-frontend/01-editor.md](../23-frontend/01-editor.md) が正)
