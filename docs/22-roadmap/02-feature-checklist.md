@@ -40,10 +40,11 @@
   BVH・コースティクス・マルチスキャッタリング・トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
-  Grab/MoveGrab/Releaseによるドラッグ操作)+ Toolbar(再生/Nudge Command)+
-  Hierarchy/Inspector(複数ボディ列挙・Scene View双方向選択連動、実Transform
-  データ)+ Probe Graphs(1系列)まで実装(詳細は§6参照)。大部分(正式な
-  Gizmo・オーバーレイ・Edit/Playモード分離・回路エディタ等)は未着手。
+  Grab/MoveGrab/Releaseによるドラッグ操作+速度ベクトルオーバーレイ)+
+  Toolbar(再生/Nudge Command)+ Hierarchy/Inspector(複数ボディ列挙・
+  Scene View双方向選択連動、実Transformデータ)+ Probe Graphs(1系列)まで
+  実装(詳細は§6参照)。大部分(正式なGizmo・残りのオーバーレイ種別・
+  Edit/Playモード分離・回路エディタ等)は未着手。
 - **次**: ワークストリームDの継続(Hierarchy/Inspectorの複数ボディ対応、Gizmo等)を軸に、
   ワークストリームB残り2シナリオ・ワークストリームC残り(R4・R3完全化)は機を見て並行して
   進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
@@ -853,6 +854,12 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       クリック選択、`main.ts`のpointerdown/move/upハンドラ参照)。オーバーレイは
       未実装)
 - [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
+      (速度ベクトルのみ`THREE.ArrowHelper`で実装済み——選択中ボディの実速度
+      (`body_velocity_at_f32`)を毎フレーム矢印として表示し、Toolbarのチェック
+      ボックスで切替可能。速さがほぼ0(静止)なら矢印を隠す。Playwrightで、
+      落下中は矢印が下向きに表示され、チェックを外すと非表示になり、静止後は
+      速度0で自動的に隠れることを確認した。接触点・力・拘束・流体場・
+      フレーム軸のオーバーレイは未実装)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
       (Bodies配下は`sim-wasm`に新設した`body_count`/`body_label_at`経由で実際の
       World状態(床の静的平面+箱)を列挙・クリックでInspector及びScene

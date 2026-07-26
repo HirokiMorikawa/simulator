@@ -17,10 +17,12 @@ import "./style.css";
 // モード限定)ではなく、Playモードのまま動く物理的なドラッグ操作)。Shape/
 // Materialは`sim-wasm`側に対応するクエリAPIが無いため(World API-only制約)、
 // Phase 0デモが実際に構築する内容と一致させた固定のルックアップテーブル
-// (`BODY_META`)を使う。Console/Projectは静的なプレースホルダ内容のまま。
-// 正式なGizmo・オーバーレイ・Command キュー残り(SetMotorTarget/SetSwitch/
-// SetHeatSource未配線)・Edit/Playモードの分離(§4)・回路サブモード(§3)は
-// 全て後続増分。
+// (`BODY_META`)を使う。Scene Viewオーバーレイ(設計§1.2)は選択中ボディの
+// 速度ベクトルを矢印表示するもの(切替可、Toolbarのチェックボックス)のみ実装
+// (接触点・力・拘束・流体場・フレーム軸は対象外)。Console/Projectは静的な
+// プレースホルダ内容のまま。正式なGizmo・オーバーレイ残り・Command キュー残り
+// (SetMotorTarget/SetSwitch/SetHeatSource未配線)・Edit/Playモードの分離(§4)・
+// 回路サブモード(§3)は全て後続増分。
 
 const GRAVITY = 9.80665;
 const DT = 1.0 / 120.0;
@@ -250,6 +252,21 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
   const grid = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
   scene.add(grid);
 
+  // Scene View オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「速度ベクトル」、
+  // 切替可)の最小デモ: 選択中ボディの速度ベクトルを矢印で表示する。縮約実装の
+  // 理由: 接触点・力・拘束・流体場・フレーム軸のオーバーレイは対象外、速度のみ。
+  const VELOCITY_OVERLAY_SCALE = 0.3; // 矢印長 = 速さ[m/s] * この係数[m]。
+  const velocityArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(0, 1, 0),
+    new THREE.Vector3(),
+    1,
+    0xffee00,
+  );
+  velocityArrow.visible = false;
+  scene.add(velocityArrow);
+  const velocityOverlayToggle = document.getElementById("toggle-velocity-overlay") as HTMLInputElement;
+  const velocityDirection = new THREE.Vector3();
+
   let selectedBodyIndex = BODY_INDEX_BOX;
   function selectBody(index: number) {
     selectedBodyIndex = index;
@@ -382,6 +399,21 @@ async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void)
     inspectorVelocity.set(selectedVelocity[0], selectedVelocity[1], selectedVelocity[2]);
     updateInspectorTransformFields(inspectorPosition, inspectorVelocity);
     updateProbeGraph(world.y_probe_history_f64());
+
+    const speed = inspectorVelocity.length();
+    if (velocityOverlayToggle.checked && speed > 1e-6) {
+      velocityDirection.copy(inspectorVelocity).divideScalar(speed);
+      velocityArrow.position.copy(inspectorPosition);
+      velocityArrow.setDirection(velocityDirection);
+      velocityArrow.setLength(
+        Math.max(speed * VELOCITY_OVERLAY_SCALE, 0.2),
+        Math.min(0.2, speed * VELOCITY_OVERLAY_SCALE * 0.3),
+        Math.min(0.15, speed * VELOCITY_OVERLAY_SCALE * 0.2),
+      );
+      velocityArrow.visible = true;
+    } else {
+      velocityArrow.visible = false;
+    }
 
     const hashFull = world.state_hash();
     hud.textContent = [
