@@ -5,9 +5,19 @@
 //! 「箱1個が落ちる」規模に縮小したものを公開する。シーンJSON・コマンドキュー・
 //! 観測値JSONはシーン記述(docs/20-integration/04-world-api.md §3)が実装され次第、
 //! Phase A 以降で追加する。
+//!
+//! **複数ボディ対応(ワークストリームD増分)**: エディタのHierarchy/Inspector
+//! (docs/23-frontend/01-editor.md §1.1・§1.3)が複数ボディを列挙・選択できることを
+//! 実際に検証するため、床の静的平面(`Shape::Plane`)を追加した(箱は床の上で静止
+//! するようになる、以前の「永遠に落下し続ける」挙動からの意図的な変更)。
+//! `sim_world::World`自体は汎用的な「全ボディ列挙」APIを持たないため(`BodyId`は
+//! 世代付きindexで、削除済みスロットとの区別に`World`内部の世代情報が必要)、
+//! `WasmWorld`が自ら構築した2体(床・箱)をindexで列挙する縮約実装とした
+//! (シーンJSON経由で任意個のボディを構築できるようになれば、`from_scenario`の
+//! ボディリストをそのまま列挙する形に置き換える)。
 
 use js_sys::{Float32Array, Float64Array};
-use sim_mechanics::{RigidBodyDesc, Shape};
+use sim_mechanics::{BodyType, RigidBodyDesc, Shape};
 use sim_world::{BodyId, Command, ProbeTarget, World, WorldOptions};
 use wasm_bindgen::prelude::*;
 
@@ -19,6 +29,7 @@ const PROBE_HISTORY_CAPACITY: usize = 600;
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
+    ground_body: BodyId,
     box_body: BodyId,
     y_probe: usize,
 }
@@ -33,6 +44,20 @@ impl WasmWorld {
             seed: 0,
         };
         let mut inner = World::new(options);
+        let concrete = inner
+            .materials()
+            .find_by_name("コンクリート")
+            .expect("standard DB has concrete");
+        let mut ground_desc = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: sim_math::Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground_desc.body_type = BodyType::Static;
+        let ground_body = inner.create_body(ground_desc);
+
         let steel = inner
             .materials()
             .find_by_name("鋼(炭素鋼)")
@@ -48,9 +73,69 @@ impl WasmWorld {
         let y_probe = inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY);
         WasmWorld {
             inner,
+            ground_body,
             box_body,
             y_probe,
         }
+    }
+
+    /// Hierarchyパネルが列挙するボディ数(モジュールdoc「複数ボディ対応」参照)。
+    pub fn body_count(&self) -> usize {
+        2
+    }
+
+    fn body_id_at(&self, index: usize) -> BodyId {
+        match index {
+            0 => self.ground_body,
+            1 => self.box_body,
+            _ => panic!(
+                "body index {index} out of range (body_count={})",
+                self.body_count()
+            ),
+        }
+    }
+
+    /// Hierarchyパネル表示用のラベル。
+    pub fn body_label_at(&self, index: usize) -> String {
+        match index {
+            0 => "Ground".to_string(),
+            1 => "Box_1".to_string(),
+            _ => panic!("body index {index} out of range"),
+        }
+    }
+
+    /// `index`番目のボディが静的(Static)かどうか。InspectorがTransformの速度欄を
+    /// 意味のある形で表示するための補助(静的ボディは速度が常に0で自明なため)。
+    pub fn body_is_static_at(&self, index: usize) -> bool {
+        index == 0
+    }
+
+    /// `index`番目のボディの位置 [x, y, z](f32)。
+    pub fn body_position_at_f32(&self, index: usize) -> Float32Array {
+        let id = self.body_id_at(index);
+        let p = self
+            .inner
+            .body_position(id)
+            .expect("body is created in new() and never removed");
+        let out = Float32Array::new_with_length(3);
+        out.set_index(0, p.x as f32);
+        out.set_index(1, p.y as f32);
+        out.set_index(2, p.z as f32);
+        out
+    }
+
+    /// `index`番目のボディの速度 [vx, vy, vz](f32)。
+    pub fn body_velocity_at_f32(&self, index: usize) -> Float32Array {
+        let id = self.body_id_at(index);
+        let v = self
+            .inner
+            .body_velocity(id)
+            .expect("body is created in new() and never removed");
+        let out = Float32Array::new_with_length(3);
+        out.set_index(0, v.x as f32);
+        out.set_index(1, v.y as f32);
+        out.set_index(2, v.z as f32);
+        out
     }
 
     /// 1 world step。
@@ -64,35 +149,6 @@ impl WasmWorld {
 
     pub fn step_count(&self) -> u64 {
         self.inner.step_count()
-    }
-
-    /// 剛体位置 [x, y, z] のビュー(描画用、f32)。
-    /// 05-rust-wasm-platform.md §3 の `body_transforms_f32` の Phase 0 縮小版
-    /// (回転は未実装のため位置のみ)。
-    pub fn body_position_f32(&self) -> Float32Array {
-        let p = self
-            .inner
-            .body_position(self.box_body)
-            .expect("box_body is created in new() and never removed");
-        let out = Float32Array::new_with_length(3);
-        out.set_index(0, p.x as f32);
-        out.set_index(1, p.y as f32);
-        out.set_index(2, p.z as f32);
-        out
-    }
-
-    /// 剛体速度 [vx, vy, vz] のビュー(エディタInspectorのTransform/RigidBody
-    /// 表示用、f32)。既存の`World::body_velocity`をそのまま公開する。
-    pub fn body_velocity_f32(&self) -> Float32Array {
-        let v = self
-            .inner
-            .body_velocity(self.box_body)
-            .expect("box_body is created in new() and never removed");
-        let out = Float32Array::new_with_length(3);
-        out.set_index(0, v.x as f32);
-        out.set_index(1, v.y as f32);
-        out.set_index(2, v.z as f32);
-        out
     }
 
     /// 決定論検証・UI 表示用の状態ハッシュ(16進文字列)。

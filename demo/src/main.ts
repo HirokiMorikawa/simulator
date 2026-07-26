@@ -5,19 +5,31 @@ import "./style.css";
 // 統合エディタ(docs/23-frontend/01-editor.md)の骨格増分。
 //
 // **縮約実装の理由**: このファイルはドッキングレイアウトの骨格(§1)と、既存の
-// Phase 0 デモ(箱 1 個の落下)を Scene View パネルへ配線するところまでを扱う。
-// Hierarchy/Inspector/Console/Project は現時点では静的なプレースホルダ内容
-// (World API 経由の実データ接続は後続増分、`sim-wasm` 側がまだ `body_transforms`
-// 以外のクエリ API を持たないため)。Gizmo・オーバーレイ・ピック・Command キュー・
-// Edit/Play モードの分離(§4)・回路サブモード(§3)は全て後続増分。
-// 再生/一時停止/1step ボタンだけは、既存の固定 dt アキュムレータの制御として
-// 素朴に配線した(新しい World API を要さないため、骨格増分でも実装できる)。
+// Phase 0 デモ(床の上に箱が落ちて静止する)を Scene View パネルへ配線するところ
+// までを扱う。Hierarchy/Inspectorは`WasmWorld`の複数ボディ列挙API
+// (`body_count`/`body_label_at`/`body_position_at_f32`/`body_velocity_at_f32`)に
+// 接続済みで、Hierarchyでのクリックがそのボディの実データをInspectorに表示する
+// (双方向選択のうちHierarchy→Inspector側のみ、Scene Viewピッキングは後続増分)。
+// Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため(World API-only
+// 制約)、Phase 0デモが実際に構築する内容と一致させた固定のルックアップテーブル
+// (`BODY_META`)を使う。Console/Projectは静的なプレースホルダ内容のまま。
+// Gizmo・オーバーレイ・Scene Viewピック・Command キュー全種・Edit/Playモードの
+// 分離(§4)・回路サブモード(§3)は全て後続増分。
 
 const GRAVITY = 9.80665;
 const DT = 1.0 / 120.0;
 const INITIAL_HEIGHT = 10.0;
 const BOX_HALF_EXTENT = 0.5;
 const MAX_STEPS_PER_FRAME = 240;
+const BODY_INDEX_GROUND = 0;
+const BODY_INDEX_BOX = 1;
+
+// `sim-wasm`のWorld API-only制約(Shape/Materialのクエリが無い)により、
+// `WasmWorld::new`が実際に構築する内容と一致させた固定のルックアップテーブル。
+const BODY_META: Record<number, { shape: string; material: string }> = {
+  [BODY_INDEX_GROUND]: { shape: "Plane(normal=(0,1,0), d=0)", material: "コンクリート" },
+  [BODY_INDEX_BOX]: { shape: `Box(${BOX_HALF_EXTENT},${BOX_HALF_EXTENT},${BOX_HALF_EXTENT})`, material: "鋼(炭素鋼)" },
+};
 
 function setUpLayoutPresetSwitcher() {
   const app = document.getElementById("app")!;
@@ -35,37 +47,55 @@ function setUpConsolePlaceholder() {
   log.appendChild(entry);
 }
 
-function setUpHierarchyPlaceholder() {
+// Hierarchyパネル(設計docs/23-frontend/01-editor.md §1.1)。`world.body_count`/
+// `body_label_at`から実際のボディ一覧を組み立て、クリックで`onSelect`を呼ぶ
+// (選択はInspectorと連動、設計が求める双方向選択のうちHierarchy→Inspector側)。
+function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): void {
   const tree = document.getElementById("hierarchy-tree")!;
+  tree.innerHTML = "";
   const root = document.createElement("li");
   root.textContent = "World Root";
   const bodies = document.createElement("ul");
   bodies.className = "tree-nested";
   const bodyItem = document.createElement("li");
   bodyItem.textContent = "Bodies";
-  const boxItem = document.createElement("ul");
-  boxItem.className = "tree-nested";
-  const box = document.createElement("li");
-  box.textContent = "Box_1";
-  boxItem.appendChild(box);
-  bodyItem.appendChild(boxItem);
+  const list = document.createElement("ul");
+  list.className = "tree-nested";
+
+  const count = world.body_count();
+  const items: HTMLLIElement[] = [];
+  for (let i = 0; i < count; i++) {
+    const item = document.createElement("li");
+    item.textContent = world.body_label_at(i);
+    item.classList.add("tree-selectable");
+    if (i === BODY_INDEX_BOX) item.classList.add("selected");
+    item.addEventListener("click", () => {
+      items.forEach((it) => it.classList.remove("selected"));
+      item.classList.add("selected");
+      onSelect(i);
+    });
+    items.push(item);
+    list.appendChild(item);
+  }
+
+  bodyItem.appendChild(list);
   bodies.appendChild(bodyItem);
   root.appendChild(bodies);
   tree.appendChild(root);
 }
 
-/// Inspector骨格を組み立てる。Transformの位置/速度は`updateInspectorTransform`で
-/// 毎フレーム実データ(`WasmWorld::body_position_f32`/`body_velocity_f32`)へ
-/// 更新される。Shape/Materialは`sim-wasm`側にまだ対応するクエリAPIが無いため
-/// (設計上、World APIに無い機能はエディタ側からも追加できない——「World API-only
-/// 制約」docs/23-frontend/01-editor.md §1.3)、Phase 0デモが実際に構築する内容と
-/// 一致させた固定値のまま(後続増分でAPIが追加され次第、実データに置き換える)。
-function setUpInspectorSkeleton(): (position: THREE.Vector3, velocity: THREE.Vector3) => void {
+// Inspectorパネル(設計docs/23-frontend/01-editor.md §1.3)。選択中ボディの
+// Shape/Material(`BODY_META`、World API-only制約により固定値)+ Transform
+// (毎フレーム実データで更新、`updateInspectorTransformFields`)を表示する。
+function renderInspectorFor(world: WasmWorld, index: number): void {
   const body = document.getElementById("inspector-body")!;
+  const meta = BODY_META[index] ?? { shape: "?", material: "?" };
+  const label = world.body_label_at(index);
+  const staticBadge = world.body_is_static_at(index) ? ' <span class="badge">Static</span>' : "";
   body.innerHTML = `
     <div class="inspector-component">
-      <h3>Box_1</h3>
-      <div class="inspector-field"><span>Shape</span><span>Box(0.5,0.5,0.5)</span></div>
+      <h3>${label}${staticBadge}</h3>
+      <div class="inspector-field"><span>Shape</span><span>${meta.shape}</span></div>
     </div>
     <div class="inspector-component">
       <h3>Transform</h3>
@@ -74,15 +104,17 @@ function setUpInspectorSkeleton(): (position: THREE.Vector3, velocity: THREE.Vec
     </div>
     <div class="inspector-component">
       <h3>RigidBody</h3>
-      <div class="inspector-field"><span>Material</span><span>鋼(炭素鋼)</span></div>
+      <div class="inspector-field"><span>Material</span><span>${meta.material}</span></div>
     </div>
   `;
-  const positionField = document.getElementById("inspector-position")!;
-  const velocityField = document.getElementById("inspector-velocity")!;
-  return (position, velocity) => {
-    positionField.textContent = `${position.x.toFixed(3)}, ${position.y.toFixed(3)}, ${position.z.toFixed(3)}`;
-    velocityField.textContent = `${velocity.x.toFixed(3)}, ${velocity.y.toFixed(3)}, ${velocity.z.toFixed(3)}`;
-  };
+}
+
+function updateInspectorTransformFields(position: THREE.Vector3, velocity: THREE.Vector3): void {
+  const positionField = document.getElementById("inspector-position");
+  const velocityField = document.getElementById("inspector-velocity");
+  if (!positionField || !velocityField) return; // 選択切替の再描画中は一時的に無い。
+  positionField.textContent = `${position.x.toFixed(3)}, ${position.y.toFixed(3)}, ${position.z.toFixed(3)}`;
+  velocityField.textContent = `${velocity.x.toFixed(3)}, ${velocity.y.toFixed(3)}, ${velocity.z.toFixed(3)}`;
 }
 
 function setUpProjectDrawer() {
@@ -157,10 +189,7 @@ function setUpConsoleTabs() {
   });
 }
 
-async function setUpSceneView(
-  updateInspectorTransform: (position: THREE.Vector3, velocity: THREE.Vector3) => void,
-  updateProbeGraph: (history: Float64Array) => void,
-) {
+async function setUpSceneView(updateProbeGraph: (history: Float64Array) => void) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
 
@@ -197,8 +226,23 @@ async function setUpSceneView(
   );
   scene.add(box);
 
+  // 床(静的平面、`WasmWorld::new`が`BODY_INDEX_GROUND`として構築するコンクリート面)。
+  const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(20, 20),
+    new THREE.MeshStandardMaterial({ color: 0x555555 }),
+  );
+  ground.rotation.x = -Math.PI / 2;
+  scene.add(ground);
+
   const grid = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
   scene.add(grid);
+
+  let selectedBodyIndex = BODY_INDEX_BOX;
+  setUpHierarchy(world, (index) => {
+    selectedBodyIndex = index;
+    renderInspectorFor(world, selectedBodyIndex);
+  });
+  renderInspectorFor(world, selectedBodyIndex);
 
   const hud = document.getElementById("hud")!;
   const hashDisplay = document.getElementById("hash-display")!;
@@ -239,13 +283,14 @@ async function setUpSceneView(
   const inspectorVelocity = new THREE.Vector3();
 
   function render() {
-    const p = world.body_position_f32();
+    const p = world.body_position_at_f32(BODY_INDEX_BOX);
     box.position.set(p[0], p[1], p[2]);
 
-    const v = world.body_velocity_f32();
-    inspectorPosition.set(p[0], p[1], p[2]);
-    inspectorVelocity.set(v[0], v[1], v[2]);
-    updateInspectorTransform(inspectorPosition, inspectorVelocity);
+    const selectedPosition = world.body_position_at_f32(selectedBodyIndex);
+    const selectedVelocity = world.body_velocity_at_f32(selectedBodyIndex);
+    inspectorPosition.set(selectedPosition[0], selectedPosition[1], selectedPosition[2]);
+    inspectorVelocity.set(selectedVelocity[0], selectedVelocity[1], selectedVelocity[2]);
+    updateInspectorTransformFields(inspectorPosition, inspectorVelocity);
     updateProbeGraph(world.y_probe_history_f64());
 
     const hashFull = world.state_hash();
@@ -291,13 +336,11 @@ async function setUpSceneView(
 
 function main() {
   setUpLayoutPresetSwitcher();
-  setUpHierarchyPlaceholder();
-  const updateInspectorTransform = setUpInspectorSkeleton();
   const updateProbeGraph = setUpProbeGraph();
   setUpConsolePlaceholder();
   setUpConsoleTabs();
   setUpProjectDrawer();
-  setUpSceneView(updateInspectorTransform, updateProbeGraph).catch((err) => {
+  setUpSceneView(updateProbeGraph).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);

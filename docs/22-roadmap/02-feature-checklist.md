@@ -38,9 +38,10 @@
   残り: R3の完全化(hero wavelength分光)、R4(コーネルボックス、参照解データ未入手)、
   BVH・コースティクス・マルチスキャッタリング・トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
-  骨格(3プリセット)+ Scene View + Toolbar(再生/Nudge Command)+ Inspector
-  (Transform実データ)+ Probe Graphs(1系列)まで実装(詳細は§6参照)。大部分
-  (Gizmo・オーバーレイ・ピック・Edit/Playモード分離・複数ボディ対応・回路エディタ等)は未着手。
+  骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止)+ Toolbar(再生/Nudge
+  Command)+ Hierarchy/Inspector(複数ボディ列挙・選択連動、実Transformデータ)+
+  Probe Graphs(1系列)まで実装(詳細は§6参照)。大部分(Gizmo・オーバーレイ・
+  Scene Viewピック・Edit/Playモード分離・回路エディタ等)は未着手。
 - **次**: ワークストリームDの継続(Hierarchy/Inspectorの複数ボディ対応、Gizmo等)を軸に、
   ワークストリームB残り2シナリオ・ワークストリームC残り(R4・R3完全化)は機を見て並行して
   進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
@@ -836,13 +837,17 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       (ビューポート自体はパネル内に配線済み、Gizmo・オーバーレイ・ピックは未実装)
 - [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
-      (骨格(静的プレースホルダツリー)のみ、World APIへの実データ接続・選択連動は未実装)
+      (Bodies配下は`sim-wasm`に新設した`body_count`/`body_label_at`経由で実際の
+      World状態(床の静的平面+箱)を列挙・クリックでInspectorと連動(片方向、
+      Hierarchy→Inspector)。Joints/Circuits/Fluids/Probes/Framesは未対応、
+      Scene Viewとの選択連動(ピッキング)も未実装)
 - [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
-      (Transform(Position/Velocity)は`sim-wasm`に新設した`body_velocity_f32`
-      (既存の`World::body_velocity`をそのまま公開)経由で実データ接続済み、毎フレーム
-      実際のWorld状態を表示する。Shape/Materialは`sim-wasm`側に対応するクエリAPIが
-      無いため固定値のまま(World API-only制約、`main.ts`のコメント参照)。Joint/
-      Circuit/FluidRegion/Coupling/Probe/近似バッジは未実装)
+      (選択中ボディのTransform(Position/Velocity)は`sim-wasm`に新設した
+      `body_position_at_f32`/`body_velocity_at_f32`(既存の`World::body_position`/
+      `body_velocity`をそのまま公開、indexで複数ボディを列挙)経由で実データ接続済み、
+      毎フレーム更新される。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無い
+      ため固定のルックアップテーブルのまま(World API-only制約、`main.ts`の
+      `BODY_META`参照)。Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジは未実装)
 - [ ] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク
       (時刻・step表示は配線済み、スクラバ操作・スナップショット巻き戻し・
       ブックマークは未実装)
