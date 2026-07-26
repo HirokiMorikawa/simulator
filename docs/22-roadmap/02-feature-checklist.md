@@ -83,8 +83,12 @@
   ボタンを追加、`sim_mechanics::DistanceJoint`(新設`World::
   add_distance_joint_to_world_point`/`distance_joint_anchor_points`)で
   ワールド固定点へ距離一定に拘束した球が実際に重力で往復運動し、拘束を結ぶ
-  線をThree.jsで描画・切替可能)も実装済み。残りは流体場/フレーム軸
-  オーバーレイ・回路エディタ等。
+  線をThree.jsで描画・切替可能)・Hierarchy Jointsサブツリー(振り子のみ対象)
+  も実装済み。Command系のSetMotorTargetも配線済み(スポーンパレットに
+  「+ モーター」ボタン、`BallJoint`+`HingeMotorPd`でワールド固定点に
+  ピン留めしたアームをToolbarの「モーター切替」ボタンで0°/90°角度制御)。
+  残りは流体場/フレーム軸オーバーレイ・SetSwitch/SetHeatSource・回路
+  エディタ等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
   機を見て並行して進める。優先順位の詳細は
@@ -1130,7 +1134,16 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       区別)として実演した——ドラッグ中は毎pointermoveで`MoveGrab`をキューに
       積むだけで、実際の"つかむ"物理(BallJoint的なピン留め)は`World::step()`側が
       担う。Playwrightで、ドラッグ中にマウスに追従して箱が動き、離すとその時点の
-      速度を保ったまま通常の物理(重力)に戻ることを確認した。SetMotorTarget/
+      速度を保ったまま通常の物理(重力)に戻ることを確認した。
+      SetMotorTargetも配線済み——スポーンパレットに「+ モーター」ボタンを
+      追加し(`sim-wasm::spawn_motor_arm`、`BallJoint`でワールド固定点へ
+      ピン留めした棒状の箱を`HingeMotorPd`(Z軸まわりのPD位置サーボ)で
+      角度制御)、Toolbarの「モーター切替」ボタンで選択中のモーターアームの
+      目標角度を0°/90°で切替える(`set_motor_target_at`→
+      `Command::SetMotorTarget`、Playモードかつモーターを持つボディ選択時
+      のみ有効)。Playwrightで、目標を90°に切替えると実際に剛体の姿勢が
+      約89°まで回転し、0°に戻すと約0°まで戻ること、モーターを持たない
+      ボディ(床・箱)を選択するとボタンが無効化されることを確認した。
       SetSwitch/SetHeatSource(いずれも`sim_world::Command`には既存)の配線・
       入力列記録は未実装)
 - [ ] レイアウトプリセット(Default / Physics-focus / Circuit-focus / Astro)

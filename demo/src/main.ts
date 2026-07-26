@@ -604,11 +604,21 @@ async function setUpSceneView(
   scene.add(scaleGizmoGroup);
   const currentScale = new Map<number, number>();
 
+  // モーターアーム(`Command::SetMotorTarget`の実証用、設計docs/20-integration/
+  // 04-world-api.md §2「Commandキュー」)。`motorArmBodies`はスポーン時に登録
+  // されたモーター付きボディのindex集合(それ以外のボディへ`set_motor_target_at`
+  // を呼ぶとRust側がパニックするため、UI側でも呼び先を絞る)。
+  const MOTOR_TARGET_LOW = 0.0;
+  const MOTOR_TARGET_HIGH = Math.PI / 2;
+  const motorArmBodies = new Set<number>();
+  const currentMotorTarget = new Map<number, number>();
+
   let selectedBodyIndex = BODY_INDEX_BOX;
   function selectBody(index: number) {
     selectedBodyIndex = index;
     renderInspectorFor(world, index);
     highlightHierarchy(index);
+    motorToggleButton.disabled = mode === "edit" || !motorArmBodies.has(index);
   }
   let highlightHierarchy = setUpHierarchy(world, selectBody);
   renderInspectorFor(world, selectedBodyIndex);
@@ -910,6 +920,7 @@ async function setUpSceneView(
   const playButton = document.getElementById("btn-play") as HTMLButtonElement;
   const stepButton = document.getElementById("btn-step") as HTMLButtonElement;
   const nudgeButton = document.getElementById("btn-nudge") as HTMLButtonElement;
+  const motorToggleButton = document.getElementById("btn-motor-toggle") as HTMLButtonElement;
   const undoButton = document.getElementById("btn-undo") as HTMLButtonElement;
   const redoButton = document.getElementById("btn-redo") as HTMLButtonElement;
 
@@ -941,6 +952,7 @@ async function setUpSceneView(
     playButton.disabled = mode === "edit";
     stepButton.disabled = mode === "edit";
     nudgeButton.disabled = mode === "edit";
+    motorToggleButton.disabled = mode === "edit" || !motorArmBodies.has(selectedBodyIndex);
     undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
     redoButton.disabled = mode !== "edit" || editRedoStack.length === 0;
     modeEditButton.classList.toggle("active", mode === "edit");
@@ -1059,6 +1071,19 @@ async function setUpSceneView(
     constraintLines.set(bodyIndex, line);
   });
 
+  document.getElementById("btn-spawn-motor")!.addEventListener("click", () => {
+    const { x, z } = nextSpawnPosition();
+    const material = spawnMaterialSelect.value;
+    const bodyIndex = world.spawn_motor_arm(x, PENDULUM_PIVOT_HEIGHT, z, material);
+    motorArmBodies.add(bodyIndex);
+    currentMotorTarget.set(bodyIndex, MOTOR_TARGET_LOW);
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(0.2, 1.2, 0.2),
+      new THREE.MeshStandardMaterial({ color: 0x66ffcc }),
+    );
+    addSpawnedMesh(bodyIndex, mesh);
+  });
+
   playButton.addEventListener("click", () => {
     if (mode !== "play") return;
     playing = !playing;
@@ -1161,6 +1186,14 @@ async function setUpSceneView(
       const p = world.body_position_at_f32(BODY_INDEX_BOX);
       showForceOverlay(new THREE.Vector3(p[0], p[1], p[2]), new THREE.Vector3(0.0, NUDGE_FORCE_NEWTONS, 0.0));
     }
+  });
+
+  motorToggleButton.addEventListener("click", () => {
+    if (mode !== "play" || !motorArmBodies.has(selectedBodyIndex)) return;
+    const current = currentMotorTarget.get(selectedBodyIndex) ?? MOTOR_TARGET_LOW;
+    const next = current === MOTOR_TARGET_LOW ? MOTOR_TARGET_HIGH : MOTOR_TARGET_LOW;
+    world.set_motor_target_at(selectedBodyIndex, next);
+    currentMotorTarget.set(selectedBodyIndex, next);
   });
 
   const inspectorPosition = new THREE.Vector3();

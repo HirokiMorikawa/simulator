@@ -24,6 +24,9 @@
           <button id="btn-nudge" title="選択中の剛体に上向きの力を加える(Command経由)">
             ↑ Nudge
           </button>
+          <button id="btn-motor-toggle" title="選択中のモーターアームの目標角度を0°/90°で切替(Command::SetMotorTarget経由)">
+            ⟳ モーター切替
+          </button>
         </div>
         <div class="toolbar-group">
           <button id="btn-undo" title="Editモードでの直前の位置編集を取り消す(Gizmoドラッグのみ)">
@@ -38,6 +41,7 @@
           <button id="btn-spawn-sphere" title="球を配置(Command経由ではなくcreate_body)">+ 球</button>
           <button id="btn-spawn-box" title="箱を配置(Command経由ではなくcreate_body)">+ 箱</button>
           <button id="btn-spawn-pendulum" title="振り子を配置(DistanceJointでワールド固定点へ拘束)">+ 振り子</button>
+          <button id="btn-spawn-motor" title="モーターアームを配置(BallJoint+HingeMotorPdでワールド固定点へピン留め)">+ モーター</button>
         </div>
         <div class="toolbar-group">
           <label><input type="checkbox" id="toggle-velocity-overlay" checked /> 速度オーバーレイ</label>

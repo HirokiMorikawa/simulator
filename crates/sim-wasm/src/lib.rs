@@ -20,7 +20,7 @@
 use std::collections::VecDeque;
 
 use js_sys::{Float32Array, Float64Array};
-use sim_mechanics::{BodyType, RigidBodyDesc, Shape};
+use sim_mechanics::{BallJoint, BodyType, HingeMotorPd, RigidBodyDesc, Shape};
 use sim_world::{BodyId, Command, ProbeTarget, World, WorldOptions};
 use wasm_bindgen::prelude::*;
 
@@ -52,6 +52,11 @@ struct SpawnedBodyMeta {
     /// `World::distance_joint_anchor_points`用index。球/箱スポーンでは`None`
     /// (拘束オーバーレイ対象外)。
     constraint_joint_index: Option<usize>,
+    /// モーターアームスポーン(`spawn_motor_arm`)が追加した`HingeMotorPd`の
+    /// `MechanicsSolver::hinge_motors`内index(`Command::SetMotorTarget`の
+    /// `hinge_motor_index`引数、`set_motor_target_at`参照)。振り子/球/箱
+    /// スポーンでは`None`。
+    hinge_motor_index: Option<usize>,
 }
 
 #[wasm_bindgen]
@@ -253,6 +258,7 @@ impl WasmWorld {
             material_label: material_name,
             base_shape: Shape::Sphere { radius },
             constraint_joint_index: None,
+            hinge_motor_index: None,
         });
         index
     }
@@ -290,6 +296,7 @@ impl WasmWorld {
                 half_extents: sim_math::Vec3::new(half_extent, half_extent, half_extent),
             },
             constraint_joint_index: None,
+            hinge_motor_index: None,
         });
         index
     }
@@ -338,8 +345,96 @@ impl WasmWorld {
             material_label: material_name,
             base_shape: Shape::Sphere { radius: BOB_RADIUS },
             constraint_joint_index: Some(joint_index),
+            hinge_motor_index: None,
         });
         index
+    }
+
+    /// スポーンパレット——モーターアーム(`Command::SetMotorTarget`の実証用)。
+    /// ワールド固定点`(pivot_x, pivot_y, pivot_z)`へ`BallJoint`でピン留めした
+    /// 棒状の箱を、Z軸まわりの`HingeMotorPd`(PD位置サーボ)で角度制御する。
+    /// 初期状態は目標角0(鉛直にぶら下がる姿勢)。
+    pub fn spawn_motor_arm(
+        &mut self,
+        pivot_x: f64,
+        pivot_y: f64,
+        pivot_z: f64,
+        material_name: String,
+    ) -> usize {
+        const HALF_EXTENTS: sim_math::Vec3 = sim_math::Vec3 {
+            x: 0.1,
+            y: 0.6,
+            z: 0.1,
+        };
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(&material_name)
+            .unwrap_or_else(|| panic!("unknown material: {material_name}"));
+        let pivot = sim_math::Vec3::new(pivot_x, pivot_y, pivot_z);
+        let anchor_local_top = sim_math::Vec3::new(0.0, HALF_EXTENTS.y, 0.0);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: HALF_EXTENTS,
+            },
+            material,
+        );
+        // 目標角0(鉛直)の姿勢: body中心はpivotから真下にHALF_EXTENTS.yだけ離れた点。
+        desc.transform.position = pivot - anchor_local_top;
+        desc.mass_override = Some(5.0); // sim-mechanicsの参照テストと同じ質量(kp/kd/torque_maxの既定値がこの慣性で検証済み)。
+        let id = self.inner.create_body(desc);
+        self.inner.mechanics_mut().add_ball_joint(BallJoint {
+            body_a: id.index as usize,
+            anchor_a: anchor_local_top,
+            body_b: None,
+            anchor_b: pivot,
+            disabled: false,
+        });
+        let hinge_motor_index = self.inner.mechanics().hinge_motors.len();
+        self.inner.mechanics_mut().add_hinge_motor(HingeMotorPd {
+            body: id.index as usize,
+            axis: sim_math::Vec3::new(0.0, 0.0, 1.0),
+            reference_rotation: sim_math::Quat::IDENTITY,
+            theta_target: 0.0,
+            kp: 20.0,
+            kd: 2.0,
+            torque_max: 50.0,
+        });
+        let index = self.body_count();
+        let label = format!("MotorArm_{index}");
+        self.spawned.push(SpawnedBodyMeta {
+            id,
+            label,
+            material_label: material_name,
+            base_shape: Shape::Box {
+                half_extents: HALF_EXTENTS,
+            },
+            constraint_joint_index: None,
+            hinge_motor_index: Some(hinge_motor_index),
+        });
+        index
+    }
+
+    /// `Command::SetMotorTarget`(モジュールdoc参照、`theta_target`は
+    /// ラジアン)を、`index`番目のボディが持つヒンジモーターへ送る。
+    /// モーターを持たないボディに呼ぶとパニックする(呼び出し側UIが
+    /// モーターを持つボディだけに対して呼ぶ前提)。
+    pub fn set_motor_target_at(&mut self, index: usize, theta_target: f64) {
+        let hinge_motor_index = match index {
+            0 | 1 => None,
+            _ => {
+                self.spawned
+                    .get(index - 2)
+                    .unwrap_or_else(|| panic!("body index {index} out of range"))
+                    .hinge_motor_index
+            }
+        };
+        let hinge_motor_index =
+            hinge_motor_index.unwrap_or_else(|| panic!("body index {index} has no hinge motor"));
+        self.inner.push_command(Command::SetMotorTarget {
+            hinge_motor_index,
+            theta_target,
+        });
     }
 
     /// Scene Viewの拘束オーバーレイ(設計docs/23-frontend/01-editor.md §1.2
