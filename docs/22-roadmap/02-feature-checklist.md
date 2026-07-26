@@ -51,7 +51,8 @@
   トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
-  Translate/Rotate Gizmo(X/Y/Z軸ハンドル・軸周りリング、Editモード限定)+
+  Translate/Rotate/Scale Gizmo(X/Y/Z軸ハンドル・軸周りリング・単一の一様
+  スケールハンドル、Editモード限定)+
   速度ベクトル/接触点/力オーバーレイ)+
   Toolbar(再生/Nudge Command + Edit/Playモードトグル)+ Hierarchy/Inspector
   (複数ボディ列挙・Scene View双方向選択連動、実Transformデータ)+
@@ -71,8 +72,14 @@
   実装済み。力オーバーレイ(既知のNudge `Command::ApplyForce`のみを500ms表示、
   縮約実装)・Probe Graphsの2系列化(y座標・速さ、独立正規化)・時間倍率
   (×0.5/×1/×2/×5)・Project ドロワーMaterialsタブの実データ接続
-  (`MaterialDb`から密度・摩擦・反発・比熱・熱伝導率を実クエリ)も実装済み。
-  残りはGizmoのスケールハンドル・拘束/流体場/フレーム軸オーバーレイ・
+  (`MaterialDb`から密度・摩擦・反発・比熱・熱伝導率を実クエリ)・Scale Gizmo
+  (単一の一様スケールハンドル、`sim_mechanics::RigidBodySet::set_shape`新設で
+  質量・慣性を`create_body`と同じ規約で再計算、Undo/Redoにも対応)も実装済み。
+  Scale Gizmo実装の過程で、静止済み(asleep)のボディをその場で拡大すると
+  接触が再解決されずに固まる実バグを発見・修正した(`set_shape`が
+  `still_time`/`asleep`をリセット、回帰テスト追加済み)。InspectorのShape
+  表示もこれに伴い、固定文字列ではなく`World::mechanics().bodies.shape_of`
+  からの実クエリに置き換えた。残りは拘束/流体場/フレーム軸オーバーレイ・
   回路エディタ等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り1シナリオ(再突入本体)・ワークストリームC残り(R4)は
@@ -946,9 +953,24 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       (姿勢クォータニオンの直接書き換え、新設の`World::body_rotation`+
       `sim-wasm`の`body_rotation_at_f32`/`set_body_rotation_at`)で適用する
       (Blenderのようなビュー平面トラックボールではなく単純な単一軸回転)。
-      スケールのハンドルはこの2体デモに意味のある対象が無い(箱のサイズ変更は
-      物理形状と一致しなくなる)ため未実装。PlayモードではGizmo(移動・回転
-      とも)は非表示になり、代わりに箱への直接ドラッグが`Command::Grab/
+      Scale Gizmo(単一の立方体ハンドル、対角オフセット位置)も実装した——
+      Blenderのような軸別スケールではなく単一の一様スケールのみで、ドラッグ
+      開始点からハンドルまでの画面上の距離比をスポーン時の寸法からの絶対
+      倍率として`sim_mechanics::RigidBodySet::set_shape`(新設、`World::
+      set_body_shape`経由)へ適用する。`set_shape`は`create_body`と同じ規約で
+      質量・慣性(`inv_mass`/`inv_inertia_local`)を再計算する。この過程で、
+      静止済み(asleep)のボディをその場で拡大すると新しい寸法が床へ深く
+      干渉したまま物理的に一切動かなくなるという実バグを発見した——asleep
+      同士(静的な床+asleepなボディ)の接触は`MechanicsSolver::
+      manifold_is_active`により再解決されないため。`set_shape`が
+      `still_time`/`asleep`をリセットして次stepで確実に起床・再接触解決
+      させるよう修正し、`sim-world`にこの正確な再現手順(着地・静止させて
+      から拡大)を含む回帰テストを追加した。InspectorのShape表示も、
+      以前はスポーン時の値を固定で覚えておく縮約実装だったのを、
+      `World::mechanics().bodies.shape_of`から常に最新の実寸法を読む
+      実クエリに置き換えた(Scale Gizmoで変更後も正しく追従する)。
+      PlayモードではGizmo(移動・回転・スケールとも)は非表示になり、
+      代わりに箱への直接ドラッグが`Command::Grab/
       MoveGrab/Release`で物理的に"つかむ"操作になる(移動量が閾値を超えると
       ドラッグ、超えなければクリック選択)。InspectorのTransformにRotation
       (Euler角度表示)欄も追加した。Playwrightで、Translate Gizmoの
@@ -962,8 +984,15 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       (ハンドルの実クリック可能領域を`THREE.Raycaster`ヒット結果のラスタ
       スキャンで実測してからPlaywrightシナリオを組んだ——見た目のハンドル
       位置と実際の当たり判定はカメラ透視の前景短縮でずれるため、目視座標の
-      当てずっぽうでは安定して当たらないという実装上の発見、Translate/Rotate
-      両方で踏襲)。オーバーレイは速度ベクトル・接触点)
+      当てずっぽうでは安定して当たらないという実装上の発見、Translate/Rotate/
+      Scale全てで踏襲。Scale Gizmoはさらに、対角オフセット位置がTranslate
+      Gizmoの軸ハンドルの当たり判定領域と画面上で重なり得ることが判明した
+      ため(ヒットテストの優先順位でTranslateが勝ってしまう)、オフセットを
+      拡大して重ならない位置に調整した)。Playwrightで、Scale Gizmoの
+      ドラッグで実際にInspectorのShape寸法が絶対倍率どおり変化しUndo/Redoで
+      正確に往復すること、Editモード中は物理が凍結されること、Playモードへ
+      戻すと拡大後の寸法で正しい高さに着地・静止すること(sleepバグ修正後)を
+      確認した。オーバーレイは速度ベクトル・接触点)
 - [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
       (速度ベクトルは`THREE.ArrowHelper`で実装済み——選択中ボディの実速度
       (`body_velocity_at_f32`)を毎フレーム矢印として表示し、Toolbarのチェック

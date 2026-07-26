@@ -209,6 +209,44 @@ impl RigidBodySet {
 
         index
     }
+
+    /// エディタのScale Gizmo(縮約実装、`sim-wasm::set_body_scale_at`参照)向けに、
+    /// 既存ボディの形状を置き換え、質量・慣性を`create_body`と同じ式
+    /// (質量 = `shape.volume() * material.density`、`inv_inertia_local`も同様)で
+    /// 再計算する。`ShapeStore`は追加専用(既存の`create_body`と同じ設計)のため、
+    /// 古い形状のエントリはプールに残り続ける(Undo/Redoが古いハンドルへ戻せる
+    /// 実装ではないため実害は無いが、スケールドラッグを繰り返すたびにプールが
+    /// 単調に増える点は正直に記録しておく)。
+    ///
+    /// 静止中(`sleep`モジュール参照)のボディの形状を変えると、寸法変更後の
+    /// 形状が新たに接触相手と干渉していても、asleepなボディ同士の接触は
+    /// 再解決されない(`MechanicsSolver::manifold_is_active`)ため、そのまま
+    /// 干渉状態で固まってしまう。形状変更は静止仮定を無効化する明らかな
+    /// イベントなので、`still_time`/`asleep`をリセットして次stepで確実に
+    /// 再評価させる。
+    pub fn set_shape(&mut self, index: usize, shape: Shape, materials: &MaterialDb) {
+        let material = materials.get(self.material[index]);
+        let mass = shape.volume().unwrap_or(0.0) * material.density;
+        let is_dynamic = matches!(self.body_type[index], BodyType::Dynamic);
+        self.inv_mass[index] = if is_dynamic && mass > 0.0 {
+            1.0 / mass
+        } else {
+            0.0
+        };
+        self.inv_inertia_local[index] = if is_dynamic && mass > 0.0 {
+            let diag = shape.unit_mass_inertia_diagonal().scale(mass);
+            Mat3::from_diagonal(diag)
+                .inverse()
+                .unwrap_or(Mat3::from_diagonal(Vec3::ZERO))
+        } else {
+            Mat3::from_diagonal(Vec3::ZERO)
+        };
+        self.inv_inertia_world[index] =
+            self.inv_inertia_local[index].similarity(self.rotation[index].to_mat3());
+        self.shape[index] = self.shapes.insert(shape);
+        self.still_time[index] = 0.0;
+        self.asleep[index] = false;
+    }
 }
 
 impl Default for RigidBodySet {

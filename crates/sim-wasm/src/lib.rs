@@ -36,15 +36,18 @@ const PROBE_HISTORY_CAPACITY: usize = 600;
 const SNAPSHOT_RING_CAPACITY: usize = 8;
 
 /// スポーンパレット(設計docs/23-frontend/01-editor.md §6「形状×材質を選んで
-/// クリック配置」)で追加したボディの記録。`sim-wasm`のWorld API-only制約
-/// (`World`自体はShape/Materialのクエリを持たない)を、スポーンした側(この
-/// 構造体)が構築時の値をそのまま覚えておくことで回避する——固定2体(床・箱)の
-/// `BODY_META`ハードコードと同じ発想を、動的に増えるボディにも一般化したもの。
+/// クリック配置」)で追加したボディの記録。Shapeは`World::mechanics().bodies.
+/// shape_of`で実クエリできるが(`body_shape_label_at`参照)、Materialは`World`が
+/// ボディからMaterialIdを引く公開APIを持たないため、スポーンした側(この構造体)
+/// が構築時の材質名をそのまま覚えておく縮約実装のまま(固定2体(床・箱)の
+/// ハードコードと同じ発想)。
 struct SpawnedBodyMeta {
     id: BodyId,
     label: String,
-    shape_label: String,
     material_label: String,
+    /// Scale Gizmo(`set_body_scale_at`参照)がスケール係数を掛ける基準形状
+    /// (スポーン時の寸法、以後`World`側の実形状が変わってもこの基準は不変)。
+    base_shape: Shape,
 }
 
 #[wasm_bindgen]
@@ -158,18 +161,26 @@ impl WasmWorld {
         index == 0
     }
 
-    /// Inspector表示用のShape文字列(World API-only制約により、スポーン時の
-    /// 値をそのまま返す縮約実装、モジュールdoc「`SpawnedBodyMeta`」参照)。
+    /// Inspector表示用のShape文字列。`World::mechanics().bodies.shape_of`で
+    /// 実際の現在の形状(Scale Gizmoで変更済みなら変更後の寸法)を読み、
+    /// フォーマットする(以前は`SpawnedBodyMeta`にスポーン時の文字列を固定で
+    /// 覚えておく縮約実装だったが、Scale Gizmoで寸法が変わりうるようになった
+    /// ため、常に最新の値を返す実クエリに置き換えた)。
     pub fn body_shape_label_at(&self, index: usize) -> String {
-        match index {
-            0 => "Plane(normal=(0,1,0), d=0)".to_string(),
-            1 => "Box(0.5,0.5,0.5)".to_string(),
-            _ => self
-                .spawned
-                .get(index - 2)
-                .unwrap_or_else(|| panic!("body index {index} out of range"))
-                .shape_label
-                .clone(),
+        let id = self.body_id_at(index);
+        match self.inner.mechanics().bodies.shape_of(id.index as usize) {
+            Shape::Sphere { radius } => format!("Sphere({radius:.4})"),
+            Shape::Box { half_extents } => format!(
+                "Box({:.4},{:.4},{:.4})",
+                half_extents.x, half_extents.y, half_extents.z
+            ),
+            Shape::Plane { normal, d } => {
+                format!(
+                    "Plane(normal=({},{},{}), d={d})",
+                    normal.x, normal.y, normal.z
+                )
+            }
+            other => format!("{other:?}"),
         }
     }
 
@@ -235,8 +246,8 @@ impl WasmWorld {
         self.spawned.push(SpawnedBodyMeta {
             id,
             label,
-            shape_label: format!("Sphere({radius})"),
             material_label: material_name,
+            base_shape: Shape::Sphere { radius },
         });
         index
     }
@@ -269,8 +280,10 @@ impl WasmWorld {
         self.spawned.push(SpawnedBodyMeta {
             id,
             label,
-            shape_label: format!("Box({half_extent},{half_extent},{half_extent})"),
             material_label: material_name,
+            base_shape: Shape::Box {
+                half_extents: sim_math::Vec3::new(half_extent, half_extent, half_extent),
+            },
         });
         index
     }
@@ -324,6 +337,38 @@ impl WasmWorld {
         let id = self.body_id_at(index);
         self.inner.mechanics_mut().bodies.rotation[id.index as usize] =
             sim_math::Quat { x, y, z, w };
+    }
+
+    /// Scale Gizmo(縮約実装、`sim_world::World::set_body_shape`のdoc参照)——
+    /// ボディの形状をスポーン時の寸法(`base_shape`、床は対象外)の`scale`倍に
+    /// 置き換え、質量・慣性を再計算する。`scale`はドラッグ開始時点からの
+    /// 相対値ではなく、常に基準形状からの絶対倍率(Translate/Rotate Gizmoの
+    /// 「ドラッグ開始値+差分」ではなく「基準値×絶対倍率」という設計、複数回の
+    /// ドラッグを重ねても誤差が蓄積しない)。
+    pub fn set_body_scale_at(&mut self, index: usize, scale: f64) {
+        let id = self.body_id_at(index);
+        let base_shape = match index {
+            0 => panic!("Ground is static and has no scale handle"),
+            1 => Shape::Box {
+                half_extents: sim_math::Vec3::new(0.5, 0.5, 0.5),
+            },
+            _ => self
+                .spawned
+                .get(index - 2)
+                .unwrap_or_else(|| panic!("body index {index} out of range"))
+                .base_shape
+                .clone(),
+        };
+        let scaled_shape = match base_shape {
+            Shape::Sphere { radius } => Shape::Sphere {
+                radius: radius * scale,
+            },
+            Shape::Box { half_extents } => Shape::Box {
+                half_extents: half_extents.scale(scale),
+            },
+            other => other,
+        };
+        self.inner.set_body_shape(id, scaled_shape);
     }
 
     /// 1 world step。1s相当のstep数ごとにTimelineスナップショットを

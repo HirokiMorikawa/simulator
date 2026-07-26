@@ -61,7 +61,7 @@ pub use scenario::{
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
 use sim_math::{SimRng, Vec3};
-use sim_mechanics::{BodyType, MechanicsSolver, RigidBodyDesc};
+use sim_mechanics::{BodyType, MechanicsSolver, RigidBodyDesc, Shape};
 
 // 下流crate(sim-wasm等)が別途sim-core依存を追加しなくてもBodyIdを使えるよう、
 // Worldの公開APIとしてそのまま再エクスポートする。
@@ -666,6 +666,13 @@ impl World {
         &self.materials
     }
 
+    /// 力学ソルバへの不変アクセス(`mechanics_mut`の読み取り専用版、Inspectorの
+    /// Shape表示など、`RigidBodySet::shape_of`のような読み取りだけで済む
+    /// クエリ向け)。
+    pub fn mechanics(&self) -> &MechanicsSolver {
+        &self.mechanics
+    }
+
     /// 材料DBへの可変アクセス(`from_scenario`の`extends`派生材料の追加用、設計§1
     /// 「シーン構築時の設定はコマンド規律の対象外」)。
     pub fn materials_mut(&mut self) -> &mut MaterialDb {
@@ -685,6 +692,19 @@ impl World {
             index: index as u32,
             generation: 0,
         }
+    }
+
+    /// エディタのScale Gizmo(縮約実装、`sim_mechanics::RigidBodySet::set_shape`の
+    /// doc参照)向けに、既存ボディの形状を置き換え、質量・慣性を`create_body`と
+    /// 同じ規約で再計算する。無効な`id`なら何もしない(`remove_body`と同じ
+    /// 不変条件)。
+    pub fn set_body_shape(&mut self, id: BodyId, shape: Shape) {
+        if !self.is_valid(id) {
+            return;
+        }
+        self.mechanics
+            .bodies
+            .set_shape(id.index as usize, shape, &self.materials);
     }
 
     fn is_valid(&self, id: BodyId) -> bool {
@@ -2275,6 +2295,120 @@ mod tests {
             world.body_position(capsule_body).unwrap(),
             local_position,
             "local physics must continue evolving the handed-off body"
+        );
+    }
+
+    /// Scale Gizmo(`set_body_shape`)向けの検証: 立方体の半辺長を2倍にすると、
+    /// 体積は2^3=8倍になるため質量も8倍になり(密度は不変)、mass()から
+    /// それが正しく読み取れること・`shape_of`が実際に新しい寸法を返すことを
+    /// 確認する。
+    #[test]
+    fn set_body_shape_rescales_mass_by_volume_ratio_and_updates_shape_query() {
+        let mut world = World::new(WorldOptions::default());
+        let idx = create_falling_box(&mut world);
+        let mass_before = world.mechanics_mut().bodies.mass(idx.index as usize);
+
+        world.set_body_shape(
+            idx,
+            Shape::Box {
+                half_extents: Vec3::new(1.0, 1.0, 1.0),
+            },
+        );
+
+        let mass_after = world.mechanics_mut().bodies.mass(idx.index as usize);
+        assert!(
+            (mass_after / mass_before - 8.0).abs() < 1e-9,
+            "doubling half_extents in all 3 axes must scale volume (and thus mass) by 2^3=8, got ratio {}",
+            mass_after / mass_before
+        );
+
+        match world.mechanics_mut().bodies.shape_of(idx.index as usize) {
+            Shape::Box { half_extents } => {
+                assert_eq!(*half_extents, Vec3::new(1.0, 1.0, 1.0));
+            }
+            other => panic!("expected Box shape, got {other:?}"),
+        }
+    }
+
+    /// `set_body_shape`は無効な(削除済み/範囲外の)`BodyId`に対しては静かに
+    /// 無視する(`remove_body`と同じ不変条件、パニックしない)。
+    #[test]
+    fn set_body_shape_on_invalid_body_id_is_a_no_op() {
+        let mut world = World::new(WorldOptions::default());
+        let idx = create_falling_box(&mut world);
+        world.remove_body(idx);
+
+        // Must not panic.
+        world.set_body_shape(idx, Shape::Sphere { radius: 5.0 });
+    }
+
+    /// Scale Gizmoが静止済み(asleep)のボディへ形状変更を適用した場合の回帰
+    /// テスト。バグ再現手順: 箱を床に着地・静止させてasleepにしてから、その場で
+    /// 大きく拡大する——`set_shape`が`still_time`/`asleep`をリセットしなければ、
+    /// asleep同士(静的な床+asleepな箱)の接触は`MechanicsSolver::
+    /// manifold_is_active`により再解決されず、拡大後の新しい半辺長が床へ
+    /// 深く干渉したまま物理的に一切動かなくなる(見た目上は形状だけ変わって
+    /// 位置が追従しない、というエディタ上の実バグとして発見)。`set_shape`の
+    /// 修正後は、次stepで確実に起床・再接触解決され、新しい半辺長ぶんだけ
+    /// 押し上げられて正しい高さに収束する。
+    #[test]
+    fn set_body_shape_wakes_a_sleeping_body_so_it_resolves_the_new_interpenetration() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world
+            .materials()
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+        let mut floor_desc = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            steel,
+        );
+        floor_desc.body_type = BodyType::Static;
+        world.create_body(floor_desc);
+
+        let mut box_desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            steel,
+        );
+        box_desc.transform = Transform {
+            position: Vec3::new(0.0, 2.0, 0.0),
+            rotation: Quat::IDENTITY,
+        };
+        let idx = world.create_body(box_desc);
+
+        // Let it fall, land, and go to sleep (SLEEP_TIME_THRESHOLD=0.5s well
+        // within this many steps at dt=1/120s).
+        for _ in 0..600 {
+            world.step();
+        }
+        let settled_y = world.body_position(idx).unwrap().y;
+        assert!(
+            (settled_y - 0.5).abs() < 0.05,
+            "box should have settled near half_extent=0.5, got {settled_y}"
+        );
+
+        // Enlarge in place: the new half_extent=1.5 now interpenetrates the
+        // floor deeply (old rest position only clears half_extent=0.5).
+        world.set_body_shape(
+            idx,
+            Shape::Box {
+                half_extents: Vec3::new(1.5, 1.5, 1.5),
+            },
+        );
+
+        for _ in 0..600 {
+            world.step();
+        }
+        let resettled_y = world.body_position(idx).unwrap().y;
+        assert!(
+            (resettled_y - 1.5).abs() < 0.05,
+            "after enlarging in place, the body must wake up and resettle near the \
+             new half_extent=1.5 (not stay frozen at the old half_extent=0.5 rest \
+             height), got {resettled_y}"
         );
     }
 }

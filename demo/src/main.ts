@@ -517,11 +517,10 @@ async function setUpSceneView(
 
   // Rotate Gizmo(設計§1.2「Gizmo: 移動/回転/スケール」の回転部分)。X(赤)/Y(緑)/
   // Z(青)の3本のリングを選択中ボディの位置に表示し、Translate Gizmoと同じく
-  // Editモードかつ非静的ボディ選択時のみ表示・操作可能。縮約実装の理由: スケール
-  // ハンドルはこの2体デモに意味のある対象が無い(箱のサイズ変更は物理形状と
-  // 一致しなくなるため)ため未実装。リングをドラッグすると、ドラッグ開始点との
-  // 画面上の角度差をそのままワールド軸周りの回転角として適用する単純な実装
-  // (Blenderのようなビュー平面トラックボールではなく、選択軸周りの単純回転)。
+  // Editモードかつ非静的ボディ選択時のみ表示・操作可能。リングをドラッグすると、
+  // ドラッグ開始点との画面上の角度差をそのままワールド軸周りの回転角として
+  // 適用する単純な実装(Blenderのようなビュー平面トラックボールではなく、
+  // 選択軸周りの単純回転)。
   const ROTATION_RING_RADIUS = 1.0;
   const ROTATION_RING_TUBE_RADIUS = 0.03;
   const rotationGizmoGroup = new THREE.Group();
@@ -538,6 +537,31 @@ async function setUpSceneView(
   }
   rotationGizmoGroup.visible = false;
   scene.add(rotationGizmoGroup);
+
+  // Scale Gizmo(設計§1.2「Gizmo: 移動/回転/スケール」のスケール部分)。単一の
+  // 立方体ハンドル(黄)を選択中ボディの対角オフセット位置に表示し、Translate/
+  // Rotate Gizmoと同じくEditモードかつ非静的ボディ選択時のみ表示・操作可能。
+  // 縮約実装の理由: Blenderのような軸別スケールではなく単一の一様スケールのみ
+  // (X/Y/Zハンドル無し)。ドラッグ開始点からハンドルまでの画面上の距離と、
+  // ドラッグ中の現在距離の比をそのまま一様スケール係数の相対変化として使う
+  // (Rotate Gizmoの「角度差をそのまま回転角に使う」設計と同じ発想)。
+  // `sim-wasm::set_body_scale_at`はスポーン時の寸法からの絶対倍率を受け取る
+  // ため、フロント側で現在のスケール値(`currentScale`、既定1.0)をボディごとに
+  // 保持し、ドラッグ開始時の値に距離比を掛けた絶対値を毎回渡す。
+  const SCALE_HANDLE_OFFSET = 1.6;
+  const SCALE_HANDLE_SIZE = 0.16;
+  const SCALE_MIN = 0.2;
+  const SCALE_MAX = 4.0;
+  const scaleGizmoGroup = new THREE.Group();
+  const scaleHandleMesh = new THREE.Mesh(
+    new THREE.BoxGeometry(SCALE_HANDLE_SIZE, SCALE_HANDLE_SIZE, SCALE_HANDLE_SIZE),
+    new THREE.MeshBasicMaterial({ color: 0xffff00 }),
+  );
+  scaleHandleMesh.position.set(SCALE_HANDLE_OFFSET, SCALE_HANDLE_OFFSET, SCALE_HANDLE_OFFSET);
+  scaleGizmoGroup.add(scaleHandleMesh);
+  scaleGizmoGroup.visible = false;
+  scene.add(scaleGizmoGroup);
+  const currentScale = new Map<number, number>();
 
   let selectedBodyIndex = BODY_INDEX_BOX;
   function selectBody(index: number) {
@@ -607,6 +631,13 @@ async function setUpSceneView(
     return handle ? handle.axisName : null;
   }
 
+  function hitScaleGizmo(event: PointerEvent): boolean {
+    if (!scaleGizmoGroup.visible) return false;
+    updatePointerNdc(event);
+    raycaster.setFromCamera(pointerNdc, camera);
+    return raycaster.intersectObject(scaleHandleMesh).length > 0;
+  }
+
   const AXIS_VECTORS: Record<"x" | "y" | "z", THREE.Vector3> = {
     x: new THREE.Vector3(1, 0, 0),
     y: new THREE.Vector3(0, 1, 0),
@@ -617,8 +648,9 @@ async function setUpSceneView(
   let pointerDownHit: ReturnType<typeof hitTest> = null;
   let pointerDownGizmoAxis: "x" | "y" | "z" | null = null;
   let pointerDownRotationAxis: "x" | "y" | "z" | null = null;
+  let pointerDownScaleHit = false;
   let isDragging = false;
-  let dragMode: "grab" | "gizmo" | "rotate" | null = null;
+  let dragMode: "grab" | "gizmo" | "rotate" | "scale" | null = null;
   const gizmoAxisDir = new THREE.Vector3();
   const gizmoDragStartPosition = new THREE.Vector3();
   let gizmoDragStartScalar = 0;
@@ -626,6 +658,9 @@ async function setUpSceneView(
   let rotateStartQuat = new THREE.Quaternion();
   let rotateCenterScreen = { x: 0, y: 0 };
   let rotateStartAngle = 0;
+  let scaleCenterScreen = { x: 0, y: 0 };
+  let scaleDragStartDistance = 0;
+  let scaleDragStartValue = 1.0;
 
   // Undo/Redo(Editモードのみ、設計docs/23-frontend/01-editor.md §6「Undo/Redo:
   // Editモードのみ。編集操作はシーンJSONの差分として保持」)。縮約実装の理由:
@@ -636,17 +671,21 @@ async function setUpSceneView(
   const EDIT_UNDO_STACK_CAPACITY = 20;
   type EditUndoEntry =
     | { bodyIndex: number; kind: "position"; position: THREE.Vector3 }
-    | { bodyIndex: number; kind: "rotation"; rotation: THREE.Quaternion };
+    | { bodyIndex: number; kind: "rotation"; rotation: THREE.Quaternion }
+    | { bodyIndex: number; kind: "scale"; scale: number };
   const editUndoStack: EditUndoEntry[] = [];
   const editRedoStack: EditUndoEntry[] = [];
 
-  function captureCurrentEntry(bodyIndex: number, kind: "position" | "rotation"): EditUndoEntry {
+  function captureCurrentEntry(bodyIndex: number, kind: "position" | "rotation" | "scale"): EditUndoEntry {
     if (kind === "position") {
       const p = world.body_position_at_f32(bodyIndex);
       return { bodyIndex, kind: "position", position: new THREE.Vector3(p[0], p[1], p[2]) };
     }
-    const r = world.body_rotation_at_f32(bodyIndex);
-    return { bodyIndex, kind: "rotation", rotation: new THREE.Quaternion(r[0], r[1], r[2], r[3]) };
+    if (kind === "rotation") {
+      const r = world.body_rotation_at_f32(bodyIndex);
+      return { bodyIndex, kind: "rotation", rotation: new THREE.Quaternion(r[0], r[1], r[2], r[3]) };
+    }
+    return { bodyIndex, kind: "scale", scale: currentScale.get(bodyIndex) ?? 1.0 };
   }
 
   function projectToScreen(worldPos: THREE.Vector3): { x: number; y: number } {
@@ -665,11 +704,16 @@ async function setUpSceneView(
     if (mode === "edit") {
       pointerDownGizmoAxis = hitGizmo(event);
       pointerDownRotationAxis = pointerDownGizmoAxis ? null : hitRotationGizmo(event);
+      pointerDownScaleHit =
+        !pointerDownGizmoAxis && !pointerDownRotationAxis && hitScaleGizmo(event);
       pointerDownHit =
-        pointerDownGizmoAxis || pointerDownRotationAxis ? null : hitTest(event, event.altKey);
+        pointerDownGizmoAxis || pointerDownRotationAxis || pointerDownScaleHit
+          ? null
+          : hitTest(event, event.altKey);
     } else {
       pointerDownGizmoAxis = null;
       pointerDownRotationAxis = null;
+      pointerDownScaleHit = false;
       pointerDownHit = hitTest(event, event.altKey);
     }
   });
@@ -727,6 +771,24 @@ async function setUpSceneView(
         }
         planeNormal.normalize();
         dragPlane.setFromNormalAndCoplanarPoint(planeNormal, gizmoDragStartPosition);
+      } else if (pointerDownScaleHit) {
+        isDragging = true;
+        dragMode = "scale";
+        scaleCenterScreen = projectToScreen(scaleGizmoGroup.position);
+        scaleDragStartDistance = Math.max(
+          Math.hypot(event.clientX - scaleCenterScreen.x, event.clientY - scaleCenterScreen.y),
+          10,
+        );
+        scaleDragStartValue = currentScale.get(selectedBodyIndex) ?? 1.0;
+        editUndoStack.push({
+          bodyIndex: selectedBodyIndex,
+          kind: "scale",
+          scale: scaleDragStartValue,
+        });
+        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+        editRedoStack.length = 0;
+        undoButton.disabled = mode !== "edit";
+        redoButton.disabled = true;
       } else {
         if (mode !== "play" || !pointerDownHit || pointerDownHit.picked.bodyIndex !== BODY_INDEX_BOX) return;
         isDragging = true;
@@ -748,6 +810,22 @@ async function setUpSceneView(
       const deltaQuat = new THREE.Quaternion().setFromAxisAngle(rotateAxisDir, deltaAngle);
       const newQuat = deltaQuat.multiply(rotateStartQuat);
       world.set_body_rotation_at(selectedBodyIndex, newQuat.x, newQuat.y, newQuat.z, newQuat.w);
+      return;
+    }
+    if (dragMode === "scale") {
+      // ドラッグ開始点からハンドルまでの画面上の距離との比を、そのまま
+      // ドラッグ開始時点のスケール値への相対倍率として使う(モジュールdoc参照)。
+      const currentDistance = Math.hypot(
+        event.clientX - scaleCenterScreen.x,
+        event.clientY - scaleCenterScreen.y,
+      );
+      const factor = Math.min(
+        Math.max(scaleDragStartValue * (currentDistance / scaleDragStartDistance), SCALE_MIN),
+        SCALE_MAX,
+      );
+      world.set_body_scale_at(selectedBodyIndex, factor);
+      currentScale.set(selectedBodyIndex, factor);
+      renderInspectorFor(world, selectedBodyIndex);
       return;
     }
     updatePointerNdc(event);
@@ -777,6 +855,7 @@ async function setUpSceneView(
     pointerDownHit = null;
     pointerDownGizmoAxis = null;
     pointerDownRotationAxis = null;
+    pointerDownScaleHit = false;
   });
 
   const hud = document.getElementById("hud")!;
@@ -826,15 +905,10 @@ async function setUpSceneView(
   modePlayButton.addEventListener("click", () => setMode("play"));
   setMode("edit");
 
-  undoButton.addEventListener("click", () => {
-    if (mode !== "edit") return;
-    const entry = editUndoStack.pop();
-    if (!entry) return;
-    editRedoStack.push(captureCurrentEntry(entry.bodyIndex, entry.kind));
-    if (editRedoStack.length > EDIT_UNDO_STACK_CAPACITY) editRedoStack.shift();
+  function applyEditEntry(entry: EditUndoEntry) {
     if (entry.kind === "position") {
       world.set_body_position_at(entry.bodyIndex, entry.position.x, entry.position.y, entry.position.z);
-    } else {
+    } else if (entry.kind === "rotation") {
       world.set_body_rotation_at(
         entry.bodyIndex,
         entry.rotation.x,
@@ -842,7 +916,20 @@ async function setUpSceneView(
         entry.rotation.z,
         entry.rotation.w,
       );
+    } else {
+      world.set_body_scale_at(entry.bodyIndex, entry.scale);
+      currentScale.set(entry.bodyIndex, entry.scale);
+      renderInspectorFor(world, entry.bodyIndex);
     }
+  }
+
+  undoButton.addEventListener("click", () => {
+    if (mode !== "edit") return;
+    const entry = editUndoStack.pop();
+    if (!entry) return;
+    editRedoStack.push(captureCurrentEntry(entry.bodyIndex, entry.kind));
+    if (editRedoStack.length > EDIT_UNDO_STACK_CAPACITY) editRedoStack.shift();
+    applyEditEntry(entry);
     undoButton.disabled = editUndoStack.length === 0;
     redoButton.disabled = editRedoStack.length === 0;
     render();
@@ -854,17 +941,7 @@ async function setUpSceneView(
     if (!entry) return;
     editUndoStack.push(captureCurrentEntry(entry.bodyIndex, entry.kind));
     if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
-    if (entry.kind === "position") {
-      world.set_body_position_at(entry.bodyIndex, entry.position.x, entry.position.y, entry.position.z);
-    } else {
-      world.set_body_rotation_at(
-        entry.bodyIndex,
-        entry.rotation.x,
-        entry.rotation.y,
-        entry.rotation.z,
-        entry.rotation.w,
-      );
-    }
+    applyEditEntry(entry);
     redoButton.disabled = editRedoStack.length === 0;
     undoButton.disabled = editUndoStack.length === 0;
     render();
@@ -1033,12 +1110,14 @@ async function setUpSceneView(
     box.position.set(p[0], p[1], p[2]);
     const boxRotation = world.body_rotation_at_f32(BODY_INDEX_BOX);
     box.quaternion.set(boxRotation[0], boxRotation[1], boxRotation[2], boxRotation[3]);
+    box.scale.setScalar(currentScale.get(BODY_INDEX_BOX) ?? 1.0);
 
     for (const [bodyIndex, mesh] of spawnedMeshes) {
       const sp = world.body_position_at_f32(bodyIndex);
       mesh.position.set(sp[0], sp[1], sp[2]);
       const sr = world.body_rotation_at_f32(bodyIndex);
       mesh.quaternion.set(sr[0], sr[1], sr[2], sr[3]);
+      mesh.scale.setScalar(currentScale.get(bodyIndex) ?? 1.0);
     }
 
     const selectedPosition = world.body_position_at_f32(selectedBodyIndex);
@@ -1089,9 +1168,11 @@ async function setUpSceneView(
     const showGizmo = mode === "edit" && !world.body_is_static_at(selectedBodyIndex);
     gizmoGroup.visible = showGizmo;
     rotationGizmoGroup.visible = showGizmo;
+    scaleGizmoGroup.visible = showGizmo;
     if (showGizmo) {
       gizmoGroup.position.copy(inspectorPosition);
       rotationGizmoGroup.position.copy(inspectorPosition);
+      scaleGizmoGroup.position.copy(inspectorPosition);
     }
 
     const hashFull = world.state_hash();
