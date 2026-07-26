@@ -55,7 +55,7 @@
   速度ベクトル/接触点/力オーバーレイ)+
   Toolbar(再生/Nudge Command + Edit/Playモードトグル)+ Hierarchy/Inspector
   (複数ボディ列挙・Scene View双方向選択連動、実Transformデータ)+
-  Probe Graphs(1系列)+ Timeline(既存の`World::snapshot`/`restore`による
+  Probe Graphs(2系列: y座標・速さ、独立正規化で重ね描き)+ Timeline(既存の`World::snapshot`/`restore`による
   スナップショットリングバッファ(1s間隔・N=8面)で実際にスクラブ・巻き戻し
   できる、名前付きブックマークの記録/復元も可能)+ Console(既存の`World::
   drain_events`を実際のログとして表示、着地/跳ね返りのContactStarted/
@@ -909,8 +909,13 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
 `y_probe_history_f64`として履歴を公開した。Console行を分割してProbe Graphsパネル
 を新設し(CSS Grid、`console probes`の2列)、canvas 2Dで単一系列の自動スケーリング
 折れ線を描画した。Playwrightで、実際に箱の落下曲線(初期値10.00から時間とともに
-下降)が正しく表示されることを確認した(複数系列の重ね描き・対数軸・CSV
-エクスポートは未実装)。
+下降)が正しく表示されることを確認した。
+その後、`ProbeTarget::BodySpeed`を2本目のプローブとして追加し(`speed_probe_
+history_f64`)、`main.ts`のグラフ描画を`ProbeSeries[]`(ラベル・色・履歴)を
+受け取る複数系列対応に一般化した(各系列は独立にmin/maxを取り正規化、値の
+レンジが大きく異なる系列を同一軸に正規化すると見づらいための設計判断)。
+Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描きされることを
+確認した(対数軸・CSVエクスポートは未実装)。
 
 - [ ] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
       (再生/一時停止/1stepの骨格配線は実装済み、時間倍率スライダー・シーン選択・
@@ -975,12 +980,14 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       Viewピックと双方向に連動(共通の`selectBody`経由)。Joints/Circuits/
       Fluids/Probes/Framesは未対応)
 - [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
-      (選択中ボディのTransform(Position/Velocity)は`sim-wasm`に新設した
-      `body_position_at_f32`/`body_velocity_at_f32`(既存の`World::body_position`/
-      `body_velocity`をそのまま公開、indexで複数ボディを列挙)経由で実データ接続済み、
-      毎フレーム更新される。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無い
-      ため固定のルックアップテーブルのまま(World API-only制約、`main.ts`の
-      `BODY_META`参照)。Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジは未実装)
+      (選択中ボディのTransform(Position/Rotation/Velocity)は`sim-wasm`に新設した
+      `body_position_at_f32`/`body_rotation_at_f32`/`body_velocity_at_f32`
+      (既存の`World::body_position`/`body_rotation`/`body_velocity`をそのまま公開、
+      indexで複数ボディを列挙)経由で実データ接続済み、毎フレーム更新される。
+      Shape/Materialもスポーンパレット増分で`body_shape_label_at`/
+      `body_material_label_at`として実クエリ化済み(固定`BODY_META`ルックアップ
+      テーブルは廃止済み、詳細は本チェックリストのスポーン項目参照)。
+      Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジは未実装)
 - [x] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク
       (再生スクラバは設計docs/00-foundation/04-architecture.md「巻き戻しの
       スナップショット予算」(既定1s間隔・リングバッファN=8面)どおりに実装済み
@@ -1013,12 +1020,17 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       オブジェクトへの連動(クリックでそのイベントの発生源ボディを選択)・
       発散/CFL警告バッジ・Contacts/Eventsタブ(設計は6タブ)は未実装)
 - [ ] Probe Graphs パネル: 複数系列・対数軸・CSV エクスポート
-      (単一系列(箱のy座標、`sim_world::World::add_probe`+`ProbeTarget::BodyPosY`を
-      `sim-wasm`に`y_probe_history_f64`として公開、既存のProbeが`step()`内で
-      毎step自動サンプルされる仕組みをそのまま利用)の自動スケーリング折れ線を
-      canvas 2Dで描画済み。Playwrightで実際に落下曲線(max=10.00→min低下)が
-      正しく表示されることを確認した。複数系列の重ね描き・対数軸・CSV
-      エクスポートは未実装)
+      (2系列(箱のy座標`ProbeTarget::BodyPosY`+箱の速さ`ProbeTarget::BodySpeed`、
+      いずれも`sim_world::World::add_probe`で登録し`step()`内で毎step自動
+      サンプルされる既存の仕組みをそのまま利用)を`sim-wasm`に
+      `y_probe_history_f64`/`speed_probe_history_f64`として公開し、
+      `main.ts`の`ProbeSeries`型(ラベル・色・履歴の配列)で複数系列の
+      重ね描きに対応した。各系列は独立にmin/maxを取り0..canvas高さへ
+      正規化する(値のレンジが大きく異なる系列を同一軸に正規化すると
+      見づらいための設計判断)。Playwrightで、実際に落下→着地曲線
+      (BodyPosY: max=10.00→min≈0.45)と速さの脈動曲線(BodySpeed: 落下中に
+      max≈13.65まで上昇し着地後min=0.00へ収束)が同一canvasに重ねて正しく
+      表示されることを確認した。対数軸・CSVエクスポートは未実装)
 - [ ] Project ドロワー: Scenes/Materials/Prefabs/Replays
       (タブ切替UIの骨格(静的プレースホルダ内容)のみ実装済み)
 - [x] Edit / Play モードの切替と編集ロック

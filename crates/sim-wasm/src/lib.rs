@@ -55,6 +55,7 @@ pub struct WasmWorld {
     /// スポーンパレットで追加されたボディ(固定2体の後にindex 2, 3, ...として続く)。
     spawned: Vec<SpawnedBodyMeta>,
     y_probe: usize,
+    speed_probe: usize,
     snapshot_interval_steps: u64,
     snapshots: VecDeque<World>,
     bookmarks: Vec<(String, World)>,
@@ -97,6 +98,7 @@ impl WasmWorld {
         desc.transform.position = sim_math::Vec3::new(0.0, initial_height, 0.0);
         let box_body = inner.create_body(desc);
         let y_probe = inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY);
+        let speed_probe = inner.add_probe(ProbeTarget::BodySpeed(box_body), PROBE_HISTORY_CAPACITY);
         let snapshot_interval_steps = (1.0 / dt).round().max(1.0) as u64;
         WasmWorld {
             inner,
@@ -104,6 +106,7 @@ impl WasmWorld {
             box_body,
             spawned: Vec::new(),
             y_probe,
+            speed_probe,
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             bookmarks: Vec::new(),
@@ -387,6 +390,17 @@ impl WasmWorld {
             .inner
             .probe(self.y_probe)
             .expect("y_probe is registered in new() and never removed");
+        let values: Vec<f64> = probe.history().copied().collect();
+        Float64Array::from(values.as_slice())
+    }
+
+    /// 箱の速さ(`ProbeTarget::BodySpeed`)プローブの観測履歴(古い順)。
+    /// y座標プローブと同じProbe Graphsパネルに2系列目として表示するデモ用。
+    pub fn speed_probe_history_f64(&self) -> Float64Array {
+        let probe = self
+            .inner
+            .probe(self.speed_probe)
+            .expect("speed_probe is registered in new() and never removed");
         let values: Vec<f64> = probe.history().copied().collect();
         Float64Array::from(values.as_slice())
     }
