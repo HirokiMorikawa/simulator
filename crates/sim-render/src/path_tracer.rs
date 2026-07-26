@@ -536,4 +536,125 @@ mod tests {
         let rel_err = (measured - expected).abs() / expected;
         assert!(rel_err < 1e-9, "measured={measured} expected={expected}");
     }
+
+    /// R7の検証シーン: 主球(Lambertian)の頂点から見て、法線方向(コサイン重み付き
+    /// サンプリングが集中する向き)の先に部分的な遮蔽球を置く。遮蔽球に当たった経路は
+    /// `max_depth`打ち切り(0を返す)、外れた経路は環境放射輝度に albedo を掛けた値
+    /// (Lambertianのbsdf*cosθ/pdf=albedo恒等式、R1参照)を返すため、`trace`の
+    /// 結果自体がベルヌーイ的な二値混合になり、真に分散を持つモンテカルロ推定量に
+    /// なる(白色炉テスト系がわざと分散ゼロにしているのとは対照的に、ここでは意図的に
+    /// 分散を持たせて収束率そのものを検証する)。
+    fn r7_variance_test_scene() -> (Scene, Ray) {
+        let main_sphere = SceneObject {
+            sphere: Sphere {
+                center: Vec3::new(0.0, 0.0, -5.0),
+                radius: 1.0,
+            },
+            material: Material::Lambertian(Lambertian { albedo: 0.9 }),
+        };
+        // 主球頂点(0,0,-4)から法線(0,0,1)方向(カメラを越えてさらに奥、z>0側)に
+        // 距離6・半径1.8の遮蔽球を置く(半頂角≈17.5°の円錐を部分的に遮蔽)。
+        // カメラ(原点)からこの遮蔽球までの距離は2 > 半径1.8なので、カメラ自身は
+        // 遮蔽球の外側にあり、かつ主レイ(-z方向)の経路(z<=0)は遮蔽球
+        // (z∈[0.2, 3.8])に一切触れない——カメラから見て遮蔽球は真後ろ(+z)に
+        // あるため、主レイは必ず主球に先に当たる。主球で拡散反射した間接レイ
+        // (法線(0,0,1)まわりのコサイン重み付き、cosθ>0すなわちz成分が正)だけが
+        // z=-4からz>0方向へ進み、この遮蔽球に当たり得る(主球とは7>1+1.8で
+        // 重ならない)。
+        let occluder = SceneObject {
+            sphere: Sphere {
+                center: Vec3::new(0.0, 0.0, 2.0),
+                radius: 1.8,
+            },
+            material: Material::Lambertian(Lambertian { albedo: 0.5 }),
+        };
+        let scene = Scene {
+            objects: vec![main_sphere, occluder],
+            lights: vec![],
+            environment_radiance: 6.0,
+        };
+        let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+        (scene, ray)
+    }
+
+    fn sample_variance(data: &[f64]) -> f64 {
+        let n = data.len() as f64;
+        let mean = data.iter().sum::<f64>() / n;
+        data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)
+    }
+
+    /// 決定論: 同一シード・同一サンプル数なら、平均放射輝度は厳密に同一の値になる
+    /// (設計§7「決定論(同一シード同一画像)」、`SimRng`が完全に決定的なため各サンプルの
+    /// 系列も再現される)。
+    #[test]
+    fn average_radiance_is_deterministic_given_the_same_seed_and_sample_count() {
+        let (scene, ray) = r7_variance_test_scene();
+        let average = |seed: u64, spp: u64| -> f64 {
+            let sum: f64 = (0..spp)
+                .map(|i| {
+                    let mut rng = SimRng::new(seed, i);
+                    scene.trace(&ray, &mut rng, 1)
+                })
+                .sum();
+            sum / spp as f64
+        };
+        let a = average(42, 500);
+        let b = average(42, 500);
+        assert_eq!(
+            a, b,
+            "identical seed and sample count must reproduce the exact same average"
+        );
+    }
+
+    /// R7: モンテカルロ推定のノイズ(平均のばらつき)はサンプル数Nに対してO(1/√N)で
+    /// 減少する。上記の意図的に分散を持つシーンから20000個の独立サンプル(サブ
+    /// ストリームごとに1個)を1回だけ引き、それをバッチサイズ100(200バッチ)と
+    /// バッチサイズ400(50バッチ)に分割してバッチ平均の分散を比較する: バッチ
+    /// サイズを4倍にすると、各バッチ平均の分散は理論上ちょうど1/4になる
+    /// (Var(平均)=Var(1サンプル)/N)ため、標準偏差(ノイズ)は1/2、つまり1/√4に
+    /// 減少する。
+    #[test]
+    fn r7_monte_carlo_noise_decreases_as_the_inverse_square_root_of_sample_count() {
+        let (scene, ray) = r7_variance_test_scene();
+        const TOTAL_SAMPLES: u64 = 20_000;
+        let samples: Vec<f64> = (0..TOTAL_SAMPLES)
+            .map(|i| {
+                let mut rng = SimRng::new(99, i);
+                scene.trace(&ray, &mut rng, 1)
+            })
+            .collect();
+
+        // 個々のサンプルが実際に(遮蔽/非遮蔽の)両方の値を取ること、つまり本当に
+        // 分散を持つシーンであることをまず確認する(そうでなければ収束率の検証自体が
+        // 意味を持たない)。
+        let min = samples.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max - min > 1.0,
+            "the test scene must actually produce variance across samples: min={min} max={max}"
+        );
+
+        let batch_means = |batch_size: usize| -> Vec<f64> {
+            samples
+                .chunks_exact(batch_size)
+                .map(|chunk| chunk.iter().sum::<f64>() / batch_size as f64)
+                .collect()
+        };
+
+        let means_100 = batch_means(100);
+        let means_400 = batch_means(400);
+        let var_100 = sample_variance(&means_100);
+        let var_400 = sample_variance(&means_400);
+
+        // 理論比: Var(batch=100)/Var(batch=400) = 400/100 = 4。有限バッチ数
+        // (200・50バッチ)によるサンプリング誤差を見込んで広めの許容範囲を取る。
+        // 実測値(固定シードのため決定論的に同一の値になる): ratio≈4.16
+        // (var_100≈0.0224, var_400≈0.00539)、理論値4に近い。
+        let ratio = var_100 / var_400;
+        assert!(
+            (3.0..5.5).contains(&ratio),
+            "batch-mean variance ratio should be close to 4 (O(1/N) variance decay, \
+             i.e. O(1/sqrt(N)) noise decay): ratio={ratio} var_100={var_100} var_400={var_400}"
+        );
+    }
 }
