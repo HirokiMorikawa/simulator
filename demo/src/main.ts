@@ -17,8 +17,12 @@ import "./style.css";
 // 3軸ハンドル)が表示され、軸ハンドルをドラッグするとその軸方向にのみ
 // `WasmWorld::set_body_position_at`(Commandキューを経由しない、
 // `RigidBodySet`位置の直接書き換え)で位置を編集できる(回転/スケールの
-// ハンドルは、この2体デモに意味のある対象が無いため未実装)。再生/ステップ/
-// Nudgeボタンは無効化される(シミュレーションは進行しない)。Playモードでは
+// ハンドルは、この2体デモに意味のある対象が無いため未実装)。Gizmoドラッグ
+// 開始のたびに直前の位置をUndoスタックへ積み、ToolbarのUndoボタン(Editモード
+// かつスタックが空でない場合のみ有効)で1件ずつ取り消せる(設計§6「Undo/Redo:
+// Editモードのみ」、縮約実装によりシーンJSON差分ではなく単純な位置スタック、
+// Redoは対象外)。再生/ステップ/Nudgeボタンは無効化される(シミュレーションは
+// 進行しない)。Playモードでは
 // Gizmoは非表示になり、箱への直接ドラッグがCommandキュー経由
 // (`Command::Grab/MoveGrab/Release`、`push_grab`/`push_move_grab`/
 // `push_release`)の物理的な"つかむ"操作になり、再生/ステップ/Nudgeボタンが
@@ -472,6 +476,13 @@ async function setUpSceneView(
   const gizmoDragStartPosition = new THREE.Vector3();
   let gizmoDragStartScalar = 0;
 
+  // Undo(Editモードのみ、設計docs/23-frontend/01-editor.md §6「Undo/Redo:
+  // Editモードのみ。編集操作はシーンJSONの差分として保持」)。縮約実装の理由:
+  // シーンJSON差分ではなく、Gizmoドラッグ開始直前の位置を積むだけの単純な
+  // スタック(Redoは対象外)。ドラッグ開始のたびに直前の位置を1件積む。
+  const EDIT_UNDO_STACK_CAPACITY = 20;
+  const editUndoStack: { bodyIndex: number; position: THREE.Vector3 }[] = [];
+
   renderer.domElement.addEventListener("pointerdown", (event) => {
     dragStartScreen = { x: event.clientX, y: event.clientY };
     isDragging = false;
@@ -497,6 +508,9 @@ async function setUpSceneView(
         gizmoAxisDir.copy(AXIS_VECTORS[pointerDownGizmoAxis]);
         gizmoDragStartPosition.copy(gizmoGroup.position);
         gizmoDragStartScalar = gizmoAxisDir.dot(gizmoDragStartPosition);
+        editUndoStack.push({ bodyIndex: selectedBodyIndex, position: gizmoDragStartPosition.clone() });
+        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+        undoButton.disabled = mode !== "edit";
         camera.getWorldDirection(cameraDirection);
         let planeNormal = cameraDirection
           .clone()
@@ -554,6 +568,7 @@ async function setUpSceneView(
   const playButton = document.getElementById("btn-play") as HTMLButtonElement;
   const stepButton = document.getElementById("btn-step") as HTMLButtonElement;
   const nudgeButton = document.getElementById("btn-nudge") as HTMLButtonElement;
+  const undoButton = document.getElementById("btn-undo") as HTMLButtonElement;
 
   // Edit/Play モードの分離(設計§4「Edit モード: シーンの直接編集が可能…Play を
   // 押した瞬間の状態が実行の初期条件になる」「Play モード: 直接編集は不可。
@@ -572,12 +587,22 @@ async function setUpSceneView(
     playButton.disabled = mode === "edit";
     stepButton.disabled = mode === "edit";
     nudgeButton.disabled = mode === "edit";
+    undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
     modeEditButton.classList.toggle("active", mode === "edit");
     modePlayButton.classList.toggle("active", mode === "play");
   }
   modeEditButton.addEventListener("click", () => setMode("edit"));
   modePlayButton.addEventListener("click", () => setMode("play"));
   setMode("edit");
+
+  undoButton.addEventListener("click", () => {
+    if (mode !== "edit") return;
+    const entry = editUndoStack.pop();
+    if (!entry) return;
+    world.set_body_position_at(entry.bodyIndex, entry.position.x, entry.position.y, entry.position.z);
+    undoButton.disabled = editUndoStack.length === 0;
+    render();
+  });
 
   playButton.addEventListener("click", () => {
     if (mode !== "play") return;
