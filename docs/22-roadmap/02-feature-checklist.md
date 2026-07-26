@@ -40,18 +40,19 @@
   BVH・コースティクス・マルチスキャッタリング・トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
-  速度ベクトルオーバーレイ)+ Toolbar(再生/Nudge Command + Edit/Playモード
-  トグル)+ Hierarchy/Inspector(複数ボディ列挙・Scene View双方向選択連動、
-  実Transformデータ)+ Probe Graphs(1系列)+ Timeline(既存の`World::
-  snapshot`/`restore`によるスナップショットリングバッファ(1s間隔・N=8面)で
-  実際にスクラブ・巻き戻しできる、名前付きブックマークの記録/復元も可能)+
-  Console(既存の`World::drain_events`を実際のログとして表示、着地/跳ね返りの
-  ContactStarted/ContactEndedが実際に流れ、All/Errors/Warnings/Infoタブが
-  実際に機能する)まで実装済み。設計§4のEdit/Playモード分離も実装
-  (既定Edit、Scene Viewドラッグは直接編集/`Command::Grab`系がモードで
-  切り替わる、詳細§6参照)。大部分(正式なGizmo・残りのオーバーレイ種別・
-  回路エディタ等)は未着手。
-- **次**: ワークストリームDの継続(正式なGizmo、残りオーバーレイ等)を軸に、
+  Translate Gizmo(X/Y/Z軸ハンドル、Editモード限定)+速度ベクトルオーバーレイ)+
+  Toolbar(再生/Nudge Command + Edit/Playモードトグル)+ Hierarchy/Inspector
+  (複数ボディ列挙・Scene View双方向選択連動、実Transformデータ)+
+  Probe Graphs(1系列)+ Timeline(既存の`World::snapshot`/`restore`による
+  スナップショットリングバッファ(1s間隔・N=8面)で実際にスクラブ・巻き戻し
+  できる、名前付きブックマークの記録/復元も可能)+ Console(既存の`World::
+  drain_events`を実際のログとして表示、着地/跳ね返りのContactStarted/
+  ContactEndedが実際に流れ、All/Errors/Warnings/Infoタブが実際に機能する)
+  まで実装済み。設計§4のEdit/Playモード分離も実装(既定Edit、Editモードの
+  Scene ViewドラッグはGizmo経由の直接編集のみ、PlayモードではGizmoが非表示に
+  なり`Command::Grab`系に切り替わる、詳細§6参照)。残りは回転/スケールの
+  Gizmo・残りのオーバーレイ種別・回路エディタ等。
+- **次**: ワークストリームDの継続(残りオーバーレイ・回路エディタ等)を軸に、
   ワークストリームB残り2シナリオ・ワークストリームC残り(R4・R3完全化)は機を見て並行して
   進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
@@ -849,20 +850,28 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
 - [ ] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
       (再生/一時停止/1stepの骨格配線は実装済み、時間倍率スライダー・シーン選択・
       Settingsは未実装、上記「現在地」参照)
-- [ ] Scene View: Three.js 3D ビューポート + Gizmo(移動/回転/スケール)+ ピック
+- [x] Scene View: Three.js 3D ビューポート + Gizmo(移動/回転/スケール)+ ピック
       (ビューポート自体はパネル内に配線済み。ピックは`THREE.Raycaster`で実装済み
       (クリックで最前面のボディを選択、Alt-クリックで2番目に手前(裏)のボディを
       選択、`intersectObjects`の距離順ソート済み結果を利用)——Hierarchy/
-      Inspectorと共通の`selectBody`経由で双方向に連動する。正式なGizmo(軸ハンドル
-      による移動/回転/スケール)は未実装だが、その代わりに箱を直接ドラッグして
-      動かせる操作を実装した(移動量が閾値を超えるとドラッグ、超えなければ
-      クリック選択、`main.ts`のpointerdown/move/upハンドラ参照)。ドラッグの
-      挙動はEdit/Playモード(§7)で切り替わる——Editモードでは
-      `set_body_position_at`による直接編集(Commandキューを経由しない位置の
-      直接書き換え、設計§4「Editモード: シーンの直接編集が可能」)、Playモードでは
-      `Command::Grab/MoveGrab/Release`で物理的に"つかんで"動かす。Playwrightで、
-      Editモードでのドラッグが物理を進めず位置だけを書き換えること(ドラッグ後
-      1秒待っても時刻・stepが不変)を確認した。オーバーレイは未実装)
+      Inspectorと共通の`selectBody`経由で双方向に連動する。Translate Gizmo
+      (X赤/Y緑/Z青の3軸ハンドル、`CylinderGeometry`+`ConeGeometry`)を実装した
+      ——Editモードかつ選択中ボディが非静的な場合のみ選択中ボディの位置に表示
+      (設計§4「Editモード…Scene View gizmo ドラッグ」)。軸ハンドルをドラッグ
+      すると、その軸とカメラ方向から作る平面へレイを投影しレイ×軸への射影量
+      だけ`set_body_position_at`(Commandキューを経由しない直接書き換え)で
+      その軸方向にのみ移動する(他2軸は不変)。回転/スケールのハンドルは
+      この2体デモに意味のある対象が無い(箱は軸並行のまま、床は静的平面)ため
+      未実装。PlayモードではGizmoは非表示になり、代わりに箱への直接ドラッグが
+      `Command::Grab/MoveGrab/Release`で物理的に"つかむ"操作になる(移動量が
+      閾値を超えるとドラッグ、超えなければクリック選択)。Playwrightで、X/Y/Z
+      各ハンドルのドラッグが対応する軸のみを変化させ他2軸を不変に保つこと・
+      ドラッグ中も時刻/stepが完全に凍結したまま(物理が一切進まない)ことを
+      確認した(ハンドルの実クリック可能領域を`THREE.Raycaster`ヒット結果の
+      ラスタスキャンで実測してからPlaywrightシナリオを組んだ——見た目の矢印
+      位置と実際の当たり判定はカメラ透視の前景短縮でずれるため、目視座標の
+      当てずっぽうでは安定して当たらないという実装上の発見)。オーバーレイは
+      速度ベクトルのみ)
 - [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
       (速度ベクトルのみ`THREE.ArrowHelper`で実装済み——選択中ボディの実速度
       (`body_velocity_at_f32`)を毎フレーム矢印として表示し、Toolbarのチェック

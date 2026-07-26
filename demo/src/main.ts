@@ -12,15 +12,17 @@ import "./style.css";
 // Raycaster`、Alt-クリックで裏側を選択)のどちらからでも同じ選択状態
 // (`selectBody`)を通じてInspectorが更新される(設計§1.2/§1.3が求める双方向
 // 選択)。設計§4のEdit/Playモード分離を実装した——既定はEditモード(Unityと同じ
-// 起動時挙動)で、Toolbarの Edit/Play トグルで切り替える。EditモードではScene
-// Viewでの箱のドラッグが`WasmWorld::set_body_position_at`による直接編集
-// (Commandキューを経由しない、`RigidBodySet`位置の直接書き換え)になり、
-// 再生/ステップ/Nudgeボタンは無効化される(シミュレーションは進行しない)。
-// PlayモードではCommandキュー経由(`Command::Grab/MoveGrab/Release`、
-// `push_grab`/`push_move_grab`/`push_release`)の物理的な"つかむ"操作になり、
-// 再生/ステップ/Nudgeボタンが有効になる——正式なGizmo(移動/回転/スケールの
-// 軸ハンドル)そのものではなく、ドラッグによる位置編集という縮約実装である
-// 点は変わらない。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため
+// 起動時挙動)で、Toolbarの Edit/Play トグルで切り替える。Editモードでは
+// Scene Viewに選択中(かつ非静的)ボディのTranslate Gizmo(X赤/Y緑/Z青の
+// 3軸ハンドル)が表示され、軸ハンドルをドラッグするとその軸方向にのみ
+// `WasmWorld::set_body_position_at`(Commandキューを経由しない、
+// `RigidBodySet`位置の直接書き換え)で位置を編集できる(回転/スケールの
+// ハンドルは、この2体デモに意味のある対象が無いため未実装)。再生/ステップ/
+// Nudgeボタンは無効化される(シミュレーションは進行しない)。Playモードでは
+// Gizmoは非表示になり、箱への直接ドラッグがCommandキュー経由
+// (`Command::Grab/MoveGrab/Release`、`push_grab`/`push_move_grab`/
+// `push_release`)の物理的な"つかむ"操作になり、再生/ステップ/Nudgeボタンが
+// 有効になる。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため
 // (World API-only制約)、Phase 0デモが実際に構築する内容と一致させた固定の
 // ルックアップテーブル(`BODY_META`)を使う。Scene Viewオーバーレイ(設計§1.2)は
 // 選択中ボディの速度ベクトルを矢印表示するもの(切替可、Toolbarのチェック
@@ -31,9 +33,9 @@ import "./style.css";
 // プレースホルダ内容のまま。TimelineはWorld::snapshot/restoreによる
 // スナップショットリングバッファ(1s間隔・N=8面)でスクラブ・巻き戻しができ、
 // 任意時点をブックマーク(`add_bookmark`/`restore_bookmark`、リングバッファの
-// 退避を受けない別領域)として名前付きで保存・復元できる。正式なGizmo(軸
-// ハンドル)・オーバーレイ残り・Commandキュー残り(SetMotorTarget/SetSwitch/
-// SetHeatSource未配線)・回路サブモードは全て後続増分。
+// 退避を受けない別領域)として名前付きで保存・復元できる。Gizmoの回転/
+// スケールハンドル・オーバーレイ残り・Commandキュー残り(SetMotorTarget/
+// SetSwitch/SetHeatSource未配線)・回路サブモードは全て後続増分。
 
 const GRAVITY = 9.80665;
 const DT = 1.0 / 120.0;
@@ -315,6 +317,44 @@ async function setUpSceneView(
   const velocityOverlayToggle = document.getElementById("toggle-velocity-overlay") as HTMLInputElement;
   const velocityDirection = new THREE.Vector3();
 
+  // 正式なGizmo(設計docs/23-frontend/01-editor.md §1.2「Gizmo: 選択中オブジェクトの
+  // Transformを直接ドラッグで編集」、§4「Scene View gizmo ドラッグ」)。縮約実装の
+  // 理由: 移動(Translate)のみ(回転/スケールはこの2体デモに意味のある対象が無い
+  // ——箱は軸並行のまま、床は静的平面——ため後続増分)。X(赤)/Y(緑)/Z(青)の3本の
+  // 矢印を選択中ボディの位置に表示し、Editモードでのみ表示・操作可能(設計§4
+  // 「Editモード…Scene View gizmo ドラッグ」「Playモード: 直接編集は不可」の
+  // 境界どおり、Playモードでは非表示)。静的ボディ(床)を選択中は編集対象として
+  // 意味が無いため非表示にする。
+  const GIZMO_AXIS_LENGTH = 1.2;
+  const GIZMO_HEAD_LENGTH = 0.28;
+  const GIZMO_SHAFT_RADIUS = 0.03;
+  const GIZMO_HEAD_RADIUS = 0.09;
+  const GIZMO_AXES: { axis: THREE.Vector3; color: number; name: "x" | "y" | "z" }[] = [
+    { axis: new THREE.Vector3(1, 0, 0), color: 0xff4444, name: "x" },
+    { axis: new THREE.Vector3(0, 1, 0), color: 0x44ff44, name: "y" },
+    { axis: new THREE.Vector3(0, 0, 1), color: 0x4488ff, name: "z" },
+  ];
+  const gizmoGroup = new THREE.Group();
+  const gizmoHandleMeshes: { mesh: THREE.Mesh; axisName: "x" | "y" | "z" }[] = [];
+  for (const { axis, color, name } of GIZMO_AXES) {
+    const shaftLength = GIZMO_AXIS_LENGTH - GIZMO_HEAD_LENGTH;
+    const material = new THREE.MeshBasicMaterial({ color });
+    const shaft = new THREE.Mesh(
+      new THREE.CylinderGeometry(GIZMO_SHAFT_RADIUS, GIZMO_SHAFT_RADIUS, shaftLength, 8),
+      material,
+    );
+    shaft.position.y = shaftLength / 2;
+    const head = new THREE.Mesh(new THREE.ConeGeometry(GIZMO_HEAD_RADIUS, GIZMO_HEAD_LENGTH, 8), material);
+    head.position.y = shaftLength + GIZMO_HEAD_LENGTH / 2;
+    const axisGroup = new THREE.Group();
+    axisGroup.add(shaft, head);
+    axisGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
+    gizmoGroup.add(axisGroup);
+    gizmoHandleMeshes.push({ mesh: shaft, axisName: name }, { mesh: head, axisName: name });
+  }
+  gizmoGroup.visible = false;
+  scene.add(gizmoGroup);
+
   let selectedBodyIndex = BODY_INDEX_BOX;
   function selectBody(index: number) {
     selectedBodyIndex = index;
@@ -325,12 +365,14 @@ async function setUpSceneView(
   renderInspectorFor(world, selectedBodyIndex);
 
   // Scene Viewピック(設計docs/23-frontend/01-editor.md §1.2「クリックでbody/
-  // joint/probeを選択。Alt-クリックで下層(重なった裏)を選択」)+ Gizmoの最小
-  // デモとしての箱のドラッグ(設計§1.2「Gizmo: 選択中オブジェクトのTransformを
-  // 直接ドラッグで編集」に相当、Play中でも動く分だけ縮約——`Command::Grab/
-  // MoveGrab/Release`(設計§4「ドラッグ系はCommand経由」)でワールド座標の目標点
-  // へ剛にピン留めする物理的な"つかむ"操作として実装した。移動量が閾値未満なら
-  // 通常のクリック選択として扱う(pointerdown/move/upの3イベントで判別)。
+  // joint/probeを選択。Alt-クリックで下層(重なった裏)を選択」)。Playモードでは
+  // 箱を直接ドラッグして`Command::Grab/MoveGrab/Release`(設計§4「ドラッグ系は
+  // Commandキュー経由」)でワールド座標の目標点へ剛にピン留めする物理的な
+  // "つかむ"操作(移動量が閾値未満なら通常のクリック選択、pointerdown/move/upの
+  // 3イベントで判別)。Editモードでは箱本体への直接ドラッグは行わず(設計§4の
+  // 「Editモード…Scene View gizmo ドラッグ」どおりGizmo経由のみ)、Gizmoの
+  // 軸ハンドルをドラッグすると`set_body_position_at`でその軸方向にのみ位置を
+  // 直接書き換える。
   const pickables: { mesh: THREE.Object3D; bodyIndex: number }[] = [
     { mesh: ground, bodyIndex: BODY_INDEX_GROUND },
     { mesh: box, bodyIndex: BODY_INDEX_BOX },
@@ -358,14 +400,42 @@ async function setUpSceneView(
     return picked ? { picked, worldPoint: hit.point } : null;
   }
 
+  function hitGizmo(event: PointerEvent): "x" | "y" | "z" | null {
+    if (!gizmoGroup.visible) return null;
+    updatePointerNdc(event);
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hits = raycaster.intersectObjects(gizmoHandleMeshes.map((h) => h.mesh));
+    if (!hits.length) return null;
+    const handle = gizmoHandleMeshes.find((h) => h.mesh === hits[0].object);
+    return handle ? handle.axisName : null;
+  }
+
+  const AXIS_VECTORS: Record<"x" | "y" | "z", THREE.Vector3> = {
+    x: new THREE.Vector3(1, 0, 0),
+    y: new THREE.Vector3(0, 1, 0),
+    z: new THREE.Vector3(0, 0, 1),
+  };
+
   let dragStartScreen: { x: number; y: number } | null = null;
   let pointerDownHit: ReturnType<typeof hitTest> = null;
+  let pointerDownGizmoAxis: "x" | "y" | "z" | null = null;
   let isDragging = false;
+  let dragMode: "grab" | "gizmo" | null = null;
+  const gizmoAxisDir = new THREE.Vector3();
+  const gizmoDragStartPosition = new THREE.Vector3();
+  let gizmoDragStartScalar = 0;
 
   renderer.domElement.addEventListener("pointerdown", (event) => {
     dragStartScreen = { x: event.clientX, y: event.clientY };
     isDragging = false;
-    pointerDownHit = hitTest(event, event.altKey);
+    dragMode = null;
+    if (mode === "edit") {
+      pointerDownGizmoAxis = hitGizmo(event);
+      pointerDownHit = pointerDownGizmoAxis ? null : hitTest(event, event.altKey);
+    } else {
+      pointerDownGizmoAxis = null;
+      pointerDownHit = hitTest(event, event.altKey);
+    }
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
@@ -374,37 +444,60 @@ async function setUpSceneView(
     const dy = event.clientY - dragStartScreen.y;
     if (!isDragging) {
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
-      if (!pointerDownHit || pointerDownHit.picked.bodyIndex !== BODY_INDEX_BOX) return;
-      isDragging = true;
-      camera.getWorldDirection(cameraDirection);
-      dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
-      if (mode === "play") {
+      if (pointerDownGizmoAxis) {
+        isDragging = true;
+        dragMode = "gizmo";
+        gizmoAxisDir.copy(AXIS_VECTORS[pointerDownGizmoAxis]);
+        gizmoDragStartPosition.copy(gizmoGroup.position);
+        gizmoDragStartScalar = gizmoAxisDir.dot(gizmoDragStartPosition);
+        camera.getWorldDirection(cameraDirection);
+        let planeNormal = cameraDirection
+          .clone()
+          .sub(gizmoAxisDir.clone().multiplyScalar(cameraDirection.dot(gizmoAxisDir)));
+        if (planeNormal.lengthSq() < 1e-9) {
+          planeNormal = new THREE.Vector3().crossVectors(gizmoAxisDir, new THREE.Vector3(0, 1, 0));
+          if (planeNormal.lengthSq() < 1e-9) {
+            planeNormal.crossVectors(gizmoAxisDir, new THREE.Vector3(1, 0, 0));
+          }
+        }
+        planeNormal.normalize();
+        dragPlane.setFromNormalAndCoplanarPoint(planeNormal, gizmoDragStartPosition);
+      } else {
+        if (mode !== "play" || !pointerDownHit || pointerDownHit.picked.bodyIndex !== BODY_INDEX_BOX) return;
+        isDragging = true;
+        dragMode = "grab";
+        camera.getWorldDirection(cameraDirection);
+        dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
         const p = world.body_position_at_f32(BODY_INDEX_BOX);
         world.push_grab(p[0], p[1], p[2]);
       }
     }
     updatePointerNdc(event);
     raycaster.setFromCamera(pointerNdc, camera);
-    if (raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)) {
-      if (mode === "play") {
-        world.push_move_grab(dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
-      } else {
-        world.set_body_position_at(BODY_INDEX_BOX, dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
-      }
+    if (!raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)) return;
+    if (dragMode === "gizmo") {
+      const t = gizmoAxisDir.dot(dragPlaneHit);
+      const delta = t - gizmoDragStartScalar;
+      const newPos = gizmoDragStartPosition.clone().addScaledVector(gizmoAxisDir, delta);
+      world.set_body_position_at(selectedBodyIndex, newPos.x, newPos.y, newPos.z);
+    } else if (dragMode === "grab") {
+      world.push_move_grab(dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
     }
   });
 
   renderer.domElement.addEventListener("pointerup", () => {
     if (isDragging) {
-      if (mode === "play") {
+      if (dragMode === "grab") {
         world.push_release();
       }
     } else if (pointerDownHit) {
       selectBody(pointerDownHit.picked.bodyIndex);
     }
     isDragging = false;
+    dragMode = null;
     dragStartScreen = null;
     pointerDownHit = null;
+    pointerDownGizmoAxis = null;
   });
 
   const hud = document.getElementById("hud")!;
@@ -543,6 +636,12 @@ async function setUpSceneView(
       velocityArrow.visible = true;
     } else {
       velocityArrow.visible = false;
+    }
+
+    const showGizmo = mode === "edit" && !world.body_is_static_at(selectedBodyIndex);
+    gizmoGroup.visible = showGizmo;
+    if (showGizmo) {
+      gizmoGroup.position.copy(inspectorPosition);
     }
 
     const hashFull = world.state_hash();
