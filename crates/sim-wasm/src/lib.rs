@@ -281,6 +281,22 @@ impl WasmWorld {
         });
     }
 
+    /// Editモードの直接編集(設計docs/23-frontend/01-editor.md §4「Editモード:
+    /// シーンの直接編集が可能…Scene View gizmo ドラッグ」)。Playモードのドラッグ
+    /// (`push_grab`/`push_move_grab`、Command経由・シミュレーション実行中でも
+    /// 決定的に記録される)とは異なり、Commandキューを経由せず`RigidBodySet`の
+    /// 位置を直接書き換える——設計が「実行中の直接編集は不可」とする境界どおり、
+    /// この操作はシミュレーションが進行していない(Editモード中は呼び出し側が
+    /// `step()`を呼ばない)ことを前提とする。`World`自体はBodyId経由の位置setterを
+    /// 公開していないため(`mechanics_mut().bodies.position`はP1設計が定める
+    /// `RigidBodySet`のSoAレイアウト、`docs/10-mechanics/01-rigid-body.md` §4)、
+    /// ここで直接アクセスする。
+    pub fn set_body_position_at(&mut self, index: usize, x: f64, y: f64, z: f64) {
+        let id = self.body_id_at(index);
+        self.inner.mechanics_mut().bodies.position[id.index as usize] =
+            sim_math::Vec3::new(x, y, z);
+    }
+
     /// Consoleパネル(設計docs/23-frontend/01-editor.md §1.5「`SolverDiagnostics`の
     /// 発散警告・…イベントをフィルタ表示」)向けに、前回呼び出し以降に発生した
     /// イベント(既存の`World::drain_events`)を1行1件のテキストへ整形して返す

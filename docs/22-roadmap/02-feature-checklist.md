@@ -40,17 +40,18 @@
   BVH・コースティクス・マルチスキャッタリング・トーンマッピング。
 - **ワークストリームD(フロントエンド)**: Phase 0スタブから、6パネルドッキングレイアウト
   骨格(3プリセット)+ Scene View(床+箱、箱が着地して静止、Raycasterピック+
-  Grab/MoveGrab/Releaseによるドラッグ操作+速度ベクトルオーバーレイ)+
-  Toolbar(再生/Nudge Command)+ Hierarchy/Inspector(複数ボディ列挙・
-  Scene View双方向選択連動、実Transformデータ)+ Probe Graphs(1系列)+
-  Timeline(既存の`World::snapshot`/`restore`によるスナップショットリング
-  バッファ(1s間隔・N=8面)で実際にスクラブ・巻き戻しできる、名前付き
-  ブックマークの記録/復元も可能)+ Console(既存の`World::drain_events`を
-  実際のログとして表示、着地/跳ね返りのContactStarted/ContactEndedが
-  実際に流れ、All/Errors/Warnings/Infoタブが実際に機能する)まで実装
-  (詳細は§6参照)。大部分(正式なGizmo・残りのオーバーレイ種別・
-  Edit/Playモード分離・回路エディタ等)は未着手。
-- **次**: ワークストリームDの継続(Hierarchy/Inspectorの複数ボディ対応、Gizmo等)を軸に、
+  速度ベクトルオーバーレイ)+ Toolbar(再生/Nudge Command + Edit/Playモード
+  トグル)+ Hierarchy/Inspector(複数ボディ列挙・Scene View双方向選択連動、
+  実Transformデータ)+ Probe Graphs(1系列)+ Timeline(既存の`World::
+  snapshot`/`restore`によるスナップショットリングバッファ(1s間隔・N=8面)で
+  実際にスクラブ・巻き戻しできる、名前付きブックマークの記録/復元も可能)+
+  Console(既存の`World::drain_events`を実際のログとして表示、着地/跳ね返りの
+  ContactStarted/ContactEndedが実際に流れ、All/Errors/Warnings/Infoタブが
+  実際に機能する)まで実装済み。設計§4のEdit/Playモード分離も実装
+  (既定Edit、Scene Viewドラッグは直接編集/`Command::Grab`系がモードで
+  切り替わる、詳細§6参照)。大部分(正式なGizmo・残りのオーバーレイ種別・
+  回路エディタ等)は未着手。
+- **次**: ワークストリームDの継続(正式なGizmo、残りオーバーレイ等)を軸に、
   ワークストリームB残り2シナリオ・ワークストリームC残り(R4・R3完全化)は機を見て並行して
   進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
@@ -853,11 +854,15 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       (クリックで最前面のボディを選択、Alt-クリックで2番目に手前(裏)のボディを
       選択、`intersectObjects`の距離順ソート済み結果を利用)——Hierarchy/
       Inspectorと共通の`selectBody`経由で双方向に連動する。正式なGizmo(軸ハンドル
-      による移動/回転/スケール、Editモード限定)は未実装だが、その代わりに
-      箱を直接ドラッグして`Command::Grab/MoveGrab/Release`で物理的に"つかんで"
+      による移動/回転/スケール)は未実装だが、その代わりに箱を直接ドラッグして
       動かせる操作を実装した(移動量が閾値を超えるとドラッグ、超えなければ
-      クリック選択、`main.ts`のpointerdown/move/upハンドラ参照)。オーバーレイは
-      未実装)
+      クリック選択、`main.ts`のpointerdown/move/upハンドラ参照)。ドラッグの
+      挙動はEdit/Playモード(§7)で切り替わる——Editモードでは
+      `set_body_position_at`による直接編集(Commandキューを経由しない位置の
+      直接書き換え、設計§4「Editモード: シーンの直接編集が可能」)、Playモードでは
+      `Command::Grab/MoveGrab/Release`で物理的に"つかんで"動かす。Playwrightで、
+      Editモードでのドラッグが物理を進めず位置だけを書き換えること(ドラッグ後
+      1秒待っても時刻・stepが不変)を確認した。オーバーレイは未実装)
 - [ ] Scene View オーバーレイ(接触点/速度/力/拘束/流体場/フレーム軸、切替可)
       (速度ベクトルのみ`THREE.ArrowHelper`で実装済み——選択中ボディの実速度
       (`body_velocity_at_f32`)を毎フレーム矢印として表示し、Toolbarのチェック
@@ -911,7 +916,22 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       エクスポートは未実装)
 - [ ] Project ドロワー: Scenes/Materials/Prefabs/Replays
       (タブ切替UIの骨格(静的プレースホルダ内容)のみ実装済み)
-- [ ] Edit / Play モードの切替と編集ロック
+- [x] Edit / Play モードの切替と編集ロック
+      (Toolbarのセグメントトグル(`#btn-mode-edit`/`#btn-mode-play`)で切替。
+      既定はEditモード(Unityと同じ起動時挙動、設計§4「Play を押した瞬間の
+      状態が実行の初期条件になる」)——再生/ステップ/Nudgeボタンは無効化され
+      (`disabled`属性)、シミュレーションのstepは一切呼ばれない(フレームループの
+      条件が`mode === "play" && playing`)。Editモードの直接編集はScene View
+      ドラッグのみ実装(Hierarchy追加/削除・Inspector直接編集は対象外、後続増分)。
+      Playモードへ切替後は自動的に再生開始し、以後の介入は`Command`
+      (Grab/MoveGrab/Release、ApplyForce)経由のみになる。Play→Editへ戻ると
+      その時点の状態で即座に凍結する(実行後状態を新規シーンとして保存する
+      選択肢の提示は未実装)。Timelineバッジがモードに応じて
+      Edit/Playing/Pausedの3状態を表示する。Playwrightで、Edit時は10秒待っても
+      箱のy座標が変化しないこと・Playへ切替後は実際に落下/着地すること・
+      Editへ戻すと即座に凍結すること(戻した直後と1秒後でt/stepが完全一致)を
+      確認した。Undo/Redo・シーンJSON diff化(設計が定めるEdit編集の記録形式)は
+      未実装)
 - [ ] Command 系(Grab/MoveGrab/Release/SetMotorTarget/…)と入力列記録
       (`ApplyForce`のみ`sim-wasm`に`push_apply_force`として最小配線し、Toolbarの
       Nudgeボタンで実演した——直接オブジェクトの状態を書き換えるのではなく

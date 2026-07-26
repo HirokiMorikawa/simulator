@@ -11,24 +11,29 @@ import "./style.css";
 // 接続済みで、Hierarchyでのクリック・Scene Viewでのクリックピック(`THREE.
 // Raycaster`、Alt-クリックで裏側を選択)のどちらからでも同じ選択状態
 // (`selectBody`)を通じてInspectorが更新される(設計§1.2/§1.3が求める双方向
-// 選択)。箱をドラッグすると`Command::Grab/MoveGrab/Release`(`push_grab`/
-// `push_move_grab`/`push_release`)経由で物理的に"つかんで"動かせる(設計§1.2の
-// Gizmoに相当する縮約実装——正式なGizmo(移動/回転/スケールの軸ハンドル、Edit
-// モード限定)ではなく、Playモードのまま動く物理的なドラッグ操作)。Shape/
-// Materialは`sim-wasm`側に対応するクエリAPIが無いため(World API-only制約)、
-// Phase 0デモが実際に構築する内容と一致させた固定のルックアップテーブル
-// (`BODY_META`)を使う。Scene Viewオーバーレイ(設計§1.2)は選択中ボディの
-// 速度ベクトルを矢印表示するもの(切替可、Toolbarのチェックボックス)のみ実装
-// (接触点・力・拘束・流体場・フレーム軸は対象外)。Consoleは`World::
-// drain_events`(既存API)が返す実イベント(この2体デモでは箱の着地/跳ね返り
-// のたびに発生する`ContactStarted`/`ContactEnded`)をAll/Errors/Warnings/Info
-// タブでフィルタ表示する(設計§1.5)。Projectは静的なプレースホルダ内容のまま。
-// TimelineはWorld::snapshot/restoreによるスナップショットリングバッファ
-// (1s間隔・N=8面)でスクラブ・巻き戻しができ、任意時点をブックマーク
-// (`add_bookmark`/`restore_bookmark`、リングバッファの退避を受けない別領域)
-// として名前付きで保存・復元できる。正式なGizmo・オーバーレイ残り・Command
-// キュー残り(SetMotorTarget/SetSwitch/SetHeatSource未配線)・
-// Edit/Playモードの分離(§4)・回路サブモードは全て後続増分。
+// 選択)。設計§4のEdit/Playモード分離を実装した——既定はEditモード(Unityと同じ
+// 起動時挙動)で、Toolbarの Edit/Play トグルで切り替える。EditモードではScene
+// Viewでの箱のドラッグが`WasmWorld::set_body_position_at`による直接編集
+// (Commandキューを経由しない、`RigidBodySet`位置の直接書き換え)になり、
+// 再生/ステップ/Nudgeボタンは無効化される(シミュレーションは進行しない)。
+// PlayモードではCommandキュー経由(`Command::Grab/MoveGrab/Release`、
+// `push_grab`/`push_move_grab`/`push_release`)の物理的な"つかむ"操作になり、
+// 再生/ステップ/Nudgeボタンが有効になる——正式なGizmo(移動/回転/スケールの
+// 軸ハンドル)そのものではなく、ドラッグによる位置編集という縮約実装である
+// 点は変わらない。Shape/Materialは`sim-wasm`側に対応するクエリAPIが無いため
+// (World API-only制約)、Phase 0デモが実際に構築する内容と一致させた固定の
+// ルックアップテーブル(`BODY_META`)を使う。Scene Viewオーバーレイ(設計§1.2)は
+// 選択中ボディの速度ベクトルを矢印表示するもの(切替可、Toolbarのチェック
+// ボックス)のみ実装(接触点・力・拘束・流体場・フレーム軸は対象外)。Consoleは
+// `World::drain_events`(既存API)が返す実イベント(この2体デモでは箱の着地/
+// 跳ね返りのたびに発生する`ContactStarted`/`ContactEnded`)をAll/Errors/
+// Warnings/Infoタブでフィルタ表示する(設計§1.5)。Projectは静的な
+// プレースホルダ内容のまま。TimelineはWorld::snapshot/restoreによる
+// スナップショットリングバッファ(1s間隔・N=8面)でスクラブ・巻き戻しができ、
+// 任意時点をブックマーク(`add_bookmark`/`restore_bookmark`、リングバッファの
+// 退避を受けない別領域)として名前付きで保存・復元できる。正式なGizmo(軸
+// ハンドル)・オーバーレイ残り・Commandキュー残り(SetMotorTarget/SetSwitch/
+// SetHeatSource未配線)・回路サブモードは全て後続増分。
 
 const GRAVITY = 9.80665;
 const DT = 1.0 / 120.0;
@@ -373,19 +378,27 @@ async function setUpSceneView(
       isDragging = true;
       camera.getWorldDirection(cameraDirection);
       dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
-      const p = world.body_position_at_f32(BODY_INDEX_BOX);
-      world.push_grab(p[0], p[1], p[2]);
+      if (mode === "play") {
+        const p = world.body_position_at_f32(BODY_INDEX_BOX);
+        world.push_grab(p[0], p[1], p[2]);
+      }
     }
     updatePointerNdc(event);
     raycaster.setFromCamera(pointerNdc, camera);
     if (raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)) {
-      world.push_move_grab(dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
+      if (mode === "play") {
+        world.push_move_grab(dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
+      } else {
+        world.set_body_position_at(BODY_INDEX_BOX, dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
+      }
     }
   });
 
   renderer.domElement.addEventListener("pointerup", () => {
     if (isDragging) {
-      world.push_release();
+      if (mode === "play") {
+        world.push_release();
+      }
     } else if (pointerDownHit) {
       selectBody(pointerDownHit.picked.bodyIndex);
     }
@@ -402,16 +415,37 @@ async function setUpSceneView(
   const stepButton = document.getElementById("btn-step") as HTMLButtonElement;
   const nudgeButton = document.getElementById("btn-nudge") as HTMLButtonElement;
 
-  // Edit/Play モードの正式な分離(設計§4、Command キュー経由の介入)は後続増分。
-  // ここでは単に「ステップ実行中かどうか」のトグルとして再生ボタンを配線する。
-  let playing = true;
-  playButton.textContent = "⏸";
+  // Edit/Play モードの分離(設計§4「Edit モード: シーンの直接編集が可能…Play を
+  // 押した瞬間の状態が実行の初期条件になる」「Play モード: 直接編集は不可。
+  // 介入は全て Command」)。既定はEditモード(Unityと同じ起動時挙動、Playを
+  // 押すまでシミュレーションは進まない)。
+  type Mode = "edit" | "play";
+  let mode: Mode = "edit";
+  let playing = false;
+  const modeEditButton = document.getElementById("btn-mode-edit") as HTMLButtonElement;
+  const modePlayButton = document.getElementById("btn-mode-play") as HTMLButtonElement;
+
+  function setMode(next: Mode) {
+    mode = next;
+    playing = next === "play";
+    playButton.textContent = playing ? "⏸" : "▶";
+    playButton.disabled = mode === "edit";
+    stepButton.disabled = mode === "edit";
+    nudgeButton.disabled = mode === "edit";
+    modeEditButton.classList.toggle("active", mode === "edit");
+    modePlayButton.classList.toggle("active", mode === "play");
+  }
+  modeEditButton.addEventListener("click", () => setMode("edit"));
+  modePlayButton.addEventListener("click", () => setMode("play"));
+  setMode("edit");
+
   playButton.addEventListener("click", () => {
+    if (mode !== "play") return;
     playing = !playing;
     playButton.textContent = playing ? "⏸" : "▶";
   });
   stepButton.addEventListener("click", () => {
-    if (!playing) {
+    if (mode === "play" && !playing) {
       world.step();
       appendConsoleEntries(world.drain_events_text());
       render();
@@ -521,7 +555,7 @@ async function setUpSceneView(
     timelineStep.textContent = `step = ${world.step_count().toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
     hashDisplay.title = hashFull;
-    playModeBadge.textContent = playing ? "Playing" : "Paused";
+    playModeBadge.textContent = mode === "edit" ? "Edit" : playing ? "Playing" : "Paused";
 
     if (!scrubbing) {
       const latestIndex = Math.max(world.snapshot_count() - 1, 0);
@@ -542,7 +576,7 @@ async function setUpSceneView(
     const frameSeconds = Math.min((nowMs - lastTimeMs) / 1000, 0.25);
     lastTimeMs = nowMs;
 
-    if (playing) {
+    if (mode === "play" && playing) {
       accumulator += frameSeconds;
       let steps = 0;
       while (accumulator >= DT && steps < MAX_STEPS_PER_FRAME) {

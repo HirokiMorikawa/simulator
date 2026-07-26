@@ -8,6 +8,14 @@
   <body>
     <div id="app" data-layout="default">
       <header id="toolbar" class="panel">
+        <div class="toolbar-group" id="mode-toggle">
+          <button id="btn-mode-edit" class="mode-btn" title="Editモード: シーンを直接編集(シミュレーション停止)">
+            Edit
+          </button>
+          <button id="btn-mode-play" class="mode-btn" title="Playモード: Command経由の操作のみ・シミュレーション実行">
+            ▶ Play
+          </button>
+        </div>
         <div class="toolbar-group">
           <button id="btn-play" title="再生/一時停止">▶</button>
           <button id="btn-step" title="1 step 進める">⏭</button>

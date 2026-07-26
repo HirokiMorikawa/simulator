@@ -91,6 +91,17 @@ body {
   color: #9cf;
 }
 
+.mode-btn.active {
+  background: #2a3a4a;
+  color: #9cf;
+  border-color: #3a4a5a;
+}
+
+#toolbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 #hierarchy {
   grid-area: hierarchy;
 }
