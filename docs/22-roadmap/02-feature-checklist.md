@@ -29,10 +29,11 @@
   (snapshot/restore・Command(ApplyForce/SetSwitch/SetHeatSource)・raycast/overlap_sphere・
   Probe・circuit_probe・`from_scenario`(bodies/materials/fluids/probesセクション))・
   決定論/保存則CIゲート(既存test suiteで充足済みと確認)・性能ベンチ(criterion、3ホット
-  パス)・統合シナリオ3/5本(ブレーキ発熱・手回し発電・断熱圧縮)。
-  残り: 統合シナリオ2本(氷と飲み物・再突入)、シーンJSON`couplings`セクション
-  (スキーマ未確定のため保留、§4参照)、D1–D39のうち専用ドメイン/未実装機能待ちの一部
-  (詳細§7)。
+  パス)・統合シナリオ4本中3本(ブレーキ発熱・手回し発電・断熱圧縮、+氷と飲み物は
+  既存のD18デモテストがcross-referenceで充足)。
+  残り: 統合シナリオ1本(再突入、天体レジーム切替との`World`結合が前提)、
+  シーンJSON`couplings`セクション(スキーマ未確定のため保留、§4参照)、
+  D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)。
 - **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R5・R6・R7完全Green、GGX
   マイクロファセット(`RoughConductor`)実装済み(詳細・各テスト名は§5/§8参照)。
   残り: R3の完全化(hero wavelength分光)、R4(コーネルボックス、参照解データ未入手)、
@@ -638,7 +639,14 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [x] 統合シナリオ: 手回し発電(機械仕事→電気→ジュール熱の核のみ、「光」(LED等の
       発光)は光学ドメインとの結合が別途必要なため対象外。`MotorCoupling`+
       `JouleHeat`、定常電力・ジュール熱注入率とも実測rel_err<1%で一致)
-- [ ] 統合シナリオ: 氷と飲み物
+- [x] 統合シナリオ: 氷と飲み物(熱伝達+相変化+浮力(質量変化)の同時進行、設計§5
+      「3. 氷と飲み物」)——新規テストは追加せず、既存のD18デモテスト
+      (`crates/sim-world/src/demos.rs::demos::tests::
+      d18_ice_and_drink_melts_along_t7_plateau_and_shrinking_mass_raises_the_floating_ice`)
+      が既にこの3つを同時に検証していることを確認しての完了扱い(ThermalSolver+
+      `PhaseChangeMorph`による熱伝達・相変化、`MechanicsSolver.water`埋め込み浮力が
+      `PhaseChangeMorph`が更新する質量を毎step自動で読み直すことによる浮力連動、
+      いずれも新規コード不要でD18時点の実装がそのまま満たしていた)
 - [x] 統合シナリオ: 断熱圧縮(`SliderJoint`(新規実装)で1自由度に拘束した`Dynamic`
       ピストンが初速で気体を圧縮する自由運動。`PistonGas`結合経由でピストン運動
       エネルギー+気体内部エネルギー($C_v T$)の合計が保存される(断熱系)ことを

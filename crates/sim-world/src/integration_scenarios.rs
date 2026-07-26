@@ -1,13 +1,17 @@
 //! 統合シナリオ(複数`Coupling`を通しで検証、設計docs/20-integration/01-coupling-matrix.md
 //! §5「統合シナリオテスト」)。
 //!
-//! **縮約実装の理由**: 5本のうち現時点で実装済みの`Coupling`で構成できる
+//! **縮約実装の理由**: 4本のうち現時点で実装済みの`Coupling`で構成できる
 //! 「1. ブレーキ: 運動 → 摩擦熱 → 温度上昇」(`DissipationToHeat`)、
 //! 「2. 手回し発電: 機械仕事 → 電気 → ジュール熱」(`MotorCoupling`+`JouleHeat`、
 //! 「光」(LED等の発光)部分は光学ドメインとの結合が別途必要なため対象外)、
 //! 「4. 断熱圧縮: 機械運動 ⇔ 気体内部エネルギー」(`PistonGas`+`SliderJoint`)を実装する。
-//! 「氷と飲み物」(相変化、`PhaseChangeMorph`未実装)・「再突入」(天体レジーム切替との
-//! 結合、`World`未接続)は前提未実装のため後続増分。
+//! 「3. 氷と飲み物: 熱伝達+相変化+浮力(質量変化)の同時進行」は、既存の
+//! `crates/sim-world/src/demos.rs`のD18デモテスト(`PhaseChangeMorph`+
+//! `MechanicsSolver.water`埋め込み浮力)が既にこの3つの同時進行をそのまま検証
+//! しているため、ここへ新規に(ほぼ重複する)テストを追加しない
+//! (cross-reference、D14/D20/D22デモと同じ判断)。「再突入」(天体レジーム切替との
+//! `World`結合)は前提未実装のため後続増分。
 //!
 //! `World::add_coupling`(`World::apply_coupling`のdoc参照)でレジストリに登録し、
 //! `world.step()`が毎フレーム自動的に適用する構成を取る(以前は`world.step()`の
