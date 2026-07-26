@@ -33,9 +33,9 @@ pub use magnetism::{
 };
 pub use motor::DcMotor;
 pub use optics::{
-    brewster_angle, critical_angle, fresnel_reflectance, prism_index_from_min_deviation,
-    prism_min_deviation, snell_refract_angle, thin_lens_focal_length,
-    thin_lens_paraxial_ray_trace_focal_length, FresnelReflectance,
+    brewster_angle, cauchy_refractive_index, critical_angle, fresnel_reflectance,
+    prism_index_from_min_deviation, prism_min_deviation, snell_refract_angle,
+    thin_lens_focal_length, thin_lens_paraxial_ray_trace_focal_length, FresnelReflectance,
 };
 pub use raytracer::{
     planck_spectral_radiance, trace_energy, OpticalSurface, Ray, SurfaceGeom, SurfaceKind,

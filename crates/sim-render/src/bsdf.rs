@@ -72,6 +72,38 @@ impl Dielectric {
     }
 }
 
+/// 分散する誘電体(設計docs/13-electromagnetism/04-light-optics.md §2.2「Cauchy式
+/// $n(\lambda)=A+B/\lambda^2$」、R3「分光/屈折」の検証対象)。`sim_em::
+/// cauchy_refractive_index`(既に検証済みの解析式)をそのまま再利用する。
+///
+/// **縮約実装の理由**: 設計の完全な分光レンダリング(hero wavelength法、1経路で
+/// 複数波長を相関サンプルしCIE等色関数でRGBへ変換、設計§3)はパストレーサ全体に
+/// 波長を通す大掛かりな変更を要するため後続増分に残す。本増分では、`Dielectric`
+/// (単色・固定屈折率)を特定の波長で具体化する`to_dielectric_at`のみを提供し、
+/// 分散(波長ごとに屈折角が異なること)そのものの正しさを、既存の`Dielectric::
+/// refract`(Snellの法則、既に検証済み)を複数の波長で呼び分けるだけで確認する
+/// (`sim_render`側に新しい幾何計算を追加しない、既存コードの再利用)。
+#[derive(Clone, Copy, Debug)]
+pub struct CauchyDielectric {
+    pub a: f64,
+    pub b: f64,
+}
+
+impl CauchyDielectric {
+    /// 波長`wavelength_nm`(ナノメートル)における屈折率。
+    pub fn ior_at(&self, wavelength_nm: f64) -> f64 {
+        sim_em::cauchy_refractive_index(self.a, self.b, wavelength_nm)
+    }
+
+    /// 指定波長での単色`Dielectric`を具体化する(既存の`reflect`/`refract`/
+    /// `reflectance`をそのまま使うため)。
+    pub fn to_dielectric_at(&self, wavelength_nm: f64) -> Dielectric {
+        Dielectric {
+            ior: self.ior_at(wavelength_nm),
+        }
+    }
+}
+
 /// 完全拡散(Lambertian)BSDF。$f_r = \rho/\pi$(設計§2.1のレンダリング方程式のBSDF項)。
 #[derive(Clone, Copy, Debug)]
 pub struct Lambertian {
@@ -235,5 +267,49 @@ mod tests {
         let steep_theta_i = 1.3_f64; // ≈74.5°、臨界角より大きい。
         let direction = Vec3::new(steep_theta_i.sin(), -steep_theta_i.cos(), 0.0);
         assert!(Dielectric::refract(direction, normal, eta).is_none());
+    }
+
+    /// R3: 分散(虹の色分散)——同じ入射角でも波長ごとに屈折率が異なるため屈折角も
+    /// 異なり、Snellの法則$n_1\sin\theta_1=n_2\sin\theta_2$は各波長でそれぞれ厳密に
+    /// 成り立ちながら、短波長(青)の方が長波長(赤)より大きく曲がる(屈折角が
+    /// 法線に近い、`n`が大きいほど屈折角は小さくなる)ことを確認する。
+    #[test]
+    fn cauchy_dielectric_disperses_different_wavelengths_into_different_refraction_angles() {
+        // 文献の標準的なBK7 Cauchy係数(可視域近似、sim-em::optics::tests参照)。
+        let bk7 = CauchyDielectric {
+            a: 1.5046,
+            b: 4200.0,
+        };
+        let n_blue = bk7.ior_at(486.1);
+        let n_red = bk7.ior_at(656.3);
+        assert!(n_blue > n_red, "n_blue={n_blue} n_red={n_red}");
+
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+        let theta_i = 0.6_f64; // 臨界角の心配がない適度な入射角(真空→ガラス、TIR無し)。
+        let direction = Vec3::new(theta_i.sin(), -theta_i.cos(), 0.0);
+
+        let refract_angle = |wavelength_nm: f64| -> f64 {
+            let dielectric = bk7.to_dielectric_at(wavelength_nm);
+            let eta = 1.0 / dielectric.ior;
+            let refracted = Dielectric::refract(direction, normal, eta)
+                .expect("should not TIR entering a denser medium");
+            let theta_t = (-refracted.dot(normal)).acos();
+            // 各波長でSnellの法則がそれぞれ厳密に成り立つことも合わせて確認する。
+            let lhs = 1.0 * theta_i.sin();
+            let rhs = dielectric.ior * theta_t.sin();
+            assert!(
+                (lhs - rhs).abs() < 1e-9,
+                "Snell's law violated at {wavelength_nm}nm: n1 sinθ1={lhs} n2 sinθ2={rhs}"
+            );
+            theta_t
+        };
+
+        let theta_t_blue = refract_angle(486.1);
+        let theta_t_red = refract_angle(656.3);
+        assert!(
+            theta_t_blue < theta_t_red,
+            "blue (higher n) should refract closer to the normal than red: \
+             theta_t_blue={theta_t_blue} theta_t_red={theta_t_red}"
+        );
     }
 }

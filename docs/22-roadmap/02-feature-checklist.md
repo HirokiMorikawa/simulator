@@ -1230,6 +1230,21 @@
   寄与ゼロ、に加えて`trace`自体がこの直接照明を正しく配線していること(環境放射
   輝度0・孤立球1個のシーンでは間接項が恒等的に0になるため、`trace`の結果が
   `direct_lighting`単体の値と厳密に一致する)も確認した。
+  続けて設計§8の実装順序「分光・屈折・コースティクス」に取り組んだ。完全な分光
+  レンダリング(hero wavelength法、`Scene`/`trace`全体への波長の配線、CIE等色
+  関数でのRGB変換)は大掛かりな変更を要するため、まずR3が要求する核となる物理
+  (分散、波長ごとに屈折角が異なること)だけを縮約実装した。`sim_em::optics`に
+  Cauchy式$n(\lambda)=A+B/\lambda^2$(設計docs/13-electromagnetism/04-light-
+  optics.md §2.2)を実装し(`cauchy_refractive_index`、既存のBK7カタログ値
+  (1.5168、d線587.6nm)とrel<0.1%で一致することを確認、文献の標準的なBK7
+  Cauchy係数A=1.5046・B=4200nm²を使用)、`sim_render`側に`CauchyDielectric`
+  (指定波長で単色`Dielectric`を具体化する`to_dielectric_at`)を追加した。新しい
+  幾何計算は追加せず、既存の`Dielectric::refract`(Snellの法則、既に検証済み)を
+  複数の波長で呼び分けるだけで、青(486.1nm)が赤(656.3nm)より屈折率が大きく
+  屈折角が小さい(法線に近い)ことと、各波長でSnell則がそれぞれ厳密に成り立つ
+  ことを同時に確認した(既存コードの再利用のみで新たな検証コストが小さい設計)。
+  R3のチェックボックス自体は、分光レンダリング全体への波長の配線(hero
+  wavelength法)・コースティクスが未実装のため完了とは見なさない。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1888,7 +1903,14 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       金属(複素屈折率$n+ik$)・粗面透過は未実装。`sim_em::raytracer`(光学ドメインの
       決定論的パワー分岐トレース、E9–E12のエネルギー収支検証用)とは目的が異なる
       別実装として意図的に型を共有しない(`bsdf.rs`モジュールdoc参照)。
-- [ ] 分光・屈折・コースティクス
+- [ ] 分光・屈折・コースティクス——分散(`CauchyDielectric`、Cauchy式
+      $n(\lambda)=A+B/\lambda^2$、`sim_em::cauchy_refractive_index`を再利用)を
+      実装済み。既存の`Dielectric::refract`(Snellの法則)を波長ごとに具体化した
+      `Dielectric`で呼び分けるだけで、各波長でSnell則が厳密に成り立ちながら
+      短波長(青)ほど屈折角が小さい(法線に近い)ことを確認した。完全な分光
+      レンダリング(hero wavelength法、1経路で複数波長を相関サンプルしCIE等色
+      関数でRGBへ変換、`Scene`/`trace`全体への波長の配線)・コースティクスは
+      未実装(モジュールdoc「縮約実装の理由」参照)。
 - [ ] 参加媒質(大気・水・煙)
 - [ ] 物理カメラ・トーンマッピング
 - [x] R1 — `crates/sim-render/src/path_tracer.rs::tests::r1_white_furnace_diffuse_surface_matches_background_radiance_exactly`。
@@ -1899,7 +1921,17 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       (rel<1e-9、設計が要求するrel0.1%を大きく上回る精度)ことを実装検証中に発見し、
       そのまま検証方針として採用した。
 - [ ] R2(誘電体側のみGreen、金属側は未実装——詳細は§8のR2行参照)。
-- [ ] 担当テスト Green: R3–R7(R1のみ完全Green、R2は誘電体側のみ)
+- [ ] R3(分散側のみ実装・Green——`crates/sim-em/src/optics.rs::tests::
+      cauchy_refractive_index_matches_bk7_catalog_value_at_the_d_line`・
+      `cauchy_refractive_index_is_larger_for_shorter_wavelengths`、
+      `crates/sim-render/src/bsdf.rs::tests::cauchy_dielectric_disperses_
+      different_wavelengths_into_different_refraction_angles`。BK7ガラスの
+      Cauchy係数(A=1.5046・B=4200nm²、文献の標準的な近似値)がd線(587.6nm)の
+      カタログ値1.5168とrel<0.1%で一致し、青(486.1nm)は赤(656.3nm)より屈折率が
+      大きく屈折角が小さい(各波長でSnell則も厳密に成り立つ)ことを確認。分光
+      レンダリング全体への波長の配線(hero wavelength法)・コースティクスは未実装
+      のため、チェックボックス自体はR3完了とは見なさない)。
+- [ ] 担当テスト Green: R4–R7(R1完全Green、R2/R3は部分実装——詳細は上記各行参照)
 - [ ] デモ D40–D43 合格
 
 ## 6. フロントエンド(設計は [../23-frontend/01-editor.md](../23-frontend/01-editor.md) が正)

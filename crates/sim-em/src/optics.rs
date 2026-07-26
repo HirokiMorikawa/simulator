@@ -82,6 +82,13 @@ pub fn prism_index_from_min_deviation(apex_angle: f64, min_deviation: f64) -> f6
     ((apex_angle + min_deviation) / 2.0).sin() / (apex_angle / 2.0).sin()
 }
 
+/// Cauchy式(分散、設計§2.2): $n(\lambda)=A+B/\lambda^2$(可視域で十分な近似)。
+/// `wavelength_nm`はナノメートル単位。`B>0`なら短波長(青)ほど屈折率が大きい
+/// (可視光分散の標準的な符号、プリズムの虹・R3の検証対象)。
+pub fn cauchy_refractive_index(a: f64, b: f64, wavelength_nm: f64) -> f64 {
+    a + b / (wavelength_nm * wavelength_nm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +171,36 @@ mod tests {
         assert!(
             rel_err < 0.005,
             "recovered_n={recovered_n} n={n} rel_err={rel_err}"
+        );
+    }
+
+    /// R3: 分散(Cauchy式)がBK7ガラスの基準波長(d線、587.6nm)でのカタログ値
+    /// (`BK7_INDEX`=1.5168)と一致すること。A=1.5046・B=4200nm²は文献の標準的な
+    /// BK7 Cauchy係数(可視域近似)。
+    #[test]
+    fn cauchy_refractive_index_matches_bk7_catalog_value_at_the_d_line() {
+        let a = 1.5046;
+        let b = 4200.0;
+        let n = cauchy_refractive_index(a, b, 587.6);
+        let rel_err = (n - BK7_INDEX).abs() / BK7_INDEX;
+        assert!(
+            rel_err < 0.001,
+            "n={n} BK7_INDEX={BK7_INDEX} rel_err={rel_err}"
+        );
+    }
+
+    /// R3: 分散の符号(B>0なら短波長(青)ほど屈折率が大きい、可視光分散の標準的な
+    /// 符号)。可視域の青(486nm、水素Fフラウンホーファー線)は赤(656nm、水素C線)
+    /// より屈折率が大きいはず。
+    #[test]
+    fn cauchy_refractive_index_is_larger_for_shorter_wavelengths() {
+        let a = 1.5046;
+        let b = 4200.0;
+        let n_blue = cauchy_refractive_index(a, b, 486.1);
+        let n_red = cauchy_refractive_index(a, b, 656.3);
+        assert!(
+            n_blue > n_red,
+            "n_blue={n_blue} should exceed n_red={n_red} (normal dispersion)"
         );
     }
 }
