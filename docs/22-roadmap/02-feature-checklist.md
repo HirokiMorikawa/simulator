@@ -1277,10 +1277,28 @@
   が、乱数を使わない既知のレンズサンプル点に対してrel<1e-9で厳密一致すること
   (このセッションで一貫している「解析恒等式があれば統計的収束を待たず厳密比較
   する」方針をここでも適用)、を確認した。$r=f/(2N)$(絞りから開口半径)の式も
-  別途検証した。これによりPhase Dのメイン増分(R1–R2完了、R3部分完了、R6完了)
-  はGGXマイクロファセット・参加媒質・完全な分光レンダリング・コースティクス・
-  コーネルボックス(R4)・大気レイリー(R5)・モンテカルロ収束検証(R7)を残す
-  段階に到達した。
+  別途検証した。
+  続けて設計§8実装順序の最後の項目「参加媒質(大気・水・煙)」に取り組み、
+  レイリー散乱(`sim_render::medium`)の単一散乱閉形式解を実装しR5を完了させた。
+  完全な体積レンダリング(マルチスキャッタリング、レイマーチングによる`Scene::
+  trace`への本格配線)ではなく、一様(homogeneous)大気を仮定し、太陽光が媒質中で
+  減衰しない(媒質が太陽方向に対して光学的に薄い)と仮定した単一散乱の閉形式解
+  $L=p(\cos\theta)L_{sun}(1-e^{-\sigma_s D})$のみを実装した(`medium.rs`モジュール
+  doc「縮約実装の理由」参照)。散乱係数$\sigma_s\propto\lambda^{-4}$
+  (`rayleigh_scattering_coefficient`、設計§9のβ_R(550nm)≈1.16e-5/mを参照値として
+  使用)とレイリー位相関数$p(\cos\theta)=\frac{3}{16\pi}(1+\cos^2\theta)$
+  (`rayleigh_phase`、全立体角積分が1に正規化されることを数値求積(中点則、
+  1e6分割)でrel<1e-9で確認)を実装し、閉形式の単一散乱積分自体は素朴な数値
+  経路積分(中点則、20万分割)とrel<1e-6で一致することを確認した(`conductor_
+  reflectance`のk=0帰着チェックと同種の自己無撞着性検証)。
+  R5が要求する2つの現象——(1)空の青: 光学的に薄い極限で青(450nm)の散乱放射輝度が
+  赤(650nm)よりσ_s比(650/450)^4だけ強いこと(rel<0.1%で一致)、(2)地平線の赤:
+  長い大気経路を直進する太陽光自体の透過率比(青/赤)が経路長とともに単調に
+  縮小し続ける(赤みが増す)こと——をそれぞれ厳密な解析式で検証した。
+  これによりPhase Dのメイン増分(R1・R2・R5・R6完了、R3部分完了)はGGX
+  マイクロファセット・マルチスキャッタリング・ミー散乱・完全な分光レンダリング・
+  コースティクス・コーネルボックス(R4)・モンテカルロ収束検証(R7)を残す段階に
+  到達した。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1951,7 +1969,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       レンダリング(hero wavelength法、1経路で複数波長を相関サンプルしCIE等色
       関数でRGBへ変換、`Scene`/`trace`全体への波長の配線)・コースティクスは
       未実装(モジュールdoc「縮約実装の理由」参照)。
-- [ ] 参加媒質(大気・水・煙)
+- [ ] 参加媒質(大気・水・煙)——大気のレイリー散乱(`sim_render::medium::
+      HomogeneousMedium`)の単一散乱閉形式解(太陽光が媒質中で減衰しないと仮定した
+      縮約実装、R5、下記参照)を実装済み。マルチスキャッタリング・`Scene::trace`への
+      本格配線(レイマーチングによる経路上の散乱イベントのサンプリング)・ミー散乱
+      (エアロゾル・雲)・煙/水の密度場からの体積散乱は未実装(`medium.rs`モジュール
+      doc「縮約実装の理由」参照)。
 - [ ] 物理カメラ・トーンマッピング(薄レンズモデルの物理カメラ`sim_render::Camera`は
       実装済み——焦点距離・開口半径(絞りF値から`r=f/(2N)`)・レンズ円板サンプリング
       による被写界深度(R6、下記参照)。トーンマッピング・露出・シャッター速度・
@@ -1988,13 +2011,26 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       大きく屈折角が小さい(各波長でSnell則も厳密に成り立つ)ことを確認。分光
       レンダリング全体への波長の配線(hero wavelength法)・コースティクスは未実装
       のため、チェックボックス自体はR3完了とは見なさない)。
+- [ ] R4(コーネルボックス、平面/壁ジオメトリと既知の参照解との収束一致が必要、未着手)
+- [x] R5 — `crates/sim-render/src/medium.rs::tests::
+      sky_scattering_is_stronger_for_blue_than_red_and_matches_the_optically_thin_ratio`
+      (空の青: 光学的に薄い極限で青(450nm)/赤(650nm)の単一散乱放射輝度比がσ_s比
+      (650/450)^4にrel<0.1%で一致)・
+      `direct_transmittance_reddens_the_sun_over_a_long_horizon_path`(地平線の赤:
+      直進太陽光の青/赤透過率比が経路長とともに単調に縮小)・
+      `single_scattering_closed_form_matches_numerical_path_integration`(閉形式解が
+      数値経路積分とrel<1e-6で一致、自己無撞着性検証)・
+      `rayleigh_phase_function_integrates_to_one_over_the_sphere`(位相関数の全立体角
+      積分が1に正規化、rel<1e-9)。マルチスキャッタリング・`Scene::trace`への本格配線は
+      未実装(縮約実装、上記「参加媒質」の行・`medium.rs`モジュールdoc参照)が、
+      R5が要求する定量的検証自体は解析的に厳密に満たしている。
 - [x] R6 — `crates/sim-render/src/camera.rs::tests::
       blur_circle_offset_matches_the_thin_lens_similar_triangles_formula`(薄レンズの
       相似三角形から導出した錯乱円径の閉形式に、乱数を使わない既知のレンズサンプル点で
       rel<1e-9で厳密一致)・`rays_converge_exactly_at_the_focus_plane_regardless_of_lens_
       sample`(合焦面では乱数使用でもrel<1e-9)・`zero_lens_radius_produces_a_pinhole_ray`・
       `aperture_radius_from_f_number_matches_the_formula`。
-- [ ] 担当テスト Green: R4・R5・R7(R1・R2・R6完全Green、R3は分散側のみ部分実装——詳細は上記各行参照)
+- [ ] 担当テスト Green: R4・R7(R1・R2・R5・R6完全Green、R3は分散側のみ部分実装——詳細は上記各行参照)
 - [ ] デモ D40–D43 合格
 
 ## 6. フロントエンド(設計は [../23-frontend/01-editor.md](../23-frontend/01-editor.md) が正)
@@ -2478,7 +2514,15 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
       レンダリング(hero wavelength法、`Scene`/`trace`全体への波長の配線)・
       コースティクスは未実装のため、チェックボックス自体はR3完了とは見なさない)
 - [ ] R4
-- [ ] R5
+- [x] R5(`crates/sim-render/src/medium.rs::tests::
+      sky_scattering_is_stronger_for_blue_than_red_and_matches_the_optically_thin_ratio`——
+      光学的に薄い極限での青(450nm)/赤(650nm)単一散乱放射輝度比がσ_s∝λ^-4比に
+      rel<0.1%で一致(空の青)。`direct_transmittance_reddens_the_sun_over_a_long_
+      horizon_path`(直進太陽光の青/赤透過率比が経路長とともに単調に縮小、地平線の
+      赤)・`single_scattering_closed_form_matches_numerical_path_integration`
+      (閉形式解と数値経路積分がrel<1e-6で一致)・`rayleigh_phase_function_
+      integrates_to_one_over_the_sphere`も参照。マルチスキャッタリング・`Scene::
+      trace`への本格配線は未実装、`medium.rs`モジュールdoc「縮約実装の理由」参照)
 - [x] R6(`crates/sim-render/src/camera.rs::tests::
       blur_circle_offset_matches_the_thin_lens_similar_triangles_formula`——
       薄レンズの相似三角形から導出した錯乱円径の閉形式に、乱数を使わない既知の

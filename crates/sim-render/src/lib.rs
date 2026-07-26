@@ -10,18 +10,22 @@
 //! 分散側)の核となる物理(波長ごとに屈折角が異なること)を検証した(`Scene`/
 //! `trace`全体への波長の配線(hero wavelength法)自体は後続増分)。
 //! さらに薄レンズモデルの物理カメラ(`Camera`、`camera`モジュールdoc参照)を追加し、
-//! R6(被写界深度: 錯乱円径が薄レンズ公式と一致)を検証した。
-//! BVH・GGXマイクロファセット(粗さ)・完全な分光レンダリング・参加媒質は
-//! 後続増分(各モジュールdoc「縮約実装の理由」参照)。
+//! R6(被写界深度: 錯乱円径が薄レンズ公式と一致)を検証し、参加媒質(レイリー散乱、
+//! `medium`モジュールdoc参照)の単一散乱閉形式解を追加してR5(大気レイリー散乱の
+//! λ^-4による空の青・地平線の赤の定量)を検証した。
+//! BVH・GGXマイクロファセット(粗さ)・完全な分光レンダリング・マルチスキャッタリング・
+//! ミー散乱・煙/水の体積散乱は後続増分(各モジュールdoc「縮約実装の理由」参照)。
 
 mod bsdf;
 mod camera;
+mod medium;
 mod path_tracer;
 mod ray;
 mod sphere;
 
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal};
 pub use camera::Camera;
+pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
 pub use path_tracer::{Material, PointLight, Scene, SceneObject};
 pub use ray::Ray;
 pub use sphere::{Hit, Sphere};
