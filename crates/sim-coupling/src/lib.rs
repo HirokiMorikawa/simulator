@@ -29,6 +29,7 @@ mod induction_coupling;
 mod joule_heat;
 mod lorentz_force;
 mod motor_coupling;
+mod phase_change_morph;
 mod piston_gas;
 mod sph_rigid;
 pub use boussinesq_buoyancy::BoussinesqBuoyancy;
@@ -43,6 +44,7 @@ pub use induction_coupling::InductionCoupling;
 pub use joule_heat::JouleHeat;
 pub use lorentz_force::LorentzForce;
 pub use motor_coupling::MotorCoupling;
+pub use phase_change_morph::PhaseChangeMorph;
 pub use piston_gas::PistonGas;
 pub use sph_rigid::SphRigid;
 

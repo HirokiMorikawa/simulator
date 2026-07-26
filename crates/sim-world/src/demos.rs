@@ -1265,6 +1265,101 @@ mod tests {
         );
     }
 
+    /// D18 氷と飲み物(docs/21-verification/03-demo-scenarios.md Phase 3表)。「氷の融解・
+    /// 温度プラトー・水位不変」「合格基準: T7 + アルキメデス統合」。`sim_coupling::
+    /// PhaseChangeMorph`(温度プラトー・剛体質量の減少)+ 埋め込み浮力(`MechanicsSolver.
+    /// water`、D6のF4部分と同じ経路)を組み合わせ、浮いた氷が融けるにつれ喫水深さが
+    /// 浅くなる(=浮力との連動、「アルキメデス統合」)ことを確認する。T7(融解プラトー
+    /// 長)自体は`sim_thermal::phase`側・`sim_coupling::phase_change_morph`側の両方で
+    /// 既に検証済みのため重複実装せず、ここではプラトーに実際に到達すること(定性)のみ
+    /// 確認する。「水位不変」(氷が融けても水位が変わらないという古典的な事実)は
+    /// 自由表面を追跡しない本実装の対象外(`sim_fluid::buoyancy`冒頭注記の縮約、
+    /// アルキメデスの原理から解析的に導かれる別の主張であり、D10/D17と同様に本実装が
+    /// 持たない機構への依存はしない)。
+    #[test]
+    fn d18_ice_and_drink_melts_along_t7_plateau_and_shrinking_mass_raises_the_floating_ice() {
+        let water_density = 998.2;
+        let ice_density = 900.0;
+        let half = 0.05;
+        let side = 2.0 * half;
+        let initial_mass = ice_density * side * side * side;
+
+        let mut world = World::new(WorldOptions::default());
+        world.mechanics_mut().water = Some(sim_fluid::StaticWaterRegion::new(0.0, water_density));
+        let ice_material = world.materials_mut().push(sim_core::Material {
+            name: "test-d18-ice",
+            density: ice_density,
+            friction: 0.0,
+            restitution: 0.0,
+            youngs_modulus: None,
+            specific_heat: 2100.0,
+            conductivity: 2.2,
+            emissivity: 0.9,
+            melting: None,
+            resistivity: None,
+            relative_permittivity: 1.0,
+            refractive_index: None,
+            source: "test fixture",
+            uncertainty: 0.0,
+        });
+
+        let ratio = ice_density / water_density;
+        let h_sub = ratio * side;
+        let equilibrium_y = -h_sub + half;
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(half, half, half),
+            },
+            ice_material,
+        );
+        desc.mass_override = Some(initial_mass);
+        desc.transform.position = Vec3::new(0.0, equilibrium_y, 0.0);
+        let ice_id = world.create_body(desc);
+
+        let mut thermal = sim_thermal::ThermalSolver::new(350.0);
+        let drink_node = thermal.add_node(sim_thermal::ThermalNode::new(350.0, 200_000.0));
+        world.enable_thermal(thermal);
+
+        let ice_mat = sim_thermal::PhaseMaterial {
+            melting_temperature: 273.15,
+            latent_heat_fusion: 334_000.0,
+            specific_heat_solid: 2100.0,
+            specific_heat_liquid: 4186.0,
+        };
+        world.add_coupling(Box::new(sim_coupling::PhaseChangeMorph::new(
+            ice_id.index as usize,
+            drink_node,
+            ice_mat,
+            initial_mass,
+            50.0,
+            -ice_mat.specific_heat_solid * 10.0,
+        )));
+
+        let steps = 6000;
+        for _ in 0..steps {
+            world.step();
+        }
+
+        // 質量が(完全融解=0まで達さず)部分的に減っていることは、`PhaseChangeMorph`が
+        // T7のプラトー(`Phase::Mixed`)に到達し留まっていたことを裏付ける(完全融解
+        // すると即座に質量0(かつ剛体の無効化)になるため、部分的な質量減少はプラトー
+        // 中でしかあり得ない)。
+        let mass_after = world.mechanics_mut().bodies.mass(ice_id.index as usize);
+        assert!(
+            mass_after < initial_mass && mass_after > 0.0,
+            "should be partway through the T7 melting plateau after {steps} steps: \
+             initial_mass={initial_mass} mass_after={mass_after}"
+        );
+
+        let y_after = world.body_position(ice_id).unwrap().y;
+        assert!(
+            y_after > equilibrium_y,
+            "as the ice loses mass, the same submerged geometry now displaces more than its \
+             weight, so it should float higher (Archimedes' principle tracking the shrinking \
+             mass): equilibrium_y={equilibrium_y} y_after={y_after}"
+        );
+    }
+
     /// D34 太陽系儀(docs/21-verification/03-demo-scenarios.md Pα表)。「8惑星の公転、
     /// 会合周期、時間加速スライダー」「合格基準: A1(ケプラー第3法則)、A2(保存)、
     /// 時間加速の切替を跨ぐリプレイ一致」。天体ドメイン(`sim_astro::NBodySystem`)は

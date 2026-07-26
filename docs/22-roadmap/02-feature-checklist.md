@@ -1091,10 +1091,37 @@
   なく有界振動であることを確認する検証(X2の「有界であること」の確認と同種)に
   切り替えて解決した(rel<0.03)。これで設計§3が挙げる元の12種のCouplingが全て
   出揃った。
-- **作業中**: ワークストリームB(Phase C)継続中 — 次は`PhaseChangeMorph`
-  (イベント駆動の剛体/流体生成)、あるいはシーンJSON`couplings`セクション+
-  排他結合検査のWorld接続、design上のpre/post 2相分離・sub-iteration剛性閾値表、
-  あるいは残りのヘッドレスデモ(D12・D18・D20・D23・D24・D27–D33・D36–D39)。
+  続けて`PhaseChangeMorph`(P3: 融解 → 剛体消滅/流体生成イベント)に着手した。
+  設計は融解時に剛体を消滅させ融けた分を流体粒子として生成する双方向のイベントを
+  想定するが、`Coupling::apply`はイベントキュー(`EventQueue`)にも`World`の世代管理
+  (`generations`)にも`DomainStates`経由でアクセスできないため、「流体生成」は対象外
+  とし「剛体消滅」のみを実装した(縮約を正直に文書化)。熱源は単一の`ThermalNode`
+  (氷を取り巻く飲み物等に相当)とし、簡易な線形熱コンダクタンスで氷側の
+  `sim_thermal::PhaseState`(エンタルピー法、T7と同じ物理)へ熱を流し込み、熱源
+  ノード側から同量を差し引く対記帳を行う。剛体質量は`initial_mass*(1-liquid_fraction)`
+  として`RigidBodySet::inv_mass`を直接更新し(形状自体は縮小しない近似)、完全融解
+  (`Phase::Liquid`)に達したら`World::remove_body`と同じ無効化手順(Static化・遠方
+  退避・速度ゼロ化)を直接行う(`World`の世代カウンタは`DomainStates`から触れない
+  ため据え置かれる制約を文書化)。この質量変化は既存の`BuoyancyDrag`・埋め込み浮力
+  双方に無変更で伝播する(いずれも毎step`bodies.mass(idx)`を読み直すため)——D18
+  「氷と飲み物」の「アルキメデス統合」が求める浮力との連動は新規コードなしで得られる。
+  D18のヘッドレスデモ実装中に重大なバグを発見した: 浮いた氷を釣り合い位置(初速0)
+  に置くと0.5秒(`sim_mechanics::sleep`の既定閾値)でスリープし、以後
+  `apply_forces`/`integrate_velocities`/`integrate_positions`が完全に停止するため、
+  `PhaseChangeMorph`が質量を減らし力の釣り合いを崩しても剛体の位置が永久に変化しない
+  (テストの`y_after`が`equilibrium_y`と完全に一致するというかたちで顕在化)。
+  `PhaseChangeMorph::apply`が質量を更新するたびに`bodies.asleep[idx] = false`で
+  明示的に起こすことで解決した(外部要因(質量減少)による力の再均衡は、他の物理
+  エンジンでも一般に明示的なwake-upを要する既知のパターン)。
+  D18のヘッドレステストは、T7の融解プラトー物理自体(既に`sim_thermal::phase`・
+  `sim_coupling::phase_change_morph`双方で検証済み)を重複実装せず、プラトーに
+  実際に到達すること(質量が0と初期値の間で部分的に減少)+シュリンクする質量に
+  応じて浮いた氷の喫水深さが浅くなること(アルキメデス統合)を確認する。「水位不変」
+  (氷が融けても水位が変わらないという古典的事実)は自由表面を追跡しない本実装の
+  対象外(D10/D17と同じ、本実装が持たない機構への依存はしない判断)。
+- **作業中**: ワークストリームB(Phase C)継続中 — 次はシーンJSON`couplings`
+  セクション+排他結合検査のWorld接続、design上のpre/post 2相分離・sub-iteration
+  剛性閾値表、あるいは残りのヘッドレスデモ(D12・D20・D23・D24・D27–D33・D36–D39)。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1610,8 +1637,14 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       中に置いた軽い剛体が流れと同じ方向に押し流されることを定性的に確認する
       `sim-world`テストも追加(`grid_fluid_rigid_coupling_pushes_a_light_body_
       downstream_via_world`、一発Greenで動的な定量検証の再度の缶詰め回避に成功)。
-      残る`BuoyancyDrag`(既存の`MechanicsSolver`埋め込み実装の切り出しリスクで別枠)・
-      シーンJSON`couplings`セクションからの自動解決・排他結合検査
+      続けて`BuoyancyDrag`(既存の`MechanicsSolver`埋め込み実装を置き換えるのではなく、
+      同じ物理式を剛体単位でCoupling登録経由から選択的に適用する独立した追加経路として
+      実装)を追加し、設計§3が挙げる元の12種のCouplingが全て出揃った。さらに元の12種
+      カウント外の追加実装として`PhaseChangeMorph`(P3: 融解→剛体消滅、`Coupling::apply`
+      がイベントキュー・`World`世代管理にアクセスできないため「流体生成」は対象外、
+      剛体消滅(質量減少→`RigidBodySet::inv_mass`直接更新→完全融解で`World::remove_body`
+      と同じ無効化)のみ実装、`sim_thermal::PhaseState`のエンタルピー法をそのまま使う)
+      も追加した。残るシーンJSON`couplings`セクションからの自動解決・排他結合検査
       (`validate_exclusive_couplings`)との接続、design上のpre/post 2相分離、
       sub-iteration剛性閾値表(`GridFluidRigid`自身は現状固定的な単一適用で、
       `GridFluidRigidBox2D`が持つ閾値ベースのsub-iteration機構までは踏襲していない)
@@ -1829,7 +1862,12 @@ Phase 2〜3:
       `adiabatic_compression_scenario_conserves_piston_kinetic_and_gas_internal_energy`
       が既にカバー済みと見なす。等温圧縮側は`PistonGas`結合が対応していないため
       対象外。目視チェック保留)
-- [ ] D18 氷と飲み物
+- [ ] D18 氷と飲み物(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視
+      チェックはワークストリームD未着手のため保留。新設した`sim_coupling::
+      PhaseChangeMorph`(埋め込み浮力(`MechanicsSolver.water`、D6のF4部分と同じ経路)
+      と組み合わせ)経由で、浮いた氷がT7の融解プラトーに実際に到達すること(質量が
+      0と初期値の間で部分的に減少)+シュリンクする質量に応じて喫水深さが浅くなる
+      こと(アルキメデス統合)を確認。「水位不変」は自由表面を追跡しない本実装の対象外)
 
 Phase 4:
 
