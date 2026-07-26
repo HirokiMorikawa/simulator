@@ -529,11 +529,14 @@ async function setUpSceneView(
 
   // Undo(Editモードのみ、設計docs/23-frontend/01-editor.md §6「Undo/Redo:
   // Editモードのみ。編集操作はシーンJSONの差分として保持」)。縮約実装の理由:
-  // シーンJSON差分ではなく、Gizmoドラッグ開始直前の位置を積むだけの単純な
-  // スタック(Redoは対象外)。ドラッグ開始のたびに直前の位置を1件積む。回転
-  // ドラッグのUndoは未対応(後続増分)。
+  // シーンJSON差分ではなく、Gizmoドラッグ開始直前の位置/姿勢を積むだけの単純な
+  // スタック(Redoは対象外)。ドラッグ(Translate/Rotateいずれも)開始のたびに
+  // 直前の値を1件積む。
   const EDIT_UNDO_STACK_CAPACITY = 20;
-  const editUndoStack: { bodyIndex: number; position: THREE.Vector3 }[] = [];
+  type EditUndoEntry =
+    | { bodyIndex: number; kind: "position"; position: THREE.Vector3 }
+    | { bodyIndex: number; kind: "rotation"; rotation: THREE.Quaternion };
+  const editUndoStack: EditUndoEntry[] = [];
 
   function projectToScreen(worldPos: THREE.Vector3): { x: number; y: number } {
     const ndc = worldPos.clone().project(camera);
@@ -577,13 +580,24 @@ async function setUpSceneView(
           event.clientY - rotateCenterScreen.y,
           event.clientX - rotateCenterScreen.x,
         );
+        editUndoStack.push({
+          bodyIndex: selectedBodyIndex,
+          kind: "rotation",
+          rotation: rotateStartQuat.clone(),
+        });
+        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+        undoButton.disabled = mode !== "edit";
       } else if (pointerDownGizmoAxis) {
         isDragging = true;
         dragMode = "gizmo";
         gizmoAxisDir.copy(AXIS_VECTORS[pointerDownGizmoAxis]);
         gizmoDragStartPosition.copy(gizmoGroup.position);
         gizmoDragStartScalar = gizmoAxisDir.dot(gizmoDragStartPosition);
-        editUndoStack.push({ bodyIndex: selectedBodyIndex, position: gizmoDragStartPosition.clone() });
+        editUndoStack.push({
+          bodyIndex: selectedBodyIndex,
+          kind: "position",
+          position: gizmoDragStartPosition.clone(),
+        });
         if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
         undoButton.disabled = mode !== "edit";
         camera.getWorldDirection(cameraDirection);
@@ -688,7 +702,17 @@ async function setUpSceneView(
     if (mode !== "edit") return;
     const entry = editUndoStack.pop();
     if (!entry) return;
-    world.set_body_position_at(entry.bodyIndex, entry.position.x, entry.position.y, entry.position.z);
+    if (entry.kind === "position") {
+      world.set_body_position_at(entry.bodyIndex, entry.position.x, entry.position.y, entry.position.z);
+    } else {
+      world.set_body_rotation_at(
+        entry.bodyIndex,
+        entry.rotation.x,
+        entry.rotation.y,
+        entry.rotation.z,
+        entry.rotation.w,
+      );
+    }
     undoButton.disabled = editUndoStack.length === 0;
     render();
   });
