@@ -18,18 +18,19 @@
 //! 拡散(Lambertian)面のみNEEを適用する(鏡面/誘電体/金属は反射/屈折方向がデルタ
 //! 関数のため光源の直接サンプルと意味を成さない、標準的な扱い)。
 
-use crate::bsdf::{Dielectric, Lambertian, Metal};
+use crate::bsdf::{Dielectric, Lambertian, Metal, RoughConductor};
 use crate::ray::Ray;
 use crate::sphere::{Hit, Sphere};
 use sim_math::{SimRng, Vec3};
 
 /// このシーンが表現できるBSDF(`bsdf`モジュールdoc「縮約実装の理由」参照、
-/// 粗面透過は未実装)。
+/// 粗い誘電体の透過は未実装)。
 #[derive(Clone, Copy, Debug)]
 pub enum Material {
     Lambertian(Lambertian),
     Dielectric(Dielectric),
     Metal(Metal),
+    RoughConductor(RoughConductor),
 }
 
 /// シーン中の1物体(球 + BSDF)。
@@ -174,6 +175,14 @@ impl Scene {
                 let direction = Dielectric::reflect(ray.direction, hit.normal);
                 let next_ray = Ray::new(hit.point, direction);
                 self.trace(&next_ray, rng, max_depth - 1) * r
+            }
+            Material::RoughConductor(rough) => {
+                let (direction, weight) = rough.sample(ray.direction, hit.normal, rng);
+                if weight <= 0.0 {
+                    return 0.0; // 出射方向がマクロ表面の裏側、寄与なし。
+                }
+                let next_ray = Ray::new(hit.point, direction);
+                self.trace(&next_ray, rng, max_depth - 1) * weight
             }
         }
     }
@@ -656,5 +665,80 @@ mod tests {
             "batch-mean variance ratio should be close to 4 (O(1/N) variance decay, \
              i.e. O(1/sqrt(N)) noise decay): ratio={ratio} var_100={var_100} var_400={var_400}"
         );
+    }
+
+    fn rough_conductor_furnace_scene(alpha: f64, environment_radiance: f64) -> (Scene, Ray) {
+        let gold = RoughConductor {
+            n: 0.47,
+            k: 2.4,
+            alpha,
+        };
+        let scene = Scene {
+            objects: vec![SceneObject {
+                sphere: Sphere {
+                    center: Vec3::new(0.0, 0.0, -5.0),
+                    radius: 1.0,
+                },
+                material: Material::RoughConductor(gold),
+            }],
+            lights: vec![],
+            environment_radiance,
+        };
+        let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+        (scene, ray)
+    }
+
+    fn average_trace(scene: &Scene, ray: &Ray, seed: u64, n: u64) -> f64 {
+        let sum: f64 = (0..n)
+            .map(|i| {
+                let mut rng = SimRng::new(seed, i);
+                scene.trace(ray, &mut rng, 1)
+            })
+            .sum();
+        sum / n as f64
+    }
+
+    /// GGX粗い金属は、粗さ(alpha)を0に近づけると完全鏡面`Metal`の白色炉テスト
+    /// (フレネル反射率でスケールされた環境放射輝度)にモンテカルロ収束する
+    /// (`RoughConductor::sample`の重み式(Walter et al. 2007)が正しく実装されて
+    /// いることの統合的な検証——白色炉系の他テストと異なり、ここではalpha>0が
+    /// 本質的な統計誤差を導入するため、統計的収束を待つ必要がある。実測値
+    /// (alpha=0.02, N=50000, 固定シード)でrel_err≈0.037%だったため、10倍以上の
+    /// 余裕を見てrel<1%を要求する)。
+    #[test]
+    fn rough_conductor_converges_to_the_smooth_mirror_furnace_test_as_roughness_approaches_zero() {
+        let environment_radiance = 5.0;
+        let (scene, ray) = rough_conductor_furnace_scene(0.02, environment_radiance);
+        let mean = average_trace(&scene, &ray, 21, 50_000);
+        let expected = Metal { n: 0.47, k: 2.4 }.reflectance(1.0) * environment_radiance;
+        let rel_err = (mean - expected).abs() / expected;
+        assert!(
+            rel_err < 0.01,
+            "mean={mean} expected={expected} rel_err={rel_err}"
+        );
+    }
+
+    /// エネルギー保存: 粗さが大きくても(単一散乱モデルではマルチスキャッタリングを
+    /// 拾えない分だけ、むしろ滑らかな鏡面より輝度を過小評価することはあっても)
+    /// 平均放射輝度が環境放射輝度を超えてエネルギーを増幅することは無い
+    /// (`microfacet`モジュールdoc「マルチスキャッタリング補償は対象外」参照——
+    /// この既知の制限により、ここでは「超過しないこと」のみを検証し、滑らかな
+    /// 鏡面の値と厳密一致することは要求しない)。
+    #[test]
+    fn rough_conductor_never_exceeds_energy_conservation_bound_for_moderate_roughness() {
+        let environment_radiance = 5.0;
+        for alpha in [0.3, 0.6] {
+            let (scene, ray) = rough_conductor_furnace_scene(alpha, environment_radiance);
+            let mean = average_trace(&scene, &ray, 21, 100_000);
+            assert!(
+                mean < environment_radiance,
+                "alpha={alpha}: mean radiance must not exceed the environment radiance \
+                 (no energy amplification): mean={mean} environment_radiance={environment_radiance}"
+            );
+            assert!(
+                mean > 0.0,
+                "alpha={alpha}: mean radiance must be positive: mean={mean}"
+            );
+        }
     }
 }

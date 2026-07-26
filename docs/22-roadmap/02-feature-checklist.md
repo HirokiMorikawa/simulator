@@ -1313,9 +1313,35 @@
   確認した。決定論(同一シード・同一サンプル数なら平均放射輝度が厳密に同一)
   も別途確認した。
   これによりPhase Dのメイン増分はR1・R2・R5・R6・R7が完全Green、R3が分散側
-  のみ部分実装という段階に到達した。残るはGGXマイクロファセット・
-  マルチスキャッタリング・ミー散乱・完全な分光レンダリング・コースティクス・
-  コーネルボックス(R4、平面/壁ジオメトリと既知の参照解が必要)。
+  のみ部分実装という段階に到達した。
+  続けて設計docs/17-rendering/03-materials-camera.md §8「BSDF(拡散→誘電体→
+  金属→粗面透過)」が本来求めるGGXマイクロファセット分布(粗さ)に取り組み、
+  `sim_render::RoughConductor`(既存の完全鏡面`Metal`を置き換えるのではなく、
+  粗さを持つ別材質として追加、`microfacet`モジュール新設)を実装した。GGX
+  (Trowbridge-Reitz)法線分布関数$D(h)$・分離可能(separable)Smith遮蔽/
+  マスキング関数$G=G_1(i)G_1(o)$・半角ベクトルの重要度サンプリング(Walter et
+  al. 2007の標準的な構成、`sim_math::Vec3::orthonormal_basis`で接線基底を
+  構築)を実装し、経路の重みはWalter et al. 2007の簡約式
+  $F\,G\,(\omega_o\cdot h)/(\cos\theta_i\,(n\cdot h))$を用いた(height-
+  correlated Smith・visible normal distribution(VNDF)サンプリング・
+  マルチスキャッタリング補償は対象外、`microfacet.rs`モジュールdoc「縮約実装の
+  理由」参照)。
+  D(h)の余弦重み付き全立体角積分が1に正規化されること(数値求積、rel<1e-3)・
+  Smith $G_1$が垂直入射で厳密に1になること・グレージング角に向けて単調減少
+  すること、を解析的に確認した上で、`RoughConductor`が粗さ(alpha)を0に近づける
+  と完全鏡面`Metal`の白色炉テストにモンテカルロ収束すること(alpha=0.02、5万
+  サンプルでrel_err≈0.037%、10倍以上の余裕を見てrel<1%を要求)を確認し、
+  重み式の実装が正しいことを統合的に検証した(白色炉系の他テストと異なり、
+  ここではalpha>0が本質的な統計誤差を導入するため統計的収束を待つ必要が
+  あった、R7で確立した「意図的に分散を持たせて収束を検証する」パターンと同種)。
+  中程度の粗さ(alpha=0.3・0.6)でもエネルギー保存(平均放射輝度が環境放射輝度を
+  超えない)を確認した——単一散乱モデルはマルチスキャッタリングを拾えない分
+  だけ滑らかな鏡面より輝度を過小評価する既知の制限があるため、滑らかな鏡面と
+  厳密一致することは要求していない。
+  誘電体側のGGX粗面透過(粗いガラス等)・height-correlated Smith・VNDF
+  サンプリング・マルチスキャッタリング補償・完全な分光レンダリング・
+  コースティクス・コーネルボックス(R4、平面/壁ジオメトリと既知の参照解が必要)
+  は残タスク。
 - **次**: B(Phase C:
   World/Coupling/Orchestrator本体・統合シナリオ5本・決定論/保存則/性能CIゲート・
   D1–D39ヘッドレス合格)→ C(Phase D: sim-renderのパストレーサ・R1–R7・D40–D43)→
@@ -1964,11 +1990,13 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       (`closest_hit_picks_the_nearer_object_when_two_spheres_overlap_along_the_ray`
       で登録順に依らない`t`最小選択・欠側`None`を確認)。三角形メッシュ・平面は未実装。
 - [x] BSDF・NEE——拡散(Lambertian)+誘電体(`Dielectric`、実屈折率のみ、`sim_em::
-      fresnel_reflectance`(E9/E10で既に検証済み)を再利用)+金属(`Metal`、複素
-      屈折率$n+ik$、`sim_em::conductor_reflectance`を再利用、完全鏡面のみ——GGX
-      マイクロファセット分布(粗さ)は対象外)を実装済み。金属は透過が無い不透明な
+      fresnel_reflectance`(E9/E10で既に検証済み)を再利用、完全鏡面のみ)+金属
+      (`Metal`、複素屈折率$n+ik$、`sim_em::conductor_reflectance`を再利用、
+      完全鏡面 / `RoughConductor`、GGXマイクロファセット分布(粗さ)、
+      `microfacet`モジュール参照)を実装済み。金属(完全鏡面)は透過が無い不透明な
       単一経路(鏡面反射方向のみ、フレネル反射率で振幅をスケール)のため、誘電体
-      のような反射/透過の確率的分岐が不要(`bsdf.rs`モジュールdoc参照)。NEE
+      のような反射/透過の確率的分岐が不要(`bsdf.rs`モジュールdoc参照)。誘電体側
+      のGGX粗面透過(粗いガラス等)は未実装。NEE
       (`PointLight`、逆二乗則の点光源、シャドウレイによる遮蔽判定)も実装済み——
       拡散面のみに適用(鏡面/誘電体/金属は反射/屈折方向がデルタ関数のため光源の
       直接サンプルと意味を成さない、標準的な扱い)。光源は幾何を持たない抽象光源
@@ -2529,7 +2557,9 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
       配線した。金(Au、550nm、n≈0.47+2.4i)の垂直入射反射率が閉形式と厳密に一致・
       金属球の白色炉テスト(`metal_furnace_test_matches_fresnel_scaled_background_
       radiance_exactly`、単一経路のためrel<1e-9で厳密一致)を確認し、R2完了とした
-      (GGXマイクロファセット分布(粗さ)は対象外、`bsdf.rs`モジュールdoc参照)。
+      (R2の合格条件自体はGGXマイクロファセット分布(粗さ)を要求しないため完全
+      鏡面のみで完了と判断。粗さ自体は後続増分で`sim_render::RoughConductor`
+      として別途実装済み、`microfacet.rs`モジュールdoc参照)。
 - [ ] R3(分散側のみ実装・Green——`crates/sim-em/src/optics.rs::tests::
       cauchy_refractive_index_matches_bk7_catalog_value_at_the_d_line`・
       `cauchy_refractive_index_is_larger_for_shorter_wavelengths`、

@@ -1,10 +1,10 @@
 //! BSDF。設計 docs/17-rendering/02-path-tracing.md §8「BVH + 拡散/鏡面BSDF + NEE(基本パストレ)」、
 //! docs/17-rendering/03-materials-camera.md §8「BSDF(拡散→誘電体→金属→粗面透過)」。
-//! **縮約実装の理由**: 拡散(Lambertian)+誘電体(`Dielectric`、実屈折率)+金属
-//! (`Metal`、複素屈折率$n+ik$、完全鏡面——設計が本来求めるGGXマイクロファセット
-//! 分布(粗さ)は対象外、`roughness=0`の鏡面反射のみ)を実装する。粗面透過は後続増分。
-//! 分光(波長ごとの反射率)は未実装のため、`albedo`・屈折率はいずれもモノクロの
-//! スカラーとする。
+//! **縮約実装の理由**: 拡散(Lambertian)+誘電体(`Dielectric`、実屈折率、完全鏡面
+//! のみ)+金属(`Metal`、複素屈折率$n+ik$、完全鏡面 / `RoughConductor`、GGX
+//! マイクロファセット分布、`microfacet`モジュールdoc参照)を実装する。誘電体側の
+//! GGX粗面透過(粗いガラス等)は後続増分。分光(波長ごとの反射率)は未実装のため、
+//! `albedo`・屈折率はいずれもモノクロのスカラーとする。
 //!
 //! `sim_em::raytracer`(光学ドメイン)が既に持つ`Ray`/`SurfaceGeom`/`OpticalSurface`は
 //! 目的が異なる別実装として意図的に区別する: あちらは決定論的なパワー分岐トレース
@@ -106,8 +106,9 @@ impl CauchyDielectric {
     }
 }
 
-/// 金属(複素屈折率$n+ik$、完全鏡面——設計のGGXマイクロファセット分布(粗さ)は
-/// 対象外、モジュールdoc参照)。誘電体と異なり透過が無い(不透明)ため、鏡面反射
+/// 金属(複素屈折率$n+ik$、完全鏡面——GGXマイクロファセット分布(粗さ)は
+/// `RoughConductor`が別途担う、モジュールdoc参照)。誘電体と異なり透過が無い
+/// (不透明)ため、鏡面反射
 /// 方向(`Dielectric::reflect`を再利用、反射則自体は材質に依らない幾何なので
 /// 重複させない)のみを持ち、その振幅がフレネル反射率でスケールされる
 /// (吸収された分(1-R)はエネルギーとして失われる、誘電体のような反射/透過の
@@ -125,6 +126,48 @@ impl Metal {
     pub fn reflectance(&self, cos_theta_i: f64) -> f64 {
         let theta_i = cos_theta_i.clamp(-1.0, 1.0).acos();
         sim_em::conductor_reflectance(self.n, self.k, theta_i)
+    }
+}
+
+/// 粗い金属(複素屈折率$n+ik$ + GGXマイクロファセット分布、`microfacet`モジュール
+/// doc参照)。`Metal`(完全鏡面)を置き換えるのではなく、粗さを持つ別材質として
+/// 追加する(`alpha=0`に近づけると完全鏡面`Metal`に収束する、後述テストで確認)。
+#[derive(Clone, Copy, Debug)]
+pub struct RoughConductor {
+    pub n: f64,
+    pub k: f64,
+    /// GGX粗さパラメータ(0に近いほど鏡面、`microfacet`モジュールdoc参照)。
+    pub alpha: f64,
+}
+
+impl RoughConductor {
+    /// GGX半角ベクトルの重要度サンプリングにより出射方向をサンプルし、経路の重み
+    /// (Walter et al. 2007の標準的な簡約式 $F\,G\,(\omega_o\cdot h) /
+    /// (\cos\theta_i\,(n\cdot h))$——`f_r\cos\theta_o/\text{pdf}`の簡約形)を
+    /// 返す。出射方向がマクロ表面の裏側(半球外)になる場合は重み0
+    /// (エネルギー寄与なし)。
+    pub fn sample(&self, incoming: Vec3, normal: Vec3, rng: &mut SimRng) -> (Vec3, f64) {
+        let half_vector = crate::microfacet::sample_ggx_half_vector(normal, self.alpha, rng);
+        let outgoing = Dielectric::reflect(incoming, half_vector);
+
+        let cos_theta_i = (-incoming).dot(normal);
+        let cos_theta_o = outgoing.dot(normal);
+        if cos_theta_i <= 0.0 || cos_theta_o <= 0.0 {
+            return (outgoing, 0.0);
+        }
+
+        let cos_theta_ih = (-incoming).dot(half_vector).max(0.0);
+        let cos_theta_h = half_vector.dot(normal).max(1e-12);
+        let fresnel = Metal {
+            n: self.n,
+            k: self.k,
+        }
+        .reflectance(cos_theta_ih);
+        let g = crate::microfacet::smith_g(cos_theta_i, cos_theta_o, self.alpha);
+        // Walter et al. 2007: (ω_o・h)は反射の対称性によりcos_theta_ihに厳密に
+        // 等しい(hは-incomingとoutgoingを二等分するベクトルとして定義されるため)。
+        let weight = fresnel * g * cos_theta_ih / (cos_theta_i * cos_theta_h);
+        (outgoing, weight)
     }
 }
 
