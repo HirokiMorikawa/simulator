@@ -52,8 +52,9 @@
   スナップショットリングバッファ(1s間隔・N=8面)で実際にスクラブ・巻き戻し
   できる、名前付きブックマークの記録/復元も可能)+ Console(既存の`World::
   drain_events`を実際のログとして表示、着地/跳ね返りのContactStarted/
-  ContactEndedが実際に流れ、All/Errors/Warnings/Infoタブが実際に機能する)
-  まで実装済み。設計§4のEdit/Playモード分離も実装(既定Edit、Editモードの
+  ContactEndedが実際に流れ、All/Errors/Warnings/Infoタブが実際に機能する、
+  イベント行クリックで最寄りのTimelineスナップショットへジャンプ)まで実装済み。
+  設計§4のEdit/Playモード分離も実装(既定Edit、Editモードの
   Scene ViewドラッグはGizmo経由の直接編集のみ、PlayモードではGizmoが非表示に
   なり`Command::Grab`系に切り替わる、詳細§6参照)。残りは回転/スケールの
   Gizmo・残りのオーバーレイ種別・回路エディタ等。
@@ -942,11 +943,17 @@ Playwrightで、一時停止中にNudgeを押してから1step進めると、Ins
       実装済み——この2体デモでは箱が床に着地/跳ね返るたびに`ContactStarted`/
       `ContactEnded`が実際に発生する。All/Errors/Warnings/Infoタブのフィルタも
       実際に機能する(`FuseBlown`/`SolverDiverged`/`JointBroken`はwarnings、
-      それ以外はinfoに分類)。Playwrightで実際にボールが着地→数回跳ね返って
-      静止する間、対応するContactStarted/ContactEndedイベントがログに現れ、
-      タブでlevel別に絞り込めることを確認した。発散/CFL警告バッジ・クリックで
-      Timeline/Scene Viewと連動する機能・Contacts/Eventsタブ(設計は6タブ)は
-      未実装)
+      それ以外はinfoに分類)。イベント行に埋め込まれたstep番号をクリックすると、
+      その時刻に最も近いTimelineスナップショットへ実際にジャンプする(設計§1.5
+      「クリックでTimeline/Scene Viewと連動」の時刻側、`jumpToStepRef`という
+      Console→Scene View間の疎結合な参照越しに配線——Consoleの構築時点では
+      `world`がまだ存在しないため、可変の参照オブジェクトを後からScene View側が
+      埋める形にした)。Playwrightで実際にボールが着地→数回跳ね返って静止する間、
+      対応するContactStarted/ContactEndedイベントがログに現れ、タブでlevel別に
+      絞り込めること、イベント行クリックで実際に最寄りのスナップショット時刻へ
+      巻き戻り一時停止すること(ジャンプ後0.8秒待っても時刻が不変)を確認した。
+      オブジェクトへの連動(クリックでそのイベントの発生源ボディを選択)・
+      発散/CFL警告バッジ・Contacts/Eventsタブ(設計は6タブ)は未実装)
 - [ ] Probe Graphs パネル: 複数系列・対数軸・CSV エクスポート
       (単一系列(箱のy座標、`sim_world::World::add_probe`+`ProbeTarget::BodyPosY`を
       `sim-wasm`に`y_probe_history_f64`として公開、既存のProbeが`step()`内で

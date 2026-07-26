@@ -31,7 +31,10 @@ import "./style.css";
 // ボックス。力・拘束・流体場・フレーム軸のオーバーレイは対象外)。Consoleは
 // `World::drain_events`(既存API)が返す実イベント(この2体デモでは箱の着地/
 // 跳ね返りのたびに発生する`ContactStarted`/`ContactEnded`)をAll/Errors/
-// Warnings/Infoタブでフィルタ表示する(設計§1.5)。Projectは静的な
+// Warnings/Infoタブでフィルタ表示し(設計§1.5)、イベント行(step番号を含む)を
+// クリックするとその時刻に最も近いTimelineスナップショットへジャンプする
+// (設計§1.5「クリックでTimeline/Scene Viewと連動」の時刻側、`jumpToStepRef`
+// 経由でConsole/Scene View間を疎結合に配線)。Projectは静的な
 // プレースホルダ内容のまま。TimelineはWorld::snapshot/restoreによる
 // スナップショットリングバッファ(1s間隔・N=8面)でスクラブ・巻き戻しができ、
 // 任意時点をブックマーク(`add_bookmark`/`restore_bookmark`、リングバッファの
@@ -72,7 +75,15 @@ function setUpLayoutPresetSwitcher() {
 // 対象外。
 const CONSOLE_LOG_CAPACITY = 200;
 
-function setUpConsole(): (eventsText: string) => void {
+// クリック→時刻連動(設計docs/23-frontend/01-editor.md §1.5「クリックで
+// Timeline/Scene Viewと連動」)。イベント行は`drain_events_text`が
+// `step={N}`を埋め込むため、それを`data-step`属性に持たせておき、クリック時に
+// `jumpToStepRef.current`(`setUpSceneView`がworld生成後に設定するコールバック)
+// へその時刻へジャンプさせる。Console自体は世界(`world`)より先に構築されるため、
+// 直接コールバックを渡せず可変の参照オブジェクト越しに後から配線する。
+type JumpToStepRef = { current: ((step: number) => void) | null };
+
+function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
   let activeLevel = "all";
@@ -92,6 +103,14 @@ function setUpConsole(): (eventsText: string) => void {
     });
   });
 
+  log.addEventListener("click", (event) => {
+    const li = (event.target as HTMLElement).closest("li");
+    const step = li?.dataset.step;
+    if (step && jumpToStepRef.current) {
+      jumpToStepRef.current(Number(step));
+    }
+  });
+
   const initial = document.createElement("li");
   initial.dataset.level = "info";
   initial.textContent = "[INFO] World起動 — SolverDiagnostics接続済み(ContactStarted/ContactEndedを表示)";
@@ -103,6 +122,12 @@ function setUpConsole(): (eventsText: string) => void {
       const [level, message] = line.split("::", 2);
       const li = document.createElement("li");
       li.dataset.level = level;
+      const stepMatch = message.match(/step=(\d+)/);
+      if (stepMatch) {
+        li.dataset.step = stepMatch[1];
+        li.classList.add("console-entry-clickable");
+        li.title = "クリックでその時点のTimelineへジャンプ";
+      }
       li.textContent = `[${level.toUpperCase()}] ${message}`;
       log.appendChild(li);
     }
@@ -257,6 +282,7 @@ function setUpProbeGraph(): (history: Float64Array) => void {
 async function setUpSceneView(
   updateProbeGraph: (history: Float64Array) => void,
   appendConsoleEntries: (eventsText: string) => void,
+  jumpToStepRef: JumpToStepRef,
 ) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -618,6 +644,29 @@ async function setUpSceneView(
     renderBookmarkList();
   });
 
+  // Consoleのイベント行クリック→Timelineジャンプ(設計docs/23-frontend/
+  // 01-editor.md §1.5「クリックでTimeline/Scene Viewと連動」)。イベント行に
+  // 埋め込まれたstep番号の時刻に最も近いスナップショットへ巻き戻す(スナップショット
+  // は1s間隔のため厳密なstep一致ではなく最近傍、`restore_snapshot`と同じ挙動)。
+  jumpToStepRef.current = (step: number) => {
+    const count = world.snapshot_count();
+    if (count === 0) return;
+    const targetTime = step * DT;
+    let bestIndex = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < count; i++) {
+      const diff = Math.abs(world.snapshot_time_at(i) - targetTime);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestIndex = i;
+      }
+    }
+    playing = false;
+    playButton.textContent = "▶";
+    world.restore_snapshot(bestIndex);
+    render();
+  };
+
   // 設計§4「Playモードでの介入は全てCommandとしてキューに積まれ、次ステップ先頭で
   // 適用される」の最小デモ: 直接オブジェクトの状態を書き換えるのではなく、
   // `push_apply_force`(Command::ApplyForceをキューに積む`sim-wasm`側の新API)を
@@ -732,9 +781,10 @@ async function setUpSceneView(
 function main() {
   setUpLayoutPresetSwitcher();
   const updateProbeGraph = setUpProbeGraph();
-  const appendConsoleEntries = setUpConsole();
+  const jumpToStepRef: JumpToStepRef = { current: null };
+  const appendConsoleEntries = setUpConsole(jumpToStepRef);
   setUpProjectDrawer();
-  setUpSceneView(updateProbeGraph, appendConsoleEntries).catch((err) => {
+  setUpSceneView(updateProbeGraph, appendConsoleEntries, jumpToStepRef).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);

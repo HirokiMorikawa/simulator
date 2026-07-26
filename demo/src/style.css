@@ -298,6 +298,16 @@ body {
   font-size: 12px;
 }
 
+#console-log .console-entry-clickable {
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+#console-log .console-entry-clickable:hover {
+  background: #232323;
+  color: #9cf;
+}
+
 #probe-graphs {
   grid-area: probes;
   padding: 6px 10px;
