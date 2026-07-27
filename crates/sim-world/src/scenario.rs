@@ -267,6 +267,17 @@ pub enum CouplingJson {
         plane_normal: [f64; 3],
         plane_d: f64,
     },
+    /// D25(ブラウン運動)向け(`sim_coupling::BrownianForce`)。`thermal_node`は
+    /// `thermal.nodes`配列のインデックス(`ProbeJson::NodeTemp`と同じ縮約、
+    /// 名前解決を経ない)。
+    BrownianForce {
+        body: String,
+        radius: f64,
+        viscosity: f64,
+        thermal_node: usize,
+        seed: u64,
+        stream: u64,
+    },
 }
 
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
@@ -450,6 +461,26 @@ impl World {
                         plane_normal: array_to_vec3(*plane_normal),
                         plane_d: *plane_d,
                     }));
+                }
+                CouplingJson::BrownianForce {
+                    body,
+                    radius,
+                    viscosity,
+                    thermal_node,
+                    seed,
+                    stream,
+                } => {
+                    let id = body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    world.add_coupling(Box::new(sim_coupling::BrownianForce::new(
+                        id.index as usize,
+                        *radius,
+                        *viscosity,
+                        *thermal_node,
+                        *seed,
+                        *stream,
+                    )));
                 }
             }
         }
@@ -1371,6 +1402,102 @@ mod tests {
             rel_err < 1e-6,
             "D26 pass criterion (inverse square): doubling distance should quarter the \
              initial acceleration: a_near={a_near} a_far={a_far} ratio={ratio}"
+        );
+    }
+
+    /// D25(ブラウン運動): `demos.rs`の
+    /// `d25_brownian_motion_ensemble_mean_squared_displacement_matches_6dt`と同じ
+    /// 物理パラメータ(1μmポリスチレン球相当、水の粘性、`sim_coupling::
+    /// BrownianForce`、本増分で追加した`CouplingJson::BrownianForce`スキーマ拡張)
+    /// を使うが、以下2点を縮約する: (1)アンサンブルサイズをN=2000→300へ縮小
+    /// (シーンJSON文字列を`format!`で毎粒子分生成するコスト・パース時間を抑える
+    /// ため、統計誤差の増加分は許容誤差を広げて吸収する)。(2)3D MSD($6Dt$、
+    /// x/y/z全成分)ではなくx軸1成分のみのMSD($\langle\Delta x^2\rangle=2Dt$、
+    /// 等方性より3D MSDの1/3)を検証する——`BodyPosZ`プローブが無いため
+    /// (`BodyPosX`はD11向けに追加済み)。ヘッドレスランナーは「起点」と「終点」の
+    /// 2時点の位置差分を直接読むAPIを持たない(`probe_histories`は最終値のみ
+    /// 実用的に使える)ため、同一の決定論的シード付きシナリオを異なる`steps`
+    /// (ウォームアップ終了時点/測定終了時点)で2回実行し、それぞれの`body_pos_x`
+    /// プローブの最終値を起点/終点として扱う(同一シードなので共通のstep区間の
+    /// 軌道は厳密に一致する、決定論性を利用したテクニック)。
+    #[test]
+    fn run_headless_scenario_brownian_motion_ensemble_mean_squared_displacement_matches_2dt() {
+        let water_like_density = 1050.0; // ポリスチレン球相当
+        let radius: f64 = 1.0e-6;
+        let volume = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
+        let mass = water_like_density * volume;
+        let viscosity: f64 = 1.002e-3; // 水の粘性(20℃)
+        let temperature: f64 = 293.15;
+
+        let gamma = 6.0 * std::f64::consts::PI * viscosity * radius;
+        let tau = mass / gamma;
+        let dt = tau / 50.0;
+        let warmup_steps = (10.0 * tau / dt) as u32;
+        let measurement_steps = (50.0 * tau / dt) as u32;
+        let n_particles: usize = 300;
+
+        let mut bodies_json = String::new();
+        let mut couplings_json = String::new();
+        let mut probes_json = String::new();
+        for i in 0..n_particles {
+            if i > 0 {
+                bodies_json.push(',');
+                couplings_json.push(',');
+                probes_json.push(',');
+            }
+            let x = i as f64 * 1.0e-3;
+            bodies_json.push_str(&format!(
+                r#"{{ "shape": {{ "sphere": {{ "radius": {radius} }} }},
+                  "material": "鋼(炭素鋼)", "mass_override": {mass},
+                  "position": [{x}, 0, 0], "name": "p{i}" }}"#
+            ));
+            couplings_json.push_str(&format!(
+                r#"{{ "brownian_force": {{ "body": "p{i}", "radius": {radius},
+                  "viscosity": {viscosity}, "thermal_node": 0, "seed": 1, "stream": {i} }} }}"#
+            ));
+            probes_json.push_str(&format!(r#"{{ "body_pos_x": "p{i}" }}"#));
+        }
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d25-brownian",
+          "world": {{ "gravity": 0.0, "dt": {dt} }},
+          "thermal": {{ "ambient_temperature": {temperature},
+            "nodes": [ {{ "temperature": {temperature}, "heat_capacity": 1000.0 }} ] }},
+          "bodies": [{bodies_json}],
+          "couplings": [{couplings_json}],
+          "probes": [{probes_json}]
+        }}
+        "#
+        );
+
+        let origin_result =
+            run_headless_scenario(&json, warmup_steps).expect("valid scenario JSON");
+        let final_result = run_headless_scenario(&json, warmup_steps + measurement_steps)
+            .expect("valid scenario JSON");
+
+        let t = measurement_steps as f64 * dt;
+        let msd: f64 = (0..n_particles)
+            .map(|i| {
+                let origin_x = *origin_result.probe_histories[i]
+                    .last()
+                    .expect("history should not be empty");
+                let final_x = *final_result.probe_histories[i]
+                    .last()
+                    .expect("history should not be empty");
+                (final_x - origin_x).powi(2)
+            })
+            .sum::<f64>()
+            / n_particles as f64;
+
+        let diffusion_coefficient = 1.380649e-23 * temperature / gamma;
+        let expected = 2.0 * diffusion_coefficient * t; // 1軸成分のみ
+        let rel_err = (msd - expected).abs() / expected;
+        assert!(
+            rel_err < 0.3,
+            "D25 pass criterion (S4 MSD, 1-axis component, N={n_particles}): \
+             msd={msd:e} expected={expected:e} rel_err={rel_err:.4}"
         );
     }
 
