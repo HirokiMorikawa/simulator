@@ -73,10 +73,14 @@
   reentry_scenario_combines_drag_heating_and_auto_regime_switch_with_
   deterministic_replay`)。これで統合シナリオ5本全てが実装済み(ブレーキ発熱・
   手回し発電・断熱圧縮・氷と飲み物(cross-reference)・再突入)。
+  ヘッドレスランナーの最小骨格(`sim_world::run_headless_scenario`——シーンJSON
+  読み込み+固定step数実行+プローブ履歴+`state_hash()`回収を1関数化)も実装した
+  (詳細§6参照)。
   残り: シーンJSON`couplings`セクション(スキーマ未確定のため保留、§4参照)、
-  D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)、動圧/高度トリガでの
-  自動微細刻み(縮約実装、現状は固定dtのまま急降下する軌道を選ぶことで
-  閾値到達を確実にしている)。
+  D1–D39各シナリオのシーンJSON化・Probe assert化・ネイティブ/wasm双方での実行
+  (ヘッドレスランナー本体の骨格はできたので、この土台に積み上げる形、詳細§7)、
+  動圧/高度トリガでの自動微細刻み(縮約実装、現状は固定dtのまま急降下する軌道を
+  選ぶことで閾値到達を確実にしている)。
 - **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R3・R5・R6・R7完全Green、GGX
   マイクロファセット(`RoughConductor`)実装済み(詳細・各テスト名は§5/§8参照)。
   R3はプリズム最小偏角・虹の偏角を、レンダラ自身の幾何プリミティブ(`Dielectric::
@@ -1344,7 +1348,20 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       (2) Undoで元位置に正確に戻る、(3) Redoでドラッグ後の位置に正確に戻り
       Redo無効/Undo有効に切り替わることをPlaywrightで確認した(Gizmoハンドルの
       実クリック可能座標は既存のラスタスキャン手法で実測した上でテストを組んだ)。
-- [ ] ヘッドレスランナー(Probe assert・CI 基盤)
+- [x] ヘッドレスランナー(Probe assert・CI 基盤、最小骨格): `sim_world::
+      run_headless_scenario(json, steps) -> Result<HeadlessRunResult, SceneError>`
+      (`scenario.rs`)——シーンJSON読み込み(`Scenario::from_json`/
+      `World::from_scenario`、既存のバリデーション込み)+固定step数実行+
+      プローブ履歴(`scenario.probes`と同じ順)+`state_hash()`/`time()`の回収を
+      1関数にまとめた。`run_headless_scenario_executes_scene_json_and_reports_
+      deterministic_probe_history`(既存の浮力+`body_pos_y`プローブ例JSONを
+      実行し、履歴件数=step数・`final_time`が`dt×steps`と一致・同一JSON+step数
+      の2回実行で`final_state_hash`が一致することを確認)・
+      `run_headless_scenario_propagates_scene_validation_errors`(不正シーンでは
+      `SceneError`をそのまま伝播しバリデーションを迂回しないことを確認)がGreen。
+      D1–D39各シナリオのシーンJSON化・Probe assert化・入力列(Command系列)の
+      再生・ネイティブ/wasm(node)双方での実行は未実装(次段、この関数を土台に
+      積み上げる)
 
 ## 7. デモ合格管理表(D1–D43)
 

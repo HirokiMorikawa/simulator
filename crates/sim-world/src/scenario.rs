@@ -206,6 +206,48 @@ impl World {
     }
 }
 
+/// ヘッドレスシナリオ実行結果(設計§8「ヘッドレスランナー」の最小骨格、
+/// `run_headless_scenario`のdoc参照)。
+pub struct HeadlessRunResult {
+    /// 実行終了時点の`World::state_hash()`(決定論リプレイ検証に使う)。
+    pub final_state_hash: u64,
+    pub final_time: f64,
+    /// `scenario.probes`と同じ順のプローブ履歴(D1–D39の合否判定はこの履歴に対する
+    /// アサートとして表現できる、設計docs/21-verification/03-demo-scenarios.md)。
+    pub probe_histories: Vec<Vec<f64>>,
+}
+
+/// シーンJSONを読み込み、固定`steps`回`step()`してプローブ履歴を回収する
+/// (設計§8「ヘッドレスランナー」——「シーンJSON + 入力列 + Probe assertでの合否判定」
+/// のうち、シーンJSON読み込み+固定step数実行+Probe履歴回収の核となる部分。
+/// 入力列(Command系列の記録・再生)の接続は、フロントエンドの`command_log`
+/// (`demo/src/main.ts`)に相当する仕組みをこちら側にも持たせる後続増分)。
+/// D1–D39各シナリオの合否基準(`docs/21-verification/03-demo-scenarios.md`)は、
+/// 呼び出し側が`probe_histories`に対してアサートすることで表現する。
+pub fn run_headless_scenario(json: &str, steps: u32) -> Result<HeadlessRunResult, SceneError> {
+    let scenario = Scenario::from_json(json)?;
+    let mut world = World::from_scenario(&scenario)?;
+
+    for _ in 0..steps {
+        world.step();
+    }
+
+    let probe_histories = (0..scenario.probes.len())
+        .map(|i| {
+            world
+                .probe(i)
+                .map(|p| p.history().copied().collect())
+                .unwrap_or_default()
+        })
+        .collect();
+
+    Ok(HeadlessRunResult {
+        final_state_hash: world.state_hash(),
+        final_time: world.time(),
+        probe_histories,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +366,64 @@ mod tests {
 
         let history: Vec<f64> = world.probe(0).unwrap().history().copied().collect();
         assert_eq!(history.len(), 10);
+    }
+
+    /// ヘッドレスランナー(設計§8)の最小骨格: シーンJSON(浮力+`body_pos_y`プローブの
+    /// 既存例)を読み込み、固定step数実行してプローブ履歴を回収できること、同じJSON+
+    /// step数を独立に2回実行すると`final_state_hash`が一致する(決定論リプレイ)ことを
+    /// 確認する。
+    #[test]
+    fn run_headless_scenario_executes_scene_json_and_reports_deterministic_probe_history() {
+        let json = r#"
+        {
+          "name": "buoyancy-full",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "materials": [ { "extends": "木材(松)", "name": "light-wood", "density": 400.0 } ],
+          "bodies": [
+            { "shape": { "box": { "half": [0.1, 0.1, 0.1] } }, "material": "light-wood",
+              "position": [0, 0.5, 0], "name": "crate" }
+          ],
+          "fluids": [ { "static_water": { "water_level": 1.0, "density": 1000.0 } } ],
+          "probes": [ { "body_pos_y": "crate" } ]
+        }
+        "#;
+
+        let steps = 10;
+        let result1 = run_headless_scenario(json, steps).expect("valid scenario JSON");
+        let result2 = run_headless_scenario(json, steps).expect("valid scenario JSON");
+
+        assert_eq!(result1.probe_histories.len(), 1);
+        assert_eq!(result1.probe_histories[0].len(), steps as usize);
+        assert_eq!(
+            result1.final_time,
+            0.008333333 * steps as f64,
+            "final_time should reflect exactly `steps` frames of dt"
+        );
+        assert_eq!(
+            result1.final_state_hash, result2.final_state_hash,
+            "identical scenario JSON + step count must replay bit-identically"
+        );
+    }
+
+    /// シーンJSONが不正(存在しない材料参照)なら、`Scenario::from_json`/
+    /// `World::from_scenario`と同じ`SceneError`をそのまま返す(ヘッドレスランナーは
+    /// バリデーションを迂回しない)。
+    #[test]
+    fn run_headless_scenario_propagates_scene_validation_errors() {
+        let json = r#"
+        {
+          "name": "broken",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [
+            { "shape": { "sphere": { "radius": 1.0 } }, "material": "unobtainium" }
+          ]
+        }
+        "#;
+        let result = run_headless_scenario(json, 1);
+        assert!(matches!(
+            result,
+            Err(SceneError::UnknownMaterial(ref name)) if name == "unobtainium"
+        ));
     }
 
     /// `probes[].body_pos_y`が`bodies[].name`のいずれとも一致しない場合は
