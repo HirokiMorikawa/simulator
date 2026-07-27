@@ -549,6 +549,62 @@ impl WasmWorld {
         });
     }
 
+    /// 自由配線回路エディタ(設計docs/23-frontend/01-editor.md §6「回路エディタ
+    /// サブモード」(D19)の縮約実装——専用のグラフィカルなノード配線UIではなく、
+    /// Circuitタブのフォームベースの操作でノード/素子を追加していく形とした)
+    /// 向けに、既存の固定デモ回路(`WasmWorld::new`が構築したもの)を`num_nodes`
+    /// 個のノードを持つ空の回路で置き換える。以後`circuit_editor_add_*`で
+    /// ユーザーが自由に素子を追加していく。置き換え後は固定デモの
+    /// `circuit_switch_index`が新回路のスイッチ数を超えて無効になり得るため、
+    /// 呼び出し側(`main.ts`)は既存の「回路スイッチ(閉)」チェックボックスを
+    /// 無効化する責任を負う(`set_circuit_switch_closed`をこの後に呼ぶと
+    /// パニックし得る)。
+    pub fn circuit_editor_reset(&mut self, num_nodes: usize) {
+        self.inner.enable_circuit(sim_em::Circuit::new(num_nodes));
+    }
+
+    /// 自由配線回路エディタ——ノード`a`・`b`間に抵抗`resistance`[Ω]を追加する。
+    /// `circuit_editor_reset`より前に呼ぶと(回路が未有効化)何もしない。
+    pub fn circuit_editor_add_resistor(&mut self, a: usize, b: usize, resistance: f64) {
+        if let Some(circuit) = self.inner.circuit_mut() {
+            circuit.add_resistor(a, b, resistance);
+        }
+    }
+
+    /// 自由配線回路エディタ——ノード`a`(正極)・`b`(負極)間に独立電圧源
+    /// `voltage`[V]を追加する。
+    pub fn circuit_editor_add_voltage_source(&mut self, a: usize, b: usize, voltage: f64) {
+        if let Some(circuit) = self.inner.circuit_mut() {
+            circuit.add_voltage_source(a, b, voltage);
+        }
+    }
+
+    /// 自由配線回路エディタ——ノード`a`・`b`間に理想スイッチを追加する。返り値は
+    /// このスイッチのindex(`circuit_editor_set_switch_closed`用)。回路が
+    /// 未有効化なら0を返す(縮約実装、呼び出し側は`circuit_editor_reset`を
+    /// 先に呼ぶ前提)。
+    pub fn circuit_editor_add_switch(&mut self, a: usize, b: usize, closed: bool) -> usize {
+        self.inner
+            .circuit_mut()
+            .map_or(0, |circuit| circuit.add_switch(a, b, closed))
+    }
+
+    /// 自由配線回路エディタ——`circuit_editor_add_switch`が返したindexのスイッチの
+    /// 開閉状態を変更する(既存の`set_circuit_switch_closed`と異なりCommandキューを
+    /// 経由しない即時変更——自由配線回路の構築/操作全体がEditモード的な直接操作
+    /// として設計されているため、`spawn_sphere`等と同じ即時反映の扱いとした)。
+    pub fn circuit_editor_set_switch_closed(&mut self, index: usize, closed: bool) {
+        if let Some(circuit) = self.inner.circuit_mut() {
+            circuit.set_switch_closed(index, closed);
+        }
+    }
+
+    /// 自由配線回路エディタ——任意ノードの電圧(既存の固定デモ専用
+    /// `circuit_divider_voltage`の一般化、`World::circuit_probe`をそのまま使う)。
+    pub fn circuit_node_voltage(&self, node: usize) -> f64 {
+        self.inner.circuit_probe(node).unwrap_or(0.0)
+    }
+
     /// 熱ノード(`WasmWorld::new`参照)の現在温度[K]。
     pub fn heater_node_temperature(&self) -> f64 {
         self.inner.thermal().unwrap().nodes[THERMAL_HEATER_NODE].temperature

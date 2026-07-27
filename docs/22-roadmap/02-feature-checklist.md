@@ -169,7 +169,7 @@
   残りは複数フレームの階層ドリルインUI・自由配線の回路エディタ本体・
   シーンJSON Import・ブックマークのエクスポート/インポート・Replay再生実行等
   (このうち複数フレームの階層ドリルインUI・シーンJSON Import・Replay再生
-  実行は後述のとおりこの後の増分で実装済み)。
+  実行・自由配線回路エディタは後述のとおりこの後の増分で実装済み)。
   さらにヘッドレスランナーの5本目の適用例としてD2弾道(45°射出)をシーンJSON化した——
   `ProbeTarget`に水平位置(range)を読める種別が無いため着地x座標を直接読む
   ことはできず、代わりに飛翔時間(解析解$T=2v_0\sin\theta/g$)・着地速さ
@@ -210,12 +210,19 @@
   へステップ番号どおりに再送、最終`state_hash`がライブなシーンと一致するかを
   検証する(ヘッドレスなテキスト報告、Scene View上のライブ再生ではない)。
   Playwrightで、Nudge→ヒーターon/off→Replay実行の順に操作し、再生後の
-  Box_1位置・state_hashが実際に一致することを確認した。
-- **次**: ワークストリームDの継続(自由配線回路エディタ・ブックマークの
-  エクスポート/インポート等)を軸に、ワークストリームC残り(R4、完全な
-  分光レンダリング・コースティクス・マルチスキャッタリング)は機を見て並行
-  して進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`
-  参照。
+  Box_1位置・state_hashが実際に一致することを確認した。続けて自由配線回路
+  エディタ(D19)も実装した——`sim_em::Circuit`の任意ノード対応素子構築APIを
+  `sim-wasm`の`circuit_editor_*`メソッド群経由でCircuitタブのフォームUIへ
+  配線し(ノード番号+素子種別+値を指定して追加、抵抗/電圧源/スイッチに対応)、
+  Playwrightで分圧回路と同じ構成を組み立てて解析解と厳密一致することを確認。
+  副次的に「回路リセット後もPlayモード切替のたびに固定デモの無効化済み
+  スイッチが再度有効化されてしまう」実装漏れ(パニックし得る危険な回帰)を
+  発見・修正した。
+- **次**: ワークストリームDの継続(ブックマークのエクスポート/インポート・
+  複数の流体塊の階層管理UI等)を軸に、ワークストリームC残り(R4、完全な
+  分光レンダリング・コースティクス・マルチスキャッタリング)・さらなる
+  ヘッドレスランナー適用例は機を見て並行して進める。優先順位の詳細は
+  `/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -1452,14 +1459,42 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       固定の大きな高さにしその分コンソール行を縮小)の3種を実装済み(`demo/src/
       style.css`のCSS Grid行テンプレート切替)。Circuit-focusは回路サブモード自体が
       無いため未実装)
-- [ ] 回路エディタ(Scene View サブモード、D19 自由配線。Project ドロワーに
-      「Circuit」タブを追加済み(`demo/src/main.ts::setUpProjectDrawer`の
-      `renderCircuitTab`)——固定トポロジー(分圧回路)の図示+
+- [x] 回路エディタ(D19 自由配線、本増分で追加)——Project ドロワーの
+      「Circuit」タブに固定トポロジー(分圧回路)の図示+
       `circuit_divider_voltage()`のライブ読み取り(200ms間隔ポーリング、
       Playwrightでスイッチ開閉に応じ0.000V⇔6.667Vと正しく切り替わることを
-      確認)+既存のスイッチチェックボックス状態の反映。Scene Viewの専用
-      サブモード(D19が求める自由配線のグラフィカルな回路構築)は依然未実装、
-      本増分は固定回路の可視化パネルのみ)
+      確認済み)+既存のスイッチチェックボックス状態の反映は元々実装済み。
+      **自由配線回路エディタ(本増分で追加)**: Scene View内の専用グラフィカル
+      サブモード(ノードをドラッグ配置してワイヤーを描く形)は大掛かりな
+      追加実装が要るため見送り、代わりにCircuitタブへノード番号を直接指定する
+      フォームベースの編集UIを追加した(`sim_em::Circuit`自体は任意ノード対応
+      素子を既に自由に組める設計であり、本増分はそこへの実際の配線が主眼、
+      縮約実装として正直に文書化)。新規`sim-wasm`の`circuit_editor_reset`
+      (`num_nodes`個のノードを持つ空の回路へ置換)・`circuit_editor_add_resistor`/
+      `circuit_editor_add_voltage_source`/`circuit_editor_add_switch`(いずれも
+      Command経由ではない即時反映、スポーンと同じ「Editモード的な直接操作」の
+      扱い)・`circuit_editor_set_switch_closed`・`circuit_node_voltage`
+      (既存の固定デモ専用`circuit_divider_voltage`の一般化、`World::
+      circuit_probe`をそのまま使う)を追加。Circuitタブに「ノード数+リセット」
+      「ノードA/B+素子種別(抵抗/電圧源/スイッチ)+値+追加」フォーム+
+      追加済み素子一覧(スイッチは個別トグルチェックボックス付き)+
+      全ノードの電圧読み取りテーブルを実装した。
+      副次的に発見・修正したバグ: 回路をリセットすると固定デモの
+      `circuit_switch_index`が新回路のスイッチ数を超えて無効になり得るため、
+      既存の「回路スイッチ(閉)」チェックボックスを無効化する必要があったが、
+      既存の`setMode`(Edit⇔Play切替)が`circuitSwitchToggle.disabled = mode
+      === "edit"`を無条件に上書きしていたため、Playモードへ切り替えるたびに
+      再度有効になってしまう実装漏れをPlaywright検証中に発見し、
+      `circuitFreeWiringState`(共有フラグ)を見るよう修正した(このガードが
+      無いと、リセット後にPlayモードへ切り替えて古いチェックボックスを
+      操作した場合、無効化された`switch_index`で`Circuit::set_switch_closed`が
+      配列範囲外アクセスしパニックし得た)。Playwrightで、電源10V(1-0)+
+      抵抗100Ω(1-2)+抵抗200Ω(2-0)という分圧回路と全く同じ構成をノード番号
+      指定で組み立て、Node1=10.000V・Node2=6.667V(固定デモと同じ解析解)と
+      厳密一致することを確認し、さらにスイッチ版(2-0にスイッチ)でも
+      開(Node2=10V、電流が流れず降下なし)⇔閉(Node2=0V、ほぼ短絡)が
+      正しく切り替わることを確認した。容量素子(コンデンサ・インダクタ・
+      ダイオード)は対象外(抵抗・電圧源・スイッチのみ、縮約実装)
 - [x] フレームサブモード(L5 ドリルイン、本増分で追加)——フレーム軸オーバーレイ
       (単一の自転フレームの可視化)を複数フレーム対応へ拡張した。Hierarchyに
       「Frames」サブツリーを新設し、各フレームの親子関係(新規`sim_wasm::
@@ -1718,13 +1753,16 @@ Phase 2〜3:
 
 Phase 4:
 
-- [ ] D19 電気工作台(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視
-      チェックはワークストリームD未着手のため保留。`circuit`ドメイン(既に`World`の
-      常時合成ドメイン)に分圧回路+コンデンサ放電回路+スイッチ付きLED回路を単一
-      `Circuit`に自由配線し、E5(分圧、機械精度)・E3(放電形、rel<1%)・
-      `Command::SetSwitch`によるLED分岐の実行中開閉・`JouleHeat`(Coupling registry
-      経由)による熱ノード温度上昇を確認。E4(RLC)は`sim-em`側で既にGreenのため
-      重複実装しない)
+- [ ] D19 電気工作台(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
+      `circuit`ドメイン(既に`World`の常時合成ドメイン)に分圧回路+コンデンサ
+      放電回路+スイッチ付きLED回路を単一`Circuit`に自由配線し、E5(分圧、
+      機械精度)・E3(放電形、rel<1%)・`Command::SetSwitch`によるLED分岐の
+      実行中開閉・`JouleHeat`(Coupling registry経由)による熱ノード温度上昇を
+      確認。E4(RLC)は`sim-em`側で既にGreenのため重複実装しない。
+      ワークストリームDの自由配線回路エディタ(上記「回路エディタ」の項目参照)
+      によりフォームベースの目視確認自体は可能になったが、このD19固有の3回路
+      (分圧+放電+LED)構成をエディタから直接組み立てて目視確認する専用の
+      デモシナリオ読み込みはまだ実装していない、チェックは保留のまま)
 - [ ] D20 モーターと発電(合格基準「E6、台帳(効率)」のうち、「手回し発電」部分は
       `crates/sim-world/src/integration_scenarios.rs`の
       `hand_crank_generator_scenario_converts_mechanical_work_to_joule_heat`が既に

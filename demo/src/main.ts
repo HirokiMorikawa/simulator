@@ -166,6 +166,31 @@ type ReplayVerifyResult = {
 };
 type ReplayVerifyRef = { current: (() => ReplayVerifyResult) | null };
 
+// 自由配線回路エディタ(設計docs/23-frontend/01-editor.md §6「回路エディタ
+// サブモード」(D19)の縮約実装——専用のグラフィカルなノード配線UIではなく、
+// Circuitタブのフォームベースの操作でノード/素子を追加していく形とした、
+// `sim-wasm`の`circuit_editor_*`メソッド群のdoc参照)向けに、`world`への
+// 直接アクセスを持たない`setUpProjectDrawer`から呼べるようにするための
+// コールバック群。`setSwitchClosed`以外は全て即時反映(Command経由ではない、
+// `circuit_editor_set_switch_closed`のdoc参照)。
+type CircuitEditorRef = {
+  current: {
+    reset: (numNodes: number) => void;
+    addResistor: (a: number, b: number, resistance: number) => void;
+    addVoltageSource: (a: number, b: number, voltage: number) => void;
+    addSwitch: (a: number, b: number, closed: boolean) => number;
+    setSwitchClosed: (index: number, closed: boolean) => void;
+    nodeVoltage: (node: number) => number;
+  } | null;
+};
+
+// 自由配線回路が有効化されたかどうかの共有フラグ。`setUpProjectDrawer`(リセット
+// ボタン押下時)がtrueにし、`setUpSceneView`の既存の固定デモ用「回路スイッチ
+// (閉)」チェックボックスのハンドラがこれを見て自身を無効化する——リセット後は
+// 固定デモの`circuit_switch_index`が新回路のスイッチ数を超えて無効になり得る
+// (`circuit_editor_reset`のdoc参照)ため、パニックを避ける。
+type CircuitFreeWiringState = { active: boolean };
+
 // Import側のシーンJSONパース(`sim_world::scenario::ShapeJson`のJSON表現と同じ
 // タグ付きオブジェクト形)。`world.import_scene_json`はボディの追加自体は行うが
 // (返り値は追加件数のみ)、Scene Viewが各ボディに対応するThree.jsメッシュを
@@ -452,6 +477,8 @@ function setUpProjectDrawer(
   sceneExportRef: SceneExportRef,
   sceneImportRef: SceneImportRef,
   replayVerifyRef: ReplayVerifyRef,
+  circuitEditorRef: CircuitEditorRef,
+  circuitFreeWiringState: CircuitFreeWiringState,
 ) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
@@ -459,6 +486,15 @@ function setUpProjectDrawer(
     prefabs: "Prefabs: 未実装",
   };
   let circuitTabRefreshIntervalId: number | null = null;
+
+  // 自由配線回路エディタの状態(タブ切替でDOMは再構築されるが、実際に構築した
+  // 回路自体はwasm側に残るため、この一覧はタブ再訪時の表示復元用)。
+  type FreeWiringComponent =
+    | { kind: "resistor"; a: number; b: number; resistance: number }
+    | { kind: "voltage_source"; a: number; b: number; voltage: number }
+    | { kind: "switch"; a: number; b: number; index: number; closed: boolean };
+  let freeWiringNumNodes = 0;
+  const freeWiringComponents: FreeWiringComponent[] = [];
 
   function renderScenesTab() {
     body.innerHTML = "";
@@ -525,10 +561,11 @@ function setUpProjectDrawer(
 
   function renderCircuitTab() {
     body.innerHTML = "";
+    let circuitFreeWiringRefresh: (() => void) | null = null;
     const topology = document.createElement("pre");
     topology.className = "circuit-topology";
     topology.textContent = [
-      "分圧回路(固定トポロジー、自由配線の回路エディタは後続増分):",
+      "分圧回路(固定トポロジー):",
       "",
       "  Node1 (10V 電源) --[100Ω]-- Node2 --[200Ω]-- GND",
       "                                  |",
@@ -536,7 +573,9 @@ function setUpProjectDrawer(
       "                                  |",
       "                                 GND",
       "",
-      "スイッチの開閉は画面上部の「回路スイッチ(閉)」チェックボックスで操作する。",
+      circuitFreeWiringState.active
+        ? "(下の自由配線回路に置き換え済みのため、このデモ回路・チェックボックスは無効です)"
+        : "スイッチの開閉は画面上部の「回路スイッチ(閉)」チェックボックスで操作する。",
     ].join("\n");
     body.appendChild(topology);
 
@@ -547,14 +586,143 @@ function setUpProjectDrawer(
 
     const switchCheckbox = document.getElementById("toggle-circuit-switch") as HTMLInputElement | null;
 
+    // 自由配線回路エディタ(設計docs/23-frontend/01-editor.md §6「回路エディタ
+    // サブモード」(D19)の縮約実装、`CircuitEditorRef`のdoc参照)。専用の
+    // グラフィカルなノード配線UIではなく、ノード番号を直接指定するフォームで
+    // 素子を追加していく形とした(Scene View内の別サブモードは大掛かりな
+    // 追加実装が要るため見送った——`sim-em::Circuit`自体は任意のノード対応
+    // 素子を既に自由に組める設計であり、本増分はそこへの配線が主眼)。
+    const editorHeading = document.createElement("h4");
+    editorHeading.textContent = "自由配線回路エディタ";
+    body.appendChild(editorHeading);
+
+    const resetForm = document.createElement("div");
+    const nodeCountInput = document.createElement("input");
+    nodeCountInput.type = "number";
+    nodeCountInput.min = "2";
+    nodeCountInput.value = "3";
+    nodeCountInput.title = "GND(node 0)を含むノード総数";
+    const resetButton = document.createElement("button");
+    resetButton.textContent = "リセット(新規回路)";
+    resetButton.addEventListener("click", () => {
+      if (!circuitEditorRef.current) return;
+      const numNodes = Math.max(2, Math.trunc(Number(nodeCountInput.value) || 2));
+      circuitEditorRef.current.reset(numNodes);
+      circuitFreeWiringState.active = true;
+      if (switchCheckbox) {
+        switchCheckbox.checked = false;
+        switchCheckbox.disabled = true;
+      }
+      freeWiringNumNodes = numNodes;
+      freeWiringComponents.length = 0;
+      renderCircuitTab();
+    });
+    resetForm.append("ノード数(GND含む): ", nodeCountInput, resetButton);
+    body.appendChild(resetForm);
+
+    if (freeWiringNumNodes > 0) {
+      const addForm = document.createElement("div");
+      const aInput = document.createElement("input");
+      aInput.type = "number";
+      aInput.min = "0";
+      aInput.value = "0";
+      aInput.title = "ノードA(0=GND)";
+      aInput.id = "circuit-editor-node-a";
+      const bInput = document.createElement("input");
+      bInput.type = "number";
+      bInput.min = "0";
+      bInput.value = "1";
+      bInput.title = "ノードB(0=GND)";
+      bInput.id = "circuit-editor-node-b";
+      const kindSelect = document.createElement("select");
+      kindSelect.id = "circuit-editor-kind";
+      for (const [value, label] of [
+        ["resistor", "抵抗 [Ω]"],
+        ["voltage_source", "電圧源 [V] (A=正極)"],
+        ["switch", "スイッチ"],
+      ]) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = label;
+        kindSelect.appendChild(option);
+      }
+      const valueInput = document.createElement("input");
+      valueInput.type = "number";
+      valueInput.value = "100";
+      valueInput.id = "circuit-editor-value";
+      const addButton = document.createElement("button");
+      addButton.textContent = "素子を追加";
+      addButton.addEventListener("click", () => {
+        if (!circuitEditorRef.current) return;
+        const a = Math.trunc(Number(aInput.value) || 0);
+        const b = Math.trunc(Number(bInput.value) || 0);
+        const value = Number(valueInput.value) || 0;
+        if (kindSelect.value === "resistor") {
+          circuitEditorRef.current.addResistor(a, b, value);
+          freeWiringComponents.push({ kind: "resistor", a, b, resistance: value });
+        } else if (kindSelect.value === "voltage_source") {
+          circuitEditorRef.current.addVoltageSource(a, b, value);
+          freeWiringComponents.push({ kind: "voltage_source", a, b, voltage: value });
+        } else {
+          const index = circuitEditorRef.current.addSwitch(a, b, false);
+          freeWiringComponents.push({ kind: "switch", a, b, index, closed: false });
+        }
+        renderCircuitTab();
+      });
+      addForm.append("A: ", aInput, " B: ", bInput, " ", kindSelect, " 値: ", valueInput, addButton);
+      body.appendChild(addForm);
+
+      const componentList = document.createElement("ul");
+      for (const c of freeWiringComponents) {
+        const item = document.createElement("li");
+        if (c.kind === "resistor") {
+          item.textContent = `抵抗 ${c.a}-${c.b}: ${c.resistance}Ω`;
+        } else if (c.kind === "voltage_source") {
+          item.textContent = `電圧源 ${c.a}(+)-${c.b}(-): ${c.voltage}V`;
+        } else {
+          const switchCheckboxItem = document.createElement("input");
+          switchCheckboxItem.type = "checkbox";
+          switchCheckboxItem.checked = c.closed;
+          switchCheckboxItem.addEventListener("change", () => {
+            c.closed = switchCheckboxItem.checked;
+            circuitEditorRef.current?.setSwitchClosed(c.index, c.closed);
+          });
+          item.textContent = `スイッチ ${c.a}-${c.b}: `;
+          item.appendChild(switchCheckboxItem);
+        }
+        componentList.appendChild(item);
+      }
+      body.appendChild(componentList);
+
+      const voltageTable = document.createElement("div");
+      voltageTable.id = "circuit-editor-voltages";
+      body.appendChild(voltageTable);
+
+      function refreshFreeWiringVoltages() {
+        if (!circuitEditorRef.current) return;
+        const lines: string[] = [];
+        for (let node = 0; node < freeWiringNumNodes; node++) {
+          lines.push(`Node${node}: ${circuitEditorRef.current.nodeVoltage(node).toFixed(3)}V`);
+        }
+        voltageTable.textContent = lines.join(" / ");
+      }
+      refreshFreeWiringVoltages();
+      circuitFreeWiringRefresh = refreshFreeWiringVoltages;
+    } else {
+      circuitFreeWiringRefresh = null;
+    }
+
     function refresh() {
       if (!circuitRef.current) {
         voltageLine.textContent = "Node2電圧: 読み込み中...";
-        return;
+      } else {
+        const voltage = circuitRef.current();
+        const switchState = switchCheckbox?.checked ? "閉" : "開";
+        voltageLine.textContent = circuitFreeWiringState.active
+          ? "固定デモ回路は自由配線回路に置き換え済みです"
+          : `Node2電圧: ${voltage.toFixed(3)} V (スイッチ: ${switchState})`;
       }
-      const voltage = circuitRef.current();
-      const switchState = switchCheckbox?.checked ? "閉" : "開";
-      voltageLine.textContent = `Node2電圧: ${voltage.toFixed(3)} V (スイッチ: ${switchState})`;
+      circuitFreeWiringRefresh?.();
     }
     refresh();
 
@@ -732,9 +900,19 @@ async function setUpSceneView(
   sceneExportRef: SceneExportRef,
   sceneImportRef: SceneImportRef,
   replayVerifyRef: ReplayVerifyRef,
+  circuitEditorRef: CircuitEditorRef,
+  circuitFreeWiringState: CircuitFreeWiringState,
 ) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
+  circuitEditorRef.current = {
+    reset: (numNodes: number) => world.circuit_editor_reset(numNodes),
+    addResistor: (a, b, resistance) => world.circuit_editor_add_resistor(a, b, resistance),
+    addVoltageSource: (a, b, voltage) => world.circuit_editor_add_voltage_source(a, b, voltage),
+    addSwitch: (a, b, closed) => world.circuit_editor_add_switch(a, b, closed),
+    setSwitchClosed: (index, closed) => world.circuit_editor_set_switch_closed(index, closed),
+    nodeVoltage: (node) => world.circuit_node_voltage(node),
+  };
   materialsRef.current = () =>
     SPAWN_MATERIALS.map((name) => {
       const [density, friction, restitution, specificHeat, conductivity] = world.material_properties_f64(name);
@@ -1360,7 +1538,10 @@ async function setUpSceneView(
     stepButton.disabled = mode === "edit";
     nudgeButton.disabled = mode === "edit";
     motorToggleButton.disabled = mode === "edit" || !motorArmBodies.has(selectedBodyIndex);
-    circuitSwitchToggle.disabled = mode === "edit";
+    // 自由配線回路エディタでリセット済みなら、モード切替に関わらず無効のまま
+    // (`circuitFreeWiringState`のdoc参照——`circuit_switch_index`が新回路の
+    // スイッチ数を超えて無効になり得るため、再有効化してはならない)。
+    circuitSwitchToggle.disabled = mode === "edit" || circuitFreeWiringState.active;
     heaterToggle.disabled = mode === "edit";
     undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
     redoButton.disabled = mode !== "edit" || editRedoStack.length === 0;
@@ -1766,6 +1947,11 @@ async function setUpSceneView(
   });
 
   circuitSwitchToggle.addEventListener("change", () => {
+    // 自由配線回路エディタでリセットした後は`circuit_switch_index`(固定デモの
+    // スイッチ)が新回路のスイッチ数を超えて無効になり得るため、この経路は
+    // 無効化する(`circuitFreeWiringState`のdoc参照、チェックボックス自体も
+    // リセット時に`disabled`にする)。
+    if (circuitFreeWiringState.active) return;
     world.set_circuit_switch_closed(circuitSwitchToggle.checked);
     pushCommandLog(world, { kind: "SetSwitch", closed: circuitSwitchToggle.checked });
   });
@@ -1952,7 +2138,17 @@ function main() {
   const sceneExportRef: SceneExportRef = { current: null };
   const sceneImportRef: SceneImportRef = { current: null };
   const replayVerifyRef: ReplayVerifyRef = { current: null };
-  setUpProjectDrawer(materialsRef, circuitRef, sceneExportRef, sceneImportRef, replayVerifyRef);
+  const circuitEditorRef: CircuitEditorRef = { current: null };
+  const circuitFreeWiringState: CircuitFreeWiringState = { active: false };
+  setUpProjectDrawer(
+    materialsRef,
+    circuitRef,
+    sceneExportRef,
+    sceneImportRef,
+    replayVerifyRef,
+    circuitEditorRef,
+    circuitFreeWiringState,
+  );
   setUpSceneView(
     updateProbeGraph,
     appendConsoleEntries,
@@ -1962,6 +2158,8 @@ function main() {
     sceneExportRef,
     sceneImportRef,
     replayVerifyRef,
+    circuitEditorRef,
+    circuitFreeWiringState,
   ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
