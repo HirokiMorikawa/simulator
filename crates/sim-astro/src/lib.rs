@@ -6,7 +6,8 @@
 //! `atmosphere`(指数大気モデル、docs/16-astro/02-orbital-mechanics.md §2.3、
 //! 空力加熱・アブレーションは未実装)・`perturbations`($J_2$扁平率摂動、同docs §2.2)・
 //! `regime`(レジーム切替の`TimeRegime`型とAstro⇄Local状態受け渡し、切替時刻の量子化・
-//! リプレイ一致・巻き戻しはWorld本体未実装のため後続増分に残す)を実装。Barnes-Hut・
+//! リプレイ一致・巻き戻しはWorld本体未実装のため後続増分に残す)・`swingby`
+//! (パッチドコニック近似によるフライバイ速度変化、D36)を実装。Barnes-Hut・
 //! WHFast・浮動原点・軌道力学(ホーマン遷移以外)の型・トレイトのスケルトンは Phase A で
 //! 追加する(docs/22-roadmap/01-phases.md)。
 
@@ -15,6 +16,7 @@ mod nbody;
 mod perturbations;
 mod regime;
 mod relativity;
+mod swingby;
 pub use atmosphere::exponential_atmosphere_density;
 pub use nbody::{NBodySystem, GRAVITATIONAL_CONSTANT};
 pub use perturbations::{j2_acceleration, EARTH_EQUATORIAL_RADIUS, EARTH_J2};
@@ -23,3 +25,4 @@ pub use relativity::{
     circular_orbital_speed, gps_proper_time_rate, light_deflection_angle, pn1_acceleration,
     pn1_precession_per_orbit, SPEED_OF_LIGHT,
 };
+pub use swingby::{hyperbolic_eccentricity, patched_conic_deflection_angle, periapsis_speed};

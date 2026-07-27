@@ -666,6 +666,11 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       誤差がGM/c²にほぼ比例して縮小する挙動から、線形の1PN近似自体が過度に強い摂動では
       破れる(2次以降の項が無視できなくなる)ことが原因と判明。誇張を弱めることで
       rel<1%を達成した
+- [x] スイングバイ(パッチドコニック近似、D36。設計docs/16-astro/
+      02-orbital-mechanics.md §4の数値解法受け入れ基準「双曲線通過前後の速度
+      ベクトル変化がパッチドコニック解析と一致(±1%)」に対応するA番号は
+      `01-analytic-tests.md`に無いため、新規`crates/sim-astro/src/swingby.rs`
+      として実装)——詳細は§7 D36参照
 - [x] 担当テスト Green: A1–A10(A1・A2縮約版・A3・A4・A5・A6・A7・A8・A9・A10 全てGreen)
 
 ## 4. Phase C — 結合・全体検証
@@ -1511,7 +1516,20 @@ Pα:
 - [ ] D35 軌道投入(ヘッドレステストGreen、同上。目視チェック保留。円軌道速度の
       0.9倍の初速で楕円軌道を作り、vis-vivaから導いた長半径によるケプラー第3法則の
       周期分だけ進めると出発点(位置・速度とも)へ戻ることを確認)
-- [ ] D36 スイングバイ
+- [x] D36 スイングバイ(ヘッドレステストGreen、新規`crates/sim-astro/src/
+      swingby.rs`。目視チェックはワークストリームD未着手のため保留。
+      `hyperbolic_eccentricity`/`patched_conic_deflection_angle`/
+      `periapsis_speed`でパッチドコニック近似の閉形式を実装し、探査機質量が
+      惑星質量に対して無視できる制限2体問題として`NBodySystem::step()`
+      (実際のleapfrog)で近点から遠方(近点距離の200倍)まで積分、
+      `d36_swingby_velocity_turn_matches_patched_conic_analysis_within_
+      one_percent`で(1)惑星基準系速度の大きさが$v_\infty$へ収束(エネルギー
+      保存、rel<1%)・(2)速度方向が半偏向角$\arcsin(1/e)$の回転と一致
+      (rel<1%)・(3)惑星速度はほぼ不変(反作用無視)・(4)探査機の慣性系速度が
+      「惑星速度+回転後の相対速度」と一致(スイングバイ加速効果の直接検算、
+      rel<1%)を確認、設計docs/16-astro/02-orbital-mechanics.md §4の受け入れ
+      基準「双曲線通過前後の速度ベクトル変化がパッチドコニック解析と一致
+      (±1%)」を満たす)
 - [ ] D37 再突入(ヘッドレス部分は`integration_scenarios.rs`の
       `reentry_scenario_combines_drag_heating_and_auto_regime_switch_with_
       deterministic_replay`が既にカバー済みと見なす——A6(大気抗力による降下)・
