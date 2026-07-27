@@ -7,7 +7,8 @@
 //! 空力加熱・アブレーションは未実装)・`perturbations`($J_2$扁平率摂動、同docs §2.2)・
 //! `regime`(レジーム切替の`TimeRegime`型とAstro⇄Local状態受け渡し、切替時刻の量子化・
 //! リプレイ一致・巻き戻しはWorld本体未実装のため後続増分に残す)・`swingby`
-//! (パッチドコニック近似によるフライバイ速度変化、D36)を実装。Barnes-Hut・
+//! (パッチドコニック近似によるフライバイ速度変化、D36)・`tides`(潮汐力の差分重力、
+//! D38)を実装。Barnes-Hut・
 //! WHFast・浮動原点・軌道力学(ホーマン遷移以外)の型・トレイトのスケルトンは Phase A で
 //! 追加する(docs/22-roadmap/01-phases.md)。
 
@@ -17,6 +18,7 @@ mod perturbations;
 mod regime;
 mod relativity;
 mod swingby;
+mod tides;
 pub use atmosphere::exponential_atmosphere_density;
 pub use nbody::{NBodySystem, GRAVITATIONAL_CONSTANT};
 pub use perturbations::{j2_acceleration, EARTH_EQUATORIAL_RADIUS, EARTH_J2};
@@ -26,3 +28,4 @@ pub use relativity::{
     pn1_precession_per_orbit, SPEED_OF_LIGHT,
 };
 pub use swingby::{hyperbolic_eccentricity, patched_conic_deflection_angle, periapsis_speed};
+pub use tides::tidal_acceleration;

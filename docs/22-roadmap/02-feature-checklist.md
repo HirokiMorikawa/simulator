@@ -75,7 +75,9 @@
   手回し発電・断熱圧縮・氷と飲み物(cross-reference)・再突入)。
   ヘッドレスランナーの最小骨格(`sim_world::run_headless_scenario`——シーンJSON
   読み込み+固定step数実行+プローブ履歴+`state_hash()`回収を1関数化)も実装した
-  (詳細§6参照)。
+  (詳細§6参照)。続けてPα(天体ウェーブ)の残りD36(スイングバイ、パッチドコニック
+  近似)・D39(相対論ON/OFF、1PN補正を`NBodySystem`へ接続)・D38(潮汐、差分重力)
+  を実装し、Pαが全て完了した(D34–D39、詳細§7)。
   残り: シーンJSON`couplings`セクション(スキーマ未確定のため保留、§4参照)、
   D1–D39各シナリオのシーンJSON化・Probe assert化・ネイティブ/wasm双方での実行
   (ヘッドレスランナー本体の骨格はできたので、この土台に積み上げる形、詳細§7)、
@@ -683,6 +685,14 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       ベクトル変化がパッチドコニック解析と一致(±1%)」に対応するA番号は
       `01-analytic-tests.md`に無いため、新規`crates/sim-astro/src/swingby.rs`
       として実装)——詳細は§7 D36参照
+- [x] 潮汐(差分重力、D38。合格基準「潮汐力の定性」に対応するA番号は
+      `01-analytic-tests.md`に無いため、新規`crates/sim-astro/src/tides.rs`
+      として実装。`tidal_acceleration`(中心天体の中心と、中心からoffset離れた
+      点との重力加速度の差、offsetを無限小近似しない厳密な差分)を実装し、
+      月による潮汐加速度が近点・遠点の両方で中心から外向き(古典的な「両側に
+      膨らむ」バルジ)・垂直側で内向き(圧縮)であること、太陽が月と同じ方向に
+      揃う(大潮)場合が直交する(小潮)場合より明確に強い(rel比>1.3)ことを
+      確認)——詳細は§7 D38参照
 - [x] 担当テスト Green: A1–A10(A1・A2縮約版・A3・A4・A5・A6・A7・A8・A9・A10 全てGreen)
 
 ## 4. Phase C — 結合・全体検証
@@ -1550,7 +1560,16 @@ Pα:
       一致)を確認。「最大加熱・減速gの傾向」の定量トレンド化、「生存/焼失」の
       2択判定(現状は降下+部分アブレーション+ハンドオフの配線検証が主眼)は
       対象外。目視チェック保留)
-- [ ] D38 潮汐
+- [x] D38 潮汐(ヘッドレステストGreen、新規`crates/sim-astro/src/tides.rs`。
+      目視チェックはワークストリームD未着手のため保留。
+      `d38_tidal_acceleration_bulges_outward_on_near_and_far_side_and_
+      inward_at_the_sides`(月の潮汐加速度が近点・遠点で外向き、垂直側で
+      内向き、近点・遠点の大きさが小offset近似解析式$2GMR/d^3$とrel<5%で
+      一致——offsetを無限小近似しない厳密な差分のため高次項による数%のずれを
+      許容、モジュールdoc参照)・
+      `d38_spring_tide_exceeds_neap_tide_when_sun_and_moon_align_vs_
+      perpendicular`(太陽が月と同じ方向に揃う大潮が、直交する小潮より
+      月直下点の正味潮汐加速度で1.3倍超強いことを確認)がGreen)
 - [x] D39 相対論 ON/OFF(ヘッドレステストGreen、新規`NBodySystem::
       enable_relativistic_correction`(`crates/sim-astro/src/nbody.rs`)。
       目視チェックはワークストリームD未着手のため保留。A8と同じ誇張$GM/c^2$比
