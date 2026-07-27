@@ -67,6 +67,13 @@ pub struct Scenario {
     /// ノード」のみサポートする、モジュールdoc「縮約実装の理由」参照)。
     #[serde(default)]
     pub thermal: Option<ThermalScenarioJson>,
+    /// 剛体間の拘束(設計の例示JSONには無い項目——D11(振り子と時計)が要る
+    /// ワールド固定点/剛体間の距離拘束に対応するため追加した拡張、モジュールdoc
+    /// 「縮約実装の理由」参照)。`from_scenario`側のみで処理する(`fluids`/
+    /// `thermal`/`probes`と同じ理由——Importは実行中ワールドへの「追加」であり、
+    /// 既存の拘束体系に無関係な参照を割り込ませたくないため対象外)。
+    #[serde(default)]
+    pub joints: Vec<JointJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
@@ -156,6 +163,12 @@ pub struct BodyScenarioDesc {
     /// (D7(風と終端速度)向け、`WorldScenarioOptions::atmosphere`と併用する)。
     #[serde(default)]
     pub drag: bool,
+    /// 質量の直接指定(`sim_mechanics::RigidBodyDesc::mass_override`)。未指定なら
+    /// 形状+材質密度から自動計算(既定の挙動を変えない)。D11(振り子)の
+    /// 「質点」(形状は球だが振り子の物理としては質量のみが意味を持つ)のような
+    /// シナリオに対応するため追加。
+    #[serde(default)]
+    pub mass_override: Option<f64>,
 }
 
 /// 設計§3の例示に現れる3形状のみ(`Capsule`/`Compound`/`ConvexMesh`は`raycast`/
@@ -205,8 +218,33 @@ pub struct ThermalNodeJson {
 #[serde(rename_all = "snake_case")]
 pub enum ProbeJson {
     BodyPosY(String),
+    /// `body_pos_y`の水平成分版(モジュールdoc「縮約実装の理由」参照 —
+    /// D11(振り子)の振れ角再構成のため追加)。
+    BodyPosX(String),
     BodySpeed(String),
     NodeTemp(usize),
+}
+
+/// `Scenario::joints`の1件。設計の例示JSONには無い項目(モジュールdoc
+/// 「縮約実装の理由」参照)——`sim_mechanics::MechanicsSolver`が既に持つ拘束の
+/// うち、D11(振り子と時計)が要る`DistanceJoint`(ワールド固定点、または
+/// 剛体間の一定長ピン拘束)のみ対応する(`BallJoint`/`SliderJoint`/
+/// `HingeMotorPd`は後続増分)。
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JointJson {
+    Distance {
+        body_a: String,
+        #[serde(default)]
+        anchor_a: [f64; 3],
+        /// 未指定ならワールド固定点への拘束(`sim_mechanics::DistanceJoint::
+        /// body_b`の`None`と同じ意味)。
+        #[serde(default)]
+        body_b: Option<String>,
+        #[serde(default)]
+        anchor_b: [f64; 3],
+        length: f64,
+    },
 }
 
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
@@ -279,6 +317,7 @@ impl World {
                 };
             }
             desc.linear_velocity = array_to_vec3(body.linear_velocity);
+            desc.mass_override = body.mass_override;
             desc.body_type = match body.body_type.as_deref() {
                 Some("static") => BodyType::Static,
                 Some("kinematic") => BodyType::Kinematic,
@@ -338,6 +377,40 @@ impl World {
             world.enable_thermal(solver);
         }
 
+        for joint in &scenario.joints {
+            match joint {
+                JointJson::Distance {
+                    body_a,
+                    anchor_a,
+                    body_b,
+                    anchor_b,
+                    length,
+                } => {
+                    let a_id = body_ids_by_name
+                        .get(body_a)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body_a.clone()))?;
+                    let b_index = match body_b {
+                        Some(name) => Some(
+                            body_ids_by_name
+                                .get(name)
+                                .ok_or_else(|| SceneError::UnknownBodyName(name.clone()))?
+                                .index as usize,
+                        ),
+                        None => None,
+                    };
+                    world
+                        .mechanics_mut()
+                        .add_distance_joint(sim_mechanics::DistanceJoint {
+                            body_a: a_id.index as usize,
+                            anchor_a: array_to_vec3(*anchor_a),
+                            body_b: b_index,
+                            anchor_b: array_to_vec3(*anchor_b),
+                            length: *length,
+                        });
+                }
+            }
+        }
+
         world.add_scenario_probes(scenario, &body_ids_by_name)?;
 
         Ok(world)
@@ -360,12 +433,15 @@ impl World {
         let mut handles = Vec::with_capacity(scenario.probes.len());
         for probe in &scenario.probes {
             let target = match probe {
-                ProbeJson::BodyPosY(name) | ProbeJson::BodySpeed(name) => {
+                ProbeJson::BodyPosY(name)
+                | ProbeJson::BodyPosX(name)
+                | ProbeJson::BodySpeed(name) => {
                     let id = body_ids_by_name
                         .get(name)
                         .ok_or_else(|| SceneError::UnknownBodyName(name.to_string()))?;
                     match probe {
                         ProbeJson::BodyPosY(_) => ProbeTarget::BodyPosY(*id),
+                        ProbeJson::BodyPosX(_) => ProbeTarget::BodyPosX(*id),
                         _ => ProbeTarget::BodySpeed(*id),
                     }
                 }
@@ -1104,10 +1180,83 @@ mod tests {
         );
     }
 
+    /// D11(振り子と時計、M3小振幅周期部分のみ): `demos.rs`の
+    /// `d11_pendulum_matches_small_amplitude_period_and_double_pendulum_replay_is_
+    /// deterministic`のM3部分(単振り子の小振幅周期)を、`Scenario::joints`
+    /// (`DistanceJoint`、本増分で追加したスキーマ拡張)+`body_pos_x`/`body_pos_y`
+    /// の2プローブ(`body_pos_x`も本増分で追加、振れ角の再構成に必要)経由で再現する。
+    /// 二重振り子のリプレイ決定論部分は`Scenario`に無関係な純粋な`World`直接操作の
+    /// 検証のため対象外(`demos.rs`側で既にGreen)。
+    #[test]
+    fn run_headless_scenario_pendulum_matches_small_amplitude_period() {
+        let length: f64 = 1.0;
+        let theta0: f64 = 0.05; // 小振幅(rad)
+                                // `demos.rs`側はdt=1/2000だが、そのままだと1周期分のstep数(約4800)が
+                                // プローブのリングバッファ容量(`DEFAULT_PROBE_CAPACITY`=600)を超え、
+                                // ゼロ交差走査に必要な先頭付近のサンプルが上書きされてしまう。
+                                // 既定dt(1/120)なら1周期あたり約240stepで容量内に収まる。
+        let dt: f64 = 0.008333333;
+        let pivot_x = 0.0;
+        let pivot_y = 0.0;
+        let bob_x = theta0.sin() * length;
+        let bob_y = -theta0.cos() * length;
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d11-pendulum",
+          "world": {{ "gravity": 9.80665, "dt": {dt} }},
+          "bodies": [
+            {{ "shape": {{ "sphere": {{ "radius": 0.01 }} }},
+              "material": "鋼(炭素鋼)", "mass_override": 1.0,
+              "position": [{bob_x}, {bob_y}, 0], "name": "bob" }}
+          ],
+          "joints": [
+            {{ "distance": {{ "body_a": "bob", "anchor_a": [0,0,0],
+              "anchor_b": [{pivot_x}, {pivot_y}, 0], "length": {length} }} }}
+          ],
+          "probes": [ {{ "body_pos_x": "bob" }}, {{ "body_pos_y": "bob" }} ]
+        }}
+        "#
+        );
+
+        let analytic_period = 2.0 * std::f64::consts::PI * (length / 9.80665_f64).sqrt();
+        let steps = (1.2 * analytic_period / dt) as u32;
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let xs = &result.probe_histories[0];
+        let ys = &result.probe_histories[1];
+
+        let angle = |x: f64, y: f64| -> f64 { (x - pivot_x).atan2(pivot_y - y) };
+        let mut prev_angle = angle(bob_x, bob_y);
+        let mut prev_t = 0.0;
+        let mut crossings = Vec::new();
+        for (step, (&x, &y)) in xs.iter().zip(ys.iter()).enumerate() {
+            let t = (step + 1) as f64 * dt;
+            let a = angle(x, y);
+            if prev_angle.signum() != a.signum() && prev_angle != 0.0 {
+                let frac = -prev_angle / (a - prev_angle);
+                crossings.push(prev_t + frac * (t - prev_t));
+                if crossings.len() >= 2 {
+                    break;
+                }
+            }
+            prev_angle = a;
+            prev_t = t;
+        }
+        assert!(crossings.len() >= 2, "should observe two zero crossings");
+        let measured_period = 2.0 * (crossings[1] - crossings[0]);
+        let rel_err = (measured_period - analytic_period).abs() / analytic_period;
+        assert!(
+            rel_err < 0.01,
+            "M3: measured_period={measured_period} analytic_period={analytic_period} rel_err={rel_err:.4}"
+        );
+    }
+
     /// D2(弾道): 45°射出の真空放物運動を`body_pos_y`/`body_speed`の2プローブのみで検証する。
-    /// `ProbeTarget`には水平位置(range)を直接読める種別が無いため、`demos.rs`の
+    /// このテストを書いた時点では`ProbeTarget`に水平位置を直接読める種別が無かったため
+    /// (D11向けに追加した`BodyPosX`は本テストより後発)、`demos.rs`の
     /// `d2_ballistic_range_matches_45_degree_formula_and_drag_shortens_range`のように
-    /// 着地x座標を直接assertすることはできない。代わりに同じ真空弾道物理から導出できる
+    /// 着地x座標を直接assertすることはできなかった。代わりに同じ真空弾道物理から導出できる
     /// 2つの不変量を確認する: (1) 飛翔時間(`body_pos_y`が0を上から下へ跨ぐ時刻)が
     /// 解析解`T=2*v0*sin(θ)/g`と一致する、(2) 着地時の速さが射出速さ`v0`と一致する
     /// (同一高度なのでエネルギー保存)、(3) 頂点(最小速度点)の速さが水平成分`v0*cos(θ)`と

@@ -282,7 +282,16 @@
   リンク・放射は対象外)+`ProbeJson::NodeTemp`(`thermal.nodes`配列の
   インデックス直接参照、名前解決を経ない)を追加し(スキーマ拡張)、
   `demos.rs`のT1(ニュートン冷却指数減衰)ネイティブ実装と同じ構成をシーンJSON
-  経由で再現、解析解と一致することを確認した。
+  経由で再現、解析解と一致することを確認した。続けてヘッドレスランナーの
+  12本目の適用例としてD11振り子のM3部分(小振幅周期)もシーンJSON化した——
+  これまで`Scenario`に剛体間拘束を構成する手段が無かったため`joints:
+  Vec<JointJson>`(`DistanceJoint`のみ対応)+`BodyScenarioDesc::mass_override`
+  を追加し(スキーマ拡張)、振れ角のゼロ交差検出に必要な`ProbeTarget::
+  BodyPosX`(`World`側)+`ProbeJson::body_pos_x`も追加した。`demos.rs`の
+  ネイティブ実装と同じ判定ロジックで解析解と一致することを確認した
+  (dt=1/2000だとプローブのリングバッファ容量600を超えるため、既定dt=1/120へ
+  変更して収めた)。二重振り子のリプレイ決定論部分は`Scenario`と無関係な
+  検証のため対象外。
 - **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
   マルチスキャッタリング)・さらなるヘッドレスランナー適用例・シーンJSON
   `couplings`セクション(スキーマ未確定で保留)を機を見て進める。優先順位の
@@ -1898,7 +1907,22 @@ Phase 2〜3:
       目視チェックはワークストリームD未着手のため保留。M3(小振幅周期)+ 二重振り子の
       同一初期条件2回実行で`state_hash()`一致(カオス的軌道でも決定論的にリプレイ
       できることの実演)を確認。M4(楕円積分解析式)自体は`sim-mechanics`で検証済みの
-      ため重複実装せず)
+      ため重複実装せず)。
+      **シーンJSON経由の12本目の適用例+スキーマ拡張(本増分で追加)**: M3
+      (単振り子の小振幅周期)部分のみシーンJSON化した——これまで`Scenario`に
+      剛体間拘束(設計の例示JSONにも無い項目)を構成する手段が無かったため
+      `joints: Vec<JointJson>`(`DistanceJoint`のみ対応、`BallJoint`/
+      `SliderJoint`/`HingeMotorPd`は後続増分)を追加し、振り子の質点に必要な
+      `BodyScenarioDesc::mass_override`も追加した(スキーマ拡張)。振れ角の
+      ゼロ交差検出には水平位置が要るため、`ProbeTarget::BodyPosX`(`World`側)+
+      `ProbeJson::body_pos_x`も追加した。`run_headless_scenario_pendulum_
+      matches_small_amplitude_period`として実装し、`demos.rs`のネイティブ実装
+      と同じ判定ロジック(ゼロ交差2点の間隔×2を周期とみなす)で解析解と
+      rel<0.01一致することを確認した(`demos.rs`はdt=1/2000だが、シーンJSON
+      版は既定dt=1/120を使う——1周期あたりのstep数をプローブのリングバッファ
+      容量(600)以内に収めるため、精度は変えずに済んだ)。二重振り子の
+      リプレイ決定論部分は`Scenario`と無関係な`World`直接操作の検証のため
+      対象外(`demos.rs`側で既にGreen)。
 - [ ] D12 ラグドール階段
 - [ ] D13 ロープと旗(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
       ワークストリームD未着手のため保留。「旗のはためき」は`SoftBody`(XPBDロープ)が

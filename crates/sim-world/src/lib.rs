@@ -186,6 +186,9 @@ pub struct FluidSample {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ProbeTarget {
     BodyPosY(BodyId),
+    /// 設計の例示には無い項目——D11(振り子と時計)のように、鉛直位置だけでは
+    /// 振れ角(周期の判定に使う量)を再構成できないシナリオに対応するため追加。
+    BodyPosX(BodyId),
     BodySpeed(BodyId),
     /// 熱ドメインの`ThermalNode`index(モジュールdoc「縮約実装の理由」参照)。
     NodeTemp(usize),
@@ -500,6 +503,7 @@ impl World {
     fn sample_probe_target(&self, target: ProbeTarget) -> f64 {
         match target {
             ProbeTarget::BodyPosY(id) => self.body_position(id).map_or(0.0, |p| p.y),
+            ProbeTarget::BodyPosX(id) => self.body_position(id).map_or(0.0, |p| p.x),
             ProbeTarget::BodySpeed(id) => self.body_velocity(id).map_or(0.0, |v| v.length()),
             ProbeTarget::NodeTemp(idx) => self
                 .thermal
