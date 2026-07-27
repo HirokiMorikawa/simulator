@@ -974,27 +974,11 @@ mod tests {
     /// 各箱の速さ(`body_speed`プローブ)が十分小さいこと(静止)を確認する。
     #[test]
     fn run_headless_scenario_settles_a_stacked_box_tower_matching_d4_pass_criterion() {
-        let json = r#"
-        {
-          "name": "d4-box-stack",
-          "world": { "gravity": 9.80665, "dt": 0.008333333 },
-          "bodies": [
-            { "shape": { "plane": { "normal": [0,1,0], "d": 0 } }, "type": "static",
-              "material": "鋼(炭素鋼)" },
-            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
-              "position": [0, 0.5, 0], "name": "box1" },
-            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
-              "position": [0, 1.51, 0], "name": "box2" },
-            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
-              "position": [0, 2.52, 0], "name": "box3" }
-          ],
-          "probes": [
-            { "body_speed": "box1" },
-            { "body_speed": "box2" },
-            { "body_speed": "box3" }
-          ]
-        }
-        "#;
+        // シーンJSONは`scenes/d4-box-stack.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分、`scenes/index.json`マニフェスト参照)。テストと
+        // 出荷アセットを同一ファイルにすることで、アセットが壊れれば直ちにこの
+        // テストがRedになる。
+        let json = include_str!("../../../scenes/d4-box-stack.json");
 
         let steps = 1200; // 既定dt(1/120s)で10秒
         let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
@@ -1020,32 +1004,20 @@ mod tests {
     /// ことを確認する。
     #[test]
     fn run_headless_scenario_settles_a_floating_box_at_the_f4_equilibrium_waterline() {
-        let water_density = 998.2;
+        // シーンJSONは`scenes/d6-floating-box-f4.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分、`scenes/index.json`マニフェスト参照)。密度・釣り合い
+        // 喫水位置(下記`equilibrium_y`と同じ計算式で導出)はJSON側に焼き込み済み——
+        // このRust側の再計算は期待値(解析解)としてアサーションに使う。
         let ratio = 0.6;
-        let density = ratio * water_density;
         let half = 0.5;
         let side = 2.0 * half;
         let h_sub = ratio * side;
         let equilibrium_y = -h_sub + half;
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d6-floating-box-f4",
-          "world": {{ "gravity": 9.80665, "dt": 0.008333333 }},
-          "materials": [ {{ "extends": "木材(松)", "name": "d6-density", "density": {density} }} ],
-          "bodies": [
-            {{ "shape": {{ "box": {{ "half": [{half}, {half}, {half}] }} }}, "material": "d6-density",
-              "position": [0, {equilibrium_y}, 0], "name": "box" }}
-          ],
-          "fluids": [ {{ "static_water": {{ "water_level": 0.0, "density": {water_density} }} }} ],
-          "probes": [ {{ "body_pos_y": "box" }} ]
-        }}
-        "#
-        );
+        let json = include_str!("../../../scenes/d6-floating-box-f4.json");
 
         let steps = 600; // 5秒(既定dt)
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
 
         let final_y = *result.probe_histories[0]
             .last()
@@ -1130,43 +1102,15 @@ mod tests {
     /// 5秒間静止し続けることの確認は`rotation`フィールドの配線自体の検証にもなる。
     #[test]
     fn run_headless_scenario_stays_static_on_an_incline_below_the_friction_angle() {
-        let theta: f64 = 10.0_f64.to_radians();
-        let normal = Vec3::new(-theta.sin(), theta.cos(), 0.0);
-        let half_extent = 0.5;
-        let position = normal.scale(half_extent);
-        let rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), theta);
-
-        let json = format!(
-            r#"
-        {{
-          "name": "d5-incline-static",
-          "world": {{ "gravity": 9.80665, "dt": 0.008333333 }},
-          "bodies": [
-            {{ "shape": {{ "plane": {{ "normal": [{nx}, {ny}, {nz}], "d": 0 }} }},
-              "type": "static", "material": "鋼(炭素鋼)" }},
-            {{ "shape": {{ "box": {{ "half": [{half_extent}, {half_extent}, {half_extent}] }} }},
-              "material": "鋼(炭素鋼)",
-              "position": [{px}, {py}, {pz}],
-              "rotation": [{qx}, {qy}, {qz}, {qw}],
-              "name": "box" }}
-          ],
-          "probes": [ {{ "body_speed": "box" }} ]
-        }}
-        "#,
-            nx = normal.x,
-            ny = normal.y,
-            nz = normal.z,
-            px = position.x,
-            py = position.y,
-            pz = position.z,
-            qx = rotation.x,
-            qy = rotation.y,
-            qz = rotation.z,
-            qw = rotation.w,
-        );
+        // シーンJSONは`scenes/d5-incline-static.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分、`scenes/index.json`マニフェスト参照)。10°の傾いた
+        // 平面(`Plane`)+それに合わせて回転させた箱の座標・クォータニオンは
+        // 事前に計算した値をそのまま焼き込んである(計算式は本テストのgit履歴、
+        // または`docs/21-verification/03-demo-scenarios.md`のD5参照)。
+        let json = include_str!("../../../scenes/d5-incline-static.json");
 
         let steps = 600; // 5秒(既定dt)
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
 
         let final_speed = *result.probe_histories[0]
             .last()
@@ -1383,40 +1327,27 @@ mod tests {
     /// 検証のため対象外(`demos.rs`側で既にGreen)。
     #[test]
     fn run_headless_scenario_pendulum_matches_small_amplitude_period() {
+        // シーンJSONは`scenes/d11-pendulum.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分、`scenes/index.json`マニフェスト参照)。小振幅
+        // (θ0=0.05 rad)の初期位置はJSON側に焼き込み済み——このRust側の`length`/
+        // `dt`は期待周期(解析解)の計算に使う。
+        // `demos.rs`側はdt=1/2000だが、そのままだと1周期分のstep数(約4800)が
+        // プローブのリングバッファ容量(`DEFAULT_PROBE_CAPACITY`=600)を超え、
+        // ゼロ交差走査に必要な先頭付近のサンプルが上書きされてしまう。
+        // 既定dt(1/120)なら1周期あたり約240stepで容量内に収まる。
         let length: f64 = 1.0;
-        let theta0: f64 = 0.05; // 小振幅(rad)
-                                // `demos.rs`側はdt=1/2000だが、そのままだと1周期分のstep数(約4800)が
-                                // プローブのリングバッファ容量(`DEFAULT_PROBE_CAPACITY`=600)を超え、
-                                // ゼロ交差走査に必要な先頭付近のサンプルが上書きされてしまう。
-                                // 既定dt(1/120)なら1周期あたり約240stepで容量内に収まる。
+        let theta0: f64 = 0.05; // 小振幅(rad)、JSON側にも同じ値が焼き込まれている。
         let dt: f64 = 0.008333333;
         let pivot_x = 0.0;
         let pivot_y = 0.0;
         let bob_x = theta0.sin() * length;
         let bob_y = -theta0.cos() * length;
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d11-pendulum",
-          "world": {{ "gravity": 9.80665, "dt": {dt} }},
-          "bodies": [
-            {{ "shape": {{ "sphere": {{ "radius": 0.01 }} }},
-              "material": "鋼(炭素鋼)", "mass_override": 1.0,
-              "position": [{bob_x}, {bob_y}, 0], "name": "bob" }}
-          ],
-          "joints": [
-            {{ "distance": {{ "body_a": "bob", "anchor_a": [0,0,0],
-              "anchor_b": [{pivot_x}, {pivot_y}, 0], "length": {length} }} }}
-          ],
-          "probes": [ {{ "body_pos_x": "bob" }}, {{ "body_pos_y": "bob" }} ]
-        }}
-        "#
-        );
+        let json = include_str!("../../../scenes/d11-pendulum.json");
 
         let analytic_period = 2.0 * std::f64::consts::PI * (length / 9.80665_f64).sqrt();
         let steps = (1.2 * analytic_period / dt) as u32;
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let xs = &result.probe_histories[0];
         let ys = &result.probe_histories[1];
 
@@ -2013,5 +1944,45 @@ mod tests {
             result,
             Err(SceneError::UnknownBodyName(ref name)) if name == "nonexistent"
         ));
+    }
+
+    /// **残タスク完遂のシーンギャラリー増分**: リポジトリ直下の`scenes/index.json`
+    /// マニフェストに載る全ファイルが実際に`Scenario::from_json`でパースでき、
+    /// `World::from_scenario`+60step実行が成功することを確認する(壊れたアセットを
+    /// 出荷しないためのゲート——各シーンJSONは`include_str!`経由でこのテストと同じ
+    /// ファイルを見ているため、シーン自体の正しさは`run_headless_scenario_*`の各
+    /// テストが個別に検証済みだが、本テストは「マニフェストに載っている全ファイルが
+    /// 実在し壊れていないこと」をマニフェスト側から検証する)。
+    #[test]
+    fn all_scenes_in_the_gallery_manifest_parse_and_run_for_sixty_steps() {
+        let manifest_json = include_str!("../../../scenes/index.json");
+        let manifest: serde_json::Value =
+            serde_json::from_str(manifest_json).expect("scenes/index.json must be valid JSON");
+        let scenes = manifest["scenes"]
+            .as_array()
+            .expect("scenes/index.json must have a top-level \"scenes\" array");
+        assert!(
+            !scenes.is_empty(),
+            "the gallery manifest should not be empty"
+        );
+
+        for entry in scenes {
+            let file = entry["file"]
+                .as_str()
+                .expect("each manifest entry must have a \"file\" string");
+            let scene_json = std::fs::read_to_string(format!(
+                "{}/../../scenes/{file}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap_or_else(|e| panic!("scenes/{file} listed in the manifest must exist: {e}"));
+
+            let scenario = Scenario::from_json(&scene_json)
+                .unwrap_or_else(|e| panic!("scenes/{file} must parse as a valid Scenario: {e:?}"));
+            let mut world = World::from_scenario(&scenario)
+                .unwrap_or_else(|e| panic!("scenes/{file} must build a valid World: {e:?}"));
+            for _ in 0..60 {
+                world.step();
+            }
+        }
     }
 }

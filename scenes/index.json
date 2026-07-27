@@ -1,0 +1,32 @@
+{
+  "scenes": [
+    {
+      "file": "d4-box-stack.json",
+      "demo": "D4",
+      "title": "積み木",
+      "description": "4段の箱スタック(接地1段+3段)。10秒で静止することを確認する(M12)。",
+      "domains": ["mechanics"]
+    },
+    {
+      "file": "d5-incline-static.json",
+      "demo": "D5",
+      "title": "斜面(静止摩擦)",
+      "description": "10°の斜面上の箱。摩擦角以下なので静止したままであることを確認する(M7)。",
+      "domains": ["mechanics"]
+    },
+    {
+      "file": "d6-floating-box-f4.json",
+      "demo": "D6",
+      "title": "浮き沈み",
+      "description": "密度比0.6の箱を水域に浮かべ、解析解どおりの喫水位置で釣り合うことを確認する(F4)。",
+      "domains": ["mechanics", "fluid"]
+    },
+    {
+      "file": "d11-pendulum.json",
+      "demo": "D11",
+      "title": "振り子",
+      "description": "小振幅の単振り子。周期が解析解(2π√(L/g))と一致することを確認する(M3)。",
+      "domains": ["mechanics"]
+    }
+  ]
+}

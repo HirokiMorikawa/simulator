@@ -1,0 +1,19 @@
+{
+  "name": "d4-box-stack",
+  "world": { "gravity": 9.80665, "dt": 0.008333333 },
+  "bodies": [
+    { "shape": { "plane": { "normal": [0,1,0], "d": 0 } }, "type": "static",
+      "material": "鋼(炭素鋼)" },
+    { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
+      "position": [0, 0.5, 0], "name": "box1" },
+    { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
+      "position": [0, 1.51, 0], "name": "box2" },
+    { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
+      "position": [0, 2.52, 0], "name": "box3" }
+  ],
+  "probes": [
+    { "body_speed": "box1" },
+    { "body_speed": "box2" },
+    { "body_speed": "box3" }
+  ]
+}
