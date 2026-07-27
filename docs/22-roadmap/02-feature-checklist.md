@@ -382,6 +382,18 @@
   だけだった。DoD⑤の手順どおり設計書を実装に合わせて改訂し、将来のLie-Trotter
   完全実装は目標仕様として残しつつ現状を正式な現状として明記した。コード変更
   なし・既存テストへの影響なし。
+  **Q3(増分1-2)も完了**: `sim-coupling::ConvectionLink::characteristic_speed`が
+  staggered(MAC)配置の`u`・`v`を同一の生indexでペアリングしていた実装バグを
+  修正した——`u`はx面$(ih,(j+\frac12)h)$、`v`はy面$((i+\frac12)h,jh)$に置かれる
+  ため、セル(i,j)を挟む2枚のx面/y面の平均としてセル中心へ補間してから合成する
+  形に直した。修正前後で値が変わることを手計算できる非一様速度場
+  (`nx=2,ny=1`、`u_at(0,0)=2.0`・`u_at(1,0)=0.0`・`v≡0`——正しい補間なら
+  RMS=1.0厳密、旧バグなら√2≈1.4142)で確認する回帰テストを追加した。
+  既存の2テスト(`convection_link_transfers_no_heat_when_fluid_is_at_rest`・
+  `convection_link_matches_blasius_forced_convection_formula_and_conserves_
+  energy`)は一様流速場を使うため補間の前後で値が変わらず無影響。
+  `sim-world`の`convection_link_coupling_warms_surface_node_from_flowing_
+  fluid_via_world`も同様に一様流速のため無影響。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -2664,7 +2676,7 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
 |---|---|---|---|
 | Q1 | `sim-world/src/lib.rs:38,1181-1189` | CouplingがLie-Trotter分割ではなく1step遅れで適用 | **設計書改訂で対応済み**(`docs/20-integration/01-coupling-matrix.md` §4に注記追加、InductionCouplingの実測rel_err0.019%等を明記) |
 | Q2 | `sim-mechanics/src/solver.rs:46-65` | 接触散逸が真値より系統的に約9%過大 | 対応予定(増分1) |
-| Q3 | `sim-coupling/src/convection_link.rs:12` | MAC食い違い格子のu/vを同一インデックスでペアリング(半セルずれ) | 対応予定(増分1) |
+| Q3 | `sim-coupling/src/convection_link.rs:12` | MAC食い違い格子のu/vを同一インデックスでペアリング(半セルずれ) | **修正済み**(セル中心への補間に変更、`characteristic_speed_interpolates_staggered_components_to_cell_centers`で退行検知、既存2テストは一様流速のため無影響) |
 | Q4 | `sim-mechanics/src/collision.rs:6-8` | マニフォールド持続化が無く多段スタックの貫入がslopを超える | 対応予定(増分1) |
 | Q5 | `sim-wasm/src/lib.rs` | 呼び出し側到達可能な`panic!`が約13箇所+シーンexportが表現不能形状を無言で捨てる | 対応予定(増分1) |
 | Q6 | `sim-statistical/src/brownian.rs:90` | γΔt/m≈17でrel_err≈760%、実行時ガード無し | 対応予定(増分1) |

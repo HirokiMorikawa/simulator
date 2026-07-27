@@ -8,12 +8,19 @@
 //! 式を挙げるが、本実装は流体ドメイン(`GridFluid2D`)の流速に依存する結合という
 //! 設計表の趣旨(「h と流速」)を素直に反映できる「強制対流・平板」の式のみを採用する
 //! (自然対流は温度差自体が駆動源であり流速に依存しないため、既存の`BoussinesqBuoyancy`
-//! が担う範疇と役割分担する)。特性速度は`GridFluid2D`の速度場全体のRMS速度
-//! (staggered配置の`u`・`v`を同一インデックスで単純にペアリングする近似、cell分の
-//! ずれは特性速度の見積もりとしては無視できる)で代表させる。プラントル数`Pr`・
-//! 熱伝導率`k_f`・動粘性係数`nu`は物性定数として`ConvectionLink`自身が保持する
-//! (`sim_thermal`にまだ流体物性DBが無いため、`PistonGas`の`area`等と同じ「呼び出し側が
-//! 材料値を直接渡す」縮約)。
+//! が担う範疇と役割分担する)。特性速度は`GridFluid2D`の速度場全体のRMS速度で代表
+//! させる。`u`・`v`はstaggered(MAC)配置(`u`はx面$(ih,(j+\frac12)h)$、`v`はy面
+//! $((i+\frac12)h,jh)$、`sim_fluid::GridFluid2D`モジュールdoc参照)なので、両者を
+//! 合成する前にまずセル中心$((i+\frac12)h,(j+\frac12)h)$へ補間する
+//! (**2026-07-27の監査・修正**: 以前は`u[k]`と`v[k]`を同一の生indexで単純に
+//! ペアリングしていたが、これは対角に半セルずつずれた2点を組み合わせる**数値的な
+//! 誤り**だった——スコープを意図的に縮小した近似ではなく、staggered配置を素直な
+//! flatインデックスで扱ったことによる実装バグ。セル(i,j)を挟む2枚のx面
+//! `u_at(i,j)`・`u_at(i+1,j)`の平均、2枚のy面`v_at(i,j)`・`v_at(i,j+1)`の平均を
+//! セル中心の速度成分とすることで修正した)。プラントル数`Pr`・熱伝導率`k_f`・
+//! 動粘性係数`nu`は物性定数として`ConvectionLink`自身が保持する(`sim_thermal`に
+//! まだ流体物性DBが無いため、`PistonGas`の`area`等と同じ「呼び出し側が材料値を
+//! 直接渡す」縮約)。
 //!
 //! 熱源側・受熱側をともに単一の`ThermalNode`(`fluid_node`・`surface_node`)として
 //! `ThermalSolver`内の2ノード間の熱交換で表す(セルごとの温度場を持たない`GridFluid2D`
@@ -43,19 +50,25 @@ pub struct ConvectionLink {
 }
 
 impl ConvectionLink {
-    /// `GridFluid2D`速度場全体のRMS速度(特性速度、モジュールdoc参照)。
+    /// `GridFluid2D`速度場全体のRMS速度(特性速度、モジュールdoc「2026-07-27の
+    /// 監査・修正」参照)。`u`・`v`はstaggered配置のため、まずセル(i,j)ごとに
+    /// 両者をセル中心へ補間してから合成する(周期境界なので`u_at`/`v_at`の
+    /// ラップアラウンドがそのまま正しく機能する)。
     fn characteristic_speed(grid_fluid: &sim_fluid::GridFluid2D) -> f64 {
-        let n = grid_fluid.u.len();
-        if n == 0 {
+        let (nx, ny) = (grid_fluid.nx, grid_fluid.ny);
+        if nx == 0 || ny == 0 {
             return 0.0;
         }
-        let sum_sq: f64 = grid_fluid
-            .u
-            .iter()
-            .zip(grid_fluid.v.iter())
-            .map(|(&u, &v)| u * u + v * v)
-            .sum();
-        (sum_sq / n as f64).sqrt()
+        let mut sum_sq = 0.0;
+        for j in 0..ny as i64 {
+            for i in 0..nx as i64 {
+                // セル(i,j)を挟む2枚のx面/y面の平均 = セル中心の速度成分。
+                let u_center = 0.5 * (grid_fluid.u_at(i, j) + grid_fluid.u_at(i + 1, j));
+                let v_center = 0.5 * (grid_fluid.v_at(i, j) + grid_fluid.v_at(i, j + 1));
+                sum_sq += u_center * u_center + v_center * v_center;
+            }
+        }
+        (sum_sq / (nx * ny) as f64).sqrt()
     }
 
     /// 強制対流(平板、Blasius解)の熱伝達係数 $h=\overline{Nu}\,k_f/L$、
@@ -110,6 +123,37 @@ mod tests {
     use sim_fluid::GridFluid2D;
     use sim_mechanics::MechanicsSolver;
     use sim_thermal::{ThermalNode, ThermalSolver};
+
+    /// **2026-07-27の監査で発見・修正した回帰テスト**: `characteristic_speed`が
+    /// staggered配置の`u`・`v`を正しくセル中心へ補間していること(修正前の
+    /// 「同一生indexでペアリング」というバグが再発しないこと)を、手計算できる
+    /// 非一様な速度場で確認する。
+    ///
+    /// `nx=2, ny=1`(周期境界)で`u_at(0,0)=2.0`・`u_at(1,0)=0.0`・`v≡0`とする。
+    /// 正しい補間: セル0はx面`u_at(0,0)`と`u_at(1,0)`に挟まれる→
+    /// `u_center=0.5*(2.0+0.0)=1.0`。セル1はx面`u_at(1,0)`と`u_at(2,0)`
+    /// (周期境界で`u_at(0,0)`に一致)に挟まれる→`u_center=0.5*(0.0+2.0)=1.0`。
+    /// v成分は恒等的に0なので、RMS速度は**厳密に1.0**になるはずである。
+    ///
+    /// 修正前の実装(`u[k]`と`v[k]`を生indexでペアリング)だと
+    /// `sum_sq=u[0]^2+u[1]^2=4.0+0.0=4.0`、`RMS=sqrt(4.0/2)=√2≈1.4142`という
+    /// 別の値になる——本テストは1.0を要求するため、退行すれば確実に失敗する。
+    #[test]
+    fn characteristic_speed_interpolates_staggered_components_to_cell_centers() {
+        let mut fluid = GridFluid2D::new(2, 1, 0.1);
+        fluid.u[0] = 2.0;
+        fluid.u[1] = 0.0;
+        // v はデフォルトで全て0。
+
+        let speed = ConvectionLink::characteristic_speed(&fluid);
+
+        assert!(
+            (speed - 1.0).abs() < 1e-12,
+            "expected the cell-center-interpolated RMS speed to be exactly 1.0, got {speed} \
+             (a value near sqrt(2)≈1.4142 would indicate the raw-index-pairing bug has \
+             regressed)"
+        );
+    }
 
     /// 流速ゼロなら(強制対流のみを扱う本実装の縮約により)熱伝達係数もゼロで、
     /// 両ノードとも温度不変。
