@@ -16,6 +16,12 @@
 //! 恒等回転)・`linear_velocity`(未指定ならゼロ)も追加済み(D5斜面のような
 //! 回転済み初期配置・D2弾道のような初速を要するシナリオへの対応、ヘッドレス
 //! ランナーの適用例参照)。
+//!
+//! `World::append_scenario_bodies`は`materials`/`bodies`セクションのみを
+//! 実行中のワールドへ追加する処理として`from_scenario`から切り出したもの
+//! (`sim-wasm::WasmWorld::import_scene_json`——シーンJSON Import——が
+//! 新規`World`を構築せず既存ワールドへボディを追加できるようにするため、
+//! `fluids`/`probes`セクションは対象外、`append_scenario_bodies`のdoc参照)。
 
 use crate::{BodyId, ProbeTarget, World, WorldOptions};
 use serde::Deserialize;
@@ -134,22 +140,27 @@ fn array_to_vec3(a: [f64; 3]) -> Vec3 {
 }
 
 impl World {
-    /// シーンJSONから`World`を構築する(設計docs/20-integration/04-world-api.md §2
-    /// `from_scenario`、`Scenario`のdoc「縮約実装の理由」参照)。
-    pub fn from_scenario(scenario: &Scenario) -> Result<World, SceneError> {
-        let options = WorldOptions {
-            gravity: scenario.world.gravity,
-            dt: scenario.world.dt,
-            seed: scenario.seed,
-        };
-        let mut world = World::new(options);
-
+    /// シーンJSONの`materials`/`bodies`セクションを現在の`World`へ追加する
+    /// (`from_scenario`と、実行中のワールドへシーンJSONを取り込むシーンJSON
+    /// Import(`sim-wasm::WasmWorld::import_scene_json`)の共通処理)。`fluids`/
+    /// `probes`セクションは対象外とする——Importは実行中のワールドへの「追加」
+    /// であり、既に有効化されているかもしれない流体設定を無条件に上書きしたり、
+    /// 既存のプローブ体系に無関係な名前解決を割り込ませたりするのは意図しない
+    /// 挙動になりうるため(`fluids`/`probes`はシーンを新規に構築する
+    /// `from_scenario`側のみで処理する)。返り値は`scenario.bodies`と同じ順序の
+    /// `BodyId`(`from_scenario`が`probes`の名前解決に使う、Importが新規ボディの
+    /// シェイプ/材質をUI側に伝えるのに使う、双方の理由で名前の有無によらず
+    /// 全ボディ分を返す)。
+    pub fn append_scenario_bodies(
+        &mut self,
+        scenario: &Scenario,
+    ) -> Result<Vec<BodyId>, SceneError> {
         for over in &scenario.materials {
-            let base_id = world
+            let base_id = self
                 .materials()
                 .find_by_name(&over.extends)
                 .ok_or_else(|| SceneError::UnknownBaseMaterial(over.extends.clone()))?;
-            let mut derived = world.materials().get(base_id).clone();
+            let mut derived = self.materials().get(base_id).clone();
             // `Material::name`は`&'static str`(既存の`MaterialDb::standard()`の
             // コンパイル時定数群と型を揃えるため)。シーンJSON由来の動的な名前は
             // `Box::leak`で`'static`化する — シーンロードは頻度の低い操作であり、
@@ -159,12 +170,12 @@ impl World {
             if let Some(density) = over.density {
                 derived.density = density;
             }
-            world.materials_mut().push(derived);
+            self.materials_mut().push(derived);
         }
 
-        let mut body_ids_by_name: HashMap<String, BodyId> = HashMap::new();
+        let mut ids = Vec::with_capacity(scenario.bodies.len());
         for body in &scenario.bodies {
-            let material_id = world
+            let material_id = self
                 .materials()
                 .find_by_name(&body.material)
                 .ok_or_else(|| SceneError::UnknownMaterial(body.material.clone()))?;
@@ -194,9 +205,27 @@ impl World {
                 Some("kinematic") => BodyType::Kinematic,
                 _ => BodyType::Dynamic,
             };
-            let id = world.create_body(desc);
+            ids.push(self.create_body(desc));
+        }
+
+        Ok(ids)
+    }
+
+    /// シーンJSONから`World`を構築する(設計docs/20-integration/04-world-api.md §2
+    /// `from_scenario`、`Scenario`のdoc「縮約実装の理由」参照)。
+    pub fn from_scenario(scenario: &Scenario) -> Result<World, SceneError> {
+        let options = WorldOptions {
+            gravity: scenario.world.gravity,
+            dt: scenario.world.dt,
+            seed: scenario.seed,
+        };
+        let mut world = World::new(options);
+        let ids = world.append_scenario_bodies(scenario)?;
+
+        let mut body_ids_by_name: HashMap<String, BodyId> = HashMap::new();
+        for (body, id) in scenario.bodies.iter().zip(ids.iter()) {
             if let Some(name) = &body.name {
-                body_ids_by_name.insert(name.clone(), id);
+                body_ids_by_name.insert(name.clone(), *id);
             }
         }
 
@@ -317,6 +346,50 @@ mod tests {
             world.step();
         }
         assert!(world.body_position(crate_id).unwrap().y < y0);
+    }
+
+    /// `World::append_scenario_bodies`(シーンJSON Importの土台、モジュールdoc参照)は
+    /// 新規`World`を作らず、既に稼働中のワールド(既存ボディ・既存の重力/dt設定を
+    /// 持つ)へシーンJSONの`bodies`を追加できることを確認する。既存ボディの位置は
+    /// 変わらず、返り値の`Vec<BodyId>`は`scenario.bodies`と同じ順序・同じ件数で、
+    /// 新規ボディの位置もJSONどおりであることを確認する。
+    #[test]
+    fn append_scenario_bodies_adds_bodies_to_an_already_running_world_without_disturbing_it() {
+        let mut world = World::new(WorldOptions {
+            gravity: 1.23, // `from_scenario`を経由しない、この既存ワールド固有の値。
+            dt: 0.008333333,
+            seed: 0,
+        });
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let mut existing_desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.2 }, steel);
+        existing_desc.transform.position = Vec3::new(9.0, 9.0, 9.0);
+        let existing_id = world.create_body(existing_desc);
+
+        let json = r#"
+        {
+          "name": "import-fragment",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [
+            { "shape": { "sphere": { "radius": 0.3 } }, "material": "鋼(炭素鋼)",
+              "position": [1.0, 2.0, 3.0], "name": "imported-a" },
+            { "shape": { "box": { "half": [0.4, 0.4, 0.4] } }, "material": "コンクリート",
+              "position": [4.0, 5.0, 6.0] }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).unwrap();
+        let ids = world
+            .append_scenario_bodies(&scenario)
+            .expect("valid scenario fragment");
+
+        assert_eq!(ids.len(), 2);
+        assert_eq!(
+            world.body_position(existing_id),
+            Some(Vec3::new(9.0, 9.0, 9.0)),
+            "appending bodies must not disturb bodies that already existed"
+        );
+        assert_eq!(world.body_position(ids[0]), Some(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(world.body_position(ids[1]), Some(Vec3::new(4.0, 5.0, 6.0)));
     }
 
     /// `materials[].extends`が未知の材料名を指す場合は`SceneError::UnknownBaseMaterial`。

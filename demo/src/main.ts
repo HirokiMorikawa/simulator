@@ -123,11 +123,17 @@ type MaterialsRef = { current: (() => MaterialProperties[]) | null };
 type CircuitRef = { current: (() => number) | null };
 
 // Projectドロワー Scenes タブ(設計docs/23-frontend/01-editor.md §1.6「Scenes:
-// シーンJSON…Export/Import」の縮約実装——現在のボディ一覧をJSONへエクスポート
-// するのみ、シーンJSONからの読み込み(Import)は`sim_world::Scenario`の
-// スキーマとスポーンパレット生成ボディとの対応付けが必要になるため後続増分)。
-// MaterialsRefと同じ理由(worldより先にパネルが構築される)で、可変の参照
-// オブジェクト越しにコールバックを後から配線する。
+// シーンJSON…Export/Import」)。Exportは現在のボディ一覧を(Inspector表示と同じ
+// 人間可読なJSONへ)書き出すのみで、`sim_world::Scenario`スキーマとは形式が違う
+// (Exportは表示専用、往復(round-trip)は想定しない)。Import(本増分で追加)は
+// 逆に`Scenario`スキーマ(ヘッドレスランナー・D1–D43のシーンJSONと同じもの)を
+// 読み、`world.import_scene_json`(`World::append_scenario_bodies`のwasm薄い
+// ラッパー)で現在のワールドへボディを追加する——Exportした自分自身のJSONを
+// そのままImportし直せるわけではない(スキーマが異なるため)が、設計書・
+// ヘッドレスランナーのテストが使うシーンJSONファイルをエディタへ読み込んで
+// 視覚的に確認できるようにする、というワークストリームDの狙い(項目13)には
+// この非対称な形で十分応える。MaterialsRefと同じ理由(worldより先にパネルが
+// 構築される)で、可変の参照オブジェクト越しにコールバックを後から配線する。
 type SceneBodyExport = {
   index: number;
   label: string;
@@ -137,6 +143,22 @@ type SceneBodyExport = {
   isStatic: boolean;
 };
 type SceneExportRef = { current: (() => SceneBodyExport[]) | null };
+type SceneImportRef = { current: ((json: string) => number) | null };
+
+// Import側のシーンJSONパース(`sim_world::scenario::ShapeJson`のJSON表現と同じ
+// タグ付きオブジェクト形)。`world.import_scene_json`はボディの追加自体は行うが
+// (返り値は追加件数のみ)、Scene Viewが各ボディに対応するThree.jsメッシュを
+// 生成するには形状の種類・寸法が要る。`body_shape_label_at`は表示専用の整形
+// 済み文字列(`Sphere(0.3000)`等)を返すのみで往復(round-trip)を想定していない
+// ため、そこから数値を文字列パースするのではなく、Import時にJSがそもそも
+// 持っている生のシーンJSONを(Rust側の`serde_json`とは独立に)そのまま
+// `JSON.parse`して形状情報を読む。
+type ImportedShapeJson =
+  | { box: { half: [number, number, number] } }
+  | { sphere: { radius: number } }
+  | { plane: { normal: [number, number, number]; d: number } };
+type ImportedBodyJson = { shape: ImportedShapeJson };
+type ImportedScenarioJson = { bodies?: ImportedBodyJson[] };
 
 function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
@@ -324,7 +346,12 @@ function logCommand(world: WasmWorld, kind: string, detail: string) {
   commandLog.push({ t: world.time(), step: Number(world.step_count()), kind, detail });
 }
 
-function setUpProjectDrawer(materialsRef: MaterialsRef, circuitRef: CircuitRef, sceneExportRef: SceneExportRef) {
+function setUpProjectDrawer(
+  materialsRef: MaterialsRef,
+  circuitRef: CircuitRef,
+  sceneExportRef: SceneExportRef,
+  sceneImportRef: SceneImportRef,
+) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
   const staticContentByTab: Record<string, string> = {
@@ -339,7 +366,7 @@ function setUpProjectDrawer(materialsRef: MaterialsRef, circuitRef: CircuitRef, 
       return;
     }
     const note = document.createElement("p");
-    note.textContent = "現在のシーン(ボディ一覧)をJSONへエクスポートする(シーンJSONからの読み込みは後続増分)。";
+    note.textContent = "現在のシーン(ボディ一覧)をJSONへエクスポートする(人間可読な表示専用の形式)。";
     body.appendChild(note);
 
     const bodies = sceneExportRef.current();
@@ -365,6 +392,34 @@ function setUpProjectDrawer(materialsRef: MaterialsRef, circuitRef: CircuitRef, 
       list.appendChild(item);
     }
     body.appendChild(list);
+
+    const importNote = document.createElement("p");
+    importNote.textContent =
+      "シーンJSON(sim_world::Scenarioスキーマ、ヘッドレスランナー・D1–D43のテストと同じ形式)を読み込み、現在のシーンへボディを追加する。";
+    body.appendChild(importNote);
+
+    const importInput = document.createElement("input");
+    importInput.type = "file";
+    importInput.accept = "application/json,.json";
+    body.appendChild(importInput);
+
+    const importStatus = document.createElement("p");
+    body.appendChild(importStatus);
+
+    importInput.addEventListener("change", () => {
+      const file = importInput.files?.[0];
+      if (!file || !sceneImportRef.current) return;
+      file
+        .text()
+        .then((text) => {
+          const count = sceneImportRef.current!(text);
+          importStatus.textContent = `${count}件のボディを追加しました。`;
+          renderScenesTab();
+        })
+        .catch((err: unknown) => {
+          importStatus.textContent = `Import失敗: ${err}`;
+        });
+    });
   }
 
   function renderCircuitTab() {
@@ -552,6 +607,7 @@ async function setUpSceneView(
   materialsRef: MaterialsRef,
   circuitRef: CircuitRef,
   sceneExportRef: SceneExportRef,
+  sceneImportRef: SceneImportRef,
 ) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -1239,6 +1295,65 @@ async function setUpSceneView(
     selectBody(bodyIndex);
   }
 
+  // シーンJSON Import(`SceneImportRef`のdoc参照)。`world.import_scene_json`が
+  // 検証+ボディ追加を行い、追加件数を返す(検証エラーはJS例外として投げられる、
+  // 呼び出し側のProjectドロワーが`.catch`で拾う)。形状ごとのメッシュ生成は
+  // Importに渡した生のシーンJSONを(Rust側とは独立に)自前で`JSON.parse`して
+  // 読む(`ImportedShapeJson`のdoc参照)。Plane形状は既存のスポーンパレットに
+  // 対応物が無いため、大きな平板メッシュで代用し、位置は物理的な平面の定義
+  // (`normal・p=d`、剛体の`transform.position`ではなく`normal`/`d`自体)に
+  // 合わせて`normal.scale(d)`に置く。
+  sceneImportRef.current = (json: string) => {
+    const count = world.import_scene_json(json);
+    const parsed = JSON.parse(json) as ImportedScenarioJson;
+    const bodies = parsed.bodies ?? [];
+    const total = world.body_count();
+    const startIndex = total - count;
+
+    for (let i = 0; i < count; i++) {
+      const bodyIndex = startIndex + i;
+      const shape = bodies[i]?.shape;
+      if (shape && "plane" in shape) {
+        const [nx, ny, nz] = shape.plane.normal;
+        const normal = new THREE.Vector3(nx, ny, nz).normalize();
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(20, 20),
+          new THREE.MeshStandardMaterial({ color: 0x777755, side: THREE.DoubleSide }),
+        );
+        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+        mesh.position.copy(normal.multiplyScalar(shape.plane.d));
+        addSpawnedMesh(bodyIndex, mesh);
+        continue;
+      }
+
+      let mesh: THREE.Mesh;
+      if (shape && "sphere" in shape) {
+        mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
+          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+        );
+      } else if (shape && "box" in shape) {
+        const [hx, hy, hz] = shape.box.half;
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2),
+          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+        );
+      } else {
+        // 形状情報が読めない(想定外のJSON構造)場合のフォールバック。
+        mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(0.3, 16, 12),
+          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+        );
+      }
+      const pos = world.body_position_at_f32(bodyIndex);
+      mesh.position.set(pos[0], pos[1], pos[2]);
+      const rot = world.body_rotation_at_f32(bodyIndex);
+      mesh.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
+      addSpawnedMesh(bodyIndex, mesh);
+    }
+    return count;
+  };
+
   document.getElementById("btn-spawn-sphere")!.addEventListener("click", () => {
     const { x, z } = nextSpawnPosition();
     const material = spawnMaterialSelect.value;
@@ -1596,8 +1711,17 @@ function main() {
   const materialsRef: MaterialsRef = { current: null };
   const circuitRef: CircuitRef = { current: null };
   const sceneExportRef: SceneExportRef = { current: null };
-  setUpProjectDrawer(materialsRef, circuitRef, sceneExportRef);
-  setUpSceneView(updateProbeGraph, appendConsoleEntries, jumpToStepRef, materialsRef, circuitRef, sceneExportRef).catch((err) => {
+  const sceneImportRef: SceneImportRef = { current: null };
+  setUpProjectDrawer(materialsRef, circuitRef, sceneExportRef, sceneImportRef);
+  setUpSceneView(
+    updateProbeGraph,
+    appendConsoleEntries,
+    jumpToStepRef,
+    materialsRef,
+    circuitRef,
+    sceneExportRef,
+    sceneImportRef,
+  ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);

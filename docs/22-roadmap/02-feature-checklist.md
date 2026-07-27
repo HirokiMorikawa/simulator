@@ -186,10 +186,20 @@
   バウンスの透過率は自然に積として合成される)。天頂を見上げると青が赤より
   強く散乱される(空の色)ことと、遠い白色炉球ほどBeer-Lambert則どおりに
   暗く見える(aerial perspective)ことを`Scene::trace`経由で確認した。
-- **次**: ワークストリームDの継続(残りオーバーレイ・自由配線回路エディタ等)を
-  軸に、ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
-  マルチスキャッタリング)は機を見て並行して進める。優先順位の詳細は
-  `/root/.claude/plans/elegant-meandering-pixel.md`参照。
+  続けてワークストリームDへ戻り、シーンJSON Importを実装した——`World::
+  from_scenario`の`materials`/`bodies`処理を`World::append_scenario_bodies`
+  として切り出し、実行中のワールドへ`fluids`/`probes`を除いてボディを追加
+  できるようにした上で、`sim-wasm::WasmWorld::import_scene_json`から呼び、
+  Scenesタブのファイル入力から`sim_world::Scenario`スキーマ(ヘッドレス
+  ランナー・D1–D43と同じ形式)のJSONを読み込めるようにした(副次的に
+  `body_is_static_at`の「index==0のみ静的」という決め打ちのバグも実クエリへ
+  修正)。Playwrightで、床+箱+球を含むシーンJSONの読み込み→Hierarchy/
+  Inspector反映→Play時の落下・接地までを確認した。
+- **次**: ワークストリームDの継続(複数フレームの階層ドリルインUI・自由配線
+  回路エディタ・Replay再生実行等)を軸に、ワークストリームC残り(R4、完全な
+  分光レンダリング・コースティクス・マルチスキャッタリング)は機を見て並行
+  して進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`
+  参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -1462,14 +1472,37 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
 - [ ] シーン + Replay + ブックマークのエクスポート/インポート
       (Replay(入力列)のエクスポートのみ実装済み——Project ドロワーの
       Replaysタブ「Export」ボタンで`commandLog`をJSONダウンロード。
-      続けてシーンのエクスポートも実装した——Project ドロワーのScenesタブに
+      シーンのエクスポートも実装済み——Project ドロワーのScenesタブに
       現在のボディ一覧(`body_count`/`body_label_at`/`body_shape_label_at`/
       `body_material_label_at`/`body_position_at_f32`/`body_is_static_at`を
       毎回クエリ)を表示+「Export current scene」ボタンでJSONダウンロード
       (Playwrightで、床+箱の初期シーンで2件のJSONがダウンロードされ、
       各要素のlabel/shape/material/position/isStaticが実際のクエリ結果と
-      一致することを確認)。シーンJSONからの読み込み(Import、`sim_world::
-      Scenario`のスキーマとスポーンパレット生成ボディとの対応付けが必要)・
+      一致することを確認)。
+      **シーンJSON Import(本増分で追加)**: `sim_world::Scenario`スキーマ
+      (ヘッドレスランナー・D1–D43のテストと同じ形式)のJSONファイルを
+      Scenesタブのファイル入力から読み込み、現在の実行中ワールドへボディを
+      追加できるようにした。Rust側は`World::from_scenario`の`materials`/
+      `bodies`処理を`World::append_scenario_bodies(&mut self, &Scenario) ->
+      Result<Vec<BodyId>, SceneError>`として切り出し(新規`World`を作らず
+      既存ワールドへ追加できるようにするため、`fluids`/`probes`セクションは
+      対象外——実行中の流体設定を無条件上書きしたり無関係な名前解決を
+      割り込ませたりするのを避ける判断)、`sim-wasm::WasmWorld::
+      import_scene_json`がこれを呼んで`spawn_sphere`/`spawn_box`と同じ
+      `SpawnedBodyMeta`として登録する(Hierarchy/Inspector/Scene Viewから
+      スポーンパレット生成ボディと区別が付かない)。副次的に`body_is_static_at`
+      の「index==0のみ静的」という決め打ちのバグ(Importで任意indexに静的
+      ボディが追加され得るため顕在化)も、`RigidBodySet::body_type`を実クエリ
+      する形に修正した。フロントエンド側は形状ごとのメッシュ生成に
+      `body_shape_label_at`の表示用文字列をパースせず、Importに渡した生の
+      シーンJSONをJS側で独立に`JSON.parse`して形状情報(box/sphere/plane)を
+      読む設計にした。Playwrightで、床+箱+球の3ボディを含むシーンJSONを
+      ファイル入力へ流し込み、Hierarchyに3件追加され、Inspectorが正しい
+      Shape/Material/Transformを表示し、Playモードで実際に落下・接地する
+      ことと、インポートした静的床がInspectorで「Static」バッジ表示される
+      ことを確認した。Export/Importは異なるスキーマ(Exportは表示専用、
+      Importは`Scenario`スキーマ)のため自分自身のExport結果をそのまま
+      Importし直すことはできない(意図的な非対称、上記コード内コメント参照)。
       ブックマークのエクスポート・Replayのインポート/再生実行は未実装)
 - [x] Undo / Redo(Edit モードのみ)
       (Gizmoドラッグ(Translate/Rotateいずれも)開始のたびに直前の位置/姿勢を

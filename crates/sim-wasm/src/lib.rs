@@ -203,9 +203,17 @@ impl WasmWorld {
 
     /// `index`番目のボディが静的(Static)かどうか。InspectorがTransformの速度欄を
     /// 意味のある形で表示するための補助(静的ボディは速度が常に0で自明なため)。
-    /// スポーンパレットで追加するボディは常にDynamic。
+    /// `World::mechanics().bodies.body_type`を実クエリする(以前は「index==0
+    /// (固定の床)のみ静的」という決め打ちだったが、シーンJSON Import
+    /// (`import_scene_json`)で任意のindexに静的ボディが追加され得るようになった
+    /// ため、実際の`BodyType`を見るクエリに置き換えた——`body_shape_label_at`が
+    /// 既に辿った同じ理由)。
     pub fn body_is_static_at(&self, index: usize) -> bool {
-        index == 0
+        let id = self.body_id_at(index);
+        matches!(
+            self.inner.mechanics().bodies.body_type[id.index as usize],
+            BodyType::Static
+        )
     }
 
     /// Inspector表示用のShape文字列。`World::mechanics().bodies.shape_of`で
@@ -337,6 +345,55 @@ impl WasmWorld {
             hinge_motor_index: None,
         });
         index
+    }
+
+    /// シーンJSON Import(設計docs/23-frontend/01-editor.md §1.6「Scenes: シーン
+    /// JSON…Export/Import」——Exportは既に実装済み、これがImport側)。`json`を
+    /// `sim_world::Scenario`としてパースし、`World::append_scenario_bodies`
+    /// (`fluids`/`probes`セクションは対象外、そのdoc参照)で現在のワールドへ
+    /// ボディを追加する。D1–D43のシーンJSONファイル(ヘッドレスランナーが使うのと
+    /// 同じスキーマ)をそのままエディタへ読み込んで視覚的に確認できるようにする
+    /// のが狙い(設計のワークストリームD項目13)。追加した各ボディを`spawn_sphere`/
+    /// `spawn_box`と同じ`SpawnedBodyMeta`として登録するため、Hierarchy/Inspector/
+    /// Scene Viewから見てスポーンパレットで追加したボディと区別が付かない。
+    /// 返り値は追加したボディ数(呼び出し側はこの数だけ`body_count()`の末尾から
+    /// メッシュを生成すればよい)。パース/検証エラーは`JsValue`(メッセージ文字列)
+    /// として返す。
+    pub fn import_scene_json(&mut self, json: String) -> Result<usize, JsValue> {
+        let scenario = sim_world::Scenario::from_json(&json)
+            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+        let ids = self
+            .inner
+            .append_scenario_bodies(&scenario)
+            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+
+        for (body, id) in scenario.bodies.iter().zip(ids.iter()) {
+            let index = self.body_count();
+            let label = body
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("Imported_{index}"));
+            let shape = match body.shape {
+                sim_world::ShapeJson::Box { half } => Shape::Box {
+                    half_extents: Vec3::new(half[0], half[1], half[2]),
+                },
+                sim_world::ShapeJson::Sphere { radius } => Shape::Sphere { radius },
+                sim_world::ShapeJson::Plane { normal, d } => Shape::Plane {
+                    normal: Vec3::new(normal[0], normal[1], normal[2]),
+                    d,
+                },
+            };
+            self.spawned.push(SpawnedBodyMeta {
+                id: *id,
+                label,
+                material_label: body.material.clone(),
+                base_shape: shape,
+                constraint_joint_index: None,
+                hinge_motor_index: None,
+            });
+        }
+
+        Ok(scenario.bodies.len())
     }
 
     /// スポーンパレット——振り子(拘束オーバーレイの実証用)。ワールド固定点
