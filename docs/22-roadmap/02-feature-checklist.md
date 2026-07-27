@@ -51,8 +51,19 @@
   (`sim_core::FrameTree`に`Clone`を追加してWorldのフィールドにできるように
   した点も含む)。テストは閾値到達時に発火して`sim_astro::astro_to_local_state`
   の直接呼び出しと厳密一致すること、閾値未到達では発火しないことの両方を確認。
-  残り: 統合シナリオ1本(再突入本体——上記の抗力統合+自動レジーム切替の
-  上に、空力加熱/アブレーションモデルを組んだ本格シナリオが必要)、
+  さらに、空力加熱・アブレーション(`sim_astro::atmosphere::{sutton_graves_
+  heat_flux, ablation_mass_loss}`+`NBodySystem::{set_reentry_heating,
+  heat_shield_mass, reentry_heat_flux}`)を実装した——Sutton-Graves式の
+  よどみ点熱流束を`accelerations()`と同じ大気密度・中心天体相対速度から評価し、
+  潜熱ベースの簡易モデルで熱シールド質量を減衰させ、0に達すると
+  `EventKind::PhaseChanged`イベントを発行する(`step()`終端で1回のみ評価、
+  leapfrogの半キック2回への二重計上を回避)。式そのもの(密度平方根・先端半径
+  逆平方根・速度3乗・質量損失=熱エネルギー/気化潜熱)はabs<1e-9〜1e-15の
+  厳密単体テストで、`NBodySystem::step()`への配線は焼失時のイベント発行で
+  それぞれ確認。
+  残り: 統合シナリオ1本(再突入本体——上記3要素(抗力・自動レジーム切替・
+  空力加熱/アブレーション)を1シナリオに組み、D37合格基準(最大加熱・減速g
+  の傾向、レジーム切替を跨ぐリプレイ一致)を検証する必要がある)、
   シーンJSON`couplings`セクション(スキーマ未確定の
   ため保留、§4参照)、D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)。
 - **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R3・R5・R6・R7完全Green、GGX
@@ -556,7 +567,28 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       失われる——物理的に正しい散逸として許容)。
       `atmospheric_drag_integrated_into_nbody_step_decays_low_orbit_faster_
       than_without_drag`で、実際の`step()`(leapfrog)経由でも弾道係数を
-      設定した衛星が設定しない場合より明確に速く高度を失うことを確認済み
+      設定した衛星が設定しない場合より明確に速く高度を失うことを確認済み。
+      **空力加熱・アブレーション(自動レジーム切替増分に続き追加)**: 設計§2.3
+      「空力加熱: よどみ点熱流束 $\dot q \approx C\sqrt{\rho/R_n}\,v^3$
+      (Sutton-Graves関係)」を`atmosphere::sutton_graves_heat_flux`に、
+      §5「アブレーションは簡易(潜熱ベースの質量除去)」を
+      `atmosphere::ablation_mass_loss`に実装し、`NBodySystem::
+      {set_reentry_heating, heat_shield_mass, reentry_heat_flux}`で
+      ボディごとの熱シールド質量を`step()`終端で1回だけ(leapfrogの半キック
+      2回への二重計上を避けるため)減衰させ、0に達すると`EventKind::
+      PhaseChanged`を発行する。
+      `sutton_graves_heat_flux_scales_with_density_nose_radius_and_speed_as_
+      expected`(密度平方根・先端半径逆平方根・速度3乗の各依存性がabs<1e-9で
+      厳密一致)・`ablation_mass_loss_matches_heat_energy_over_latent_heat_of_
+      vaporization`(質量損失=熱エネルギー/気化潜熱がabs<1e-15で厳密一致、
+      いずれも`atmosphere.rs`の式単体テスト)・`reentry_heating_depletes_
+      shield_mass_and_emits_phase_changed_event_on_burn_through`(高速・低高度
+      条件で1stepのうちに熱シールドが焼失し`PhaseChanged`イベントが発行される
+      ことを実際の`NBodySystem::step()`経由で確認、`nbody.rs`)・
+      `reentry_heat_flux_and_shield_mass_are_none_without_reentry_heating_
+      configured`(未設定時は`None`/イベント無発行のままであることの裏取り)
+      がGreen。動圧/高度トリガでの自動微細刻みは未実装(次段の統合シナリオ
+      「再突入」本体が必要とする最後のピース)
 - [x] フレーム階層・floating origin(木構造・フレーム間変換・非慣性項までを`sim_core::frame`
       (`FrameTree`)に実装。§7の単体テストのうち跨ぎ判定を要さない2本 —
       `round_trip_transform_between_frames_is_identity`(往復変換恒等、abs<1e-12)・

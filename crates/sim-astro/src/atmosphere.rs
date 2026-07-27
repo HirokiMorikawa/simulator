@@ -6,8 +6,11 @@
 //! NBodySystem`本体(`enable_atmospheric_drag`/`set_ballistic_coefficient`、
 //! `accelerations()`内)へ実際に統合した——leapfrog経由でも低軌道が抗力により
 //! 明確に速く減衰することを検証済み(`nbody`モジュールのテスト参照)。
-//! 空力加熱・アブレーション・レジーム切替(再突入時の自動微細刻み、設計§4)は
-//! 依然未実装(次の増分候補)。
+//! 空力加熱・アブレーションも`nbody::NBodySystem`本体(`set_reentry_heating`、
+//! `apply_reentry_heating_and_ablation`)へ統合済み(`sutton_graves_heat_flux`・
+//! `ablation_mass_loss`をこのモジュールに実装、`nbody`モジュールのテスト参照)。
+//! レジーム切替時の自動微細刻み(動圧/高度トリガ、設計§4)は依然未実装
+//! (Orchestratorのsub-step決定は軌道周期基準のみ)。
 
 /// 指数大気モデル(設計§2.3): $\rho(h) = \rho_0 e^{-h/H}$。
 pub fn exponential_atmosphere_density(
@@ -18,6 +21,29 @@ pub fn exponential_atmosphere_density(
     surface_density * (-altitude / scale_height).exp()
 }
 
+/// Sutton-Graves関係(設計§2.3「空力加熱: よどみ点熱流束」)による、よどみ点熱流束
+/// $\dot q \approx k\sqrt{\rho/R_n}\,v^3$(SI単位、W/m²)。定数$k$はSutton & Graves(1971)の
+/// 経験式をW/cm²からW/m²に換算した近似値(この経験式自体が実測フィットであり、
+/// 元の文献値も有効数字2〜3桁程度の精度である点に注意)。
+pub const SUTTON_GRAVES_CONSTANT: f64 = 1.7415;
+
+pub fn sutton_graves_heat_flux(density: f64, nose_radius: f64, speed: f64) -> f64 {
+    SUTTON_GRAVES_CONSTANT * (density / nose_radius).sqrt() * speed.powi(3)
+}
+
+/// アブレーション(設計§2.3「アブレーション」、§5「潜熱ベースの質量除去」の簡易モデル)。
+/// 1ステップ(`dt`)で熱シールドが吸収した熱エネルギー($\dot q \times$面積$\times dt$)を
+/// そのまま気化潜熱で質量に換算する——溶融点到達の判定や、溶融→気化の2段階の温度上昇は
+/// モデル化しない(§5が明記する「詳細な熱防護材の化学は非対象」の範囲)。
+pub fn ablation_mass_loss(
+    heat_flux: f64,
+    area: f64,
+    dt: f64,
+    latent_heat_vaporization: f64,
+) -> f64 {
+    heat_flux * area * dt / latent_heat_vaporization
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -25,6 +51,47 @@ mod tests {
 
     const GM_EARTH: f64 = 3.986_004_418e14;
     const R_EARTH: f64 = 6.371e6;
+
+    /// Sutton-Graves式の各依存性(密度の平方根・先端半径の逆平方根・速度の3乗)が
+    /// 厳密にその通りにスケールすることを確認する(式そのものの評価なのでabs<1e-9)。
+    #[test]
+    fn sutton_graves_heat_flux_scales_with_density_nose_radius_and_speed_as_expected() {
+        let base = sutton_graves_heat_flux(1.0, 1.0, 1.0);
+
+        let density_scaled = sutton_graves_heat_flux(4.0, 1.0, 1.0);
+        assert!(
+            (density_scaled - base * 2.0).abs() < 1e-9,
+            "flux should scale with sqrt(density): {density_scaled} vs {}",
+            base * 2.0
+        );
+
+        let nose_radius_scaled = sutton_graves_heat_flux(1.0, 4.0, 1.0);
+        assert!(
+            (nose_radius_scaled - base * 0.5).abs() < 1e-9,
+            "flux should scale with 1/sqrt(nose_radius): {nose_radius_scaled} vs {}",
+            base * 0.5
+        );
+
+        let speed_scaled = sutton_graves_heat_flux(1.0, 1.0, 2.0);
+        assert!(
+            (speed_scaled - base * 8.0).abs() < 1e-9,
+            "flux should scale with speed^3: {speed_scaled} vs {}",
+            base * 8.0
+        );
+    }
+
+    /// アブレーション質量損失が熱エネルギー(熱流束×面積×dt)を気化潜熱で割った
+    /// ものと厳密に一致すること(式そのものの評価、abs<1e-15)。
+    #[test]
+    fn ablation_mass_loss_matches_heat_energy_over_latent_heat_of_vaporization() {
+        let heat_flux = 1000.0;
+        let area = 2.0;
+        let dt = 0.5;
+        let latent_heat = 2.0e6;
+        let loss = ablation_mass_loss(heat_flux, area, dt, latent_heat);
+        let expected = (heat_flux * area * dt) / latent_heat;
+        assert!((loss - expected).abs() < 1e-15);
+    }
 
     /// 低軌道衛星を重力+大気抗力(指数大気モデル)で1軌道あたり複数ステップの
     /// semi-implicit Eulerで積分し、最終高度を返す(設計§4「軌道伝播はシンプレクティック

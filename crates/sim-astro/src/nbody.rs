@@ -17,8 +17,9 @@ pub const GRAVITATIONAL_CONSTANT: f64 = 6.674e-11;
 /// 大気は`central_body`と共回転する前提を置かず(実際は地表に対する相対風速が正しいが、
 /// ここでは中心天体に対する相対速度をそのまま使う)。抗力は非保存力のため、この力が
 /// 働く間はleapfrogの厳密なシンプレクティック性(エネルギー誤差の有界振動)は失われる
-/// (物理的に正しい散逸なので許容する、設計が求める「レジーム切替時の自動微細刻み」・
-/// 空力加熱・アブレーションは未実装、`atmosphere`モジュールdoc参照)。ボディは
+/// (物理的に正しい散逸なので許容する)。空力加熱・アブレーションは`reentry_heating`
+/// フィールド(`ReentryHeatingState`のdoc参照)で別途構成する。設計が求める
+/// 「レジーム切替時の自動微細刻み」は未実装(`atmosphere`モジュールdoc参照)。ボディは
 /// `enable_atmospheric_drag`を呼ぶ前に全て`add_body`しておく必要がある
 /// (`ballistic_coefficient`はその時点のボディ数で初期化するため)。
 #[derive(Clone)]
@@ -30,6 +31,27 @@ pub struct AtmosphericDragConfig {
     /// ボディごとの弾道係数(抗力係数×断面積/質量)。`None`なら抗力を受けない
     /// (中心天体自身や無関係な他の天体に使う)。
     pub ballistic_coefficient: Vec<Option<f64>>,
+    /// ボディごとの空力加熱・アブレーション設定(`ReentryHeatingState`のdoc参照)。
+    /// `None`なら加熱評価を行わない。
+    pub reentry_heating: Vec<Option<ReentryHeatingState>>,
+}
+
+/// 空力加熱・アブレーション設定+状態(設計docs/16-astro/02-orbital-mechanics.md §2.3
+/// 「空力加熱」「アブレーション」の縮約実装、`atmosphere::{sutton_graves_heat_flux,
+/// ablation_mass_loss}`のdoc参照)。`AtmosphericDragConfig`と同じ中心天体・大気
+/// パラメータ(密度・相対速度)を再利用する——大気圏内でのみ意味を持つ量のため。
+#[derive(Clone, Copy, Debug)]
+pub struct ReentryHeatingState {
+    /// よどみ点先端半径(Sutton-Graves式の$R_n$)。
+    pub nose_radius: f64,
+    /// 熱を受け取る熱シールドの面積(アブレーション質量損失の計算に使う)。
+    pub heat_shield_area: f64,
+    /// 熱シールド材の気化潜熱(アブレーション質量損失の計算に使う)。
+    pub latent_heat_vaporization: f64,
+    /// 残存する熱シールド質量。0に達すると焼失(`EventKind::PhaseChanged`を発行、
+    /// ボディ自体の質量除去は行わない——熱シールド質量は本体質量とは別の簿記量として
+    /// 扱う縮約実装、設計§5「詳細な熱防護材の化学は非対象」の範囲)。
+    pub remaining_shield_mass: f64,
 }
 
 /// N体系。設計 §3 の `NBodySystem` から、Barnes-Hut ツリー・積分器種別の選択機構を除いた
@@ -81,6 +103,7 @@ impl NBodySystem {
             scale_height,
             planet_radius,
             ballistic_coefficient: vec![None; self.len()],
+            reentry_heating: vec![None; self.len()],
         });
     }
 
@@ -89,6 +112,113 @@ impl NBodySystem {
     pub fn set_ballistic_coefficient(&mut self, body: usize, value: f64) {
         if let Some(drag) = &mut self.atmospheric_drag {
             drag.ballistic_coefficient[body] = Some(value);
+        }
+    }
+
+    /// `body`の空力加熱・アブレーション設定を有効化する(`ReentryHeatingState`のdoc
+    /// 参照)。`enable_atmospheric_drag`が未呼び出しなら何もしない(密度・相対速度の
+    /// 評価に中心天体・大気パラメータを再利用するため)。
+    pub fn set_reentry_heating(
+        &mut self,
+        body: usize,
+        nose_radius: f64,
+        heat_shield_area: f64,
+        latent_heat_vaporization: f64,
+        shield_mass: f64,
+    ) {
+        if let Some(drag) = &mut self.atmospheric_drag {
+            drag.reentry_heating[body] = Some(ReentryHeatingState {
+                nose_radius,
+                heat_shield_area,
+                latent_heat_vaporization,
+                remaining_shield_mass: shield_mass,
+            });
+        }
+    }
+
+    /// `body`の残存熱シールド質量(`set_reentry_heating`未設定、または
+    /// `enable_atmospheric_drag`未呼び出しなら`None`)。
+    pub fn heat_shield_mass(&self, body: usize) -> Option<f64> {
+        self.atmospheric_drag
+            .as_ref()?
+            .reentry_heating
+            .get(body)?
+            .map(|h| h.remaining_shield_mass)
+    }
+
+    /// `body`の現在のよどみ点熱流束(Sutton-Graves式、W/m²)。加熱設定が無ければ`None`。
+    pub fn reentry_heat_flux(&self, body: usize) -> Option<f64> {
+        let drag = self.atmospheric_drag.as_ref()?;
+        if body == drag.central_body {
+            return None;
+        }
+        let heating = drag.reentry_heating.get(body)?.as_ref()?;
+        let altitude =
+            (self.position[body] - self.position[drag.central_body]).length() - drag.planet_radius;
+        let speed = (self.velocity[body] - self.velocity[drag.central_body]).length();
+        let density = crate::atmosphere::exponential_atmosphere_density(
+            altitude,
+            drag.surface_density,
+            drag.scale_height,
+        );
+        Some(crate::atmosphere::sutton_graves_heat_flux(
+            density,
+            heating.nose_radius,
+            speed,
+        ))
+    }
+
+    /// 空力加熱・アブレーションを1ステップ分評価する(`step()`末尾から呼ぶ、
+    /// `ReentryHeatingState`のdoc参照)。熱流束はステップ末(積分後)の位置・速度で
+    /// 評価する——`accelerations()`はleapfrogの半キックごとに2回呼ばれるため、
+    /// 質量損失の評価はそこに混ぜず`step()`終端で1回だけ行う(二重計上を避ける)。
+    fn apply_reentry_heating_and_ablation(&mut self, dt: f64, ctx: &mut SolverContext) {
+        let Some(drag) = &self.atmospheric_drag else {
+            return;
+        };
+        let central_body = drag.central_body;
+        let planet_radius = drag.planet_radius;
+        let surface_density = drag.surface_density;
+        let scale_height = drag.scale_height;
+        let central_position = self.position[central_body];
+        let central_velocity = self.velocity[central_body];
+        let n = self.len();
+        let position = &self.position;
+        let velocity = &self.velocity;
+        let drag = self.atmospheric_drag.as_mut().expect("checked Some above");
+        for i in 0..n {
+            if i == central_body {
+                continue;
+            }
+            let Some(heating) = drag.reentry_heating.get_mut(i).and_then(|h| h.as_mut()) else {
+                continue;
+            };
+            if heating.remaining_shield_mass <= 0.0 {
+                continue;
+            }
+            let altitude = (position[i] - central_position).length() - planet_radius;
+            let speed = (velocity[i] - central_velocity).length();
+            let density = crate::atmosphere::exponential_atmosphere_density(
+                altitude,
+                surface_density,
+                scale_height,
+            );
+            let heat_flux =
+                crate::atmosphere::sutton_graves_heat_flux(density, heating.nose_radius, speed);
+            let mass_loss = crate::atmosphere::ablation_mass_loss(
+                heat_flux,
+                heating.heat_shield_area,
+                dt,
+                heating.latent_heat_vaporization,
+            );
+            heating.remaining_shield_mass = (heating.remaining_shield_mass - mass_loss).max(0.0);
+            if heating.remaining_shield_mass <= 0.0 {
+                ctx.events.push(sim_core::Event {
+                    step: 0,
+                    source: sim_core::SourceId(i as u64),
+                    kind: sim_core::EventKind::PhaseChanged,
+                });
+            }
         }
     }
 
@@ -154,7 +284,7 @@ impl Solver for NBodySystem {
 
     /// leapfrog(kick-drift-kick)。設計 §4.2:
     /// v_{1/2}=v_0+dt/2・a_0、x_1=x_0+dt・v_{1/2}、v_1=v_{1/2}+dt/2・a_1。
-    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+    fn step(&mut self, dt: f64, ctx: &mut SolverContext) {
         let n = self.len();
         if n == 0 {
             return;
@@ -170,6 +300,7 @@ impl Solver for NBodySystem {
         for (v, &a) in self.velocity.iter_mut().zip(a1.iter()) {
             *v = v.addcarry_scaled(a, dt * 0.5);
         }
+        self.apply_reentry_heating_and_ablation(dt, ctx);
     }
 
     fn state_hash(&self, hasher: &mut StateHasher) {
@@ -498,5 +629,83 @@ mod tests {
              drag-free control: with_drag={final_altitude_with_drag} \
              without_drag={final_altitude_without_drag}"
         );
+    }
+
+    /// 空力加熱・アブレーション(設計§2.3「空力加熱」「アブレーション」)を
+    /// `NBodySystem::step()`へ統合した検証。極端に薄い(すぐ焼失する)熱シールドを
+    /// 持つカプセルを、高速(7km/s級)・低高度(50km)——Sutton-Graves熱流束が
+    /// 非常に大きくなる条件——に置き、1stepで熱シールド質量が0まで減り
+    /// `EventKind::PhaseChanged`イベントが発行されることを確認する(数値自体の
+    /// 精度は`atmosphere.rs`の`sutton_graves_heat_flux`/`ablation_mass_loss`単体
+    /// テストが厳密式評価で担う。ここでは実際の`step()`経由の配線——密度・相対
+    /// 速度の評価・質量減衰・イベント発行——が機能することを確認する)。
+    #[test]
+    fn reentry_heating_depletes_shield_mass_and_emits_phase_changed_event_on_burn_through() {
+        let r_earth = 6.371e6;
+        let mass_earth = 5.972e24;
+        let mut sys = NBodySystem::new(0.0);
+        let central = sys.add_body(Vec3::ZERO, Vec3::ZERO, mass_earth);
+        let capsule = sys.add_body(
+            Vec3::new(r_earth + 50_000.0, 0.0, 0.0),
+            Vec3::new(0.0, 7000.0, 0.0),
+            1000.0,
+        );
+        sys.enable_atmospheric_drag(central, 1.225, 8500.0, r_earth);
+        sys.set_reentry_heating(capsule, 0.5, 1.0, 2.0e6, 0.001);
+
+        let materials = MaterialDb::standard();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        sys.step(1e-3, &mut ctx);
+
+        assert_eq!(
+            sys.heat_shield_mass(capsule),
+            Some(0.0),
+            "shield mass must clamp to zero once burned through"
+        );
+
+        let drained = events.drain_sorted();
+        assert!(
+            drained
+                .iter()
+                .any(|e| e.kind == sim_core::EventKind::PhaseChanged
+                    && e.source == sim_core::SourceId(capsule as u64)),
+            "burning through the shield must emit a PhaseChanged event for the capsule body: {drained:?}"
+        );
+    }
+
+    /// 加熱設定が無い場合(`set_reentry_heating`未呼び出し)は、大気抗力・重力は
+    /// 従来どおり働くが焼失イベントは発行されない(誤発火防止の裏取り)。
+    #[test]
+    fn reentry_heat_flux_and_shield_mass_are_none_without_reentry_heating_configured() {
+        let r_earth = 6.371e6;
+        let mass_earth = 5.972e24;
+        let mut sys = NBodySystem::new(0.0);
+        let central = sys.add_body(Vec3::ZERO, Vec3::ZERO, mass_earth);
+        let capsule = sys.add_body(
+            Vec3::new(r_earth + 50_000.0, 0.0, 0.0),
+            Vec3::new(0.0, 7000.0, 0.0),
+            1000.0,
+        );
+        sys.enable_atmospheric_drag(central, 1.225, 8500.0, r_earth);
+
+        assert_eq!(sys.heat_shield_mass(capsule), None);
+        assert_eq!(sys.reentry_heat_flux(capsule), None);
+
+        let materials = MaterialDb::standard();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        sys.step(1e-3, &mut ctx);
+        assert!(events.drain_sorted().is_empty());
     }
 }
