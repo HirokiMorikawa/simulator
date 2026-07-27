@@ -29,6 +29,9 @@
 //! マーチングによる不均質媒質は対象外(`medium`モジュールdoc参照、変わらず)。
 
 use crate::bsdf::{Dielectric, Lambertian, Metal, RoughConductor};
+use crate::bvh::Bvh;
+use crate::primitive::Primitive;
+use crate::quad::Quad;
 use crate::ray::Ray;
 use crate::sphere::{Hit, Sphere};
 use sim_math::{SimRng, Vec3};
@@ -43,11 +46,27 @@ pub enum Material {
     RoughConductor(RoughConductor),
 }
 
-/// シーン中の1物体(球 + BSDF)。
+/// シーン中の1物体(プリミティブ + BSDF)。
 #[derive(Clone, Copy, Debug)]
 pub struct SceneObject {
-    pub sphere: Sphere,
+    pub primitive: Primitive,
     pub material: Material,
+}
+
+impl SceneObject {
+    pub fn sphere(sphere: Sphere, material: Material) -> SceneObject {
+        SceneObject {
+            primitive: Primitive::Sphere(sphere),
+            material,
+        }
+    }
+
+    pub fn quad(quad: Quad, material: Material) -> SceneObject {
+        SceneObject {
+            primitive: Primitive::Quad(quad),
+            material,
+        }
+    }
 }
 
 /// 点光源(幾何を持たない抽象光源、モジュールdoc参照)。逆二乗則の点光源として
@@ -98,30 +117,62 @@ impl AtmosphereMedium {
     }
 }
 
-/// 複数の球 + BSDF + 一様環境放射輝度 + 点光源からなるシーン。
+/// 複数のプリミティブ + BSDF + 一様環境放射輝度 + 点光源からなるシーン。
+///
+/// **構築は必ず`Scene::new`を使う**(フィールドを直接書ける構造体リテラルでは
+/// なくコンストラクタにしているのは、`objects`から一度だけBVHを構築して保持する
+/// ため——構築後に`objects`を差し替えるとBVHが陳腐化するので、`objects`は
+/// 非公開にして読み取り専用の`objects()`だけを公開する)。
 pub struct Scene {
-    pub objects: Vec<SceneObject>,
+    objects: Vec<SceneObject>,
     pub lights: Vec<PointLight>,
     /// 環境放射輝度(方向によらず一定、モノクロスカラー、設計§5「大気散乱等は後続」)。
     pub environment_radiance: f64,
     /// 参加媒質(`None`なら真空、既存の全テストの挙動を完全に保つ)。
     pub medium: Option<AtmosphereMedium>,
+    /// `objects`に対する加速構造(`bvh`モジュールdoc参照)。`new`で一度だけ構築する。
+    bvh: Bvh,
+    /// `objects`と同じ順序のプリミティブ配列。`Bvh::closest_hit`がスライスを要求
+    /// するため、レイごとに作り直さずに済むよう`new`で一度だけ作って保持する
+    /// (レイ1本ごとに`Vec`を確保するとBVH導入の目的である高速化が帳消しになる)。
+    primitives: Vec<Primitive>,
 }
 
 impl Scene {
-    /// 全物体を線形探索し、最も近い交差(`t`最小)を返す(モジュールdoc「BVHは
-    /// 実際に必要になるまで見送る」参照)。`pub(crate)`はテストから直接この幾何選択
+    /// シーンを構築し、あわせて`objects`のBVHを一度だけ構築する(型のdoc参照)。
+    pub fn new(
+        objects: Vec<SceneObject>,
+        lights: Vec<PointLight>,
+        environment_radiance: f64,
+        medium: Option<AtmosphereMedium>,
+    ) -> Scene {
+        let primitives: Vec<Primitive> = objects.iter().map(|o| o.primitive).collect();
+        let bvh = Bvh::build(&primitives);
+        Scene {
+            objects,
+            lights,
+            environment_radiance,
+            medium,
+            bvh,
+            primitives,
+        }
+    }
+
+    /// 読み取り専用のシーン物体一覧(型のdoc参照 — BVHとの整合を保つため
+    /// 構築後の差し替えは許さない)。
+    pub fn objects(&self) -> &[SceneObject] {
+        &self.objects
+    }
+
+    /// BVHで最近傍交差(`t`最小)を返す。`pub(crate)`はテストから直接この幾何選択
     /// ロジックだけを検証するため(`trace`経由だと再帰的なBSDFサンプリングの結果と
     /// 混ざり、どちらの物体が選ばれたか単体では判別しづらい)。
     pub(crate) fn closest_hit(&self, ray: &Ray, t_min: f64) -> Option<(Hit, &Material)> {
-        self.objects
-            .iter()
-            .filter_map(|obj| {
-                obj.sphere
-                    .intersect(ray, t_min)
-                    .map(|hit| (hit, &obj.material))
-            })
-            .min_by(|(a, _), (b, _)| a.t.total_cmp(&b.t))
+        // `Bvh`はindexだけを返すので、`objects`と同じ順序である前提で引き当てる
+        // (`new`が`objects`の順序そのままで`primitives`を作るため成立する)。
+        self.bvh
+            .closest_hit(&self.primitives, ray, t_min)
+            .map(|(index, hit)| (hit, &self.objects[index].material))
     }
 
     /// NEE(Next Event Estimation、設計§4「直接光: 光源を明示サンプル」)。全ての
@@ -280,18 +331,18 @@ mod tests {
     #[test]
     fn r1_white_furnace_diffuse_surface_matches_background_radiance_exactly() {
         let environment_radiance = 3.7; // 任意の一様環境放射輝度。
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::Lambertian(Lambertian { albedo: 1.0 }),
-            }],
-            lights: vec![],
+                Material::Lambertian(Lambertian { albedo: 1.0 }),
+            )],
+            vec![],
             environment_radiance,
-            medium: None,
-        };
+            None,
+        );
         let camera_origin = Vec3::ZERO;
         let mut rng = SimRng::new(1, 1);
 
@@ -316,18 +367,18 @@ mod tests {
     fn sub_unity_albedo_scales_radiance_by_albedo_exactly() {
         let environment_radiance = 2.0;
         let albedo = 0.6;
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::Lambertian(Lambertian { albedo }),
-            }],
-            lights: vec![],
+                Material::Lambertian(Lambertian { albedo }),
+            )],
+            vec![],
             environment_radiance,
-            medium: None,
-        };
+            None,
+        );
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
         let mut rng = SimRng::new(2, 2);
         let radiance = scene.trace(&ray, &mut rng, 4);
@@ -339,18 +390,18 @@ mod tests {
     /// レイが球を外れた場合は環境放射輝度そのものを返す。
     #[test]
     fn ray_missing_the_sphere_returns_environment_radiance() {
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::Lambertian(Lambertian { albedo: 1.0 }),
-            }],
-            lights: vec![],
-            environment_radiance: 9.0,
-            medium: None,
-        };
+                Material::Lambertian(Lambertian { albedo: 1.0 }),
+            )],
+            vec![],
+            9.0,
+            None,
+        );
         let ray = Ray::new(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
         let mut rng = SimRng::new(3, 3);
         assert_eq!(scene.trace(&ray, &mut rng, 4), 9.0);
@@ -371,18 +422,18 @@ mod tests {
     #[test]
     fn dielectric_furnace_test_non_absorbing_glass_sphere_matches_background_radiance_exactly() {
         let environment_radiance = 4.2;
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::Dielectric(Dielectric { ior: 1.5 }),
-            }],
-            lights: vec![],
+                Material::Dielectric(Dielectric { ior: 1.5 }),
+            )],
+            vec![],
             environment_radiance,
-            medium: None,
-        };
+            None,
+        );
         let camera_origin = Vec3::ZERO;
         let mut rng = SimRng::new(4, 4);
 
@@ -411,18 +462,18 @@ mod tests {
     fn metal_furnace_test_matches_fresnel_scaled_background_radiance_exactly() {
         let environment_radiance = 5.0;
         let gold = Metal { n: 0.47, k: 2.4 };
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::Metal(gold),
-            }],
-            lights: vec![],
+                Material::Metal(gold),
+            )],
+            vec![],
             environment_radiance,
-            medium: None,
-        };
+            None,
+        );
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0)); // 垂直入射。
         let mut rng = SimRng::new(7, 7);
         let radiance = scene.trace(&ray, &mut rng, 4);
@@ -438,26 +489,21 @@ mod tests {
     /// (線形探索による最近傍交差選択そのものの配線確認、モジュールdoc参照)。
     #[test]
     fn closest_hit_picks_the_nearer_object_when_two_spheres_overlap_along_the_ray() {
-        let near = SceneObject {
-            sphere: Sphere {
+        let near = SceneObject::sphere(
+            Sphere {
                 center: Vec3::new(0.0, 0.0, -3.0),
                 radius: 1.0,
             },
-            material: Material::Lambertian(Lambertian { albedo: 0.2 }),
-        };
-        let far = SceneObject {
-            sphere: Sphere {
+            Material::Lambertian(Lambertian { albedo: 0.2 }),
+        );
+        let far = SceneObject::sphere(
+            Sphere {
                 center: Vec3::new(0.0, 0.0, -8.0),
                 radius: 1.0,
             },
-            material: Material::Lambertian(Lambertian { albedo: 0.9 }),
-        };
-        let scene = Scene {
-            objects: vec![near, far],
-            lights: vec![],
-            environment_radiance: 1.0,
-            medium: None,
-        };
+            Material::Lambertian(Lambertian { albedo: 0.9 }),
+        );
+        let scene = Scene::new(vec![near, far], vec![], 1.0, None);
 
         // 両方の球の中心を貫く一直線: 手前の球(t≈2)が奥の球(t≈7)より先にヒットする。
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
@@ -481,12 +527,7 @@ mod tests {
 
         // 物体を除いた登録順で試しても(奥→手前)、結果は変わらず手前が選ばれる
         // (線形探索は登録順に依存しない`t`最小選択であることの確認)。
-        let scene_reordered = Scene {
-            objects: vec![far, near],
-            lights: vec![],
-            environment_radiance: 1.0,
-            medium: None,
-        };
+        let scene_reordered = Scene::new(vec![far, near], vec![], 1.0, None);
         let (hit_reordered, _) = scene_reordered
             .closest_hit(&ray, 1e-6)
             .expect("should still hit the near sphere");
@@ -505,18 +546,18 @@ mod tests {
             position: Vec3::new(0.0, 0.0, -1.0),
             intensity: 12.0,
         };
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::Lambertian(Lambertian { albedo: 0.8 }),
-            }],
-            lights: vec![light],
-            environment_radiance: 0.0,
-            medium: None,
-        };
+                Material::Lambertian(Lambertian { albedo: 0.8 }),
+            )],
+            vec![light],
+            0.0,
+            None,
+        );
         let point = Vec3::new(0.0, 0.0, -4.0); // 球の手前(原点側)の頂点。
         let normal = Vec3::new(0.0, 0.0, 1.0); // 外向き法線(光源の方向と一致)。
         let bsdf = 0.8 / std::f64::consts::PI;
@@ -537,26 +578,21 @@ mod tests {
             position: Vec3::new(0.0, 0.0, -1.0),
             intensity: 12.0,
         };
-        let occluder = SceneObject {
-            sphere: Sphere {
+        let occluder = SceneObject::sphere(
+            Sphere {
                 center: Vec3::new(0.0, 0.0, -2.5),
                 radius: 0.3,
             },
-            material: Material::Lambertian(Lambertian { albedo: 0.5 }),
-        };
-        let main_sphere = SceneObject {
-            sphere: Sphere {
+            Material::Lambertian(Lambertian { albedo: 0.5 }),
+        );
+        let main_sphere = SceneObject::sphere(
+            Sphere {
                 center: Vec3::new(0.0, 0.0, -5.0),
                 radius: 1.0,
             },
-            material: Material::Lambertian(Lambertian { albedo: 0.8 }),
-        };
-        let scene = Scene {
-            objects: vec![occluder, main_sphere],
-            lights: vec![light],
-            environment_radiance: 0.0,
-            medium: None,
-        };
+            Material::Lambertian(Lambertian { albedo: 0.8 }),
+        );
+        let scene = Scene::new(vec![occluder, main_sphere], vec![light], 0.0, None);
         let point = Vec3::new(0.0, 0.0, -4.0);
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let bsdf = 0.8 / std::f64::consts::PI;
@@ -576,18 +612,18 @@ mod tests {
             position: Vec3::new(0.0, 0.0, -6.0), // 法線の反対側。
             intensity: 12.0,
         };
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::Lambertian(Lambertian { albedo: 0.8 }),
-            }],
-            lights: vec![light],
-            environment_radiance: 0.0,
-            medium: None,
-        };
+                Material::Lambertian(Lambertian { albedo: 0.8 }),
+            )],
+            vec![light],
+            0.0,
+            None,
+        );
         let point = Vec3::new(0.0, 0.0, -4.0);
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let bsdf = 0.8 / std::f64::consts::PI;
@@ -606,18 +642,18 @@ mod tests {
             intensity: 12.0,
         };
         let albedo = 0.8;
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::Lambertian(Lambertian { albedo }),
-            }],
-            lights: vec![light],
-            environment_radiance: 0.0,
-            medium: None,
-        };
+                Material::Lambertian(Lambertian { albedo }),
+            )],
+            vec![light],
+            0.0,
+            None,
+        );
         let point = Vec3::new(0.0, 0.0, -4.0);
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let bsdf = albedo / std::f64::consts::PI;
@@ -638,13 +674,13 @@ mod tests {
     /// なる(白色炉テスト系がわざと分散ゼロにしているのとは対照的に、ここでは意図的に
     /// 分散を持たせて収束率そのものを検証する)。
     fn r7_variance_test_scene() -> (Scene, Ray) {
-        let main_sphere = SceneObject {
-            sphere: Sphere {
+        let main_sphere = SceneObject::sphere(
+            Sphere {
                 center: Vec3::new(0.0, 0.0, -5.0),
                 radius: 1.0,
             },
-            material: Material::Lambertian(Lambertian { albedo: 0.9 }),
-        };
+            Material::Lambertian(Lambertian { albedo: 0.9 }),
+        );
         // 主球頂点(0,0,-4)から法線(0,0,1)方向(カメラを越えてさらに奥、z>0側)に
         // 距離6・半径1.8の遮蔽球を置く(半頂角≈17.5°の円錐を部分的に遮蔽)。
         // カメラ(原点)からこの遮蔽球までの距離は2 > 半径1.8なので、カメラ自身は
@@ -654,19 +690,14 @@ mod tests {
         // (法線(0,0,1)まわりのコサイン重み付き、cosθ>0すなわちz成分が正)だけが
         // z=-4からz>0方向へ進み、この遮蔽球に当たり得る(主球とは7>1+1.8で
         // 重ならない)。
-        let occluder = SceneObject {
-            sphere: Sphere {
+        let occluder = SceneObject::sphere(
+            Sphere {
                 center: Vec3::new(0.0, 0.0, 2.0),
                 radius: 1.8,
             },
-            material: Material::Lambertian(Lambertian { albedo: 0.5 }),
-        };
-        let scene = Scene {
-            objects: vec![main_sphere, occluder],
-            lights: vec![],
-            environment_radiance: 6.0,
-            medium: None,
-        };
+            Material::Lambertian(Lambertian { albedo: 0.5 }),
+        );
+        let scene = Scene::new(vec![main_sphere, occluder], vec![], 6.0, None);
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
         (scene, ray)
     }
@@ -758,18 +789,18 @@ mod tests {
             k: 2.4,
             alpha,
         };
-        let scene = Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
+        let scene = Scene::new(
+            vec![SceneObject::sphere(
+                Sphere {
                     center: Vec3::new(0.0, 0.0, -5.0),
                     radius: 1.0,
                 },
-                material: Material::RoughConductor(gold),
-            }],
-            lights: vec![],
+                Material::RoughConductor(gold),
+            )],
+            vec![],
             environment_radiance,
-            medium: None,
-        };
+            None,
+        );
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
         (scene, ray)
     }
@@ -845,12 +876,7 @@ mod tests {
             thickness: 8000.0,
         };
         let environment_radiance = 2.0;
-        let scene = Scene {
-            objects: vec![],
-            lights: vec![],
-            environment_radiance,
-            medium: Some(atmosphere),
-        };
+        let scene = Scene::new(vec![], vec![], environment_radiance, Some(atmosphere));
 
         // 天頂から60°傾いた視線方向(cosθ_zenith=0.5、secant則のクランプの影響を
         // 受けない値)。
@@ -878,17 +904,19 @@ mod tests {
     fn trace_reproduces_stronger_blue_sky_scattering_than_red_through_the_medium_wiring() {
         let up = Vec3::new(0.0, 1.0, 0.0);
         let sun_direction = Vec3::new(0.6, 0.8, 0.0); // 既に単位ベクトル(0.6²+0.8²=1)。
-        let scene_for_wavelength = |wavelength_nm: f64| Scene {
-            objects: vec![],
-            lights: vec![],
-            environment_radiance: 0.0,
-            medium: Some(AtmosphereMedium {
-                medium: HomogeneousMedium::rayleigh_atmosphere(wavelength_nm, 1.16e-5),
-                sun_direction,
-                sun_radiance: 1.0,
-                up,
-                thickness: 8000.0,
-            }),
+        let scene_for_wavelength = |wavelength_nm: f64| {
+            Scene::new(
+                vec![],
+                vec![],
+                0.0,
+                Some(AtmosphereMedium {
+                    medium: HomogeneousMedium::rayleigh_atmosphere(wavelength_nm, 1.16e-5),
+                    sun_direction,
+                    sun_radiance: 1.0,
+                    up,
+                    thickness: 8000.0,
+                }),
+            )
         };
         let ray = Ray::new(Vec3::ZERO, up); // 天頂を見上げる。
         let mut rng = SimRng::new(9, 9);
@@ -928,17 +956,19 @@ mod tests {
         let near_distance: f64 = 1000.0;
         let far_distance: f64 = 5000.0;
 
-        let scene_for = |distance: f64| Scene {
-            objects: vec![SceneObject {
-                sphere: Sphere {
-                    center: Vec3::new(0.0, 0.0, -distance),
-                    radius,
-                },
-                material: Material::Lambertian(Lambertian { albedo: 1.0 }),
-            }],
-            lights: vec![],
-            environment_radiance,
-            medium: Some(atmosphere),
+        let scene_for = |distance: f64| {
+            Scene::new(
+                vec![SceneObject::sphere(
+                    Sphere {
+                        center: Vec3::new(0.0, 0.0, -distance),
+                        radius,
+                    },
+                    Material::Lambertian(Lambertian { albedo: 1.0 }),
+                )],
+                vec![],
+                environment_radiance,
+                Some(atmosphere),
+            )
         };
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
 
