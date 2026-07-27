@@ -349,12 +349,29 @@
   対照実験を確認した(色付きの非対称18.4%はその45倍)。**これでR1–R7が全てGreen**。
   色はチャンネル別レンダリング(RGBであって分光ではない)、面光源はMIS無し、
   画像出力は未実装のため検証は点推定、という縮約は正直に文書化した。
-- **次**: ワークストリームC残り(完全な分光レンダリング(hero wavelength法)・
-  コースティクス・マルチスキャッタリング・フレームバッファへの画像出力とD40–D43)。その後にワークストリームC残り(完全な分光レンダリング・
-  コースティクス・マルチスキャッタリング)・デモシーンギャラリー(D1–D43の目視
-  チェック解禁)・さらなるヘッドレスランナー適用例(`couplings`の
-  残り11種)を機を見て進める。優先順位の
-  詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
+- **残タスク全体の洗い出し監査(2026-07-27)**: ユーザーから「残タスクが無くなるまで
+  続けてほしい」との指示を受け、チェックリスト・Rustコード・CI/フロントエンドの
+  3方向から監査を実施した。チェックボックス総数262/済195/未67(完了率74.4%)。
+  §7デモ合格管理表(D1–D43)が未チェック40件(今回のD36/D38/D39訂正で43件)と
+  最大の滞留で、その大半(28件)は**ヘッドレスGreen済みで目視チェックのみ未了**、
+  残り13件(D12/D23/D24/D27–D33/D40/D41/D43)のうち9件(D12/D23/D27–D33)は
+  **既存ソルバ(`WaveFunction1D/2D`・`FdtdSim2D`・`GasSim`・`IsingSim`・
+  `find_eigenstates`・`brownian`・`BallJoint`・`SphFluid`)で書ける**ことを確認した。
+  監査では文書の不整合3件(本増分で訂正済み: §8のR4チェック漏れ・D26の
+  「Coupling registry未接続」という誤記——実際は`sim-world/src/lib.rs:967`で
+  接続済み——・D36/D38/D39のチェック規約不整合)に加え、**チェックリストには
+  現れない品質面の懸念13件(Q1–Q13)**をコード監査で発見した。うちQ1(Coupling
+  がLie-Trotter分割ではなく1step遅れで適用)・Q2(接触散逸が真値より約9%系統的に
+  過大)・Q3(MAC食い違い格子のu/vを同一インデックスでペアリング、半セルずれ)・
+  Q4(マニフォールド持続化が無く多段スタックの貫入がslopを超える)・Q5(wasm境界に
+  呼び出し側到達可能な`panic!`が約13箇所)は正しさに関わる懸念として重い。
+  CI面では性能ベンチ回帰ゲートが実質未実施(`cargo bench -- --test`は1回実行の
+  パニック確認のみでベースライン比較なし)・フロントエンドのテストがCIに皆無、
+  という2つの穴を確認した。詳細な監査結果と実行順序は
+  `/root/.claude/plans/elegant-meandering-pixel.md`(「残タスク完遂」節)参照。
+  ユーザーとの相談の結果、①品質是正(Q1–Q8)を先に②Q1はコード変更ではなく
+  設計書改訂(`docs/20-integration/`に1step遅れを正式な縮約として明記)で
+  閉じる、の2点を決定し、この順で増分を進める。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -1887,6 +1904,14 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
 定義は [21-verification/03-demo-scenarios.md](../21-verification/03-demo-scenarios.md)。
 「合格」= 合格基準のヘッドレステスト Green + 目視チェック。
 
+> **2026-07-27の監査で訂正**: D36・D38・D39 はこれまで本文に「目視チェックは
+> ワークストリームD未着手のため保留」と書きながらチェックボックスは `[x]` に
+> なっているという矛盾があった(§7冒頭の規約どおりなら「合格」判定には目視も
+> 必要で、他のD1–D35・D37・D40–D43はこの規約に従って未チェックのままにして
+> いる)。D36/D38/D39を他のヘッドレスGreen済みデモと同じ扱いに揃え、
+> `[ ]` に訂正した(シーンギャラリー実装後、実際に目視確認できた時点で
+> チェックする)。
+
 Phase 1(P1〜P2 スモーク):
 
 - [ ] D1 落下時計(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
@@ -2160,8 +2185,13 @@ Phase 4:
       すると初期加速度が1/4になる逆二乗則を確認)。
       **シーンJSON経由の13本目の適用例+スキーマ拡張(本増分で追加)**: これまで
       `Scenario`に`sim-coupling`の`Coupling`実装(設計の例示JSONでは名前配列
-      `["buoyancy_drag", ...]`だが、`Coupling`registry自体が`World::step()`に
-      未接続なため——モジュールdoc冒頭参照)を構成する手段が全く無かった。
+      `["buoyancy_drag", ...]`)を構成する手段が全く無かった。
+      (**2026-07-27の監査で訂正**: この行はかつて「`Coupling` registry自体が
+      `World::step()`に未接続」と書いていたが**誤り**。registryは
+      `crates/sim-world/src/lib.rs:967`の`for coupling in self.couplings.iter_mut()`
+      として`pub fn step`(同900行)の中で毎step適用されており、**接続済み**である。
+      未接続なのはregistryではなく「シーンJSONの`couplings`セクションからの
+      自動解決・排他結合検査との接続」の方——下記参照。)
       `couplings: Vec<CouplingJson>`を新設し、現時点では`ImageChargeForce`
       (`{body, charge, plane_normal, plane_d}`)のみ対応する(他13種は後続増分、
       この`couplings`セクション自体はまだ最小の一歩——排他結合検査等は対象外)。
@@ -2207,7 +2237,7 @@ Pα:
       `astro.bodies`配列のインデックス直接参照)を追加した(スキーマ拡張)。
       `demos.rs`のネイティブ実装と同じ構成をシーンJSON経由で再現し、位置・
       速度とも解析的な周期後に出発点付近へ戻ることを確認した。
-- [x] D36 スイングバイ(ヘッドレステストGreen、新規`crates/sim-astro/src/
+- [ ] D36 スイングバイ(ヘッドレステストGreen、新規`crates/sim-astro/src/
       swingby.rs`。目視チェックはワークストリームD未着手のため保留。
       `hyperbolic_eccentricity`/`patched_conic_deflection_angle`/
       `periapsis_speed`でパッチドコニック近似の閉形式を実装し、探査機質量が
@@ -2229,7 +2259,7 @@ Pα:
       一致)を確認。「最大加熱・減速gの傾向」の定量トレンド化、「生存/焼失」の
       2択判定(現状は降下+部分アブレーション+ハンドオフの配線検証が主眼)は
       対象外。目視チェック保留)
-- [x] D38 潮汐(ヘッドレステストGreen、新規`crates/sim-astro/src/tides.rs`。
+- [ ] D38 潮汐(ヘッドレステストGreen、新規`crates/sim-astro/src/tides.rs`。
       目視チェックはワークストリームD未着手のため保留。
       `d38_tidal_acceleration_bulges_outward_on_near_and_far_side_and_
       inward_at_the_sides`(月の潮汐加速度が近点・遠点で外向き、垂直側で
@@ -2239,7 +2269,7 @@ Pα:
       `d38_spring_tide_exceeds_neap_tide_when_sun_and_moon_align_vs_
       perpendicular`(太陽が月と同じ方向に揃う大潮が、直交する小潮より
       月直下点の正味潮汐加速度で1.3倍超強いことを確認)がGreen)
-- [x] D39 相対論 ON/OFF(ヘッドレステストGreen、新規`NBodySystem::
+- [ ] D39 相対論 ON/OFF(ヘッドレステストGreen、新規`NBodySystem::
       enable_relativistic_correction`(`crates/sim-astro/src/nbody.rs`)。
       目視チェックはワークストリームD未着手のため保留。A8と同じ誇張$GM/c^2$比
       での近日点移動を、実際の`NBodySystem::step()`経由でON(解析式とrel<1%
@@ -2557,7 +2587,16 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
       different_wavelengths_into_different_refraction_angles`。完全な分光
       レンダリング(hero wavelength法、`Scene`/`trace`全体への波長の配線)・
       コースティクスは未実装のため、チェックボックス自体はR3完了とは見なさない)
-- [ ] R4
+- [x] R4(コーネルボックス、**設計改訂の上で代替検証**によりGreen——
+      `crates/sim-render/src/path_tracer.rs::tests::
+      cornell_box_color_bleeding_matches_the_analytic_single_bounce_transfer`
+      (発光壁から拡散床への一次反射を、パストレーサとは独立な投影立体角の数値求積
+      $\Omega_{proj}=\int\cos\theta_P\cos\theta_w/r^2 dA$ から求めた
+      $L=\rho_{floor}L_w\Omega_{proj}/\pi$ と比較。3点で実測rel_err
+      0.14%/0.075%/0.34%、閾値3%)+ `cornell_box_shows_color_bleeding_from_the_
+      red_and_green_side_walls`(フルシーンでの色移りの符号と、両壁を灰色にすると
+      非対称が0.40%まで消える対照実験)。参照解データが入手できなかった経緯は
+      設計docs/21-verification/01-analytic-tests.mdの「R4 注記」参照)
 - [x] R5(`crates/sim-render/src/medium.rs::tests::
       sky_scattering_is_stronger_for_blue_than_red_and_matches_the_optically_thin_ratio`——
       光学的に薄い極限での青(450nm)/赤(650nm)単一散乱放射輝度比がσ_s∝λ^-4比に
@@ -2602,3 +2641,31 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
       系全体を自由落下させてしまう問題を発見し重力0(ばね+付加質量のみの純粋な機械振動)
       に変更して解決。10秒間発散なし・有界・加速度符号反転頻度が理論値の4倍以内に収まる
       ことを確認(debugビルドで約54秒)
+
+## 9. 既知の限界レジストリ(2026-07-27の監査で新設)
+
+チェックボックスに現れない「正しさに関わる懸念」は各モジュールdocに散在していて
+全体像が見えない、という問題が監査で判明した。ここに集約する。**Q1–Q8は増分で
+是正・改訂済み**(各項目の状況欄参照)。**Q9–Q13は直さない判断を明示**する
+(いずれもモジュールdoc内で既に文書化済みの限界で、影響範囲がテストの許容誤差に
+明示的に織り込まれている——「知らないまま」ではなく「知った上で許容している」もの)。
+
+| # | 箇所 | 内容 | 状況 |
+|---|---|---|---|
+| Q1 | `sim-world/src/lib.rs:38,1181-1189` | CouplingがLie-Trotter分割ではなく1step遅れで適用 | 設計書改訂で対応予定(増分1) |
+| Q2 | `sim-mechanics/src/solver.rs:46-65` | 接触散逸が真値より系統的に約9%過大 | 対応予定(増分1) |
+| Q3 | `sim-coupling/src/convection_link.rs:12` | MAC食い違い格子のu/vを同一インデックスでペアリング(半セルずれ) | 対応予定(増分1) |
+| Q4 | `sim-mechanics/src/collision.rs:6-8` | マニフォールド持続化が無く多段スタックの貫入がslopを超える | 対応予定(増分1) |
+| Q5 | `sim-wasm/src/lib.rs` | 呼び出し側到達可能な`panic!`が約13箇所+シーンexportが表現不能形状を無言で捨てる | 対応予定(増分1) |
+| Q6 | `sim-statistical/src/brownian.rs:90` | γΔt/m≈17でrel_err≈760%、実行時ガード無し | 対応予定(増分1) |
+| Q7 | `sim-astro/src/relativity.rs:103` | 1PN線形近似がc=20でrel_err≈14%まで破れる、範囲チェック無し | 対応予定(増分1) |
+| Q8 | `sim-thermal/src/lib.rs:161` | PCG非収束が`debug_assert!`のみ、releaseでは無検知 | 対応予定(増分1) |
+| Q9 | `sim-em/src/fdtd.rs` | 吸収境界(PML)が無くPECのみ、エネルギーはε=μ=1決め打ちの正規化単位 | **既知の限界として維持**(モジュールdocに明記済み、Phase 5の残りとして`fdtd.rs`冒頭に記載) |
+| Q10 | `sim-coupling/src/phase_change_morph.rs:20` | 融解を見かけ質量減少で表現、`Shape`は縮まないため幾何と質量が不整合 | **既知の限界として維持**(モジュールdocが「対象外」と明記、`Shape`のランタイム変形は`RigidBodySet`未実装のため) |
+| Q11 | `sim-core/src/ledger.rs:27`、`sim-thermal/src/lib.rs:28` | 台帳のモーター/ユーザ項が常に0、熱伝達係数hが定数固定 | **既知の限界として維持**(いずれもモジュールdocが「P1時点では」「Phase 3待ち」と明記した暫定値) |
+| Q12 | `sim-quantum/src/schrodinger.rs:318,339` | 無限障壁をV=1e6で近似、d_tauが誤差相殺の実測最適点 | **既知の限界として維持**(モジュールdocに数値実験の経緯を記載済み、パラメータ変更時は再検証が必要という注記あり) |
+| Q13 | `sim-fluid/src/karman.rs:400` | 数値拡散で実効Reが渦剥離閾値を下回り、渦度強化(ε=1.0)で補って渦列を出している | **既知の限界として維持**(F11のモジュールdocが検証モードである旨を明記) |
+
+なお `todo!()` が `sim-mechanics/src/{shape.rs:47,70,collision.rs:74,710}` の4箇所に
+残る(Capsule/Compound/ConvexMesh、Phase 2/5の設計上未実装形状)。`TODO`/`FIXME`
+コメント・`#[ignore]`テストはゼロ。
