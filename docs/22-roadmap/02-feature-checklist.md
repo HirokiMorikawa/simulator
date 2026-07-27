@@ -528,6 +528,51 @@
   確認・`push_commands_accept_an_explicit_body_index_for_a_valid_body`)を追加した。
   残り13デモ相当のシーン切り出しと、フロントエンドのギャラリーUI(一覧+
   読み込みボタン)は後続増分(増分3-3)。
+  **続けて増分3-3(フロントエンドのシーンギャラリーUI)を実装し、増分群3を完了した**。
+  `demo/src/main.ts`の`setUpSceneView`は`const world`という固定シーン(床+箱)
+  専用の束縛だったため、まず任意シーンへの差し替えに耐えるよう既存コードを
+  一般化した: ①`box`/`ground`/`spawnedMeshes`という3つの別々のメッシュ管理を
+  単一の`bodyMeshes: Map<number, THREE.Mesh>`へ統合(この過程で、統合後の
+  単一同期ループが`Shape::Plane`の世界向き(`normal`/`d`で定義され剛体の
+  `Transform.rotation`とは独立、`RigidBodyDesc::dynamic`は常に恒等回転を
+  設定する)を剛体の恒等回転で上書きして床の見た目を壊すバグになりかけたが、
+  同期ループに`body_shape_kind_at(bodyIndex) === "plane"`のスキップガードを
+  入れて未然に防いだ)。②Nudge/Grab/MoveGrab/Releaseを`BODY_INDEX_BOX`決め打ち
+  から`selectedBodyIndex`/`grabbedBodyIndex`へ一般化(増分3-2で`sim-wasm`側の
+  `body_index`引数はすでに追加済みだったため、フロントエンド側の配線のみ)。
+  ③この一般化に伴い`CommandLogEntry`の`Grab`/`Release`/`ApplyForce`が対象
+  ボディを記録していなかった(`SetMotorTarget`のみ記録)ことに気付き、
+  `bodyIndex`フィールドを追加してReplay再生実行の対象ボディ解決を正しくした。
+  以上を土台に、`SceneGalleryRef`(`SceneImportRef`と同じ「`world`構築前に
+  パネルを組むため可変参照でコールバックを後から配線する」パターン)を新設し、
+  `WasmWorld.from_scene_json`で`world`束縛自体を差し替える`loadScene`を実装
+  した。差し替えに伴い旧`world`前提の状態を掃除する必要があり、実装中に
+  **新規のクラッシュ経路を1件発見して修正した**: `heater_node_temperature`
+  (`sim-wasm/src/lib.rs`)が`self.inner.thermal().unwrap()`で、熱ドメインを
+  持たないシーン(ギャラリーの4シーンは全て力学のみ)を読み込むとHUD描画が
+  毎フレーム呼ぶこのメソッドが直ちにパニックしてrender()ループごと壊れる
+  ——これまでは`WasmWorld::new`の既定シーンが常に熱ノードを持っていたため
+  潜在していたバグで、`from_scene_json`が「熱ドメインを持たないWorld」を
+  作れる初めての経路だったために露見した。同じファイル内の
+  `circuit_divider_voltage`と同じ`unwrap_or`パターン(`f64::NAN`を返す、
+  HUD側は`toFixed`でそのまま表示できる)に揃えて修正した。他にも、
+  フレーム軸オーバーレイ(起動時に追加する既定の回転フレームが新worldには
+  存在せず`frame_world_position_f32`がJS例外を投げる)・自由配線回路
+  (`circuit_switch_index`が新worldでは無関係な値になる、既存の
+  `circuitFreeWiringState`ゲートを再利用)・流体パーティクルバッファ・
+  Undo履歴・コマンドログについても、旧worldのボディ数/フレーム数を前提にした
+  参照が残らないよう`loadScene`内で明示的に掃除した(いずれも実装中に
+  「この状態は新worldに対して意味を持つか」を辿って発見した、ヘッドレス
+  テストでは踏めない種類のクラッシュ経路)。Scenesタブには
+  `import.meta.glob("../../scenes/*.json", { query: "?raw", import: "default",
+  eager: true })`でバンドルしたギャラリー一覧(D番号・タイトル・説明・
+  ドメインタグ+読み込みボタン)を追加した。Playwrightで4シーン全て
+  (D4積み木・D5斜面・D6浮き沈み・D11振り子)を実際にギャラリーから読み込み、
+  Play実行・Hierarchy更新・HUD更新・コンソールエラー無し(前述の
+  `heater_node_temperature`修正が効いていることも含め)を確認し、
+  §7の該当4項目をチェック済みにした。残り24デモ相当のシーン切り出しは
+  対象外(視覚的に完結する追加シーンが要る場合は今後の増分で追加できる、
+  土台のギャラリー機構自体は完成)。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -2110,9 +2155,13 @@ Phase 1(P1〜P2 スモーク):
       一致することを確認した(他3材質はネイティブ側で検証済みのため対象外)。
       dt=1/120(既定)では反発の数値精度が粗すぎて大きく外れたため、D1弾道と
       同じ理由でdt=1/240へ細かくした
-- [ ] D4 積み木(ヘッドレステストGreen、同上。目視チェック保留。M12(4段の箱
+- [x] D4 積み木(ヘッドレステストGreen、同上。M12(4段の箱
       スタックが10秒静止)を確認。反復回数スライダーで崩れる観察は
       `JOINT_VELOCITY_ITERATIONS`が公開API化されていないため対象外)。
+      **目視チェック完了(シーンギャラリー増分3-3)**: `demo`のScenesタブから
+      `scenes/d4-box-stack.json`をワンクリック読み込み、Playモードで実行して
+      Hierarchy(4ボディ)・HUD・Probeグラフが更新されコンソールエラーが
+      無いことをPlaywrightで確認した。
       **シーンJSON経由の2本目の適用例(本増分で追加)**:
       `run_headless_scenario`(ヘッドレスランナー最小骨格)の実用性を、
       既存のRustネイティブ実装(`demos.rs`)とは別に、シーンJSON経由で示す
@@ -2121,9 +2170,14 @@ Phase 1(P1〜P2 スモーク):
       matching_d4_pass_criterion`——静的な床+3段の箱をJSONで記述、
       `body_speed`プローブ3本で10秒後(1200step)に各箱が静止(速さ<0.01m/s)
       していることを確認)
-- [ ] D5 斜面(ヘッドレステストGreen、同上。目視チェック保留。M7(静止摩擦角未満
+- [x] D5 斜面(ヘッドレステストGreen、同上。M7(静止摩擦角未満
       10°で静止)・M8(45°で解析解$g(\sin\theta-\mu_k\cos\theta)$どおり滑走)の
       両方を確認)。
+      **目視チェック完了(シーンギャラリー増分3-3)**: `scenes/d5-incline-
+      static.json`をギャラリーから読み込み、Playモードで実行してHierarchy
+      (2ボディ)・HUD・コンソールエラー無しをPlaywrightで確認した(M7の
+      静止側のみ、M8の滑走側は別バリエーションのシーンJSONの追加が必要な
+      ため対象外)。
       **シーンJSON経由の4本目の適用例+スキーマ拡張(本増分で追加)**: これまで
       `BodyScenarioDesc`は`rotation`(初期姿勢)・`linear_velocity`(初速)を
       持たず、回転/初速を要するデモ(D2弾道・D5斜面等)はJSON経由で表現でき
@@ -2145,8 +2199,13 @@ Phase 1(P1〜P2 スモーク):
       ことを利用し、`body_speed`(速さ)がそのまま下り方向速度に一致すると
       みなした(`demos.rs`の対応するネイティブ実装と同じ判定を、符号付き
       速度を読めない`ProbeJson`の制約下で再現)。
-- [ ] D6 浮き沈み(ヘッドレステストGreen、同上。目視チェック保留。F4(密度比0.6の
+- [x] D6 浮き沈み(ヘッドレステストGreen、同上。F4(密度比0.6の
       喫水深さ)・F5(密度比0.5の振動周期、下降方向ゼロ交差で1周期を判定)の両方を確認)。
+      **目視チェック完了(シーンギャラリー増分3-3)**: `scenes/d6-floating-
+      box-f4.json`をギャラリーから読み込み、Playモードで実行してHierarchy
+      (1ボディ、`fluids`セクションは剛体を持たないため非表示)・HUD・
+      コンソールエラー無しをPlaywrightで確認した(F4部分のみ、静水面自体の
+      可視化・F5の振動観察は対象外)。
       **シーンJSON経由の3本目の適用例(本増分で追加)**: F4部分を
       `run_headless_scenario_settles_a_floating_box_at_the_f4_equilibrium_
       waterline`(`scenario.rs`)としてヘッドレスランナー経由でも実装した——
@@ -2205,11 +2264,15 @@ Phase 1(P1〜P2 スモーク):
 
 Phase 2〜3:
 
-- [ ] D11 振り子と時計(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
-      目視チェックはワークストリームD未着手のため保留。M3(小振幅周期)+ 二重振り子の
+- [x] D11 振り子と時計(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
+      M3(小振幅周期)+ 二重振り子の
       同一初期条件2回実行で`state_hash()`一致(カオス的軌道でも決定論的にリプレイ
       できることの実演)を確認。M4(楕円積分解析式)自体は`sim-mechanics`で検証済みの
       ため重複実装せず)。
+      **目視チェック完了(シーンギャラリー増分3-3)**: `scenes/d11-pendulum.json`
+      をギャラリーから読み込み、Playモードで実行してHierarchy(1ボディ)・
+      HUD・コンソールエラー無しをPlaywrightで確認した(M3部分のみ、二重振り子の
+      リプレイ決定論は`Scenario`と無関係な`World`直接操作のため対象外)。
       **シーンJSON経由の12本目の適用例+スキーマ拡張(本増分で追加)**: M3
       (単振り子の小振幅周期)部分のみシーンJSON化した——これまで`Scenario`に
       剛体間拘束(設計の例示JSONにも無い項目)を構成する手段が無かったため

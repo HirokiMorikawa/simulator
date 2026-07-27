@@ -145,6 +145,15 @@ type SceneBodyExport = {
 type SceneExportRef = { current: (() => SceneBodyExport[]) | null };
 type SceneImportRef = { current: ((json: string) => number) | null };
 
+// シーンギャラリー(設計docs/23-frontend/01-editor.md §1.6「Scenes」、ワーク
+// ストリームD項目13「D1–D43の全シーンをエディタから読み込み可能にし、視覚的な
+// 合否確認を可能にする」)。Importが既存ワールドへボディを「追加」するのに対し、
+// ギャラリーは`WasmWorld::from_scene_json`(`World::from_scenario`ベース、
+// fluids/thermal/circuit/astro/joints/probesの全セクションが効く)で**ワールド
+// 自体を丸ごと差し替える**——D9(熱のみ)やD34(天体のみ)のような非力学
+// シーンも正しく成立させるため。
+type SceneGalleryRef = { current: ((json: string) => void) | null };
+
 // Replay再生実行(設計docs/23-frontend/01-editor.md §1.6「Replays」)。記録済みの
 // `commandLog`を、既定シーン(床+箱のみ、`WasmWorld`のコンストラクタが構築する
 // もの)を持つ新規`WasmWorld`へステップ番号どおりに再送し、実際に同じ入力列を
@@ -224,6 +233,36 @@ type ImportedBodyJson = { shape: ImportedShapeJson };
 // 渡した生のJSONをJSが独立に読む——他のImportedShapeJson等と同じ設計)。
 type ImportedPredictionPromptJson = { question: string; probe_index: number; expected_value: number };
 type ImportedScenarioJson = { bodies?: ImportedBodyJson[]; prediction_prompts?: ImportedPredictionPromptJson[] };
+
+// シーンギャラリー(`SceneGalleryRef`のdoc参照)向けのアセット読み込み。
+// リポジトリ直下`scenes/`(ヘッドレスランナーのテストが読むのと同じファイル、
+// `crates/sim-world/src/scenario.rs`の`all_scenes_in_the_gallery_manifest_
+// parse_and_run_for_sixty_steps`が壊れたアセットの出荷を防ぐ)を`import.meta.glob`
+// でバンドルする(`vite.config.ts`の`server.fs.allow: [".."]`によりdemo/外の
+// ディレクトリを参照できる、ビルド後の出力にも静的にバンドルされる)。
+type SceneGalleryManifestEntry = {
+  file: string;
+  demo: string;
+  title: string;
+  description: string;
+  domains: string[];
+};
+const sceneGalleryFiles = import.meta.glob("../../scenes/*.json", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+
+function sceneGalleryFileContent(file: string): string | null {
+  const entry = Object.entries(sceneGalleryFiles).find(([path]) => path.endsWith(`/${file}`));
+  return entry ? entry[1] : null;
+}
+
+function sceneGalleryManifest(): SceneGalleryManifestEntry[] {
+  const indexJson = sceneGalleryFileContent("index.json");
+  if (!indexJson) return [];
+  return (JSON.parse(indexJson) as { scenes: SceneGalleryManifestEntry[] }).scenes;
+}
 
 function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
@@ -460,9 +499,17 @@ function updateInspectorTransformFields(
 // 要るため、この増分で構造化した——表示用の文字列化は`formatCommandLogDetail`
 // に一本化)。
 type CommandLogEntry =
-  | { t: number; step: number; kind: "Grab"; targetX: number; targetY: number; targetZ: number }
-  | { t: number; step: number; kind: "Release" }
-  | { t: number; step: number; kind: "ApplyForce"; fx: number; fy: number; fz: number }
+  | {
+      t: number;
+      step: number;
+      kind: "Grab";
+      bodyIndex: number;
+      targetX: number;
+      targetY: number;
+      targetZ: number;
+    }
+  | { t: number; step: number; kind: "Release"; bodyIndex: number }
+  | { t: number; step: number; kind: "ApplyForce"; bodyIndex: number; fx: number; fy: number; fz: number }
   | {
       t: number;
       step: number;
@@ -511,6 +558,7 @@ function setUpProjectDrawer(
   circuitEditorRef: CircuitEditorRef,
   circuitFreeWiringState: CircuitFreeWiringState,
   prefabRef: PrefabRef,
+  sceneGalleryRef: SceneGalleryRef,
 ) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
@@ -533,6 +581,34 @@ function setUpProjectDrawer(
       body.textContent = "Scenes: 読み込み中...";
       return;
     }
+
+    // シーンギャラリー(`SceneGalleryRef`のdoc参照)。ヘッドレスランナー・
+    // D1–D43のテストと同じシーンJSONをワンクリックで読み込む。ここでの
+    // 読み込みは既存シーンへの追加(下のImport)ではなく、ワールド自体の
+    // 差し替え(`from_scene_json`)である点が異なる。
+    const galleryHeading = document.createElement("h4");
+    galleryHeading.textContent = "シーンギャラリー(ワールドを差し替えて読み込み)";
+    body.appendChild(galleryHeading);
+    const galleryList = document.createElement("ul");
+    galleryList.className = "scene-gallery-list";
+    for (const entry of sceneGalleryManifest()) {
+      const item = document.createElement("li");
+      const label = document.createElement("div");
+      label.textContent = `${entry.demo}: ${entry.title} — ${entry.description} [${entry.domains.join(", ")}]`;
+      item.appendChild(label);
+      const loadButton = document.createElement("button");
+      loadButton.textContent = "読み込み";
+      loadButton.dataset.sceneFile = entry.file;
+      loadButton.addEventListener("click", () => {
+        const json = sceneGalleryFileContent(entry.file);
+        if (!json || !sceneGalleryRef.current) return;
+        sceneGalleryRef.current(json);
+      });
+      item.appendChild(loadButton);
+      galleryList.appendChild(item);
+    }
+    body.appendChild(galleryList);
+
     const note = document.createElement("p");
     note.textContent = "現在のシーン(ボディ一覧)をJSONへエクスポートする(人間可読な表示専用の形式)。";
     body.appendChild(note);
@@ -605,7 +681,7 @@ function setUpProjectDrawer(
       "                                 GND",
       "",
       circuitFreeWiringState.active
-        ? "(下の自由配線回路に置き換え済みのため、このデモ回路・チェックボックスは無効です)"
+        ? "(自由配線回路への置き換え、またはシーンギャラリーからの読み込みにより、このデモ回路・チェックボックスは無効です)"
         : "スイッチの開閉は画面上部の「回路スイッチ(閉)」チェックボックスで操作する。",
     ].join("\n");
     body.appendChild(topology);
@@ -977,9 +1053,10 @@ async function setUpSceneView(
   circuitEditorRef: CircuitEditorRef,
   circuitFreeWiringState: CircuitFreeWiringState,
   prefabRef: PrefabRef,
+  sceneGalleryRef: SceneGalleryRef,
 ) {
   await init();
-  const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
+  let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
   circuitEditorRef.current = {
     reset: (numNodes: number) => world.circuit_editor_reset(numNodes),
     addResistor: (a, b, resistance) => world.circuit_editor_add_resistor(a, b, resistance),
@@ -1051,6 +1128,17 @@ async function setUpSceneView(
   );
   ground.rotation.x = -Math.PI / 2;
   scene.add(ground);
+
+  // 全ボディのThree.jsメッシュ(bodyIndexで引ける、`render()`が毎フレーム
+  // 位置/姿勢を反映させるために使う)。**残タスク完遂のシーンギャラリー増分**で
+  // `box`/`ground`(既定シーン固有の決め打ち)とスポーンパレットで追加した
+  // メッシュを統合した——シーンギャラリー(`loadScene`)が任意のシーンJSONを
+  // 読み込むと、既定シーンには無いボディ構成(例: D11振り子は球1個のみで
+  // index 1に「箱」は存在しない)になり得るため、「index 1は常に箱」という
+  // 決め打ちを解く必要があった。
+  const bodyMeshes = new Map<number, THREE.Mesh>();
+  bodyMeshes.set(BODY_INDEX_GROUND, ground);
+  bodyMeshes.set(BODY_INDEX_BOX, box);
 
   const grid = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
   scene.add(grid);
@@ -1277,13 +1365,10 @@ async function setUpSceneView(
   // 「Editモード…Scene View gizmo ドラッグ」どおりGizmo経由のみ)、Gizmoの
   // 軸ハンドルをドラッグすると`set_body_position_at`でその軸方向にのみ位置を
   // 直接書き換える。
-  const pickables: { mesh: THREE.Object3D; bodyIndex: number }[] = [
+  let pickables: { mesh: THREE.Object3D; bodyIndex: number }[] = [
     { mesh: ground, bodyIndex: BODY_INDEX_GROUND },
     { mesh: box, bodyIndex: BODY_INDEX_BOX },
   ];
-  // スポーンパレット(設計§6)で追加したボディのThree.jsメッシュ(bodyIndexで
-  // 引ける、`render()`が毎フレーム位置/姿勢を反映させるために使う)。
-  const spawnedMeshes = new Map<number, THREE.Mesh>();
   // 拘束オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「拘束」)向けの
   // THREE.Line(振り子スポーンごとに1本、`world.constraint_anchor_points_at`が
   // 返す2点を毎フレーム反映する)。
@@ -1351,6 +1436,10 @@ async function setUpSceneView(
   let pointerDownScaleHit = false;
   let isDragging = false;
   let dragMode: "grab" | "gizmo" | "rotate" | "scale" | null = null;
+  // 現在grab中のボディ(**残タスク完遂のシーンギャラリー増分**で`BODY_INDEX_BOX`
+  // 決め打ちから一般化した——ピックしたボディをそのままgrab対象にする、
+  // `push_grab`/`push_move_grab`/`push_release`のdoc参照)。
+  let grabbedBodyIndex = BODY_INDEX_BOX;
   const gizmoAxisDir = new THREE.Vector3();
   const gizmoDragStartPosition = new THREE.Vector3();
   let gizmoDragStartScalar = 0;
@@ -1490,14 +1579,16 @@ async function setUpSceneView(
         undoButton.disabled = mode !== "edit";
         redoButton.disabled = true;
       } else {
-        if (mode !== "play" || !pointerDownHit || pointerDownHit.picked.bodyIndex !== BODY_INDEX_BOX) return;
+        if (mode !== "play" || !pointerDownHit) return;
         isDragging = true;
         dragMode = "grab";
+        grabbedBodyIndex = pointerDownHit.picked.bodyIndex;
+        selectBody(grabbedBodyIndex);
         camera.getWorldDirection(cameraDirection);
         dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
-        const p = world.body_position_at_f32(BODY_INDEX_BOX);
-        world.push_grab(BODY_INDEX_BOX, p[0], p[1], p[2]);
-        pushCommandLog(world, { kind: "Grab", targetX: p[0], targetY: p[1], targetZ: p[2] });
+        const p = world.body_position_at_f32(grabbedBodyIndex);
+        world.push_grab(grabbedBodyIndex, p[0], p[1], p[2]);
+        pushCommandLog(world, { kind: "Grab", bodyIndex: grabbedBodyIndex, targetX: p[0], targetY: p[1], targetZ: p[2] });
       }
     }
     if (dragMode === "rotate") {
@@ -1538,15 +1629,15 @@ async function setUpSceneView(
       const newPos = gizmoDragStartPosition.clone().addScaledVector(gizmoAxisDir, delta);
       world.set_body_position_at(selectedBodyIndex, newPos.x, newPos.y, newPos.z);
     } else if (dragMode === "grab") {
-      world.push_move_grab(BODY_INDEX_BOX, dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
+      world.push_move_grab(grabbedBodyIndex, dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
     }
   });
 
   renderer.domElement.addEventListener("pointerup", () => {
     if (isDragging) {
       if (dragMode === "grab") {
-        world.push_release(BODY_INDEX_BOX);
-        pushCommandLog(world, { kind: "Release" });
+        world.push_release(grabbedBodyIndex);
+        pushCommandLog(world, { kind: "Release", bodyIndex: grabbedBodyIndex });
       }
     } else if (pointerDownHit) {
       selectBody(pointerDownHit.picked.bodyIndex);
@@ -1681,8 +1772,13 @@ async function setUpSceneView(
     spawnMaterialSelect.appendChild(option);
   }
 
+  // `sceneBaseBodyCount`: 現在の`world`が最初から持つボディ数(既定シーンは
+  // 床+箱の2体、`loadScene`でギャラリーシーンへ差し替えた後はそのシーンの
+  // ボディ数)。以後のスポーンパレット操作による「これまでのスポーン数」の
+  // 基準点として使う。
+  let sceneBaseBodyCount = 2;
   function nextSpawnPosition(): { x: number; z: number } {
-    const n = world.body_count() - 2; // これまでのスポーン数
+    const n = world.body_count() - sceneBaseBodyCount; // これまでのスポーン数
     const angle = n * 2.4; // 黄金角に近い値、重ならないようばらけさせる
     const radius = 1.5 + n * 0.3;
     return { x: Math.cos(angle) * radius, z: Math.sin(angle) * radius };
@@ -1691,7 +1787,7 @@ async function setUpSceneView(
   function addSpawnedMesh(bodyIndex: number, mesh: THREE.Mesh) {
     scene.add(mesh);
     pickables.push({ mesh, bodyIndex });
-    spawnedMeshes.set(bodyIndex, mesh);
+    bodyMeshes.set(bodyIndex, mesh);
     highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
     selectBody(bodyIndex);
   }
@@ -1809,6 +1905,117 @@ async function setUpSceneView(
     return count;
   };
 
+  // シーンギャラリー(`SceneGalleryRef`のdoc参照)。Importと異なり`world`
+  // そのものを`WasmWorld.from_scene_json`で差し替える——D9/D34のような
+  // 非力学シーンも`fluids`/`thermal`/`circuit`/`astro`セクション込みで
+  // 正しく構成されるようにするため(`import_scene_json`は`fluids`/`probes`
+  // 以外を見ない設計上の非対称、モジュール冒頭のdoc参照)。
+  //
+  // 差し替えに伴い、旧`world`に紐づいていた以下の状態を掃除する(**残タスク
+  // 完遂の増分**で発見した、旧worldのボディ/フレーム数を前提にした箇所):
+  // - `bodyMeshes`/`pickables`/`constraintLines`: 旧ボディのメッシュ・拘束線。
+  // - `motorArmBodies`/`currentMotorTarget`/`currentScale`: 旧ボディのindex
+  //   キーが新worldでは無関係な(あるいは存在しない)ボディを指してしまう。
+  // - `frameAxesHelpers`/`selectedFrameIndex`: 起動時に追加した既定の回転
+  //   フレーム(`initialFrameIndex`)は新worldには存在しないため、参照すると
+  //   `frame_world_position_f32`がJS例外を投げてrender()ループが壊れる
+  //   ——ROOT(常に存在するindex 0)へリセットする。ギャラリーシーンの
+  //   フレーム階層自体は現状スコープ外(正直な限界として記録)。
+  // - `fluidPositionAttribute`: 旧worldで流体をスポーンしていた場合の粒子
+  //   バッファ、新worldの流体粒子数と食い違うと壊れるため無効化する。
+  // - `editUndoStack`/`commandLog`: 旧ボディのindexを記録しているため無効化。
+  // - `circuitFreeWiringState.active`: 現状のギャラリーシーン(D4/D5/D6/D11)は
+  //   いずれも回路を持たないため、固定デモ回路のスイッチ(`circuit_switch_index`
+  //   はプレースホルダ値0、`from_scene_json`のdoc参照)を無効化する
+  //   (自由配線回路エディタと同じ保護、`circuitFreeWiringState`のdoc参照)。
+  sceneGalleryRef.current = (json: string) => {
+    const parsed = JSON.parse(json) as ImportedScenarioJson;
+    const bodies = parsed.bodies ?? [];
+
+    for (const mesh of bodyMeshes.values()) {
+      scene.remove(mesh);
+      mesh.geometry.dispose();
+      (mesh.material as THREE.Material).dispose();
+    }
+    bodyMeshes.clear();
+    for (const line of constraintLines.values()) {
+      scene.remove(line);
+    }
+    constraintLines.clear();
+    for (const helper of frameAxesHelpers.values()) {
+      scene.remove(helper);
+    }
+    frameAxesHelpers.clear();
+    selectedFrameIndex = 0; // ROOT。ギャラリーシーンのフレーム階層は対象外。
+    pickables = [];
+    motorArmBodies.clear();
+    currentMotorTarget.clear();
+    currentScale.clear();
+    editUndoStack.length = 0;
+    commandLog.length = 0;
+    fluidPositionAttribute = null;
+    fluidPoints.visible = false;
+    circuitFreeWiringState.active = true;
+    circuitSwitchToggle.disabled = true;
+
+    world = WasmWorld.from_scene_json(json);
+    sceneBaseBodyCount = bodies.length;
+
+    currentPredictionPrompts = parsed.prediction_prompts ?? [];
+    renderPredictionPanel();
+
+    for (let bodyIndex = 0; bodyIndex < bodies.length; bodyIndex++) {
+      const shape = bodies[bodyIndex]?.shape;
+      if (shape && "plane" in shape) {
+        const [nx, ny, nz] = shape.plane.normal;
+        const normal = new THREE.Vector3(nx, ny, nz).normalize();
+        const mesh = new THREE.Mesh(
+          new THREE.PlaneGeometry(20, 20),
+          new THREE.MeshStandardMaterial({ color: 0x777755, side: THREE.DoubleSide }),
+        );
+        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+        mesh.position.copy(normal.multiplyScalar(shape.plane.d));
+        addSpawnedMesh(bodyIndex, mesh);
+        continue;
+      }
+
+      let mesh: THREE.Mesh;
+      if (shape && "sphere" in shape) {
+        mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
+          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+        );
+      } else if (shape && "box" in shape) {
+        const [hx, hy, hz] = shape.box.half;
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2),
+          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+        );
+      } else {
+        mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(0.3, 16, 12),
+          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+        );
+      }
+      const pos = world.body_position_at_f32(bodyIndex);
+      mesh.position.set(pos[0], pos[1], pos[2]);
+      const rot = world.body_rotation_at_f32(bodyIndex);
+      mesh.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
+      addSpawnedMesh(bodyIndex, mesh);
+
+      if (world.constraint_anchor_points_at(bodyIndex).length >= 6) {
+        const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(),
+          new THREE.Vector3(),
+        ]);
+        const line = new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({ color: 0xffaa00 }));
+        scene.add(line);
+        constraintLines.set(bodyIndex, line);
+      }
+    }
+    selectBody(0);
+  };
+
   // Replay再生実行(`ReplayVerifyRef`のdoc参照)。記録済み`commandLog`を、
   // 既定シーン(床+箱のみ)を持つ新規`WasmWorld`へステップ番号どおりに再送する。
   // Grab/Release/ApplyForce/SetSwitch/SetHeatSourceはWasmWorldのコンストラクタが
@@ -1835,13 +2042,19 @@ async function setUpSceneView(
       for (const entry of commandsByStep.get(s) ?? []) {
         switch (entry.kind) {
           case "Grab":
-            replayWorld.push_grab(BODY_INDEX_BOX, entry.targetX, entry.targetY, entry.targetZ);
+            if (entry.bodyIndex < replayWorld.body_count()) {
+              replayWorld.push_grab(entry.bodyIndex, entry.targetX, entry.targetY, entry.targetZ);
+            }
             break;
           case "Release":
-            replayWorld.push_release(BODY_INDEX_BOX);
+            if (entry.bodyIndex < replayWorld.body_count()) {
+              replayWorld.push_release(entry.bodyIndex);
+            }
             break;
           case "ApplyForce":
-            replayWorld.push_apply_force(BODY_INDEX_BOX, entry.fx, entry.fy, entry.fz);
+            if (entry.bodyIndex < replayWorld.body_count()) {
+              replayWorld.push_apply_force(entry.bodyIndex, entry.fx, entry.fy, entry.fz);
+            }
             break;
           case "SetMotorTarget":
             if (entry.bodyIndex < replayWorld.body_count()) {
@@ -1862,7 +2075,12 @@ async function setUpSceneView(
     }
 
     const finalBoxPos = replayWorld.body_position_at_f32(BODY_INDEX_BOX);
-    const liveBoxPos = world.body_position_at_f32(BODY_INDEX_BOX);
+    // ライブ側の`world`はシーンギャラリー経由で任意のシーンに差し替わっている
+    // 可能性があり、index 1(既定シーンの箱)が存在しないことがある——`sceneChanged`
+    // が真の時点で`matches`は`false`確定なので、位置の意味自体が無いプレース
+    // ホルダで安全に済ませる(**残タスク完遂のシーンギャラリー増分**で追加した
+    // ガード、以前は既定シーン以外あり得なかったため無条件アクセスで安全だった)。
+    const liveBoxPos = sceneChanged ? new Float32Array(3) : world.body_position_at_f32(BODY_INDEX_BOX);
     const finalStateHash = replayWorld.state_hash();
     const liveStateHash = world.state_hash();
     return {
@@ -2108,15 +2326,16 @@ async function setUpSceneView(
   // 適用される」の最小デモ: 直接オブジェクトの状態を書き換えるのではなく、
   // `push_apply_force`(Command::ApplyForceをキューに積む`sim-wasm`側の新API)を
   // 呼ぶだけで、実際の力の適用は次の`world.step()`側が担う。
-  // 箱は鋼(炭素鋼)1m^3(密度約7850kg/m^3)相当のため質量が大きく、1step
-  // (dt=1/120s)だけ働く力ではΔv=F*dt/mが小さくなりがち。目視で分かる程度の
-  // 速度変化(1クリックでΔv≈0.4m/s程度)になるよう十分大きな値を選んだ。
+  // 既定シーンの箱(鋼(炭素鋼)1m^3、密度約7850kg/m^3)を目視で分かる程度に動かす
+  // (1クリックでΔv≈0.4m/s程度)よう較正した値。**残タスク完遂のシーンギャラリー
+  // 増分**で`selectedBodyIndex`(選択中のボディ)へ効くよう一般化した——質量が
+  // 異なるボディでは体感速度変化も変わる(質量ごとの再較正は対象外)。
   const NUDGE_FORCE_NEWTONS = 400_000.0;
   nudgeButton.addEventListener("click", () => {
-    world.push_apply_force(BODY_INDEX_BOX, 0.0, NUDGE_FORCE_NEWTONS, 0.0);
-    pushCommandLog(world, { kind: "ApplyForce", fx: 0.0, fy: NUDGE_FORCE_NEWTONS, fz: 0.0 });
+    world.push_apply_force(selectedBodyIndex, 0.0, NUDGE_FORCE_NEWTONS, 0.0);
+    pushCommandLog(world, { kind: "ApplyForce", bodyIndex: selectedBodyIndex, fx: 0.0, fy: NUDGE_FORCE_NEWTONS, fz: 0.0 });
     if (forceOverlayToggle.checked) {
-      const p = world.body_position_at_f32(BODY_INDEX_BOX);
+      const p = world.body_position_at_f32(selectedBodyIndex);
       showForceOverlay(new THREE.Vector3(p[0], p[1], p[2]), new THREE.Vector3(0.0, NUDGE_FORCE_NEWTONS, 0.0));
     }
   });
@@ -2161,13 +2380,17 @@ async function setUpSceneView(
   function render() {
     updatePredictionResults();
 
-    const p = world.body_position_at_f32(BODY_INDEX_BOX);
-    box.position.set(p[0], p[1], p[2]);
-    const boxRotation = world.body_rotation_at_f32(BODY_INDEX_BOX);
-    box.quaternion.set(boxRotation[0], boxRotation[1], boxRotation[2], boxRotation[3]);
-    box.scale.setScalar(currentScale.get(BODY_INDEX_BOX) ?? 1.0);
-
-    for (const [bodyIndex, mesh] of spawnedMeshes) {
+    // 全ボディのメッシュ位置/姿勢/スケールを同期する(**残タスク完遂の
+    // シーンギャラリー増分**で`box`だけの決め打ち同期を統合、`bodyMeshes`の
+    // doc参照)。**Plane形状は同期から除外する**——`Shape::Plane`の世界座標での
+    // 向き/位置は`normal`/`d`で定義され、剛体の`Transform.position`/
+    // `rotation`とは独立(`RigidBodyDesc::dynamic`は常に`rotation:
+    // Quat::IDENTITY`を設定するため、同期すればPlaneメッシュ生成時に
+    // `normal`から計算した向き(`sceneImportRef`のPlane分岐参照)が単位回転で
+    // 上書きされてしまう——統合の際に発見し、床メッシュの見た目が壊れる前に
+    // 気付いて対処した)。Planeは静的なので同期しなくても正しい。
+    for (const [bodyIndex, mesh] of bodyMeshes) {
+      if (world.body_shape_kind_at(bodyIndex) === "plane") continue;
       const sp = world.body_position_at_f32(bodyIndex);
       mesh.position.set(sp[0], sp[1], sp[2]);
       const sr = world.body_rotation_at_f32(bodyIndex);
@@ -2271,7 +2494,7 @@ async function setUpSceneView(
     hud.textContent = [
       `t = ${world.time().toFixed(3)} s`,
       `step = ${world.step_count().toString()}`,
-      `y = ${p[1].toFixed(4)} m`,
+      `y = ${selectedPosition[1].toFixed(4)} m`,
       `circuit V = ${world.circuit_divider_voltage().toFixed(3)} V`,
       `heater T = ${world.heater_node_temperature().toFixed(2)} K`,
     ].join("\n");
@@ -2332,6 +2555,7 @@ function main() {
   const circuitEditorRef: CircuitEditorRef = { current: null };
   const circuitFreeWiringState: CircuitFreeWiringState = { active: false };
   const prefabRef: PrefabRef = { current: null };
+  const sceneGalleryRef: SceneGalleryRef = { current: null };
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
@@ -2341,6 +2565,7 @@ function main() {
     circuitEditorRef,
     circuitFreeWiringState,
     prefabRef,
+    sceneGalleryRef,
   );
   setUpSceneView(
     updateProbeGraph,
@@ -2354,6 +2579,7 @@ function main() {
     circuitEditorRef,
     circuitFreeWiringState,
     prefabRef,
+    sceneGalleryRef,
   ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;

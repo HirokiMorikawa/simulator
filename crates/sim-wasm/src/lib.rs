@@ -783,9 +783,16 @@ impl WasmWorld {
         self.inner.circuit_probe(node).unwrap_or(0.0)
     }
 
-    /// 熱ノード(`WasmWorld::new`参照)の現在温度[K]。
+    /// 熱ノード(`WasmWorld::new`参照)の現在温度[K]。`from_scene_json`で読み込んだ
+    /// シーンが熱ドメインを持たない場合(現状のギャラリーシーンは全て力学のみ)
+    /// `thermal`は`None`になるため、`circuit_divider_voltage`と同じ`unwrap_or`
+    /// パターンでNaNを返す(HUD側は`toFixed`でそのまま表示できる、値が無いことが
+    /// 伝わればよい縮約実装)。
     pub fn heater_node_temperature(&self) -> f64 {
-        self.inner.thermal().unwrap().nodes[THERMAL_HEATER_NODE].temperature
+        self.inner
+            .thermal()
+            .map(|thermal| thermal.nodes[THERMAL_HEATER_NODE].temperature)
+            .unwrap_or(f64::NAN)
     }
 
     /// `Command::SetHeatSource`——熱ノードへ`watts`ワットの熱源を1step分だけ
