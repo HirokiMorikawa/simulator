@@ -76,10 +76,13 @@ pub struct WasmWorld {
     /// 読み出す公開APIを持たないため、構築時の値をここへ複製して保持する)。
     gravity: f64,
     dt: f64,
-    ground_body: BodyId,
-    box_body: BodyId,
-    /// スポーンパレットで追加されたボディ(固定2体の後にindex 2, 3, ...として続く)。
-    spawned: Vec<SpawnedBodyMeta>,
+    /// 全ボディの記録(**2026-07-27の残タスク完遂セッションで統合**:
+    /// 以前は固定2体(`ground_body`/`box_body`)を専用フィールド、それ以降を
+    /// `spawned: Vec<SpawnedBodyMeta>`という別々の表現にしていたが、シーン
+    /// ギャラリー(`from_scene_json`)が任意個・任意種別のボディを一括構築できる
+    /// ようにするため単一の`Vec`へ統合した。index 0=Ground・index 1=Box_1という
+    /// 既存の意味は`new()`がこの順でpushすることでそのまま維持される)。
+    bodies: Vec<SpawnedBodyMeta>,
     y_probe: usize,
     speed_probe: usize,
     /// 分圧回路のスイッチ(`sim_em::Circuit::add_switch`が返すindex、
@@ -123,17 +126,19 @@ impl WasmWorld {
         );
         ground_desc.body_type = BodyType::Static;
         let ground_body = inner.create_body(ground_desc);
+        let ground_shape = Shape::Plane {
+            normal: sim_math::Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
 
         let steel = inner
             .materials()
             .find_by_name("鋼(炭素鋼)")
             .expect("standard DB has steel");
-        let mut desc = RigidBodyDesc::dynamic(
-            Shape::Box {
-                half_extents: sim_math::Vec3::new(0.5, 0.5, 0.5),
-            },
-            steel,
-        );
+        let box_shape = Shape::Box {
+            half_extents: sim_math::Vec3::new(0.5, 0.5, 0.5),
+        };
+        let mut desc = RigidBodyDesc::dynamic(box_shape.clone(), steel);
         desc.transform.position = sim_math::Vec3::new(0.0, initial_height, 0.0);
         let box_body = inner.create_body(desc);
         let y_probe = inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY);
@@ -164,13 +169,29 @@ impl WasmWorld {
         inner.enable_thermal(thermal);
 
         let snapshot_interval_steps = (1.0 / dt).round().max(1.0) as u64;
+        let bodies = vec![
+            SpawnedBodyMeta {
+                id: ground_body,
+                label: "Ground".to_string(),
+                material_label: "コンクリート".to_string(),
+                base_shape: ground_shape,
+                constraint_joint_index: None,
+                hinge_motor_index: None,
+            },
+            SpawnedBodyMeta {
+                id: box_body,
+                label: "Box_1".to_string(),
+                material_label: "鋼(炭素鋼)".to_string(),
+                base_shape: box_shape,
+                constraint_joint_index: None,
+                hinge_motor_index: None,
+            },
+        ];
         WasmWorld {
             inner,
             gravity,
             dt,
-            ground_body,
-            box_body,
-            spawned: Vec::new(),
+            bodies,
             y_probe,
             speed_probe,
             circuit_switch_index,
@@ -182,10 +203,95 @@ impl WasmWorld {
         }
     }
 
-    /// Hierarchyパネルが列挙するボディ数(固定2体+スポーンパレットで追加した分、
-    /// モジュールdoc「複数ボディ対応」参照)。
+    /// **残タスク完遂のシーンギャラリー増分**でシーンJSONから丸ごと`WasmWorld`を
+    /// 構築するコンストラクタ。既存の`import_scene_json`(実行中ワールドへの
+    /// 「追加」、`fluids`/`thermal`/`circuit`/`astro`セクションは対象外、
+    /// `append_scenario_bodies`のdoc参照)とは異なり、`World::from_scenario`
+    /// (`sim_world::Scenario`の**全セクション**を構成する)でワールドそのものを
+    /// 差し替える。D1–D43のシーンJSON(ヘッドレスランナーが使うのと同じ
+    /// スキーマ、`scenes/`ディレクトリのシーンギャラリー参照)をエディタへそのまま
+    /// 読み込んで視覚的に確認できるようにするのが狙い(設計のワークストリームD
+    /// 項目13)。既定コンストラクタ(`new`)固有のデモ用備品(分圧回路・ヒーター
+    /// ノード)はこの経路では作らない——`circuit_switch_index`は無害なプレース
+    /// ホルダ(0)のままにする(呼び出し側UIは分圧回路専用の「回路スイッチ」
+    /// チェックボックスをこの経路では表示しない前提、`circuit_editor_reset`の
+    /// doc「回路スイッチ(閉)チェックボックスを無効化する責任を負う」と同じ規約)。
+    /// `y_probe`/`speed_probe`(Probe Graphsパネルの既定2系列)はシーン最初の
+    /// ボディへ向ける——シーン定義プローブ(`scenario.probes`)がある場合は
+    /// フロントエンド側がそちらを優先して表示する想定(後続増分)。
+    pub fn from_scene_json(json: String) -> Result<WasmWorld, JsValue> {
+        let scenario = sim_world::Scenario::from_json(&json)
+            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+        let (inner, ids) = World::from_scenario_with_body_ids(&scenario)
+            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+        let Some(&first_id) = ids.first() else {
+            return Err(JsValue::from_str(
+                "scene JSON must define at least one body",
+            ));
+        };
+
+        let mut inner = inner;
+        let y_probe = inner.add_probe(ProbeTarget::BodyPosY(first_id), PROBE_HISTORY_CAPACITY);
+        let speed_probe = inner.add_probe(ProbeTarget::BodySpeed(first_id), PROBE_HISTORY_CAPACITY);
+
+        let mut body_ids_by_name: HashMap<String, BodyId> = HashMap::new();
+        for (body, id) in scenario.bodies.iter().zip(ids.iter()) {
+            if let Some(name) = &body.name {
+                body_ids_by_name.insert(name.clone(), *id);
+            }
+        }
+        let imported_probe_handles = inner
+            .add_scenario_probes(&scenario, &body_ids_by_name)
+            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+
+        let bodies = scenario
+            .bodies
+            .iter()
+            .zip(ids.iter())
+            .enumerate()
+            .map(|(index, (body, &id))| {
+                let label = body.name.clone().unwrap_or_else(|| format!("Body_{index}"));
+                let shape = match body.shape {
+                    sim_world::ShapeJson::Box { half } => Shape::Box {
+                        half_extents: Vec3::new(half[0], half[1], half[2]),
+                    },
+                    sim_world::ShapeJson::Sphere { radius } => Shape::Sphere { radius },
+                    sim_world::ShapeJson::Plane { normal, d } => Shape::Plane {
+                        normal: Vec3::new(normal[0], normal[1], normal[2]),
+                        d,
+                    },
+                };
+                SpawnedBodyMeta {
+                    id,
+                    label,
+                    material_label: body.material.clone(),
+                    base_shape: shape,
+                    constraint_joint_index: None,
+                    hinge_motor_index: None,
+                }
+            })
+            .collect();
+
+        let snapshot_interval_steps = (1.0 / scenario.world.dt).round().max(1.0) as u64;
+        Ok(WasmWorld {
+            gravity: scenario.world.gravity,
+            dt: scenario.world.dt,
+            inner,
+            bodies,
+            y_probe,
+            speed_probe,
+            circuit_switch_index: 0,
+            snapshot_interval_steps,
+            snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
+            bookmarks: Vec::new(),
+            fluid_spawn_count: 0,
+            imported_probe_handles,
+        })
+    }
+
+    /// Hierarchyパネルが列挙するボディ数(モジュールdoc「複数ボディ対応」参照)。
     pub fn body_count(&self) -> usize {
-        2 + self.spawned.len()
+        self.bodies.len()
     }
 
     /// `index`をボディIDへ解決する。範囲外なら`JsValue`(メッセージ文字列)を返す
@@ -199,34 +305,26 @@ impl WasmWorld {
     /// 通常の(捕捉可能な)JS例外をthrowする形にバインドするため、TypeScript側の
     /// 呼び出し規約は変わらない)。
     fn try_body_id_at(&self, index: usize) -> Result<BodyId, JsValue> {
-        match index {
-            0 => Ok(self.ground_body),
-            1 => Ok(self.box_body),
-            _ => self
-                .spawned
-                .get(index - 2)
-                .map(|meta| meta.id)
-                .ok_or_else(|| {
-                    JsValue::from_str(&format!(
-                        "body index {index} out of range (body_count={})",
-                        self.body_count()
-                    ))
-                }),
-        }
+        self.bodies.get(index).map(|meta| meta.id).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "body index {index} out of range (body_count={})",
+                self.body_count()
+            ))
+        })
+    }
+
+    /// `index`が範囲外なら`JsValue`エラーを返す`self.bodies[index]`の
+    /// フォールブル版(`try_body_id_at`と同じ理由でResult化、共通ヘルパとして
+    /// 切り出した)。
+    fn try_body_meta_at(&self, index: usize) -> Result<&SpawnedBodyMeta, JsValue> {
+        self.bodies
+            .get(index)
+            .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))
     }
 
     /// Hierarchyパネル表示用のラベル。
     pub fn body_label_at(&self, index: usize) -> Result<String, JsValue> {
-        Ok(match index {
-            0 => "Ground".to_string(),
-            1 => "Box_1".to_string(),
-            _ => self
-                .spawned
-                .get(index - 2)
-                .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
-                .label
-                .clone(),
-        })
+        Ok(self.try_body_meta_at(index)?.label.clone())
     }
 
     /// `index`番目のボディが静的(Static)かどうか。InspectorがTransformの速度欄を
@@ -306,16 +404,7 @@ impl WasmWorld {
 
     /// Inspector表示用の材質名。
     pub fn body_material_label_at(&self, index: usize) -> Result<String, JsValue> {
-        Ok(match index {
-            0 => "コンクリート".to_string(),
-            1 => "鋼(炭素鋼)".to_string(),
-            _ => self
-                .spawned
-                .get(index - 2)
-                .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
-                .material_label
-                .clone(),
-        })
+        Ok(self.try_body_meta_at(index)?.material_label.clone())
     }
 
     /// Projectドロワー Materials タブ(設計docs/23-frontend/01-editor.md §1.6
@@ -365,7 +454,7 @@ impl WasmWorld {
         let id = self.inner.create_body(desc);
         let index = self.body_count();
         let label = format!("Sphere_{index}");
-        self.spawned.push(SpawnedBodyMeta {
+        self.bodies.push(SpawnedBodyMeta {
             id,
             label,
             material_label: material_name,
@@ -401,7 +490,7 @@ impl WasmWorld {
         let id = self.inner.create_body(desc);
         let index = self.body_count();
         let label = format!("Box_{index}");
-        self.spawned.push(SpawnedBodyMeta {
+        self.bodies.push(SpawnedBodyMeta {
             id,
             label,
             material_label: material_name,
@@ -450,7 +539,7 @@ impl WasmWorld {
                     d,
                 },
             };
-            self.spawned.push(SpawnedBodyMeta {
+            self.bodies.push(SpawnedBodyMeta {
                 id: *id,
                 label,
                 material_label: body.material.clone(),
@@ -529,7 +618,7 @@ impl WasmWorld {
         );
         let index = self.body_count();
         let label = format!("Pendulum_{index}");
-        self.spawned.push(SpawnedBodyMeta {
+        self.bodies.push(SpawnedBodyMeta {
             id,
             label,
             material_label: material_name,
@@ -592,7 +681,7 @@ impl WasmWorld {
         });
         let index = self.body_count();
         let label = format!("MotorArm_{index}");
-        self.spawned.push(SpawnedBodyMeta {
+        self.bodies.push(SpawnedBodyMeta {
             id,
             label,
             material_label: material_name,
@@ -611,15 +700,7 @@ impl WasmWorld {
     /// モーターを持つボディだけに対して呼ぶ前提だが、`try_body_id_at`のdocと
     /// 同じ理由でResult化した)。
     pub fn set_motor_target_at(&mut self, index: usize, theta_target: f64) -> Result<(), JsValue> {
-        let hinge_motor_index = match index {
-            0 | 1 => None,
-            _ => {
-                self.spawned
-                    .get(index - 2)
-                    .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
-                    .hinge_motor_index
-            }
-        };
+        let hinge_motor_index = self.try_body_meta_at(index)?.hinge_motor_index;
         let hinge_motor_index = hinge_motor_index
             .ok_or_else(|| JsValue::from_str(&format!("body index {index} has no hinge motor")))?;
         self.inner.push_command(Command::SetMotorTarget {
@@ -723,15 +804,7 @@ impl WasmWorld {
     /// アンカー点2点を`[ax,ay,az,bx,by,bz]`(f32)で返す。拘束を持たない
     /// ボディ(床・箱・スポーンした球/箱)なら空配列を返す。
     pub fn constraint_anchor_points_at(&self, index: usize) -> Result<Float32Array, JsValue> {
-        let joint_index = match index {
-            0 | 1 => None,
-            _ => {
-                self.spawned
-                    .get(index - 2)
-                    .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
-                    .constraint_joint_index
-            }
-        };
+        let joint_index = self.try_body_meta_at(index)?.constraint_joint_index;
         let Some(joint_index) = joint_index else {
             return Ok(Float32Array::new_with_length(0));
         };
@@ -1041,22 +1114,12 @@ impl WasmWorld {
     /// ドラッグを重ねても誤差が蓄積しない)。
     pub fn set_body_scale_at(&mut self, index: usize, scale: f64) -> Result<(), JsValue> {
         let id = self.try_body_id_at(index)?;
-        let base_shape = match index {
-            0 => {
-                return Err(JsValue::from_str(
-                    "Ground is static and has no scale handle",
-                ));
-            }
-            1 => Shape::Box {
-                half_extents: sim_math::Vec3::new(0.5, 0.5, 0.5),
-            },
-            _ => self
-                .spawned
-                .get(index - 2)
-                .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
-                .base_shape
-                .clone(),
-        };
+        if index == 0 {
+            return Err(JsValue::from_str(
+                "Ground is static and has no scale handle",
+            ));
+        }
+        let base_shape = self.try_body_meta_at(index)?.base_shape.clone();
         let scaled_shape = match base_shape {
             Shape::Sphere { radius } => Shape::Sphere {
                 radius: radius * scale,
@@ -1294,40 +1357,71 @@ impl WasmWorld {
     }
 
     /// エディタのPlayモード操作(設計docs/23-frontend/01-editor.md §4「介入は全て
-    /// Commandとしてキューに積まれ、次ステップ先頭で適用される」)の最小デモとして、
-    /// 箱に力を加えるCommandをキューに積む。重心への加力(トルク無し、`point=None`)。
-    pub fn push_apply_force(&mut self, fx: f64, fy: f64, fz: f64) {
+    /// Commandとしてキューに積まれ、次ステップ先頭で適用される」)、`index`番目の
+    /// ボディに力を加えるCommandをキューに積む。重心への加力(トルク無し、
+    /// `point=None`)。**2026-07-27の残タスク完遂セッションで`body_index`引数を
+    /// 追加**(以前は常に固定の箱(index 1)決め打ちだったが、シーンギャラリー
+    /// (`from_scene_json`)で任意のボディが存在するようになったため、呼び出し側が
+    /// 対象を選べるようにした)。
+    pub fn push_apply_force(
+        &mut self,
+        body_index: usize,
+        fx: f64,
+        fy: f64,
+        fz: f64,
+    ) -> Result<(), JsValue> {
+        let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::ApplyForce {
-            body: self.box_body,
+            body,
             force: sim_math::Vec3::new(fx, fy, fz),
             point: None,
         });
+        Ok(())
     }
 
-    /// Scene ViewでのドラッグでD&D的に箱をつかむ(設計§1.2「Gizmo」に相当する
-    /// 最小デモ、`Command::Grab`——重心(`anchor_local=Vec3::ZERO`)をワールド座標
-    /// `target`へ剛にピン留めする)。
-    pub fn push_grab(&mut self, target_x: f64, target_y: f64, target_z: f64) {
+    /// Scene ViewでのドラッグでD&D的に`index`番目のボディをつかむ(設計§1.2
+    /// 「Gizmo」に相当する最小デモ、`Command::Grab`——重心(`anchor_local=
+    /// Vec3::ZERO`)をワールド座標`target`へ剛にピン留めする)。`push_apply_force`
+    /// と同じ理由で`body_index`引数を追加した。
+    pub fn push_grab(
+        &mut self,
+        body_index: usize,
+        target_x: f64,
+        target_y: f64,
+        target_z: f64,
+    ) -> Result<(), JsValue> {
+        let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::Grab {
-            body: self.box_body,
+            body,
             anchor_local: sim_math::Vec3::ZERO,
             target: sim_math::Vec3::new(target_x, target_y, target_z),
         });
+        Ok(())
     }
 
     /// ドラッグ中の`Command::MoveGrab`(既存のgrabの目標点をマウス位置へ追従させる)。
-    pub fn push_move_grab(&mut self, target_x: f64, target_y: f64, target_z: f64) {
+    /// `push_grab`と同じ`body_index`引数。
+    pub fn push_move_grab(
+        &mut self,
+        body_index: usize,
+        target_x: f64,
+        target_y: f64,
+        target_z: f64,
+    ) -> Result<(), JsValue> {
+        let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::MoveGrab {
-            body: self.box_body,
+            body,
             target: sim_math::Vec3::new(target_x, target_y, target_z),
         });
+        Ok(())
     }
 
     /// ドラッグ終了時の`Command::Release`(grabを解除、以後は通常の物理に戻る)。
-    pub fn push_release(&mut self) {
-        self.inner.push_command(Command::Release {
-            body: self.box_body,
-        });
+    /// `push_grab`と同じ`body_index`引数。
+    pub fn push_release(&mut self, body_index: usize) -> Result<(), JsValue> {
+        let body = self.try_body_id_at(body_index)?;
+        self.inner.push_command(Command::Release { body });
+        Ok(())
     }
 
     /// Editモードの直接編集(設計docs/23-frontend/01-editor.md §4「Editモード:
@@ -1515,5 +1609,47 @@ mod tests {
             .expect("known material name must succeed");
         world.set_body_scale_at(sphere_index, 2.0).unwrap();
         assert_eq!(world.body_shape_kind_at(sphere_index).unwrap(), "sphere");
+    }
+
+    /// **残タスク完遂のシーンギャラリー増分**: `WasmWorld::from_scene_json`が
+    /// シーンギャラリーの実アセット(`scenes/d4-box-stack.json`、4体——地面+
+    /// 3段の箱)を正しく読み込み、`step()`を回して静止させられることを確認する
+    /// (`sim-world::scenario`側の`run_headless_scenario_settles_a_stacked_box_
+    /// tower_matching_d4_pass_criterion`と同じシーンJSONファイルを読む——
+    /// アセットが壊れれば両方のテストが連動してRedになる)。
+    #[test]
+    fn from_scene_json_loads_the_d4_box_stack_gallery_asset_and_settles() {
+        let json = include_str!("../../../scenes/d4-box-stack.json");
+        let mut world = WasmWorld::from_scene_json(json.to_string())
+            .expect("scenes/d4-box-stack.json must be a valid scene");
+        assert_eq!(world.body_count(), 4); // 地面+3段の箱。
+                                           // 地面(JSON側に"name"フィールドが無い)は`format!("Body_{index}")`の
+                                           // フォールバックラベルになる。
+        assert_eq!(world.body_label_at(0).unwrap(), "Body_0");
+        for _ in 0..1200 {
+            world.step();
+        }
+        for index in 1..4 {
+            let label = world.body_label_at(index).unwrap();
+            assert!(
+                label.starts_with("box"),
+                "body {index} should be named box1/box2/box3, got {label:?}"
+            );
+        }
+    }
+
+    /// 範囲外の`body_index`で`push_apply_force`/`push_grab`/`push_move_grab`/
+    /// `push_release`を呼ぶと`Err`を返すこと(**Q5と同じ理由でResult化した
+    /// 対象**、シーンギャラリーで任意のシーンを読み込んだ後にNudge/Grab UIが
+    /// 古い`body_index`を渡しても`panic!`しないことの検証)。ここでの`Err`検証は
+    /// `JsValue`を構築するため、ネイティブターゲットでは**abortする**
+    /// (モジュールdoc「正直な制約」参照)——したがって成功パスのみを確認する。
+    #[test]
+    fn push_commands_accept_an_explicit_body_index_for_a_valid_body() {
+        let mut world = new_world();
+        world.push_apply_force(1, 0.0, 1.0, 0.0).unwrap();
+        world.push_grab(1, 0.0, 1.0, 0.0).unwrap();
+        world.push_move_grab(1, 0.0, 1.0, 0.0).unwrap();
+        world.push_release(1).unwrap();
     }
 }

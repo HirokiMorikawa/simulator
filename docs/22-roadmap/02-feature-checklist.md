@@ -498,9 +498,36 @@
   を追加し、新規テスト`all_scenes_in_the_gallery_manifest_parse_and_run_for_
   sixty_steps`でマニフェスト記載の全ファイルが実際にパース+60step実行できる
   ことを検証する(意図的に壊れたJSONを差し込んでテストが実際にRedになることを
-  確認済み——安全網が機能することを実地で確かめた)。残り13デモ相当の切り出しと、
-  `sim-wasm`側の全ドメイン込みシーン読み込み・フロントエンドのギャラリーUIは
-  後続増分(増分3-2・3-3)。
+  確認済み——安全網が機能することを実地で確かめた)。
+  **続けて増分3-2(`sim-wasm`の全ドメイン込みシーン読み込み)を実装した**。
+  `WasmWorld`の`ground_body`/`box_body`/`spawned`という3つの別々の表現を
+  単一の`bodies: Vec<SpawnedBodyMeta>`へ統合した(index 0=Ground・1=Box_1という
+  既存の意味は`new()`がこの順でpushすることでそのまま維持)。これに伴い、
+  `sim-world::Scenario::from_scenario`が内部で構築した`BodyId`一覧を使い捨てて
+  いた(呼び出し元がHierarchy表示用のメタデータを構築するのに必要な対応情報が
+  無かった)ため、`from_scenario_with_body_ids`という新しい関数を切り出し
+  `(World, Vec<BodyId>)`を返すようにした——既存の`from_scenario`はこれの薄い
+  ラッパーに変更し、振る舞いは一切変えていない(全既存テストは無変更のままGreen)。
+  新規`WasmWorld::from_scene_json(json) -> Result<WasmWorld, JsValue>`は
+  `World::from_scenario`(`fluids`/`thermal`/`circuit`/`astro`/`joints`/`probes`
+  の**全セクション**を構成する、`import_scene_json`の「追加のみ・`fluids`/
+  `thermal`/`circuit`/`astro`は対象外」という制約が無い)を使ってワールドを
+  丸ごと構築する。あわせて`push_apply_force`/`push_grab`/`push_move_grab`/
+  `push_release`に`body_index`引数を追加し(以前は常に固定の箱決め打ち)、
+  `demo/src/main.ts`の7箇所の呼び出しを`BODY_INDEX_BOX`定数を明示的に渡す形へ
+  更新した(挙動は変えていない——Nudge/Grabが選択中のボディに効くようにする
+  UX拡張は別途の判断が要るため今回は見送り、まず決め打ちを解いてAPIとして
+  任意ボディを指定できるようにする段階に留めた)。生成された`.d.ts`
+  (`static from_scene_json(json: string): WasmWorld`・
+  `push_apply_force(body_index: number, ...): void`等)を確認し、`npm run build`
+  (`tsc --noEmit`込み)・実際に生成したwasmバインディング経由のPlaywright
+  スモーク(Nudgeボタン+ドラッグでのgrab/move_grab/releaseを実行、コンソール
+  エラー無し)で検証した。`sim-wasm`に新規2テスト
+  (`from_scene_json_loads_the_d4_box_stack_gallery_asset_and_settles`——
+  `scenes/d4-box-stack.json`を実際に読み込み1200step実行して静止することを
+  確認・`push_commands_accept_an_explicit_body_index_for_a_valid_body`)を追加した。
+  残り13デモ相当のシーン切り出しと、フロントエンドのギャラリーUI(一覧+
+  読み込みボタン)は後続増分(増分3-3)。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・

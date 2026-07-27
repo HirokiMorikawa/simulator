@@ -1496,7 +1496,7 @@ async function setUpSceneView(
         camera.getWorldDirection(cameraDirection);
         dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
         const p = world.body_position_at_f32(BODY_INDEX_BOX);
-        world.push_grab(p[0], p[1], p[2]);
+        world.push_grab(BODY_INDEX_BOX, p[0], p[1], p[2]);
         pushCommandLog(world, { kind: "Grab", targetX: p[0], targetY: p[1], targetZ: p[2] });
       }
     }
@@ -1538,14 +1538,14 @@ async function setUpSceneView(
       const newPos = gizmoDragStartPosition.clone().addScaledVector(gizmoAxisDir, delta);
       world.set_body_position_at(selectedBodyIndex, newPos.x, newPos.y, newPos.z);
     } else if (dragMode === "grab") {
-      world.push_move_grab(dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
+      world.push_move_grab(BODY_INDEX_BOX, dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
     }
   });
 
   renderer.domElement.addEventListener("pointerup", () => {
     if (isDragging) {
       if (dragMode === "grab") {
-        world.push_release();
+        world.push_release(BODY_INDEX_BOX);
         pushCommandLog(world, { kind: "Release" });
       }
     } else if (pointerDownHit) {
@@ -1835,13 +1835,13 @@ async function setUpSceneView(
       for (const entry of commandsByStep.get(s) ?? []) {
         switch (entry.kind) {
           case "Grab":
-            replayWorld.push_grab(entry.targetX, entry.targetY, entry.targetZ);
+            replayWorld.push_grab(BODY_INDEX_BOX, entry.targetX, entry.targetY, entry.targetZ);
             break;
           case "Release":
-            replayWorld.push_release();
+            replayWorld.push_release(BODY_INDEX_BOX);
             break;
           case "ApplyForce":
-            replayWorld.push_apply_force(entry.fx, entry.fy, entry.fz);
+            replayWorld.push_apply_force(BODY_INDEX_BOX, entry.fx, entry.fy, entry.fz);
             break;
           case "SetMotorTarget":
             if (entry.bodyIndex < replayWorld.body_count()) {
@@ -2113,7 +2113,7 @@ async function setUpSceneView(
   // 速度変化(1クリックでΔv≈0.4m/s程度)になるよう十分大きな値を選んだ。
   const NUDGE_FORCE_NEWTONS = 400_000.0;
   nudgeButton.addEventListener("click", () => {
-    world.push_apply_force(0.0, NUDGE_FORCE_NEWTONS, 0.0);
+    world.push_apply_force(BODY_INDEX_BOX, 0.0, NUDGE_FORCE_NEWTONS, 0.0);
     pushCommandLog(world, { kind: "ApplyForce", fx: 0.0, fy: NUDGE_FORCE_NEWTONS, fz: 0.0 });
     if (forceOverlayToggle.checked) {
       const p = world.body_position_at_f32(BODY_INDEX_BOX);

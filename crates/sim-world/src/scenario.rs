@@ -444,6 +444,20 @@ impl World {
     /// シーンJSONから`World`を構築する(設計docs/20-integration/04-world-api.md §2
     /// `from_scenario`、`Scenario`のdoc「縮約実装の理由」参照)。
     pub fn from_scenario(scenario: &Scenario) -> Result<World, SceneError> {
+        let (world, _ids) = Self::from_scenario_with_body_ids(scenario)?;
+        Ok(world)
+    }
+
+    /// `from_scenario`と同じ全ドメイン構築を行い、あわせて`scenario.bodies`と
+    /// 同じ順の`BodyId`一覧も返す(**残タスク完遂のシーンギャラリー増分で追加**:
+    /// `sim-wasm::WasmWorld::from_scene_json`がHierarchy表示用の`SpawnedBodyMeta`
+    /// (ラベル・材質名・基準形状)を構築するには、各ボディの`BodyId`と
+    /// `scenario.bodies`のどの要素に対応するかの対応が要るが、`from_scenario`は
+    /// この対応を内部で使い捨てていたため公開していなかった。既存の`from_scenario`
+    /// はこの関数の薄いラッパーに変更し、振る舞いは変えていない)。
+    pub fn from_scenario_with_body_ids(
+        scenario: &Scenario,
+    ) -> Result<(World, Vec<BodyId>), SceneError> {
         let options = WorldOptions {
             gravity: scenario.world.gravity,
             dt: scenario.world.dt,
@@ -603,7 +617,7 @@ impl World {
 
         world.add_scenario_probes(scenario, &body_ids_by_name)?;
 
-        Ok(world)
+        Ok((world, ids))
     }
 
     /// シーンJSONの`probes`セクションを、既に解決済みの名前→`BodyId`対応表を使って
