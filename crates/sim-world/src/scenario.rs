@@ -677,6 +677,54 @@ mod tests {
     }
 
     /// `probes[].body_pos_y`が`bodies[].name`のいずれとも一致しない場合は
+    /// D1(落下時計)を6本目の適用例として実装する。`demos.rs`の
+    /// `d1_falling_clock_matches_free_fall_time_and_shows_drag_on_off_difference`の
+    /// うち真空側(M1: 自由落下時間が解析解$t=\sqrt{2h/g}$と一致)を、地面プレーンを
+    /// 置かず`body_pos_y`プローブだけで検証する——球の半径ぶん手前(`y<=radius`)を
+    /// 通過した最初のステップを着地時刻とする。抗力側(D1のもう一つの合格基準)は
+    /// シーンJSONに大気抵抗を配線する手段がまだ無いため対象外。
+    #[test]
+    fn run_headless_scenario_free_fall_time_matches_analytic_vacuum_formula() {
+        let height: f64 = 20.0;
+        let radius: f64 = 0.3;
+        let g: f64 = 9.80665;
+        let dt: f64 = 0.008333333;
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d1-falling-clock",
+          "world": {{ "gravity": {g}, "dt": {dt} }},
+          "bodies": [
+            {{ "shape": {{ "sphere": {{ "radius": {radius} }} }},
+              "material": "鋼(炭素鋼)",
+              "position": [0.0, {height}, 0.0],
+              "name": "clock" }}
+          ],
+          "probes": [ {{ "body_pos_y": "clock" }} ]
+        }}
+        "#,
+        );
+
+        let steps = 400; // 解析落下時間T≈2.019sに対し十分な余裕(dt=1/120で約243step)
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let pos_y = &result.probe_histories[0];
+
+        let landing_step = (0..pos_y.len())
+            .find(|&i| pos_y[i] <= radius)
+            .expect("free-falling sphere should reach the ground within the simulated window");
+        // `history[i]`はstep(i+1)後の値(`World::step`のプローブサンプリングは
+        // `clock.advance()`の後、`run_headless_scenario_ballistic_flight_...`のコメント参照)。
+        let landing_time = (landing_step + 1) as f64 * dt;
+        let analytic = (2.0 * height / g).sqrt();
+        let rel_err = (landing_time - analytic).abs() / analytic;
+        assert!(
+            rel_err < 0.01,
+            "D1/M1: free-fall time landing_time={landing_time} analytic={analytic} \
+             rel_err={rel_err:.4}"
+        );
+    }
+
     /// `SceneError::UnknownBodyName`。
     #[test]
     fn from_scenario_rejects_unknown_body_name_in_probe() {
