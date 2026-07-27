@@ -688,6 +688,17 @@ async function setUpSceneView(
   frameAxesHelper.position.set(0, 3, 0); // 他のメッシュと重ならない高さ
   scene.add(frameAxesHelper);
 
+  // 流体場オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「流体場」の土台)。
+  // 「+ 流体」ボタンでSPH流体塊(`world.spawn_fluid_block`)をスポーンすると、
+  // 粒子位置をTHREE.Pointsで毎フレーム反映する(粒子数は固定なので、スポーン時に
+  // 一度だけBufferAttributeを確保しrender()内で内容だけ更新する)。
+  const fluidGeometry = new THREE.BufferGeometry();
+  const fluidMaterial = new THREE.PointsMaterial({ color: 0x3399ff, size: 0.08 });
+  const fluidPoints = new THREE.Points(fluidGeometry, fluidMaterial);
+  fluidPoints.visible = false;
+  scene.add(fluidPoints);
+  let fluidPositionAttribute: THREE.BufferAttribute | null = null;
+
   function showForceOverlay(origin: THREE.Vector3, force: THREE.Vector3) {
     const magnitude = force.length();
     if (magnitude < 1e-6) return;
@@ -1281,6 +1292,14 @@ async function setUpSceneView(
     addSpawnedMesh(bodyIndex, mesh);
   });
 
+  document.getElementById("btn-spawn-fluid")!.addEventListener("click", () => {
+    world.spawn_fluid_block();
+    const count = world.fluid_particle_count();
+    fluidPositionAttribute = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
+    fluidGeometry.setAttribute("position", fluidPositionAttribute);
+    fluidPoints.visible = true;
+  });
+
   playButton.addEventListener("click", () => {
     if (mode !== "play") return;
     playing = !playing;
@@ -1454,6 +1473,12 @@ async function setUpSceneView(
       frameAxesHelper.visible = true;
     } else {
       frameAxesHelper.visible = false;
+    }
+
+    if (fluidPositionAttribute) {
+      const positions = world.fluid_particle_positions_f32();
+      (fluidPositionAttribute.array as Float32Array).set(positions);
+      fluidPositionAttribute.needsUpdate = true;
     }
 
     const selectedPosition = world.body_position_at_f32(selectedBodyIndex);

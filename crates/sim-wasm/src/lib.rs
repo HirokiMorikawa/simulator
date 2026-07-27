@@ -570,6 +570,67 @@ impl WasmWorld {
         )
     }
 
+    /// 流体場オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「流体場」の土台)
+    /// 向けに、`sim_fluid::SphFluid`を有効化し、小さな水塊(3×3×3粒子)+その直下の
+    /// 床(1層の境界粒子、`SphFluid::add_boundary_particle`)を追加する。二度目以降の
+    /// 呼び出しは`World::enable_sph`が新しい`SphFluid`で置き換えるため実質的に
+    /// リセットとして機能する。
+    pub fn spawn_fluid_block(&mut self) {
+        let h: f64 = 0.15;
+        let rho0: f64 = 1000.0;
+        let c_s: f64 = 20.0;
+        let dx: f64 = 0.1;
+        let mut sph = sim_fluid::SphFluid::new(h, rho0, c_s);
+        sph.mass = rho0 * dx.powi(3);
+
+        let origin = Vec3::new(3.0, 2.0, 0.0);
+        let n = 3;
+        for ix in 0..n {
+            for iy in 0..n {
+                for iz in 0..n {
+                    let pos = origin + Vec3::new(ix as f64 * dx, iy as f64 * dx, iz as f64 * dx);
+                    sph.add_particle(pos, Vec3::ZERO);
+                }
+            }
+        }
+
+        let floor_half = 0.6;
+        let floor_y = -dx;
+        let mut fx = origin.x - floor_half;
+        while fx <= origin.x + floor_half {
+            let mut fz = origin.z - floor_half;
+            while fz <= origin.z + floor_half {
+                sph.add_boundary_particle(Vec3::new(fx, floor_y, fz));
+                fz += dx;
+            }
+            fx += dx;
+        }
+
+        self.inner.enable_sph(sph);
+    }
+
+    /// 流体粒子数(境界粒子は含まない、`fluid_particle_positions_f32`と同じ体系)。
+    /// 流体ドメインが有効でなければ0。
+    pub fn fluid_particle_count(&self) -> usize {
+        self.inner.sph().map_or(0, |s| s.position.len())
+    }
+
+    /// 全流体粒子の位置をフラットな`[x0,y0,z0,x1,y1,z1,...]`(f32)で返す
+    /// (毎フレーム粒子数分`body_position_at_f32`相当を個別呼び出しするのは
+    /// wasm境界越えのオーバーヘッドが大きいため、1回のクエリにまとめた)。
+    pub fn fluid_particle_positions_f32(&self) -> Float32Array {
+        let Some(sph) = self.inner.sph() else {
+            return Float32Array::new_with_length(0);
+        };
+        let mut flat = Vec::with_capacity(sph.position.len() * 3);
+        for p in &sph.position {
+            flat.push(p.x as f32);
+            flat.push(p.y as f32);
+            flat.push(p.z as f32);
+        }
+        Float32Array::from(&flat[..])
+    }
+
     /// `index`番目のボディの位置 [x, y, z](f32)。
     pub fn body_position_at_f32(&self, index: usize) -> Float32Array {
         let id = self.body_id_at(index);

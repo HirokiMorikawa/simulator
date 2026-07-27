@@ -540,6 +540,7 @@ dependencies = [
  "js-sys",
  "sim-core",
  "sim-em",
+ "sim-fluid",
  "sim-math",
  "sim-mechanics",
  "sim-thermal",

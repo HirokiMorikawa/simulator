@@ -160,9 +160,12 @@
   へ配線し(自動レジーム切替の判定を壊さない順序で)、`sim-wasm`に
   `add_rotating_frame`/`frame_rotation_at_f32`を追加、Toolbarのチェックボックス
   で切替可能な`THREE.AxesHelper`として実際に回転する単一フレームを可視化した。
-  残りは流体場オーバーレイ・複数フレームの階層ドリルインUI・自由配線の回路
-  エディタ本体・シーンJSON Import・ブックマークのエクスポート/インポート・
-  Replay再生実行等。
+  さらにヘッドレスランナーの3本目の適用例(D6浮き沈みF4のシーンJSON化)を挟んだ
+  後、流体場オーバーレイも実装した——インタラクティブデモに初めてSPH流体
+  ドメインを接続し(スポーンパレット「+ 流体」ボタン、`spawn_fluid_block`が
+  水塊+床の境界粒子を構築)、`THREE.Points`で粒子位置を毎フレーム可視化した。
+  残りは複数フレームの階層ドリルインUI・自由配線の回路エディタ本体・
+  シーンJSON Import・ブックマークのエクスポート/インポート・Replay再生実行等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・自由配線回路エディタ等)を
   軸に、ワークストリームC残り(R4)は機を見て並行して進める。優先順位の詳細は
   `/root/.claude/plans/elegant-meandering-pixel.md`参照。
@@ -1213,7 +1216,22 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       Playwrightで、約3.8秒経過後に軸が初期(単位クォータニオン、グリッドと
       平行)から明確に回転した向きになっていること(スクリーンショットで
       目視確認)、チェックボックスのON/OFF切替でクラッシュしないことを確認。
-      流体場オーバーレイは未実装)
+      **流体場オーバーレイ(本増分で追加)**: これまでインタラクティブデモには
+      流体ドメインが一切接続されていなかった(`WasmWorld::new`が構築するのは
+      mechanics/circuit/thermalのみ)ため、まずSPH流体ドメインを接続する土台
+      から実装した。スポーンパレットに「+ 流体」ボタンを追加し
+      (`sim-wasm::spawn_fluid_block`——3×3×3粒子の水塊+その直下の床
+      (`SphFluid::add_boundary_particle`による1層の境界粒子)を構築し
+      `World::enable_sph`で有効化)、`fluid_particle_count`/
+      `fluid_particle_positions_f32`(全粒子位置を1回のクエリでフラット配列
+      として返す、粒子数分の個別wasm呼び出しを避けるため)で粒子位置を取得し、
+      `THREE.Points`として毎フレーム描画する(粒子数は固定なので
+      `BufferAttribute`はスポーン時に1回だけ確保し内容だけ更新)。Playwrightで、
+      スポーン直後は粒子が水塊の初期形状(密集した立方体状)で見え、数秒後には
+      重力で落下して床の上に広がって静止する様子をズームスクリーンショットで
+      目視確認した。格子流体(`GridFluid2D`)の速度場ベクトル表示・機械ドメインと
+      のCoupling(`SphRigid`)接続は未実装(SPH自身の境界粒子のみで完結する
+      縮約実装)。フレームサブモード同様、複数の流体塊の階層管理UIも未実装)
 - [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
       (Bodies配下は`sim-wasm`に新設した`body_count`/`body_label_at`経由で実際の
       World状態(床の静的平面+箱+スポーンしたボディ)を列挙・クリックでInspector
