@@ -1746,7 +1746,13 @@ Phase D:
 
 - [ ] D40 光の実験室
 - [ ] D41 材質ギャラリー
-- [ ] D42 空と大気
+- [ ] D42 空と大気(合格基準R5は`Scene::trace`への参加媒質配線(上記「参加媒質」
+      の項目参照)で実際のレイトレース経路を通して確認済み——`crates/sim-render/
+      src/path_tracer.rs::tests::trace_reproduces_stronger_blue_sky_scattering_
+      than_red_through_the_medium_wiring`。`sim-render`はまだ実際の画像出力
+      パイプライン(フレームバッファ、`tonemap.rs`モジュールdoc参照)を持たない
+      ため、目視チェック(実際にレンダリングした画像で空が青く見えることの確認)
+      は保留)
 - [ ] D43 カメラ
 
 ## 8. 解析解テスト Green 管理表
