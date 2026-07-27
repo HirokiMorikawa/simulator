@@ -12,7 +12,10 @@
 //! に素直に対応しない形は後続増分。validator(参照整合検査)はこの縮約版が対象とする
 //! 範囲(材料参照・剛体名参照)のみ実装する — 排他結合検査(`sim-coupling::
 //! validate_exclusive_couplings`)は`couplings`セクション未実装のため接続できない
-//! (後続増分)。
+//! (後続増分)。`bodies[]`には`rotation`(クォータニオン`[x,y,z,w]`、未指定なら
+//! 恒等回転)・`linear_velocity`(未指定ならゼロ)も追加済み(D5斜面のような
+//! 回転済み初期配置・D2弾道のような初速を要するシナリオへの対応、ヘッドレス
+//! ランナーの適用例参照)。
 
 use crate::{BodyId, ProbeTarget, World, WorldOptions};
 use serde::Deserialize;
@@ -84,6 +87,15 @@ pub struct BodyScenarioDesc {
     pub material: String,
     #[serde(default)]
     pub position: [f64; 3],
+    /// 初期姿勢(クォータニオン`[x,y,z,w]`)。未指定なら恒等回転(縮約実装:
+    /// 傾いた斜面(D5)のように回転済みの初期配置を必要とするシナリオに対応する
+    /// ため追加)。
+    #[serde(default)]
+    pub rotation: Option<[f64; 4]>,
+    /// 初期速度。未指定なら`[0,0,0]`(縮約実装: D2弾道のような初速を要する
+    /// シナリオに対応するため追加、`[f64;3]`の`Default`はゼロ配列)。
+    #[serde(default)]
+    pub linear_velocity: [f64; 3],
     #[serde(default, rename = "type")]
     pub body_type: Option<String>,
     #[serde(default)]
@@ -168,6 +180,15 @@ impl World {
             };
             let mut desc = RigidBodyDesc::dynamic(shape, material_id);
             desc.transform.position = array_to_vec3(body.position);
+            if let Some(q) = body.rotation {
+                desc.transform.rotation = sim_math::Quat {
+                    x: q[0],
+                    y: q[1],
+                    z: q[2],
+                    w: q[3],
+                };
+            }
+            desc.linear_velocity = array_to_vec3(body.linear_velocity);
             desc.body_type = match body.body_type.as_deref() {
                 Some("static") => BodyType::Static,
                 Some("kinematic") => BodyType::Kinematic,
@@ -252,6 +273,7 @@ pub fn run_headless_scenario(json: &str, steps: u32) -> Result<HeadlessRunResult
 mod tests {
     use super::*;
     use crate::BodyId;
+    use sim_math::Quat;
 
     /// 設計docs/20-integration/04-world-api.md §3の例示JSON(浮力デモの縮約版、
     /// `fluids`/`couplings`/`probes`セクションを除く)を実際にパースして`World`を構築し、
@@ -516,6 +538,64 @@ mod tests {
             drift < 0.05 * side,
             "box should remain near the F4 equilibrium waterline depth (stable equilibrium): \
              final_y={final_y} equilibrium_y={equilibrium_y} drift={drift}"
+        );
+    }
+
+    /// シーンJSONに`rotation`(クォータニオン)・`linear_velocity`フィールドを追加した
+    /// 上での4本目の適用例。D5 斜面(docs/21-verification/03-demo-scenarios.md
+    /// 「角度スライダー+素材切替」「合格基準: M7/M8」)のうちM7(静止摩擦角未満では
+    /// 静止し続ける)を、傾いた平面(`Plane`)+それに合わせて回転させた箱
+    /// (`demos.rs`の`d5_incline_stays_static_below_friction_angle_and_slides_
+    /// matching_formula_above`と同じ構成)で検証する。回転が正しく適用されて
+    /// いなければ箱は斜面に対して傾いたまま接触し即座に転倒/滑落するため、
+    /// 5秒間静止し続けることの確認は`rotation`フィールドの配線自体の検証にもなる。
+    #[test]
+    fn run_headless_scenario_stays_static_on_an_incline_below_the_friction_angle() {
+        let theta: f64 = 10.0_f64.to_radians();
+        let normal = Vec3::new(-theta.sin(), theta.cos(), 0.0);
+        let half_extent = 0.5;
+        let position = normal.scale(half_extent);
+        let rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), theta);
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d5-incline-static",
+          "world": {{ "gravity": 9.80665, "dt": 0.008333333 }},
+          "bodies": [
+            {{ "shape": {{ "plane": {{ "normal": [{nx}, {ny}, {nz}], "d": 0 }} }},
+              "type": "static", "material": "鋼(炭素鋼)" }},
+            {{ "shape": {{ "box": {{ "half": [{half_extent}, {half_extent}, {half_extent}] }} }},
+              "material": "鋼(炭素鋼)",
+              "position": [{px}, {py}, {pz}],
+              "rotation": [{qx}, {qy}, {qz}, {qw}],
+              "name": "box" }}
+          ],
+          "probes": [ {{ "body_speed": "box" }} ]
+        }}
+        "#,
+            nx = normal.x,
+            ny = normal.y,
+            nz = normal.z,
+            px = position.x,
+            py = position.y,
+            pz = position.z,
+            qx = rotation.x,
+            qy = rotation.y,
+            qz = rotation.z,
+            qw = rotation.w,
+        );
+
+        let steps = 600; // 5秒(既定dt)
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+
+        let final_speed = *result.probe_histories[0]
+            .last()
+            .expect("history should not be empty");
+        assert!(
+            final_speed < 1e-4,
+            "M7: box on a 10° incline (below the friction angle) should stay at rest: \
+             final_speed={final_speed}"
         );
     }
 
