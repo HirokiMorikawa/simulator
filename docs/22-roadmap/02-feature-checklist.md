@@ -651,12 +651,24 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       (閾値未到達では発火せずLocalボディが未変更のままであることを確認)がGreen。
       ヒステリシス・Command化・往復切替(Local→Astro自動判定)は依然未実装
       (縮約実装、上記の「未実装」列挙がそのまま適用される)
-- [x] 1PN 補正(オプトイン、A8・A9・A10。`RelativitySettings`構造体・`NBodySystem`への
-      完全統合は未実装)—
+- [x] 1PN 補正(オプトイン、A8・A9・A10。`RelativitySettings`構造体(複数天体への
+      一般化・GR効果の個別トグル)は未実装だが、`NBodySystem`への接続(D39向け)は
+      後述のとおり完了)—
       `crates/sim-astro/src/relativity.rs::{pn1_acceleration, pn1_precession_per_orbit,
       gps_proper_time_rate, light_deflection_angle}`。A9(GPS固有時率、設計§2.2)は
       解析式のみ(シミュレーション不要)で+38.6μs/日にrel<1%で一致。A10(光の重力偏向、
       設計§2.3)も解析式$\delta=4GM/(c^2b)$のみで太陽縁1.7512″とrel<2%で一致。
+      **`NBodySystem`への接続(D39向け、本増分で追加)**: `NBodySystem`に
+      `RelativisticCorrectionConfig { central_body, speed_of_light }`+
+      `enable_relativistic_correction`を追加、`accelerations()`内で`central_body`
+      まわりのtest-particle近似として`pn1_acceleration`を加算する(縮約実装:
+      `RelativitySettings`のような複数天体・個別GR効果トグルへの一般化はまだ
+      対象外、1体・test-particle近似のみ)。
+      `d39_relativity_on_off_matches_analytic_precession_via_nbody_step`
+      (A8と同じ誇張$GM/c^2$比・同じ離心率ベクトル追跡法だが、直接組んだ
+      velocity Verlet風ループではなく実際の`NBodySystem::step()`(KDK leapfrog)
+      経由で検証する点が新規: ONでは近日点移動率が解析式とrel<1%で一致、OFFでは
+      有意な歳差が検出されない(Keplerの閉軌道)ことを確認)がGreen。
       A8(近日点移動、設計§2.1のSchwarzschild項)は、実際の太陽・水星のGM/c²比では
       43″/世紀という極小の歳差を検出するのに非現実的な数の周回積分が要るため、GM/c²比を
       誇張した二体系(主星固定・test-particle近似)で少数周回積分し、同じ誇張パラメータ
@@ -1539,7 +1551,12 @@ Pα:
       2択判定(現状は降下+部分アブレーション+ハンドオフの配線検証が主眼)は
       対象外。目視チェック保留)
 - [ ] D38 潮汐
-- [ ] D39 相対論 ON/OFF
+- [x] D39 相対論 ON/OFF(ヘッドレステストGreen、新規`NBodySystem::
+      enable_relativistic_correction`(`crates/sim-astro/src/nbody.rs`)。
+      目視チェックはワークストリームD未着手のため保留。A8と同じ誇張$GM/c^2$比
+      での近日点移動を、実際の`NBodySystem::step()`経由でON(解析式とrel<1%
+      一致)/OFF(有意な歳差なし)の両方を確認。「GPS時刻」側はA9が解析式のみで
+      既にGreenのためNBodySystem接続は不要と判断)
 
 Phase D:
 

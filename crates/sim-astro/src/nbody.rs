@@ -54,6 +54,18 @@ pub struct ReentryHeatingState {
     pub remaining_shield_mass: f64,
 }
 
+/// 1PN相対論補正の設定(オプトイン、D39「相対論ON/OFF」、設計docs/16-astro/
+/// 03-relativistic-corrections.md)。`central_body`まわりのtest-particle近似
+/// (`relativity::pn1_acceleration`をそのまま使う、`central_body`自身には適用しない)。
+/// **縮約実装の理由**: 設計が示す`RelativitySettings`構造体(複数天体への一般化・
+/// GR効果の個別トグル)ではなく、`sim-astro`のモジュールdocが明記する既存の縮約
+/// (「1体・test-particle近似」)をそのまま`NBodySystem`へ接続した最小形。
+#[derive(Clone, Copy)]
+pub struct RelativisticCorrectionConfig {
+    pub central_body: usize,
+    pub speed_of_light: f64,
+}
+
 /// N体系。設計 §3 の `NBodySystem` から、Barnes-Hut ツリー・積分器種別の選択機構を除いた
 /// P0 スコープ(総当たり + leapfrog 固定)。
 #[derive(Clone)]
@@ -65,6 +77,8 @@ pub struct NBodySystem {
     pub softening: f64,
     /// 大気抗力(`AtmosphericDragConfig`のdoc参照)。既定`None`(抗力無し)。
     pub atmospheric_drag: Option<AtmosphericDragConfig>,
+    /// 1PN相対論補正(`RelativisticCorrectionConfig`のdoc参照)。既定`None`(補正無し)。
+    pub relativistic_correction: Option<RelativisticCorrectionConfig>,
 }
 
 impl NBodySystem {
@@ -75,7 +89,17 @@ impl NBodySystem {
             mass: Vec::new(),
             softening,
             atmospheric_drag: None,
+            relativistic_correction: None,
         }
+    }
+
+    /// `central_body`まわりの1PN補正を有効化する(`RelativisticCorrectionConfig`の
+    /// doc参照)。
+    pub fn enable_relativistic_correction(&mut self, central_body: usize, speed_of_light: f64) {
+        self.relativistic_correction = Some(RelativisticCorrectionConfig {
+            central_body,
+            speed_of_light,
+        });
     }
 
     pub fn add_body(&mut self, position: Vec3, velocity: Vec3, mass: f64) -> usize {
@@ -269,6 +293,23 @@ impl NBodySystem {
                 );
                 let drag_accel_magnitude = 0.5 * density * speed * speed * beta;
                 *acc_i = acc_i.addcarry_scaled(v_rel, -drag_accel_magnitude / speed);
+            }
+        }
+        if let Some(rel) = &self.relativistic_correction {
+            let gm_central = GRAVITATIONAL_CONSTANT * self.mass[rel.central_body];
+            for (i, acc_i) in acc.iter_mut().enumerate() {
+                if i == rel.central_body {
+                    continue;
+                }
+                let r_vec = self.position[i] - self.position[rel.central_body];
+                let v_vec = self.velocity[i] - self.velocity[rel.central_body];
+                *acc_i = *acc_i
+                    + crate::relativity::pn1_acceleration(
+                        gm_central,
+                        rel.speed_of_light,
+                        r_vec,
+                        v_vec,
+                    );
             }
         }
         acc
@@ -707,5 +748,93 @@ mod tests {
         };
         sys.step(1e-3, &mut ctx);
         assert!(events.drain_sorted().is_empty());
+    }
+
+    /// D39 相対論ON/OFF(1PN補正を`NBodySystem`本体へ統合、設計docs/16-astro/
+    /// 03-relativistic-corrections.mdが「未実装」と明記していたギャップを埋める)。
+    /// `crates/sim-astro/src/relativity.rs`のA8テスト(近日点移動)と同じ誇張
+    /// $GM/c^2$比(現実の水星の43″/世紀は非現実的な周回数を要するため、モジュールdoc
+    /// が明記する誇張パラメータでの解析式比較方式)・同じ離心率ベクトル追跡法だが、
+    /// 直接組んだvelocity Verlet風ループではなく実際の`NBodySystem::step()`
+    /// (KDM leapfrog)経由で検証する点が新しい。`enable_relativistic_correction`
+    /// ONでは近日点移動率が解析式`pn1_precession_per_orbit`とrel<1%で一致し、OFFでは
+    /// 有意な歳差が検出されない(Keplerの閉軌道、ドリフトは数値誤差のみ)ことを確認する。
+    #[test]
+    fn d39_relativity_on_off_matches_analytic_precession_via_nbody_step() {
+        let gm: f64 = 1.0;
+        let c: f64 = 100.0; // A8と同じ誇張GM/c^2比(モジュールdoc参照)
+        let a: f64 = 1.0;
+        let e: f64 = 0.5;
+
+        let r_peri = a * (1.0 - e);
+        let v_peri = ((gm / a) * (1.0 + e) / (1.0 - e)).sqrt();
+
+        let eccentricity_vector_angle = |r: Vec3, v: Vec3| -> f64 {
+            let h = r.cross(v);
+            let e_vec = v.cross(h).scale(1.0 / gm) - r.scale(1.0 / r.length());
+            e_vec.y.atan2(e_vec.x)
+        };
+
+        let period = 2.0 * std::f64::consts::PI * (a.powi(3) / gm).sqrt();
+        let orbits = 20;
+        let steps_per_orbit = 8000;
+        let dt = period / steps_per_orbit as f64;
+
+        let run = |relativistic_correction_enabled: bool| -> f64 {
+            let mut sys = NBodySystem::new(0.0);
+            let central = sys.add_body(Vec3::ZERO, Vec3::ZERO, gm / GRAVITATIONAL_CONSTANT);
+            let probe = sys.add_body(
+                Vec3::new(r_peri, 0.0, 0.0),
+                Vec3::new(0.0, v_peri, 0.0),
+                0.0,
+            );
+            if relativistic_correction_enabled {
+                sys.enable_relativistic_correction(central, c);
+            }
+
+            let initial_angle = eccentricity_vector_angle(sys.position[probe], sys.velocity[probe]);
+            let mut unwrapped_angle = initial_angle;
+            let mut prev_angle = initial_angle;
+
+            let materials = MaterialDb::standard();
+            let mut rng = SimRng::new(1, 1);
+            let mut events = EventQueue::new();
+            for _ in 0..(orbits * steps_per_orbit) {
+                let mut ctx = SolverContext {
+                    materials: &materials,
+                    rng: &mut rng,
+                    events: &mut events,
+                };
+                sys.step(dt, &mut ctx);
+
+                let raw_angle = eccentricity_vector_angle(sys.position[probe], sys.velocity[probe]);
+                let mut delta = raw_angle - prev_angle;
+                while delta > std::f64::consts::PI {
+                    delta -= 2.0 * std::f64::consts::PI;
+                }
+                while delta < -std::f64::consts::PI {
+                    delta += 2.0 * std::f64::consts::PI;
+                }
+                unwrapped_angle += delta;
+                prev_angle = raw_angle;
+            }
+
+            (unwrapped_angle - initial_angle) / orbits as f64
+        };
+
+        let measured_on = run(true);
+        let analytic = crate::relativity::pn1_precession_per_orbit(gm, c, a, e);
+        let rel_err_on = (measured_on - analytic).abs() / analytic;
+        assert!(
+            rel_err_on < 0.01,
+            "ON: measured={measured_on:.6} analytic={analytic:.6} rel_err={rel_err_on:.4}"
+        );
+
+        let measured_off = run(false);
+        assert!(
+            measured_off.abs() < analytic * 0.05,
+            "OFF: should show no meaningful precession (Keplerian closed orbit): \
+             measured_off={measured_off:.6} analytic_on={analytic:.6}"
+        );
     }
 }
