@@ -599,6 +599,83 @@ mod tests {
         );
     }
 
+    /// D2(弾道): 45°射出の真空放物運動を`body_pos_y`/`body_speed`の2プローブのみで検証する。
+    /// `ProbeTarget`には水平位置(range)を直接読める種別が無いため、`demos.rs`の
+    /// `d2_ballistic_range_matches_45_degree_formula_and_drag_shortens_range`のように
+    /// 着地x座標を直接assertすることはできない。代わりに同じ真空弾道物理から導出できる
+    /// 2つの不変量を確認する: (1) 飛翔時間(`body_pos_y`が0を上から下へ跨ぐ時刻)が
+    /// 解析解`T=2*v0*sin(θ)/g`と一致する、(2) 着地時の速さが射出速さ`v0`と一致する
+    /// (同一高度なのでエネルギー保存)、(3) 頂点(最小速度点)の速さが水平成分`v0*cos(θ)`と
+    /// 一致する。地面プレーンを置かず、床衝突なしで自由落下させることで着地判定を
+    /// 「y=0を跨いだ最初のステップ」という単純な走査で済ませている。
+    #[test]
+    fn run_headless_scenario_ballistic_flight_matches_analytic_time_of_flight_and_landing_speed() {
+        let v0 = 20.0;
+        let theta: f64 = std::f64::consts::FRAC_PI_4; // 45°(最大到達距離)
+        let g = 9.80665;
+        let dt = 0.008333333;
+        let vx = v0 * theta.cos();
+        let vy = v0 * theta.sin();
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d2-ballistic",
+          "world": {{ "gravity": {g}, "dt": {dt} }},
+          "bodies": [
+            {{ "shape": {{ "sphere": {{ "radius": 0.1 }} }},
+              "material": "鋼(炭素鋼)",
+              "linear_velocity": [{vx}, {vy}, 0.0],
+              "name": "shell" }}
+          ],
+          "probes": [ {{ "body_pos_y": "shell" }}, {{ "body_speed": "shell" }} ]
+        }}
+        "#,
+        );
+
+        // プローブ履歴はリングバッファ(容量`DEFAULT_PROBE_CAPACITY`=600、`run_headless_scenario`
+        // 参照)なので、着地ステップ(解析値T≈2.885s→step≈346)より前の区間が上書きされて
+        // インデックスと絶対時刻の対応がずれないよう、stepsは容量以下に収める。
+        let steps = 500;
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let pos_y = &result.probe_histories[0];
+        let speed = &result.probe_histories[1];
+
+        let landing_step = (1..pos_y.len())
+            .find(|&i| pos_y[i] <= 0.0 && pos_y[i - 1] > 0.0)
+            .expect("ballistic flight should return to y=0 within the simulated window");
+        // `history[i]`はstep(i+1)後の値(`World::step`のプローブサンプリングは
+        // `clock.advance()`の後、`sim-world/src/lib.rs`参照)なので絶対時刻は`(i+1)*dt`。
+        let landing_time = (landing_step + 1) as f64 * dt;
+        let analytic_time_of_flight = 2.0 * v0 * theta.sin() / g;
+        let time_rel_err = (landing_time - analytic_time_of_flight).abs() / analytic_time_of_flight;
+        assert!(
+            time_rel_err < 0.01,
+            "D2: time-of-flight landing_time={landing_time} analytic={analytic_time_of_flight} \
+             rel_err={time_rel_err:.4}"
+        );
+
+        let landing_speed = speed[landing_step];
+        let landing_speed_rel_err = (landing_speed - v0).abs() / v0;
+        assert!(
+            landing_speed_rel_err < 0.02,
+            "D2: landing speed should match launch speed in vacuum (energy conservation): \
+             landing_speed={landing_speed} v0={v0} rel_err={landing_speed_rel_err:.4}"
+        );
+
+        let apex_speed = speed[..=landing_step]
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let analytic_apex_speed = v0 * theta.cos();
+        let apex_rel_err = (apex_speed - analytic_apex_speed).abs() / analytic_apex_speed;
+        assert!(
+            apex_rel_err < 0.02,
+            "D2: apex speed should match the horizontal velocity component: \
+             apex_speed={apex_speed} analytic={analytic_apex_speed} rel_err={apex_rel_err:.4}"
+        );
+    }
+
     /// `probes[].body_pos_y`が`bodies[].name`のいずれとも一致しない場合は
     /// `SceneError::UnknownBodyName`。
     #[test]
