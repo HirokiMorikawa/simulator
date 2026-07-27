@@ -168,8 +168,8 @@
   水塊+床の境界粒子を構築)、`THREE.Points`で粒子位置を毎フレーム可視化した。
   残りは複数フレームの階層ドリルインUI・自由配線の回路エディタ本体・
   シーンJSON Import・ブックマークのエクスポート/インポート・Replay再生実行等
-  (このうち複数フレームの階層ドリルインUI・シーンJSON Importは後述のとおり
-  この後の増分で実装済み)。
+  (このうち複数フレームの階層ドリルインUI・シーンJSON Import・Replay再生
+  実行は後述のとおりこの後の増分で実装済み)。
   さらにヘッドレスランナーの5本目の適用例としてD2弾道(45°射出)をシーンJSON化した——
   `ProbeTarget`に水平位置(range)を読める種別が無いため着地x座標を直接読む
   ことはできず、代わりに飛翔時間(解析解$T=2v_0\sin\theta/g$)・着地速さ
@@ -203,9 +203,16 @@
   鎖状にネストしたフレームを組み立てられるようにした(新規`sim_core::
   FrameTree::frame_count`+`sim_wasm`の`add_child_frame`/`frame_parent_index`/
   `frame_world_position_f32`/`frame_world_rotation_f32`)。Playwrightで3段
-  ネストの構築とScene View上での連鎖的な回転表示を確認した。
-- **次**: ワークストリームDの継続(自由配線回路エディタ・Replay再生実行等)を
-  軸に、ワークストリームC残り(R4、完全な
+  ネストの構築とScene View上での連鎖的な回転表示を確認した。続けてReplay
+  再生実行も実装した——`CommandLogEntry`を表示専用文字列ではなく判別共用体の
+  構造化データとして保持するよう再設計した上で、Replaysタブに「▶ Replay実行
+  (検証)」ボタンを追加し、記録済み`commandLog`を既定シーンの新規`WasmWorld`
+  へステップ番号どおりに再送、最終`state_hash`がライブなシーンと一致するかを
+  検証する(ヘッドレスなテキスト報告、Scene View上のライブ再生ではない)。
+  Playwrightで、Nudge→ヒーターon/off→Replay実行の順に操作し、再生後の
+  Box_1位置・state_hashが実際に一致することを確認した。
+- **次**: ワークストリームDの継続(自由配線回路エディタ・ブックマークの
+  エクスポート/インポート等)を軸に、ワークストリームC残り(R4、完全な
   分光レンダリング・コースティクス・マルチスキャッタリング)は機を見て並行
   して進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`
   参照。
@@ -1527,7 +1534,29 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       ことを確認した。Export/Importは異なるスキーマ(Exportは表示専用、
       Importは`Scenario`スキーマ)のため自分自身のExport結果をそのまま
       Importし直すことはできない(意図的な非対称、上記コード内コメント参照)。
-      ブックマークのエクスポート・Replayのインポート/再生実行は未実装)
+      **Replay再生実行(本増分で追加)**: `CommandLogEntry`を(表示用の
+      整形済み文字列`detail`のみを保持していたのを)判別共用体として
+      構造化データのまま保持するよう再設計した(表示専用の文字列化は
+      `formatCommandLogDetail`に一本化)。Replaysタブに「▶ Replay実行
+      (検証)」ボタンを追加——記録済み`commandLog`を、既定シーン(床+箱のみ、
+      `WasmWorld`のコンストラクタが構築するもの)を持つ新規`WasmWorld`へ
+      ステップ番号どおりに再送し、最終`state_hash`が現在のライブなシーンと
+      一致するかを検証する(縮約実装: Scene View上のライブな視覚的再生では
+      なく、ヘッドレスに再実行して結果をテキスト報告する形——`world`を
+      ライブで差し替えるとScene View/Hierarchy/Inspector等の大部分の配線を
+      作り直す必要があり影響範囲が大きいため見送った)。Grab/Release/
+      ApplyForce/SetSwitchは常に再現できるが、SetMotorTarget(スポーンした
+      モーターアームが対象)は新規Worldにそのボディが存在しないため
+      `bodyIndex`が範囲外なら無視する(既知の限定、`sceneChanged`で明示)。
+      SetHeatSourceは`on`/`watts`から再送区間(on→offの間、毎step
+      `push_heat_source`を再送)を再構成する。MoveGrab(ドラッグ中の連続更新)
+      はそもそも記録していないため、再生されるのはGrabの初期アンカー位置のみ。
+      Playwrightで、Nudge→ヒーターon→off→Replay実行の順に操作し、
+      「3件のコマンドを497stepにわたって再生」+再生後のBox_1位置が現在の
+      ライブなシーンと厳密一致+「state_hashが一致——決定論的に同じ結果を
+      再現しました」と表示されることを確認した(スポーン/Importが無い場合の
+      決定論的再現性を実地で検証)。
+      ブックマークのエクスポート/インポートは未実装)
 - [x] Undo / Redo(Edit モードのみ)
       (Gizmoドラッグ(Translate/Rotateいずれも)開始のたびに直前の位置/姿勢を
       単純なスタック(判別共用体、上限20件)へ積み、Toolbarの

@@ -145,6 +145,27 @@ type SceneBodyExport = {
 type SceneExportRef = { current: (() => SceneBodyExport[]) | null };
 type SceneImportRef = { current: ((json: string) => number) | null };
 
+// Replay再生実行(設計docs/23-frontend/01-editor.md §1.6「Replays」)。記録済みの
+// `commandLog`を、既定シーン(床+箱のみ、`WasmWorld`のコンストラクタが構築する
+// もの)を持つ新規`WasmWorld`へステップ番号どおりに再送し、実際に同じ入力列を
+// 再実行できることを検証する(縮約実装: Scene Viewでのライブな視覚的再生では
+// なく、ヘッドレスに再実行して最終状態を報告するテキストベースの検証——
+// `world`をライブで差し替えるとScene View/Hierarchy/Inspector等の大部分の
+// 配線をworldへの可変参照へ作り直す必要があり影響範囲が大きいため見送った)。
+// スポーン/Importでボディが増えているとスポーン由来のCommand(モーター等)を
+// 再現できない(`sceneChanged`で明示)。
+type ReplayVerifyResult = {
+  totalSteps: number;
+  commandCount: number;
+  sceneChanged: boolean;
+  finalStateHash: string;
+  finalBoxPosition: [number, number, number];
+  liveStateHash: string;
+  liveBoxPosition: [number, number, number];
+  matches: boolean;
+};
+type ReplayVerifyRef = { current: (() => ReplayVerifyResult) | null };
+
 // Import側のシーンJSONパース(`sim_world::scenario::ShapeJson`のJSON表現と同じ
 // タグ付きオブジェクト形)。`world.import_scene_json`はボディの追加自体は行うが
 // (返り値は追加件数のみ)、Scene Viewが各ボディに対応するThree.jsメッシュを
@@ -376,11 +397,53 @@ function updateInspectorTransformFields(
 // 再送する継続的な内部動作(縮約実装、モジュールdoc参照)のため、切替の
 // 瞬間だけを記録し、各subStepの再送そのものは記録しない(記録が単調に
 // 膨れ上がるのを避ける、ユーザーの実際の操作単位に対応させる設計)。
-type CommandLogEntry = { t: number; step: number; kind: string; detail: string };
+//
+// 各コマンドの実際のパラメータを判別共用体として構造化データのまま保持する
+// (以前は呼び出し側が組み立てた表示用文字列`detail`のみを保持していたが、
+// Replay再生実行(`replayCommandLogHeadless`)には実際のパラメータそのものが
+// 要るため、この増分で構造化した——表示用の文字列化は`formatCommandLogDetail`
+// に一本化)。
+type CommandLogEntry =
+  | { t: number; step: number; kind: "Grab"; targetX: number; targetY: number; targetZ: number }
+  | { t: number; step: number; kind: "Release" }
+  | { t: number; step: number; kind: "ApplyForce"; fx: number; fy: number; fz: number }
+  | {
+      t: number;
+      step: number;
+      kind: "SetMotorTarget";
+      bodyIndex: number;
+      bodyLabel: string;
+      targetAngle: number;
+    }
+  | { t: number; step: number; kind: "SetSwitch"; closed: boolean }
+  | { t: number; step: number; kind: "SetHeatSource"; on: boolean; watts: number };
 const commandLog: CommandLogEntry[] = [];
 
-function logCommand(world: WasmWorld, kind: string, detail: string) {
-  commandLog.push({ t: world.time(), step: Number(world.step_count()), kind, detail });
+// `Omit<Union, K>`はTypeScriptでは判別共用体を分配せず、各variant固有の
+// フィールド(targetX/fx/closed等)が消えてしまう既知の挙動のため、分配版の
+// Omitを自前で定義する(`T extends any ? ... : never`は条件型がunion型の各
+// メンバーへ分配して適用される性質を利用する標準的なパターン)。
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
+
+function pushCommandLog(world: WasmWorld, entry: DistributiveOmit<CommandLogEntry, "t" | "step">) {
+  commandLog.push({ ...entry, t: world.time(), step: Number(world.step_count()) } as CommandLogEntry);
+}
+
+function formatCommandLogDetail(entry: CommandLogEntry): string {
+  switch (entry.kind) {
+    case "Grab":
+      return `body=Box_1 anchor=(${entry.targetX.toFixed(3)},${entry.targetY.toFixed(3)},${entry.targetZ.toFixed(3)})`;
+    case "Release":
+      return "body=Box_1";
+    case "ApplyForce":
+      return `body=Box_1 force=(${entry.fx},${entry.fy},${entry.fz})`;
+    case "SetMotorTarget":
+      return `body=${entry.bodyLabel} theta_target=${entry.targetAngle.toFixed(3)}`;
+    case "SetSwitch":
+      return `closed=${entry.closed}`;
+    case "SetHeatSource":
+      return `toggled ${entry.on ? "on" : "off"} (${entry.watts}W)`;
+  }
 }
 
 function setUpProjectDrawer(
@@ -388,6 +451,7 @@ function setUpProjectDrawer(
   circuitRef: CircuitRef,
   sceneExportRef: SceneExportRef,
   sceneImportRef: SceneImportRef,
+  replayVerifyRef: ReplayVerifyRef,
 ) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
@@ -546,10 +610,32 @@ function setUpProjectDrawer(
       URL.revokeObjectURL(url);
     });
     body.appendChild(exportButton);
+
+    const replayButton = document.createElement("button");
+    replayButton.textContent = "▶ Replay実行(検証)";
+    replayButton.title =
+      "記録済みコマンドを既定シーン(床+箱)の新規Worldへ再送し、最終状態が現在のシーンと一致するか検証する";
+    const replayStatus = document.createElement("p");
+    replayButton.addEventListener("click", () => {
+      if (!replayVerifyRef.current) return;
+      const result = replayVerifyRef.current();
+      const boxText = (p: [number, number, number]) => `(${p[0].toFixed(3)}, ${p[1].toFixed(3)}, ${p[2].toFixed(3)})`;
+      replayStatus.textContent =
+        `${result.commandCount}件のコマンドを${result.totalSteps}stepにわたって再生。` +
+        `再生後Box_1位置=${boxText(result.finalBoxPosition)} (現在のシーン: ${boxText(result.liveBoxPosition)})。` +
+        (result.sceneChanged
+          ? "現在のシーンはスポーン/Importで初期状態から変更されているため一致は期待できません。"
+          : result.matches
+            ? "state_hashが一致——決定論的に同じ結果を再現しました。"
+            : "state_hashが一致しませんでした。");
+    });
+    body.appendChild(replayButton);
+    body.appendChild(replayStatus);
+
     const list = document.createElement("ul");
     for (const entry of commandLog) {
       const item = document.createElement("li");
-      item.textContent = `[step ${entry.step}, t=${entry.t.toFixed(3)}s] ${entry.kind}: ${entry.detail}`;
+      item.textContent = `[step ${entry.step}, t=${entry.t.toFixed(3)}s] ${entry.kind}: ${formatCommandLogDetail(entry)}`;
       list.appendChild(item);
     }
     body.appendChild(list);
@@ -645,6 +731,7 @@ async function setUpSceneView(
   circuitRef: CircuitRef,
   sceneExportRef: SceneExportRef,
   sceneImportRef: SceneImportRef,
+  replayVerifyRef: ReplayVerifyRef,
 ) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -1157,7 +1244,7 @@ async function setUpSceneView(
         dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
         const p = world.body_position_at_f32(BODY_INDEX_BOX);
         world.push_grab(p[0], p[1], p[2]);
-        logCommand(world, "Grab", `body=Box_1 anchor=(${p[0].toFixed(3)},${p[1].toFixed(3)},${p[2].toFixed(3)})`);
+        pushCommandLog(world, { kind: "Grab", targetX: p[0], targetY: p[1], targetZ: p[2] });
       }
     }
     if (dragMode === "rotate") {
@@ -1206,7 +1293,7 @@ async function setUpSceneView(
     if (isDragging) {
       if (dragMode === "grab") {
         world.push_release();
-        logCommand(world, "Release", "body=Box_1");
+        pushCommandLog(world, { kind: "Release" });
       }
     } else if (pointerDownHit) {
       selectBody(pointerDownHit.picked.bodyIndex);
@@ -1412,6 +1499,74 @@ async function setUpSceneView(
     return count;
   };
 
+  // Replay再生実行(`ReplayVerifyRef`のdoc参照)。記録済み`commandLog`を、
+  // 既定シーン(床+箱のみ)を持つ新規`WasmWorld`へステップ番号どおりに再送する。
+  // Grab/Release/ApplyForce/SetSwitch/SetHeatSourceはWasmWorldのコンストラクタが
+  // 必ず用意する固定ボディ/回路/熱ノードが対象なので常に再現できるが、
+  // SetMotorTarget(スポーンしたモーターアームが対象)は新規Worldにその
+  // ボディが存在しないため`bodyIndex`が範囲外なら無視する(縮約実装、既知の
+  // 限定——`sceneChanged`で呼び出し側に伝える)。MoveGrab(ドラッグ中の連続更新)
+  // は元々記録していないため、再生されるのはGrabの初期アンカー位置のみ。
+  replayVerifyRef.current = () => {
+    const replayWorld = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
+    const totalSteps = Number(world.step_count());
+    const sceneChanged = world.body_count() !== 2;
+
+    const commandsByStep = new Map<number, CommandLogEntry[]>();
+    for (const entry of commandLog) {
+      const list = commandsByStep.get(entry.step) ?? [];
+      list.push(entry);
+      commandsByStep.set(entry.step, list);
+    }
+
+    let heaterOn = false;
+    let heaterWatts = 0;
+    for (let s = 0; s < totalSteps; s++) {
+      for (const entry of commandsByStep.get(s) ?? []) {
+        switch (entry.kind) {
+          case "Grab":
+            replayWorld.push_grab(entry.targetX, entry.targetY, entry.targetZ);
+            break;
+          case "Release":
+            replayWorld.push_release();
+            break;
+          case "ApplyForce":
+            replayWorld.push_apply_force(entry.fx, entry.fy, entry.fz);
+            break;
+          case "SetMotorTarget":
+            if (entry.bodyIndex < replayWorld.body_count()) {
+              replayWorld.set_motor_target_at(entry.bodyIndex, entry.targetAngle);
+            }
+            break;
+          case "SetSwitch":
+            replayWorld.set_circuit_switch_closed(entry.closed);
+            break;
+          case "SetHeatSource":
+            heaterOn = entry.on;
+            heaterWatts = entry.watts;
+            break;
+        }
+      }
+      if (heaterOn) replayWorld.push_heat_source(heaterWatts);
+      replayWorld.step();
+    }
+
+    const finalBoxPos = replayWorld.body_position_at_f32(BODY_INDEX_BOX);
+    const liveBoxPos = world.body_position_at_f32(BODY_INDEX_BOX);
+    const finalStateHash = replayWorld.state_hash();
+    const liveStateHash = world.state_hash();
+    return {
+      totalSteps,
+      commandCount: commandLog.length,
+      sceneChanged,
+      finalStateHash,
+      finalBoxPosition: [finalBoxPos[0], finalBoxPos[1], finalBoxPos[2]],
+      liveStateHash,
+      liveBoxPosition: [liveBoxPos[0], liveBoxPos[1], liveBoxPos[2]],
+      matches: !sceneChanged && finalStateHash === liveStateHash,
+    };
+  };
+
   document.getElementById("btn-spawn-sphere")!.addEventListener("click", () => {
     const { x, z } = nextSpawnPosition();
     const material = spawnMaterialSelect.value;
@@ -1589,7 +1744,7 @@ async function setUpSceneView(
   const NUDGE_FORCE_NEWTONS = 400_000.0;
   nudgeButton.addEventListener("click", () => {
     world.push_apply_force(0.0, NUDGE_FORCE_NEWTONS, 0.0);
-    logCommand(world, "ApplyForce", `body=Box_1 force=(0,${NUDGE_FORCE_NEWTONS},0)`);
+    pushCommandLog(world, { kind: "ApplyForce", fx: 0.0, fy: NUDGE_FORCE_NEWTONS, fz: 0.0 });
     if (forceOverlayToggle.checked) {
       const p = world.body_position_at_f32(BODY_INDEX_BOX);
       showForceOverlay(new THREE.Vector3(p[0], p[1], p[2]), new THREE.Vector3(0.0, NUDGE_FORCE_NEWTONS, 0.0));
@@ -1602,23 +1757,25 @@ async function setUpSceneView(
     const next = current === MOTOR_TARGET_LOW ? MOTOR_TARGET_HIGH : MOTOR_TARGET_LOW;
     world.set_motor_target_at(selectedBodyIndex, next);
     currentMotorTarget.set(selectedBodyIndex, next);
-    logCommand(
-      world,
-      "SetMotorTarget",
-      `body=${world.body_label_at(selectedBodyIndex)} theta_target=${next.toFixed(3)}`,
-    );
+    pushCommandLog(world, {
+      kind: "SetMotorTarget",
+      bodyIndex: selectedBodyIndex,
+      bodyLabel: world.body_label_at(selectedBodyIndex),
+      targetAngle: next,
+    });
   });
 
   circuitSwitchToggle.addEventListener("change", () => {
     world.set_circuit_switch_closed(circuitSwitchToggle.checked);
-    logCommand(world, "SetSwitch", `closed=${circuitSwitchToggle.checked}`);
+    pushCommandLog(world, { kind: "SetSwitch", closed: circuitSwitchToggle.checked });
   });
 
   heaterToggle.addEventListener("change", () => {
     // ヒーター自体の`Command::SetHeatSource`は`frame()`ループが毎subStep
     // 再送する(モジュールdoc「1step分だけ効く」縮約セマンティクス参照)ため
-    // ここでは記録しない——ユーザーが行った「切替」という離散操作のみ記録する。
-    logCommand(world, "SetHeatSource", `toggled ${heaterToggle.checked ? "on" : "off"} (${HEATER_WATTS}W)`);
+    // ここでは記録しない——ユーザーが行った「切替」という離散操作のみ記録する
+    // (Replay再生実行はこの`on`/`watts`から再送区間を再構成する)。
+    pushCommandLog(world, { kind: "SetHeatSource", on: heaterToggle.checked, watts: HEATER_WATTS });
   });
 
   const inspectorPosition = new THREE.Vector3();
@@ -1794,7 +1951,8 @@ function main() {
   const circuitRef: CircuitRef = { current: null };
   const sceneExportRef: SceneExportRef = { current: null };
   const sceneImportRef: SceneImportRef = { current: null };
-  setUpProjectDrawer(materialsRef, circuitRef, sceneExportRef, sceneImportRef);
+  const replayVerifyRef: ReplayVerifyRef = { current: null };
+  setUpProjectDrawer(materialsRef, circuitRef, sceneExportRef, sceneImportRef, replayVerifyRef);
   setUpSceneView(
     updateProbeGraph,
     appendConsoleEntries,
@@ -1803,6 +1961,7 @@ function main() {
     circuitRef,
     sceneExportRef,
     sceneImportRef,
+    replayVerifyRef,
   ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
