@@ -372,6 +372,16 @@
   ユーザーとの相談の結果、①品質是正(Q1–Q8)を先に②Q1はコード変更ではなく
   設計書改訂(`docs/20-integration/`に1step遅れを正式な縮約として明記)で
   閉じる、の2点を決定し、この順で増分を進める。
+  **Q1(増分1-1)は完了**: `docs/20-integration/01-coupling-matrix.md` §4に
+  実装時確認の注記を追加した。調査の結果、この1step遅れ自体は`sim-coupling`の
+  該当実装(`induction_coupling.rs`・`motor_coupling.rs`・`grid_fluid_rigid.rs`・
+  `sph_rigid.rs`)側では既に「1step遅れの縮約」として一貫して文書化・実測
+  (`InductionCoupling`はrel_err0.019%)されており、コード衛生としては元々
+  健全だった——欠けていたのは design 側(coupling-matrix.md §4)がこの縮約を
+  反映しないまま pre/post 2相分離を「実装済み」であるかのように書いていたこと
+  だけだった。DoD⑤の手順どおり設計書を実装に合わせて改訂し、将来のLie-Trotter
+  完全実装は目標仕様として残しつつ現状を正式な現状として明記した。コード変更
+  なし・既存テストへの影響なし。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -2652,7 +2662,7 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
 
 | # | 箇所 | 内容 | 状況 |
 |---|---|---|---|
-| Q1 | `sim-world/src/lib.rs:38,1181-1189` | CouplingがLie-Trotter分割ではなく1step遅れで適用 | 設計書改訂で対応予定(増分1) |
+| Q1 | `sim-world/src/lib.rs:38,1181-1189` | CouplingがLie-Trotter分割ではなく1step遅れで適用 | **設計書改訂で対応済み**(`docs/20-integration/01-coupling-matrix.md` §4に注記追加、InductionCouplingの実測rel_err0.019%等を明記) |
 | Q2 | `sim-mechanics/src/solver.rs:46-65` | 接触散逸が真値より系統的に約9%過大 | 対応予定(増分1) |
 | Q3 | `sim-coupling/src/convection_link.rs:12` | MAC食い違い格子のu/vを同一インデックスでペアリング(半セルずれ) | 対応予定(増分1) |
 | Q4 | `sim-mechanics/src/collision.rs:6-8` | マニフォールド持続化が無く多段スタックの貫入がslopを超える | 対応予定(増分1) |

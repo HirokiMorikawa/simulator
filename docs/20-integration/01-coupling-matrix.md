@@ -90,6 +90,44 @@ Coupling(post): DissipationToHeat, JouleHeat, ConvectionLink,
 
 順序は固定・文書化(決定論の一部)。pre は「力を作る」、post は「結果を配る」。
 
+> **実装時確認・設計改訂(2026-07-27、`sim-world::World`実装)**: 上記の pre/post
+> 2 相分離は`World::step()`には実装されていない。実際の`World::step()`
+> (`crates/sim-world/src/lib.rs::step`)は、全ドメインソルバ(mechanics → thermal →
+> em_electrostatics → astro → circuit → sph → grid_fluid)を1回ずつ進めた**後**に、
+> 登録済み全`Coupling`を(pre/post の区別なく)登録順で1回ずつ適用する
+> (`World::add_coupling`/`apply_coupling`のdoc参照)。
+>
+> この結果、**design上「post」に分類される結合(直近stepで確定した量を読む —
+> `DissipationToHeat`・`JouleHeat`・`ConvectionLink`等)は設計どおり正しく機能する**が、
+> **design上「pre」に分類される結合(力・速度を注入し同stepの位置積分に反映される
+> べき — `BuoyancyDrag`・`LorentzForce`・`BrownianForce`・`BoussinesqBuoyancy`・
+> `MotorCoupling`の電気→トルク・`PistonGas`の圧力→力)は、その注入が次の`step()`まで
+> 反映されない「1step遅れ」が生じる**。つまり実装は本節の pre/post 2 相分離ではなく、
+> 全結合を毎ステップ1回・post相当のタイミングで適用する**縮約版**であり、
+> §2 規則3「弱結合(operator splitting)が既定、各ステップで前ステップ確定値を読む」を
+> 一貫して満たすものの、pre 結合についてはその適用が1ステップぶん余分に遅れる
+> (Lie-Trotter分割が本来求める「同stepの解に反映される」という性質は満たさない)。
+>
+> `sim-coupling`の該当実装(`induction_coupling.rs`・`motor_coupling.rs`・
+> `grid_fluid_rigid.rs`・`sph_rigid.rs`)は、実装当初からこれを「1step遅れの縮約」
+> として各モジュールdocに明記済みで、影響も実測してある: `InductionCoupling`は
+> 遅れの無い自己無撞着な明示的Eulerに対し実測rel_err **0.019%**(E7自体の許容誤差
+> より小さい)。`MotorCoupling`は駆動体が`Kinematic`(角速度が毎step確定的)の
+> ケースでは遅れによる誤差がそもそも生じない。一般に、**$dt \ll \tau$(結合の時定数)
+> であれば1step遅れの誤差は無視できる**——これは弱結合の項別分離誤差
+> $O(dt)$(Lie-Trotter分割の理論誤差 $O(\Delta t^2)$、
+> [00-foundation/04](../00-foundation/04-architecture.md) §1.3)に、1ステップぶんの
+> 追加位相遅れが乗る形なので、$dt$が結合の時定数に対して十分小さい限り同じオーダーに
+> 留まる。既知の要注意組(結合が強い/時定数が短い)は、本節§2規則3が既に定める
+> **stiff検出テスト(X1/X2)**でカバーする(発振・発散の兆候が出れば「このテストが
+> Red になったら対処」という既定の運用に乗る)。
+>
+> ロードマップ横断ルール「実装が設計から乖離したら設計書を先に改訂する」に従い、
+> **本節の pre/post 2 相分離は将来のLie-Trotter完全実装に向けた目標仕様として残しつつ、
+> 現状の`World::step()`は「全結合を毎ステップ1回・post相当のタイミングで適用する
+> 縮約版」であることをここに正式な現状として明記する**。pre/post 分離の実装(および
+> それに伴う決定論・性能への影響の再検証)は後続増分とする。
+
 ## 5. 検証(結合固有)
 
 - 各 Coupling 単体のエネルギー・運動量収支テスト(ドメイン文書の §7 に個別基準)。
