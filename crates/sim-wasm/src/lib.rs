@@ -627,6 +627,85 @@ impl WasmWorld {
         )
     }
 
+    /// 全フレーム数(ROOT含む、`sim_core::FrameTree::frame_count`の素通し)。
+    /// フレーム階層ドリルインUI(Hierarchyの「Frames」サブツリー)がフレーム
+    /// 一覧を列挙するために使う。
+    pub fn frame_count(&self) -> usize {
+        self.inner.frames().frame_count()
+    }
+
+    /// `frame_index`番目のフレームの親のindex。ROOT自身(index 0)は親を
+    /// 持たないため`-1`を返す(フレーム階層ドリルインUIがツリー構造を
+    /// 組み立てるための情報)。
+    pub fn frame_parent_index(&self, frame_index: usize) -> i32 {
+        match self
+            .inner
+            .frames()
+            .frame(FrameId(frame_index as u32))
+            .parent
+        {
+            Some(parent) => parent.0 as i32,
+            None => -1,
+        }
+    }
+
+    /// `frame_index`番目のフレームのROOT(ワールド)座標系での位置
+    /// (`sim_core::FrameTree::transform_to_root`)。`frame_rotation_at_f32`
+    /// (親フレームからの相対回転のみ、単一のROOT直下フレームを想定していた
+    /// 旧API)と異なり、複数フレームが親子関係を持つ場合(フレーム階層
+    /// ドリルインUI)でも階層を遡って合成した実際のワールド位置を返す。
+    pub fn frame_world_position_f32(&self, frame_index: usize) -> Float32Array {
+        let position = self
+            .inner
+            .frames()
+            .transform_to_root(FrameId(frame_index as u32))
+            .position;
+        Float32Array::from(&[position.x as f32, position.y as f32, position.z as f32][..])
+    }
+
+    /// `frame_index`番目のフレームのROOT(ワールド)座標系での姿勢
+    /// (`frame_world_position_f32`と同じ理由で`transform_to_root`を使う)。
+    pub fn frame_world_rotation_f32(&self, frame_index: usize) -> Float32Array {
+        let rotation = self
+            .inner
+            .frames()
+            .transform_to_root(FrameId(frame_index as u32))
+            .rotation;
+        Float32Array::from(
+            &[
+                rotation.x as f32,
+                rotation.y as f32,
+                rotation.z as f32,
+                rotation.w as f32,
+            ][..],
+        )
+    }
+
+    /// フレーム階層ドリルインUI(設計docs/23-frontend/01-editor.md §1.3
+    /// 「フレームサブモード」)向けに、任意の既存フレーム(`parent_index`、
+    /// 0=ROOT)の子として新規フレームを追加する(`add_rotating_frame`の
+    /// 一般化——親をROOT固定ではなく任意に選べる)。`origin_offset_*`は
+    /// 親フレーム内での原点位置(Scene View上でネストしたフレームが重ならない
+    /// よう、呼び出し側が親からのオフセットを指定する)。返り値は新規フレームの
+    /// index(`frame_world_position_f32`/`frame_world_rotation_f32`に渡す)。
+    pub fn add_child_frame(
+        &mut self,
+        parent_index: usize,
+        origin_offset_x: f64,
+        origin_offset_y: f64,
+        origin_offset_z: f64,
+        angular_velocity_z: f64,
+    ) -> usize {
+        let id = self.inner.add_frame(
+            FrameId(parent_index as u32),
+            Vec3::new(origin_offset_x, origin_offset_y, origin_offset_z),
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, angular_velocity_z),
+        );
+        id.0 as usize
+    }
+
     /// 流体場オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「流体場」の土台)
     /// 向けに、`sim_fluid::SphFluid`を有効化し、小さな水塊(3×3×3粒子)+その直下の
     /// 床(1層の境界粒子、`SphFluid::add_boundary_particle`)を追加する。二度目以降の

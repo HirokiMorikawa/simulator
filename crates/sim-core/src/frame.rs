@@ -64,6 +64,12 @@ impl FrameTree {
         }
     }
 
+    /// 全フレーム数(ROOT含む)。フレーム階層UI(Hierarchyのドリルイン)が
+    /// フレーム一覧を列挙するために使う。
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
     /// 新規フレームを追加する(木構造、閉路なし: 親は既存フレームのみ指定可能なため
     /// 構築時に自動的に閉路が排除される)。
     #[allow(clippy::too_many_arguments)]
@@ -305,6 +311,25 @@ mod tests {
         // ROOT自身は回転しない(親を持たないため`angular_velocity_in_parent`が無意味)。
         let root_probe = tree.frame(FrameId::ROOT).rotation_in_parent.rotate(probe);
         assert_eq!(root_probe, probe);
+    }
+
+    /// `frame_count`(フレーム階層ドリルインUIがフレーム一覧を列挙するための
+    /// 新規API)は、新規`FrameTree`ではROOTのみの1、フレームを追加するたびに
+    /// 1ずつ増えることを確認する(ネストした孫フレームでも同様)。
+    #[test]
+    fn frame_count_reflects_root_plus_added_frames() {
+        let mut tree = FrameTree::new();
+        assert_eq!(tree.frame_count(), 1);
+        let a = tree.add_frame(
+            FrameId::ROOT,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::ZERO,
+        );
+        assert_eq!(tree.frame_count(), 2);
+        let _b = tree.add_frame(a, Vec3::ZERO, Quat::IDENTITY, Vec3::ZERO, Vec3::ZERO);
+        assert_eq!(tree.frame_count(), 3);
     }
 
     /// 往復変換 $T_{B\to A}\circ T_{A\to B}=\mathrm{id}$(設計§7、abs 1e-12)。

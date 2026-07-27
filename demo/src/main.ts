@@ -225,7 +225,12 @@ function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => voi
 // Bodiesの兄弟としてJointsサブツリーも実装済み(振り子スポーンが追加した
 // DistanceJointのみが対象、`constraint_anchor_points_at`で判定)。
 // Circuits/Fluids/Probes/Framesはこれらのドメインが未接続のため未対応。
-function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): (index: number) => void {
+function setUpHierarchy(
+  world: WasmWorld,
+  onSelect: (index: number) => void,
+  selectedFrameIndex: number,
+  onSelectFrame: (frameIndex: number) => void,
+): (index: number) => void {
   const tree = document.getElementById("hierarchy-tree")!;
   tree.innerHTML = "";
   const root = document.createElement("li");
@@ -285,6 +290,38 @@ function setUpHierarchy(world: WasmWorld, onSelect: (index: number) => void): (i
     jointItem.textContent = "Joints";
     jointItem.appendChild(jointList);
     bodies.appendChild(jointItem);
+  }
+
+  // Frames(設計§1.1「シーングラフツリー(...Frames)」、フレーム階層ドリルイン
+  // UI)。index 0はROOT(常に存在、`add_child_frame`の既定の親候補だが、それ自体は
+  // クリック可能な項目として列挙しない)。1以上の各フレームについて、
+  // `frame_parent_index`(親子関係)から再帰的にネストした`<ul>`を組み立てる——
+  // 「階層ドリルイン」の名のとおり、クリックしたフレームを選択すると
+  // 「+ フレーム」ボタンがそのフレームの子として次のフレームを追加するようになる。
+  const frameCount = world.frame_count();
+  if (frameCount > 1) {
+    function buildFrameSubtree(parentIndex: number): HTMLUListElement {
+      const ul = document.createElement("ul");
+      ul.className = "tree-nested";
+      for (let i = 1; i < frameCount; i++) {
+        if (world.frame_parent_index(i) !== parentIndex) continue;
+        const item = document.createElement("li");
+        item.textContent = `Frame ${i}`;
+        item.classList.add("tree-selectable");
+        item.classList.toggle("selected", i === selectedFrameIndex);
+        item.addEventListener("click", (event) => {
+          event.stopPropagation();
+          onSelectFrame(i);
+        });
+        item.appendChild(buildFrameSubtree(i));
+        ul.appendChild(item);
+      }
+      return ul;
+    }
+    const frameItem = document.createElement("li");
+    frameItem.textContent = "Frames";
+    frameItem.appendChild(buildFrameSubtree(0));
+    bodies.appendChild(frameItem);
   }
 
   root.appendChild(bodies);
@@ -733,16 +770,30 @@ async function setUpSceneView(
   // 床・箱)は対象外。
   const constraintOverlayToggle = document.getElementById("toggle-constraint-overlay") as HTMLInputElement;
 
-  // フレーム軸オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「フレーム
-  // サブモード」の土台)。ROOTの子としてz軸まわりに自転するフレームを1つ追加し
-  // (`World::add_frame`+`sim_core::FrameTree::step`が毎step自動的に回転を進める、
-  // `sim-world`側の増分参照)、その姿勢をAxesHelperで可視化する。
+  // フレーム軸オーバーレイ + 階層ドリルインUI(設計docs/23-frontend/01-editor.md
+  // §1.3「フレームサブモード」)。ROOTの子としてz軸まわりに自転するフレームを
+  // 1つ既定で追加し(`World::add_frame`+`sim_core::FrameTree::step`が毎step
+  // 自動的に回転を進める、`sim-world`側の増分参照)、以後Hierarchyの「Frames」
+  // サブツリーで選択したフレームの子として「+ フレーム」ボタンからネストした
+  // フレームを追加できる(`add_child_frame`——`add_rotating_frame`の一般化、
+  // 親をROOT固定ではなく任意に選べる)。各フレームは`frame_world_position_f32`/
+  // `frame_world_rotation_f32`(`FrameTree::transform_to_root`、階層を遡って
+  // 合成したワールド姿勢)で毎フレーム更新する専用の`THREE.AxesHelper`を持つ。
   const frameOverlayToggle = document.getElementById("toggle-frame-overlay") as HTMLInputElement;
   const FRAME_AXIS_ANGULAR_VELOCITY = 1.0; // rad/s(任意値、回転が目視できる速さ)
-  const rotatingFrameIndex = world.add_rotating_frame(FRAME_AXIS_ANGULAR_VELOCITY);
-  const frameAxesHelper = new THREE.AxesHelper(2.0);
-  frameAxesHelper.position.set(0, 3, 0); // 他のメッシュと重ならない高さ
-  scene.add(frameAxesHelper);
+  const FRAME_CHILD_OFFSET = 1.5; // 新規子フレームの親からのローカルオフセット(x軸方向)
+  const frameAxesHelpers = new Map<number, THREE.AxesHelper>();
+  let selectedFrameIndex = 0; // 0=ROOT(既定の親)。Hierarchyでフレームを選ぶと更新される。
+
+  function createFrameAxesHelper(frameIndex: number) {
+    const helper = new THREE.AxesHelper(2.0);
+    scene.add(helper);
+    frameAxesHelpers.set(frameIndex, helper);
+  }
+
+  const initialFrameIndex = world.add_child_frame(0, 0, 3, 0, FRAME_AXIS_ANGULAR_VELOCITY);
+  createFrameAxesHelper(initialFrameIndex);
+  selectedFrameIndex = initialFrameIndex;
 
   // 流体場オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「流体場」の土台)。
   // 「+ 流体」ボタンでSPH流体塊(`world.spawn_fluid_block`)をスポーンすると、
@@ -867,7 +918,14 @@ async function setUpSceneView(
     highlightHierarchy(index);
     motorToggleButton.disabled = mode === "edit" || !motorArmBodies.has(index);
   }
-  let highlightHierarchy = setUpHierarchy(world, selectBody);
+  // フレーム階層ドリルインUI(Hierarchyの「Frames」サブツリー): クリックした
+  // フレームを以後の「+ フレーム」ボタンの親候補にする(`selectedFrameIndex`は
+  // このスコープの外側で宣言済み)。
+  function selectFrame(frameIndex: number) {
+    selectedFrameIndex = frameIndex;
+    highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
+  }
+  let highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
   renderInspectorFor(world, selectedBodyIndex);
 
   // Scene Viewピック(設計docs/23-frontend/01-editor.md §1.2「クリックでbody/
@@ -1291,7 +1349,7 @@ async function setUpSceneView(
     scene.add(mesh);
     pickables.push({ mesh, bodyIndex });
     spawnedMeshes.set(bodyIndex, mesh);
-    highlightHierarchy = setUpHierarchy(world, selectBody);
+    highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
     selectBody(bodyIndex);
   }
 
@@ -1413,6 +1471,24 @@ async function setUpSceneView(
     fluidPositionAttribute = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
     fluidGeometry.setAttribute("position", fluidPositionAttribute);
     fluidPoints.visible = true;
+  });
+
+  // フレーム階層ドリルインUI: Hierarchyで選択中のフレーム(既定はROOTでは
+  // なく、起動時に追加した既定のフレーム——`selectedFrameIndex`の初期値)の
+  // 子として新規フレームを追加する。追加した新規フレームをそのまま選択状態に
+  // することで、連続クリックすると親→子→孫…と鎖状にネストしたフレームを
+  // 手軽に組み立てられる(選択を変えれば任意のフレームの下に分岐させることも
+  // できる)。
+  document.getElementById("btn-add-frame")!.addEventListener("click", () => {
+    const newFrameIndex = world.add_child_frame(
+      selectedFrameIndex,
+      FRAME_CHILD_OFFSET,
+      0,
+      0,
+      FRAME_AXIS_ANGULAR_VELOCITY,
+    );
+    createFrameAxesHelper(newFrameIndex);
+    selectFrame(newFrameIndex);
   });
 
   playButton.addEventListener("click", () => {
@@ -1583,11 +1659,17 @@ async function setUpSceneView(
     }
 
     if (frameOverlayToggle.checked) {
-      const rot = world.frame_rotation_at_f32(rotatingFrameIndex);
-      frameAxesHelper.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
-      frameAxesHelper.visible = true;
+      for (const [frameIndex, helper] of frameAxesHelpers) {
+        const pos = world.frame_world_position_f32(frameIndex);
+        const rot = world.frame_world_rotation_f32(frameIndex);
+        helper.position.set(pos[0], pos[1], pos[2]);
+        helper.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
+        helper.visible = true;
+      }
     } else {
-      frameAxesHelper.visible = false;
+      for (const helper of frameAxesHelpers.values()) {
+        helper.visible = false;
+      }
     }
 
     if (fluidPositionAttribute) {
