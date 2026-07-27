@@ -291,10 +291,17 @@
   ネイティブ実装と同じ判定ロジックで解析解と一致することを確認した
   (dt=1/2000だとプローブのリングバッファ容量600を超えるため、既定dt=1/120へ
   変更して収めた)。二重振り子のリプレイ決定論部分は`Scenario`と無関係な
-  検証のため対象外。
+  検証のため対象外。続けてヘッドレスランナーの13本目の適用例として
+  D26帯電風船もシーンJSON化した——これまで保留していた`couplings`セクション
+  (設計の例示JSONの`["buoyancy_drag", ...]`のような名前配列は`Coupling`
+  registry自体が未接続なため実装できないが、パラメータ付きで個別に`Coupling`
+  を構成する形なら可能と気づいた)を`couplings: Vec<CouplingJson>`として
+  最小の一歩(`ImageChargeForce`のみ対応、他13種は後続増分)を踏み出し、
+  `demos.rs`のネイティブ実装と同じ2構成(鏡像力での壁への到達・逆二乗則)を
+  シーンJSON経由で再現した。
 - **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
-  マルチスキャッタリング)・さらなるヘッドレスランナー適用例・シーンJSON
-  `couplings`セクション(スキーマ未確定で保留)を機を見て進める。優先順位の
+  マルチスキャッタリング)・さらなるヘッドレスランナー適用例(`couplings`の
+  残り13種)を機を見て進める。優先順位の
   詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
@@ -2013,7 +2020,18 @@ Phase 4:
       ($F=-q^2/(16\pi\varepsilon_0d^2)$、平板近傍の点電荷、風船が壁に貼りつくデモ用に
       限定提供)を新規実装した`sim_coupling::ImageChargeForce`(10種目のCoupling)で、
       帯電した風船が壁に実際に引き寄せられて到達すること(定性)と、初期距離を2倍に
-      すると初期加速度が1/4になる逆二乗則を確認)
+      すると初期加速度が1/4になる逆二乗則を確認)。
+      **シーンJSON経由の13本目の適用例+スキーマ拡張(本増分で追加)**: これまで
+      `Scenario`に`sim-coupling`の`Coupling`実装(設計の例示JSONでは名前配列
+      `["buoyancy_drag", ...]`だが、`Coupling`registry自体が`World::step()`に
+      未接続なため——モジュールdoc冒頭参照)を構成する手段が全く無かった。
+      `couplings: Vec<CouplingJson>`を新設し、現時点では`ImageChargeForce`
+      (`{body, charge, plane_normal, plane_d}`)のみ対応する(他13種は後続増分、
+      この`couplings`セクション自体はまだ最小の一歩——排他結合検査等は対象外)。
+      `run_headless_scenario_charged_balloon_sticks_to_wall_matching_inverse_
+      square_law`として`demos.rs`のネイティブ実装と同じ2構成(定性: 鏡像力
+      のみで壁へ到達。逆二乗則: 初期距離2倍で初期加速度1/4)をシーンJSON経由で
+      再現した。
 
 Phase 5:
 

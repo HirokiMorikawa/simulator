@@ -74,6 +74,15 @@ pub struct Scenario {
     /// 既存の拘束体系に無関係な参照を割り込ませたくないため対象外)。
     #[serde(default)]
     pub joints: Vec<JointJson>,
+    /// `sim-coupling`の`Coupling`実装群(設計の例示JSONでは`["buoyancy_drag", ...]`の
+    /// ような名前配列だが、`sim-coupling`registry自体が未接続な設計の縮約状態
+    /// (モジュールdoc冒頭参照)を反映し、この実装では各`Coupling`をパラメータ付きで
+    /// 直接構成する形にする)。現時点では`ImageChargeForce`(D26帯電風船が要る鏡像力)
+    /// のみ対応——他13種は後続増分(この`couplings`セクション自体、設計が
+    /// 「排他結合検査」を要求する多対多の相互作用検証はまだ及ばない、最小の一歩)。
+    /// `joints`と同じ理由で`from_scenario`側のみで処理する。
+    #[serde(default)]
+    pub couplings: Vec<CouplingJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
@@ -247,6 +256,19 @@ pub enum JointJson {
     },
 }
 
+/// `Scenario::couplings`の1件(モジュールdoc「縮約実装の理由」参照 — 現時点で
+/// `ImageChargeForce`のみ対応)。
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouplingJson {
+    ImageChargeForce {
+        body: String,
+        charge: f64,
+        plane_normal: [f64; 3],
+        plane_d: f64,
+    },
+}
+
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
@@ -407,6 +429,27 @@ impl World {
                             anchor_b: array_to_vec3(*anchor_b),
                             length: *length,
                         });
+                }
+            }
+        }
+
+        for coupling in &scenario.couplings {
+            match coupling {
+                CouplingJson::ImageChargeForce {
+                    body,
+                    charge,
+                    plane_normal,
+                    plane_d,
+                } => {
+                    let id = body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    world.add_coupling(Box::new(sim_coupling::ImageChargeForce {
+                        body_index: id.index as usize,
+                        charge: *charge,
+                        plane_normal: array_to_vec3(*plane_normal),
+                        plane_d: *plane_d,
+                    }));
                 }
             }
         }
@@ -1249,6 +1292,85 @@ mod tests {
         assert!(
             rel_err < 0.01,
             "M3: measured_period={measured_period} analytic_period={analytic_period} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// D26(帯電風船): `demos.rs`の`d26_charged_balloon_sticks_to_wall_via_image_
+    /// charge_force_matching_inverse_square_law`と同じ2構成(定性: 鏡像力のみで
+    /// 壁へ到達する。逆二乗則: 初期距離2倍で初期加速度1/4)を`Scenario::couplings`
+    /// (`CouplingJson::ImageChargeForce`、本増分で追加したスキーマ拡張)経由で
+    /// 再現する。
+    #[test]
+    fn run_headless_scenario_charged_balloon_sticks_to_wall_matching_inverse_square_law() {
+        let charge = 1.0e-7; // 摩擦帯電した風船オーダー
+
+        // 定性: 壁から離れた位置で静止させた帯電風船が鏡像力のみで壁(x=0)へ到達する。
+        {
+            let json = r#"
+            {
+              "name": "d26-balloon-qualitative",
+              "world": { "gravity": 0.0, "dt": 0.008333333 },
+              "materials": [
+                { "extends": "木材(松)", "name": "d26-foam", "density": 30.0 }
+              ],
+              "bodies": [
+                { "shape": { "sphere": { "radius": 0.02 } }, "material": "d26-foam",
+                  "position": [0.2, 0, 0], "name": "balloon" }
+              ],
+              "couplings": [
+                { "image_charge_force": { "body": "balloon", "charge": 1.0e-7,
+                  "plane_normal": [1, 0, 0], "plane_d": 0 } }
+              ],
+              "probes": [ { "body_pos_x": "balloon" } ]
+            }
+            "#;
+            let result = run_headless_scenario(json, 6000).expect("valid scenario JSON");
+            let final_x = *result.probe_histories[0]
+                .last()
+                .expect("history should not be empty");
+            assert!(
+                final_x <= 0.03,
+                "D26 pass criterion (image charge qualitative): charged balloon should be \
+                 pulled to the wall by the image charge force: final_x={final_x}"
+            );
+        }
+
+        // 逆二乗則: 初期距離を2倍にすると初期加速度(=1step目の速度変化/dt)は1/4になる。
+        let initial_acceleration_at = |initial_x: f64| -> f64 {
+            let dt: f64 = 0.008333333;
+            let json = format!(
+                r#"
+            {{
+              "name": "d26-balloon-inverse-square",
+              "world": {{ "gravity": 0.0, "dt": {dt} }},
+              "bodies": [
+                {{ "shape": {{ "sphere": {{ "radius": 0.01 }} }},
+                  "material": "木材(松)",
+                  "position": [{initial_x}, 0, 0], "name": "balloon" }}
+              ],
+              "couplings": [
+                {{ "image_charge_force": {{ "body": "balloon", "charge": {charge},
+                  "plane_normal": [1, 0, 0], "plane_d": 0 }} }}
+              ],
+              "probes": [ {{ "body_speed": "balloon" }} ]
+            }}
+            "#
+            );
+            let result = run_headless_scenario(&json, 1).expect("valid scenario JSON");
+            let speed = *result.probe_histories[0]
+                .last()
+                .expect("history should not be empty");
+            speed / dt
+        };
+
+        let a_near = initial_acceleration_at(0.1);
+        let a_far = initial_acceleration_at(0.2);
+        let ratio = a_near / a_far;
+        let rel_err = (ratio - 4.0).abs() / 4.0;
+        assert!(
+            rel_err < 1e-6,
+            "D26 pass criterion (inverse square): doubling distance should quarter the \
+             initial acceleration: a_near={a_near} a_far={a_far} ratio={ratio}"
         );
     }
 
