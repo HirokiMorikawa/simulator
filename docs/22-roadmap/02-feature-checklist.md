@@ -414,6 +414,30 @@
   成功パスのみと判明した。エラーパス・`Float32Array`/`Float64Array`の中身の検証には
   `wasm-bindgen-test`(`wasm-pack test --node`等、現状このcrateにもCIにも無い)の
   導入が要ることを正直に記録し、スコープ外とした。
+  **続けてQ6・Q7・Q8を検証**した——**Q6・Q7は「実行時ガードを追加すると
+  かえって間違いになる」ことを実測で確認し、意図的にガードを追加しないという
+  判断をした**。Q6(`sim-statistical::BrownianParticleSet::step_baoab`のBAOAB積分器、
+  「γΔt/m≈17でrel_err≈760%」)について、既存の2テストで実際にγΔt/mを計算した
+  ところ、S4(自由拡散のMSD、γΔt/m≈0.171)は健全な一方、**S5(調和トラップの
+  分散、γΔt/m≈17.09)は「破綻する」とされた値と同じ桁でありながらrel<2%で
+  普通に成立している**ことを確認した——誤差は`γΔt/m`という単一パラメータでは
+  決まらず、無制限に蓄積する自由拡散のMSD測定と、有界な平衡分布の分散測定とで
+  破綻の仕方が本質的に異なるため。仮に閾値ガードを入れれば、S5のような正当な
+  使用を拒否するか、S4のような破綻を見逃すかのどちらかになり、**チェックリスト
+  作成時点の想定(「実行時ガードを追加すればよい」)自体が誤りだったと判明した**。
+  Q7(`sim-astro::relativity`の1PN線形近似、「c=20でrel_err≈14%」)も同じ構造の
+  誤り——A8のテスト自体が「本来観測不能な効果を見える大きさにするため意図的に
+  GM/c²比を誇張する」ことを目的としており、`c=20`という「破綻する」値は
+  **まさにその意図的な誇張の妥当な使用域**である。ガードを入れれば天体シミュ
+  レーションの正当な実験的用途(exaggerated parameter探索)自体を壊す。
+  両者とも、チェックリストの本行に検証結果を記録し、対応を見送る判断を明示した。
+  **Q8は実際に修正した**——`sim-thermal::ThermalSolver::step`のPCG非収束検知が
+  `debug_assert!`のみでreleaseビルドでは無検知だった件。`SolverContext::events`
+  (既存の`EventKind::SolverDiverged`——`sim-mechanics`の接触イベント等と同じ
+  仕組みが既にあったが使われていなかった)へ両ビルド一律で通知する形に変更し、
+  `debug_assert!`自体は撤去した(通知後も解自体は書き戻す、既存の設計判断を
+  維持)。4000ノード・コンダクタンスが12桁にわたって振動する悪条件な熱網を
+  実際に構成してPCGを収束失敗させ、イベントが積まれることを回帰テストで確認した。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -2699,9 +2723,9 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
 | Q3 | `sim-coupling/src/convection_link.rs:12` | MAC食い違い格子のu/vを同一インデックスでペアリング(半セルずれ) | **修正済み**(セル中心への補間に変更、`characteristic_speed_interpolates_staggered_components_to_cell_centers`で退行検知、既存2テストは一様流速のため無影響) |
 | Q4 | `sim-mechanics/src/collision.rs:6-8` | マニフォールド持続化が無く多段スタックの貫入がslopを超える | 対応予定(増分1) |
 | Q5 | `sim-wasm/src/lib.rs` | 呼び出し側到達可能な`panic!`が約13箇所+シーンexportが表現不能形状を無言で捨てる | **修正済み**(実際の調査で約29箇所——`panic!`/`unwrap_or_else(panic)`13箇所に加え、生スライスindexアクセス(`self.bookmarks[index]`等)・`sim_core::FrameTree`の境界チェック無しindexアクセスも同種のパニックであることが判明。26個の公開メソッドを`Result<T, JsValue>`化。wasm-bindgenは`Result<T,JsValue>`をTS側で`T`のまま(Errは通常の捕捉可能なJS例外)にバインドするため`demo/src/main.ts`は無変更で`npm run build`・Playwrightスモーク(スポーン6回)とも成功。あわせて`sim-wasm`(1280行、監査時点でテスト0本)に成功パス限定のユニットテスト6本を追加——調査の結果`JsValue`/`Float32Array`の**構築自体**がネイティブターゲットでabort/パニックすることが判明し、エラーパスのネイティブテストは不可能と判明、正直に記録した) |
-| Q6 | `sim-statistical/src/brownian.rs:90` | γΔt/m≈17でrel_err≈760%、実行時ガード無し | 対応予定(増分1) |
-| Q7 | `sim-astro/src/relativity.rs:103` | 1PN線形近似がc=20でrel_err≈14%まで破れる、範囲チェック無し | 対応予定(増分1) |
-| Q8 | `sim-thermal/src/lib.rs:161` | PCG非収束が`debug_assert!`のみ、releaseでは無検知 | 対応予定(増分1) |
+| Q6 | `sim-statistical/src/brownian.rs:90` | γΔt/m≈17でrel_err≈760%、実行時ガード無し | **ガードは追加しない、検証の上で判断**(下記参照) |
+| Q7 | `sim-astro/src/relativity.rs:103` | 1PN線形近似がc=20でrel_err≈14%まで破れる、範囲チェック無し | **ガードは追加しない、検証の上で判断**(下記参照) |
+| Q8 | `sim-thermal/src/lib.rs:161` | PCG非収束が`debug_assert!`のみ、releaseでは無検知 | **修正済み**(`debug_assert!`を廃し`SolverContext::events`へ`EventKind::SolverDiverged`を両ビルド一律で通知する形に変更。4000ノードの悪条件な熱網で実際にPCGを収束失敗させ、イベントが積まれることを回帰テストで確認) |
 | Q9 | `sim-em/src/fdtd.rs` | 吸収境界(PML)が無くPECのみ、エネルギーはε=μ=1決め打ちの正規化単位 | **既知の限界として維持**(モジュールdocに明記済み、Phase 5の残りとして`fdtd.rs`冒頭に記載) |
 | Q10 | `sim-coupling/src/phase_change_morph.rs:20` | 融解を見かけ質量減少で表現、`Shape`は縮まないため幾何と質量が不整合 | **既知の限界として維持**(モジュールdocが「対象外」と明記、`Shape`のランタイム変形は`RigidBodySet`未実装のため) |
 | Q11 | `sim-core/src/ledger.rs:27`、`sim-thermal/src/lib.rs:28` | 台帳のモーター/ユーザ項が常に0、熱伝達係数hが定数固定 | **既知の限界として維持**(いずれもモジュールdocが「P1時点では」「Phase 3待ち」と明記した暫定値) |
