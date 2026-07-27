@@ -313,10 +313,16 @@
   Option<CircuitScenarioJson>`(抵抗器・電圧源のみ対応)+`CouplingJson::
   InductionCoupling`を追加し(スキーマ拡張)、`demos.rs`のネイティブ実装
   (渦電流ブレーキによる終端速度)と同じ構成をシーンJSON経由で再現、解析解と
-  一致することを確認した。
+  一致することを確認した。続けてヘッドレスランナーの16本目の適用例として
+  D34太陽系儀のA1部分(円軌道半径保存)もシーンJSON化した——これまで
+  `Scenario`に天体ドメイン(`sim_astro::NBodySystem`)を構成する手段が無かった
+  ため`astro: Option<AstroScenarioJson>`(`mechanics`の`bodies`とは別名前空間の
+  質点集合)+軌道半径再構成用の`ProbeTarget::AstroPosX`/`AstroPosY`を追加した
+  (スキーマ拡張)。A2(エネルギー・角運動量保存)はプローブが速度を読めず対象外
+  (`demos.rs`側で既にGreen)。
 - **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
   マルチスキャッタリング)・さらなるヘッドレスランナー適用例(`couplings`の
-  残り11種)を機を見て進める。優先順位の
+  残り11種、D35軌道投入等)を機を見て進める。優先順位の
   詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
@@ -2086,7 +2092,18 @@ Pα:
 - [ ] D34 太陽系儀(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
       目視チェックはワークストリームD未着手のため保留。8惑星ではなく1惑星(円軌道)
       への縮約でA1(ケプラー第3法則)・A2(エネルギー・角運動量保存)を確認。
-      時間加速の切替を跨ぐリプレイ一致はレジーム切替が`World`未接続のため対象外)
+      時間加速の切替を跨ぐリプレイ一致はレジーム切替が`World`未接続のため対象外)。
+      **シーンJSON経由の16本目の適用例+スキーマ拡張(本増分で追加)**: A1
+      (円軌道半径が20周回後も保たれる)部分のみシーンJSON化した——これまで
+      `Scenario`に天体ドメイン(`sim_astro::NBodySystem`)を構成する手段が
+      無かったため`astro: Option<AstroScenarioJson>`(`{softening, bodies:
+      [{position, velocity, mass}]}`、`mechanics`の`bodies`とは別名前空間の
+      質点集合、大気抗力・相対論補正は後続増分)を追加し、軌道半径の再構成に
+      必要な`ProbeTarget::AstroPosX`/`AstroPosY`(`World`側)+
+      `ProbeJson::astro_pos_x`/`astro_pos_y`(`astro.bodies`配列のインデックス
+      直接参照、名前解決を経ない)も追加した(スキーマ拡張)。A2(エネルギー・
+      角運動量保存)はプローブが速度成分を読めず角運動量$L=r\times v$を
+      再構成できないため対象外(`demos.rs`側で既にGreen)。
 - [ ] D35 軌道投入(ヘッドレステストGreen、同上。目視チェック保留。円軌道速度の
       0.9倍の初速で楕円軌道を作り、vis-vivaから導いた長半径によるケプラー第3法則の
       周期分だけ進めると出発点(位置・速度とも)へ戻ることを確認)

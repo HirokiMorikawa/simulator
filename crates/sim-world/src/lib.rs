@@ -192,6 +192,10 @@ pub enum ProbeTarget {
     BodySpeed(BodyId),
     /// 熱ドメインの`ThermalNode`index(モジュールdoc「縮約実装の理由」参照)。
     NodeTemp(usize),
+    /// 天体ドメイン(`sim_astro::NBodySystem`)の`position`配列index(D34太陽系儀
+    /// のような軌道半径の再構成に使う、`BodyPosX`と同じ理由で追加)。
+    AstroPosX(usize),
+    AstroPosY(usize),
     /// 回路の電圧源index(モジュールdoc「縮約実装の理由」参照)。
     CircuitCurrent(usize),
     LedgerKinetic,
@@ -510,6 +514,16 @@ impl World {
                 .as_ref()
                 .and_then(|t| t.nodes.get(idx))
                 .map_or(0.0, |n| n.temperature),
+            ProbeTarget::AstroPosX(idx) => self
+                .astro
+                .as_ref()
+                .and_then(|a| a.position.get(idx))
+                .map_or(0.0, |p| p.x),
+            ProbeTarget::AstroPosY(idx) => self
+                .astro
+                .as_ref()
+                .and_then(|a| a.position.get(idx))
+                .map_or(0.0, |p| p.y),
             ProbeTarget::CircuitCurrent(idx) => {
                 self.circuit.as_ref().map_or(0.0, |c| c.source_current(idx))
             }

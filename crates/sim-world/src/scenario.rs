@@ -91,6 +91,12 @@ pub struct Scenario {
     /// D21銅管落下が要る最小構成のみ)。
     #[serde(default)]
     pub circuit: Option<CircuitScenarioJson>,
+    /// 天体ドメイン(`sim_astro::NBodySystem`)。未指定なら無効。`mechanics`の
+    /// `bodies`(形状+材質を持つ剛体)とは別種の質点集合であり、質量中心運動や
+    /// 衝突判定は対象外——D34(太陽系儀)/D35(軌道投入)が要る2体重力の最小構成
+    /// (大気抗力・相対論補正は後続増分)。
+    #[serde(default)]
+    pub astro: Option<AstroScenarioJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
@@ -240,6 +246,10 @@ pub enum ProbeJson {
     BodyPosX(String),
     BodySpeed(String),
     NodeTemp(usize),
+    /// `astro.bodies`配列のインデックス(0起点、名前解決を経ない——`NodeTemp`と
+    /// 同じ理由、D34太陽系儀の軌道半径再構成に使う)。
+    AstroPosX(usize),
+    AstroPosY(usize),
 }
 
 /// `Scenario::joints`の1件。設計の例示JSONには無い項目(モジュールdoc
@@ -324,6 +334,25 @@ pub struct VoltageSourceJson {
     pub a: usize,
     pub b: usize,
     pub voltage: f64,
+}
+
+/// `Scenario::astro`(モジュールdoc「縮約実装の理由」参照)。
+#[derive(Deserialize)]
+pub struct AstroScenarioJson {
+    #[serde(default)]
+    pub softening: f64,
+    #[serde(default)]
+    pub bodies: Vec<AstroBodyJson>,
+}
+
+/// `AstroScenarioJson::bodies`の1件(`sim_astro::NBodySystem::add_body`の
+/// 縮約表現、`position`配列のインデックス(0起点)が`ProbeJson::AstroPosX`等の
+/// 参照先——`mechanics`の`bodies`とは名前空間が別なので名前解決を経ない)。
+#[derive(Deserialize)]
+pub struct AstroBodyJson {
+    pub position: [f64; 3],
+    pub velocity: [f64; 3],
+    pub mass: f64,
 }
 
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
@@ -467,6 +496,14 @@ impl World {
             world.enable_circuit(circuit);
         }
 
+        if let Some(astro_json) = &scenario.astro {
+            let mut sys = sim_astro::NBodySystem::new(astro_json.softening);
+            for b in &astro_json.bodies {
+                sys.add_body(array_to_vec3(b.position), array_to_vec3(b.velocity), b.mass);
+            }
+            world.enable_astro(sys);
+        }
+
         for joint in &scenario.joints {
             match joint {
                 JointJson::Distance {
@@ -595,6 +632,8 @@ impl World {
                     }
                 }
                 ProbeJson::NodeTemp(index) => ProbeTarget::NodeTemp(*index),
+                ProbeJson::AstroPosX(index) => ProbeTarget::AstroPosX(*index),
+                ProbeJson::AstroPosY(index) => ProbeTarget::AstroPosY(*index),
             };
             handles.push(self.add_probe(target, DEFAULT_PROBE_CAPACITY));
         }
@@ -1627,6 +1666,60 @@ mod tests {
             rel_err < 0.02,
             "D21 pass criterion (eddy current terminal velocity): measured_v={measured_v} \
              expected_v_term={expected_v_term} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// D34(太陽系儀、A1軌道半径保存のみ): `demos.rs`の
+    /// `d34_solar_system_single_planet_matches_keplers_third_law_and_conserves_
+    /// energy_and_angular_momentum`のA1部分(20周回後も円軌道半径が保たれる)を
+    /// `Scenario::astro`(本増分で追加したスキーマ拡張、`sim_astro::NBodySystem`)
+    /// +`AstroPosX`/`AstroPosY`プローブ経由で再現する。A2(エネルギー・角運動量
+    /// 保存)は検証しない——`ProbeTarget`が位置成分のみ対応で速度を読めないため
+    /// 角運動量($L=r\times v$)を再構成できない(`demos.rs`側で既にGreen)。
+    #[test]
+    fn run_headless_scenario_solar_system_single_planet_preserves_circular_orbit_radius() {
+        let mass_sun: f64 = 1.989e30;
+        let r: f64 = 1.496e11; // 1 AU相当
+        let g = sim_astro::GRAVITATIONAL_CONSTANT;
+
+        let period = 2.0 * std::f64::consts::PI * (r.powi(3) / (g * mass_sun)).sqrt();
+        let steps_per_orbit = 1000u32;
+        let dt = period / steps_per_orbit as f64;
+        let orbits = 20u32;
+        let v_circ = (g * mass_sun / r).sqrt();
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d34-solar-system-single-planet",
+          "world": {{ "gravity": 9.80665, "dt": {dt} }},
+          "astro": {{
+            "softening": 0.0,
+            "bodies": [
+              {{ "position": [0, 0, 0], "velocity": [0, 0, 0], "mass": {mass_sun} }},
+              {{ "position": [{r}, 0, 0], "velocity": [0, {v_circ}, 0], "mass": 1.0 }}
+            ]
+          }},
+          "probes": [ {{ "astro_pos_x": 1 }}, {{ "astro_pos_y": 1 }} ]
+        }}
+        "#
+        );
+
+        let steps = steps_per_orbit * orbits;
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let final_x = *result.probe_histories[0]
+            .last()
+            .expect("history should not be empty");
+        let final_y = *result.probe_histories[1]
+            .last()
+            .expect("history should not be empty");
+        let final_r = (final_x * final_x + final_y * final_y).sqrt();
+
+        let rel_r_err = (final_r - r).abs() / r;
+        assert!(
+            rel_r_err < 0.01,
+            "A1: circular orbit radius should be preserved: final_r={final_r} r={r} \
+             rel_err={rel_r_err:.4}"
         );
     }
 
