@@ -243,7 +243,25 @@
   ため、`Scenario`互換のJSON文字列として剛体の観測可能な状態(位置・姿勢・
   速度)を書き出す新規`bookmark_export_scene_json`を実装し、既存のScenes
   タブImportへそのまま読み込める形にすることで専用のインポートボタンを
-  設けずに済ませた(ラウンドトリップをPlaywrightで実証)。
+  設けずに済ませた(ラウンドトリップをPlaywrightで実証)。続けてPrefabs機能も
+  実装した——設計が言う「再利用可能なBody/Joint/Circuitセット」のうちBodyの
+  形状+材質の保存/再スポーンのみに縮約したもので(Joint/Circuitのプレファブ
+  化・永続化・シーンJSONへの書き出しは対象外、セッション内のみのメモリ上
+  リスト)、`sim-wasm`に`body_shape_kind_at`("sphere"/"box"/"plane"/"other")と
+  `body_shape_params_f64_at`(形状に応じた寸法配列)を追加し、`Scene View`で
+  選択中のボディの形状種別・寸法・材質名を読み取れるようにした。フロントエンド
+  側は`PrefabDefinition`/`PrefabRef`型と`renderPrefabsTab()`を新設し、
+  Projectドロワー「Prefabs」タブ(旧「未実装」プレースホルダ)を名前入力欄+
+  「選択中のボディをPrefabとして保存」ボタン+保存済みPrefab一覧
+  (各行に「スポーン」ボタン)を持つ実装へ置き換えた。スポーンは既存の
+  `spawn_sphere`/`spawn_box`をそのまま再利用するため、対応形状はsphere/box
+  のみ(box は`spawn_box`自身の制約により立方体のみ、直方体は非対応)。
+  Playwrightで、既定のBox_1をPrefab保存→一覧表示→スポーンボタンクリックで
+  Hierarchyに新規`Box_2`が追加されることを確認した(最初のテストスクリプトは
+  `text=スポーン`セレクタが意図した要素をクリックできず何も起きなかったが、
+  `#project-body li button`で直接ターゲットした2本目のスクリプトでは正しく
+  動作したため、これはテストツール側のセレクタ問題であり製品側の不具合では
+  ないと判断した)。
 - **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
   マルチスキャッタリング)・さらなるヘッドレスランナー適用例・シーンJSON
   `couplings`セクション(スキーマ未確定で保留)を機を見て進める。優先順位の
@@ -1405,7 +1423,7 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       (BodyPosY: max=10.00→min≈0.45)と速さの脈動曲線(BodySpeed: 落下中に
       max≈13.65まで上昇し着地後min=0.00へ収束)が同一canvasに重ねて正しく
       表示されることを確認した。対数軸・CSVエクスポートは未実装)
-- [ ] Project ドロワー: Scenes/Materials/Prefabs/Replays
+- [x] Project ドロワー: Scenes/Materials/Prefabs/Replays
       (タブ切替UIの骨格は実装済み。Materialsタブは実データ接続済み——
       `sim-wasm`に新設した`material_properties_f64(name)`(`World::materials()`
       (`MaterialDb`)から`find_by_name`+`get`で実物性値を取得、`spawn_sphere`と
@@ -1426,7 +1444,16 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       Nudge/回路スイッチ切替/ヒーター切替を行うと実際に3件記録され、
       Exportボタンをクリックすると正しい内容(記録した3件のkindが順に
       一致)のJSONファイルがダウンロードされることを確認した。
-      Scenes/Prefabsは引き続き静的プレースホルダ)
+      Scenesタブも実データ接続済み——現在のボディ一覧の表示+シーンJSON
+      エクスポート、および`World::append_scenario_bodies`経由のシーンJSON
+      Import(`fluids`/`probes`セクション非対応の制約あり)。Prefabsタブも
+      実データ接続済み——`sim-wasm`の`body_shape_kind_at`/
+      `body_shape_params_f64_at`で選択中ボディの形状+材質を読み取って
+      名前付きで保存し、一覧から`spawn_sphere`/`spawn_box`経由で再スポーン
+      できる(縮約実装: Body形状+材質のみ、対応形状はsphere/box(boxは
+      立方体のみ)、Joint/Circuitのプレファブ化・永続化は対象外)。
+      Playwrightで保存→一覧表示→再スポーンによるHierarchyへの新規ボディ
+      追加を確認した)
 - [x] Edit / Play モードの切替と編集ロック
       (Toolbarのセグメントトグル(`#btn-mode-edit`/`#btn-mode-play`)で切替。
       既定はEditモード(Unityと同じ起動時挙動、設計§4「Play を押した瞬間の

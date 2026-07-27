@@ -191,6 +191,20 @@ type CircuitEditorRef = {
 // (`circuit_editor_reset`のdoc参照)ため、パニックを避ける。
 type CircuitFreeWiringState = { active: boolean };
 
+// Prefabs(設計docs/23-frontend/01-editor.md §6「Prefabs: 再利用可能な
+// Body/Joint/Circuit組(自作シーンから右クリック→「Prefabとして保存」)。
+// 他シーンへドラッグで再利用」の縮約実装——Bodyの形状/材質のみ対象、
+// Joint/Circuit組・ドラッグ&ドロップ・複数シーンをまたいだ永続化は対象外、
+// ブラウザセッション内のみ保持)。`setUpProjectDrawer`から`world`への
+// 直接アクセスを持たないため、他のRef同様コールバック経由で配線する。
+type PrefabDefinition = { name: string; kind: string; params: number[]; material: string };
+type PrefabRef = {
+  current: {
+    captureSelectedBody: () => Omit<PrefabDefinition, "name"> | null;
+    spawn: (prefab: PrefabDefinition) => void;
+  } | null;
+};
+
 // Import側のシーンJSONパース(`sim_world::scenario::ShapeJson`のJSON表現と同じ
 // タグ付きオブジェクト形)。`world.import_scene_json`はボディの追加自体は行うが
 // (返り値は追加件数のみ)、Scene Viewが各ボディに対応するThree.jsメッシュを
@@ -496,13 +510,13 @@ function setUpProjectDrawer(
   replayVerifyRef: ReplayVerifyRef,
   circuitEditorRef: CircuitEditorRef,
   circuitFreeWiringState: CircuitFreeWiringState,
+  prefabRef: PrefabRef,
 ) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
-  const staticContentByTab: Record<string, string> = {
-    prefabs: "Prefabs: 未実装",
-  };
+  const staticContentByTab: Record<string, string> = {};
   let circuitTabRefreshIntervalId: number | null = null;
+  const prefabs: PrefabDefinition[] = [];
 
   // 自由配線回路エディタの状態(タブ切替でDOMは再構築されるが、実際に構築した
   // 回路自体はwasm側に残るため、この一覧はタブ再訪時の表示復元用)。
@@ -749,6 +763,45 @@ function setUpProjectDrawer(
     circuitTabRefreshIntervalId = window.setInterval(refresh, 200);
   }
 
+  function renderPrefabsTab() {
+    body.innerHTML = "";
+    const note = document.createElement("p");
+    note.textContent = "選択中のボディの形状+材質をPrefabとして保存し、後で同じ形状+材質のボディを再スポーンできる。";
+    body.appendChild(note);
+
+    const saveForm = document.createElement("div");
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.placeholder = "Prefab名";
+    const saveButton = document.createElement("button");
+    saveButton.textContent = "選択中のボディをPrefabとして保存";
+    saveButton.addEventListener("click", () => {
+      if (!prefabRef.current) return;
+      const captured = prefabRef.current.captureSelectedBody();
+      if (!captured) return; // 未対応の形状(Plane等)は保存しない。
+      const name = nameInput.value.trim() || `Prefab_${prefabs.length + 1}`;
+      prefabs.push({ name, ...captured });
+      nameInput.value = "";
+      renderPrefabsTab();
+    });
+    saveForm.append(nameInput, saveButton);
+    body.appendChild(saveForm);
+
+    const list = document.createElement("ul");
+    for (const prefab of prefabs) {
+      const item = document.createElement("li");
+      item.textContent = `${prefab.name} (${prefab.kind}, ${prefab.material}) `;
+      const spawnButton = document.createElement("button");
+      spawnButton.textContent = "スポーン";
+      spawnButton.addEventListener("click", () => {
+        prefabRef.current?.spawn(prefab);
+      });
+      item.appendChild(spawnButton);
+      list.appendChild(item);
+    }
+    body.appendChild(list);
+  }
+
   function renderMaterialsTab() {
     if (!materialsRef.current) {
       body.textContent = "Materials: 読み込み中...";
@@ -848,6 +901,10 @@ function setUpProjectDrawer(
       renderCircuitTab();
       return;
     }
+    if (tab === "prefabs") {
+      renderPrefabsTab();
+      return;
+    }
     body.textContent = staticContentByTab[tab] ?? "";
   }
   tabs.forEach((tab) => {
@@ -919,6 +976,7 @@ async function setUpSceneView(
   replayVerifyRef: ReplayVerifyRef,
   circuitEditorRef: CircuitEditorRef,
   circuitFreeWiringState: CircuitFreeWiringState,
+  prefabRef: PrefabRef,
 ) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -1819,6 +1877,41 @@ async function setUpSceneView(
     };
   };
 
+  // Prefabs(`PrefabRef`のdoc参照)。球/箱のみ対応(スポーンパレットの
+  // `spawn_sphere`/`spawn_box`自体がこの2形状しか受け付けないのと同じ制約)。
+  // `spawn_box`は立方体のみ(単一`half_extent`引数)のため、非立方体の箱を
+  // captureした場合は`params[0]`(半径/1軸目のhalf_extent)のみを使う
+  // (既知の簡略化)。
+  prefabRef.current = {
+    captureSelectedBody: () => {
+      const kind = world.body_shape_kind_at(selectedBodyIndex);
+      if (kind !== "sphere" && kind !== "box") return null;
+      const params = Array.from(world.body_shape_params_f64_at(selectedBodyIndex));
+      const material = world.body_material_label_at(selectedBodyIndex);
+      return { kind, params, material };
+    },
+    spawn: (prefab) => {
+      const { x, z } = nextSpawnPosition();
+      if (prefab.kind === "sphere") {
+        const radius = prefab.params[0] ?? SPAWN_SPHERE_RADIUS;
+        const bodyIndex = world.spawn_sphere(x, SPAWN_HEIGHT, z, radius, prefab.material);
+        const mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(radius, 16, 12),
+          new THREE.MeshStandardMaterial({ color: 0x6699ff }),
+        );
+        addSpawnedMesh(bodyIndex, mesh);
+      } else if (prefab.kind === "box") {
+        const halfExtent = prefab.params[0] ?? SPAWN_BOX_HALF_EXTENT;
+        const bodyIndex = world.spawn_box(x, SPAWN_HEIGHT, z, halfExtent, prefab.material);
+        const mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(halfExtent * 2, halfExtent * 2, halfExtent * 2),
+          new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
+        );
+        addSpawnedMesh(bodyIndex, mesh);
+      }
+    },
+  };
+
   document.getElementById("btn-spawn-sphere")!.addEventListener("click", () => {
     const { x, z } = nextSpawnPosition();
     const material = spawnMaterialSelect.value;
@@ -2238,6 +2331,7 @@ function main() {
   const replayVerifyRef: ReplayVerifyRef = { current: null };
   const circuitEditorRef: CircuitEditorRef = { current: null };
   const circuitFreeWiringState: CircuitFreeWiringState = { active: false };
+  const prefabRef: PrefabRef = { current: null };
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
@@ -2246,6 +2340,7 @@ function main() {
     replayVerifyRef,
     circuitEditorRef,
     circuitFreeWiringState,
+    prefabRef,
   );
   setUpSceneView(
     updateProbeGraph,
@@ -2258,6 +2353,7 @@ function main() {
     replayVerifyRef,
     circuitEditorRef,
     circuitFreeWiringState,
+    prefabRef,
   ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;

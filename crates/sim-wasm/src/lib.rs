@@ -258,6 +258,37 @@ impl WasmWorld {
         }
     }
 
+    /// Prefab機能(設計docs/23-frontend/01-editor.md §6「Prefabs: 再利用可能な
+    /// Body/Joint/Circuit組(自作シーンから...「Prefabとして保存」)。他シーンへ
+    /// ドラッグで再利用」の縮約実装——Bodyの形状/材質のみ対象、Joint/Circuit組は
+    /// 対象外)向けに、`index`番目のボディの形状の種類を返す
+    /// ("sphere"/"box"/"plane"/"other")。`body_shape_params_f64_at`と対で使う。
+    pub fn body_shape_kind_at(&self, index: usize) -> String {
+        let id = self.body_id_at(index);
+        match self.inner.mechanics().bodies.shape_of(id.index as usize) {
+            Shape::Sphere { .. } => "sphere".to_string(),
+            Shape::Box { .. } => "box".to_string(),
+            Shape::Plane { .. } => "plane".to_string(),
+            _ => "other".to_string(),
+        }
+    }
+
+    /// `body_shape_kind_at`と対応する数値パラメータ: sphere→`[radius]`、
+    /// box→`[hx,hy,hz]`、plane→`[nx,ny,nz,d]`、other→空配列(Prefab保存用)。
+    pub fn body_shape_params_f64_at(&self, index: usize) -> Float64Array {
+        let id = self.body_id_at(index);
+        match self.inner.mechanics().bodies.shape_of(id.index as usize) {
+            Shape::Sphere { radius } => Float64Array::from(&[*radius][..]),
+            Shape::Box { half_extents } => {
+                Float64Array::from(&[half_extents.x, half_extents.y, half_extents.z][..])
+            }
+            Shape::Plane { normal, d } => {
+                Float64Array::from(&[normal.x, normal.y, normal.z, *d][..])
+            }
+            _ => Float64Array::from(&[][..]),
+        }
+    }
+
     /// Inspector表示用の材質名。
     pub fn body_material_label_at(&self, index: usize) -> String {
         match index {
