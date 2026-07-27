@@ -299,6 +299,38 @@ pub struct World {
     /// まだ`step()`から参照されない(フロントエンド側の`MAX_STEPS_PER_FRAME`相当の
     /// responsibilityは既に呼び出し側にあるため)。
     time_regime: sim_astro::TimeRegime,
+    /// フレーム階層(設計docs/20-integration/05-frame-hierarchy.md、`sim_core::FrameTree`の
+    /// doc参照)。`World`は常にROOTのみの木を持つ(空のシーンでも`Default`が使える)。
+    /// 自動レジーム切替(`auto_regime_switch`)が地表フレームをここに追加する。
+    frames: sim_core::FrameTree,
+    /// 閾値ベースの自動レジーム切替設定(設計docs/20-integration/06-regime-switching.md §1
+    /// 「天体→局所への切替は、中心天体からの距離が閾値を下回った時点で自動的に発生する」
+    /// の縮約実装、`configure_auto_regime_switch`のdoc参照)。`Some`の間、`step()`の
+    /// Astroレジーム分岐が毎step終端でこの設定を見て閾値判定する。切替が起きると`None`に
+    /// 戻し(1回のみ発火、再トリガ防止)、以後は通常のLocalレジーム挙動に戻る。
+    auto_regime_switch: Option<AutoRegimeSwitchConfig>,
+}
+
+/// `World::configure_auto_regime_switch`が使う自動切替の設定(モジュールdoc「全ドメイン
+/// 合成」・`auto_regime_switch`フィールドdoc参照)。
+///
+/// **縮約実装の理由**: 設計が定めるヒステリシス(往復切替の抑制)・切替のCommand化・
+/// 切替を跨いだリプレイ一致のCIゲートはここでは実装しない。本増分は「天体レンジ中に
+/// 中心天体からの距離を毎step監視し、閾値を下回った瞬間に既存の手動ハンドオフ手順
+/// (`switching_from_astro_to_local_hands_off_orbital_state_via_frame_conversion`と
+/// 同じフレーム変換)を`World::step()`内部で自動的に実行する」という土台のみを提供する。
+#[derive(Clone, Copy, Debug)]
+pub struct AutoRegimeSwitchConfig {
+    /// `astro`ドメイン(`sim_astro::NBodySystem`)内での、切替対象ボディのインデックス。
+    pub astro_body_index: usize,
+    /// 距離判定の基準にする中心天体の`astro`ドメイン内インデックス。
+    pub central_body_index: usize,
+    /// この距離(中心天体からの距離)を下回るとLocalへ切り替える。
+    pub threshold_distance: f64,
+    /// フレーム変換先の地表フレーム(`World::add_frame`で事前に`frames`へ追加しておく)。
+    pub surface_frame: sim_core::FrameId,
+    /// 変換後の状態を書き込む、あらかじめ`create_body`で作成済みのLocalボディ。
+    pub local_body: BodyId,
 }
 
 /// `event_log`の容量(設計は`subscribe`/`drain_events`の容量を規定しないため、
@@ -361,6 +393,8 @@ impl World {
             event_log: sim_math::RingBuffer::new(EVENT_LOG_CAPACITY),
             couplings: Vec::new(),
             time_regime: sim_astro::TimeRegime::Local { steps_per_frame: 1 },
+            frames: sim_core::FrameTree::new(),
+            auto_regime_switch: None,
         }
     }
 
@@ -374,6 +408,75 @@ impl World {
     /// (§1)自体は後続増分)。
     pub fn set_time_regime(&mut self, regime: sim_astro::TimeRegime) {
         self.time_regime = regime;
+    }
+
+    /// フレーム階層(`frames`フィールドdoc参照)への読み取りアクセス。
+    pub fn frames(&self) -> &sim_core::FrameTree {
+        &self.frames
+    }
+
+    /// `frames`に新規フレームを追加する(`sim_core::FrameTree::add_frame`の素通し、
+    /// 自動レジーム切替が地表フレームを追加するために使う)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_frame(
+        &mut self,
+        parent: sim_core::FrameId,
+        origin_in_parent: Vec3,
+        rotation_in_parent: sim_math::Quat,
+        velocity_in_parent: Vec3,
+        angular_velocity_in_parent: Vec3,
+    ) -> sim_core::FrameId {
+        self.frames.add_frame(
+            parent,
+            origin_in_parent,
+            rotation_in_parent,
+            velocity_in_parent,
+            angular_velocity_in_parent,
+        )
+    }
+
+    /// 閾値ベースの自動レジーム切替を設定する(`AutoRegimeSwitchConfig`のdoc参照)。
+    /// `config.local_body`は呼び出し側があらかじめ`create_body`で作成しておく必要がある
+    /// (切替発火時に`World::step()`内部から新規`create_body`を呼ぶのは、既存の手動
+    /// ハンドオフ手順が示す「シーン構築はcreate_body、実行中の状態変更はCommand/内部
+    /// 書き込み」という役割分担から外れるため避けた)。
+    pub fn configure_auto_regime_switch(&mut self, config: AutoRegimeSwitchConfig) {
+        self.auto_regime_switch = Some(config);
+    }
+
+    /// Astroレジーム中、毎step終端で中心天体からの距離を判定し、閾値を下回っていれば
+    /// 既存の手動ハンドオフ手順と同じフレーム変換でLocalボディへ状態を書き込み、
+    /// レジームをLocalへ切り替える(`auto_regime_switch`フィールドdoc参照)。
+    fn check_auto_regime_switch(&mut self) {
+        let Some(config) = self.auto_regime_switch else {
+            return;
+        };
+        let Some(astro) = &self.astro else {
+            return;
+        };
+        let central_position = astro.position[config.central_body_index];
+        let orbital_position = astro.position[config.astro_body_index];
+        let orbital_velocity = astro.velocity[config.astro_body_index];
+        if (orbital_position - central_position).length() > config.threshold_distance {
+            return;
+        }
+
+        let (local_position, local_velocity) = sim_astro::astro_to_local_state(
+            &self.frames,
+            config.surface_frame,
+            orbital_position,
+            orbital_velocity,
+        );
+
+        if self.is_valid(config.local_body) {
+            let index = config.local_body.index as usize;
+            self.mechanics.bodies.position[index] = local_position;
+            self.mechanics.bodies.linear_velocity[index] = local_velocity;
+            self.mechanics.bodies.still_time[index] = 0.0;
+            self.mechanics.bodies.asleep[index] = false;
+        }
+        self.time_regime = sim_astro::TimeRegime::Local { steps_per_frame: 1 };
+        self.auto_regime_switch = None;
     }
 
     /// プローブを登録する(`Probe`のdoc参照)。返すハンドルは`probe`/`probe_history`が
@@ -814,6 +917,7 @@ impl World {
                         a.step(dt_astro, &mut ctx);
                     }
                 }
+                self.check_auto_regime_switch();
             }
         }
         // 登録済み全Couplingを1回ずつ適用する(登録順、`apply_coupling`のdocが説明する
@@ -2343,6 +2447,135 @@ mod tests {
             world.body_position(capsule_body).unwrap(),
             local_position,
             "local physics must continue evolving the handed-off body"
+        );
+    }
+
+    /// 閾値ベース自動レジーム切替(`AutoRegimeSwitchConfig`のdoc参照): Astroレジーム中、
+    /// 中心天体からの距離が閾値を下回った時点で`step()`が自動的に(既存の手動ハンドオフ
+    /// 手順と同じフレーム変換で)Localボディへ状態を書き込み、レジームをLocalへ切り替える
+    /// ことを確認する。`dt_astro: 0.0`により天体状態を切替判定の瞬間に固定し(積分器の
+    /// 詳細に依存しない)、`sim_astro::astro_to_local_state`を直接呼んだ期待値と厳密一致
+    /// することを確認する(既存の手動ハンドオフテストと同じ変換式、自動化されたことのみが違い)。
+    #[test]
+    fn auto_regime_switch_triggers_when_distance_crosses_threshold_and_hands_off_state() {
+        let mut world = World::new(WorldOptions::default());
+
+        let mut astro = sim_astro::NBodySystem::new(0.0);
+        astro.add_body(Vec3::ZERO, Vec3::ZERO, 1.0e15);
+        let orbital_position0 = Vec3::new(1000.0, 0.0, 0.0);
+        let orbital_velocity0 = Vec3::new(0.0, 10.0, 0.0);
+        let capsule_index = astro.add_body(orbital_position0, orbital_velocity0, 1.0);
+        world.enable_astro(astro);
+
+        let surface_frame = world.add_frame(
+            sim_core::FrameId::ROOT,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 7.292e-5),
+        );
+
+        let (expected_position, expected_velocity) = sim_astro::astro_to_local_state(
+            world.frames(),
+            surface_frame,
+            orbital_position0,
+            orbital_velocity0,
+        );
+
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 1.0 }, steel);
+        desc.transform.position = Vec3::new(0.0, 12345.0, 0.0); // プレースホルダー(切替時に上書きされる)
+        let capsule_body = world.create_body(desc);
+
+        world.configure_auto_regime_switch(AutoRegimeSwitchConfig {
+            astro_body_index: capsule_index,
+            central_body_index: 0,
+            threshold_distance: 1500.0, // 実際の距離(1000)は既に閾値未満なので初回stepで即発火
+            surface_frame,
+            local_body: capsule_body,
+        });
+
+        world.set_time_regime(sim_astro::TimeRegime::Astro {
+            dt_astro: 0.0,
+            steps_per_frame: 1,
+        });
+        world.step();
+
+        assert_eq!(
+            world.time_regime(),
+            sim_astro::TimeRegime::Local { steps_per_frame: 1 },
+            "crossing the threshold must auto-switch the regime to Local"
+        );
+        assert_eq!(
+            world.body_position(capsule_body).unwrap(),
+            expected_position
+        );
+        assert_eq!(
+            world.body_velocity(capsule_body).unwrap(),
+            expected_velocity
+        );
+
+        for _ in 0..10 {
+            world.step();
+        }
+        assert_ne!(
+            world.body_position(capsule_body).unwrap(),
+            expected_position,
+            "after auto hand-off, local physics must continue evolving the body"
+        );
+    }
+
+    /// 閾値を上回っている間は自動切替が発火しないこと(誤発火防止の裏取り)。
+    #[test]
+    fn auto_regime_switch_does_not_trigger_while_still_above_threshold_distance() {
+        let mut world = World::new(WorldOptions::default());
+
+        let mut astro = sim_astro::NBodySystem::new(0.0);
+        astro.add_body(Vec3::ZERO, Vec3::ZERO, 1.0e15);
+        let capsule_index =
+            astro.add_body(Vec3::new(1000.0, 0.0, 0.0), Vec3::new(0.0, 10.0, 0.0), 1.0);
+        world.enable_astro(astro);
+
+        let surface_frame = world.add_frame(
+            sim_core::FrameId::ROOT,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 7.292e-5),
+        );
+
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 1.0 }, steel);
+        let placeholder = Vec3::new(0.0, 12345.0, 0.0);
+        desc.transform.position = placeholder;
+        let capsule_body = world.create_body(desc);
+
+        world.configure_auto_regime_switch(AutoRegimeSwitchConfig {
+            astro_body_index: capsule_index,
+            central_body_index: 0,
+            threshold_distance: 500.0, // 実際の距離(1000)は閾値を上回っているため発火しない
+            surface_frame,
+            local_body: capsule_body,
+        });
+
+        world.set_time_regime(sim_astro::TimeRegime::Astro {
+            dt_astro: 0.0,
+            steps_per_frame: 1,
+        });
+        world.step();
+
+        assert_eq!(
+            world.time_regime(),
+            sim_astro::TimeRegime::Astro {
+                dt_astro: 0.0,
+                steps_per_frame: 1
+            },
+            "must stay in Astro while still above the threshold distance"
+        );
+        assert_eq!(
+            world.body_position(capsule_body).unwrap(),
+            placeholder,
+            "local body must be untouched until the threshold is actually crossed"
         );
     }
 

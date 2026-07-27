@@ -46,6 +46,7 @@ impl Frame {
 }
 
 /// フレームの木構造(ROOTを根とする、深さ上限は設計§9が既定4とするが実装上は無制限)。
+#[derive(Clone)]
 pub struct FrameTree {
     frames: Vec<Frame>,
 }

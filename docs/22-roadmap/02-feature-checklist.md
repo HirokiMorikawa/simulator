@@ -41,9 +41,19 @@
   leapfrog経由の実際の`step()`で、弾道係数を設定した低軌道衛星が設定しない
   場合より明確に速く高度を失うことをテストで確認済み(`atmosphere.rs`が
   以前指摘していた「NBodySystem本体には未統合」というギャップを解消)。
-  残り: 統合シナリオ1本(再突入本体——上記の抗力統合+レジーム切替土台の
-  上に、閾値ベースの自動切替・空力加熱/アブレーションモデルを組んだ
-  本格シナリオが必要)、シーンJSON`couplings`セクション(スキーマ未確定の
+  さらに、`World`に閾値ベースの自動レジーム切替(`AutoRegimeSwitchConfig`・
+  `configure_auto_regime_switch`・`World::frames`という`sim_core::FrameTree`
+  常設フィールド・`World::add_frame`)を実装した——これまでの手動ハンドオフ
+  (呼び出し側がフレーム変換を都度手書きする)を、`step()`内部でAstroレジーム中
+  毎step末尾に追跡ボディと中心天体の距離を閾値と比較し、下回った瞬間に既存と
+  同じフレーム変換で事前作成済みLocalボディへ状態を書き込みレジームをLocalへ
+  切り替える(再発火しないよう設定をクリアする)自動判定に置き換えた
+  (`sim_core::FrameTree`に`Clone`を追加してWorldのフィールドにできるように
+  した点も含む)。テストは閾値到達時に発火して`sim_astro::astro_to_local_state`
+  の直接呼び出しと厳密一致すること、閾値未到達では発火しないことの両方を確認。
+  残り: 統合シナリオ1本(再突入本体——上記の抗力統合+自動レジーム切替の
+  上に、空力加熱/アブレーションモデルを組んだ本格シナリオが必要)、
+  シーンJSON`couplings`セクション(スキーマ未確定の
   ため保留、§4参照)、D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)。
 - **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R3・R5・R6・R7完全Green、GGX
   マイクロファセット(`RoughConductor`)実装済み(詳細・各テスト名は§5/§8参照)。
@@ -574,7 +584,25 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       追加。切替のCommand化・ヒステリシス付き自動切替・World時刻の天体時刻への
       従属化・Astro中のスナップショット間隔の天体時間基準化・切替を跨ぐリプレイ
       一致のCIゲートは未実装(§1・§3・§4、統合シナリオ「再突入」本体もこの土台の
-      上に別途必要)
+      上に別途必要)。
+      **閾値ベースの自動切替(本増分で追加)**: 上記の手動ハンドオフ手順を
+      `World::step()`内部で自動実行する土台として、`World`に`frames:
+      sim_core::FrameTree`常設フィールド(`FrameTree`へ`#[derive(Clone)]`を
+      追加して`World`の`Clone`実装と両立させた)・`add_frame`(素通し)・
+      `AutoRegimeSwitchConfig`(追跡ボディ/中心天体のindex・閾値距離・地表
+      フレーム・事前作成済みLocalボディの`BodyId`)・`configure_auto_regime_switch`
+      を追加。Astroレジーム中、毎`step()`終端の`check_auto_regime_switch`が
+      追跡ボディと中心天体の距離を閾値と比較し、下回った瞬間に既存と同じ
+      `astro_to_local_state`変換で状態を書き込み(スリープ中のボディ形状変更
+      と同じ理由で`still_time`/`asleep`もリセット)、`time_regime`を`Local`へ
+      切り替えて設定をクリアする(再発火防止)。
+      `auto_regime_switch_triggers_when_distance_crosses_threshold_and_hands_off_state`
+      (`dt_astro: 0.0`で軌道状態を切替判定の瞬間に固定し、`astro_to_local_state`
+      を直接呼んだ期待値と厳密一致することを確認)・
+      `auto_regime_switch_does_not_trigger_while_still_above_threshold_distance`
+      (閾値未到達では発火せずLocalボディが未変更のままであることを確認)がGreen。
+      ヒステリシス・Command化・往復切替(Local→Astro自動判定)は依然未実装
+      (縮約実装、上記の「未実装」列挙がそのまま適用される)
 - [x] 1PN 補正(オプトイン、A8・A9・A10。`RelativitySettings`構造体・`NBodySystem`への
       完全統合は未実装)—
       `crates/sim-astro/src/relativity.rs::{pn1_acceleration, pn1_precession_per_orbit,
