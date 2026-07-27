@@ -1944,6 +1944,7 @@ async function setUpSceneView(
     bookmarkList.innerHTML = "";
     const count = world.bookmark_count();
     for (let i = 0; i < count; i++) {
+      const item = document.createElement("span");
       const chip = document.createElement("button");
       chip.className = "bookmark-chip";
       chip.textContent = `${world.bookmark_label_at(i)} (${world.bookmark_time_at(i).toFixed(1)}s)`;
@@ -1953,7 +1954,30 @@ async function setUpSceneView(
         world.restore_bookmark(i);
         render();
       });
-      bookmarkList.appendChild(chip);
+      item.appendChild(chip);
+
+      // ブックマークのエクスポート(設計§6「保存・共有: シーンJSON+Replay+
+      // ブックマークを単一ファイルとしてエクスポート」の縮約実装)。`World`が
+      // `Serialize`を持たないため内部状態のバイト単位の保存ではなく、シーンJSON
+      // Importへそのまま読み込める`Scenario`互換JSONとして剛体の観測可能な状態
+      // (位置・姿勢・速度)のみを書き出す(流体/熱/回路ドメインの状態は対象外、
+      // `bookmark_export_scene_json`のdoc参照)。
+      const exportButton = document.createElement("button");
+      exportButton.textContent = "⬇";
+      exportButton.title = "このブックマークをシーンJSONとしてエクスポート(Importで読み込み可能)";
+      exportButton.addEventListener("click", () => {
+        const json = world.bookmark_export_scene_json(i);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `bookmark_${world.bookmark_label_at(i)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+      item.appendChild(exportButton);
+
+      bookmarkList.appendChild(item);
     }
   }
 

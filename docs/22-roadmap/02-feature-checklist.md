@@ -238,12 +238,16 @@
   `scenario.probes`も実際にセットアップするよう拡張(`World::
   add_scenario_probes`として`from_scenario`と共有)、Inspector隣の新設
   `#prediction-panel`に質問文+予測値入力欄+実測/予測/解析解の比較行を
-  表示する(シーンが宣言していなければ非表示のオプトイン)。
-- **次**: ワークストリームDの継続(ブックマークのエクスポート/インポート等)を
-  軸に、ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
-  マルチスキャッタリング)・さらなるヘッドレスランナー適用例は機を見て並行
-  して進める。優先順位の詳細は`/root/.claude/plans/elegant-meandering-pixel.md`
-  参照。
+  表示する(シーンが宣言していなければ非表示のオプトイン)。続けて
+  ブックマークのエクスポートも実装した——`World`が`Serialize`を持たない
+  ため、`Scenario`互換のJSON文字列として剛体の観測可能な状態(位置・姿勢・
+  速度)を書き出す新規`bookmark_export_scene_json`を実装し、既存のScenes
+  タブImportへそのまま読み込める形にすることで専用のインポートボタンを
+  設けずに済ませた(ラウンドトリップをPlaywrightで実証)。
+- **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
+  マルチスキャッタリング)・さらなるヘッドレスランナー適用例・シーンJSON
+  `couplings`セクション(スキーマ未確定で保留)を機を見て進める。優先順位の
+  詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -1645,7 +1649,25 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       ライブなシーンと厳密一致+「state_hashが一致——決定論的に同じ結果を
       再現しました」と表示されることを確認した(スポーン/Importが無い場合の
       決定論的再現性を実地で検証)。
-      ブックマークのエクスポート/インポートは未実装)
+      **ブックマークのエクスポート(本増分で追加)**: `World`が`Serialize`を
+      持たない(`sim-wasm`は`serde_json`にも依存しない)ため、内部状態の
+      バイト単位の保存ではなく、シーンJSON Import(`import_scene_json`)へ
+      そのまま読み込める`Scenario`互換のJSON文字列として剛体の観測可能な
+      状態(位置・姿勢・速度)を書き出す新規`WasmWorld::
+      bookmark_export_scene_json(index)`を実装した(`format!`によるJSON
+      組み立て、`sim-wasm`に新規依存を増やさないため)。ブックマーク時点に
+      まだ存在しなかったボディ(`World::body_position`等が`None`)は自動的に
+      スキップする。流体/熱/回路ドメインの状態・イベントログ・接触履歴は
+      対象外(縮約実装、既知の限定)。ボディの形状/材質はブックマーク取得
+      時点ではなく現在の値を使う(通常は変化しないため実用上問題にならない、
+      これも既知の簡略化)。Timelineのブックマーク一覧に「⬇」エクスポート
+      ボタンを追加した。専用の「インポート」ボタンは設けず、既存のScenesタブ
+      Importへそのまま読み込める形にすることでImport/Export機能を再利用した
+      (Scene Import/Exportと同じ非対称設計の踏襲)。Playwrightで、Play中に
+      ブックマークを取得→エクスポート→JSONの妥当性(Ground+Box_1、実際の
+      落下後の位置・姿勢・速度を反映)を確認→同じJSONをScenesタブから
+      再インポートしてHierarchyにGround/Box_1が正しく追加されることを確認
+      (ラウンドトリップの実証))
 - [x] Undo / Redo(Edit モードのみ)
       (Gizmoドラッグ(Translate/Rotateいずれも)開始のたびに直前の位置/姿勢を
       単純なスタック(判別共用体、上限20件)へ積み、Toolbarの

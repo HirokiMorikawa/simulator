@@ -71,6 +71,11 @@ struct SpawnedBodyMeta {
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
+    /// コンストラクタに渡された重力・dt(`bookmark_export_scene_json`が
+    /// エクスポートするシーンJSONの`world`ブロックに使う——`World`自体はこれらを
+    /// 読み出す公開APIを持たないため、構築時の値をここへ複製して保持する)。
+    gravity: f64,
+    dt: f64,
     ground_body: BodyId,
     box_body: BodyId,
     /// スポーンパレットで追加されたボディ(固定2体の後にindex 2, 3, ...として続く)。
@@ -161,6 +166,8 @@ impl WasmWorld {
         let snapshot_interval_steps = (1.0 / dt).round().max(1.0) as u64;
         WasmWorld {
             inner,
+            gravity,
+            dt,
             ground_body,
             box_body,
             spawned: Vec::new(),
@@ -1026,6 +1033,80 @@ impl WasmWorld {
 
     pub fn bookmark_time_at(&self, index: usize) -> f64 {
         self.bookmarks[index].1.time()
+    }
+
+    /// ブックマークのエクスポート(設計docs/23-frontend/01-editor.md §6
+    /// 「保存・共有: シーンJSON+Replay+ブックマークを単一ファイルとして
+    /// エクスポート」の縮約実装)。`World`自体は`Serialize`を持たない
+    /// (`sim-wasm`は`serde_json`にも依存しない)ため、内部状態のバイト単位の
+    /// 保存ではなく、シーンJSON Import(`import_scene_json`)へそのまま
+    /// 読み込める`sim_world::Scenario`互換のJSON文字列として剛体の観測可能な
+    /// 状態(位置・姿勢・速度)を書き出す——流体/熱/回路ドメインの状態や
+    /// イベントログ・接触履歴は対象外(縮約実装、既知の限定)。
+    ///
+    /// ボディの形状/材質は現在のワールド(スケールGizmo等で変わりうる)ではなく
+    /// ブックマーク取得時点の値を使うべきだが、`SpawnedBodyMeta`はスポーン時の
+    /// 基準形状のみ保持し履歴を持たないため、現在の形状/材質ラベルをそのまま
+    /// 使う(通常は変化しないため実用上問題にならない、既知の簡略化)。
+    /// ブックマーク時点にまだ存在しなかったボディ(`body_position`が`None`を
+    /// 返す)はスキップする。
+    pub fn bookmark_export_scene_json(&self, index: usize) -> String {
+        let (label, snapshot) = &self.bookmarks[index];
+        let mut bodies_json = Vec::new();
+        for i in 0..self.body_count() {
+            let id = self.body_id_at(i);
+            let (Some(position), Some(rotation), Some(velocity)) = (
+                snapshot.body_position(id),
+                snapshot.body_rotation(id),
+                snapshot.body_velocity(id),
+            ) else {
+                continue; // ブックマーク時点にまだ存在しなかったボディ。
+            };
+            // シーンJSONの`ShapeJson`が対応する3形状のみ書き出せる(`Capsule`等は
+            // `ShapeJson`自体が対象外、`scenario.rs`のdoc参照)。それ以外の形状の
+            // ボディはこのエクスポートでは省略する(既知の限定)。
+            let Some(shape_json) = (match self.inner.mechanics().bodies.shape_of(id.index as usize)
+            {
+                Shape::Sphere { radius } => Some(format!(r#"{{"sphere":{{"radius":{radius}}}}}"#)),
+                Shape::Box { half_extents } => Some(format!(
+                    r#"{{"box":{{"half":[{},{},{}]}}}}"#,
+                    half_extents.x, half_extents.y, half_extents.z
+                )),
+                Shape::Plane { normal, d } => Some(format!(
+                    r#"{{"plane":{{"normal":[{},{},{}],"d":{d}}}}}"#,
+                    normal.x, normal.y, normal.z
+                )),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let type_json = if self.body_is_static_at(i) {
+                r#","type":"static""#
+            } else {
+                ""
+            };
+            bodies_json.push(format!(
+                r#"{{"shape":{shape_json},"material":"{material}","position":[{px},{py},{pz}],"rotation":[{qx},{qy},{qz},{qw}],"linear_velocity":[{vx},{vy},{vz}],"name":"{name}"{type_json}}}"#,
+                material = self.body_material_label_at(i),
+                px = position.x,
+                py = position.y,
+                pz = position.z,
+                qx = rotation.x,
+                qy = rotation.y,
+                qz = rotation.z,
+                qw = rotation.w,
+                vx = velocity.x,
+                vy = velocity.y,
+                vz = velocity.z,
+                name = self.body_label_at(i),
+            ));
+        }
+        format!(
+            r#"{{"name":"bookmark-{label}","world":{{"gravity":{gravity},"dt":{dt}}},"bodies":[{bodies}]}}"#,
+            gravity = self.gravity,
+            dt = self.dt,
+            bodies = bodies_json.join(",")
+        )
     }
 
     /// ブックマークへ巻き戻す。`restore_snapshot`と異なり、ブックマーク自体は
