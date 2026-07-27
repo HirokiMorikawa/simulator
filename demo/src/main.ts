@@ -370,6 +370,18 @@ function setUpHierarchy(
     bodies.appendChild(frameItem);
   }
 
+  // Fluids(設計§1.1「シーングラフツリー(...Fluids)」)。個々の粒子や塊単位の
+  // 選択・ドリルインまでは実装せず(SPH粒子は`RigidBodySet`のような個別ID体系を
+  // 持たないため)、スポーンした水塊の数+総粒子数の概要表示のみとする
+  // (縮約実装、`spawn_fluid_block`が複数回スポーンで水塊を追加できるように
+  // なったことを受けての最小限のHierarchy反映)。
+  const fluidSpawnCount = world.fluid_spawn_count();
+  if (fluidSpawnCount > 0) {
+    const fluidItem = document.createElement("li");
+    fluidItem.textContent = `Fluids (${fluidSpawnCount}塊, ${world.fluid_particle_count()}粒子)`;
+    bodies.appendChild(fluidItem);
+  }
+
   root.appendChild(bodies);
   tree.appendChild(root);
   return highlight;
@@ -1807,6 +1819,7 @@ async function setUpSceneView(
     fluidPositionAttribute = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
     fluidGeometry.setAttribute("position", fluidPositionAttribute);
     fluidPoints.visible = true;
+    highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
   });
 
   // フレーム階層ドリルインUI: Hierarchyで選択中のフレーム(既定はROOTでは

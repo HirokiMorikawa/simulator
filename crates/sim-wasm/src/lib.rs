@@ -83,6 +83,10 @@ pub struct WasmWorld {
     snapshot_interval_steps: u64,
     snapshots: VecDeque<World>,
     bookmarks: Vec<(String, World)>,
+    /// `spawn_fluid_block`を呼んだ回数(複数の水塊を並べてスポーンする際、
+    /// 塊どうしが重ならないようX方向のオフセットを決めるのに使う。Hierarchyの
+    /// 「Fluids」概要表示にも使う、`fluid_spawn_count`のdoc参照)。
+    fluid_spawn_count: u32,
 }
 
 #[wasm_bindgen]
@@ -160,6 +164,7 @@ impl WasmWorld {
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             bookmarks: Vec::new(),
+            fluid_spawn_count: 0,
         }
     }
 
@@ -763,42 +768,67 @@ impl WasmWorld {
     }
 
     /// 流体場オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「流体場」の土台)
-    /// 向けに、`sim_fluid::SphFluid`を有効化し、小さな水塊(3×3×3粒子)+その直下の
-    /// 床(1層の境界粒子、`SphFluid::add_boundary_particle`)を追加する。二度目以降の
-    /// 呼び出しは`World::enable_sph`が新しい`SphFluid`で置き換えるため実質的に
-    /// リセットとして機能する。
+    /// 向けに、小さな水塊(3×3×3粒子)+その直下の床(1層の境界粒子、
+    /// `SphFluid::add_boundary_particle`)を追加する。既にSPH流体が有効なら
+    /// (`World::sph_mut`)そこへ粒子を追加する(複数回スポーンすると水塊が
+    /// 増えていく、`fluid_spawn_count`でX方向にずらして重なりを避ける)。
+    /// まだ無効なら新規`SphFluid`を構築して有効化する(初回のみ)。
     pub fn spawn_fluid_block(&mut self) {
         let h: f64 = 0.15;
         let rho0: f64 = 1000.0;
         let c_s: f64 = 20.0;
         let dx: f64 = 0.1;
-        let mut sph = sim_fluid::SphFluid::new(h, rho0, c_s);
-        sph.mass = rho0 * dx.powi(3);
-
-        let origin = Vec3::new(3.0, 2.0, 0.0);
         let n = 3;
+        let floor_half = 0.6;
+        let floor_y = -dx;
+
+        let spawn_index = self.fluid_spawn_count;
+        self.fluid_spawn_count += 1;
+        let origin = Vec3::new(3.0 + spawn_index as f64 * 1.5, 2.0, 0.0);
+
+        let mut particle_positions = Vec::with_capacity(n * n * n);
         for ix in 0..n {
             for iy in 0..n {
                 for iz in 0..n {
-                    let pos = origin + Vec3::new(ix as f64 * dx, iy as f64 * dx, iz as f64 * dx);
-                    sph.add_particle(pos, Vec3::ZERO);
+                    particle_positions
+                        .push(origin + Vec3::new(ix as f64 * dx, iy as f64 * dx, iz as f64 * dx));
                 }
             }
         }
-
-        let floor_half = 0.6;
-        let floor_y = -dx;
+        let mut boundary_positions = Vec::new();
         let mut fx = origin.x - floor_half;
         while fx <= origin.x + floor_half {
             let mut fz = origin.z - floor_half;
             while fz <= origin.z + floor_half {
-                sph.add_boundary_particle(Vec3::new(fx, floor_y, fz));
+                boundary_positions.push(Vec3::new(fx, floor_y, fz));
                 fz += dx;
             }
             fx += dx;
         }
 
-        self.inner.enable_sph(sph);
+        if let Some(sph) = self.inner.sph_mut() {
+            for p in particle_positions {
+                sph.add_particle(p, Vec3::ZERO);
+            }
+            for b in boundary_positions {
+                sph.add_boundary_particle(b);
+            }
+        } else {
+            let mut sph = sim_fluid::SphFluid::new(h, rho0, c_s);
+            sph.mass = rho0 * dx.powi(3);
+            for p in particle_positions {
+                sph.add_particle(p, Vec3::ZERO);
+            }
+            for b in boundary_positions {
+                sph.add_boundary_particle(b);
+            }
+            self.inner.enable_sph(sph);
+        }
+    }
+
+    /// `spawn_fluid_block`を呼んだ回数(Hierarchyの「Fluids」概要表示用)。
+    pub fn fluid_spawn_count(&self) -> u32 {
+        self.fluid_spawn_count
     }
 
     /// 流体粒子数(境界粒子は含まない、`fluid_particle_positions_f32`と同じ体系)。
