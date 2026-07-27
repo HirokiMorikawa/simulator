@@ -624,6 +624,68 @@ mod tests {
         );
     }
 
+    /// D6浮き沈みのF5部分(平衡点から変位させると解析解の周期で振動する、
+    /// `demos.rs`の同テストのF5部分)を8本目の適用例として実装する。F4と同じ
+    /// `materials[].extends`密度派生+`fluids`静水面構成を流用し、箱を平衡位置より
+    /// `amplitude`だけ高い位置に置く。ネイティブ側は`body_velocity`(符号付き
+    /// y速度)の下降方向ゼロ交差で1周期を判定するが、シーンJSONの`ProbeJson`には
+    /// 符号付き速度を読める種別が無いため、`body_pos_y`のみから「最初の谷(底)を
+    /// 過ぎた後の次の山(頂点)」を検出する位置ベースの判定に置き換えた(単振動
+    /// なので谷から次の山までの時間も1周期に等しい)。
+    #[test]
+    fn run_headless_scenario_floating_box_oscillates_at_the_f5_analytic_period() {
+        let water_density: f64 = 998.2;
+        let ratio: f64 = 0.5;
+        let density = ratio * water_density;
+        let half: f64 = 0.5;
+        let side = 2.0 * half;
+        let equilibrium_y = -(ratio * side) + half;
+        let amplitude: f64 = 0.1;
+        let dt: f64 = 0.008333333;
+        let start_y = equilibrium_y + amplitude;
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d6-floating-box-f5",
+          "world": {{ "gravity": 9.80665, "dt": {dt} }},
+          "materials": [ {{ "extends": "木材(松)", "name": "d6-f5-density", "density": {density} }} ],
+          "bodies": [
+            {{ "shape": {{ "box": {{ "half": [{half}, {half}, {half}] }} }}, "material": "d6-f5-density",
+              "position": [0, {start_y}, 0], "name": "box" }}
+          ],
+          "fluids": [ {{ "static_water": {{ "water_level": 0.0, "density": {water_density} }} }} ],
+          "probes": [ {{ "body_pos_y": "box" }} ]
+        }}
+        "#
+        );
+
+        let steps = 400; // ネイティブ側と同じ既定dt換算での歩数。
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let pos_y = &result.probe_histories[0];
+
+        // 谷(最初にheightが上昇へ転じる点)。
+        let trough_step = (1..pos_y.len())
+            .find(|&i| pos_y[i] > pos_y[i - 1])
+            .expect("box should start descending then bounce back up");
+        // 谷の後、次に下降へ転じる直前の点(=次の山、1周期後)。
+        let peak_step = (trough_step + 1..pos_y.len())
+            .find(|&i| pos_y[i] < pos_y[i - 1])
+            .map(|i| i - 1)
+            .expect("box should reach a subsequent peak within the simulated window");
+
+        let measured_period = (peak_step + 1) as f64 * dt;
+        let mass = ratio * water_density * side * side * side;
+        let k = water_density * 9.80665 * side * side;
+        let analytic_period = 2.0 * std::f64::consts::PI * (mass / k).sqrt();
+        let rel_err = (measured_period - analytic_period).abs() / analytic_period;
+        assert!(
+            rel_err < 0.05,
+            "F5: measured_period={measured_period} analytic_period={analytic_period} \
+             rel_err={rel_err:.4}"
+        );
+    }
+
     /// シーンJSONに`rotation`(クォータニオン)・`linear_velocity`フィールドを追加した
     /// 上での4本目の適用例。D5 斜面(docs/21-verification/03-demo-scenarios.md
     /// 「角度スライダー+素材切替」「合格基準: M7/M8」)のうちM7(静止摩擦角未満では
