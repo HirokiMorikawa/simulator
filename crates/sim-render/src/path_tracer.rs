@@ -17,6 +17,16 @@
 //! (エリアライト)を扱うには多重重点サンプリング(MIS)が必要になるため後続増分)。
 //! 拡散(Lambertian)面のみNEEを適用する(鏡面/誘電体/金属は反射/屈折方向がデルタ
 //! 関数のため光源の直接サンプルと意味を成さない、標準的な扱い)。
+//!
+//! `AtmosphereMedium`(参加媒質、`medium`モジュールの`HomogeneousMedium`を`Scene`へ
+//! 配線したもの)は本増分で追加した。各レイセグメント(交差点まで、または環境へ
+//! 抜けるまで)ごとに、平行平面近似のsecant則(空へ抜ける場合)または交差距離
+//! (物体に当たる場合、aerial perspective)を光路長として、透過率(Beer-Lambert則)で
+//! そのセグメントの先にある放射輝度を減衰させつつ、同じ光路上の太陽光の単一散乱を
+//! 加算する。再帰呼び出し(間接光のバウンス)にも同じ処理が各セグメントの光路長で
+//! 適用されるため、複数バウンスに渡る透過率の減衰は自然に積(Beer-Lambert則の
+//! 加法的な光学的厚みに対応)として合成される。マルチスキャッタリング・レイ
+//! マーチングによる不均質媒質は対象外(`medium`モジュールdoc参照、変わらず)。
 
 use crate::bsdf::{Dielectric, Lambertian, Metal, RoughConductor};
 use crate::ray::Ray;
@@ -48,12 +58,54 @@ pub struct PointLight {
     pub intensity: f64,
 }
 
+/// シーン全体を満たす一様参加媒質(`medium`モジュールdoc「縮約実装の理由」参照——
+/// 単一散乱の閉形式解のみ)+ 平行光源としての太陽。平行平面(plane-parallel)大気
+/// 近似のsecant則(標準的な大気光学の近似、`up`との天頂角のコサインで光路長を
+/// スケールする)で、環境へ抜けるレイ(空を見上げる)の光路長を決める——`thickness`は
+/// 天頂方向(`up`)を真っ直ぐ見た場合の実効光路長(大気スケールハイトに相当)。
+/// 物体に当たったレイは、単純に交差距離`hit.t`を光路長とする(aerial perspective、
+/// 手前の大気による霞み)。
+#[derive(Clone, Copy, Debug)]
+pub struct AtmosphereMedium {
+    pub medium: crate::medium::HomogeneousMedium,
+    /// 太陽がある方向(カメラから見た方向、正規化済みを想定)。
+    pub sun_direction: Vec3,
+    pub sun_radiance: f64,
+    /// 天頂方向(secant近似の基準軸、正規化済みを想定)。
+    pub up: Vec3,
+    pub thickness: f64,
+}
+
+impl AtmosphereMedium {
+    /// 天頂角のコサインに基づくsecant近似の光路長(モジュールdoc参照)。天頂
+    /// 方向ぎりぎり(地平線方向、コサインが0に近い)で光路長が発散しないよう、
+    /// コサインの絶対値を`MIN_COS_ZENITH`未満にはクランプする。
+    fn sky_path_length(&self, direction: Vec3) -> f64 {
+        const MIN_COS_ZENITH: f64 = 0.02;
+        self.thickness / direction.dot(self.up).abs().max(MIN_COS_ZENITH)
+    }
+
+    /// 大気越しの放射輝度合成: 経路長`path_length`ぶんの透過率で`beyond`
+    /// (物体表面/環境から届く放射輝度)を減衰させ、同じ経路上での太陽光の単一散乱
+    /// (`medium`モジュールdoc参照)を加算する。
+    fn composite(&self, beyond: f64, path_length: f64, view_direction: Vec3) -> f64 {
+        let cos_theta = view_direction.dot(self.sun_direction);
+        let transmittance = self.medium.transmittance(path_length);
+        let in_scattered =
+            self.medium
+                .single_scattering_radiance(path_length, cos_theta, self.sun_radiance);
+        beyond * transmittance + in_scattered
+    }
+}
+
 /// 複数の球 + BSDF + 一様環境放射輝度 + 点光源からなるシーン。
 pub struct Scene {
     pub objects: Vec<SceneObject>,
     pub lights: Vec<PointLight>,
     /// 環境放射輝度(方向によらず一定、モノクロスカラー、設計§5「大気散乱等は後続」)。
     pub environment_radiance: f64,
+    /// 参加媒質(`None`なら真空、既存の全テストの挙動を完全に保つ)。
+    pub medium: Option<AtmosphereMedium>,
 }
 
 impl Scene {
@@ -112,13 +164,22 @@ impl Scene {
     /// doc参照)。
     pub fn trace(&self, ray: &Ray, rng: &mut SimRng, max_depth: u32) -> f64 {
         let Some((hit, material)) = self.closest_hit(ray, 1e-6) else {
-            return self.environment_radiance;
+            return match &self.medium {
+                None => self.environment_radiance,
+                // 空へ抜けるレイ(モジュールdoc「AtmosphereMedium」参照): 平行平面近似の
+                // secant則で光路長を決め、環境放射輝度を大気越しの透過率で減衰させつつ、
+                // その経路上での太陽光の単一散乱(空の色)を加算する。
+                Some(atmosphere) => {
+                    let path_length = atmosphere.sky_path_length(ray.direction);
+                    atmosphere.composite(self.environment_radiance, path_length, ray.direction)
+                }
+            };
         };
         if max_depth == 0 {
             return 0.0; // 打ち切り(エネルギーを捨てる、通常のロシアンルーレット無し打切りと同じ)。
         }
 
-        match material {
+        let surface_radiance = match material {
             Material::Lambertian(lambertian) => {
                 let direct = self.direct_lighting(hit.point, hit.normal, lambertian.eval());
 
@@ -179,11 +240,22 @@ impl Scene {
             Material::RoughConductor(rough) => {
                 let (direction, weight) = rough.sample(ray.direction, hit.normal, rng);
                 if weight <= 0.0 {
-                    return 0.0; // 出射方向がマクロ表面の裏側、寄与なし。
+                    // 出射方向がマクロ表面の裏側、寄与なし。この早期returnは関数全体を
+                    // 抜けるため、大気媒質が設定されていてもこのセグメント分の
+                    // 大気越しの単一散乱(空の色の混入)は加算されない(既知の限定、
+                    // 縮約実装として許容——このサンプリング失敗自体が稀なケース)。
+                    return 0.0;
                 }
                 let next_ray = Ray::new(hit.point, direction);
                 self.trace(&next_ray, rng, max_depth - 1) * weight
             }
+        };
+
+        match &self.medium {
+            None => surface_radiance,
+            // 物体に当たったレイ(モジュールdoc参照): 交差距離`hit.t`をそのまま
+            // 大気の光路長とする(aerial perspective、手前の大気による霞み)。
+            Some(atmosphere) => atmosphere.composite(surface_radiance, hit.t, ray.direction),
         }
     }
 }
@@ -191,6 +263,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::medium::HomogeneousMedium;
 
     /// R1: 白色炉テスト(docs/21-verification/01-analytic-tests.md、
     /// docs/17-rendering/02-path-tracing.md §7)。完全拡散面(ρ=1)が一様環境放射輝度の
@@ -217,6 +290,7 @@ mod tests {
             }],
             lights: vec![],
             environment_radiance,
+            medium: None,
         };
         let camera_origin = Vec3::ZERO;
         let mut rng = SimRng::new(1, 1);
@@ -252,6 +326,7 @@ mod tests {
             }],
             lights: vec![],
             environment_radiance,
+            medium: None,
         };
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
         let mut rng = SimRng::new(2, 2);
@@ -274,6 +349,7 @@ mod tests {
             }],
             lights: vec![],
             environment_radiance: 9.0,
+            medium: None,
         };
         let ray = Ray::new(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0));
         let mut rng = SimRng::new(3, 3);
@@ -305,6 +381,7 @@ mod tests {
             }],
             lights: vec![],
             environment_radiance,
+            medium: None,
         };
         let camera_origin = Vec3::ZERO;
         let mut rng = SimRng::new(4, 4);
@@ -344,6 +421,7 @@ mod tests {
             }],
             lights: vec![],
             environment_radiance,
+            medium: None,
         };
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0)); // 垂直入射。
         let mut rng = SimRng::new(7, 7);
@@ -378,6 +456,7 @@ mod tests {
             objects: vec![near, far],
             lights: vec![],
             environment_radiance: 1.0,
+            medium: None,
         };
 
         // 両方の球の中心を貫く一直線: 手前の球(t≈2)が奥の球(t≈7)より先にヒットする。
@@ -406,6 +485,7 @@ mod tests {
             objects: vec![far, near],
             lights: vec![],
             environment_radiance: 1.0,
+            medium: None,
         };
         let (hit_reordered, _) = scene_reordered
             .closest_hit(&ray, 1e-6)
@@ -435,6 +515,7 @@ mod tests {
             }],
             lights: vec![light],
             environment_radiance: 0.0,
+            medium: None,
         };
         let point = Vec3::new(0.0, 0.0, -4.0); // 球の手前(原点側)の頂点。
         let normal = Vec3::new(0.0, 0.0, 1.0); // 外向き法線(光源の方向と一致)。
@@ -474,6 +555,7 @@ mod tests {
             objects: vec![occluder, main_sphere],
             lights: vec![light],
             environment_radiance: 0.0,
+            medium: None,
         };
         let point = Vec3::new(0.0, 0.0, -4.0);
         let normal = Vec3::new(0.0, 0.0, 1.0);
@@ -504,6 +586,7 @@ mod tests {
             }],
             lights: vec![light],
             environment_radiance: 0.0,
+            medium: None,
         };
         let point = Vec3::new(0.0, 0.0, -4.0);
         let normal = Vec3::new(0.0, 0.0, 1.0);
@@ -533,6 +616,7 @@ mod tests {
             }],
             lights: vec![light],
             environment_radiance: 0.0,
+            medium: None,
         };
         let point = Vec3::new(0.0, 0.0, -4.0);
         let normal = Vec3::new(0.0, 0.0, 1.0);
@@ -581,6 +665,7 @@ mod tests {
             objects: vec![main_sphere, occluder],
             lights: vec![],
             environment_radiance: 6.0,
+            medium: None,
         };
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
         (scene, ray)
@@ -683,6 +768,7 @@ mod tests {
             }],
             lights: vec![],
             environment_radiance,
+            medium: None,
         };
         let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
         (scene, ray)
@@ -740,5 +826,135 @@ mod tests {
                 "alpha={alpha}: mean radiance must be positive: mean={mean}"
             );
         }
+    }
+
+    /// D42(空と大気)の土台: `medium`モジュールの`HomogeneousMedium`(R5/R6で純粋関数
+    /// として既に検証済み)を`Scene::trace`へ実際に配線する(モジュールdoc
+    /// 「AtmosphereMedium」参照——それまでは`Scene`に参加媒質を持つ手段自体が
+    /// 無かった)。オブジェクトの無いシーンでは環境へ抜けるレイが必ず`self.medium`の
+    /// miss分岐を通り、確率的なBSDFサンプリングが絡まないため、secant則による
+    /// 光路長・透過率・単一散乱の合成値を解析的に厳密一致で検証できる。
+    #[test]
+    fn trace_applies_secant_sky_path_length_and_single_scattering_to_environment_rays() {
+        let medium = HomogeneousMedium::rayleigh_atmosphere(450.0, 1.16e-5);
+        let atmosphere = AtmosphereMedium {
+            medium,
+            sun_direction: Vec3::new(0.3, 0.4, 0.0).normalize_or_zero(),
+            sun_radiance: 3.0,
+            up: Vec3::new(0.0, 1.0, 0.0),
+            thickness: 8000.0,
+        };
+        let environment_radiance = 2.0;
+        let scene = Scene {
+            objects: vec![],
+            lights: vec![],
+            environment_radiance,
+            medium: Some(atmosphere),
+        };
+
+        // 天頂から60°傾いた視線方向(cosθ_zenith=0.5、secant則のクランプの影響を
+        // 受けない値)。
+        let direction = Vec3::new(3.0_f64.sqrt() / 2.0, 0.5, 0.0);
+        let ray = Ray::new(Vec3::ZERO, direction);
+        let mut rng = SimRng::new(3, 3);
+        let radiance = scene.trace(&ray, &mut rng, 4);
+
+        let path_length = atmosphere.thickness / 0.5;
+        let cos_theta = direction.dot(atmosphere.sun_direction);
+        let expected = environment_radiance * medium.transmittance(path_length)
+            + medium.single_scattering_radiance(path_length, cos_theta, atmosphere.sun_radiance);
+        let rel_err = (radiance - expected).abs() / expected;
+        assert!(
+            rel_err < 1e-9,
+            "radiance={radiance} expected={expected} rel_err={rel_err}"
+        );
+    }
+
+    /// R5/R6(空の色)を`medium`モジュール単体の純粋関数としてではなく、`Scene::trace`
+    /// 経由で再確認する(「配線」自体の検証)。環境放射輝度をゼロにして単一散乱項
+    /// のみを抽出し、青(450nm)が赤(650nm)より強く散乱される(空が青い)ことを、
+    /// 天頂を見上げるレイで確認する。
+    #[test]
+    fn trace_reproduces_stronger_blue_sky_scattering_than_red_through_the_medium_wiring() {
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let sun_direction = Vec3::new(0.6, 0.8, 0.0); // 既に単位ベクトル(0.6²+0.8²=1)。
+        let scene_for_wavelength = |wavelength_nm: f64| Scene {
+            objects: vec![],
+            lights: vec![],
+            environment_radiance: 0.0,
+            medium: Some(AtmosphereMedium {
+                medium: HomogeneousMedium::rayleigh_atmosphere(wavelength_nm, 1.16e-5),
+                sun_direction,
+                sun_radiance: 1.0,
+                up,
+                thickness: 8000.0,
+            }),
+        };
+        let ray = Ray::new(Vec3::ZERO, up); // 天頂を見上げる。
+        let mut rng = SimRng::new(9, 9);
+
+        let blue = scene_for_wavelength(450.0).trace(&ray, &mut rng, 1);
+        let red = scene_for_wavelength(650.0).trace(&ray, &mut rng, 1);
+
+        assert!(
+            blue > red,
+            "sky must appear blue, not red: blue={blue} red={red}"
+        );
+    }
+
+    /// Aerial perspective: 孤立した白色炉球(albedo=1、`bsdf*cosθ/pdf`が方向に
+    /// よらずalbedoに恒常的に相殺されるR1と同じ性質)を異なる距離に置き、大気による
+    /// 手前の透過率減衰で遠い球ほど暗く見えることを、Beer-Lambert則が予測する
+    /// 比率と比較して定量的に確認する(太陽の単一散乱項は`sun_radiance=0`で
+    /// 切り離し、純粋な透過率減衰のみを対象にする——単一散乱込みの検証は上の
+    /// 2テストが担う)。
+    #[test]
+    fn atmosphere_dims_a_distant_white_furnace_sphere_matching_beer_lambert_transmittance_ratio() {
+        // 効果を統計的に測定しやすくするため、現実の大気(β_R(550nm)≈1.16e-5/m)より
+        // 一桁大きい係数を使う(縮約実装のテスト設計としては`sim-fluid`等で使って
+        // きた「効果が測定しやすいパラメータを選ぶ」方針と同じ)。
+        let sigma_s_reference: f64 = 1.0e-4;
+        let medium = HomogeneousMedium::rayleigh_atmosphere(550.0, sigma_s_reference);
+        let atmosphere = AtmosphereMedium {
+            medium,
+            sun_direction: Vec3::new(0.0, 1.0, 0.0),
+            sun_radiance: 0.0, // 単一散乱項を切り離し、透過率減衰のみを対象にする。
+            up: Vec3::new(0.0, 1.0, 0.0),
+            thickness: 8000.0,
+        };
+
+        let environment_radiance = 4.0;
+        let radius = 0.5;
+        let near_distance: f64 = 1000.0;
+        let far_distance: f64 = 5000.0;
+
+        let scene_for = |distance: f64| Scene {
+            objects: vec![SceneObject {
+                sphere: Sphere {
+                    center: Vec3::new(0.0, 0.0, -distance),
+                    radius,
+                },
+                material: Material::Lambertian(Lambertian { albedo: 1.0 }),
+            }],
+            lights: vec![],
+            environment_radiance,
+            medium: Some(atmosphere),
+        };
+        let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+
+        let n = 200_000;
+        let mean_near = average_trace(&scene_for(near_distance), &ray, 7, n);
+        let mean_far = average_trace(&scene_for(far_distance), &ray, 7, n);
+
+        // 球面上の交差点までの距離は`distance - radius`だが、比を取ると`radius`は
+        // 厳密に相殺する(`transmittance(d)=exp(-sigma_s*d)`が指数関数のため)。
+        let measured_ratio = mean_far / mean_near;
+        let expected_ratio = (-medium.sigma_s * (far_distance - near_distance)).exp();
+        let rel_err = (measured_ratio - expected_ratio).abs() / expected_ratio;
+        assert!(
+            rel_err < 0.05,
+            "measured_ratio={measured_ratio} expected_ratio={expected_ratio} \
+             rel_err={rel_err:.4} mean_near={mean_near} mean_far={mean_far}"
+        );
     }
 }
