@@ -833,6 +833,73 @@ mod tests {
         );
     }
 
+    /// D5(斜面、続き): 静止摩擦角を超える(45°)と`M8`の解析解どおりの加速度で滑り出す
+    /// ことを確認する(`demos.rs`の`d5_incline_stays_static_below_friction_angle_and_
+    /// slides_matching_formula_above`のM8部分と同じ構成をシーンJSONで再現)。
+    /// `ProbeTarget`には斜面下り方向の符号付き速度成分を直接読める種別が無いが、
+    /// 初期速度ゼロ・XY平面内のみの運動(重力はY軸負方向、斜面法線はXY平面内)であれば
+    /// 速度は常に下り方向の単一成分のみを持つため、`body_speed`(速さ)がそのまま
+    /// 下り方向速度に一致する。
+    #[test]
+    fn run_headless_scenario_slides_down_an_incline_above_the_friction_angle_matching_m8() {
+        let theta: f64 = 45.0_f64.to_radians();
+        let normal = Vec3::new(-theta.sin(), theta.cos(), 0.0);
+        let half_extent = 0.5;
+        let position = normal.scale(half_extent);
+        let rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), theta);
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d5-incline-slide",
+          "world": {{ "gravity": 9.80665, "dt": 0.008333333 }},
+          "bodies": [
+            {{ "shape": {{ "plane": {{ "normal": [{nx}, {ny}, {nz}], "d": 0 }} }},
+              "type": "static", "material": "鋼(炭素鋼)" }},
+            {{ "shape": {{ "box": {{ "half": [{half_extent}, {half_extent}, {half_extent}] }} }},
+              "material": "鋼(炭素鋼)",
+              "position": [{px}, {py}, {pz}],
+              "rotation": [{qx}, {qy}, {qz}, {qw}],
+              "name": "box" }}
+          ],
+          "probes": [ {{ "body_speed": "box" }} ]
+        }}
+        "#,
+            nx = normal.x,
+            ny = normal.y,
+            nz = normal.z,
+            px = position.x,
+            py = position.y,
+            pz = position.z,
+            qx = rotation.x,
+            qy = rotation.y,
+            qz = rotation.z,
+            qw = rotation.w,
+        );
+
+        let steps = 60; // 0.5秒(既定dt) — demos.rsのM8アサーションと同じ経過時間
+        let dt: f64 = 0.008333333;
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+
+        let measured_speed = *result.probe_histories[0]
+            .last()
+            .expect("history should not be empty");
+        let elapsed = steps as f64 * dt;
+        let measured_accel = measured_speed / elapsed;
+
+        let world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let steel_friction = world.materials().friction_pair(steel, steel);
+        let expected_accel = 9.80665 * (theta.sin() - steel_friction * theta.cos());
+        let rel_err = (measured_accel - expected_accel).abs() / expected_accel;
+        assert!(
+            rel_err < 0.05,
+            "M8: box on a 45° incline (above the friction angle) should slide with \
+             a=g(sinθ-μkcosθ): measured_accel={measured_accel} expected_accel={expected_accel} \
+             rel_err={rel_err:.4}"
+        );
+    }
+
     /// D2(弾道): 45°射出の真空放物運動を`body_pos_y`/`body_speed`の2プローブのみで検証する。
     /// `ProbeTarget`には水平位置(range)を直接読める種別が無いため、`demos.rs`の
     /// `d2_ballistic_range_matches_45_degree_formula_and_drag_shortens_range`のように
