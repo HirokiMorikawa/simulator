@@ -115,6 +115,13 @@ type MaterialProperties = {
 };
 type MaterialsRef = { current: (() => MaterialProperties[]) | null };
 
+// Projectドロワー Circuit タブ(設計docs/23-frontend/01-editor.md §1.7「回路
+// エディタサブモード」の縮約実装——自由配線ではなく、既存の固定トポロジー
+// (分圧回路)のトポロジー表示+ライブ電圧読み取りのみ)。MaterialsRefと同じ理由
+// (worldより先にパネルが構築される)で、可変の参照オブジェクト越しにコールバックを
+// 後から配線する。
+type CircuitRef = { current: (() => number) | null };
+
 function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
@@ -301,13 +308,55 @@ function logCommand(world: WasmWorld, kind: string, detail: string) {
   commandLog.push({ t: world.time(), step: Number(world.step_count()), kind, detail });
 }
 
-function setUpProjectDrawer(materialsRef: MaterialsRef) {
+function setUpProjectDrawer(materialsRef: MaterialsRef, circuitRef: CircuitRef) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
   const staticContentByTab: Record<string, string> = {
     scenes: "Scenes: (D1–D43 サンプルシーンの読み込みは後続増分)",
     prefabs: "Prefabs: 未実装",
   };
+  let circuitTabRefreshIntervalId: number | null = null;
+
+  function renderCircuitTab() {
+    body.innerHTML = "";
+    const topology = document.createElement("pre");
+    topology.className = "circuit-topology";
+    topology.textContent = [
+      "分圧回路(固定トポロジー、自由配線の回路エディタは後続増分):",
+      "",
+      "  Node1 (10V 電源) --[100Ω]-- Node2 --[200Ω]-- GND",
+      "                                  |",
+      "                              [スイッチ]",
+      "                                  |",
+      "                                 GND",
+      "",
+      "スイッチの開閉は画面上部の「回路スイッチ(閉)」チェックボックスで操作する。",
+    ].join("\n");
+    body.appendChild(topology);
+
+    const voltageLine = document.createElement("div");
+    voltageLine.id = "circuit-tab-voltage";
+    voltageLine.className = "inspector-field";
+    body.appendChild(voltageLine);
+
+    const switchCheckbox = document.getElementById("toggle-circuit-switch") as HTMLInputElement | null;
+
+    function refresh() {
+      if (!circuitRef.current) {
+        voltageLine.textContent = "Node2電圧: 読み込み中...";
+        return;
+      }
+      const voltage = circuitRef.current();
+      const switchState = switchCheckbox?.checked ? "閉" : "開";
+      voltageLine.textContent = `Node2電圧: ${voltage.toFixed(3)} V (スイッチ: ${switchState})`;
+    }
+    refresh();
+
+    if (circuitTabRefreshIntervalId !== null) {
+      window.clearInterval(circuitTabRefreshIntervalId);
+    }
+    circuitTabRefreshIntervalId = window.setInterval(refresh, 200);
+  }
 
   function renderMaterialsTab() {
     if (!materialsRef.current) {
@@ -366,12 +415,20 @@ function setUpProjectDrawer(materialsRef: MaterialsRef) {
 
   function show(tab: string) {
     tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
+    if (tab !== "circuit" && circuitTabRefreshIntervalId !== null) {
+      window.clearInterval(circuitTabRefreshIntervalId);
+      circuitTabRefreshIntervalId = null;
+    }
     if (tab === "materials") {
       renderMaterialsTab();
       return;
     }
     if (tab === "replays") {
       renderReplaysTab();
+      return;
+    }
+    if (tab === "circuit") {
+      renderCircuitTab();
       return;
     }
     body.textContent = staticContentByTab[tab] ?? "";
@@ -439,6 +496,7 @@ async function setUpSceneView(
   appendConsoleEntries: (eventsText: string) => void,
   jumpToStepRef: JumpToStepRef,
   materialsRef: MaterialsRef,
+  circuitRef: CircuitRef,
 ) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -447,6 +505,7 @@ async function setUpSceneView(
       const [density, friction, restitution, specificHeat, conductivity] = world.material_properties_f64(name);
       return { name, density, friction, restitution, specificHeat, conductivity };
     });
+  circuitRef.current = () => world.circuit_divider_voltage();
 
   const host = document.getElementById("scene-view-canvas-host")!;
 
@@ -1420,8 +1479,9 @@ function main() {
   const jumpToStepRef: JumpToStepRef = { current: null };
   const appendConsoleEntries = setUpConsole(jumpToStepRef);
   const materialsRef: MaterialsRef = { current: null };
-  setUpProjectDrawer(materialsRef);
-  setUpSceneView(updateProbeGraph, appendConsoleEntries, jumpToStepRef, materialsRef).catch((err) => {
+  const circuitRef: CircuitRef = { current: null };
+  setUpProjectDrawer(materialsRef, circuitRef);
+  setUpSceneView(updateProbeGraph, appendConsoleEntries, jumpToStepRef, materialsRef, circuitRef).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);

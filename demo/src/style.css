@@ -357,3 +357,14 @@ body {
 .materials-table th {
   color: #9cf;
 }
+
+.circuit-topology {
+  font-size: 12px;
+  color: #ccc;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  padding: 8px;
+  margin: 0 0 8px 0;
+  white-space: pre;
+  overflow-x: auto;
+}
