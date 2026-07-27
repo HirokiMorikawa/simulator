@@ -122,6 +122,22 @@ type MaterialsRef = { current: (() => MaterialProperties[]) | null };
 // 後から配線する。
 type CircuitRef = { current: (() => number) | null };
 
+// Projectドロワー Scenes タブ(設計docs/23-frontend/01-editor.md §1.6「Scenes:
+// シーンJSON…Export/Import」の縮約実装——現在のボディ一覧をJSONへエクスポート
+// するのみ、シーンJSONからの読み込み(Import)は`sim_world::Scenario`の
+// スキーマとスポーンパレット生成ボディとの対応付けが必要になるため後続増分)。
+// MaterialsRefと同じ理由(worldより先にパネルが構築される)で、可変の参照
+// オブジェクト越しにコールバックを後から配線する。
+type SceneBodyExport = {
+  index: number;
+  label: string;
+  shape: string;
+  material: string;
+  position: [number, number, number];
+  isStatic: boolean;
+};
+type SceneExportRef = { current: (() => SceneBodyExport[]) | null };
+
 function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
@@ -308,14 +324,48 @@ function logCommand(world: WasmWorld, kind: string, detail: string) {
   commandLog.push({ t: world.time(), step: Number(world.step_count()), kind, detail });
 }
 
-function setUpProjectDrawer(materialsRef: MaterialsRef, circuitRef: CircuitRef) {
+function setUpProjectDrawer(materialsRef: MaterialsRef, circuitRef: CircuitRef, sceneExportRef: SceneExportRef) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
   const staticContentByTab: Record<string, string> = {
-    scenes: "Scenes: (D1–D43 サンプルシーンの読み込みは後続増分)",
     prefabs: "Prefabs: 未実装",
   };
   let circuitTabRefreshIntervalId: number | null = null;
+
+  function renderScenesTab() {
+    body.innerHTML = "";
+    if (!sceneExportRef.current) {
+      body.textContent = "Scenes: 読み込み中...";
+      return;
+    }
+    const note = document.createElement("p");
+    note.textContent = "現在のシーン(ボディ一覧)をJSONへエクスポートする(シーンJSONからの読み込みは後続増分)。";
+    body.appendChild(note);
+
+    const bodies = sceneExportRef.current();
+    const exportButton = document.createElement("button");
+    exportButton.textContent = `Export current scene (${bodies.length}件, JSON)`;
+    exportButton.addEventListener("click", () => {
+      const latestBodies = sceneExportRef.current ? sceneExportRef.current() : bodies;
+      const blob = new Blob([JSON.stringify(latestBodies, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "scene.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+    body.appendChild(exportButton);
+
+    const list = document.createElement("ul");
+    for (const b of bodies) {
+      const item = document.createElement("li");
+      const [x, y, z] = b.position;
+      item.textContent = `${b.label}: ${b.shape} / ${b.material} @ (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})${b.isStatic ? " [static]" : ""}`;
+      list.appendChild(item);
+    }
+    body.appendChild(list);
+  }
 
   function renderCircuitTab() {
     body.innerHTML = "";
@@ -419,6 +469,10 @@ function setUpProjectDrawer(materialsRef: MaterialsRef, circuitRef: CircuitRef) 
       window.clearInterval(circuitTabRefreshIntervalId);
       circuitTabRefreshIntervalId = null;
     }
+    if (tab === "scenes") {
+      renderScenesTab();
+      return;
+    }
     if (tab === "materials") {
       renderMaterialsTab();
       return;
@@ -497,6 +551,7 @@ async function setUpSceneView(
   jumpToStepRef: JumpToStepRef,
   materialsRef: MaterialsRef,
   circuitRef: CircuitRef,
+  sceneExportRef: SceneExportRef,
 ) {
   await init();
   const world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -506,6 +561,22 @@ async function setUpSceneView(
       return { name, density, friction, restitution, specificHeat, conductivity };
     });
   circuitRef.current = () => world.circuit_divider_voltage();
+  sceneExportRef.current = () => {
+    const count = world.body_count();
+    const bodies: SceneBodyExport[] = [];
+    for (let i = 0; i < count; i++) {
+      const pos = world.body_position_at_f32(i);
+      bodies.push({
+        index: i,
+        label: world.body_label_at(i),
+        shape: world.body_shape_label_at(i),
+        material: world.body_material_label_at(i),
+        position: [pos[0], pos[1], pos[2]],
+        isStatic: world.body_is_static_at(i),
+      });
+    }
+    return bodies;
+  };
 
   const host = document.getElementById("scene-view-canvas-host")!;
 
@@ -1480,8 +1551,9 @@ function main() {
   const appendConsoleEntries = setUpConsole(jumpToStepRef);
   const materialsRef: MaterialsRef = { current: null };
   const circuitRef: CircuitRef = { current: null };
-  setUpProjectDrawer(materialsRef, circuitRef);
-  setUpSceneView(updateProbeGraph, appendConsoleEntries, jumpToStepRef, materialsRef, circuitRef).catch((err) => {
+  const sceneExportRef: SceneExportRef = { current: null };
+  setUpProjectDrawer(materialsRef, circuitRef, sceneExportRef);
+  setUpSceneView(updateProbeGraph, appendConsoleEntries, jumpToStepRef, materialsRef, circuitRef, sceneExportRef).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;
     console.error(err);

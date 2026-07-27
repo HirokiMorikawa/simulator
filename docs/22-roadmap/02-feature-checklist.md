@@ -148,9 +148,13 @@
   固定トポロジー(分圧回路)の図示+`circuit_divider_voltage()`のライブ読み取り
   (200ms間隔ポーリング)+既存のスイッチチェックボックス状態の反映
   (縮約実装: D19が求める「自由配線」の回路エディタ本体はまだ未実装、
-  既存の固定回路の可視化パネルのみ)。
+  既存の固定回路の可視化パネルのみ)。続けてScenesタブも実装した——現在の
+  ボディ一覧(label/shape/material/position/isStatic)を表示+「Export
+  current scene」ボタンでJSONダウンロード(シーンJSONからの読み込み
+  (Import)は`sim_world::Scenario`のスキーマとスポーンパレット生成ボディとの
+  対応付けが必要なため後続増分)。
   残りは流体場/フレーム軸オーバーレイ・自由配線の回路エディタ本体・
-  シーン/ブックマークのエクスポート/インポート・Replay再生実行等。
+  シーンJSON Import・ブックマークのエクスポート/インポート・Replay再生実行等。
 - **次**: ワークストリームDの継続(残りオーバーレイ・自由配線回路エディタ等)を
   軸に、ワークストリームC残り(R4)は機を見て並行して進める。優先順位の詳細は
   `/root/.claude/plans/elegant-meandering-pixel.md`参照。
@@ -1365,8 +1369,15 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
 - [ ] シーン + Replay + ブックマークのエクスポート/インポート
       (Replay(入力列)のエクスポートのみ実装済み——Project ドロワーの
       Replaysタブ「Export」ボタンで`commandLog`をJSONダウンロード。
-      シーン自体のエクスポート/インポート・ブックマークのエクスポート・
-      Replayのインポート/再生実行は未実装)
+      続けてシーンのエクスポートも実装した——Project ドロワーのScenesタブに
+      現在のボディ一覧(`body_count`/`body_label_at`/`body_shape_label_at`/
+      `body_material_label_at`/`body_position_at_f32`/`body_is_static_at`を
+      毎回クエリ)を表示+「Export current scene」ボタンでJSONダウンロード
+      (Playwrightで、床+箱の初期シーンで2件のJSONがダウンロードされ、
+      各要素のlabel/shape/material/position/isStaticが実際のクエリ結果と
+      一致することを確認)。シーンJSONからの読み込み(Import、`sim_world::
+      Scenario`のスキーマとスポーンパレット生成ボディとの対応付けが必要)・
+      ブックマークのエクスポート・Replayのインポート/再生実行は未実装)
 - [x] Undo / Redo(Edit モードのみ)
       (Gizmoドラッグ(Translate/Rotateいずれも)開始のたびに直前の位置/姿勢を
       単純なスタック(判別共用体、上限20件)へ積み、Toolbarの
