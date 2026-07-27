@@ -471,6 +471,54 @@ mod tests {
         }
     }
 
+    /// D6 浮き沈み(docs/21-verification/03-demo-scenarios.md「密度スライダー付きの
+    /// 箱を水域へ」「合格基準: F4(喫水)」)を、ヘッドレスランナーの3本目の適用例
+    /// として実装する。`materials[].extends`で密度比0.6の材質を派生させ
+    /// (`demos.rs`の`d6_floating_box_matches_waterline_depth_and_heave_period`の
+    /// F4部分と同じ密度・寸法)、箱を解析的な釣り合い喫水位置(`h_sub=0.6×側面長`、
+    /// `equilibrium_y=-h_sub+half`)にちょうど置く。安定平衡のため、十分な時間
+    /// 経過後も`body_pos_y`プローブの最終値が釣り合い位置から大きくずれていない
+    /// ことを確認する。
+    #[test]
+    fn run_headless_scenario_settles_a_floating_box_at_the_f4_equilibrium_waterline() {
+        let water_density = 998.2;
+        let ratio = 0.6;
+        let density = ratio * water_density;
+        let half = 0.5;
+        let side = 2.0 * half;
+        let h_sub = ratio * side;
+        let equilibrium_y = -h_sub + half;
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d6-floating-box-f4",
+          "world": {{ "gravity": 9.80665, "dt": 0.008333333 }},
+          "materials": [ {{ "extends": "木材(松)", "name": "d6-density", "density": {density} }} ],
+          "bodies": [
+            {{ "shape": {{ "box": {{ "half": [{half}, {half}, {half}] }} }}, "material": "d6-density",
+              "position": [0, {equilibrium_y}, 0], "name": "box" }}
+          ],
+          "fluids": [ {{ "static_water": {{ "water_level": 0.0, "density": {water_density} }} }} ],
+          "probes": [ {{ "body_pos_y": "box" }} ]
+        }}
+        "#
+        );
+
+        let steps = 600; // 5秒(既定dt)
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+
+        let final_y = *result.probe_histories[0]
+            .last()
+            .expect("history should not be empty");
+        let drift = (final_y - equilibrium_y).abs();
+        assert!(
+            drift < 0.05 * side,
+            "box should remain near the F4 equilibrium waterline depth (stable equilibrium): \
+             final_y={final_y} equilibrium_y={equilibrium_y} drift={drift}"
+        );
+    }
+
     /// `probes[].body_pos_y`が`bodies[].name`のいずれとも一致しない場合は
     /// `SceneError::UnknownBodyName`。
     #[test]
