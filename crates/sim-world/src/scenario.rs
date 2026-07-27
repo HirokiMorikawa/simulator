@@ -77,12 +77,20 @@ pub struct Scenario {
     /// `sim-coupling`の`Coupling`実装群(設計の例示JSONでは`["buoyancy_drag", ...]`の
     /// ような名前配列だが、`sim-coupling`registry自体が未接続な設計の縮約状態
     /// (モジュールdoc冒頭参照)を反映し、この実装では各`Coupling`をパラメータ付きで
-    /// 直接構成する形にする)。現時点では`ImageChargeForce`(D26帯電風船が要る鏡像力)
-    /// のみ対応——他13種は後続増分(この`couplings`セクション自体、設計が
-    /// 「排他結合検査」を要求する多対多の相互作用検証はまだ及ばない、最小の一歩)。
-    /// `joints`と同じ理由で`from_scenario`側のみで処理する。
+    /// 直接構成する形にする)。現時点では`ImageChargeForce`(D26帯電風船の鏡像力)・
+    /// `BrownianForce`(D25ブラウン運動)・`InductionCoupling`(D21銅管落下の渦電流
+    /// ブレーキ)のみ対応——残り11種は後続増分(この`couplings`セクション自体、
+    /// 設計が「排他結合検査」を要求する多対多の相互作用検証はまだ及ばない、
+    /// 最小の一歩)。`joints`と同じ理由で`from_scenario`側のみで処理する。
     #[serde(default)]
     pub couplings: Vec<CouplingJson>,
+    /// 回路ドメイン(`sim_em::Circuit`)。未指定なら無効。ノードはインデックス
+    /// (`sim_em::GROUND`=0が接地、`Circuit::new`と同じ規約)——ノード名前付けの
+    /// 手間を避けるため`thermal.nodes`同様インデックス直接指定とする。現時点では
+    /// 抵抗器・電圧源のみ対応(コンデンサ・スイッチ・ダイオードは後続増分、
+    /// D21銅管落下が要る最小構成のみ)。
+    #[serde(default)]
+    pub circuit: Option<CircuitScenarioJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
@@ -278,6 +286,44 @@ pub enum CouplingJson {
         seed: u64,
         stream: u64,
     },
+    /// D21(磁石遊び、銅管落下)向け(`sim_coupling::InductionCoupling`)。
+    /// `voltage_source_index`は`circuit.voltage_sources`配列のインデックス
+    /// (`thermal_node`と同じ縮約)。
+    InductionCoupling {
+        body: String,
+        voltage_source_index: usize,
+        length: f64,
+        magnetic_field: f64,
+        axis: [f64; 3],
+    },
+}
+
+/// `Scenario::circuit`(モジュールdoc「縮約実装の理由」参照)。
+#[derive(Deserialize)]
+pub struct CircuitScenarioJson {
+    pub num_nodes: usize,
+    #[serde(default)]
+    pub resistors: Vec<ResistorJson>,
+    #[serde(default)]
+    pub voltage_sources: Vec<VoltageSourceJson>,
+}
+
+/// `CircuitScenarioJson::resistors`の1件。
+#[derive(Deserialize)]
+pub struct ResistorJson {
+    pub a: usize,
+    pub b: usize,
+    pub resistance: f64,
+}
+
+/// `CircuitScenarioJson::voltage_sources`の1件(`sim_em::Circuit::
+/// add_voltage_source`の順序どおり登録されるため、`couplings`側の
+/// `voltage_source_index`はこの配列のインデックスと一致する)。
+#[derive(Deserialize)]
+pub struct VoltageSourceJson {
+    pub a: usize,
+    pub b: usize,
+    pub voltage: f64,
 }
 
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
@@ -410,6 +456,17 @@ impl World {
             world.enable_thermal(solver);
         }
 
+        if let Some(circuit_json) = &scenario.circuit {
+            let mut circuit = sim_em::Circuit::new(circuit_json.num_nodes);
+            for r in &circuit_json.resistors {
+                circuit.add_resistor(r.a, r.b, r.resistance);
+            }
+            for v in &circuit_json.voltage_sources {
+                circuit.add_voltage_source(v.a, v.b, v.voltage);
+            }
+            world.enable_circuit(circuit);
+        }
+
         for joint in &scenario.joints {
             match joint {
                 JointJson::Distance {
@@ -481,6 +538,24 @@ impl World {
                         *seed,
                         *stream,
                     )));
+                }
+                CouplingJson::InductionCoupling {
+                    body,
+                    voltage_source_index,
+                    length,
+                    magnetic_field,
+                    axis,
+                } => {
+                    let id = body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    world.add_coupling(Box::new(sim_coupling::InductionCoupling {
+                        body_index: id.index as usize,
+                        voltage_source_index: *voltage_source_index,
+                        length: *length,
+                        magnetic_field: *magnetic_field,
+                        axis: array_to_vec3(*axis),
+                    }));
                 }
             }
         }
@@ -1498,6 +1573,60 @@ mod tests {
             rel_err < 0.3,
             "D25 pass criterion (S4 MSD, 1-axis component, N={n_particles}): \
              msd={msd:e} expected={expected:e} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// D21(磁石遊び、銅管落下): `demos.rs`の
+    /// `d21_magnet_play_copper_tube_drop_reaches_analytic_terminal_velocity`と
+    /// 同じ構成(渦電流ブレーキ、`Circuit`+`InductionCoupling`、本増分で追加した
+    /// `Scenario::circuit`+`CouplingJson::InductionCoupling`スキーマ拡張)を
+    /// シーンJSON経由で再現し、終端速度が解析解$v_{term}=mgR/(B\ell)^2$と
+    /// rel<0.02一致することを確認する。
+    #[test]
+    fn run_headless_scenario_copper_tube_drop_reaches_analytic_terminal_velocity() {
+        let mass: f64 = 0.01;
+        let length: f64 = 0.1;
+        let b: f64 = 0.5;
+        let r: f64 = 1.0;
+        let gravity: f64 = 9.80665;
+        let dt: f64 = 0.001;
+        let tau = mass * r / (b * length).powi(2);
+        let steps = (5.0 * tau / dt) as u32;
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d21-copper-tube-drop",
+          "world": {{ "gravity": {gravity}, "dt": {dt} }},
+          "bodies": [
+            {{ "shape": {{ "sphere": {{ "radius": 0.01 }} }},
+              "material": "鋼(炭素鋼)", "mass_override": {mass}, "name": "rod" }}
+          ],
+          "circuit": {{
+            "num_nodes": 2,
+            "resistors": [ {{ "a": 1, "b": 0, "resistance": {r} }} ],
+            "voltage_sources": [ {{ "a": 1, "b": 0, "voltage": 0.0 }} ]
+          }},
+          "couplings": [
+            {{ "induction_coupling": {{ "body": "rod", "voltage_source_index": 0,
+              "length": {length}, "magnetic_field": {b}, "axis": [0, 1, 0] }} }}
+          ],
+          "probes": [ {{ "body_speed": "rod" }} ]
+        }}
+        "#
+        );
+
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let measured_v = *result.probe_histories[0]
+            .last()
+            .expect("history should not be empty");
+
+        let expected_v_term = mass * gravity * r / (b * length).powi(2);
+        let rel_err = (measured_v - expected_v_term).abs() / expected_v_term;
+        assert!(
+            rel_err < 0.02,
+            "D21 pass criterion (eddy current terminal velocity): measured_v={measured_v} \
+             expected_v_term={expected_v_term} rel_err={rel_err:.4}"
         );
     }
 

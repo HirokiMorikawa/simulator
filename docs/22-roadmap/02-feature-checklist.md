@@ -307,10 +307,16 @@
   「起点」「終点」2時点の位置差分を直接読む手段を持たないため、同一の
   決定論的シード付きシナリオを異なる`steps`で2回実行し共通区間の軌道一致を
   利用して起点/終点を再構成する手法を確立した(今後の同種デモにも使える
-  パターン)。
+  パターン)。続けてヘッドレスランナーの15本目の適用例としてD21磁石遊び
+  (銅管落下)もシーンJSON化した——これまで`Scenario`に回路ドメイン
+  (`sim_em::Circuit`)を構成する手段が無かったため`circuit:
+  Option<CircuitScenarioJson>`(抵抗器・電圧源のみ対応)+`CouplingJson::
+  InductionCoupling`を追加し(スキーマ拡張)、`demos.rs`のネイティブ実装
+  (渦電流ブレーキによる終端速度)と同じ構成をシーンJSON経由で再現、解析解と
+  一致することを確認した。
 - **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
   マルチスキャッタリング)・さらなるヘッドレスランナー適用例(`couplings`の
-  残り12種)を機を見て進める。優先順位の
+  残り11種)を機を見て進める。優先順位の
   詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
@@ -2003,7 +2009,18 @@ Phase 4:
       と同じ`axis: Vec3`パラメータへ一般化(レンツ則の制動ループは軸の向きによらず
       自己無撞着に安定するため符号の再調整は不要だった、既存のE7テストは
       axis=(1,0,0)を渡すよう更新、数値結果は変化なし)し、重力下で導体棒が渦電流
-      ブレーキにより解析的終端速度$v_{term}=mgR/(B\ell)^2$へrel<2%で収束することを確認)
+      ブレーキにより解析的終端速度$v_{term}=mgR/(B\ell)^2$へrel<2%で収束することを確認)。
+      **シーンJSON経由の15本目の適用例+スキーマ拡張(本増分で追加)**: これまで
+      `Scenario`に回路ドメイン(`sim_em::Circuit`)を構成する手段が全く無かった
+      ため`circuit: Option<CircuitScenarioJson>`(`{num_nodes, resistors:
+      [{a,b,resistance}], voltage_sources: [{a,b,voltage}]}`、ノードは
+      `sim_em::GROUND`=0の規約に沿ったインデックス直接指定——コンデンサ・
+      スイッチ・ダイオードは後続増分)を追加し、`CouplingJson::
+      InductionCoupling`(`voltage_source_index`は`circuit.voltage_sources`
+      配列のインデックス)も追加した(スキーマ拡張)。`run_headless_scenario_
+      copper_tube_drop_reaches_analytic_terminal_velocity`として`demos.rs`の
+      ネイティブ実装と同じ構成をシーンJSON経由で再現し、解析解と一致することを
+      確認した。
 - [ ] D22 光学ベンチ(合格基準は「E9–E12(焦点・分光・全反射)」のみで、これらは設計の
       解析解テスト表(docs/21-verification/01-analytic-tests.md)自体が「—(レイ・代数検算)」
       と明記するとおり時間発展を伴わない静的な幾何光学計算であり、`World`のドメイン
