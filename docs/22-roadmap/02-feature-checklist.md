@@ -29,8 +29,9 @@
   (snapshot/restore・Command(ApplyForce/SetSwitch/SetHeatSource)・raycast/overlap_sphere・
   Probe・circuit_probe・`from_scenario`(bodies/materials/fluids/probesセクション))・
   決定論/保存則CIゲート(既存test suiteで充足済みと確認)・性能ベンチ(criterion、3ホット
-  パス)・統合シナリオ4本中3本(ブレーキ発熱・手回し発電・断熱圧縮、+氷と飲み物は
-  既存のD18デモテストがcross-referenceで充足)。`World`へのレジーム切替接続
+  パス)・統合シナリオ5本全て(ブレーキ発熱・手回し発電・断熱圧縮・再突入、+氷と
+  飲み物は既存のD18デモテストがcross-referenceで充足、詳細は後述)。`World`への
+  レジーム切替接続
   (`time_regime`フィールド、Astro/Local分岐、frame変換によるAstro→Localの
   ハンドオフ)も実装済み(詳細§2参照)。
   再突入シナリオの土台として、大気抗力(`sim_astro::atmosphere::
@@ -61,11 +62,21 @@
   逆平方根・速度3乗・質量損失=熱エネルギー/気化潜熱)はabs<1e-9〜1e-15の
   厳密単体テストで、`NBodySystem::step()`への配線は焼失時のイベント発行で
   それぞれ確認。
-  残り: 統合シナリオ1本(再突入本体——上記3要素(抗力・自動レジーム切替・
-  空力加熱/アブレーション)を1シナリオに組み、D37合格基準(最大加熱・減速g
-  の傾向、レジーム切替を跨ぐリプレイ一致)を検証する必要がある)、
-  シーンJSON`couplings`セクション(スキーマ未確定の
-  ため保留、§4参照)、D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)。
+  統合シナリオ5本目「再突入」も実装した——大気抗力・空力加熱/アブレーション・
+  閾値ベース自動レジーム切替の3要素を単一シナリオ(急な降下角の軌道、現実の
+  軌道力学の再現は狙わない縮約シナリオ)で通しで動かし、閾値到達で自動的に
+  Astro→Localへ切り替わりハンドオフ後もLocal物理が継続進行すること・降下中に
+  熱シールド質量が実際にアブレーションで減ることを確認。さらに設計
+  docs/20-integration/02-determinism-replay.mdが求める「レジーム切替を跨ぐ
+  リプレイ一致」も、同一初期条件を独立に2回構築・実行し`state_hash()`が
+  一致することで確認(`integration_scenarios.rs::
+  reentry_scenario_combines_drag_heating_and_auto_regime_switch_with_
+  deterministic_replay`)。これで統合シナリオ5本全てが実装済み(ブレーキ発熱・
+  手回し発電・断熱圧縮・氷と飲み物(cross-reference)・再突入)。
+  残り: シーンJSON`couplings`セクション(スキーマ未確定のため保留、§4参照)、
+  D1–D39のうち専用ドメイン/未実装機能待ちの一部(詳細§7)、動圧/高度トリガでの
+  自動微細刻み(縮約実装、現状は固定dtのまま急降下する軌道を選ぶことで
+  閾値到達を確実にしている)。
 - **ワークストリームC(Phase D: `sim-render`)**: R1・R2・R3・R5・R6・R7完全Green、GGX
   マイクロファセット(`RoughConductor`)実装済み(詳細・各テスト名は§5/§8参照)。
   R3はプリズム最小偏角・虹の偏角を、レンダラ自身の幾何プリミティブ(`Dielectric::
@@ -614,9 +625,10 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       変換し、その状態で新設した`RigidBody`にLocal物理を引き継がせる一連の配線が
       機能することを確認、軌道力学の値自体は現実の再現を狙わない縮約シナリオ)を
       追加。切替のCommand化・ヒステリシス付き自動切替・World時刻の天体時刻への
-      従属化・Astro中のスナップショット間隔の天体時間基準化・切替を跨ぐリプレイ
-      一致のCIゲートは未実装(§1・§3・§4、統合シナリオ「再突入」本体もこの土台の
-      上に別途必要)。
+      従属化・Astro中のスナップショット間隔の天体時間基準化は未実装(§1・§3・§4)。
+      切替を跨ぐリプレイ一致は専用のCIゲートこそ無いが、後続の統合シナリオ
+      「再突入」(§4参照)が同一初期条件2回実行の`state_hash()`一致として実際に
+      検証している。
       **閾値ベースの自動切替(本増分で追加)**: 上記の手動ハンドオフ手順を
       `World::step()`内部で自動実行する土台として、`World`に`frames:
       sim_core::FrameTree`常設フィールド(`FrameTree`へ`#[derive(Clone)]`を
@@ -798,7 +810,17 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       ピストンが初速で気体を圧縮する自由運動。`PistonGas`結合経由でピストン運動
       エネルギー+気体内部エネルギー($C_v T$)の合計が保存される(断熱系)ことを
       実測rel_err最大約1.4%(閾値<2%)で確認)
-- [ ] 統合シナリオ: 再突入
+- [x] 統合シナリオ: 再突入(大気抗力・空力加熱/アブレーション・閾値ベース自動
+      レジーム切替の3要素を単一シナリオで通しで検証。急な降下角の軌道(現実の
+      軌道力学の再現は狙わない、既存の手動ハンドオフテストと同じスタンス)を選び
+      モデレートなstep数(dt_astro=0.05s×4000step=200秒)で閾値到達を確実にした。
+      閾値到達時の自動Astro→Localハンドオフ・ハンドオフ後のLocal物理継続進行・
+      降下中の熱シールド質量アブレーション(減少)を確認、さらに設計
+      docs/20-integration/02-determinism-replay.mdの「レジーム切替を跨ぐリプレイ
+      一致」も同一初期条件2回構築・実行の`state_hash()`一致で検証
+      (`integration_scenarios.rs::reentry_scenario_combines_drag_heating_and_
+      auto_regime_switch_with_deterministic_replay`)。動圧/高度トリガでの
+      自動微細刻みは対象外(固定dtのまま急降下する軌道を選ぶことで代替)
 - [x] CI ゲート: 決定論(階層1: 2 回実行一致・スナップショット再開一致)— 既存の
       `.github/workflows/ci.yml`の`native`ジョブが`cargo test --workspace`を実行
       しており、`determinism_same_scenario_twice_matches_hash`・

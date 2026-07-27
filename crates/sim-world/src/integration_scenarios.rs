@@ -10,8 +10,9 @@
 //! `crates/sim-world/src/demos.rs`のD18デモテスト(`PhaseChangeMorph`+
 //! `MechanicsSolver.water`埋め込み浮力)が既にこの3つの同時進行をそのまま検証
 //! しているため、ここへ新規に(ほぼ重複する)テストを追加しない
-//! (cross-reference、D14/D20/D22デモと同じ判断)。「再突入」(天体レジーム切替との
-//! `World`結合)は前提未実装のため後続増分。
+//! (cross-reference、D14/D20/D22デモと同じ判断)。「5. 再突入」は前提(大気抗力・
+//! 空力加熱/アブレーション・閾値ベース自動レジーム切替)が揃った後段で実装した
+//! (下記モジュールdoc追記参照)。
 //!
 //! `World::add_coupling`(`World::apply_coupling`のdoc参照)でレジストリに登録し、
 //! `world.step()`が毎フレーム自動的に適用する構成を取る(以前は`world.step()`の
@@ -19,10 +20,14 @@
 //! 導入によりレジストリ登録1回で済むようになった — タイミングは変わらないため
 //! (`step()`内でも旧来と同じ「全ドメインsub-step完了後」の位置で適用)、既存の
 //! 数値許容誤差はそのまま成立する)。
+//!
+//! **「5. 再突入」(自動レジーム切替増分の後に追加)**: 前提(大気抗力・空力加熱/
+//! アブレーション・閾値ベース自動レジーム切替)が全て揃ったため、`Coupling`ではなく
+//! `World`の天体ドメイン+自動レジーム切替の配線を通しで検証するシナリオとして実装した。
 
 #[cfg(test)]
 mod tests {
-    use crate::{World, WorldOptions};
+    use crate::{AutoRegimeSwitchConfig, World, WorldOptions};
     use sim_coupling::DissipationToHeat;
     use sim_math::{Quat, Transform, Vec3};
     use sim_mechanics::{BodyType, RigidBodyDesc, Shape};
@@ -245,6 +250,125 @@ mod tests {
         assert!(
             max_energy_rel_err < 0.02,
             "piston KE + gas internal energy should be conserved (adiabatic, no external heat/work): max_energy_rel_err={max_energy_rel_err:.4}"
+        );
+    }
+
+    struct ReentryOutcome {
+        state_hash: u64,
+        switched_to_local: bool,
+        final_shield_mass: f64,
+        local_position_right_after_switch: Vec3,
+        local_position_after_more_steps: Vec3,
+    }
+
+    /// 大気抗力+空力加熱/アブレーション+閾値ベース自動レジーム切替の3要素を
+    /// 同一シナリオで通しで動かす(`total_steps`回`world.step()`し、その過程で
+    /// 自動切替が発火した瞬間の`local_body`位置と、その後さらにstepを重ねた後の
+    /// 位置を記録する)。現実の軌道力学の再現は狙わない急な降下角の軌道
+    /// (`switching_from_astro_to_local_hands_off_orbital_state_via_frame_conversion`
+    /// と同じスタンス)で、閾値到達をモデレートなstep数で確実に起こす。
+    fn run_reentry_scenario(total_steps: u32) -> ReentryOutcome {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world
+            .materials()
+            .find_by_name("鋼(炭素鋼)")
+            .expect("standard DB has steel");
+
+        let r_earth = 6.371e6;
+        let mass_earth = 5.972e24;
+        let mut astro = sim_astro::NBodySystem::new(0.0);
+        let central = astro.add_body(Vec3::ZERO, Vec3::ZERO, mass_earth);
+        let altitude0 = 120_000.0;
+        let capsule_index = astro.add_body(
+            Vec3::new(r_earth + altitude0, 0.0, 0.0),
+            Vec3::new(-3000.0, 6000.0, 0.0), // 急な降下角(現実の再突入軌道の縮約表現)
+            1000.0,
+        );
+        astro.enable_atmospheric_drag(central, 1.225, 8500.0, r_earth);
+        astro.set_ballistic_coefficient(capsule_index, 0.5);
+        let initial_shield_mass = 50.0;
+        astro.set_reentry_heating(capsule_index, 1.0, 3.0, 2.0e6, initial_shield_mass);
+        world.enable_astro(astro);
+
+        let surface_frame = world.add_frame(
+            sim_core::FrameId::ROOT,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, 7.292e-5),
+        );
+
+        let mut placeholder_desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 1.0 }, steel);
+        placeholder_desc.transform.position = Vec3::new(0.0, 1.0e9, 0.0); // 切替時に上書きされる
+        let local_body = world.create_body(placeholder_desc);
+
+        world.configure_auto_regime_switch(AutoRegimeSwitchConfig {
+            astro_body_index: capsule_index,
+            central_body_index: central,
+            threshold_distance: r_earth + 60_000.0, // 高度60kmを下回ったら切替
+            surface_frame,
+            local_body,
+        });
+
+        world.set_time_regime(sim_astro::TimeRegime::Astro {
+            dt_astro: 0.05,
+            steps_per_frame: 1,
+        });
+
+        let mut switched_to_local = false;
+        let mut local_position_right_after_switch = Vec3::ZERO;
+        for _ in 0..total_steps {
+            world.step();
+            if !switched_to_local
+                && matches!(world.time_regime(), sim_astro::TimeRegime::Local { .. })
+            {
+                switched_to_local = true;
+                local_position_right_after_switch = world.body_position(local_body).unwrap();
+            }
+        }
+
+        ReentryOutcome {
+            state_hash: world.state_hash(),
+            switched_to_local,
+            final_shield_mass: world
+                .astro()
+                .unwrap()
+                .heat_shield_mass(capsule_index)
+                .unwrap(),
+            local_position_right_after_switch,
+            local_position_after_more_steps: world.body_position(local_body).unwrap(),
+        }
+    }
+
+    /// 設計§5「5. 再突入」の統合シナリオ(自動レジーム切替増分で前提が揃ったため実装)。
+    /// 大気抗力による降下・Sutton-Graves加熱によるアブレーション・閾値ベースの自動
+    /// レジーム切替が単一シナリオで通しで機能すること、加えて設計
+    /// docs/20-integration/02-determinism-replay.mdが求める「レジーム切替を跨ぐ
+    /// リプレイ一致」を、同一初期条件を独立に2回構築・実行し`state_hash()`が
+    /// 一致することで確認する。
+    #[test]
+    fn reentry_scenario_combines_drag_heating_and_auto_regime_switch_with_deterministic_replay() {
+        let steps = 4000u32; // dt_astro=0.05sで200秒、閾値到達に十分な余裕を持たせた
+
+        let run1 = run_reentry_scenario(steps);
+        let run2 = run_reentry_scenario(steps);
+
+        assert!(
+            run1.switched_to_local,
+            "auto regime switch must fire during the descent within {steps} steps"
+        );
+        assert!(
+            run1.final_shield_mass < 50.0,
+            "heating must have ablated some shield mass during the descent: {}",
+            run1.final_shield_mass
+        );
+        assert_ne!(
+            run1.local_position_after_more_steps, run1.local_position_right_after_switch,
+            "local physics must continue evolving the handed-off body after the switch"
+        );
+        assert_eq!(
+            run1.state_hash, run2.state_hash,
+            "identical initial conditions must replay bit-identically across the regime switch"
         );
     }
 }
