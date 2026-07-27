@@ -1161,4 +1161,281 @@ mod tests {
             );
         }
     }
+
+    /// 発光壁からの**一次反射(single bounce)の投影立体角**を数値求積で独立に
+    /// 計算する参照解(R4のcolor bleeding検証の定量的な土台、下のテストのdoc参照)。
+    ///
+    /// 床の測定点`p`(法線+y)から見て、`wall`(x=`wall_x`平面上、y∈[0,`wall_h`]、
+    /// z∈[`wall_z0`,`wall_z1`])が張る投影立体角
+    /// $$\Omega_{proj} = \int_{wall} \frac{\cos\theta_P \cos\theta_w}{r^2} dA$$
+    /// を中点則で求める。パストレーサとは全く独立な決定的求積であり、
+    /// パストレーサ側は「コサイン重み付き半球サンプリング + 再帰」という別経路で
+    /// 同じ量を推定するため、両者の一致は幾何・BSDF・サンプリングの連鎖全体を
+    /// 相互検証する(`medium.rs`の`single_scattering_closed_form_matches_numerical_
+    /// path_integration`と同じ「独立実装どうしの突き合わせ」パターン)。
+    fn projected_solid_angle_of_wall(
+        p: Vec3,
+        wall_x: f64,
+        wall_h: f64,
+        wall_z0: f64,
+        wall_z1: f64,
+        n: usize,
+    ) -> f64 {
+        let dy = wall_h / n as f64;
+        let dz = (wall_z1 - wall_z0) / n as f64;
+        let da = dy * dz;
+        let mut total = 0.0;
+        for i in 0..n {
+            let qy = (i as f64 + 0.5) * dy;
+            for j in 0..n {
+                let qz = wall_z0 + (j as f64 + 0.5) * dz;
+                let d = Vec3::new(wall_x - p.x, qy - p.y, qz - p.z);
+                let r2 = d.dot(d);
+                let r = r2.sqrt();
+                // 床法線は+y、壁法線は±x。
+                let cos_p = d.y / r;
+                let cos_w = (d.x / r).abs();
+                if cos_p <= 0.0 {
+                    continue;
+                }
+                total += cos_p * cos_w / r2 * da;
+            }
+        }
+        total
+    }
+
+    /// **R4(コーネルボックス)のcolor bleeding、定量的検証**。
+    ///
+    /// 設計(docs/21-verification/01-analytic-tests.md R4)の合格基準は「既知の
+    /// 参照解(color bleeding)と収束一致」だが、参照解データが入手できなかった
+    /// (同docsのR4注記に調査経緯を記録)。そこでF10(ダム崩壊)と同じく設計を
+    /// 改訂し、**解析的に計算できる一次反射の色移りを参照解とする**形で満たす。
+    ///
+    /// 構成: 床(Lambertian、アルベド`rho_floor`)の測定点へ真上からレイを撃つ。
+    /// 側壁は`Emissive { radiance: L_w, albedo: 0 }`——壁の出射放射輝度を
+    /// **直接指定する**ことで、光源→壁の輸送という連鎖を1段外し参照解を厳密に
+    /// する(壁は完全吸収なので二次以降の反射も無い)。他に光源・環境光は無い
+    /// (`environment_radiance = 0`)ので、測定点に届く光は壁からの一次反射のみ。
+    /// `max_depth = 2`(床で1バウンス + 壁の発光を読む)で経路長も厳密に限定する。
+    ///
+    /// このとき床から出る放射輝度は
+    /// $$L = \rho_{floor} \cdot L_w \cdot \frac{\Omega_{proj}}{\pi}$$
+    /// (コサイン重み付きサンプリングでは壁に当たる確率がちょうど
+    /// $\Omega_{proj}/\pi$、かつ`bsdf*cosθ/pdf`が恒等的に$\rho_{floor}$——R1と
+    /// 同じ完全相殺)。$\Omega_{proj}$は`projected_solid_angle_of_wall`が
+    /// パストレーサとは独立な数値求積で与える。
+    ///
+    /// 壁からの距離を変えた3点で確認するため、**距離に応じて色移りが減衰する**
+    /// という color bleeding の空間的性質そのものが定量的に検証される。
+    #[test]
+    fn cornell_box_color_bleeding_matches_the_analytic_single_bounce_transfer() {
+        let wall_radiance = 1.0;
+        let rho_floor = 0.8;
+        let wall_x = 1.0;
+        let wall_h = 1.0;
+        let (wall_z0, wall_z1) = (-1.0, 1.0);
+
+        let scene = Scene::new(
+            vec![
+                // 床: y=0、x,z∈[-1,1]。
+                SceneObject::quad(
+                    Quad::axis_aligned(1, 0.0, -1.0, 1.0, -1.0, 1.0),
+                    Material::Lambertian(Lambertian { albedo: rho_floor }),
+                ),
+                // 発光する側壁: x=1、y∈[0,1]、z∈[-1,1]。完全吸収(albedo=0)。
+                SceneObject::quad(
+                    Quad::axis_aligned(0, wall_x, 0.0, wall_h, wall_z0, wall_z1),
+                    Material::Emissive(Emissive {
+                        radiance: wall_radiance,
+                        albedo: 0.0,
+                    }),
+                ),
+            ],
+            vec![],
+            0.0,
+            None,
+        );
+
+        let samples = 200_000;
+        let mut rng = SimRng::new(20260727, 11);
+        let mut previous: Option<f64> = None;
+
+        for px in [0.9, 0.5, 0.0] {
+            let point = Vec3::new(px, 0.0, 0.0);
+            let omega_proj =
+                projected_solid_angle_of_wall(point, wall_x, wall_h, wall_z0, wall_z1, 400);
+            let expected = rho_floor * wall_radiance * omega_proj / std::f64::consts::PI;
+
+            // 真上から床へ撃つ(壁はx=1平面なので鉛直レイとは交差しない)。
+            let ray = Ray::new(Vec3::new(px, 1.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
+            let mut sum = 0.0;
+            for _ in 0..samples {
+                sum += scene.trace(&ray, &mut rng, 2);
+            }
+            let measured = sum / samples as f64;
+
+            let rel_err = (measured - expected).abs() / expected;
+            assert!(
+                rel_err < 0.03,
+                "R4 color bleeding (single-bounce transfer) at px={px}: \
+                 measured={measured:.6} expected={expected:.6} rel_err={rel_err:.4}"
+            );
+
+            // 壁から遠ざかるほど色移りは弱くなる(color bleedingの空間的性質)。
+            if let Some(nearer) = previous {
+                assert!(
+                    measured < nearer,
+                    "bleeding must weaken with distance from the wall: \
+                     px={px} measured={measured:.6} nearer={nearer:.6}"
+                );
+            }
+            previous = Some(measured);
+        }
+    }
+
+    /// コーネルボックスの幾何(1チャンネル分)。`left`/`right`は側壁のアルベド
+    /// (このチャンネルでの値)、`white`は床/天井/奥壁のアルベド、`light`は天井
+    /// パネルの放射輝度。箱は x∈[-1,1]、y∈[0,2]、z∈[-1,1] で、**手前(z=+1)は
+    /// 開いている**(標準的なコーネルボックスと同じ。抜けたレイは
+    /// `environment_radiance`=0 を拾う)。
+    fn cornell_box_channel(white: f64, left: f64, right: f64, light: f64) -> Vec<SceneObject> {
+        let diffuse = |albedo: f64| Material::Lambertian(Lambertian { albedo });
+        vec![
+            // 床・天井(白)。
+            SceneObject::quad(
+                Quad::axis_aligned(1, 0.0, -1.0, 1.0, -1.0, 1.0),
+                diffuse(white),
+            ),
+            SceneObject::quad(
+                Quad::axis_aligned(1, 2.0, -1.0, 1.0, -1.0, 1.0),
+                diffuse(white),
+            ),
+            // 奥壁(白)。
+            SceneObject::quad(
+                Quad::axis_aligned(2, -1.0, -1.0, 1.0, 0.0, 2.0),
+                diffuse(white),
+            ),
+            // 左壁・右壁(色付き)。
+            SceneObject::quad(
+                Quad::axis_aligned(0, -1.0, 0.0, 2.0, -1.0, 1.0),
+                diffuse(left),
+            ),
+            SceneObject::quad(
+                Quad::axis_aligned(0, 1.0, 0.0, 2.0, -1.0, 1.0),
+                diffuse(right),
+            ),
+            // 天井直下の発光パネル(面光源、`Emissive`のdoc参照——NEEは行わない)。
+            SceneObject::quad(
+                Quad::axis_aligned(1, 1.98, -0.3, 0.3, -0.3, 0.3),
+                Material::Emissive(Emissive {
+                    radiance: light,
+                    albedo: 0.0,
+                }),
+            ),
+        ]
+    }
+
+    /// 床の測定点から出る放射輝度を推定する(真上からレイを撃ち`samples`本平均)。
+    fn measure_floor_radiance(scene: &Scene, px: f64, samples: usize, seed: u64) -> f64 {
+        let mut rng = SimRng::new(seed, 5);
+        let ray = Ray::new(Vec3::new(px, 1.0, 0.0), Vec3::new(0.0, -1.0, 0.0));
+        let mut sum = 0.0;
+        for _ in 0..samples {
+            sum += scene.trace(&ray, &mut rng, 5);
+        }
+        sum / samples as f64
+    }
+
+    /// **R4(コーネルボックス)のcolor bleeding、フルシーンでの検証**。
+    ///
+    /// 上の`cornell_box_color_bleeding_matches_the_analytic_single_bounce_transfer`が
+    /// 色移りの**量**を独立な数値求積と突き合わせて定量的に裏付けているので、
+    /// こちらは実際のコーネルボックス(白い床/天井/奥壁 + 赤い左壁 + 緑い右壁 +
+    /// 天井の発光パネル)で**色移りの符号と対称性**を確認する。
+    ///
+    /// **チャンネル別レンダリングという縮約**: `trace`はモノクロスカラーを返す
+    /// (分光レンダリングもRGBも未実装)ため、同じ幾何でアルベドだけをR/G/Bの各
+    /// 成分に差し替えた`Scene`を3つ作り、既存の`trace`を3回走らせる。color
+    /// bleedingの検証はチャンネル間の比較そのものなのでこれで足りる——`trace`の
+    /// 型を変えないため既存60テストへの回帰リスクがゼロという利点もある。これは
+    /// 「RGBレンダリング」であって分光(hero wavelength法)ではない。
+    ///
+    /// 合格条件は対称な2つの主張である:
+    /// - 赤い壁の近くの床は、緑の壁の近くの床より**赤チャンネルが明るい**
+    /// - 緑の壁の近くの床は、赤い壁の近くの床より**緑チャンネルが明るい**
+    ///
+    /// さらに**対照実験**として、両側壁を同じ灰色にすると(箱が左右対称になる)
+    /// この非対称が消えることを確認する——非対称が幾何やサンプリングの偏りでは
+    /// なく確かに壁の色に由来することの裏付け。
+    #[test]
+    fn cornell_box_shows_color_bleeding_from_the_red_and_green_side_walls() {
+        // 標準的なコーネルボックスに近い反射率(白/赤/緑)。
+        let white = (0.74, 0.74, 0.74);
+        let red = (0.61, 0.06, 0.06);
+        let green = (0.12, 0.45, 0.09);
+        let light_radiance = 8.0;
+        let samples = 60_000;
+
+        // 左壁=赤、右壁=緑。
+        let channel_scene = |ch: usize| {
+            let pick = |c: (f64, f64, f64)| match ch {
+                0 => c.0,
+                1 => c.1,
+                _ => c.2,
+            };
+            Scene::new(
+                cornell_box_channel(pick(white), pick(red), pick(green), light_radiance),
+                vec![],
+                0.0,
+                None,
+            )
+        };
+        let red_scene = channel_scene(0);
+        let green_scene = channel_scene(1);
+
+        let near_red = -0.8; // 赤い左壁のそば。
+        let near_green = 0.8; // 緑い右壁のそば。
+
+        let r_near_red = measure_floor_radiance(&red_scene, near_red, samples, 101);
+        let r_near_green = measure_floor_radiance(&red_scene, near_green, samples, 102);
+        let g_near_red = measure_floor_radiance(&green_scene, near_red, samples, 103);
+        let g_near_green = measure_floor_radiance(&green_scene, near_green, samples, 104);
+        assert!(
+            r_near_red > r_near_green,
+            "R4 color bleeding: the red channel must be brighter near the red wall: \
+             r_near_red={r_near_red:.6} r_near_green={r_near_green:.6}"
+        );
+        assert!(
+            g_near_green > g_near_red,
+            "R4 color bleeding: the green channel must be brighter near the green wall: \
+             g_near_green={g_near_green:.6} g_near_red={g_near_red:.6}"
+        );
+
+        // 対照実験: 両側壁を同じ灰色にすると左右対称になり、非対称は消える
+        // (残るのはモンテカルロ誤差のみ)。
+        let gray = (0.5, 0.5, 0.5);
+        let symmetric = Scene::new(
+            cornell_box_channel(white.0, gray.0, gray.0, light_radiance),
+            vec![],
+            0.0,
+            None,
+        );
+        let sym_left = measure_floor_radiance(&symmetric, near_red, samples, 201);
+        let sym_right = measure_floor_radiance(&symmetric, near_green, samples, 202);
+        let asymmetry = (sym_left - sym_right).abs() / (0.5 * (sym_left + sym_right));
+
+        // 色付きの箱で観測された非対称の大きさ。
+        let colored_asymmetry =
+            (r_near_red - r_near_green).abs() / (0.5 * (r_near_red + r_near_green));
+        assert!(
+            asymmetry < 0.02,
+            "the control (both walls gray) must be left-right symmetric: \
+             sym_left={sym_left:.6} sym_right={sym_right:.6} asymmetry={asymmetry:.4}"
+        );
+        assert!(
+            colored_asymmetry > 5.0 * asymmetry.max(1e-4),
+            "the colored box's asymmetry must clearly exceed the symmetric control's \
+             residual noise: colored={colored_asymmetry:.4} control={asymmetry:.4}"
+        );
+    }
 }
