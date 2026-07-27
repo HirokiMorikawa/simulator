@@ -75,6 +75,13 @@ impl Scenario {
 pub struct WorldScenarioOptions {
     pub gravity: f64,
     pub dt: f64,
+    /// 反発を適用しない法線方向相対速度のしきい値(`sim_mechanics::MechanicsSolver::
+    /// restitution_velocity_threshold`、数値安定化のための既定値がある)。未指定なら
+    /// 既定値のまま(D3(バウンド比べ)のような、反発係数の合成則を避けて同一材質どうし
+    /// で正確にe²倍の跳ね返り高さを検証したいシナリオでは0.0を指定する、ヘッドレス
+    /// ランナーの適用例参照)。
+    #[serde(default)]
+    pub restitution_velocity_threshold: Option<f64>,
 }
 
 /// 既存材料からの派生(設計§3「`extends`による材料派生」— 「密度だけ変えた木」等)。
@@ -220,6 +227,9 @@ impl World {
             seed: scenario.seed,
         };
         let mut world = World::new(options);
+        if let Some(threshold) = scenario.world.restitution_velocity_threshold {
+            world.mechanics_mut().restitution_velocity_threshold = threshold;
+        }
         let ids = world.append_scenario_bodies(scenario)?;
 
         let mut body_ids_by_name: HashMap<String, BodyId> = HashMap::new();
@@ -795,6 +805,74 @@ mod tests {
             rel_err < 0.01,
             "D1/M1: free-fall time landing_time={landing_time} analytic={analytic} \
              rel_err={rel_err:.4}"
+        );
+    }
+
+    /// D3(バウンド比べ)を7本目の適用例として実装する。`demos.rs`の
+    /// `d3_bounce_comparison_matches_restitution_squared_for_each_material`は
+    /// `restitution_velocity_threshold=0.0`(反発係数の合成則を避けるため床・球を
+    /// 同一材質にした上で数値安定化のしきい値も切る)という、これまでのシーンJSON
+    /// スキーマには無かった設定を必要としていた。`WorldScenarioOptions`に
+    /// `restitution_velocity_threshold`(省略可、既定値のまま)を追加したことで
+    /// JSON経由でも表現できるようになったため、ゴム(天然)1材質分(他3材質は
+    /// ネイティブ側で既に検証済み)を、床への落下→跳ね返り→頂点到達までを
+    /// `body_pos_y`プローブ1本から検出して確認する。
+    #[test]
+    fn run_headless_scenario_bounce_height_matches_restitution_squared_for_rubber() {
+        let radius: f64 = 0.1;
+        let drop_height: f64 = 1.9;
+        let dt: f64 = 1.0 / 240.0; // 反発の数値精度のため既定よりやや細かく(D1弾道と同じ理由)。
+        let material_name = "ゴム(天然)";
+
+        // 期待値(反発係数の2乗)はMaterialDbから実際にクエリする(ネイティブ側の
+        // `d3_bounce_comparison_matches_restitution_squared_for_each_material`と
+        // 同じ導出方法)。
+        let reference_world = World::new(WorldOptions::default());
+        let material_id = reference_world
+            .materials()
+            .find_by_name(material_name)
+            .expect("standard DB has rubber");
+        let expected_e = reference_world.materials().get(material_id).restitution;
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d3-bounce",
+          "world": {{ "gravity": 9.80665, "dt": {dt}, "restitution_velocity_threshold": 0.0 }},
+          "bodies": [
+            {{ "shape": {{ "plane": {{ "normal": [0, 1, 0], "d": 0 }} }},
+              "type": "static", "material": "{material_name}" }},
+            {{ "shape": {{ "sphere": {{ "radius": {radius} }} }}, "material": "{material_name}",
+              "position": [0.0, {y0}, 0.0], "name": "ball" }}
+          ],
+          "probes": [ {{ "body_pos_y": "ball" }} ]
+        }}
+        "#,
+            y0 = drop_height + radius,
+        );
+
+        let steps = 500; // リングバッファ容量600以下(D1/D2の増分で確立した配慮)。
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let pos_y = &result.probe_histories[0];
+        let height: Vec<f64> = pos_y.iter().map(|y| y - radius).collect();
+
+        // 床への到達(最初にheightが最小値を取る点、跳ね返り直前)。
+        let bounce_step = (1..height.len())
+            .find(|&i| height[i] > height[i - 1])
+            .expect("ball should bounce back up within the simulated window");
+        // 跳ね返り後の頂点(そこから先、再び下降に転じるまでの最大値)。
+        let post_bounce_max = height[bounce_step..]
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let ratio = post_bounce_max / drop_height;
+        let expected_ratio = expected_e * expected_e;
+        let rel_err = (ratio - expected_ratio).abs() / expected_ratio;
+        assert!(
+            rel_err < 0.05,
+            "D3: bounce height ratio ratio={ratio} expected_ratio={expected_ratio} \
+             (e={expected_e}) rel_err={rel_err:.4}"
         );
     }
 
