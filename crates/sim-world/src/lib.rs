@@ -196,6 +196,10 @@ pub enum ProbeTarget {
     /// のような軌道半径の再構成に使う、`BodyPosX`と同じ理由で追加)。
     AstroPosX(usize),
     AstroPosY(usize),
+    /// `sim_astro::NBodySystem`の`velocity`配列index(D35軌道投入のような
+    /// 「出発点(位置・速度とも)へ戻る」判定に使う、`position`版と対称に追加)。
+    AstroVelX(usize),
+    AstroVelY(usize),
     /// 回路の電圧源index(モジュールdoc「縮約実装の理由」参照)。
     CircuitCurrent(usize),
     LedgerKinetic,
@@ -524,6 +528,16 @@ impl World {
                 .as_ref()
                 .and_then(|a| a.position.get(idx))
                 .map_or(0.0, |p| p.y),
+            ProbeTarget::AstroVelX(idx) => self
+                .astro
+                .as_ref()
+                .and_then(|a| a.velocity.get(idx))
+                .map_or(0.0, |v| v.x),
+            ProbeTarget::AstroVelY(idx) => self
+                .astro
+                .as_ref()
+                .and_then(|a| a.velocity.get(idx))
+                .map_or(0.0, |v| v.y),
             ProbeTarget::CircuitCurrent(idx) => {
                 self.circuit.as_ref().map_or(0.0, |c| c.source_current(idx))
             }

@@ -250,6 +250,10 @@ pub enum ProbeJson {
     /// 同じ理由、D34太陽系儀の軌道半径再構成に使う)。
     AstroPosX(usize),
     AstroPosY(usize),
+    /// `astro.bodies`配列の速度成分版(D35軌道投入の「速度も出発点へ戻る」
+    /// 判定に使う)。
+    AstroVelX(usize),
+    AstroVelY(usize),
 }
 
 /// `Scenario::joints`の1件。設計の例示JSONには無い項目(モジュールdoc
@@ -634,6 +638,8 @@ impl World {
                 ProbeJson::NodeTemp(index) => ProbeTarget::NodeTemp(*index),
                 ProbeJson::AstroPosX(index) => ProbeTarget::AstroPosX(*index),
                 ProbeJson::AstroPosY(index) => ProbeTarget::AstroPosY(*index),
+                ProbeJson::AstroVelX(index) => ProbeTarget::AstroVelX(*index),
+                ProbeJson::AstroVelY(index) => ProbeTarget::AstroVelY(*index),
             };
             handles.push(self.add_probe(target, DEFAULT_PROBE_CAPACITY));
         }
@@ -1720,6 +1726,76 @@ mod tests {
             rel_r_err < 0.01,
             "A1: circular orbit radius should be preserved: final_r={final_r} r={r} \
              rel_err={rel_r_err:.4}"
+        );
+    }
+
+    /// D35(軌道投入): `demos.rs`の
+    /// `d35_orbital_insertion_elliptical_period_matches_keplers_third_law`と
+    /// 同じ構成(円軌道速度の0.9倍の初速で楕円軌道を作り、vis-vivaから導いた
+    /// 長半径によるケプラー第3法則の周期分だけ進めると出発点(位置・速度とも)
+    /// 付近に戻ることを確認)を、D34向けに追加した`Scenario::astro`+
+    /// `AstroPosX`/`AstroPosY`プローブに加え、本増分で追加した`AstroVelX`/
+    /// `AstroVelY`プローブ(速度も出発点へ戻ることの確認に必要)経由で再現する。
+    #[test]
+    fn run_headless_scenario_orbital_insertion_elliptical_period_matches_keplers_third_law() {
+        let mass_central: f64 = 1.989e30;
+        let r0: f64 = 1.496e11; // 1 AU相当
+        let g = sim_astro::GRAVITATIONAL_CONSTANT;
+        let gm = g * mass_central;
+        let v_circ = (gm / r0).sqrt();
+        let v0 = v_circ * 0.9; // 円軌道より遅い初速 → 楕円軌道(出発点が遠地点)
+
+        let semi_major_axis = 1.0 / (2.0 / r0 - v0 * v0 / gm);
+        let analytic_period = 2.0 * std::f64::consts::PI * (semi_major_axis.powi(3) / gm).sqrt();
+
+        let steps_per_period = 4000u32;
+        let dt = analytic_period / steps_per_period as f64;
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d35-orbital-insertion",
+          "world": {{ "gravity": 9.80665, "dt": {dt} }},
+          "astro": {{
+            "softening": 0.0,
+            "bodies": [
+              {{ "position": [0, 0, 0], "velocity": [0, 0, 0], "mass": {mass_central} }},
+              {{ "position": [{r0}, 0, 0], "velocity": [0, {v0}, 0], "mass": 1.0 }}
+            ]
+          }},
+          "probes": [
+            {{ "astro_pos_x": 1 }}, {{ "astro_pos_y": 1 }},
+            {{ "astro_vel_x": 1 }}, {{ "astro_vel_y": 1 }}
+          ]
+        }}
+        "#
+        );
+
+        let result = run_headless_scenario(&json, steps_per_period).expect("valid scenario JSON");
+        let final_x = *result.probe_histories[0]
+            .last()
+            .expect("history should not be empty");
+        let final_y = *result.probe_histories[1]
+            .last()
+            .expect("history should not be empty");
+        let final_vx = *result.probe_histories[2]
+            .last()
+            .expect("history should not be empty");
+        let final_vy = *result.probe_histories[3]
+            .last()
+            .expect("history should not be empty");
+
+        let pos_err = ((final_x - r0).powi(2) + final_y.powi(2)).sqrt() / r0;
+        let vel_err = (final_vx.powi(2) + (final_vy - v0).powi(2)).sqrt() / v0;
+        assert!(
+            pos_err < 0.01,
+            "A3 + Kepler's third law: elliptical orbit should close after the analytic period: \
+             pos_err={pos_err:.4} final_x={final_x} final_y={final_y}"
+        );
+        assert!(
+            vel_err < 0.01,
+            "A3 + Kepler's third law: velocity should also return to its initial value: \
+             vel_err={vel_err:.4} final_vx={final_vx} final_vy={final_vy}"
         );
     }
 

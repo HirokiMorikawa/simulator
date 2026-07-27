@@ -319,10 +319,14 @@
   ため`astro: Option<AstroScenarioJson>`(`mechanics`の`bodies`とは別名前空間の
   質点集合)+軌道半径再構成用の`ProbeTarget::AstroPosX`/`AstroPosY`を追加した
   (スキーマ拡張)。A2(エネルギー・角運動量保存)はプローブが速度を読めず対象外
-  (`demos.rs`側で既にGreen)。
+  (`demos.rs`側で既にGreen)。続けてヘッドレスランナーの17本目の適用例として
+  D35軌道投入もシーンJSON化した——D34向けの`Scenario::astro`をそのまま流用し、
+  位置・速度とも出発点へ戻ることの確認に必要な`ProbeTarget::AstroVelX`/
+  `AstroVelY`(`AstroPosX`/`AstroPosY`と対称)を追加した(スキーマ拡張)。
+  `demos.rs`のネイティブ実装と同じ構成をシーンJSON経由で再現した。
 - **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
   マルチスキャッタリング)・さらなるヘッドレスランナー適用例(`couplings`の
-  残り11種、D35軌道投入等)を機を見て進める。優先順位の
+  残り11種)を機を見て進める。優先順位の
   詳細は`/root/.claude/plans/elegant-meandering-pixel.md`参照。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
@@ -2106,7 +2110,14 @@ Pα:
       再構成できないため対象外(`demos.rs`側で既にGreen)。
 - [ ] D35 軌道投入(ヘッドレステストGreen、同上。目視チェック保留。円軌道速度の
       0.9倍の初速で楕円軌道を作り、vis-vivaから導いた長半径によるケプラー第3法則の
-      周期分だけ進めると出発点(位置・速度とも)へ戻ることを確認)
+      周期分だけ進めると出発点(位置・速度とも)へ戻ることを確認)。
+      **シーンJSON経由の17本目の適用例+スキーマ拡張(本増分で追加)**: D34向けに
+      追加済みの`Scenario::astro`をそのまま流用し、位置・速度とも出発点へ戻る
+      ことの確認に必要な`ProbeTarget::AstroVelX`/`AstroVelY`(`World`側)+
+      `ProbeJson::astro_vel_x`/`astro_vel_y`(`AstroPosX`/`AstroPosY`と対称、
+      `astro.bodies`配列のインデックス直接参照)を追加した(スキーマ拡張)。
+      `demos.rs`のネイティブ実装と同じ構成をシーンJSON経由で再現し、位置・
+      速度とも解析的な周期後に出発点付近へ戻ることを確認した。
 - [x] D36 スイングバイ(ヘッドレステストGreen、新規`crates/sim-astro/src/
       swingby.rs`。目視チェックはワークストリームD未着手のため保留。
       `hyperbolic_eccentricity`/`patched_conic_deflection_angle`/
