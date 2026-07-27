@@ -275,7 +275,14 @@
   ストークス沈降)ネイティブ実装と同じ構成をシーンJSON経由で再現、両レジーム
   とも解析解と一致することを確認した(同じ`sim_fluid::drag_force_sphere`が
   レイノルズ数から自動でレジームを選択するため、シーンJSON側は大気パラメータ
-  を変えるだけで済んだ)。
+  を変えるだけで済んだ)。続けてヘッドレスランナーの11本目の適用例として
+  D9冷めるコーヒーもシーンJSON化した——これまで`Scenario`に熱ドメイン
+  (`sim_thermal::ThermalSolver`)を構成する手段が無かったため
+  `thermal: Option<ThermalScenarioJson>`(対流のみの単一ノード、ノード間
+  リンク・放射は対象外)+`ProbeJson::NodeTemp`(`thermal.nodes`配列の
+  インデックス直接参照、名前解決を経ない)を追加し(スキーマ拡張)、
+  `demos.rs`のT1(ニュートン冷却指数減衰)ネイティブ実装と同じ構成をシーンJSON
+  経由で再現、解析解と一致することを確認した。
 - **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
   マルチスキャッタリング)・さらなるヘッドレスランナー適用例・シーンJSON
   `couplings`セクション(スキーマ未確定で保留)を機を見て進める。優先順位の
@@ -1864,7 +1871,23 @@ Phase 1(P1〜P2 スモーク):
 - [ ] D8 散乱の再現(ヘッドレステストGreen、同上。目視チェック保留。50球をシーン
       構築用の独立`SimRng`で散乱、同シード2回実行で`state_hash()`一致を確認)
 - [ ] D9 冷めるコーヒー(ヘッドレステストGreen、同上。目視チェック保留。単一熱ノード
-      (対流のみ)のニュートン冷却指数減衰がT1解析解とrel<1%で一致)
+      (対流のみ)のニュートン冷却指数減衰がT1解析解とrel<1%で一致)。
+      **シーンJSON経由の11本目の適用例+スキーマ拡張(本増分で追加)**: これまで
+      `Scenario`に熱ドメイン(`sim_thermal::ThermalSolver`)を構成する手段が
+      無かったため、`thermal: Option<ThermalScenarioJson>`
+      (`{ambient_temperature, nodes: [{temperature, heat_capacity,
+      convection_coefficient, area}]}`、ノード間リンク・放射は対象外——
+      D9が要る「対流のみの単一ノード」のみサポート)を追加し、`ProbeJson`に
+      `node_temp`(`thermal.nodes`配列のインデックス、名前解決を経ない)を
+      追加した(既存の`ProbeTarget::NodeTemp(usize)`自体は`World`側に
+      既にあったが`ProbeJson`未対応だった)。副次的に`add_scenario_probes`を
+      「`(name, コンストラクタ関数)`を抽出してから解決する」形から
+      「各`match`枝で直接`ProbeTarget`を組み立てる」形へ整理した(`NodeTemp`が
+      ボディ名解決を経ないため、旧来の関数ポインタ抽出パターンに素直に
+      収まらなかったため)。`run_headless_scenario_cooling_coffee_matches_
+      newton_cooling_exponential_decay`として`demos.rs`のネイティブ実装と
+      同じ構成(比熱100・対流係数10・面積1・初期温度350K・外気温293.15K)を
+      シーンJSON経由で再現し、解析解とrel<0.01一致することを確認した。
 - [ ] D10 摩擦の熱(ヘッドレス部分は`integration_scenarios.rs`の
       `brake_heat_scenario_keeps_world_energy_ledger_residual_small`が既にカバー
       済みと見なす。目視チェック保留)

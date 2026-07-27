@@ -61,6 +61,12 @@ pub struct Scenario {
     pub bodies: Vec<BodyScenarioDesc>,
     #[serde(default)]
     pub fluids: Vec<FluidJson>,
+    /// 熱ドメイン(`sim_thermal::ThermalSolver`)。未指定なら無効(縮約実装:
+    /// ノード間リンク(`ThermalSolver::add_link`、伝導ネットワーク)・放射
+    /// (`emissivity`)は対象外——D9(冷めるコーヒー)が要る「対流のみの単一
+    /// ノード」のみサポートする、モジュールdoc「縮約実装の理由」参照)。
+    #[serde(default)]
+    pub thermal: Option<ThermalScenarioJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
@@ -170,13 +176,37 @@ pub enum FluidJson {
     StaticWater { water_level: f64, density: f64 },
 }
 
-/// モジュールdoc「縮約実装の理由」参照 — `body_pos_y`/`body_speed`のみ、
-/// `bodies[].name`による名前解決。
+/// `Scenario::thermal`(モジュールdoc「縮約実装の理由」参照)。
+#[derive(Deserialize)]
+pub struct ThermalScenarioJson {
+    pub ambient_temperature: f64,
+    #[serde(default)]
+    pub nodes: Vec<ThermalNodeJson>,
+}
+
+/// `ThermalScenarioJson::nodes`の1件(`sim_thermal::ThermalNode`の縮約表現、
+/// `heat_accum`は毎step`Solver::step`前にゼロクリアされる中間値のため
+/// シーンJSONの対象外)。
+#[derive(Deserialize)]
+pub struct ThermalNodeJson {
+    pub temperature: f64,
+    pub heat_capacity: f64,
+    #[serde(default)]
+    pub convection_coefficient: f64,
+    #[serde(default)]
+    pub area: f64,
+}
+
+/// モジュールdoc「縮約実装の理由」参照 — `body_pos_y`/`body_speed`は
+/// `bodies[].name`による名前解決、`node_temp`は`thermal.nodes`配列の
+/// インデックス(0起点、名前解決を経ない——D9のような単一ノードのシナリオでは
+/// 名前付けの手間自体が不要なため)。
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeJson {
     BodyPosY(String),
     BodySpeed(String),
+    NodeTemp(usize),
 }
 
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
@@ -297,6 +327,17 @@ impl World {
             }
         }
 
+        if let Some(thermal_json) = &scenario.thermal {
+            let mut solver = sim_thermal::ThermalSolver::new(thermal_json.ambient_temperature);
+            for n in &thermal_json.nodes {
+                let mut node = sim_thermal::ThermalNode::new(n.temperature, n.heat_capacity);
+                node.convection_coefficient = n.convection_coefficient;
+                node.area = n.area;
+                solver.add_node(node);
+            }
+            world.enable_thermal(solver);
+        }
+
         world.add_scenario_probes(scenario, &body_ids_by_name)?;
 
         Ok(world)
@@ -318,14 +359,19 @@ impl World {
     ) -> Result<Vec<usize>, SceneError> {
         let mut handles = Vec::with_capacity(scenario.probes.len());
         for probe in &scenario.probes {
-            let (name, make_target): (&str, fn(BodyId) -> ProbeTarget) = match probe {
-                ProbeJson::BodyPosY(name) => (name, ProbeTarget::BodyPosY),
-                ProbeJson::BodySpeed(name) => (name, ProbeTarget::BodySpeed),
+            let target = match probe {
+                ProbeJson::BodyPosY(name) | ProbeJson::BodySpeed(name) => {
+                    let id = body_ids_by_name
+                        .get(name)
+                        .ok_or_else(|| SceneError::UnknownBodyName(name.to_string()))?;
+                    match probe {
+                        ProbeJson::BodyPosY(_) => ProbeTarget::BodyPosY(*id),
+                        _ => ProbeTarget::BodySpeed(*id),
+                    }
+                }
+                ProbeJson::NodeTemp(index) => ProbeTarget::NodeTemp(*index),
             };
-            let id = body_ids_by_name
-                .get(name)
-                .ok_or_else(|| SceneError::UnknownBodyName(name.to_string()))?;
-            handles.push(self.add_probe(make_target(*id), DEFAULT_PROBE_CAPACITY));
+            handles.push(self.add_probe(target, DEFAULT_PROBE_CAPACITY));
         }
         Ok(handles)
     }
@@ -1008,6 +1054,54 @@ mod tests {
                 "F3: measured={measured} analytic={analytic} rel_err={rel_err:.4}"
             );
         }
+    }
+
+    /// D9(冷めるコーヒー): `demos.rs`の`d9_cooling_coffee_matches_newton_cooling_
+    /// exponential_decay`と同じ構成(単一の熱ノード、対流のみ)をシーンJSON
+    /// (`Scenario::thermal`+`ProbeJson::NodeTemp`、本増分で追加したスキーマ拡張)
+    /// 経由で再現し、ニュートン冷却の指数減衰$T=T_{env}+(T_0-T_{env})e^{-t/\tau}$
+    /// ($\tau=C/(hA)$)と一致することを確認する。剛体は登場しない(`bodies`は
+    /// 空配列)ため`Scenario::bodies`の`#[serde(default)]`をそのまま使う。
+    #[test]
+    fn run_headless_scenario_cooling_coffee_matches_newton_cooling_exponential_decay() {
+        let ambient: f64 = 293.15;
+        let c: f64 = 100.0;
+        let h: f64 = 10.0;
+        let area: f64 = 1.0;
+        let t0: f64 = 350.0; // 約77°C(熱いコーヒー相当)
+        let dt: f64 = 0.008333333;
+        let tau = c / (h * area);
+        let steps = (2.0 * tau / dt) as u32;
+
+        let json = format!(
+            r#"
+        {{
+          "name": "d9-cooling-coffee",
+          "world": {{ "gravity": 9.80665, "dt": {dt} }},
+          "thermal": {{
+            "ambient_temperature": {ambient},
+            "nodes": [
+              {{ "temperature": {t0}, "heat_capacity": {c},
+                "convection_coefficient": {h}, "area": {area} }}
+            ]
+          }},
+          "probes": [ {{ "node_temp": 0 }} ]
+        }}
+        "#
+        );
+
+        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let measured = *result.probe_histories[0]
+            .last()
+            .expect("history should not be empty");
+
+        let t_elapsed = steps as f64 * dt;
+        let analytic = ambient + (t0 - ambient) * (-t_elapsed / tau).exp();
+        let rel_err = (measured - analytic).abs() / (t0 - ambient);
+        assert!(
+            rel_err < 0.01,
+            "T1: measured={measured} analytic={analytic} rel_err={rel_err:.4}"
+        );
     }
 
     /// D2(弾道): 45°射出の真空放物運動を`body_pos_y`/`body_speed`の2プローブのみで検証する。
