@@ -948,8 +948,18 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       doc「縮約実装の理由」参照)。
 - [ ] 物理カメラ・トーンマッピング(薄レンズモデルの物理カメラ`sim_render::Camera`は
       実装済み——焦点距離・開口半径(絞りF値から`r=f/(2N)`)・レンズ円板サンプリング
-      による被写界深度(R6、下記参照)。トーンマッピング・露出・シャッター速度・
-      モーションブラーは未実装、`camera.rs`モジュールdoc「縮約実装の理由」参照)
+      による被写界深度(R6、下記参照)。
+      **トーンマッピング(本増分で追加)**: 新規`crates/sim-render/src/
+      tonemap.rs`に輝度ベースのReinhard演算子(`reinhard_tonemap`:
+      $L_{out}=L_{in}/(1+L_{in})$)+色相を保つ版(`reinhard_tonemap_color`:
+      Rec.709相対輝度のみを圧縮しチャンネルへ均等にスケールを掛け戻す)を実装。
+      `sim-render`はまだ実際の画像出力パイプライン(フレームバッファ)を
+      持たないため(R1–R7は単一レイ/解析値比較)、純粋関数として実装し
+      実際のレンダリングパイプラインへの配線は後続増分とした。テスト6本
+      (式の厳密評価・単調増加・高輝度で1へ漸近・輝度0で0・色相保存・
+      放射輝度0で黒のまま)がGreen。
+      露出・シャッター速度・モーションブラーは未実装、`camera.rs`/
+      `tonemap.rs`モジュールdoc「縮約実装の理由」参照)
 - [x] R1 — `crates/sim-render/src/path_tracer.rs::tests::r1_white_furnace_diffuse_surface_matches_background_radiance_exactly`。
       Lambertian BSDFをコサイン重み付き半球サンプリング(pdf=cosθ/π)と対にすると
       `bsdf*cosθ/pdf=albedo`が方向によらず恒等的に成り立つ(重要度サンプリングの

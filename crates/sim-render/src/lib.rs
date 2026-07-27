@@ -29,8 +29,11 @@
 //! かつ実際に遠いクラスタの部分木を刈って総当たりよりテスト数が少ないことを
 //! 検証した。既存の`Scene::closest_hit`(現状は少数物体のR1–R7検証シーンのみで
 //! 十分)への配線は、対象になり得る多数物体デモ(D40–D43)がまだ無いため後続増分。
+//! さらにトーンマッピング(Reinhard演算子、`tonemap`モジュールdoc参照)を
+//! HDR輝度→表示可能範囲[0,1]への圧縮として追加した(色相を保つ輝度ベース版)。
 //! GGX粗い誘電体・完全な分光レンダリング(hero wavelength法)・マルチスキャッ
-//! タリング・ミー散乱・煙/水の体積散乱・コーネルボックス(R4)は後続増分
+//! タリング・ミー散乱・煙/水の体積散乱・コーネルボックス(R4)・露出調整/
+//! シャッター速度/モーションブラー・実際のフレームバッファへの配線は後続増分
 //! (各モジュールdoc「縮約実装の理由」参照)。
 
 mod bsdf;
@@ -42,6 +45,7 @@ mod path_tracer;
 mod prism;
 mod ray;
 mod sphere;
+mod tonemap;
 
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal, RoughConductor};
 pub use bvh::{Bvh, BvhDiagnostics};
@@ -52,3 +56,4 @@ pub use path_tracer::{Material, PointLight, Scene, SceneObject};
 pub use prism::{trace_prism_deviation, trace_raindrop_deviation};
 pub use ray::Ray;
 pub use sphere::{Hit, Sphere};
+pub use tonemap::{reinhard_tonemap, reinhard_tonemap_color, relative_luminance};
