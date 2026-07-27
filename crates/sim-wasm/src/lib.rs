@@ -188,36 +188,45 @@ impl WasmWorld {
         2 + self.spawned.len()
     }
 
-    fn body_id_at(&self, index: usize) -> BodyId {
+    /// `index`をボディIDへ解決する。範囲外なら`JsValue`(メッセージ文字列)を返す
+    /// (**2026-07-27の監査で修正**: 以前は`panic!`していたが、この`index`は
+    /// JS側から渡される値でありシーン再読み込み後の古い参照や単純な入力ミスで
+    /// 容易に範囲外になり得る。wasmの`panic`はモジュール全体を使用不能にする
+    /// ため——`console_error_panic_hook`を導入していない現状では捕捉不能な
+    /// wasmトラップとしてJSに伝わり、以後同じ`WasmWorld`インスタンスへの呼び出しが
+    /// 全て失敗し得る——`Result`によるエラー返却へ置き換えた。wasm-bindgenは
+    /// `Result<T, JsValue>`を返すexport関数を、成功時は`T`をそのまま返し失敗時は
+    /// 通常の(捕捉可能な)JS例外をthrowする形にバインドするため、TypeScript側の
+    /// 呼び出し規約は変わらない)。
+    fn try_body_id_at(&self, index: usize) -> Result<BodyId, JsValue> {
         match index {
-            0 => self.ground_body,
-            1 => self.box_body,
-            _ => {
-                self.spawned
-                    .get(index - 2)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "body index {index} out of range (body_count={})",
-                            self.body_count()
-                        )
-                    })
-                    .id
-            }
+            0 => Ok(self.ground_body),
+            1 => Ok(self.box_body),
+            _ => self
+                .spawned
+                .get(index - 2)
+                .map(|meta| meta.id)
+                .ok_or_else(|| {
+                    JsValue::from_str(&format!(
+                        "body index {index} out of range (body_count={})",
+                        self.body_count()
+                    ))
+                }),
         }
     }
 
     /// Hierarchyパネル表示用のラベル。
-    pub fn body_label_at(&self, index: usize) -> String {
-        match index {
+    pub fn body_label_at(&self, index: usize) -> Result<String, JsValue> {
+        Ok(match index {
             0 => "Ground".to_string(),
             1 => "Box_1".to_string(),
             _ => self
                 .spawned
                 .get(index - 2)
-                .unwrap_or_else(|| panic!("body index {index} out of range"))
+                .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
                 .label
                 .clone(),
-        }
+        })
     }
 
     /// `index`番目のボディが静的(Static)かどうか。InspectorがTransformの速度欄を
@@ -227,12 +236,12 @@ impl WasmWorld {
     /// (`import_scene_json`)で任意のindexに静的ボディが追加され得るようになった
     /// ため、実際の`BodyType`を見るクエリに置き換えた——`body_shape_label_at`が
     /// 既に辿った同じ理由)。
-    pub fn body_is_static_at(&self, index: usize) -> bool {
-        let id = self.body_id_at(index);
-        matches!(
+    pub fn body_is_static_at(&self, index: usize) -> Result<bool, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        Ok(matches!(
             self.inner.mechanics().bodies.body_type[id.index as usize],
             BodyType::Static
-        )
+        ))
     }
 
     /// Inspector表示用のShape文字列。`World::mechanics().bodies.shape_of`で
@@ -240,22 +249,24 @@ impl WasmWorld {
     /// フォーマットする(以前は`SpawnedBodyMeta`にスポーン時の文字列を固定で
     /// 覚えておく縮約実装だったが、Scale Gizmoで寸法が変わりうるようになった
     /// ため、常に最新の値を返す実クエリに置き換えた)。
-    pub fn body_shape_label_at(&self, index: usize) -> String {
-        let id = self.body_id_at(index);
-        match self.inner.mechanics().bodies.shape_of(id.index as usize) {
-            Shape::Sphere { radius } => format!("Sphere({radius:.4})"),
-            Shape::Box { half_extents } => format!(
-                "Box({:.4},{:.4},{:.4})",
-                half_extents.x, half_extents.y, half_extents.z
-            ),
-            Shape::Plane { normal, d } => {
-                format!(
-                    "Plane(normal=({},{},{}), d={d})",
-                    normal.x, normal.y, normal.z
-                )
-            }
-            other => format!("{other:?}"),
-        }
+    pub fn body_shape_label_at(&self, index: usize) -> Result<String, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        Ok(
+            match self.inner.mechanics().bodies.shape_of(id.index as usize) {
+                Shape::Sphere { radius } => format!("Sphere({radius:.4})"),
+                Shape::Box { half_extents } => format!(
+                    "Box({:.4},{:.4},{:.4})",
+                    half_extents.x, half_extents.y, half_extents.z
+                ),
+                Shape::Plane { normal, d } => {
+                    format!(
+                        "Plane(normal=({},{},{}), d={d})",
+                        normal.x, normal.y, normal.z
+                    )
+                }
+                other => format!("{other:?}"),
+            },
+        )
     }
 
     /// Prefab機能(設計docs/23-frontend/01-editor.md §6「Prefabs: 再利用可能な
@@ -263,59 +274,64 @@ impl WasmWorld {
     /// ドラッグで再利用」の縮約実装——Bodyの形状/材質のみ対象、Joint/Circuit組は
     /// 対象外)向けに、`index`番目のボディの形状の種類を返す
     /// ("sphere"/"box"/"plane"/"other")。`body_shape_params_f64_at`と対で使う。
-    pub fn body_shape_kind_at(&self, index: usize) -> String {
-        let id = self.body_id_at(index);
-        match self.inner.mechanics().bodies.shape_of(id.index as usize) {
-            Shape::Sphere { .. } => "sphere".to_string(),
-            Shape::Box { .. } => "box".to_string(),
-            Shape::Plane { .. } => "plane".to_string(),
-            _ => "other".to_string(),
-        }
+    pub fn body_shape_kind_at(&self, index: usize) -> Result<String, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        Ok(
+            match self.inner.mechanics().bodies.shape_of(id.index as usize) {
+                Shape::Sphere { .. } => "sphere".to_string(),
+                Shape::Box { .. } => "box".to_string(),
+                Shape::Plane { .. } => "plane".to_string(),
+                _ => "other".to_string(),
+            },
+        )
     }
 
     /// `body_shape_kind_at`と対応する数値パラメータ: sphere→`[radius]`、
     /// box→`[hx,hy,hz]`、plane→`[nx,ny,nz,d]`、other→空配列(Prefab保存用)。
-    pub fn body_shape_params_f64_at(&self, index: usize) -> Float64Array {
-        let id = self.body_id_at(index);
-        match self.inner.mechanics().bodies.shape_of(id.index as usize) {
-            Shape::Sphere { radius } => Float64Array::from(&[*radius][..]),
-            Shape::Box { half_extents } => {
-                Float64Array::from(&[half_extents.x, half_extents.y, half_extents.z][..])
-            }
-            Shape::Plane { normal, d } => {
-                Float64Array::from(&[normal.x, normal.y, normal.z, *d][..])
-            }
-            _ => Float64Array::from(&[][..]),
-        }
+    pub fn body_shape_params_f64_at(&self, index: usize) -> Result<Float64Array, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        Ok(
+            match self.inner.mechanics().bodies.shape_of(id.index as usize) {
+                Shape::Sphere { radius } => Float64Array::from(&[*radius][..]),
+                Shape::Box { half_extents } => {
+                    Float64Array::from(&[half_extents.x, half_extents.y, half_extents.z][..])
+                }
+                Shape::Plane { normal, d } => {
+                    Float64Array::from(&[normal.x, normal.y, normal.z, *d][..])
+                }
+                _ => Float64Array::from(&[][..]),
+            },
+        )
     }
 
     /// Inspector表示用の材質名。
-    pub fn body_material_label_at(&self, index: usize) -> String {
-        match index {
+    pub fn body_material_label_at(&self, index: usize) -> Result<String, JsValue> {
+        Ok(match index {
             0 => "コンクリート".to_string(),
             1 => "鋼(炭素鋼)".to_string(),
             _ => self
                 .spawned
                 .get(index - 2)
-                .unwrap_or_else(|| panic!("body index {index} out of range"))
+                .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
                 .material_label
                 .clone(),
-        }
+        })
     }
 
     /// Projectドロワー Materials タブ(設計docs/23-frontend/01-editor.md §1.6
     /// 「Materials: MaterialDbプリセット一覧」)向けに、指定した材質名の主要物性値を
     /// `[density, friction, restitution, specific_heat, conductivity]`の順で返す。
-    /// 未知の名前ならパニックする(呼び出し側UIが`SPAWN_MATERIALS`等の既知の名前だけを
-    /// 渡す前提、`spawn_sphere`と同じ設計)。
-    pub fn material_properties_f64(&self, name: String) -> Float64Array {
+    /// 未知の名前なら`JsValue`エラーを返す(呼び出し側UIが`SPAWN_MATERIALS`等の
+    /// 既知の名前だけを渡す前提だが、**2026-07-27の監査で修正**: 以前は
+    /// `panic!`していた——`try_body_id_at`のdocと同じ理由でResult化した)。
+    pub fn material_properties_f64(&self, name: String) -> Result<Float64Array, JsValue> {
         let id = self
             .inner
             .materials()
             .find_by_name(&name)
-            .unwrap_or_else(|| panic!("unknown material: {name}"));
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {name}")))?;
         let m = self.inner.materials().get(id);
-        Float64Array::from(
+        Ok(Float64Array::from(
             &[
                 m.density,
                 m.friction,
@@ -323,13 +339,14 @@ impl WasmWorld {
                 m.specific_heat,
                 m.conductivity,
             ][..],
-        )
+        ))
     }
 
     /// スポーンパレット(設計docs/23-frontend/01-editor.md §6)——球を`material_name`
     /// (`MaterialDb::standard`が持つ名前)で`(x,y,z)`に配置する。新しいボディの
-    /// index(`body_count`と同じ体系)を返す。未知の材質名ならパニックする
-    /// (呼び出し側UIが既知の名前だけを選択肢にするため、実行時に到達しない前提)。
+    /// index(`body_count`と同じ体系)を返す。未知の材質名なら`JsValue`エラーを
+    /// 返す(呼び出し側UIが既知の名前だけを選択肢にする前提だが、
+    /// `material_properties_f64`のdocと同じ理由でResult化した)。
     pub fn spawn_sphere(
         &mut self,
         x: f64,
@@ -337,12 +354,12 @@ impl WasmWorld {
         z: f64,
         radius: f64,
         material_name: String,
-    ) -> usize {
+    ) -> Result<usize, JsValue> {
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .unwrap_or_else(|| panic!("unknown material: {material_name}"));
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
         let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, material);
         desc.transform.position = sim_math::Vec3::new(x, y, z);
         let id = self.inner.create_body(desc);
@@ -356,7 +373,7 @@ impl WasmWorld {
             constraint_joint_index: None,
             hinge_motor_index: None,
         });
-        index
+        Ok(index)
     }
 
     /// スポーンパレット——箱(半辺長`half_extent`の立方体)を`material_name`で
@@ -368,12 +385,12 @@ impl WasmWorld {
         z: f64,
         half_extent: f64,
         material_name: String,
-    ) -> usize {
+    ) -> Result<usize, JsValue> {
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .unwrap_or_else(|| panic!("unknown material: {material_name}"));
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
         let mut desc = RigidBodyDesc::dynamic(
             Shape::Box {
                 half_extents: sim_math::Vec3::new(half_extent, half_extent, half_extent),
@@ -394,7 +411,7 @@ impl WasmWorld {
             constraint_joint_index: None,
             hinge_motor_index: None,
         });
-        index
+        Ok(index)
     }
 
     /// シーンJSON Import(設計docs/23-frontend/01-editor.md §1.6「Scenes: シーン
@@ -487,13 +504,13 @@ impl WasmWorld {
         pivot_z: f64,
         arm_length: f64,
         material_name: String,
-    ) -> usize {
+    ) -> Result<usize, JsValue> {
         const BOB_RADIUS: f64 = 0.3;
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .unwrap_or_else(|| panic!("unknown material: {material_name}"));
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
         let pivot = sim_math::Vec3::new(pivot_x, pivot_y, pivot_z);
         let initial_angle_from_vertical = std::f64::consts::PI / 6.0; // 30度
         let initial_offset = sim_math::Vec3::new(
@@ -520,7 +537,7 @@ impl WasmWorld {
             constraint_joint_index: Some(joint_index),
             hinge_motor_index: None,
         });
-        index
+        Ok(index)
     }
 
     /// スポーンパレット——モーターアーム(`Command::SetMotorTarget`の実証用)。
@@ -533,7 +550,7 @@ impl WasmWorld {
         pivot_y: f64,
         pivot_z: f64,
         material_name: String,
-    ) -> usize {
+    ) -> Result<usize, JsValue> {
         const HALF_EXTENTS: sim_math::Vec3 = sim_math::Vec3 {
             x: 0.1,
             y: 0.6,
@@ -543,7 +560,7 @@ impl WasmWorld {
             .inner
             .materials()
             .find_by_name(&material_name)
-            .unwrap_or_else(|| panic!("unknown material: {material_name}"));
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
         let pivot = sim_math::Vec3::new(pivot_x, pivot_y, pivot_z);
         let anchor_local_top = sim_math::Vec3::new(0.0, HALF_EXTENTS.y, 0.0);
         let mut desc = RigidBodyDesc::dynamic(
@@ -585,29 +602,31 @@ impl WasmWorld {
             constraint_joint_index: None,
             hinge_motor_index: Some(hinge_motor_index),
         });
-        index
+        Ok(index)
     }
 
     /// `Command::SetMotorTarget`(モジュールdoc参照、`theta_target`は
     /// ラジアン)を、`index`番目のボディが持つヒンジモーターへ送る。
-    /// モーターを持たないボディに呼ぶとパニックする(呼び出し側UIが
-    /// モーターを持つボディだけに対して呼ぶ前提)。
-    pub fn set_motor_target_at(&mut self, index: usize, theta_target: f64) {
+    /// モーターを持たないボディに呼ぶと`JsValue`エラーを返す(呼び出し側UIが
+    /// モーターを持つボディだけに対して呼ぶ前提だが、`try_body_id_at`のdocと
+    /// 同じ理由でResult化した)。
+    pub fn set_motor_target_at(&mut self, index: usize, theta_target: f64) -> Result<(), JsValue> {
         let hinge_motor_index = match index {
             0 | 1 => None,
             _ => {
                 self.spawned
                     .get(index - 2)
-                    .unwrap_or_else(|| panic!("body index {index} out of range"))
+                    .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
                     .hinge_motor_index
             }
         };
-        let hinge_motor_index =
-            hinge_motor_index.unwrap_or_else(|| panic!("body index {index} has no hinge motor"));
+        let hinge_motor_index = hinge_motor_index
+            .ok_or_else(|| JsValue::from_str(&format!("body index {index} has no hinge motor")))?;
         self.inner.push_command(Command::SetMotorTarget {
             hinge_motor_index,
             theta_target,
         });
+        Ok(())
     }
 
     /// 分圧回路(`WasmWorld::new`参照)の分圧点電圧[V]。`Command::SetSwitch`の
@@ -703,28 +722,28 @@ impl WasmWorld {
     /// 「拘束」)向けに、`index`番目のボディが持つ拘束(DistanceJoint)の
     /// アンカー点2点を`[ax,ay,az,bx,by,bz]`(f32)で返す。拘束を持たない
     /// ボディ(床・箱・スポーンした球/箱)なら空配列を返す。
-    pub fn constraint_anchor_points_at(&self, index: usize) -> Float32Array {
+    pub fn constraint_anchor_points_at(&self, index: usize) -> Result<Float32Array, JsValue> {
         let joint_index = match index {
             0 | 1 => None,
             _ => {
                 self.spawned
                     .get(index - 2)
-                    .unwrap_or_else(|| panic!("body index {index} out of range"))
+                    .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
                     .constraint_joint_index
             }
         };
         let Some(joint_index) = joint_index else {
-            return Float32Array::new_with_length(0);
+            return Ok(Float32Array::new_with_length(0));
         };
         let (a, b) = self
             .inner
             .distance_joint_anchor_points(joint_index)
             .expect("constraint_joint_index recorded at spawn time must stay valid");
-        Float32Array::from(
+        Ok(Float32Array::from(
             &[
                 a.x as f32, a.y as f32, a.z as f32, b.x as f32, b.y as f32, b.z as f32,
             ][..],
-        )
+        ))
     }
 
     /// フレーム軸オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「フレーム
@@ -743,22 +762,40 @@ impl WasmWorld {
         id.0 as usize
     }
 
+    /// `frame_index`が有効な範囲内かを検証する(**2026-07-27の監査で追加**:
+    /// `sim_core::FrameTree::frame`は範囲外の`FrameId`に対し生スライスindexで
+    /// パニックする——`try_body_id_at`のdocと同じ理由で、フレームindexを扱う
+    /// 各wasm公開メソッドの入口でここを通す)。フレームは`add_frame`/
+    /// `add_child_frame`で単調増加するのみ(削除が無い)ため、
+    /// `frame_index < frame_count()`が有効性の必要十分条件になる。
+    fn check_frame_index(&self, frame_index: usize) -> Result<(), JsValue> {
+        if frame_index < self.frame_count() {
+            Ok(())
+        } else {
+            Err(JsValue::from_str(&format!(
+                "frame index {frame_index} out of range (frame_count={})",
+                self.frame_count()
+            )))
+        }
+    }
+
     /// `frame_index`番目のフレームの現在の姿勢(親フレームからの相対回転)を
     /// クォータニオン`[x, y, z, w]`(f32)で返す。
-    pub fn frame_rotation_at_f32(&self, frame_index: usize) -> Float32Array {
+    pub fn frame_rotation_at_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+        self.check_frame_index(frame_index)?;
         let rotation = self
             .inner
             .frames()
             .frame(FrameId(frame_index as u32))
             .rotation_in_parent;
-        Float32Array::from(
+        Ok(Float32Array::from(
             &[
                 rotation.x as f32,
                 rotation.y as f32,
                 rotation.z as f32,
                 rotation.w as f32,
             ][..],
-        )
+        ))
     }
 
     /// 全フレーム数(ROOT含む、`sim_core::FrameTree::frame_count`の素通し)。
@@ -771,16 +808,19 @@ impl WasmWorld {
     /// `frame_index`番目のフレームの親のindex。ROOT自身(index 0)は親を
     /// 持たないため`-1`を返す(フレーム階層ドリルインUIがツリー構造を
     /// 組み立てるための情報)。
-    pub fn frame_parent_index(&self, frame_index: usize) -> i32 {
-        match self
-            .inner
-            .frames()
-            .frame(FrameId(frame_index as u32))
-            .parent
-        {
-            Some(parent) => parent.0 as i32,
-            None => -1,
-        }
+    pub fn frame_parent_index(&self, frame_index: usize) -> Result<i32, JsValue> {
+        self.check_frame_index(frame_index)?;
+        Ok(
+            match self
+                .inner
+                .frames()
+                .frame(FrameId(frame_index as u32))
+                .parent
+            {
+                Some(parent) => parent.0 as i32,
+                None => -1,
+            },
+        )
     }
 
     /// `frame_index`番目のフレームのROOT(ワールド)座標系での位置
@@ -788,31 +828,35 @@ impl WasmWorld {
     /// (親フレームからの相対回転のみ、単一のROOT直下フレームを想定していた
     /// 旧API)と異なり、複数フレームが親子関係を持つ場合(フレーム階層
     /// ドリルインUI)でも階層を遡って合成した実際のワールド位置を返す。
-    pub fn frame_world_position_f32(&self, frame_index: usize) -> Float32Array {
+    pub fn frame_world_position_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+        self.check_frame_index(frame_index)?;
         let position = self
             .inner
             .frames()
             .transform_to_root(FrameId(frame_index as u32))
             .position;
-        Float32Array::from(&[position.x as f32, position.y as f32, position.z as f32][..])
+        Ok(Float32Array::from(
+            &[position.x as f32, position.y as f32, position.z as f32][..],
+        ))
     }
 
     /// `frame_index`番目のフレームのROOT(ワールド)座標系での姿勢
     /// (`frame_world_position_f32`と同じ理由で`transform_to_root`を使う)。
-    pub fn frame_world_rotation_f32(&self, frame_index: usize) -> Float32Array {
+    pub fn frame_world_rotation_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+        self.check_frame_index(frame_index)?;
         let rotation = self
             .inner
             .frames()
             .transform_to_root(FrameId(frame_index as u32))
             .rotation;
-        Float32Array::from(
+        Ok(Float32Array::from(
             &[
                 rotation.x as f32,
                 rotation.y as f32,
                 rotation.z as f32,
                 rotation.w as f32,
             ][..],
-        )
+        ))
     }
 
     /// フレーム階層ドリルインUI(設計docs/23-frontend/01-editor.md §1.3
@@ -829,7 +873,11 @@ impl WasmWorld {
         origin_offset_y: f64,
         origin_offset_z: f64,
         angular_velocity_z: f64,
-    ) -> usize {
+    ) -> Result<usize, JsValue> {
+        // `World::add_frame`は範囲外の親`FrameId`に対し`assert!`でパニックする
+        // (`sim_core::FrameTree::add_frame`)ため、`try_body_id_at`のdocと同じ
+        // 理由でここも事前に検証する。
+        self.check_frame_index(parent_index)?;
         let id = self.inner.add_frame(
             FrameId(parent_index as u32),
             Vec3::new(origin_offset_x, origin_offset_y, origin_offset_z),
@@ -837,7 +885,7 @@ impl WasmWorld {
             Vec3::ZERO,
             Vec3::new(0.0, 0.0, angular_velocity_z),
         );
-        id.0 as usize
+        Ok(id.0 as usize)
     }
 
     /// 流体場オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「流体場」の土台)
@@ -927,8 +975,8 @@ impl WasmWorld {
     }
 
     /// `index`番目のボディの位置 [x, y, z](f32)。
-    pub fn body_position_at_f32(&self, index: usize) -> Float32Array {
-        let id = self.body_id_at(index);
+    pub fn body_position_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+        let id = self.try_body_id_at(index)?;
         let p = self
             .inner
             .body_position(id)
@@ -937,12 +985,12 @@ impl WasmWorld {
         out.set_index(0, p.x as f32);
         out.set_index(1, p.y as f32);
         out.set_index(2, p.z as f32);
-        out
+        Ok(out)
     }
 
     /// `index`番目のボディの速度 [vx, vy, vz](f32)。
-    pub fn body_velocity_at_f32(&self, index: usize) -> Float32Array {
-        let id = self.body_id_at(index);
+    pub fn body_velocity_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+        let id = self.try_body_id_at(index)?;
         let v = self
             .inner
             .body_velocity(id)
@@ -951,12 +999,12 @@ impl WasmWorld {
         out.set_index(0, v.x as f32);
         out.set_index(1, v.y as f32);
         out.set_index(2, v.z as f32);
-        out
+        Ok(out)
     }
 
     /// `index`番目のボディの姿勢クォータニオン [x, y, z, w](f32)。
-    pub fn body_rotation_at_f32(&self, index: usize) -> Float32Array {
-        let id = self.body_id_at(index);
+    pub fn body_rotation_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+        let id = self.try_body_id_at(index)?;
         let q = self
             .inner
             .body_rotation(id)
@@ -966,15 +1014,23 @@ impl WasmWorld {
         out.set_index(1, q.y as f32);
         out.set_index(2, q.z as f32);
         out.set_index(3, q.w as f32);
-        out
+        Ok(out)
     }
 
     /// Editモードの回転Gizmo向けの直接編集(`set_body_position_at`の姿勢版、
     /// 同じくCommandキューを経由しない直接書き換え)。
-    pub fn set_body_rotation_at(&mut self, index: usize, x: f64, y: f64, z: f64, w: f64) {
-        let id = self.body_id_at(index);
+    pub fn set_body_rotation_at(
+        &mut self,
+        index: usize,
+        x: f64,
+        y: f64,
+        z: f64,
+        w: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(index)?;
         self.inner.mechanics_mut().bodies.rotation[id.index as usize] =
             sim_math::Quat { x, y, z, w };
+        Ok(())
     }
 
     /// Scale Gizmo(縮約実装、`sim_world::World::set_body_shape`のdoc参照)——
@@ -983,17 +1039,21 @@ impl WasmWorld {
     /// 相対値ではなく、常に基準形状からの絶対倍率(Translate/Rotate Gizmoの
     /// 「ドラッグ開始値+差分」ではなく「基準値×絶対倍率」という設計、複数回の
     /// ドラッグを重ねても誤差が蓄積しない)。
-    pub fn set_body_scale_at(&mut self, index: usize, scale: f64) {
-        let id = self.body_id_at(index);
+    pub fn set_body_scale_at(&mut self, index: usize, scale: f64) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(index)?;
         let base_shape = match index {
-            0 => panic!("Ground is static and has no scale handle"),
+            0 => {
+                return Err(JsValue::from_str(
+                    "Ground is static and has no scale handle",
+                ));
+            }
             1 => Shape::Box {
                 half_extents: sim_math::Vec3::new(0.5, 0.5, 0.5),
             },
             _ => self
                 .spawned
                 .get(index - 2)
-                .unwrap_or_else(|| panic!("body index {index} out of range"))
+                .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))?
                 .base_shape
                 .clone(),
         };
@@ -1007,6 +1067,7 @@ impl WasmWorld {
             other => other,
         };
         self.inner.set_body_shape(id, scaled_shape);
+        Ok(())
     }
 
     /// 1 world step。1s相当のstep数ごとにTimelineスナップショットを
@@ -1031,18 +1092,41 @@ impl WasmWorld {
         self.snapshots.len()
     }
 
+    /// `index`が有効なスナップショットindexかを検証する(**2026-07-27の監査で
+    /// 追加**: `VecDeque`の生indexアクセスは範囲外でパニックする、
+    /// `try_body_id_at`のdocと同じ理由)。
+    fn try_snapshot_at(&self, index: usize) -> Result<&World, JsValue> {
+        self.snapshots.get(index).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "snapshot index {index} out of range (snapshot_count={})",
+                self.snapshots.len()
+            ))
+        })
+    }
+
     /// `index`番目のスナップショットの記録時刻(秒、古い順)。
-    pub fn snapshot_time_at(&self, index: usize) -> f64 {
-        self.snapshots[index].time()
+    pub fn snapshot_time_at(&self, index: usize) -> Result<f64, JsValue> {
+        Ok(self.try_snapshot_at(index)?.time())
     }
 
     /// Timelineスクラバ操作: `index`番目のスナップショットへ巻き戻す(既存の
     /// `World::restore`をそのまま使う)。巻き戻した時点より後のスナップショットは
     /// もはや実際の未来を表さないため破棄する(新しいタイムラインがそこから
     /// 再開する、設計の「直前スナップショットへの巻き戻し」と同じ発想)。
-    pub fn restore_snapshot(&mut self, index: usize) {
-        self.inner.restore(&self.snapshots[index]);
+    pub fn restore_snapshot(&mut self, index: usize) -> Result<(), JsValue> {
+        // `try_snapshot_at`は`&self`(disjointでない全体借用)を取るため、
+        // その戻り値を保持したまま`&mut self.inner`は取れない。フィールドへ
+        // 直接アクセスして借用チェッカに`snapshots`と`inner`が別フィールド
+        // であることを見せる。
+        let snapshot = self.snapshots.get(index).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "snapshot index {index} out of range (snapshot_count={})",
+                self.snapshots.len()
+            ))
+        })?;
+        self.inner.restore(snapshot);
         self.snapshots.truncate(index + 1);
+        Ok(())
     }
 
     /// Timelineのブックマーク(設計docs/23-frontend/01-editor.md §1.4
@@ -1058,12 +1142,24 @@ impl WasmWorld {
         self.bookmarks.len()
     }
 
-    pub fn bookmark_label_at(&self, index: usize) -> String {
-        self.bookmarks[index].0.clone()
+    /// `index`が有効なブックマークindexかを検証する(**2026-07-27の監査で
+    /// 追加**: `Vec`の生indexアクセスは範囲外でパニックする、
+    /// `try_body_id_at`のdocと同じ理由)。
+    fn try_bookmark_at(&self, index: usize) -> Result<&(String, World), JsValue> {
+        self.bookmarks.get(index).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "bookmark index {index} out of range (bookmark_count={})",
+                self.bookmarks.len()
+            ))
+        })
     }
 
-    pub fn bookmark_time_at(&self, index: usize) -> f64 {
-        self.bookmarks[index].1.time()
+    pub fn bookmark_label_at(&self, index: usize) -> Result<String, JsValue> {
+        Ok(self.try_bookmark_at(index)?.0.clone())
+    }
+
+    pub fn bookmark_time_at(&self, index: usize) -> Result<f64, JsValue> {
+        Ok(self.try_bookmark_at(index)?.1.time())
     }
 
     /// ブックマークのエクスポート(設計docs/23-frontend/01-editor.md §6
@@ -1081,11 +1177,15 @@ impl WasmWorld {
     /// 使う(通常は変化しないため実用上問題にならない、既知の簡略化)。
     /// ブックマーク時点にまだ存在しなかったボディ(`body_position`が`None`を
     /// 返す)はスキップする。
-    pub fn bookmark_export_scene_json(&self, index: usize) -> String {
-        let (label, snapshot) = &self.bookmarks[index];
+    pub fn bookmark_export_scene_json(&self, index: usize) -> Result<String, JsValue> {
+        let (label, snapshot) = self.try_bookmark_at(index)?;
         let mut bodies_json = Vec::new();
         for i in 0..self.body_count() {
-            let id = self.body_id_at(i);
+            // `i`は`0..body_count()`の範囲内なので必ず解決できる
+            // (`try_body_id_at`のdoc参照——削除が無いため常に有効)。
+            let id = self
+                .try_body_id_at(i)
+                .expect("index within 0..body_count() is always valid");
             let (Some(position), Some(rotation), Some(velocity)) = (
                 snapshot.body_position(id),
                 snapshot.body_rotation(id),
@@ -1111,14 +1211,14 @@ impl WasmWorld {
             }) else {
                 continue;
             };
-            let type_json = if self.body_is_static_at(i) {
+            let type_json = if self.body_is_static_at(i)? {
                 r#","type":"static""#
             } else {
                 ""
             };
             bodies_json.push(format!(
                 r#"{{"shape":{shape_json},"material":"{material}","position":[{px},{py},{pz}],"rotation":[{qx},{qy},{qz},{qw}],"linear_velocity":[{vx},{vy},{vz}],"name":"{name}"{type_json}}}"#,
-                material = self.body_material_label_at(i),
+                material = self.body_material_label_at(i)?,
                 px = position.x,
                 py = position.y,
                 pz = position.z,
@@ -1129,25 +1229,33 @@ impl WasmWorld {
                 vx = velocity.x,
                 vy = velocity.y,
                 vz = velocity.z,
-                name = self.body_label_at(i),
+                name = self.body_label_at(i)?,
             ));
         }
-        format!(
+        Ok(format!(
             r#"{{"name":"bookmark-{label}","world":{{"gravity":{gravity},"dt":{dt}}},"bodies":[{bodies}]}}"#,
             gravity = self.gravity,
             dt = self.dt,
             bodies = bodies_json.join(",")
-        )
+        ))
     }
 
     /// ブックマークへ巻き戻す。`restore_snapshot`と異なり、ブックマーク自体は
     /// 巻き戻し後も残す(いつでも同じブックマークへ再度戻れるように)。ただし
     /// リングバッファ側のスナップショットは、もはや実際の未来を表さないため
     /// 全て破棄する(新しいタイムラインがそこから再開する)。
-    pub fn restore_bookmark(&mut self, index: usize) {
-        let (_, snapshot) = &self.bookmarks[index];
+    pub fn restore_bookmark(&mut self, index: usize) -> Result<(), JsValue> {
+        // `restore_snapshot`と同じ理由でフィールドへ直接アクセスする
+        // (借用チェッカに`bookmarks`と`inner`が別フィールドであることを見せる)。
+        let (_, snapshot) = self.bookmarks.get(index).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "bookmark index {index} out of range (bookmark_count={})",
+                self.bookmarks.len()
+            ))
+        })?;
         self.inner.restore(snapshot);
         self.snapshots.clear();
+        Ok(())
     }
 
     pub fn time(&self) -> f64 {
@@ -1232,10 +1340,17 @@ impl WasmWorld {
     /// 公開していないため(`mechanics_mut().bodies.position`はP1設計が定める
     /// `RigidBodySet`のSoAレイアウト、`docs/10-mechanics/01-rigid-body.md` §4)、
     /// ここで直接アクセスする。
-    pub fn set_body_position_at(&mut self, index: usize, x: f64, y: f64, z: f64) {
-        let id = self.body_id_at(index);
+    pub fn set_body_position_at(
+        &mut self,
+        index: usize,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(index)?;
         self.inner.mechanics_mut().bodies.position[id.index as usize] =
             sim_math::Vec3::new(x, y, z);
+        Ok(())
     }
 
     /// Scene View オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「接触点」)向けに、
@@ -1276,5 +1391,129 @@ impl WasmWorld {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+/// **2026-07-27の監査で追加**: このcrate(JS/WASM境界、1280行)にテストが
+/// 1本も無かった(Rustワークスペース最大の未テスト面)ため、Q5(wasm境界の
+/// パニック除去)の作業とあわせて最小限のユニットテストを追加する。
+///
+/// **正直な制約(実際に検証した結果、当初の想定より厳しいことが判明した)**:
+/// `js_sys::Float32Array`/`Float64Array`と`wasm_bindgen::JsValue`はいずれも、
+/// 実際のwasmホスト(ブラウザ/Node)無しでは**値を構築すること自体ができない**。
+/// 実験の結果、`Float32Array::new_with_length`はネイティブターゲットで
+/// 「cannot call wasm-bindgen imported functions on non-wasm targets」と
+/// (unwind可能な)パニックを起こす一方、`JsValue::from_str`は**unwindしない
+/// プロセスabort(SIGABRT)** を起こすことを確認した——つまり`Result<_, JsValue>`
+/// の`Err`分岐を`assert!(result.is_err())`のような形で検証しようとするテストは、
+/// `Err`を構築した時点で**テストプロセスごと**abortする(該当テストの
+/// `#[should_panic]`でも捕捉できない)。したがって本テストモジュールは
+/// **成功パスのみ**(`Float32Array`/`Float64Array`を返す関数の戻り値自体も
+/// 検証できないため、そちらは「パニックせず`Ok`を返した」ことの確認に留める)
+/// に限定する。エラーパス・`Float32Array`/`Float64Array`の中身の実行時検証には
+/// `wasm-bindgen-test`(`wasm-pack test --node`等)の導入が要るが、本増分の
+/// スコープ外として正直に記録する(CIにもこのcrateにも現状
+/// `wasm-bindgen-test`は無い、`docs/22-roadmap/02-feature-checklist.md`参照)。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn new_world() -> WasmWorld {
+        WasmWorld::new(-9.80665, 1.0 / 60.0, 5.0)
+    }
+
+    /// 固定2体(床・箱)のラベル・材質・静的判定が期待どおりであること。
+    #[test]
+    fn fixed_bodies_have_expected_labels_and_materials() {
+        let world = new_world();
+        assert_eq!(world.body_count(), 2);
+        assert_eq!(world.body_label_at(0).unwrap(), "Ground");
+        assert_eq!(world.body_label_at(1).unwrap(), "Box_1");
+        assert_eq!(world.body_material_label_at(0).unwrap(), "コンクリート");
+        assert_eq!(world.body_material_label_at(1).unwrap(), "鋼(炭素鋼)");
+        assert!(world.body_is_static_at(0).unwrap());
+        assert!(!world.body_is_static_at(1).unwrap());
+    }
+
+    /// `spawn_sphere`/`spawn_box`が正しい材質名で成功し、`body_count`が
+    /// 増分どおりに伸び、新しいボディのラベル・形状種別・材質が読めること
+    /// (Q5でResult化した成功パスの回帰テスト)。
+    #[test]
+    fn spawn_sphere_and_box_succeed_and_extend_body_count() {
+        let mut world = new_world();
+        let sphere_index = world
+            .spawn_sphere(1.0, 2.0, 3.0, 0.5, "コンクリート".to_string())
+            .expect("known material name must succeed");
+        assert_eq!(sphere_index, 2);
+        assert_eq!(world.body_count(), 3);
+        assert_eq!(world.body_shape_kind_at(sphere_index).unwrap(), "sphere");
+        assert_eq!(
+            world.body_material_label_at(sphere_index).unwrap(),
+            "コンクリート"
+        );
+
+        let box_index = world
+            .spawn_box(0.0, 0.0, 0.0, 0.25, "鋼(炭素鋼)".to_string())
+            .expect("known material name must succeed");
+        assert_eq!(box_index, 3);
+        assert_eq!(world.body_count(), 4);
+        assert_eq!(world.body_shape_kind_at(box_index).unwrap(), "box");
+    }
+
+    /// フレーム階層: ROOTの子フレームを追加でき、親indexが正しく読めること。
+    #[test]
+    fn add_child_frame_succeeds_and_reports_correct_parent() {
+        let mut world = new_world();
+        assert_eq!(world.frame_count(), 1); // ROOTのみ。
+        let child = world
+            .add_child_frame(0, 1.0, 0.0, 0.0, 0.5)
+            .expect("ROOT is always a valid parent");
+        assert_eq!(child, 1);
+        assert_eq!(world.frame_count(), 2);
+        assert_eq!(world.frame_parent_index(child).unwrap(), 0);
+        assert_eq!(world.frame_parent_index(0).unwrap(), -1); // ROOTは親を持たない。
+    }
+
+    /// ブックマークの追加・ラベル/時刻の読み取り・巻き戻しが成功パスで
+    /// 期待どおり動くこと。
+    #[test]
+    fn bookmark_add_and_restore_round_trips_successfully() {
+        let mut world = new_world();
+        world.step();
+        let time_at_bookmark = world.time();
+        world.add_bookmark("test-bookmark".to_string());
+        assert_eq!(world.bookmark_count(), 1);
+        assert_eq!(world.bookmark_label_at(0).unwrap(), "test-bookmark");
+        assert!((world.bookmark_time_at(0).unwrap() - time_at_bookmark).abs() < 1e-12);
+
+        world.step();
+        world.step();
+        assert!(world.time() > time_at_bookmark);
+
+        world.restore_bookmark(0).expect("bookmark 0 must exist");
+        assert!((world.time() - time_at_bookmark).abs() < 1e-12);
+    }
+
+    /// 位置/姿勢の直接編集(Gizmo相当)が成功パスで正しく反映されること
+    /// (`Float32Array`経由の読み出し自体はネイティブターゲットで検証できない
+    /// ため、モジュールdoc「正直な制約」参照のとおりパニックせず成功した
+    /// ことのみを確認する)。
+    #[test]
+    fn set_body_position_and_rotation_succeed_for_a_valid_body() {
+        let mut world = new_world();
+        world.set_body_position_at(1, 7.0, 8.0, 9.0).unwrap();
+        world.set_body_rotation_at(1, 0.0, 0.0, 0.0, 1.0).unwrap();
+    }
+
+    /// Scale Gizmo(`set_body_scale_at`)がスポーンした球のスケールを
+    /// 成功パスで受理すること。
+    #[test]
+    fn set_body_scale_at_succeeds_for_a_spawned_body() {
+        let mut world = new_world();
+        let sphere_index = world
+            .spawn_sphere(0.0, 0.0, 0.0, 0.5, "コンクリート".to_string())
+            .expect("known material name must succeed");
+        world.set_body_scale_at(sphere_index, 2.0).unwrap();
+        assert_eq!(world.body_shape_kind_at(sphere_index).unwrap(), "sphere");
     }
 }

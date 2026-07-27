@@ -394,6 +394,26 @@
   energy`)は一様流速場を使うため補間の前後で値が変わらず無影響。
   `sim-world`の`convection_link_coupling_warms_surface_node_from_flowing_
   fluid_via_world`も同様に一様流速のため無影響。
+  **Q5(増分1-3)も完了**——今回の増分群1で最大の作業。実際に`sim-wasm/src/lib.rs`を
+  監査したところ、当初把握していた`panic!`/`unwrap_or_else(panic)`約13箇所に加え、
+  `self.bookmarks[index]`等の生スライスindexアクセス・`sim_core::FrameTree::frame`の
+  境界チェック無しindexアクセス(`assert!`込み)も同種のパニックであることが判明し、
+  実際の規模は約29箇所だった。`try_body_id_at`/`try_bookmark_at`/`try_snapshot_at`/
+  `check_frame_index`という4つの検証ヘルパを新設し、26個の公開メソッドを
+  `Result<T, JsValue>`化した。wasm-bindgenは`Result<T, JsValue>`を返すexport関数を
+  TS側で戻り値型`T`のまま(失敗時は通常の捕捉可能なJS例外をthrow)にバインドするため、
+  **`demo/src/main.ts`は一切変更不要**だった——`npm run build`・実際に生成した
+  wasmバインディング経由でのPlaywrightスモーク(spawn_sphere/spawn_box を6回呼び、
+  Hierarchyパネルに正しいラベルが並び、JS/wasmエラーがコンソールに出ないことを確認)
+  とも成功。あわせてこのcrate(1280行、監査時点でテスト0本、Rustワークスペース
+  最大の未テスト面)に6本のユニットテストを追加した——ただし実装中に`js_sys::
+  Float32Array`/`Float64Array`と`wasm_bindgen::JsValue`はいずれも**実際のwasmホスト
+  無しでは値を構築すること自体ができない**(`Float32Array::new_with_length`は
+  unwind可能なパニック、`JsValue::from_str`に至っては非unwindのプロセスabortを
+  引き起こすことを実験で確認)ため、ネイティブ`cargo test`で安全に検証できるのは
+  成功パスのみと判明した。エラーパス・`Float32Array`/`Float64Array`の中身の検証には
+  `wasm-bindgen-test`(`wasm-pack test --node`等、現状このcrateにもCIにも無い)の
+  導入が要ることを正直に記録し、スコープ外とした。
   なお、mathウェーブ(`sim-math`の`Vec3`/`Quat`/`Mat3`/`Transform`/`SimRng`/積分器カタログの
   汎用部分等)は依存が無く低リスクなため、Phase AのRed段階を経ずに直接実装+テストで
   Green化した。状態を持つ各ドメインのソルバ(`RigidIntegrator`・陰的Euler・IC(0)・
@@ -2678,7 +2698,7 @@ PR-2 の監査で確定後、末尾に「(長時間級)」を付記すること�
 | Q2 | `sim-mechanics/src/solver.rs:46-65` | 接触散逸が真値より系統的に約9%過大 | 対応予定(増分1) |
 | Q3 | `sim-coupling/src/convection_link.rs:12` | MAC食い違い格子のu/vを同一インデックスでペアリング(半セルずれ) | **修正済み**(セル中心への補間に変更、`characteristic_speed_interpolates_staggered_components_to_cell_centers`で退行検知、既存2テストは一様流速のため無影響) |
 | Q4 | `sim-mechanics/src/collision.rs:6-8` | マニフォールド持続化が無く多段スタックの貫入がslopを超える | 対応予定(増分1) |
-| Q5 | `sim-wasm/src/lib.rs` | 呼び出し側到達可能な`panic!`が約13箇所+シーンexportが表現不能形状を無言で捨てる | 対応予定(増分1) |
+| Q5 | `sim-wasm/src/lib.rs` | 呼び出し側到達可能な`panic!`が約13箇所+シーンexportが表現不能形状を無言で捨てる | **修正済み**(実際の調査で約29箇所——`panic!`/`unwrap_or_else(panic)`13箇所に加え、生スライスindexアクセス(`self.bookmarks[index]`等)・`sim_core::FrameTree`の境界チェック無しindexアクセスも同種のパニックであることが判明。26個の公開メソッドを`Result<T, JsValue>`化。wasm-bindgenは`Result<T,JsValue>`をTS側で`T`のまま(Errは通常の捕捉可能なJS例外)にバインドするため`demo/src/main.ts`は無変更で`npm run build`・Playwrightスモーク(スポーン6回)とも成功。あわせて`sim-wasm`(1280行、監査時点でテスト0本)に成功パス限定のユニットテスト6本を追加——調査の結果`JsValue`/`Float32Array`の**構築自体**がネイティブターゲットでabort/パニックすることが判明し、エラーパスのネイティブテストは不可能と判明、正直に記録した) |
 | Q6 | `sim-statistical/src/brownian.rs:90` | γΔt/m≈17でrel_err≈760%、実行時ガード無し | 対応予定(増分1) |
 | Q7 | `sim-astro/src/relativity.rs:103` | 1PN線形近似がc=20でrel_err≈14%まで破れる、範囲チェック無し | 対応予定(増分1) |
 | Q8 | `sim-thermal/src/lib.rs:161` | PCG非収束が`debug_assert!`のみ、releaseでは無検知 | 対応予定(増分1) |
