@@ -27,7 +27,7 @@ use crate::{BodyId, ProbeTarget, World, WorldOptions};
 use serde::Deserialize;
 use sim_fluid::StaticWaterRegion;
 use sim_math::Vec3;
-use sim_mechanics::{BodyType, RigidBodyDesc, Shape};
+use sim_mechanics::{BodyType, DragModel, RigidBodyDesc, Shape};
 use std::collections::HashMap;
 
 /// `probes`セクションで名前解決を経ずにプローブ履歴の容量を指定する仕組みが設計JSONに
@@ -99,6 +99,20 @@ pub struct WorldScenarioOptions {
     /// ランナーの適用例参照)。
     #[serde(default)]
     pub restitution_velocity_threshold: Option<f64>,
+    /// 静止大気/流体(`sim_mechanics::MechanicsSolver::atmosphere`、
+    /// `sim_fluid::Atmosphere::still`)。未指定なら無効(既定は真空、これまでの
+    /// ヘッドレスランナー適用例の挙動を変えない)。D7(風と終端速度)のような
+    /// 球の抗力(F1高Re/F3低Re、いずれも同じ`sim_fluid::drag_force_sphere`が
+    /// レイノルズ数から自動選択)を検証するシナリオに対応するため追加。
+    #[serde(default)]
+    pub atmosphere: Option<AtmosphereJson>,
+}
+
+/// `WorldScenarioOptions::atmosphere`(モジュールdoc参照)。
+#[derive(Deserialize)]
+pub struct AtmosphereJson {
+    pub density: f64,
+    pub viscosity: f64,
 }
 
 /// 既存材料からの派生(設計§3「`extends`による材料派生」— 「密度だけ変えた木」等)。
@@ -130,6 +144,12 @@ pub struct BodyScenarioDesc {
     pub body_type: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// 球の抗力モデル(`sim_mechanics::DragModel::Sphere`)を有効化するかどうか。
+    /// 縮約実装: 対応する`DragModel`は球のみ(`sim-mechanics`自体に他の抗力
+    /// モデルが無いため)なので、この体の`shape`が`Sphere`でない場合は無視する
+    /// (D7(風と終端速度)向け、`WorldScenarioOptions::atmosphere`と併用する)。
+    #[serde(default)]
+    pub drag: bool,
 }
 
 /// 設計§3の例示に現れる3形状のみ(`Capsule`/`Compound`/`ConvexMesh`は`raycast`/
@@ -213,7 +233,12 @@ impl World {
                     d,
                 },
             };
+            let drag = match (body.drag, &body.shape) {
+                (true, ShapeJson::Sphere { radius }) => DragModel::Sphere { radius: *radius },
+                _ => DragModel::None,
+            };
             let mut desc = RigidBodyDesc::dynamic(shape, material_id);
+            desc.drag = drag;
             desc.transform.position = array_to_vec3(body.position);
             if let Some(q) = body.rotation {
                 desc.transform.rotation = sim_math::Quat {
@@ -246,6 +271,10 @@ impl World {
         let mut world = World::new(options);
         if let Some(threshold) = scenario.world.restitution_velocity_threshold {
             world.mechanics_mut().restitution_velocity_threshold = threshold;
+        }
+        if let Some(atm) = &scenario.world.atmosphere {
+            world.mechanics_mut().atmosphere =
+                Some(sim_fluid::Atmosphere::still(atm.density, atm.viscosity));
         }
         let ids = world.append_scenario_bodies(scenario)?;
 
@@ -898,6 +927,87 @@ mod tests {
              a=g(sinθ-μkcosθ): measured_accel={measured_accel} expected_accel={expected_accel} \
              rel_err={rel_err:.4}"
         );
+    }
+
+    /// D7(風と終端速度): `demos.rs`の`d7_wind_and_terminal_velocity_matches_high_and_
+    /// low_reynolds_formulas`と同じ構成(F1高Re・F3低Re、いずれも`sim_fluid::
+    /// drag_force_sphere`がレイノルズ数から自動選択するため同じ物理式)をシーンJSON
+    /// (`WorldScenarioOptions::atmosphere`+`BodyScenarioDesc::drag`、本増分で追加した
+    /// スキーマ拡張)経由で再現する。F2(雨粒の実測値との比較)はF1と同じ物理を別
+    /// パラメータで示すのみのため`demos.rs`同様対象外。
+    #[test]
+    fn run_headless_scenario_wind_and_terminal_velocity_matches_high_and_low_reynolds_formulas() {
+        // F1: 高Re(鋼球、Cd=0.47相当の二次抗力)。
+        {
+            let radius: f64 = 0.005;
+            let json = format!(
+                r#"
+            {{
+              "name": "d7-wind-high-re",
+              "world": {{ "gravity": 9.80665, "dt": 0.008333333,
+                "atmosphere": {{ "density": 1.225, "viscosity": 1.81e-5 }} }},
+              "bodies": [
+                {{ "shape": {{ "sphere": {{ "radius": {radius} }} }},
+                  "material": "鋼(炭素鋼)", "drag": true, "name": "ball" }}
+              ],
+              "probes": [ {{ "body_speed": "ball" }} ]
+            }}
+            "#
+            );
+
+            let steps = 3600; // 30秒(既定dt)
+            let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+            let measured = *result.probe_histories[0]
+                .last()
+                .expect("history should not be empty");
+
+            let mass = 7850.0 * (4.0 / 3.0) * std::f64::consts::PI * radius.powi(3);
+            let area = std::f64::consts::PI * radius * radius;
+            let cd = 0.47;
+            let atmosphere_density = 1.225;
+            let analytic_vt = (2.0 * mass * 9.80665 / (atmosphere_density * cd * area)).sqrt();
+            let rel_err = (measured - analytic_vt).abs() / analytic_vt;
+            assert!(
+                rel_err < 0.01,
+                "F1: measured={measured} analytic_vt={analytic_vt} rel_err={rel_err:.4}"
+            );
+        }
+
+        // F3: 低Re(ストークス沈降、v=2r²Δρg/(9μ))。
+        {
+            let radius: f64 = 0.01;
+            let fluid_density: f64 = 0.5;
+            let viscosity: f64 = 1.0;
+            let json = format!(
+                r#"
+            {{
+              "name": "d7-wind-low-re",
+              "world": {{ "gravity": 9.80665, "dt": 0.008333333,
+                "atmosphere": {{ "density": {fluid_density}, "viscosity": {viscosity} }} }},
+              "bodies": [
+                {{ "shape": {{ "sphere": {{ "radius": {radius} }} }},
+                  "material": "鋼(炭素鋼)", "drag": true, "name": "ball" }}
+              ],
+              "probes": [ {{ "body_speed": "ball" }} ]
+            }}
+            "#
+            );
+
+            let steps = 240; // 2秒(既定dt)
+            let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+            let measured = *result.probe_histories[0]
+                .last()
+                .expect("history should not be empty");
+
+            let steel_density = 7850.0;
+            let delta_rho = steel_density - fluid_density;
+            let analytic = 2.0 * radius * radius * delta_rho * 9.80665 / (9.0 * viscosity);
+            let rel_err = (measured - analytic).abs() / analytic;
+            assert!(
+                rel_err < 0.02,
+                "F3: measured={measured} analytic={analytic} rel_err={rel_err:.4}"
+            );
+        }
     }
 
     /// D2(弾道): 45°射出の真空放物運動を`body_pos_y`/`body_speed`の2プローブのみで検証する。

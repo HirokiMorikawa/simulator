@@ -267,7 +267,15 @@
   `MaterialDb`の鋼-鋼摩擦係数をそのまま使う構成(スキーマ拡張不要)で
   検証可能だったため実装し、45°の傾斜で解析解$a=g(\sin\theta-\mu_k\cos\theta)$
   どおりに滑り出すことを確認した(D5のM7・M8両方がヘッドレスランナー経由で
-  Green)。
+  Green)。続けてヘッドレスランナーの10本目の適用例としてD7風と終端速度も
+  シーンJSON化した——これまで`WorldScenarioOptions`に静止大気を、
+  `BodyScenarioDesc`に球の抗力モデルを設定する手段が無かったため
+  `atmosphere: Option<{density,viscosity}>`・`drag: bool`(球以外は無視)を
+  それぞれ追加し(スキーマ拡張)、`demos.rs`のF1(高Re二次抗力)/F3(低Re
+  ストークス沈降)ネイティブ実装と同じ構成をシーンJSON経由で再現、両レジーム
+  とも解析解と一致することを確認した(同じ`sim_fluid::drag_force_sphere`が
+  レイノルズ数から自動でレジームを選択するため、シーンJSON側は大気パラメータ
+  を変えるだけで済んだ)。
 - **次**: ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
   マルチスキャッタリング)・さらなるヘッドレスランナー適用例・シーンJSON
   `couplings`セクション(スキーマ未確定で保留)を機を見て進める。優先順位の
@@ -1838,7 +1846,21 @@ Phase 1(P1〜P2 スモーク):
       rel<0.05で一致することを確認した)
 - [ ] D7 風と終端速度(ヘッドレステストGreen、同上。目視チェック保留。F1(高Re、
       鋼球+Cd=0.47の二次抗力)・F3(低Re、ストークス沈降)の2レジームを確認。
-      F2(雨粒の実測値、F1と同じ物理の別パラメータ)は対象外)
+      F2(雨粒の実測値、F1と同じ物理の別パラメータ)は対象外)。
+      **シーンJSON経由の10本目の適用例+スキーマ拡張(本増分で追加)**: これまで
+      `WorldScenarioOptions`に静止大気(`sim_mechanics::MechanicsSolver::
+      atmosphere`)を、`BodyScenarioDesc`に球の抗力モデル(`sim_mechanics::
+      DragModel::Sphere`)をそれぞれ設定する手段が無かったため両フィールド
+      (`atmosphere: Option<{density,viscosity}>`・`drag: bool`、boolの意味は
+      「この体が球なら`DragModel::Sphere`を有効化する」——`sim-mechanics`自体に
+      他の抗力モデルが無いため球以外は無視)を追加し、`run_headless_scenario_
+      wind_and_terminal_velocity_matches_high_and_low_reynolds_formulas`
+      として`demos.rs`のF1/F3ネイティブ実装と同じ構成をシーンJSON経由で再現
+      した(F1: 大気密度1.225/粘性1.81e-5で30秒後の終端速度がCd=0.47の二次抗力
+      解析解とrel<0.01一致、F3: 流体密度0.5/粘性1.0で2秒後の終端速度がストークス
+      解析解とrel<0.02一致——`sim_fluid::drag_force_sphere`がレイノルズ数に応じて
+      両レジームを自動選択するため、シーンJSON側は大気パラメータを変えるだけで
+      同じ`drag: true`設定を使い回せる)。
 - [ ] D8 散乱の再現(ヘッドレステストGreen、同上。目視チェック保留。50球をシーン
       構築用の独立`SimRng`で散乱、同シード2回実行で`state_hash()`一致を確認)
 - [ ] D9 冷めるコーヒー(ヘッドレステストGreen、同上。目視チェック保留。単一熱ノード
