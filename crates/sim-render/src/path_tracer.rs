@@ -44,6 +44,32 @@ pub enum Material {
     Dielectric(Dielectric),
     Metal(Metal),
     RoughConductor(RoughConductor),
+    /// 面光源(自ら放射輝度を放つ拡散面、`Emissive`のdoc参照)。
+    Emissive(Emissive),
+}
+
+/// 発光する拡散面(面光源)。R4(コーネルボックス)の天井パネルのように、
+/// 幾何を持つ可視の光源を表す。
+///
+/// **NEE(次事象推定)を適用しない**のがこの型の設計の核である。既存の
+/// `PointLight`は幾何を持たない抽象光源なので、BSDFサンプリングで到達したレイが
+/// 光源自体に「衝突」して二重計上する心配が無く、NEEと再帰を単純加算できた。
+/// 一方、可視な面光源に対してNEEを併用すると、BSDFサンプリングで偶然その面へ
+/// 到達した経路とNEEの寄与が二重計上されるため、本来は多重重点サンプリング
+/// (MIS)で重み付けする必要がある(モジュールdoc参照)。
+///
+/// **縮約実装の理由**: MISは実装せず、面光源については**NEEを一切行わない
+/// 純粋なBSDFサンプリングのパストレース**とする。レイがこの面に当たったときに
+/// `radiance`を加算するだけなので二重計上が原理的に起こらない(不偏。分散は
+/// MIS併用より大きいが、R4の検証は高サンプル数の点推定なので許容できる)。
+/// 既存の`PointLight`+NEE経路には一切手を入れないため、R1–R7の既存テストは
+/// そのまま成立し続ける。
+#[derive(Clone, Copy, Debug)]
+pub struct Emissive {
+    /// この面が自ら放つ放射輝度(モノクロスカラー、両面から等しく放つ)。
+    pub radiance: f64,
+    /// 反射成分のアルベド(Lambertian)。`0.0`なら純粋な光源(入射光を全て吸収)。
+    pub albedo: f64,
 }
 
 /// シーン中の1物体(プリミティブ + BSDF)。
@@ -287,6 +313,24 @@ impl Scene {
                 let direction = Dielectric::reflect(ray.direction, hit.normal);
                 let next_ray = Ray::new(hit.point, direction);
                 self.trace(&next_ray, rng, max_depth - 1) * r
+            }
+            Material::Emissive(emissive) => {
+                // 自己発光分をそのまま加算する(NEEは行わない、`Emissive`のdoc参照)。
+                // 反射成分はLambertianと同じ扱い——コサイン重み付き半球サンプリングと
+                // 対にすると`bsdf*cosθ/pdf`が`albedo`に恒等的に一致する(R1と同じ
+                // 完全な相殺)。
+                let mut radiance = emissive.radiance;
+                if emissive.albedo > 0.0 {
+                    let lambertian = Lambertian {
+                        albedo: emissive.albedo,
+                    };
+                    let (direction, pdf) = lambertian.sample(hit.normal, rng);
+                    let cos_theta = direction.dot(hit.normal);
+                    let bsdf = lambertian.eval();
+                    let next_ray = Ray::new(hit.point, direction);
+                    radiance += self.trace(&next_ray, rng, max_depth - 1) * bsdf * cos_theta / pdf;
+                }
+                radiance
             }
             Material::RoughConductor(rough) => {
                 let (direction, weight) = rough.sample(ray.direction, hit.normal, rng);
@@ -986,5 +1030,135 @@ mod tests {
             "measured_ratio={measured_ratio} expected_ratio={expected_ratio} \
              rel_err={rel_err:.4} mean_near={mean_near} mean_far={mean_far}"
         );
+    }
+
+    /// 閉じた箱を作るヘルパ(6面の軸並行クアッド、`[-h,h]^3`)。全面に同じ材質を
+    /// 与える。クアッドの法線は常に入射レイと逆を向く(`quad.rs`モジュールdoc)ため、
+    /// 箱の内側から見て正しく機能する。
+    fn closed_box(half: f64, material: Material) -> Vec<SceneObject> {
+        let mut objects = Vec::with_capacity(6);
+        for axis in 0..3 {
+            for sign in [-1.0, 1.0] {
+                objects.push(SceneObject::quad(
+                    Quad::axis_aligned(axis, sign * half, -half, half, -half, half),
+                    material,
+                ));
+            }
+        }
+        objects
+    }
+
+    /// 面光源(`Emissive`)の検証その1: **閉じた箱の等比級数**。
+    ///
+    /// 全6面が同一の「放射輝度`L_e`を放ちアルベド`ρ`で反射する」面である閉じた箱の
+    /// 内部では、経路追跡の推定値が幾何形状に一切依存しない閉形式になる:
+    /// 各バウンスで必ず何かの面に当たり(閉じているので環境へ抜けられない)、
+    /// `L_e`を受け取ってスループットが厳密に`ρ`倍される。したがって深さ`d`で
+    /// 打ち切った推定値は
+    /// $$L = L_e (1 + \rho + \rho^2 + \cdots + \rho^{d-1}) = L_e\frac{1-\rho^d}{1-\rho}$$
+    /// に**分散ゼロで厳密一致する**(R1白色炉テストと同じ仕組み——Lambertianの
+    /// `bsdf*cosθ/pdf`がコサイン重み付きサンプリングと完全に相殺して方向に依らず
+    /// `ρ`になるため、乱数の引き方によらず同じ値になる)。
+    ///
+    /// これは面光源の配線について次を同時に立証する: 発光が正しく加算されている
+    /// (係数1、二重計上なし)・反射成分が正しくスケールされている・複数バウンスが
+    /// 正しく積算される・箱が実際に閉じている(クアッドの交差判定に光が漏れる穴が
+    /// 無い)。形態係数を必要としないため、参照解データも不要である。
+    #[test]
+    fn emissive_closed_box_matches_the_analytic_geometric_series_exactly() {
+        let emitted = 0.7;
+        let albedo = 0.6;
+        let scene = Scene::new(
+            closed_box(
+                1.0,
+                Material::Emissive(Emissive {
+                    radiance: emitted,
+                    albedo,
+                }),
+            ),
+            vec![],
+            0.0, // 環境光は箱の外なので寄与しない(閉じている検証も兼ねる)。
+            None,
+        );
+
+        let mut rng = SimRng::new(20260727, 3);
+        for max_depth in 1..=8u32 {
+            let expected = emitted * (1.0 - albedo.powi(max_depth as i32)) / (1.0 - albedo);
+            // 方向をばらしても分散ゼロで同じ値になるはず(幾何非依存)。
+            for _ in 0..16 {
+                let direction = rng.unit_sphere();
+                let ray = Ray::new(Vec3::ZERO, direction);
+                let measured = scene.trace(&ray, &mut rng, max_depth);
+                let error = (measured - expected).abs();
+                assert!(
+                    error < 1e-12,
+                    "closed emissive box must match the geometric series exactly: \
+                     max_depth={max_depth} measured={measured} expected={expected} error={error:e}"
+                );
+            }
+        }
+    }
+
+    /// 面光源の検証その2: 発光面を直接見たときの放射輝度は、その面の`radiance`に
+    /// 厳密一致する(アルベド0の純粋な光源なら反射成分が無いため、1バウンスで
+    /// 確定する)。`max_depth`を増やしても値が変わらないことも確認する
+    /// (吸収体なので余分な寄与が積み上がらない)。
+    #[test]
+    fn looking_straight_at_a_pure_emitter_returns_its_radiance_exactly() {
+        let emitted = 2.5;
+        let scene = Scene::new(
+            vec![SceneObject::quad(
+                Quad::axis_aligned(2, 5.0, -1.0, 1.0, -1.0, 1.0),
+                Material::Emissive(Emissive {
+                    radiance: emitted,
+                    albedo: 0.0,
+                }),
+            )],
+            vec![],
+            0.0,
+            None,
+        );
+
+        let mut rng = SimRng::new(7, 7);
+        let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0));
+        for max_depth in 1..=5u32 {
+            let measured = scene.trace(&ray, &mut rng, max_depth);
+            assert!(
+                (measured - emitted).abs() < 1e-12,
+                "max_depth={max_depth} measured={measured} expected={emitted}"
+            );
+        }
+    }
+
+    /// 面光源の検証その3: **NEEを行わないため二重計上が起きない**ことを、
+    /// 「発光面のアルベドを0にすると等比級数の第1項だけが残る」形で確認する。
+    /// もし面光源にNEEを併用していれば(MISなしでは)直接光の寄与が余分に
+    /// 加算され`L_e`を超えるはずである(`Emissive`のdoc参照)。
+    #[test]
+    fn emissive_surfaces_are_not_double_counted_without_multiple_importance_sampling() {
+        let emitted = 1.3;
+        let scene = Scene::new(
+            closed_box(
+                1.0,
+                Material::Emissive(Emissive {
+                    radiance: emitted,
+                    albedo: 0.0, // 完全吸収 = 反射成分なし。
+                }),
+            ),
+            vec![],
+            0.0,
+            None,
+        );
+
+        let mut rng = SimRng::new(99, 1);
+        for _ in 0..32 {
+            let ray = Ray::new(Vec3::ZERO, rng.unit_sphere());
+            let measured = scene.trace(&ray, &mut rng, 8);
+            assert!(
+                (measured - emitted).abs() < 1e-12,
+                "a purely absorbing emitter must contribute exactly L_e once: \
+                 measured={measured} expected={emitted}"
+            );
+        }
     }
 }

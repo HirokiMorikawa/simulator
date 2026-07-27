@@ -24,15 +24,22 @@
 //! シーンでR7(モンテカルロ収束O(1/√N)・決定論)も検証した。さらにGGXマイクロ
 //! ファセット分布(`RoughConductor`、`microfacet`モジュールdoc参照、粗い金属のみ)
 //! を追加した。
-//! 球群向けのBVH(`bvh`モジュールdoc参照、最長軸中央値分割のトップダウン構築)を
+//! BVH(`bvh`モジュールdoc参照、最長軸中央値分割のトップダウン構築)を
 //! 追加し、多数の乱数シーン・乱数レイで最近傍ヒットが総当たりと厳密一致すること、
 //! かつ実際に遠いクラスタの部分木を刈って総当たりよりテスト数が少ないことを
-//! 検証した。既存の`Scene::closest_hit`(現状は少数物体のR1–R7検証シーンのみで
-//! 十分)への配線は、対象になり得る多数物体デモ(D40–D43)がまだ無いため後続増分。
-//! さらにトーンマッピング(Reinhard演算子、`tonemap`モジュールdoc参照)を
+//! 検証した。さらにトーンマッピング(Reinhard演算子、`tonemap`モジュールdoc参照)を
 //! HDR輝度→表示可能範囲[0,1]への圧縮として追加した(色相を保つ輝度ベース版)。
+//!
+//! **R4(コーネルボックス)に向けた増分**: ①`Primitive`(球・クアッドの総和型、
+//! `primitive`モジュール)+`Quad`(平行四辺形、`quad`モジュール)を追加し、BVHを
+//! `Sphere`決め打ちから`Primitive`へ一般化した上で`Scene::closest_hit`へ配線した
+//! (`Scene`は`Scene::new`で構築しBVHとプリミティブ配列を一度だけ保持する)。
+//! ②面光源(`Emissive`、`path_tracer`モジュールの`Emissive`のdoc参照)を追加した
+//! ——MISを実装せずに済ませるため、面光源についてはNEEを一切行わない純粋な
+//! BSDFサンプリングのパストレースとする(不偏、二重計上が原理的に起きない)。
+//!
 //! GGX粗い誘電体・完全な分光レンダリング(hero wavelength法)・マルチスキャッ
-//! タリング・ミー散乱・煙/水の体積散乱・コーネルボックス(R4)・露出調整/
+//! タリング・ミー散乱・煙/水の体積散乱・MIS・三角形メッシュ・SAH分割・露出調整/
 //! シャッター速度/モーションブラー・実際のフレームバッファへの配線は後続増分
 //! (各モジュールdoc「縮約実装の理由」参照)。
 
@@ -54,7 +61,7 @@ pub use bvh::{Bvh, BvhDiagnostics};
 pub use camera::Camera;
 pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
 pub use microfacet::{ggx_distribution, sample_ggx_half_vector, smith_g, smith_g1};
-pub use path_tracer::{Material, PointLight, Scene, SceneObject};
+pub use path_tracer::{Emissive, Material, PointLight, Scene, SceneObject};
 pub use primitive::Primitive;
 pub use prism::{trace_prism_deviation, trace_raindrop_deviation};
 pub use quad::Quad;
