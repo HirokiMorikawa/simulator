@@ -63,6 +63,23 @@ pub struct Scenario {
     pub fluids: Vec<FluidJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
+    /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
+    /// (オプションのミニパネル)」)向けのメタデータ。物理には影響しない
+    /// (`from_scenario`/`append_scenario_bodies`はこのフィールドを読まない)——
+    /// フロントエンド(`sim-wasm::WasmWorld::import_scene_json`)がインポート時に
+    /// 生のJSONを独立に読んで、ユーザーが数値予測を書ける入力欄+実測値との
+    /// 比較表を表示するためだけの、意味を検証しない自由記述のヒント。
+    #[serde(default)]
+    pub prediction_prompts: Vec<PredictionPromptJson>,
+}
+
+/// `Scenario::prediction_prompts`の1件(モジュールdoc参照)。
+#[derive(Deserialize)]
+pub struct PredictionPromptJson {
+    pub question: String,
+    /// `probes`配列内でのインデックス(0起点)。この予測が対応するプローブ。
+    pub probe_index: usize,
+    pub expected_value: f64,
 }
 
 impl Scenario {
@@ -251,6 +268,26 @@ impl World {
             }
         }
 
+        world.add_scenario_probes(scenario, &body_ids_by_name)?;
+
+        Ok(world)
+    }
+
+    /// シーンJSONの`probes`セクションを、既に解決済みの名前→`BodyId`対応表を使って
+    /// 現在のワールドへ追加する(`from_scenario`から切り出したもの、
+    /// `sim-wasm::WasmWorld::import_scene_json`——シーンJSON Import——も同じ解決
+    /// ロジックでインポートしたシーンのプローブを再現できるよう共有する)。
+    /// `append_scenario_bodies`とは別メソッドにしているのは、`append_scenario_bodies`
+    /// のdocに明記したとおりImportが実行中ワールドへの「追加」であり、両者を
+    /// 呼ぶかどうかを呼び出し側が選べるようにするため(Importは`fluids`は
+    /// 対象外のまま、`probes`のみ対象に含める、という非対称を表現できる)。
+    /// 返り値は`scenario.probes`と同じ順のプローブハンドル(`World::probe`用)。
+    pub fn add_scenario_probes(
+        &mut self,
+        scenario: &Scenario,
+        body_ids_by_name: &HashMap<String, BodyId>,
+    ) -> Result<Vec<usize>, SceneError> {
+        let mut handles = Vec::with_capacity(scenario.probes.len());
         for probe in &scenario.probes {
             let (name, make_target): (&str, fn(BodyId) -> ProbeTarget) = match probe {
                 ProbeJson::BodyPosY(name) => (name, ProbeTarget::BodyPosY),
@@ -259,10 +296,9 @@ impl World {
             let id = body_ids_by_name
                 .get(name)
                 .ok_or_else(|| SceneError::UnknownBodyName(name.to_string()))?;
-            world.add_probe(make_target(*id), DEFAULT_PROBE_CAPACITY);
+            handles.push(self.add_probe(make_target(*id), DEFAULT_PROBE_CAPACITY));
         }
-
-        Ok(world)
+        Ok(handles)
     }
 }
 
@@ -400,6 +436,59 @@ mod tests {
         );
         assert_eq!(world.body_position(ids[0]), Some(Vec3::new(1.0, 2.0, 3.0)));
         assert_eq!(world.body_position(ids[1]), Some(Vec3::new(4.0, 5.0, 6.0)));
+    }
+
+    /// `World::add_scenario_probes`(`from_scenario`から切り出した、シーンJSON
+    /// Importが取り込んだシーンのプローブも再現できるようにする土台、モジュールdoc
+    /// 参照)を、`append_scenario_bodies`と組み合わせて直接呼び、`scenario.probes`と
+    /// 同じ順のハンドルで実際に値が読めることを確認する。
+    #[test]
+    fn add_scenario_probes_registers_probes_matching_scenario_order() {
+        let mut world = World::new(WorldOptions::default());
+        let json = r#"
+        {
+          "name": "probe-fragment",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [
+            { "shape": { "sphere": { "radius": 0.3 } }, "material": "鋼(炭素鋼)",
+              "position": [0.0, 5.0, 0.0], "name": "ball" }
+          ],
+          "probes": [ { "body_pos_y": "ball" }, { "body_speed": "ball" } ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).unwrap();
+        let ids = world.append_scenario_bodies(&scenario).unwrap();
+
+        let mut body_ids_by_name: HashMap<String, BodyId> = HashMap::new();
+        for (body, id) in scenario.bodies.iter().zip(ids.iter()) {
+            if let Some(name) = &body.name {
+                body_ids_by_name.insert(name.clone(), *id);
+            }
+        }
+        let handles = world
+            .add_scenario_probes(&scenario, &body_ids_by_name)
+            .expect("valid probe references");
+
+        assert_eq!(handles.len(), 2);
+        world.step();
+        let pos_y_history: Vec<f64> = world
+            .probe(handles[0])
+            .unwrap()
+            .history()
+            .copied()
+            .collect();
+        let speed_history: Vec<f64> = world
+            .probe(handles[1])
+            .unwrap()
+            .history()
+            .copied()
+            .collect();
+        assert_eq!(pos_y_history.len(), 1);
+        assert_eq!(speed_history.len(), 1);
+        assert!(
+            pos_y_history[0] < 5.0,
+            "ball should have fallen after 1 step"
+        );
     }
 
     /// `materials[].extends`が未知の材料名を指す場合は`SceneError::UnknownBaseMaterial`。

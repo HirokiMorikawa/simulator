@@ -17,7 +17,7 @@
 //! 列挙する縮約実装とした(シーンJSON経由で任意個のボディを構築できるように
 //! なれば、`from_scenario`のボディリストをそのまま列挙する形に置き換える)。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use js_sys::{Float32Array, Float64Array};
 use sim_core::FrameId;
@@ -87,6 +87,12 @@ pub struct WasmWorld {
     /// 塊どうしが重ならないようX方向のオフセットを決めるのに使う。Hierarchyの
     /// 「Fluids」概要表示にも使う、`fluid_spawn_count`のdoc参照)。
     fluid_spawn_count: u32,
+    /// 直近の`import_scene_json`呼び出しが`scenario.probes`から作成したプローブの
+    /// ハンドル(`World::probe`用、`scenario.probes`と同じ順)。予測→実験ミニ
+    /// パネル(`imported_probe_value_at`のdoc参照)がインポートしたシナリオの
+    /// プローブ値を読むために使う。新規Importのたびに置き換わる(縮約実装、
+    /// 複数回インポートした場合は最後のシナリオの`probes`のみ対象)。
+    imported_probe_handles: Vec<usize>,
 }
 
 #[wasm_bindgen]
@@ -165,6 +171,7 @@ impl WasmWorld {
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
+            imported_probe_handles: Vec::new(),
         }
     }
 
@@ -398,7 +405,35 @@ impl WasmWorld {
             });
         }
 
+        // `scenario.probes`(予測→実験ミニパネルが参照する`probe_index`は
+        // この配列の並びに対応する)を、`append_scenario_bodies`とは別に
+        // `World::add_scenario_probes`で設定する(`append_scenario_bodies`自体は
+        // probesを対象外とする設計のまま、そのdoc参照)。
+        let mut body_ids_by_name: HashMap<String, BodyId> = HashMap::new();
+        for (body, id) in scenario.bodies.iter().zip(ids.iter()) {
+            if let Some(name) = &body.name {
+                body_ids_by_name.insert(name.clone(), *id);
+            }
+        }
+        self.imported_probe_handles = self
+            .inner
+            .add_scenario_probes(&scenario, &body_ids_by_name)
+            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+
         Ok(scenario.bodies.len())
+    }
+
+    /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5)向けに、直近の
+    /// `import_scene_json`が`scenario.probes`から作成したプローブの現在値を返す。
+    /// `probe_index`は`scenario.probes`配列内でのインデックス(`prediction_prompts
+    /// [].probe_index`と同じ添字系)。範囲外、または該当プローブの履歴がまだ
+    /// 1件も無い(1stepも進んでいない)場合は0.0を返す。
+    pub fn imported_probe_value_at(&self, probe_index: usize) -> f64 {
+        self.imported_probe_handles
+            .get(probe_index)
+            .and_then(|&handle| self.inner.probe(handle))
+            .and_then(|probe| probe.history().last().copied())
+            .unwrap_or(0.0)
     }
 
     /// スポーンパレット——振り子(拘束オーバーレイの実証用)。ワールド固定点

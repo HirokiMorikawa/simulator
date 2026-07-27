@@ -204,7 +204,12 @@ type ImportedShapeJson =
   | { sphere: { radius: number } }
   | { plane: { normal: [number, number, number]; d: number } };
 type ImportedBodyJson = { shape: ImportedShapeJson };
-type ImportedScenarioJson = { bodies?: ImportedBodyJson[] };
+// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5)向け。
+// `sim_world::scenario::PredictionPromptJson`のJSON表現と同じ形(物理には
+// 影響しないメタデータのため、Rust側で検証済みの値としてではなく、Importに
+// 渡した生のJSONをJSが独立に読む——他のImportedShapeJson等と同じ設計)。
+type ImportedPredictionPromptJson = { question: string; probe_index: number; expected_value: number };
+type ImportedScenarioJson = { bodies?: ImportedBodyJson[]; prediction_prompts?: ImportedPredictionPromptJson[] };
 
 function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
@@ -1641,10 +1646,64 @@ async function setUpSceneView(
   // 対応物が無いため、大きな平板メッシュで代用し、位置は物理的な平面の定義
   // (`normal・p=d`、剛体の`transform.position`ではなく`normal`/`d`自体)に
   // 合わせて`normal.scale(d)`に置く。
+  // 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5、`prediction_prompts`
+  // を宣言したシーンJSONをImportした場合のみ表示するオプトイン——シーン側に
+  // 無ければ既定でスキップされる、モジュール冒頭の設計ノート「全画面遷移を強制
+  // しない」に対応)。停止条件による自動一時停止・Probeグラフへの予測線重ね描き
+  // は対象外(縮約実装)——予測入力+実測/予測/解析解の比較表のみ実装する。
+  let currentPredictionPrompts: ImportedPredictionPromptJson[] = [];
+  const predictionPanel = document.getElementById("prediction-panel")!;
+
+  function renderPredictionPanel() {
+    predictionPanel.innerHTML = "";
+    if (currentPredictionPrompts.length === 0) {
+      predictionPanel.style.display = "none";
+      return;
+    }
+    predictionPanel.style.display = "block";
+    const heading = document.createElement("h3");
+    heading.textContent = "予測 → 実験";
+    predictionPanel.appendChild(heading);
+    currentPredictionPrompts.forEach((prompt, i) => {
+      const questionLine = document.createElement("div");
+      questionLine.className = "inspector-field";
+      questionLine.textContent = prompt.question;
+      predictionPanel.appendChild(questionLine);
+
+      const guessRow = document.createElement("div");
+      guessRow.className = "inspector-field";
+      const guessLabel = document.createElement("span");
+      guessLabel.textContent = "あなたの予測";
+      const guessInput = document.createElement("input");
+      guessInput.type = "number";
+      guessInput.id = `prediction-guess-${i}`;
+      guessRow.append(guessLabel, guessInput);
+      predictionPanel.appendChild(guessRow);
+
+      const resultLine = document.createElement("div");
+      resultLine.className = "inspector-field";
+      resultLine.id = `prediction-result-${i}`;
+      predictionPanel.appendChild(resultLine);
+    });
+  }
+
+  function updatePredictionResults() {
+    currentPredictionPrompts.forEach((prompt, i) => {
+      const resultLine = document.getElementById(`prediction-result-${i}`);
+      if (!resultLine) return;
+      const guessInput = document.getElementById(`prediction-guess-${i}`) as HTMLInputElement | null;
+      const actual = world.imported_probe_value_at(prompt.probe_index);
+      const guessText = guessInput?.value ? Number(guessInput.value).toFixed(3) : "(未入力)";
+      resultLine.textContent = `実測=${actual.toFixed(3)} / 予測=${guessText} / 解析解=${prompt.expected_value.toFixed(3)}`;
+    });
+  }
+
   sceneImportRef.current = (json: string) => {
     const count = world.import_scene_json(json);
     const parsed = JSON.parse(json) as ImportedScenarioJson;
     const bodies = parsed.bodies ?? [];
+    currentPredictionPrompts = parsed.prediction_prompts ?? [];
+    renderPredictionPanel();
     const total = world.body_count();
     const startIndex = total - count;
 
@@ -1983,6 +2042,8 @@ async function setUpSceneView(
   const inspectorVelocity = new THREE.Vector3();
 
   function render() {
+    updatePredictionResults();
+
     const p = world.body_position_at_f32(BODY_INDEX_BOX);
     box.position.set(p[0], p[1], p[2]);
     const boxRotation = world.body_rotation_at_f32(BODY_INDEX_BOX);

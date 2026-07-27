@@ -56,8 +56,8 @@ mod raycast;
 mod scenario;
 
 pub use scenario::{
-    run_headless_scenario, BodyScenarioDesc, HeadlessRunResult, MaterialOverride, Scenario,
-    SceneError, ShapeJson, WorldScenarioOptions,
+    run_headless_scenario, BodyScenarioDesc, HeadlessRunResult, MaterialOverride,
+    PredictionPromptJson, Scenario, SceneError, ShapeJson, WorldScenarioOptions,
 };
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};

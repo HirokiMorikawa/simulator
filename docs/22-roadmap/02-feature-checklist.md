@@ -232,7 +232,13 @@
   ——`spawn_fluid_block`を、既にSPH流体が有効ならそこへ粒子を追加する形に
   変更し(以前は毎回`enable_sph`が丸ごと置き換えるため水塊が1つに固定
   されていた)、水塊どうしが重ならないようX方向にオフセット、Hierarchyに
-  「Fluids (N塊, M粒子)」概要行を追加した。
+  「Fluids (N塊, M粒子)」概要行を追加した。続けて予測→実験ミニパネルも
+  実装した——`Scenario`に`prediction_prompts`(質問文+probe index参照+
+  解析的期待値、物理には影響しないメタデータ)を追加し、Import側で
+  `scenario.probes`も実際にセットアップするよう拡張(`World::
+  add_scenario_probes`として`from_scenario`と共有)、Inspector隣の新設
+  `#prediction-panel`に質問文+予測値入力欄+実測/予測/解析解の比較行を
+  表示する(シーンが宣言していなければ非表示のオプトイン)。
 - **次**: ワークストリームDの継続(ブックマークのエクスポート/インポート等)を
   軸に、ワークストリームC残り(R4、完全な分光レンダリング・コースティクス・
   マルチスキャッタリング)・さらなるヘッドレスランナー適用例は機を見て並行
@@ -1540,7 +1546,28 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       してFrame 1→Frame 2→Frame 3の3段ネストを構築し、HierarchyのDOM構造で
       実際にネストしていること・Play時に3本のAxesHelperが親からのオフセットを
       引き継いで連鎖的に動くことを確認した)
-- [ ] 予測→実験ミニパネル(シーン側オプトイン)
+- [x] 予測→実験ミニパネル(シーン側オプトイン、本増分で追加)——`sim_world::
+      Scenario`に`prediction_prompts`(質問文+`probes`配列内indexへの参照+
+      解析的な期待値)を追加した。物理には影響しないメタデータのため
+      `from_scenario`/`append_scenario_bodies`はこのフィールドを読まず、
+      Import側(`sim-wasm::WasmWorld::import_scene_json`)が生のJSONを独立に
+      `JSON.parse`して読む(他のImport用メタデータと同じ設計)。
+      `import_scene_json`はこれと合わせて`scenario.probes`も実際にセット
+      アップするよう拡張した(以前は`append_scenario_bodies`が`probes`を
+      対象外とする設計のため、Importしたシーンのプローブは一切作られて
+      いなかった——`World::from_scenario`の`probes`処理ループを
+      `World::add_scenario_probes`として切り出し、`from_scenario`・Import
+      両方から共有する形にした)。新規`WasmWorld::imported_probe_value_at`
+      (直近のImportが作成したプローブの現在値を返す)。
+      フロントエンドはInspector隣に新設した`#prediction-panel`(シーンが
+      `prediction_prompts`を宣言していない場合は非表示、設計の「全画面遷移を
+      強制しない」に対応)に、質問文+予測値入力欄+「実測/予測/解析解」の
+      比較行を表示する。停止条件による自動一時停止・Probeグラフへの予測線
+      重ね描きは対象外(縮約実装)。Playwrightで、自由落下球+`body_pos_y`
+      プローブ+予測プロンプトを含むシーンJSONをImportし、パネルが表示され
+      正しい質問文を示すこと、ユーザーが入力した予測値がそのまま表示される
+      こと、Play中に実測値が`imported_probe_value_at`経由でライブ更新される
+      ことを確認した。
 - [ ] シーン編集・スポーン・材料派生
       (スポーンのみ実装済み——設計§6「Toolbarの「+」…形状(球・箱)×材質を選んで
       クリック配置(`create_body`)」。`sim-wasm`に`spawn_sphere`/`spawn_box`
