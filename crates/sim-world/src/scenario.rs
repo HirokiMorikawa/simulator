@@ -426,6 +426,51 @@ mod tests {
         ));
     }
 
+    /// D4 積み木(docs/21-verification/03-demo-scenarios.md「箱スタック+ドミノ。
+    /// 反復回数スライダー」「合格基準: M12(10秒静止)」)を、`demos.rs`の既存の
+    /// Rustネイティブ実装(`d4_box_stack_settles_below_velocity_threshold_
+    /// within_10s`)とは別に、シーンJSON経由でヘッドレスランナーの土台
+    /// (`run_headless_scenario`)が実際に使えることを示す2本目の適用例として
+    /// 実装する。3段の箱スタックを床に置き、10秒(既定dtで1200step)後に
+    /// 各箱の速さ(`body_speed`プローブ)が十分小さいこと(静止)を確認する。
+    #[test]
+    fn run_headless_scenario_settles_a_stacked_box_tower_matching_d4_pass_criterion() {
+        let json = r#"
+        {
+          "name": "d4-box-stack",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [
+            { "shape": { "plane": { "normal": [0,1,0], "d": 0 } }, "type": "static",
+              "material": "鋼(炭素鋼)" },
+            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
+              "position": [0, 0.5, 0], "name": "box1" },
+            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
+              "position": [0, 1.51, 0], "name": "box2" },
+            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
+              "position": [0, 2.52, 0], "name": "box3" }
+          ],
+          "probes": [
+            { "body_speed": "box1" },
+            { "body_speed": "box2" },
+            { "body_speed": "box3" }
+          ]
+        }
+        "#;
+
+        let steps = 1200; // 既定dt(1/120s)で10秒
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
+
+        assert_eq!(result.probe_histories.len(), 3);
+        for (i, history) in result.probe_histories.iter().enumerate() {
+            let final_speed = *history.last().expect("history should not be empty");
+            assert!(
+                final_speed < 0.01,
+                "box{} should be at rest after 10s (D4 pass criterion): final_speed={final_speed}",
+                i + 1
+            );
+        }
+    }
+
     /// `probes[].body_pos_y`が`bodies[].name`のいずれとも一致しない場合は
     /// `SceneError::UnknownBodyName`。
     #[test]

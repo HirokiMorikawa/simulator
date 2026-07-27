@@ -1440,7 +1440,15 @@ Phase 1(P1〜P2 スモーク):
       高さが小さくヒステリシス検出の影響でrel_err約12%のため許容誤差を緩和)
 - [ ] D4 積み木(ヘッドレステストGreen、同上。目視チェック保留。M12(4段の箱
       スタックが10秒静止)を確認。反復回数スライダーで崩れる観察は
-      `JOINT_VELOCITY_ITERATIONS`が公開API化されていないため対象外)
+      `JOINT_VELOCITY_ITERATIONS`が公開API化されていないため対象外)。
+      **シーンJSON経由の2本目の適用例(本増分で追加)**:
+      `run_headless_scenario`(ヘッドレスランナー最小骨格)の実用性を、
+      既存のRustネイティブ実装(`demos.rs`)とは別に、シーンJSON経由で示す
+      2本目の例として3段の箱スタックを実装
+      (`scenario.rs::run_headless_scenario_settles_a_stacked_box_tower_
+      matching_d4_pass_criterion`——静的な床+3段の箱をJSONで記述、
+      `body_speed`プローブ3本で10秒後(1200step)に各箱が静止(速さ<0.01m/s)
+      していることを確認)
 - [ ] D5 斜面(ヘッドレステストGreen、同上。目視チェック保留。M7(静止摩擦角未満
       10°で静止)・M8(45°で解析解$g(\sin\theta-\mu_k\cos\theta)$どおり滑走)の
       両方を確認)
