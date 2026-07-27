@@ -677,6 +677,17 @@ async function setUpSceneView(
   // 床・箱)は対象外。
   const constraintOverlayToggle = document.getElementById("toggle-constraint-overlay") as HTMLInputElement;
 
+  // フレーム軸オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「フレーム
+  // サブモード」の土台)。ROOTの子としてz軸まわりに自転するフレームを1つ追加し
+  // (`World::add_frame`+`sim_core::FrameTree::step`が毎step自動的に回転を進める、
+  // `sim-world`側の増分参照)、その姿勢をAxesHelperで可視化する。
+  const frameOverlayToggle = document.getElementById("toggle-frame-overlay") as HTMLInputElement;
+  const FRAME_AXIS_ANGULAR_VELOCITY = 1.0; // rad/s(任意値、回転が目視できる速さ)
+  const rotatingFrameIndex = world.add_rotating_frame(FRAME_AXIS_ANGULAR_VELOCITY);
+  const frameAxesHelper = new THREE.AxesHelper(2.0);
+  frameAxesHelper.position.set(0, 3, 0); // 他のメッシュと重ならない高さ
+  scene.add(frameAxesHelper);
+
   function showForceOverlay(origin: THREE.Vector3, force: THREE.Vector3) {
     const magnitude = force.length();
     if (magnitude < 1e-6) return;
@@ -1435,6 +1446,14 @@ async function setUpSceneView(
       positions.setXYZ(1, anchors[3], anchors[4], anchors[5]);
       positions.needsUpdate = true;
       line.visible = true;
+    }
+
+    if (frameOverlayToggle.checked) {
+      const rot = world.frame_rotation_at_f32(rotatingFrameIndex);
+      frameAxesHelper.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
+      frameAxesHelper.visible = true;
+    } else {
+      frameAxesHelper.visible = false;
     }
 
     const selectedPosition = world.body_position_at_f32(selectedBodyIndex);

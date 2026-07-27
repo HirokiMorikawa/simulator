@@ -95,6 +95,21 @@ impl FrameTree {
         (id.0 as usize) < self.frames.len()
     }
 
+    /// 全フレームの姿勢を`dt`分だけ自身の`angular_velocity_in_parent`に応じて
+    /// 進める(フレーム自身の回転運動学、設計§2)。ROOTは対象外(親を持たず
+    /// `angular_velocity_in_parent`自体が意味を持たないため)。`Quat::
+    /// integrate_angular_velocity`(既存の剛体回転積分と同じ一次積分)をそのまま
+    /// 使う——`angular_velocity_in_parent`は親フレーム内で表現されるため、
+    /// `rotation_in_parent`(このフレームから親への回転)を直接この角速度で
+    /// 積分すればよい。
+    pub fn step(&mut self, dt: f64) {
+        for frame in self.frames.iter_mut().skip(1) {
+            frame.rotation_in_parent = frame
+                .rotation_in_parent
+                .integrate_angular_velocity(frame.angular_velocity_in_parent, dt);
+        }
+    }
+
     pub fn frame(&self, id: FrameId) -> &Frame {
         &self.frames[id.0 as usize]
     }
@@ -250,6 +265,47 @@ pub fn fictitious_forces(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `FrameTree::step`(フレーム軸オーバーレイの土台): 角速度$\omega_z$を持つ
+    /// フレームを1周期分(または任意角度分)積分すると、既知の解析回転
+    /// (z軸まわり角度$\omega_z t$)に一致することを確認する(`Quat::
+    /// integrate_angular_velocity`の一次積分誤差の範囲、十分小さいdtでrel<1e-6)。
+    /// ROOTは`angular_velocity_in_parent`が無意味なため回転しないままであることも
+    /// 確認する。
+    #[test]
+    fn frame_tree_step_rotates_frame_by_its_angular_velocity_over_time() {
+        let omega_z = 0.5; // rad/s
+        let mut tree = FrameTree::new();
+        let spinning = tree.add_frame(
+            FrameId::ROOT,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, omega_z),
+        );
+
+        let dt: f64 = 1e-4;
+        let total_time: f64 = 2.0;
+        let steps = (total_time / dt).round() as u32;
+        for _ in 0..steps {
+            tree.step(dt);
+        }
+
+        let expected_angle = omega_z * total_time;
+        let expected_rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), expected_angle);
+        let probe = Vec3::new(1.0, 0.0, 0.0);
+        let actual = tree.frame(spinning).rotation_in_parent.rotate(probe);
+        let expected = expected_rotation.rotate(probe);
+        let rel_err = (actual - expected).length() / expected.length();
+        assert!(
+            rel_err < 1e-6,
+            "spinning frame should match analytic rotation: actual={actual:?} expected={expected:?} rel_err={rel_err:e}"
+        );
+
+        // ROOT自身は回転しない(親を持たないため`angular_velocity_in_parent`が無意味)。
+        let root_probe = tree.frame(FrameId::ROOT).rotation_in_parent.rotate(probe);
+        assert_eq!(root_probe, probe);
+    }
 
     /// 往復変換 $T_{B\to A}\circ T_{A\to B}=\mathrm{id}$(設計§7、abs 1e-12)。
     #[test]

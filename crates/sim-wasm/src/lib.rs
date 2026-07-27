@@ -20,6 +20,8 @@
 use std::collections::VecDeque;
 
 use js_sys::{Float32Array, Float64Array};
+use sim_core::FrameId;
+use sim_math::{Quat, Vec3};
 use sim_mechanics::{BallJoint, BodyType, HingeMotorPd, RigidBodyDesc, Shape};
 use sim_world::{BodyId, Command, ProbeTarget, World, WorldOptions};
 use wasm_bindgen::prelude::*;
@@ -530,6 +532,40 @@ impl WasmWorld {
         Float32Array::from(
             &[
                 a.x as f32, a.y as f32, a.z as f32, b.x as f32, b.y as f32, b.z as f32,
+            ][..],
+        )
+    }
+
+    /// フレーム軸オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「フレーム
+    /// サブモード」の土台)向けに、ROOTの子として指定角速度(z軸まわり)で自転する
+    /// フレームを追加する(`World::add_frame`+`sim_core::FrameTree::step`が毎step
+    /// 自動的に回転を進める)。返り値はこのフレームの`FrameId`(`frame_rotation_
+    /// at_f32`に渡すindex)。
+    pub fn add_rotating_frame(&mut self, angular_velocity_z: f64) -> usize {
+        let id = self.inner.add_frame(
+            FrameId::ROOT,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, angular_velocity_z),
+        );
+        id.0 as usize
+    }
+
+    /// `frame_index`番目のフレームの現在の姿勢(親フレームからの相対回転)を
+    /// クォータニオン`[x, y, z, w]`(f32)で返す。
+    pub fn frame_rotation_at_f32(&self, frame_index: usize) -> Float32Array {
+        let rotation = self
+            .inner
+            .frames()
+            .frame(FrameId(frame_index as u32))
+            .rotation_in_parent;
+        Float32Array::from(
+            &[
+                rotation.x as f32,
+                rotation.y as f32,
+                rotation.z as f32,
+                rotation.w as f32,
             ][..],
         )
     }

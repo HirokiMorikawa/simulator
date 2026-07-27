@@ -921,6 +921,13 @@ impl World {
                 self.check_auto_regime_switch();
             }
         }
+        // フレーム自身の回転運動学(`sim_core::FrameTree::step`のdoc参照、
+        // フレーム軸オーバーレイの土台)。惑星の自転のような「どのレジームが
+        // 走っていても物理的に進み続ける」性質の量のため、レジーム分岐の外側で
+        // 毎step無条件に進める(自動レジーム切替の判定は上記で既に完了しているため、
+        // この時点で`self.frames`を進めても`check_auto_regime_switch`が読んだ状態には
+        // 影響しない)。
+        self.frames.step(dt);
         // 登録済み全Couplingを1回ずつ適用する(登録順、`apply_coupling`のdocが説明する
         // 「post」型結合(前stepで確定した量を読む)と同じタイミング — 呼び出し側が
         // 毎stepの後に手動で`apply_coupling`を呼んでいた既存の使い方をそのまま
@@ -2577,6 +2584,51 @@ mod tests {
             world.body_position(capsule_body).unwrap(),
             placeholder,
             "local body must be untouched until the threshold is actually crossed"
+        );
+    }
+
+    /// フレーム軸オーバーレイの土台: `World::step()`が毎step`self.frames`
+    /// (`sim_core::FrameTree::step`)を実際に進めることを確認する。角速度
+    /// $\omega_z$を持つフレームを`add_frame`で追加し、`Local`レジームで複数step
+    /// 進めた後、フレームの回転が既知の解析回転(z軸まわり角度$\omega_z t$)に
+    /// 一致することを確認する(`FrameTree::step`単体テストと同じ検証をWorld
+    /// 経由で行う)。
+    #[test]
+    fn world_step_advances_frame_rotation_by_its_angular_velocity() {
+        let dt = WorldOptions::default().dt;
+        let mut world = World::new(WorldOptions::default());
+        let omega_z = 1.0; // rad/s
+        let spinning = world.add_frame(
+            sim_core::FrameId::ROOT,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::ZERO,
+            Vec3::new(0.0, 0.0, omega_z),
+        );
+
+        let steps = 100u32;
+        for _ in 0..steps {
+            world.step();
+        }
+
+        let elapsed = dt * steps as f64;
+        let expected_rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), omega_z * elapsed);
+        let probe = Vec3::new(1.0, 0.0, 0.0);
+        let actual = world
+            .frames()
+            .frame(spinning)
+            .rotation_in_parent
+            .rotate(probe);
+        let expected = expected_rotation.rotate(probe);
+        let rel_err = (actual - expected).length() / expected.length();
+        // `FrameTree::step`は一次積分(`Quat::integrate_angular_velocity`)のため、
+        // Worldの既定dt(細かいdtを使う`FrameTree::step`単体テストより粗い)では
+        // 離散化誤差がやや大きくなる。ここでは配線(WorldがちゃんとFrameTree::step
+        // を毎step呼んでいること)の検証が主眼なので、rel<1e-4を採用する。
+        assert!(
+            rel_err < 1e-4,
+            "frame rotation should match analytic rotation after {steps} world steps: \
+             actual={actual:?} expected={expected:?} rel_err={rel_err:e}"
         );
     }
 
