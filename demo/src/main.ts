@@ -449,8 +449,26 @@ function setUpHierarchy(
 // Shape/Material(`world.body_shape_label_at`/`body_material_label_at`、
 // スポーンパレットで追加したボディも含めて実際にクエリできる)+ Transform
 // (毎フレーム実データで更新、`updateInspectorTransformFields`)を表示する。
+//
+// **2026-07-28のD9/D34/D35増分で追加したガード**: `index`が`world.body_count()`
+// の範囲外(D9=熱のみ・D34/D35=天体のみのように力学ボディを1つも持たない
+// ギャラリーシーンを読み込んだ直後、`index`に渡り得る`0`を含む)なら
+// `world.body_label_at`等(いずれも`Result`化済みでボディが無ければ`Err`を
+// throwする)を呼ばず、代わりに「選択中のボディはない」プレースホルダを表示する
+// (呼ばずに済ませる以外に無害な選択肢が無いため——空文字列や`-1`を渡しても
+// 同じくRust側がエラーを返す)。`updateInspectorTransformFields`は
+// `#inspector-position`等のDOM要素が無ければ何もしない null-safe 実装のため、
+// このプレースホルダ表示と両立する。
 function renderInspectorFor(world: WasmWorld, index: number): void {
   const body = document.getElementById("inspector-body")!;
+  if (index < 0 || index >= world.body_count()) {
+    body.innerHTML = `
+      <div class="inspector-component">
+        <p>選択中のボディはありません(このシーンには力学ボディがありません——Probe Graphsパネルで観測してください)。</p>
+      </div>
+    `;
+    return;
+  }
   const label = world.body_label_at(index);
   const staticBadge = world.body_is_static_at(index) ? ' <span class="badge">Static</span>' : "";
   body.innerHTML = `
@@ -1354,6 +1372,18 @@ async function setUpSceneView(
   const currentMotorTarget = new Map<number, number>();
 
   let selectedBodyIndex = BODY_INDEX_BOX;
+  // **2026-07-28のD9/D34/D35増分で追加**: `selectedBodyIndex`が現在の`world`の
+  // 有効なボディを指しているか(D9=熱のみ・D34/D35=天体のみのギャラリー
+  // シーンは力学ボディを1つも持たないため、`selectedBodyIndex`が有効な
+  // ボディを指さない状態が実際に起こり得る、`sceneGalleryRef.current`の
+  // doc参照)。`render()`の毎フレーム呼び出し(`body_position_at_f32`等)や
+  // Nudge/Prefabキャプチャのようなユーザー操作トリガのwasm呼び出しは、
+  // いずれもこのチェックで先にガードする——ボディが無ければ何も送信/表示
+  // しないのが唯一の無害な選択肢(`try_body_id_at`のResult化と同じ理由で
+  // 「呼べば例外」なので、呼ぶ前に弾く)。
+  function hasSelectedBody(): boolean {
+    return selectedBodyIndex >= 0 && selectedBodyIndex < world.body_count();
+  }
   function selectBody(index: number) {
     selectedBodyIndex = index;
     renderInspectorFor(world, index);
@@ -2028,7 +2058,21 @@ async function setUpSceneView(
         constraintLines.set(bodyIndex, line);
       }
     }
-    selectBody(0);
+    // **2026-07-28のD9/D34/D35増分で追加したガード**: D9(熱のみ)・D34/D35
+    // (天体のみ)は力学ボディを1つも持たないため、上のループが1回も回らず
+    // `addSpawnedMesh`(内部で`selectBody`を呼ぶ)も一度も呼ばれない——
+    // 無条件に`selectBody(0)`していた旧実装は、この場合ボディindex 0が
+    // 存在しないままInspectorのTransform読み出し(`renderInspectorFor`→
+    // `body_label_at`等)・毎フレームの`render()`(`body_position_at_f32`等)
+    // へ渡り、いずれもJS例外を投げてUIが壊れる(HUD更新も止まる)——
+    // ボディが無ければHierarchyだけ空の状態へ更新し、選択は行わない。
+    if (world.body_count() > 0) {
+      selectBody(0);
+    } else {
+      selectedBodyIndex = -1; // 有効なボディ無し(`hasSelectedBody`参照)。
+      highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
+      renderInspectorFor(world, selectedBodyIndex);
+    }
   };
 
   // Replay再生実行(`ReplayVerifyRef`のdoc参照)。記録済み`commandLog`を、
@@ -2117,6 +2161,9 @@ async function setUpSceneView(
   // (既知の簡略化)。
   prefabRef.current = {
     captureSelectedBody: () => {
+      // ボディが無いシーン(D9/D34/D35のようなギャラリーシーン)で選択が
+      // 無効なら何もキャプチャできない(`hasSelectedBody`のdoc参照)。
+      if (!hasSelectedBody()) return null;
       const kind = world.body_shape_kind_at(selectedBodyIndex);
       if (kind !== "sphere" && kind !== "box") return null;
       const params = Array.from(world.body_shape_params_f64_at(selectedBodyIndex));
@@ -2347,6 +2394,9 @@ async function setUpSceneView(
   // 異なるボディでは体感速度変化も変わる(質量ごとの再較正は対象外)。
   const NUDGE_FORCE_NEWTONS = 400_000.0;
   nudgeButton.addEventListener("click", () => {
+    // ボディが無いシーン(D9/D34/D35のようなギャラリーシーン)では力を
+    // 加える対象が無い(`hasSelectedBody`のdoc参照)。
+    if (!hasSelectedBody()) return;
     world.push_apply_force(selectedBodyIndex, 0.0, NUDGE_FORCE_NEWTONS, 0.0);
     pushCommandLog(world, { kind: "ApplyForce", bodyIndex: selectedBodyIndex, fx: 0.0, fy: NUDGE_FORCE_NEWTONS, fz: 0.0 });
     if (forceOverlayToggle.checked) {
@@ -2450,14 +2500,29 @@ async function setUpSceneView(
       fluidPositionAttribute.needsUpdate = true;
     }
 
-    const selectedPosition = world.body_position_at_f32(selectedBodyIndex);
-    const selectedRotation = world.body_rotation_at_f32(selectedBodyIndex);
-    const selectedVelocity = world.body_velocity_at_f32(selectedBodyIndex);
+    // **2026-07-28のD9/D34/D35増分で追加したガード**: `hasSelectedBody()`が
+    // falseのとき(D9/D34/D35のように力学ボディを1つも持たないギャラリー
+    // シーンを読み込んだ直後)、`body_position_at_f32`等を呼ぶとJS例外を
+    // 投げてこの`render()`ループ自体が(次フレーム以降も)壊れる——このガード
+    // 撤廃前は実際にここで毎フレームパニックしていた(`heater_node_temperature`/
+    // `Circuit::node_voltage`と同じバグの系統、増分3-3/B2で発見した2件と同型)。
+    const selectedBodyValid = hasSelectedBody();
+    const selectedPosition = selectedBodyValid
+      ? world.body_position_at_f32(selectedBodyIndex)
+      : new Float32Array(3);
+    const selectedRotation = selectedBodyValid
+      ? world.body_rotation_at_f32(selectedBodyIndex)
+      : new Float32Array([0, 0, 0, 1]);
+    const selectedVelocity = selectedBodyValid
+      ? world.body_velocity_at_f32(selectedBodyIndex)
+      : new Float32Array(3);
     inspectorPosition.set(selectedPosition[0], selectedPosition[1], selectedPosition[2]);
     inspectorRotationQuat.set(selectedRotation[0], selectedRotation[1], selectedRotation[2], selectedRotation[3]);
     inspectorRotation.setFromQuaternion(inspectorRotationQuat);
     inspectorVelocity.set(selectedVelocity[0], selectedVelocity[1], selectedVelocity[2]);
-    updateInspectorTransformFields(inspectorPosition, inspectorRotation, inspectorVelocity);
+    if (selectedBodyValid) {
+      updateInspectorTransformFields(inspectorPosition, inspectorRotation, inspectorVelocity);
+    }
     if (isGalleryScene) {
       // シーンギャラリー読み込み中(D6/D11のような、Scene Viewに描く物が
       // 乏しい/無いデモを含む)は、シーンJSONの`probes`セクションが宣言した
@@ -2512,7 +2577,7 @@ async function setUpSceneView(
 
     forceArrow.visible = forceOverlayToggle.checked && performance.now() < forceOverlayHideAtMs;
 
-    const showGizmo = mode === "edit" && !world.body_is_static_at(selectedBodyIndex);
+    const showGizmo = selectedBodyValid && mode === "edit" && !world.body_is_static_at(selectedBodyIndex);
     gizmoGroup.visible = showGizmo;
     rotationGizmoGroup.visible = showGizmo;
     scaleGizmoGroup.visible = showGizmo;
@@ -2526,7 +2591,7 @@ async function setUpSceneView(
     hud.textContent = [
       `t = ${world.time().toFixed(3)} s`,
       `step = ${world.step_count().toString()}`,
-      `y = ${selectedPosition[1].toFixed(4)} m`,
+      `y = ${selectedBodyValid ? selectedPosition[1].toFixed(4) : "—"} m`,
       `circuit V = ${world.circuit_divider_voltage().toFixed(3)} V`,
       `heater T = ${world.heater_node_temperature().toFixed(2)} K`,
     ].join("\n");

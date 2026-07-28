@@ -1,0 +1,15 @@
+{
+  "name": "d35-orbital-insertion",
+  "world": { "gravity": 9.80665, "dt": 6076.959367326936 },
+  "astro": {
+    "softening": 0.0,
+    "bodies": [
+      { "position": [0, 0, 0], "velocity": [0, 0, 0], "mass": 1.989e30 },
+      { "position": [1.496e11, 0, 0], "velocity": [0, 26809.406846376616, 0], "mass": 1.0 }
+    ]
+  },
+  "probes": [
+    { "astro_pos_x": 1 }, { "astro_pos_y": 1 },
+    { "astro_vel_x": 1 }, { "astro_vel_y": 1 }
+  ]
+}

@@ -1231,6 +1231,12 @@ mod tests {
     /// 経由で再現し、ニュートン冷却の指数減衰$T=T_{env}+(T_0-T_{env})e^{-t/\tau}$
     /// ($\tau=C/(hA)$)と一致することを確認する。剛体は登場しない(`bodies`は
     /// 空配列)ため`Scenario::bodies`の`#[serde(default)]`をそのまま使う。
+    ///
+    /// シーンJSONは`scenes/d9-cooling-coffee.json`として出荷する(残タスク完遂の
+    /// シーンギャラリー増分B3、`scenes/index.json`マニフェスト参照)。全値が
+    /// リテラルなので焼き込みに計算は不要——このRust側の`ambient`/`c`/`h`/`area`/
+    /// `t0`/`dt`はJSONに焼き込んだ値と同じものを、解析解(ニュートン冷却の
+    /// 指数減衰)の計算に使う。
     #[test]
     fn run_headless_scenario_cooling_coffee_matches_newton_cooling_exponential_decay() {
         let ambient: f64 = 293.15;
@@ -1242,24 +1248,9 @@ mod tests {
         let tau = c / (h * area);
         let steps = (2.0 * tau / dt) as u32;
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d9-cooling-coffee",
-          "world": {{ "gravity": 9.80665, "dt": {dt} }},
-          "thermal": {{
-            "ambient_temperature": {ambient},
-            "nodes": [
-              {{ "temperature": {t0}, "heat_capacity": {c},
-                "convection_coefficient": {h}, "area": {area} }}
-            ]
-          }},
-          "probes": [ {{ "node_temp": 0 }} ]
-        }}
-        "#
-        );
+        let json = include_str!("../../../scenes/d9-cooling-coffee.json");
 
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let measured = *result.probe_histories[0]
             .last()
             .expect("history should not be empty");
@@ -1539,37 +1530,26 @@ mod tests {
     /// +`AstroPosX`/`AstroPosY`プローブ経由で再現する。A2(エネルギー・角運動量
     /// 保存)は検証しない——`ProbeTarget`が位置成分のみ対応で速度を読めないため
     /// 角運動量($L=r\times v$)を再構成できない(`demos.rs`側で既にGreen)。
+    ///
+    /// シーンJSONは`scenes/d34-solar-system-single-planet.json`として出荷する
+    /// (残タスク完遂のシーンギャラリー増分B3)。JSON側の`world.dt`・初期速度
+    /// (円軌道速度$v_{circ}=\sqrt{GM_{sun}/r}$)は、`period/steps_per_orbit`
+    /// (`period`は下記と同じケプラー第3法則の式)を計算した結果をそのまま
+    /// 焼き込んだリテラル値——このテスト自体は`steps_per_orbit`/`orbits`から
+    /// 総step数を、`r`から解析解(円軌道半径)を計算するだけで、`dt`/`v_circ`の
+    /// 計算式自体は不要になったため削除した(B2で確立した「解析解の期待値を
+    /// 計算するロジックはRust側に残す」規律どおり——ここでの期待値は`final_r`と
+    /// 比較する`r`のみで、初期条件の`v_circ`は期待値ではない)。
     #[test]
     fn run_headless_scenario_solar_system_single_planet_preserves_circular_orbit_radius() {
-        let mass_sun: f64 = 1.989e30;
-        let r: f64 = 1.496e11; // 1 AU相当
-        let g = sim_astro::GRAVITATIONAL_CONSTANT;
-
-        let period = 2.0 * std::f64::consts::PI * (r.powi(3) / (g * mass_sun)).sqrt();
+        let r: f64 = 1.496e11; // 1 AU相当(JSON側の`astro.bodies[1].position`と同じ値)。
         let steps_per_orbit = 1000u32;
-        let dt = period / steps_per_orbit as f64;
         let orbits = 20u32;
-        let v_circ = (g * mass_sun / r).sqrt();
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d34-solar-system-single-planet",
-          "world": {{ "gravity": 9.80665, "dt": {dt} }},
-          "astro": {{
-            "softening": 0.0,
-            "bodies": [
-              {{ "position": [0, 0, 0], "velocity": [0, 0, 0], "mass": {mass_sun} }},
-              {{ "position": [{r}, 0, 0], "velocity": [0, {v_circ}, 0], "mass": 1.0 }}
-            ]
-          }},
-          "probes": [ {{ "astro_pos_x": 1 }}, {{ "astro_pos_y": 1 }} ]
-        }}
-        "#
-        );
+        let json = include_str!("../../../scenes/d34-solar-system-single-planet.json");
 
         let steps = steps_per_orbit * orbits;
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let final_x = *result.probe_histories[0]
             .last()
             .expect("history should not be empty");
@@ -1593,42 +1573,28 @@ mod tests {
     /// 付近に戻ることを確認)を、D34向けに追加した`Scenario::astro`+
     /// `AstroPosX`/`AstroPosY`プローブに加え、本増分で追加した`AstroVelX`/
     /// `AstroVelY`プローブ(速度も出発点へ戻ることの確認に必要)経由で再現する。
+    ///
+    /// シーンJSONは`scenes/d35-orbital-insertion.json`として出荷する(残タスク
+    /// 完遂のシーンギャラリー増分B3)。JSON側の`world.dt`は
+    /// `analytic_period/steps_per_period`(`analytic_period`は下のケプラー第3
+    /// 法則の式)を計算した結果をそのまま焼き込んだリテラル値——`semi_major_axis`/
+    /// `analytic_period`自体はこのテストの期待値計算(`pos_err`/`vel_err`)には
+    /// 使わないため、D34と同じ理由(モジュールdoc参照)で削除した。初期速度`v0`
+    /// (=円軌道速度の0.9倍)は期待値計算(`vel_err`)にも使うためRust側に残す。
     #[test]
     fn run_headless_scenario_orbital_insertion_elliptical_period_matches_keplers_third_law() {
         let mass_central: f64 = 1.989e30;
-        let r0: f64 = 1.496e11; // 1 AU相当
+        let r0: f64 = 1.496e11; // 1 AU相当(JSON側の`astro.bodies[1].position`と同じ値)。
         let g = sim_astro::GRAVITATIONAL_CONSTANT;
         let gm = g * mass_central;
         let v_circ = (gm / r0).sqrt();
         let v0 = v_circ * 0.9; // 円軌道より遅い初速 → 楕円軌道(出発点が遠地点)
 
-        let semi_major_axis = 1.0 / (2.0 / r0 - v0 * v0 / gm);
-        let analytic_period = 2.0 * std::f64::consts::PI * (semi_major_axis.powi(3) / gm).sqrt();
-
         let steps_per_period = 4000u32;
-        let dt = analytic_period / steps_per_period as f64;
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d35-orbital-insertion",
-          "world": {{ "gravity": 9.80665, "dt": {dt} }},
-          "astro": {{
-            "softening": 0.0,
-            "bodies": [
-              {{ "position": [0, 0, 0], "velocity": [0, 0, 0], "mass": {mass_central} }},
-              {{ "position": [{r0}, 0, 0], "velocity": [0, {v0}, 0], "mass": 1.0 }}
-            ]
-          }},
-          "probes": [
-            {{ "astro_pos_x": 1 }}, {{ "astro_pos_y": 1 }},
-            {{ "astro_vel_x": 1 }}, {{ "astro_vel_y": 1 }}
-          ]
-        }}
-        "#
-        );
+        let json = include_str!("../../../scenes/d35-orbital-insertion.json");
 
-        let result = run_headless_scenario(&json, steps_per_period).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps_per_period).expect("valid scenario JSON");
         let final_x = *result.probe_histories[0]
             .last()
             .expect("history should not be empty");

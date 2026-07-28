@@ -90,6 +90,27 @@
       "title": "帯電風船",
       "description": "壁から0.2m離れた帯電風船が、鏡像電荷力のみで壁(x=0)へ向けて加速しながら引き寄せられることを確認する(壁の反発力はモデル化されていないため、到達後は力が切れてそのまま通過する)。",
       "domains": ["mechanics"]
+    },
+    {
+      "file": "d9-cooling-coffee.json",
+      "demo": "D9",
+      "title": "冷めるコーヒー",
+      "description": "力学剛体を持たない熱ドメインのみのシーン——Scene Viewには何も描かれない。単一の熱ノード(初期350K)が対流のみで冷えていく様子をProbe Graphs(NodeTemp[0])で観測し、ニュートン冷却の指数減衰T=T_env+(T0-T_env)e^(-t/τ)と一致することを確認する(T1)。",
+      "domains": ["thermal"]
+    },
+    {
+      "file": "d34-solar-system-single-planet.json",
+      "demo": "D34",
+      "title": "太陽系儀(円軌道)",
+      "description": "力学剛体を持たない天体ドメインのみのシーン——Scene Viewには何も描かれない(質点はmechanicsの剛体ではないため描画対象外)。太陽+惑星1個の円軌道を20周回させ、Probe Graphs(AstroPosX[1]/AstroPosY[1])で軌道半径が保たれることを観測する(A1)。",
+      "domains": ["astro"]
+    },
+    {
+      "file": "d35-orbital-insertion.json",
+      "demo": "D35",
+      "title": "軌道投入(楕円軌道)",
+      "description": "力学剛体を持たない天体ドメインのみのシーン——Scene Viewには何も描かれない。円軌道速度の0.9倍で投入した楕円軌道を1周期分進め、Probe Graphs(AstroPosX/Y・AstroVelX/Y[1])で位置・速度とも出発点付近へ戻ることを観測する(ケプラー第3法則)。",
+      "domains": ["astro"]
     }
   ]
 }

@@ -83,8 +83,14 @@ pub struct WasmWorld {
     /// ようにするため単一の`Vec`へ統合した。index 0=Ground・index 1=Box_1という
     /// 既存の意味は`new()`がこの順でpushすることでそのまま維持される)。
     bodies: Vec<SpawnedBodyMeta>,
-    y_probe: usize,
-    speed_probe: usize,
+    /// Probe Graphsパネルの既定2系列(箱のy座標・速さ)。**2026-07-28のD9/D34/D35
+    /// 増分で`Option`化**: `WasmWorld::new`(既定シーン)は常に箱を持つため必ず
+    /// `Some`だが、`from_scene_json`が読み込むギャラリーシーンは力学ボディを
+    /// 1つも持たないことがある(D9=熱のみ、D34/D35=天体のみ)。ボディが無い
+    /// シーンでは登録しようがないため`None`にする——`y_probe_history_f64`/
+    /// `speed_probe_history_f64`はこの場合に空配列を返す(モジュールdoc参照)。
+    y_probe: Option<usize>,
+    speed_probe: Option<usize>,
     /// 分圧回路のスイッチ(`sim_em::Circuit::add_switch`が返すindex、
     /// `set_circuit_switch_closed`参照)。
     circuit_switch_index: usize,
@@ -141,8 +147,10 @@ impl WasmWorld {
         let mut desc = RigidBodyDesc::dynamic(box_shape.clone(), steel);
         desc.transform.position = sim_math::Vec3::new(0.0, initial_height, 0.0);
         let box_body = inner.create_body(desc);
-        let y_probe = inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY);
-        let speed_probe = inner.add_probe(ProbeTarget::BodySpeed(box_body), PROBE_HISTORY_CAPACITY);
+        let y_probe =
+            Some(inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY));
+        let speed_probe =
+            Some(inner.add_probe(ProbeTarget::BodySpeed(box_body), PROBE_HISTORY_CAPACITY));
 
         // 分圧回路(`Command::SetSwitch`の実証用、`sim-world`の
         // `set_switch_command_closes_switch_and_changes_circuit_state`と同じ
@@ -219,20 +227,31 @@ impl WasmWorld {
     /// `y_probe`/`speed_probe`(Probe Graphsパネルの既定2系列)はシーン最初の
     /// ボディへ向ける——シーン定義プローブ(`scenario.probes`)がある場合は
     /// フロントエンド側がそちらを優先して表示する想定(後続増分)。
+    ///
+    /// **2026-07-28のD9/D34/D35増分で「ボディが1つも無いシーンを拒否する」
+    /// ガードを撤廃した**: 元々この関数は`ids.first()`が`None`(=`bodies`が
+    /// 空配列)なら`Err`を返していた——`y_probe`/`speed_probe`が「必ず先頭
+    /// ボディへ向ける」設計だったための制約だが、これはD1–D26(いずれも
+    /// `mechanics.bodies`を持つ)だけを相手にしていた頃の名残に過ぎない。
+    /// D9(冷めるコーヒー、`thermal`+`probes`のみ)・D34/D35(太陽系儀/軌道投入、
+    /// `astro`の質点のみ)は力学剛体を1つも持たない正当なシーンであり、
+    /// シーン定義プローブ(増分B1で配線済みの`scenario.probes`/
+    /// `imported_probe_*`)が既に系列を提供するため、`y_probe`/`speed_probe`が
+    /// 無くても何も失われない。したがって「先頭ボディが無ければ登録しない」
+    /// (`Option::None`)という設計にした——既定シーン(`WasmWorld::new`)は
+    /// 常に箱を持つため挙動は変わらない。
     pub fn from_scene_json(json: String) -> Result<WasmWorld, JsValue> {
         let scenario = sim_world::Scenario::from_json(&json)
             .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
-        let (inner, ids) = World::from_scenario_with_body_ids(&scenario)
+        let (mut inner, ids) = World::from_scenario_with_body_ids(&scenario)
             .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
-        let Some(&first_id) = ids.first() else {
-            return Err(JsValue::from_str(
-                "scene JSON must define at least one body",
-            ));
+        let (y_probe, speed_probe) = match ids.first() {
+            Some(&first_id) => (
+                Some(inner.add_probe(ProbeTarget::BodyPosY(first_id), PROBE_HISTORY_CAPACITY)),
+                Some(inner.add_probe(ProbeTarget::BodySpeed(first_id), PROBE_HISTORY_CAPACITY)),
+            ),
+            None => (None, None),
         };
-
-        let mut inner = inner;
-        let y_probe = inner.add_probe(ProbeTarget::BodyPosY(first_id), PROBE_HISTORY_CAPACITY);
-        let speed_probe = inner.add_probe(ProbeTarget::BodySpeed(first_id), PROBE_HISTORY_CAPACITY);
 
         let mut body_ids_by_name: HashMap<String, BodyId> = HashMap::new();
         for (body, id) in scenario.bodies.iter().zip(ids.iter()) {
@@ -882,10 +901,20 @@ impl WasmWorld {
     }
 
     /// 熱ノード(`WasmWorld::new`参照)の現在温度[K]。`from_scene_json`で読み込んだ
-    /// シーンが熱ドメインを持たない場合(現状のギャラリーシーンは全て力学のみ)
-    /// `thermal`は`None`になるため、`circuit_divider_voltage`と同じ`unwrap_or`
-    /// パターンでNaNを返す(HUD側は`toFixed`でそのまま表示できる、値が無いことが
-    /// 伝わればよい縮約実装)。
+    /// シーンが熱ドメインを持たない場合`thermal`は`None`になるため、
+    /// `circuit_divider_voltage`と同じ`unwrap_or`パターンでNaNを返す(HUD側は
+    /// `toFixed`でそのまま表示できる、値が無いことが伝わればよい縮約実装)。
+    ///
+    /// **2026-07-28のD9増分で以下の記述を訂正**: 以前は「現状のギャラリー
+    /// シーンは全て力学のみ」と書いていたが、D9(冷めるコーヒー)は`thermal`
+    /// セクションに単一ノード(index 0)を持つため、D9を読み込むとこの関数は
+    /// **HUDの固定デモ用ヒーターノードではなくD9自身のコーヒーノードの実温度**
+    /// を返すようになる(`THERMAL_HEATER_NODE`=0が両者で一致するため、
+    /// たまたま意味のある値が出る——コード変更は不要だが、doc上の前提が古く
+    /// なっていたため訂正した)。同様に、既定シーンの「ヒーター」トグル
+    /// (`push_heat_source`)はD9を読み込んだ状態でPlay中に操作すると、D9の
+    /// コーヒーノードへ実際に追加の熱を加える(既定シーン専用に作られたUIが
+    /// ギャラリーシーンの実ドメインへ意図せず干渉し得るという、既知の限定)。
     pub fn heater_node_temperature(&self) -> f64 {
         self.inner
             .thermal()
@@ -1441,22 +1470,34 @@ impl WasmWorld {
 
     /// 箱のy座標プローブの観測履歴(古い順)。エディタのProbe Graphsパネル
     /// (設計docs/23-frontend/01-editor.md §1.4)デモ用。
+    ///
+    /// **2026-07-28のD9/D34/D35増分**: `y_probe`が`None`(`from_scene_json`が
+    /// 力学ボディを持たないシーン——D9/D34/D35——を読み込んだ場合)なら空配列を
+    /// 返す(`.expect`していた旧実装はここでパニックしていた——既定シーン
+    /// (`WasmWorld::new`)は必ず`Some`のため挙動は変わらない)。
     pub fn y_probe_history_f64(&self) -> Float64Array {
+        let Some(handle) = self.y_probe else {
+            return Float64Array::new_with_length(0);
+        };
         let probe = self
             .inner
-            .probe(self.y_probe)
-            .expect("y_probe is registered in new() and never removed");
+            .probe(handle)
+            .expect("y_probe, once Some, is registered and never removed");
         let values: Vec<f64> = probe.history().copied().collect();
         Float64Array::from(values.as_slice())
     }
 
     /// 箱の速さ(`ProbeTarget::BodySpeed`)プローブの観測履歴(古い順)。
     /// y座標プローブと同じProbe Graphsパネルに2系列目として表示するデモ用。
+    /// `y_probe_history_f64`と同じ理由で`speed_probe`が`None`なら空配列を返す。
     pub fn speed_probe_history_f64(&self) -> Float64Array {
+        let Some(handle) = self.speed_probe else {
+            return Float64Array::new_with_length(0);
+        };
         let probe = self
             .inner
-            .probe(self.speed_probe)
-            .expect("speed_probe is registered in new() and never removed");
+            .probe(handle)
+            .expect("speed_probe, once Some, is registered and never removed");
         let values: Vec<f64> = probe.history().copied().collect();
         Float64Array::from(values.as_slice())
     }
@@ -1793,5 +1834,54 @@ mod tests {
         assert_eq!(world.imported_probe_count(), 2);
         assert_eq!(world.imported_probe_label_at(0).unwrap(), "BodyPosX(bob)");
         assert_eq!(world.imported_probe_label_at(1).unwrap(), "BodyPosY(bob)");
+    }
+
+    /// **残タスク完遂の増分B3(D9/D34/D35)**: `from_scene_json`が力学ボディを
+    /// 1つも持たないシーン(D9=`thermal`のみ、D34/D35=`astro`のみ)を実際に
+    /// 拒否せず読み込めること(以前の`ids.first()`が`None`なら`Err`を返す
+    /// ガードの撤廃、モジュールdoc参照)。あわせて`body_count()`が0であること、
+    /// シーン定義プローブ(`imported_probe_count`)が各シーンの`probes`本数
+    /// どおりであること(D9=1本、D34=2本、D35=4本)、`step()`を呼んでも
+    /// パニックしないことを確認する。
+    ///
+    /// **正直な制約**: `y_probe`/`speed_probe`が`None`になったときの
+    /// `y_probe_history_f64`/`speed_probe_history_f64`(空の`Float64Array`を
+    /// 返す経路、かつては`.expect(...)`でパニックしていた箇所そのもの)は
+    /// ここでは検証できない——モジュールdoc「正直な制約」のとおり
+    /// `Float64Array::new_with_length`はネイティブターゲットでは(空配列
+    /// 生成であっても)`cannot call wasm-bindgen imported functions on
+    /// non-wasm targets`でパニックする。したがってこの経路は実ブラウザでの
+    /// Playwright確認(`docs/22-roadmap/02-feature-checklist.md`参照)でのみ
+    /// 検証した。
+    #[test]
+    fn from_scene_json_loads_bodyless_thermal_and_astro_gallery_scenes_without_panicking() {
+        fn check_bodyless_scene(path: &str, json: &str, expected_imported_probes: usize) {
+            let mut world = WasmWorld::from_scene_json(json.to_string())
+                .unwrap_or_else(|e| panic!("{path} must be a valid (bodyless) scene: {e:?}"));
+            assert_eq!(world.body_count(), 0, "{path} should define zero bodies");
+            assert_eq!(
+                world.imported_probe_count(),
+                expected_imported_probes,
+                "{path} probe count mismatch"
+            );
+            world.step();
+            world.step();
+        }
+
+        check_bodyless_scene(
+            "scenes/d9-cooling-coffee.json",
+            include_str!("../../../scenes/d9-cooling-coffee.json"),
+            1,
+        );
+        check_bodyless_scene(
+            "scenes/d34-solar-system-single-planet.json",
+            include_str!("../../../scenes/d34-solar-system-single-planet.json"),
+            2,
+        );
+        check_bodyless_scene(
+            "scenes/d35-orbital-insertion.json",
+            include_str!("../../../scenes/d35-orbital-insertion.json"),
+            4,
+        );
     }
 }
