@@ -5,112 +5,174 @@
       "demo": "D1",
       "title": "落下時計",
       "description": "高さ20mから落下する球(真空、抗力なし)。落下時間が解析解t=√(2h/g)と一致することを確認する(M1)。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d2-ballistic.json",
       "demo": "D2",
       "title": "弾道(45°射出)",
       "description": "初速20m/sで45°射出した球の真空放物運動。飛翔時間・着地速度・頂点速度が解析解と一致することを確認する。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d3-bounce.json",
       "demo": "D3",
       "title": "バウンド(ゴム)",
       "description": "ゴム球が床に落下し跳ね返る。跳ね返り後の到達高さが反発係数の2乗どおりであることを確認する。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d4-box-stack.json",
       "demo": "D4",
       "title": "積み木",
       "description": "4段の箱スタック(接地1段+3段)。10秒で静止することを確認する(M12)。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d5-incline-static.json",
       "demo": "D5",
       "title": "斜面(静止摩擦)",
       "description": "10°の斜面上の箱。摩擦角以下なので静止したままであることを確認する(M7)。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d5-incline-slide.json",
       "demo": "D5",
       "title": "斜面(滑走)",
       "description": "45°の斜面上の箱。摩擦角を超えるため滑り出し、加速度が解析解a=g(sinθ-μkcosθ)と一致することを確認する(M8)。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d6-floating-box-f4.json",
       "demo": "D6",
       "title": "浮き沈み(静止)",
       "description": "密度比0.6の箱を水域に浮かべ、解析解どおりの喫水位置で釣り合うことを確認する(F4)。",
-      "domains": ["mechanics", "fluid"]
+      "domains": [
+        "mechanics",
+        "fluid"
+      ]
     },
     {
       "file": "d6-floating-box-f5.json",
       "demo": "D6",
       "title": "浮き沈み(振動)",
       "description": "密度比0.5の箱を平衡位置より0.1m高い位置から静かに離し、上下振動の周期が解析解(浮力ばね)と一致することを確認する(F5)。",
-      "domains": ["mechanics", "fluid"]
+      "domains": [
+        "mechanics",
+        "fluid"
+      ]
     },
     {
       "file": "d7-wind-high-re.json",
       "demo": "D7",
       "title": "風と終端速度(高Re)",
       "description": "半径5mmの鋼球が空気中(密度1.225kg/m³)を落下し、慣性抗力領域の終端速度(v=√(2mg/(ρCdA)))へ収束することを確認する(F1)。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d7-wind-low-re.json",
       "demo": "D7",
       "title": "風と終端速度(低Re)",
       "description": "半径1cmの鋼球が高粘性流体(粘性1.0Pa·s)中を沈降し、ストークス沈降の終端速度(v=2r²Δρg/(9μ))へ収束することを確認する(F3)。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d11-pendulum.json",
       "demo": "D11",
       "title": "振り子",
       "description": "小振幅の単振り子。周期が解析解(2π√(L/g))と一致することを確認する(M3)。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d21-copper-tube-drop.json",
       "demo": "D21",
       "title": "銅管落下(渦電流ブレーキ)",
       "description": "導体管を模した抵抗回路+誘導結合の中を磁石が落下し、渦電流ブレーキで解析解どおりの終端速度(v=mgR/(Bl)²)へ収束することを確認する。",
-      "domains": ["mechanics", "circuit"]
+      "domains": [
+        "mechanics",
+        "circuit"
+      ]
     },
     {
       "file": "d26-balloon-qualitative.json",
       "demo": "D26",
       "title": "帯電風船",
       "description": "壁から0.2m離れた帯電風船が、鏡像電荷力のみで壁(x=0)へ向けて加速しながら引き寄せられることを確認する(壁の反発力はモデル化されていないため、到達後は力が切れてそのまま通過する)。",
-      "domains": ["mechanics"]
+      "domains": [
+        "mechanics"
+      ]
     },
     {
       "file": "d9-cooling-coffee.json",
       "demo": "D9",
       "title": "冷めるコーヒー",
       "description": "力学剛体を持たない熱ドメインのみのシーン——Scene Viewには何も描かれない。単一の熱ノード(初期350K)が対流のみで冷えていく様子をProbe Graphs(NodeTemp[0])で観測し、ニュートン冷却の指数減衰T=T_env+(T0-T_env)e^(-t/τ)と一致することを確認する(T1)。",
-      "domains": ["thermal"]
+      "domains": [
+        "thermal"
+      ]
     },
     {
       "file": "d34-solar-system-single-planet.json",
       "demo": "D34",
       "title": "太陽系儀(円軌道)",
       "description": "力学剛体を持たない天体ドメインのみのシーン——Scene Viewには何も描かれない(質点はmechanicsの剛体ではないため描画対象外)。太陽+惑星1個の円軌道を20周回させ、Probe Graphs(AstroPosX[1]/AstroPosY[1])で軌道半径が保たれることを観測する(A1)。",
-      "domains": ["astro"]
+      "domains": [
+        "astro"
+      ]
     },
     {
       "file": "d35-orbital-insertion.json",
       "demo": "D35",
       "title": "軌道投入(楕円軌道)",
       "description": "力学剛体を持たない天体ドメインのみのシーン——Scene Viewには何も描かれない。円軌道速度の0.9倍で投入した楕円軌道を1周期分進め、Probe Graphs(AstroPosX/Y・AstroVelX/Y[1])で位置・速度とも出発点付近へ戻ることを観測する(ケプラー第3法則)。",
-      "domains": ["astro"]
+      "domains": [
+        "astro"
+      ]
+    },
+    {
+      "file": "d8-scatter.json",
+      "demo": "D8",
+      "title": "散乱の再現",
+      "description": "50個の鋼球が床へ落ちて散らばる。同じシードなら毎回同じ結果になる決定論の実演(D8)。",
+      "domains": [
+        "mechanics"
+      ]
+    },
+    {
+      "file": "d12-ragdoll.json",
+      "demo": "D12",
+      "title": "ラグドール",
+      "description": "胴体・頭・両腕をBallJointで連結した簡易人形が床へ落ちる。エネルギーが単調減少し床を貫通しないことを確認する(D12)。",
+      "domains": [
+        "mechanics"
+      ]
+    },
+    {
+      "file": "d36-swingby.json",
+      "demo": "D36",
+      "title": "スイングバイ",
+      "description": "探査機が惑星の重力で双曲線軌道を描いて加速する。Scene Viewには何も描かれないのでProbeグラフ(位置・速度)で観測する(D36)。",
+      "domains": [
+        "astro"
+      ]
     }
   ]
 }

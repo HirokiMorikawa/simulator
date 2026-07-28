@@ -1,0 +1,31 @@
+{
+  "name": "d12-ragdoll",
+  "world": { "gravity": 9.80665, "dt": 0.008333333 },
+  "bodies": [
+    { "shape": { "plane": { "normal": [0,1,0], "d": 0 } }, "type": "static",
+      "material": "木材(松)", "name": "floor" },
+    { "shape": { "box": { "half": [0.3, 0.5, 0.15] } }, "material": "木材(松)",
+      "position": [0, 3, 0], "name": "torso" },
+    { "shape": { "box": { "half": [0.2, 0.2, 0.2] } }, "material": "木材(松)",
+      "position": [0, 3.7, 0], "name": "head" },
+    { "shape": { "box": { "half": [0.5, 0.1, 0.1] } }, "material": "木材(松)",
+      "position": [-0.8, 3.3, 0], "name": "arm_left" },
+    { "shape": { "box": { "half": [0.5, 0.1, 0.1] } }, "material": "木材(松)",
+      "position": [0.8, 3.3, 0], "name": "arm_right" }
+  ],
+  "joints": [
+    { "ball": { "body_a": "torso", "anchor_a": [0, 0.5, 0],
+                "body_b": "head", "anchor_b": [0, -0.2, 0] } },
+    { "ball": { "body_a": "torso", "anchor_a": [-0.3, 0.3, 0],
+                "body_b": "arm_left", "anchor_b": [0.5, 0, 0] } },
+    { "ball": { "body_a": "torso", "anchor_a": [0.3, 0.3, 0],
+                "body_b": "arm_right", "anchor_b": [-0.5, 0, 0] } }
+  ],
+  "probes": [
+    { "body_pos_y": "torso" },
+    { "body_pos_y": "head" },
+    { "body_speed": "torso" },
+    { "body_pos_x": "torso" },
+    { "body_pos_x": "head" }
+  ]
+}

@@ -283,6 +283,19 @@ pub enum JointJson {
         anchor_b: [f64; 3],
         length: f64,
     },
+    /// `sim_mechanics::BallJoint`(ワールド座標軸沿いの3本の独立スカラー拘束、
+    /// ゼロ距離でも退化しないピン拘束)。**増分G1で追加**——D12(ラグドール)を
+    /// シーンJSON化するのに必要だった。`Distance`と同じく`body_b`未指定なら
+    /// ワールド固定点への拘束。
+    Ball {
+        body_a: String,
+        #[serde(default)]
+        anchor_a: [f64; 3],
+        #[serde(default)]
+        body_b: Option<String>,
+        #[serde(default)]
+        anchor_b: [f64; 3],
+    },
 }
 
 /// `Scenario::couplings`の1件(モジュールdoc「縮約実装の理由」参照 — 現時点で
@@ -608,6 +621,34 @@ impl World {
                             body_b: b_index,
                             anchor_b: array_to_vec3(*anchor_b),
                             length: *length,
+                        });
+                }
+                JointJson::Ball {
+                    body_a,
+                    anchor_a,
+                    body_b,
+                    anchor_b,
+                } => {
+                    let a_id = body_ids_by_name
+                        .get(body_a)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body_a.clone()))?;
+                    let b_index = match body_b {
+                        Some(name) => Some(
+                            body_ids_by_name
+                                .get(name)
+                                .ok_or_else(|| SceneError::UnknownBodyName(name.clone()))?
+                                .index as usize,
+                        ),
+                        None => None,
+                    };
+                    world
+                        .mechanics_mut()
+                        .add_ball_joint(sim_mechanics::BallJoint {
+                            body_a: a_id.index as usize,
+                            anchor_a: array_to_vec3(*anchor_a),
+                            body_b: b_index,
+                            anchor_b: array_to_vec3(*anchor_b),
+                            disabled: false,
                         });
                 }
             }
@@ -1031,9 +1072,87 @@ mod tests {
         );
     }
 
-    /// シーンJSONが不正(存在しない材料参照)なら、`Scenario::from_json`/
-    /// `World::from_scenario`と同じ`SceneError`をそのまま返す(ヘッドレスランナーは
-    /// バリデーションを迂回しない)。
+    /// **増分G1**: D12(ラグドール)をシーンJSON経由で検証する。`JointJson::Ball`
+    /// (本増分で追加)が実際に効いていることの確認でもある——`BallJoint`が無ければ
+    /// 4つの箱はバラバラに落ちるので、頭と胴体の距離が保たれることが拘束が働いて
+    /// いる直接の証拠になる。合格基準(docs/20-integration/03-entity-layer.md §7
+    /// 「ラグドール落下: エネルギー単調減少・貫入なし」)のうち貫入なしを見る。
+    #[test]
+    fn run_headless_scenario_ragdoll_stays_connected_and_does_not_penetrate_the_floor() {
+        let json = include_str!("../../../scenes/d12-ragdoll.json");
+        let steps = 600; // 5秒。落下(3m)して静止するのに十分。
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
+        let torso_y = &result.probe_histories[0];
+        let head_y = &result.probe_histories[1];
+        let torso_speed = &result.probe_histories[2];
+
+        let torso_x = &result.probe_histories[3];
+        let head_x = &result.probe_histories[4];
+
+        // **床への貫入が無いこと**。ここで注意が要るのは、胴体の半寸法が
+        // `[0.3, 0.5, 0.15]` で**等方でない**点である。ラグドールは落下中に倒れ、
+        // 最終的に一番広い面(0.3×0.5)で床に伏せるため、重心の静止高さは
+        // 半高さ0.5ではなく**最小半寸法の0.15**になる(実測 0.1496)。
+        // 「0.5を下回ったら貫通」と書くとこの正しい挙動を貫通と誤判定するので、
+        // 判定の下限は最小半寸法を使う。
+        const TORSO_MIN_HALF_EXTENT: f64 = 0.15;
+        const FLOOR_PENETRATION_SLOP: f64 = 0.05; // `demos.rs`のD12テストと同じ許容。
+        let min_torso = torso_y.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            min_torso > TORSO_MIN_HALF_EXTENT - FLOOR_PENETRATION_SLOP,
+            "胴体が床を貫通した: min_torso_y={min_torso}"
+        );
+
+        // **BallJointが効いていること**。頭は胴体の上端(+0.5)に半高さ0.2で
+        // 繋がるので、両重心の3D距離は拘束により常に 0.7 に保たれる。
+        // プローブは x と y しか取れない(`ProbeTarget` に Z が無い)が、
+        // **3D距離の xy 平面への射影は元の距離を超えられない**ので、
+        // 「射影距離が 0.7 を超えない」は拘束が破れていないことの厳密な必要条件になる。
+        // 実測の最大値は 0.7000000000000004(浮動小数の丸め以内で上限に張り付く)。
+        //
+        // 逆向き(拘束が消えていないこと)は射影では見られない——胴体が倒れると
+        // 頭は z 方向へ回るため、射影距離は最終的に 0.084 まで縮む。そこで
+        // 3D距離の検証は同じJSONからワールドを直接組んで下で行う。
+        for (i, ((tx, hx), (ty, hy))) in torso_x
+            .iter()
+            .zip(head_x)
+            .zip(torso_y.iter().zip(head_y))
+            .enumerate()
+        {
+            let projected = ((hx - tx).powi(2) + (hy - ty).powi(2)).sqrt();
+            assert!(
+                projected < 0.7 + 1e-9,
+                "BallJointの拘束距離0.7を射影距離が超えた(拘束が破れている): step={i} projected={projected}"
+            );
+        }
+
+        // 3D距離が全区間で 0.7 に保たれること。**これが `JointJson::Ball` が
+        // 実際に拘束を張っている直接の証拠**——ジョイントが無ければ頭と胴体は
+        // 独立に落ち、それぞれの静止高さ(0.2 と 0.15)へ落ち着いて距離は 0.05 になる。
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let (mut world, ids) = World::from_scenario_with_body_ids(&scenario).expect("valid world");
+        let (torso, head) = (ids[1], ids[2]);
+        let distance = |w: &World| {
+            let p = &w.mechanics().bodies.position;
+            (p[head.index as usize] - p[torso.index as usize]).length()
+        };
+        for i in 0..steps {
+            world.step();
+            let d = distance(&world);
+            assert!(
+                (d - 0.7).abs() < 0.02,
+                "BallJointは頭と胴体の距離を0.7に保つべき: step={i} distance={d}"
+            );
+        }
+
+        // 最終的にほぼ静止する(散逸してエネルギーを失う)。実測 8.1e-4。
+        let final_speed = *torso_speed.last().expect("履歴が空でない");
+        assert!(
+            final_speed < 0.5,
+            "5秒後にはほぼ静止しているべき: final_speed={final_speed}"
+        );
+    }
+
     /// **増分F1: 排他結合の静的検査が実際に発火すること**。設計
     /// docs/20-integration/01-coupling-matrix.md §2規則2「浮力: 静的水域
     /// (集中定数)と解像流体は排他」を、シーン読み込みの時点で弾く。
@@ -1092,6 +1211,9 @@ mod tests {
         );
     }
 
+    /// シーンJSONが不正(存在しない材料参照)なら、`Scenario::from_json`/
+    /// `World::from_scenario`と同じ`SceneError`をそのまま返す(ヘッドレスランナーは
+    /// バリデーションを迂回しない)。
     #[test]
     fn run_headless_scenario_propagates_scene_validation_errors() {
         let json = r#"
@@ -1751,6 +1873,147 @@ mod tests {
             vel_err < 0.01,
             "A3 + Kepler's third law: velocity should also return to its initial value: \
              vel_err={vel_err:.4} final_vx={final_vx} final_vy={final_vy}"
+        );
+    }
+
+    /// **増分G1** D8(散乱の再現): 球50個の接触だらけの落下を`scenes/d8-scatter.json`
+    /// 経由で走らせ、同じJSONからの2回の実行が`state_hash`までビット一致することを確認する。
+    ///
+    /// `demos.rs`の`d8_scattered_spheres_with_same_seed_reproduce_identical_state_hash`
+    /// との違いを明記しておく。あちらは**実行時に`SimRng`で散乱位置を生成**して
+    /// 「同じシード→同じ配置→同じハッシュ」を見ている。こちらは静的なシーンJSONなので
+    /// 散乱位置は黄金角スパイラルで**事前に焼き込んである**——つまりここで担保するのは
+    /// 「シーン読み込み経路(JSONパース→`World::from_scenario`→300step)が決定的である」
+    /// ことであり、散乱の乱数再現性そのものではない。ギャラリーが必要とするのは前者である。
+    ///
+    /// **正直な限界**: このシーンには確率的な物理項(ブラウン力など)が無いため、
+    /// JSONの`seed`を42→43に書き換えても`state_hash`は**変わらない**(実測で確認:
+    /// 3回とも 5936827133798999545)。`seed`が実際に結果を左右する経路はD25
+    /// (ブラウン運動)側であり、このシーンでは`seed`は事実上不活性である。
+    /// したがってハッシュ一致は「乱数を含めた再現性」ではなく「決定的積分の再現性」の
+    /// 主張に留まる——弱いほうの主張だけを書く。
+    #[test]
+    fn run_headless_scenario_scatter_is_bit_reproducible() {
+        let json = include_str!("../../../scenes/d8-scatter.json");
+        let steps = 300u32;
+        let a = run_headless_scenario(json, steps).expect("valid scenario JSON");
+        let b = run_headless_scenario(json, steps).expect("valid scenario JSON");
+        assert_eq!(
+            a.final_state_hash, b.final_state_hash,
+            "同じシーンJSONの2回の実行は`state_hash`までビット一致すべき"
+        );
+
+        // **ハッシュ一致が空虚でないこと**: 50球が実際に落ちて床で静止し、
+        // どれも床をすり抜けていない(半径0.2、接触slopぶんの余裕を見る)。
+        // 何も起きていないシーンならハッシュ一致は自明になってしまう。
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let (mut world, ids) = World::from_scenario_with_body_ids(&scenario).expect("valid world");
+        assert_eq!(ids.len(), 51, "床1枚 + 球50個");
+        for _ in 0..steps {
+            world.step();
+        }
+        const SPHERE_RADIUS: f64 = 0.2;
+        const CONTACT_SLOP: f64 = 0.05; // 実測の最終 min_y は 0.19614(半径0.2に対し貫入0.0039)。
+        let position = &world.mechanics().bodies.position;
+        let min_y = ids[1..]
+            .iter()
+            .map(|id| position[id.index as usize].y)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            min_y > SPHERE_RADIUS - CONTACT_SLOP,
+            "どの球も床をすり抜けていないこと: min_y={min_y}"
+        );
+        // 300step(2.5秒)後には落下しきって静止している(s0は実測で速さ0)。
+        let final_speed = *a.probe_histories[0].last().expect("履歴が空でない");
+        assert!(
+            final_speed < 0.1,
+            "2.5秒後には静止しているべき: final_speed={final_speed}"
+        );
+    }
+
+    /// **増分G1** D36(スイングバイ): 双曲線フライバイを`scenes/d36-swingby.json`
+    /// 経由で解析解と突き合わせる。
+    ///
+    /// シーンは**近点から**始める配置にしてある——探査機の位置は惑星から+x方向に
+    /// `r_p = 5e6 m`、相対速度は+y方向(位置ベクトルと直交)なので、この点が
+    /// 定義上そのまま近点になる。相対速度の大きさ `v_p = 7189.993045893716 m/s` は
+    /// 無限遠速度がちょうど `v_inf = 5000 m/s` になるよう逆算して焼き込んだ値
+    /// (`v_p = sqrt(v_inf^2 + 2GM/r_p)`)。ここから離心率と漸近真近点角が閉形式で出る:
+    ///
+    /// - `e = r_p * v_p^2 / GM - 1 = 2.8729397662571174`
+    /// - `nu_inf = arccos(-1/e) = 110.36965034969745°`(近点方向=+x から測った角度)
+    ///
+    /// 近点で相対速度は+y(=+xから90°)を向いており、無限遠では漸近線に平行=
+    /// `nu_inf` を向く。つまり**近点から無限遠までの偏向は `nu_inf - 90° = 20.37°`**
+    /// (全偏向 `2*arcsin(1/e) = 40.74°` の半分)。
+    ///
+    /// 実測(1e5秒 = 20,000ステップ後、r = 5.10e8 m ≒ 近点の102倍):
+    /// 速度方向 110.36749°(解析解との相対誤差 **2.0e-5**)、
+    /// 相対速さ 5026.0909 m/s に対し同じrでのvis-viva `sqrt(v_inf^2 + 2GM/r)` は
+    /// 5026.0809 m/s(相対誤差 **2.0e-6**)。
+    #[test]
+    fn run_headless_scenario_swingby_deflection_matches_hyperbolic_analytic_solution() {
+        let gm = sim_astro::GRAVITATIONAL_CONSTANT * 1.0e24; // JSON側の惑星質量。
+        let r_p: f64 = 5.0e6; // JSON側の初期相対距離(=近点距離)。
+        let v_inf: f64 = 5000.0; // JSON側の初期相対速度はこれを与えるよう逆算済み。
+        let v_p = (v_inf * v_inf + 2.0 * gm / r_p).sqrt();
+        let eccentricity = r_p * v_p * v_p / gm - 1.0;
+        let nu_inf = (-1.0 / eccentricity).acos().to_degrees();
+
+        let json = include_str!("../../../scenes/d36-swingby.json");
+        let steps = 20_000u32; // dt=5s → 1e5秒。近点から近点距離の約100倍まで飛ばす。
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
+        let last = |i: usize| *result.probe_histories[i].last().expect("履歴が空でない");
+        // プローブ0..3が探査機、4..7が惑星(惑星自身も+y方向へ 20 km/s で動いている
+        // ため、双曲線軌道の量は**相対**座標で見る必要がある)。
+        let (rx, ry) = (last(0) - last(4), last(1) - last(5));
+        let (vx, vy) = (last(2) - last(6), last(3) - last(7));
+        let r = rx.hypot(ry);
+        let v = vx.hypot(vy);
+
+        assert!(
+            r > 50.0 * r_p,
+            "漸近的な向きを見るには十分遠方まで飛ばす必要がある: r/r_p={}",
+            r / r_p
+        );
+
+        // ①偏向: 相対速度の向きが漸近真近点角と一致する。
+        let angle = vy.atan2(vx).to_degrees();
+        let angle_rel_err = (angle - nu_inf).abs() / nu_inf;
+        assert!(
+            angle_rel_err < 1.0e-4,
+            "双曲線フライバイの漸近方向が解析解と一致すべき: \
+             angle={angle} nu_inf={nu_inf} rel_err={angle_rel_err:e}"
+        );
+
+        // ②エネルギー保存: 到達した距離でのvis-viva速度と一致する
+        // (無限遠ではないので `v_inf` そのものではなく `sqrt(v_inf^2 + 2GM/r)` と比べる)。
+        let vis_viva = (v_inf * v_inf + 2.0 * gm / r).sqrt();
+        let speed_rel_err = (v - vis_viva).abs() / vis_viva;
+        assert!(
+            speed_rel_err < 1.0e-4,
+            "相対速さがvis-vivaと一致すべき: v={v} vis_viva={vis_viva} rel_err={speed_rel_err:e}"
+        );
+
+        // ③スイングバイであること: 惑星に対する速さは(散逸が無いので)保存される
+        // 一方、**慣性系での速さは変化する**——これが重力アシストの定義そのもの。
+        // この配置では探査機は惑星の進行方向へ向かって近点を通るため**減速**する。
+        // 解析的な漸近値は `|v_inf*(cos nu_inf, sin nu_inf) + (0, 20000)|`。
+        let planet_speed: f64 = 20_000.0; // JSON側の惑星速度(+y)。
+        let asymptotic_inertial = (v_inf * nu_inf.to_radians().cos())
+            .hypot(v_inf * nu_inf.to_radians().sin() + planet_speed);
+        let initial_inertial = v_p + planet_speed; // 近点では両者とも+y向き。
+        let final_inertial = last(2).hypot(last(3));
+        assert!(
+            final_inertial < initial_inertial - 2_000.0,
+            "スイングバイで慣性系の速さが変化しているべき: \
+             initial={initial_inertial} final={final_inertial}"
+        );
+        // 有限距離(r は近点の約100倍)なので漸近値からは0.1%ほどずれる。
+        assert!(
+            (final_inertial - asymptotic_inertial).abs() / asymptotic_inertial < 3.0e-3,
+            "慣性系の速さが解析的な漸近値に近づくべき: \
+             final={final_inertial} asymptotic={asymptotic_inertial}"
         );
     }
 

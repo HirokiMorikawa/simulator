@@ -171,6 +171,46 @@ test("Hierarchy に Probes サブツリーが出る(D11 は body_pos_x/y の2本
   expect(errors).toEqual([]);
 });
 
+test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読み込める", async ({ page }) => {
+  // Rust 側は `run_headless_scenario` で解析解と突き合わせ済み(貫入なし・
+  // BallJoint の拘束距離・双曲線フライバイの偏向角)。ここが守るのは
+  // **同じ JSON がフロントエンドの経路でも壊れずに載る**ことだけ。
+  //
+  // D36 は剛体を持たない(天体ドメインのみ)ので Scene View には何も描かれない。
+  // 観測手段は Probe Graphs であり、それが D9/D34/D35 と同じ既知の限界である。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+  const hierarchy = page.locator("#hierarchy-tree");
+
+  await page.click('.project-tab[data-tab="scenes"]');
+
+  // D12 ラグドール: 床 + 胴体/頭/腕2本 = 5体。BallJoint 3本入りのシーンが
+  // `JointJson::Ball`(本増分で追加)経由でパースできることの確認でもある。
+  await page.click('.scene-gallery-list button[data-scene-file="d12-ragdoll.json"]');
+  await expect(hierarchy.getByText("torso", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("BodyPosY(head)", { exact: true })).toBeVisible();
+
+  // D8 散乱: 床 + 球50個 = 51体。ギャラリー中で最大のシーン。
+  await page.click('.scene-gallery-list button[data-scene-file="d8-scatter.json"]');
+  await expect(page.locator("#hierarchy-tree .tree-selectable")).toHaveCount(51);
+
+  // D36 スイングバイ: 剛体0体、天体2体。Hierarchy のボディ一覧は空になるが、
+  // シーン定義プローブ8本が Probes サブツリーに並ぶ。
+  await page.click('.scene-gallery-list button[data-scene-file="d36-swingby.json"]');
+  await expect(page.locator("#hierarchy-tree .tree-selectable")).toHaveCount(0);
+  await expect(hierarchy.getByText("AstroPosX[1]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("AstroVelY[0]", { exact: true })).toBeVisible();
+
+  // 剛体が無いシーンでも再生して描画ループが回ること。
+  await page.click("#btn-mode-play");
+  await page.waitForTimeout(800);
+  await page.click("#btn-play");
+  await expect(page.locator("#probe-canvas")).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
 test("Project ドロワーがタブクリックで開き、中身が画面内に入る(増分E3)", async ({ page }) => {
   // **増分E3で修正した重大なUIバグの回帰テスト**: 既定のグリッド行はタブバーの
   // 高さしか無く、ドロワー本体(Scenes/Materials/... の中身)は画面外へ押し出されて
