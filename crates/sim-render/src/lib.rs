@@ -58,6 +58,17 @@
 //! が`pub`でありながら`lib.rs`の再エクスポートに含まれておらず(`path_tracer`
 //! モジュール自体が非公開のため)クレート外から型を名指しできなかった実装漏れ
 //! (`Scene::new`の第4引数に`None`しか渡せなかった)を修正した。
+//!
+//! **増分C2(露出)**: `camera.rs`に写真測光の標準的な露出方程式(EV換算、設計§4.1)
+//! を追加した(`relative_exposure`/`exposure_value_at_iso100`、詳細は
+//! `camera.rs`モジュールdoc参照)。
+//!
+//! **増分C3(モーションブラー)**: 新規`motion_blur`モジュール(`render_motion_blur`/
+//! `render_motion_blur_channel`)を追加した。`Ray`に時刻フィールドを足す代わりに
+//! 「シャッター開時間内の複数時刻でシーンを構築し直して平均する」方式を採用
+//! (これは縮約ではなく物理的にシャッター積分そのもの、詳細な設計判断の理由は
+//! `motion_blur.rs`モジュールdoc参照)——既存の`Ray`・`Camera::generate_ray`・
+//! `Scene::trace`には一切手を入れていない。
 
 mod bsdf;
 mod bvh;
@@ -65,6 +76,7 @@ mod camera;
 mod framebuffer;
 mod medium;
 mod microfacet;
+mod motion_blur;
 mod path_tracer;
 mod png;
 mod primitive;
@@ -81,6 +93,7 @@ pub use camera::{exposure_value_at_iso100, relative_exposure, Camera};
 pub use framebuffer::Framebuffer;
 pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
 pub use microfacet::{ggx_distribution, sample_ggx_half_vector, smith_g, smith_g1};
+pub use motion_blur::{render_motion_blur, render_motion_blur_channel};
 pub use path_tracer::{AtmosphereMedium, Emissive, Material, PointLight, Scene, SceneObject};
 pub use primitive::Primitive;
 pub use prism::{trace_prism_deviation, trace_raindrop_deviation};
