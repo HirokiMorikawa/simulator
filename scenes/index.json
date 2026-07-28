@@ -173,6 +173,16 @@
       "domains": [
         "astro"
       ]
+    },
+    {
+      "file": "d19-electric-workbench.json",
+      "demo": "D19",
+      "title": "電気工作台",
+      "description": "分圧回路+コンデンサ放電+スイッチ付きLEDを1つの回路に自由配線。Scene Viewには何も描かれないのでProbeグラフ(節点電圧・電流・ジュール熱による温度上昇)で観測する(D19)。",
+      "domains": [
+        "circuit",
+        "thermal"
+      ]
     }
   ]
 }

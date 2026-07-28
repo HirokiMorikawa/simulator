@@ -636,6 +636,86 @@ impl WasmWorld {
         self.imported_probe_handles.len()
     }
 
+    /// 現在の回路に実際に配線されている素子の本数(**増分G2で追加**)。
+    /// `circuit_element_label_at`の`index`引数の有効範囲は
+    /// `0..circuit_element_count()`。回路ドメインが無効なら0。
+    ///
+    /// **追加した理由**: フロントエンドのCircuitタブは固定デモ回路の図を
+    /// ハードコードで描いており、シーンギャラリーから別の回路を読み込んでも
+    /// **その図が残って実際とは違う値を表示し続けていた**(D19を読み込んでも
+    /// 「10V 電源 / 100Ω / 200Ω」のまま。実際は9V / 1kΩ / 2kΩ + コンデンサ +
+    /// スイッチ + ダイオード)。実際の素子を列挙する手段が無かったのが原因。
+    pub fn circuit_element_count(&self) -> usize {
+        self.inner.circuit().map_or(0, |c| {
+            c.voltage_sources().len()
+                + c.resistors().len()
+                + c.capacitors().len()
+                + c.inductors().len()
+                + c.diodes().len()
+                + c.switches().len()
+        })
+    }
+
+    /// `index`番目の回路素子の人間可読ラベル。並び順は
+    /// 電圧源→抵抗→コンデンサ→インダクタ→ダイオード→スイッチ
+    /// (`circuit_element_count`の加算順と同じ)。スイッチは現在の開閉状態も出す
+    /// ——`Command::SetSwitch`で実行中に変わる唯一の素子であり、
+    /// 表示が実態と乖離しないことがこのAPIを足した動機そのものだから。
+    pub fn circuit_element_label_at(&self, index: usize) -> Result<String, JsValue> {
+        let circuit = self.inner.circuit().ok_or_else(|| {
+            JsValue::from_str("circuit domain is not enabled in the current world")
+        })?;
+        let node = |n: usize| {
+            if n == sim_em::GROUND {
+                "GND".to_string()
+            } else {
+                format!("N{n}")
+            }
+        };
+        let mut i = index;
+        for (k, (a, b, v)) in circuit.voltage_sources().iter().enumerate() {
+            if i == 0 {
+                return Ok(format!("V{k}: {} → {} {v} V", node(*b), node(*a)));
+            }
+            i -= 1;
+        }
+        for (a, b, r) in circuit.resistors() {
+            if i == 0 {
+                return Ok(format!("R: {} – {} {r} Ω", node(*a), node(*b)));
+            }
+            i -= 1;
+        }
+        for (a, b, c) in circuit.capacitors() {
+            if i == 0 {
+                return Ok(format!("C: {} – {} {c} F", node(*a), node(*b)));
+            }
+            i -= 1;
+        }
+        for (a, b, l) in circuit.inductors() {
+            if i == 0 {
+                return Ok(format!("L: {} – {} {l} H", node(*a), node(*b)));
+            }
+            i -= 1;
+        }
+        for (a, k, _, _) in circuit.diodes() {
+            if i == 0 {
+                return Ok(format!("D: {} → {}", node(*a), node(*k)));
+            }
+            i -= 1;
+        }
+        for (k, (a, b, closed)) in circuit.switches().iter().enumerate() {
+            if i == 0 {
+                let state = if *closed { "閉" } else { "開" };
+                return Ok(format!("SW{k}: {} – {} ({state})", node(*a), node(*b)));
+            }
+            i -= 1;
+        }
+        Err(JsValue::from_str(&format!(
+            "circuit element index {index} out of range (circuit_element_count={})",
+            self.circuit_element_count()
+        )))
+    }
+
     /// `index`番目のインポート済みプローブの人間可読ラベル(Probe Graphsパネルの
     /// 凡例表示用)。`probe_target_label`のdoc参照。
     pub fn imported_probe_label_at(&self, index: usize) -> Result<String, JsValue> {
@@ -692,6 +772,7 @@ impl WasmWorld {
             ProbeTarget::AstroVelX(idx) => format!("AstroVelX[{idx}]"),
             ProbeTarget::AstroVelY(idx) => format!("AstroVelY[{idx}]"),
             ProbeTarget::CircuitCurrent(idx) => format!("CircuitCurrent[{idx}]"),
+            ProbeTarget::CircuitNodeVoltage(node) => format!("CircuitV[{node}]"),
             ProbeTarget::LedgerKinetic => "LedgerKinetic".to_string(),
             ProbeTarget::StateHashDigest => "StateHashDigest".to_string(),
         }

@@ -224,6 +224,11 @@ pub enum ProbeTarget {
     AstroVelY(usize),
     /// 回路の電圧源index(モジュールdoc「縮約実装の理由」参照)。
     CircuitCurrent(usize),
+    /// 回路のノードindex(`circuit_probe(node)`と同じ量をプローブ履歴に積む、
+    /// **増分G2で追加**)。D19(電気工作台)は分圧比・RC放電の指数減衰・LED分岐の
+    /// スイッチ開閉という**3つとも節点電圧で観測する現象**であり、電流だけを見る
+    /// `CircuitCurrent`では合格基準(E5/E3)のどれも再構成できなかった。
+    CircuitNodeVoltage(usize),
     LedgerKinetic,
     /// `state_hash()`をグラフ表示用に`f64`へ変換した値(厳密な数値変換ではなく、
     /// UI上でハッシュの変化を視覚化するためのダイジェスト、設計§2.1「UIのグラフ」)。
@@ -563,6 +568,7 @@ impl World {
             ProbeTarget::CircuitCurrent(idx) => {
                 self.circuit.as_ref().map_or(0.0, |c| c.source_current(idx))
             }
+            ProbeTarget::CircuitNodeVoltage(idx) => self.circuit_probe(idx).unwrap_or(0.0),
             ProbeTarget::LedgerKinetic => self.mechanics.total_energy().kinetic,
             ProbeTarget::StateHashDigest => self.state_hash() as f64,
         }

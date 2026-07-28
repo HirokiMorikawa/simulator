@@ -211,6 +211,49 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
   expect(errors).toEqual([]);
 });
 
+test("D19(電気工作台)を読み込むと Circuit タブと Hierarchy が実際の素子を出す(増分G2)", async ({
+  page,
+}) => {
+  // **増分G2で修正した表示バグの回帰テスト**: Circuit タブは固定デモ回路の図
+  // (10V / 100Ω / 200Ω)をハードコードで描いており、ギャラリーから別の回路を
+  // 読み込んでも**その図が残って実際とは違う値を表示し続けていた**。
+  // 「無効です」という注記は出ていたので既存テストは通ってしまっていた——
+  // **数字が実態と一致しているか**を見るのがこのテストの要点。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  await page.click('.project-tab[data-tab="scenes"]');
+  await page.click('.scene-gallery-list button[data-scene-file="d19-electric-workbench.json"]');
+  await page.click('.project-tab[data-tab="scenes"]'); // ドロワーを閉じる
+
+  // HUD は分圧点(node2)の電圧を出す。E5 の解析解は 9V * 2k/(1k+2k) = 6.000V。
+  // **読み込み直後は 0.000 V**——回路は`step()`で初めて解かれるため、1step進める。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play"); // 一時停止(`setMode`が既に再生を始めている)
+  await page.click("#btn-step");
+  await expect(page.locator("#hud")).toContainText("circuit V = 6.000 V");
+
+  // Hierarchy の Circuits サブツリーに実際の素子が並ぶ(葉ノードで検証する
+  // ——"Circuits" の li は入れ子の ul を含むため exact 一致しない)。
+  const hierarchy = page.locator("#hierarchy-tree");
+  await expect(hierarchy.getByText("V0: GND → N1 9 V", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("R: N1 – N2 1000 Ω", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("C: N3 – GND 0.001 F", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("SW0: N1 – N4 (閉)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("D: N4 → GND", { exact: true })).toBeVisible();
+
+  // Circuit タブ本体も同じ実素子を出し、**固定デモ回路の嘘の数字は消えている**。
+  await page.click('.project-tab[data-tab="circuit"]');
+  const topology = page.locator("#project-body .circuit-topology");
+  await expect(topology).toContainText("回路の素子(実際に配線されているもの、7件)");
+  await expect(topology).toContainText("R: N1 – N2 1000 Ω");
+  await expect(topology).not.toContainText("100Ω");
+  await expect(topology).not.toContainText("10V 電源");
+
+  expect(errors).toEqual([]);
+});
+
 test("Project ドロワーがタブクリックで開き、中身が画面内に入る(増分E3)", async ({ page }) => {
   // **増分E3で修正した重大なUIバグの回帰テスト**: 既定のグリッド行はタブバーの
   // 高さしか無く、ドロワー本体(Scenes/Materials/... の中身)は画面外へ押し出されて

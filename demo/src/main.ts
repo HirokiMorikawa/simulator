@@ -128,6 +128,12 @@ type MaterialsRef = { current: (() => MaterialProperties[]) | null };
 // 後から配線する。
 type CircuitRef = { current: (() => number) | null };
 
+// Circuitタブが「実際に配線されている素子」を読むためのref(**増分G2で追加**)。
+// `CircuitRef`(分圧点の電圧を1つ返す)と同じ理由で、パネルの構築が`world`の
+// 生成より先に走りうるためrefを介する。中身は`circuit_element_label_at`を
+// 全素子ぶん呼んだ結果。
+type CircuitElementsRef = { current: (() => string[]) | null };
+
 // Projectドロワー Scenes タブ(設計docs/23-frontend/01-editor.md §1.6「Scenes:
 // シーンJSON…Export/Import」)。Exportは現在のボディ一覧を(Inspector表示と同じ
 // 人間可読なJSONへ)書き出すのみで、`sim_world::Scenario`スキーマとは形式が違う
@@ -471,6 +477,27 @@ function setUpHierarchy(
     bodies.appendChild(fluidItem);
   }
 
+  // Circuits(設計§1.1「シーングラフツリー(...Circuits)」、**増分G2で追加**)。
+  // 増分G2で`sim-em::Circuit`へ足した素子アクセサ(それまで全フィールドが
+  // privateで、載っている素子を外から数える手段が無かった)を`sim-wasm`の
+  // `circuit_element_count`/`circuit_element_label_at`経由で列挙する。
+  // **縮約**: Probesと同じ理由で個々の素子は選択対象にしない
+  // (Inspectorに回路素子用のComponent表示が無い)。
+  const circuitElementCount = world.circuit_element_count();
+  if (circuitElementCount > 0) {
+    const circuitItem = document.createElement("li");
+    circuitItem.textContent = "Circuits";
+    const circuitList = document.createElement("ul");
+    circuitList.className = "tree-nested";
+    for (let i = 0; i < circuitElementCount; i++) {
+      const item = document.createElement("li");
+      item.textContent = world.circuit_element_label_at(i);
+      circuitList.appendChild(item);
+    }
+    circuitItem.appendChild(circuitList);
+    bodies.appendChild(circuitItem);
+  }
+
   // Probes(設計§1.1「シーングラフツリー(...Probes)」、増分E2で追加)。
   // シーンJSONの`probes`セクションが宣言したプローブを、増分B1で追加した
   // `imported_probe_count`/`imported_probe_label_at`(`ProbeTarget`の11変種を
@@ -634,6 +661,7 @@ function setUpProjectDrawer(
   circuitFreeWiringState: CircuitFreeWiringState,
   prefabRef: PrefabRef,
   sceneGalleryRef: SceneGalleryRef,
+  circuitElementsRef: CircuitElementsRef,
 ) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
@@ -746,19 +774,31 @@ function setUpProjectDrawer(
     let circuitFreeWiringRefresh: (() => void) | null = null;
     const topology = document.createElement("pre");
     topology.className = "circuit-topology";
-    topology.textContent = [
-      "分圧回路(固定トポロジー):",
-      "",
-      "  Node1 (10V 電源) --[100Ω]-- Node2 --[200Ω]-- GND",
-      "                                  |",
-      "                              [スイッチ]",
-      "                                  |",
-      "                                 GND",
-      "",
-      circuitFreeWiringState.active
-        ? "(自由配線回路への置き換え、またはシーンギャラリーからの読み込みにより、このデモ回路・チェックボックスは無効です)"
-        : "スイッチの開閉は画面上部の「回路スイッチ(閉)」チェックボックスで操作する。",
-    ].join("\n");
+    // **増分G2で修正した表示バグ**: ここは以前、固定デモ回路の図
+    // (`Node1 (10V 電源) --[100Ω]-- Node2 --[200Ω]-- GND`)を無条件に
+    // ハードコードで描いていた。シーンギャラリーから別の回路を読み込んでも図は
+    // そのまま残り、「無効です」という注記は出るものの**数字自体が実態と違う嘘の
+    // まま**だった(D19を読み込むと実際は9V / 1kΩ / 2kΩ + コンデンサ + スイッチ +
+    // ダイオードなのに、10V / 100Ω / 200Ω と表示され続ける)。sim-wasm へ
+    // `circuit_element_count`/`circuit_element_label_at` を足し、
+    // **実際に載っている素子を列挙して描く**ようにした。
+    const elements = circuitElementsRef.current ? circuitElementsRef.current() : [];
+    if (elements.length > 0) {
+      const lines: string[] = [
+        `回路の素子(実際に配線されているもの、${elements.length}件):`,
+        "",
+      ];
+      for (const label of elements) lines.push(`  ${label}`);
+      lines.push("");
+      lines.push(
+        circuitFreeWiringState.active
+          ? "(この一覧は現在のワールドの回路そのもの。画面上部の「回路スイッチ(閉)」チェックボックスは固定デモ回路専用のため無効です)"
+          : "スイッチの開閉は画面上部の「回路スイッチ(閉)」チェックボックスで操作する。",
+      );
+      topology.textContent = lines.join("\n");
+    } else {
+      topology.textContent = "このシーンには回路ドメインがありません。";
+    }
     body.appendChild(topology);
 
     const voltageLine = document.createElement("div");
@@ -1220,6 +1260,7 @@ async function setUpSceneView(
   prefabRef: PrefabRef,
   sceneGalleryRef: SceneGalleryRef,
   selectBodyRef: SelectBodyRef,
+  circuitElementsRef: CircuitElementsRef,
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -1244,6 +1285,15 @@ async function setUpSceneView(
       return { name, density, friction, restitution, specificHeat, conductivity };
     });
   circuitRef.current = () => world.circuit_divider_voltage();
+  // Circuitタブ・Hierarchyの「Circuits」が実際の素子を読むための配線
+  // (**増分G2**、`CircuitElementsRef`のdoc参照)。`world`はギャラリーからの
+  // シーン読み込みで再束縛されるため、クロージャで毎回現在のものを見る。
+  circuitElementsRef.current = () => {
+    const count = world.circuit_element_count();
+    const labels: string[] = [];
+    for (let i = 0; i < count; i += 1) labels.push(world.circuit_element_label_at(i));
+    return labels;
+  };
   sceneExportRef.current = () => {
     const count = world.body_count();
     const bodies: SceneBodyExport[] = [];
@@ -2804,6 +2854,7 @@ function main() {
   const circuitFreeWiringState: CircuitFreeWiringState = { active: false };
   const prefabRef: PrefabRef = { current: null };
   const sceneGalleryRef: SceneGalleryRef = { current: null };
+  const circuitElementsRef: CircuitElementsRef = { current: null };
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
@@ -2814,6 +2865,7 @@ function main() {
     circuitFreeWiringState,
     prefabRef,
     sceneGalleryRef,
+    circuitElementsRef,
   );
   setUpSceneView(
     updateProbeGraph,
@@ -2829,6 +2881,7 @@ function main() {
     prefabRef,
     sceneGalleryRef,
     selectBodyRef,
+    circuitElementsRef,
   ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;

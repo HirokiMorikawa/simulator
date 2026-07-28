@@ -113,6 +113,50 @@ impl Circuit {
         self.switches[index].2 = closed;
     }
 
+    /// 実際に配線されている素子を読み出すためのアクセサ群(**増分G2で追加**)。
+    ///
+    /// **追加した理由**: フロントエンドのCircuitタブが固定デモ回路の図
+    /// (`Node1 (10V 電源) --[100Ω]-- Node2 --[200Ω]-- GND`)をハードコードで
+    /// 描いており、シーンギャラリーから別の回路を読み込んでも**その図がそのまま
+    /// 残って実際とは違う値を表示していた**。「無効です」という注記は出るものの、
+    /// 数字自体は嘘のままだった。実際に載っている素子を列挙できる手段が無いこと
+    /// が原因なので、ここに最小限の読み出しを足す。設計
+    /// docs/18-frontend/02-panels.md のHierarchy「Circuits」サブツリーも
+    /// 同じAPIを必要とする。
+    pub fn num_nodes(&self) -> usize {
+        self.num_nodes
+    }
+
+    /// `(a, b, resistance)`。
+    pub fn resistors(&self) -> &[(usize, usize, f64)] {
+        &self.resistors
+    }
+
+    /// `(a, b, capacitance)`。
+    pub fn capacitors(&self) -> &[(usize, usize, f64)] {
+        &self.capacitors
+    }
+
+    /// `(a, b, inductance)`。
+    pub fn inductors(&self) -> &[(usize, usize, f64)] {
+        &self.inductors
+    }
+
+    /// `(a, b, voltage)`。インデックスが`source_current`の引数と対応する。
+    pub fn voltage_sources(&self) -> &[(usize, usize, f64)] {
+        &self.voltage_sources
+    }
+
+    /// `(anode, cathode, saturation_current, n_vt)`。
+    pub fn diodes(&self) -> &[(usize, usize, f64, f64)] {
+        &self.diodes
+    }
+
+    /// `(a, b, closed)`。インデックスが`set_switch_closed`の引数と対応する。
+    pub fn switches(&self) -> &[(usize, usize, bool)] {
+        &self.switches
+    }
+
     /// `node`が現在の回路のノード数を超える場合は0を返す(パニックしない)。
     ///
     /// **修正の経緯(シーンギャラリー増分B2で発見)**: 以前は

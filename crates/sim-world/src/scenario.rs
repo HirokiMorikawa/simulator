@@ -261,6 +261,13 @@ pub enum ProbeJson {
     /// 判定に使う)。
     AstroVelX(usize),
     AstroVelY(usize),
+    /// 回路の節点電圧(`circuit.num_nodes`の範囲のインデックス、0=接地。
+    /// **増分G2で追加** — D19の合格基準 E5(分圧)・E3(RC放電)・スイッチによる
+    /// LED分岐の開閉はいずれも節点電圧で観測する現象で、既存の`CircuitCurrent`
+    /// (電圧源の電流)では再構成できない)。
+    CircuitNodeVoltage(usize),
+    /// 回路の電圧源index(`circuit.voltage_sources`配列のインデックス)を流れる電流。
+    CircuitCurrent(usize),
 }
 
 /// `Scenario::joints`の1件。設計の例示JSONには無い項目(モジュールdoc
@@ -309,6 +316,10 @@ pub enum CouplingJson {
         plane_normal: [f64; 3],
         plane_d: f64,
     },
+    /// D19(電気工作台)向け(`sim_coupling::JouleHeat`、**増分G2で追加**)。
+    /// 回路の抵抗損失を熱ノードへ注入する。`thermal_node`は`thermal.nodes`配列の
+    /// インデックス(`BrownianForce`と同じ縮約)。
+    JouleHeat { thermal_node: usize },
     /// D25(ブラウン運動)向け(`sim_coupling::BrownianForce`)。`thermal_node`は
     /// `thermal.nodes`配列のインデックス(`ProbeJson::NodeTemp`と同じ縮約、
     /// 名前解決を経ない)。
@@ -359,6 +370,62 @@ pub struct CircuitScenarioJson {
     pub resistors: Vec<ResistorJson>,
     #[serde(default)]
     pub voltage_sources: Vec<VoltageSourceJson>,
+    /// **増分G2で追加**。D19(電気工作台)の合格基準は E5(分圧)・E3(RC放電)・
+    /// スイッチによるLED分岐の開閉であり、抵抗と電圧源だけでは**放電もスイッチも
+    /// ダイオードも書けなかった**。`sim_em::Circuit`側には
+    /// `add_capacitor`/`add_inductor`/`add_diode`/`add_switch`が揃っているので、
+    /// シーンJSON側が追いついていなかっただけである。
+    #[serde(default)]
+    pub capacitors: Vec<CapacitorJson>,
+    #[serde(default)]
+    pub inductors: Vec<InductorJson>,
+    #[serde(default)]
+    pub diodes: Vec<DiodeJson>,
+    /// 登録順が`Command::SetSwitch`の`switch_index`になる
+    /// (`voltage_sources`と`couplings`の関係と同じ縮約)。
+    #[serde(default)]
+    pub switches: Vec<SwitchJson>,
+}
+
+/// `CircuitScenarioJson::capacitors`の1件(`sim_em::Circuit::add_capacitor`)。
+/// `initial_voltage`は「予め充電された状態」を書くために要る——D19のRC放電は
+/// これが無いと初期電圧0から始まってしまい、指数減衰そのものが起きない。
+#[derive(Deserialize)]
+pub struct CapacitorJson {
+    pub a: usize,
+    pub b: usize,
+    pub capacitance: f64,
+    #[serde(default)]
+    pub initial_voltage: f64,
+}
+
+/// `CircuitScenarioJson::inductors`の1件(`sim_em::Circuit::add_inductor`)。
+#[derive(Deserialize)]
+pub struct InductorJson {
+    pub a: usize,
+    pub b: usize,
+    pub inductance: f64,
+    #[serde(default)]
+    pub initial_current: f64,
+}
+
+/// `CircuitScenarioJson::diodes`の1件(`sim_em::Circuit::add_diode`)。
+/// `saturation_current`/`n_vt`はShockleyダイオード式のパラメータ。
+#[derive(Deserialize)]
+pub struct DiodeJson {
+    pub anode: usize,
+    pub cathode: usize,
+    pub saturation_current: f64,
+    pub n_vt: f64,
+}
+
+/// `CircuitScenarioJson::switches`の1件(`sim_em::Circuit::add_switch`)。
+#[derive(Deserialize)]
+pub struct SwitchJson {
+    pub a: usize,
+    pub b: usize,
+    #[serde(default)]
+    pub closed: bool,
 }
 
 /// `CircuitScenarioJson::resistors`の1件。
@@ -581,6 +648,20 @@ impl World {
             for v in &circuit_json.voltage_sources {
                 circuit.add_voltage_source(v.a, v.b, v.voltage);
             }
+            for c in &circuit_json.capacitors {
+                circuit.add_capacitor(c.a, c.b, c.capacitance, c.initial_voltage);
+            }
+            for l in &circuit_json.inductors {
+                circuit.add_inductor(l.a, l.b, l.inductance, l.initial_current);
+            }
+            for d in &circuit_json.diodes {
+                circuit.add_diode(d.anode, d.cathode, d.saturation_current, d.n_vt);
+            }
+            for s in &circuit_json.switches {
+                // 返り値の`switch_index`は登録順に0,1,2...なので捨ててよい
+                // (`Command::SetSwitch`が参照するのはこの順序、`SwitchJson`のdoc参照)。
+                circuit.add_switch(s.a, s.b, s.closed);
+            }
             world.enable_circuit(circuit);
         }
 
@@ -689,6 +770,11 @@ impl World {
                         plane_d: *plane_d,
                     }));
                 }
+                CouplingJson::JouleHeat { thermal_node } => {
+                    world.add_coupling(Box::new(sim_coupling::JouleHeat {
+                        thermal_node: *thermal_node,
+                    }));
+                }
                 CouplingJson::BrownianForce {
                     body,
                     radius,
@@ -769,6 +855,8 @@ impl World {
                 ProbeJson::AstroPosY(index) => ProbeTarget::AstroPosY(*index),
                 ProbeJson::AstroVelX(index) => ProbeTarget::AstroVelX(*index),
                 ProbeJson::AstroVelY(index) => ProbeTarget::AstroVelY(*index),
+                ProbeJson::CircuitNodeVoltage(node) => ProbeTarget::CircuitNodeVoltage(*node),
+                ProbeJson::CircuitCurrent(index) => ProbeTarget::CircuitCurrent(*index),
             };
             handles.push(self.add_probe(target, DEFAULT_PROBE_CAPACITY));
         }
@@ -1873,6 +1961,95 @@ mod tests {
             vel_err < 0.01,
             "A3 + Kepler's third law: velocity should also return to its initial value: \
              vel_err={vel_err:.4} final_vx={final_vx} final_vy={final_vy}"
+        );
+    }
+
+    /// **増分G2** D19(電気工作台): 分圧回路 + コンデンサ放電回路 + スイッチ付き
+    /// LED回路を単一`Circuit`へ自由配線したシーンを`scenes/d19-electric-workbench.json`
+    /// 経由で検証する。`demos.rs`の
+    /// `d19_electric_workbench_matches_divider_and_rc_discharge_and_switch_controls_led_and_joule_heats_node`
+    /// と同じ回路構成を、Rustコードではなくシーンファイルとして組む。
+    ///
+    /// **本増分で追加したスキーマ拡張が全部ここで効く**: `capacitors`(充電済み
+    /// 初期電圧つき)・`switches`・`diodes`・`couplings[].joule_heat`・
+    /// `probes[].circuit_node_voltage`。これまで`CircuitScenarioJson`は抵抗と
+    /// 電圧源しか書けず、D19の合格基準3つ(E5分圧・E3放電・スイッチ開閉)のうち
+    /// 分圧しか表現できなかった。
+    #[test]
+    fn run_headless_scenario_electric_workbench_matches_divider_and_rc_discharge_and_switch() {
+        let (v0, r1, r2, r3, c): (f64, f64, f64, f64, f64) = (9.0, 1000.0, 2000.0, 500.0, 1.0e-3);
+        let dt: f64 = 0.008333333; // JSON側の`world.dt`。
+        let tau = r3 * c;
+
+        let json = include_str!("../../../scenes/d19-electric-workbench.json");
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let mut world = World::from_scenario(&scenario).expect("valid world");
+        world.step();
+
+        // **E5(分圧、機械精度)**: 理想電圧源からの純抵抗分圧なので、節点2は
+        // `v0*r2/(r1+r2)` に厳密に一致する(実測 5.999999999999999)。
+        let expected_divider = v0 * r2 / (r1 + r2);
+        let measured_divider = world.circuit_probe(2).expect("回路ドメインが有効");
+        assert!(
+            (measured_divider - expected_divider).abs() < 1e-9,
+            "E5 分圧: measured={measured_divider} expected={expected_divider}"
+        );
+
+        // スイッチが閉じている間はLED(ダイオード)分岐が順方向バイアスされ、
+        // 節点4が電源電圧付近まで持ち上がる(実測 8.999999978)。
+        let led_on = world.circuit_probe(4).expect("回路ドメインが有効");
+        assert!(
+            led_on > 0.1,
+            "閉じたスイッチはLED分岐を順方向バイアスすべき: led_on={led_on}"
+        );
+
+        // `Command::SetSwitch`でスイッチを開く。`switches`配列の登録順が
+        // `switch_index`になる(`SwitchJson`のdoc参照)ので、唯一のスイッチは0番。
+        world.push_command(crate::Command::SetSwitch {
+            switch_index: 0,
+            closed: false,
+        });
+        for _ in 0..5 {
+            world.step();
+        }
+        let led_off = world.circuit_probe(4).expect("回路ドメインが有効");
+        assert!(
+            led_off < led_on * 0.5,
+            "開いたスイッチはLED分岐の電圧を大幅に下げるべき(スイッチの開放抵抗は\
+             有限なので完全な0Vにはならない、実測 0.2347): led_on={led_on} led_off={led_off}"
+        );
+
+        // **E3(放電形、rel<1%)**: コンデンサは初期電圧v0から R3 経由で
+        // `V(t)=V0*exp(-t/(R3*C))` で減衰する。実測の相対誤差は
+        // 1step後 1.4e-4、6step後 8.2e-4(後方Euler相当の離散化誤差が時間とともに
+        // 蓄積する向き)。
+        let steps_so_far = 6.0; // 上の world.step() 呼び出し回数(1 + 5)
+        let expected_v3 = v0 * (-(steps_so_far * dt) / tau).exp();
+        let measured_v3 = world.circuit_probe(3).expect("回路ドメインが有効");
+        let rel_err = (measured_v3 - expected_v3).abs() / expected_v3;
+        assert!(
+            rel_err < 0.01,
+            "E3 放電: measured={measured_v3} expected={expected_v3} rel_err={rel_err:e}"
+        );
+
+        // **JouleHeat結合**: 回路の抵抗損失が`couplings[].joule_heat`経由で
+        // 熱ノードへ注入され、温度が初期値293.15Kから上昇する
+        // (実測 293.1500085764805 —— 熱容量1000 J/K に対し6stepぶんなので微小)。
+        let temp = world.thermal().expect("熱ドメインが有効").nodes[0].temperature;
+        assert!(
+            temp > 293.15,
+            "ジュール熱が熱ノードへ注入されるべき: temp={temp}"
+        );
+
+        // プローブ経由でも同じ値が読めること(ギャラリーのProbe Graphsが
+        // 見せているのはこちらの経路)。
+        let result = run_headless_scenario(json, 6).expect("valid scenario JSON");
+        assert_eq!(result.probe_histories.len(), 5);
+        let probed_v3 = *result.probe_histories[1].last().expect("履歴が空でない");
+        assert!(
+            (probed_v3 - measured_v3).abs() < 1e-12,
+            "circuit_node_voltageプローブは`circuit_probe`と同じ値を積むべき: \
+             probed={probed_v3} direct={measured_v3}"
         );
     }
 

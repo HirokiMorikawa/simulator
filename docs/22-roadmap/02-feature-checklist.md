@@ -35,7 +35,7 @@
 - フロントエンドは6パネルドッキングレイアウト(Scene View/Hierarchy/Inspector/
   Probe Graphs/Timeline/Console)+ Project ドロワー各タブ + シーンギャラリー
   (D1/D2/D3/D4/D5(静止+滑走)/D6(静止+振動)/D7(高Re+低Re)/D8/D9/D11/D12/
-  D21/D26/D34/D35/D36の19シーンをJSONアセット化、`loadScene`で切替可能)まで
+  D19/D21/D26/D34/D35/D36の20シーンをJSONアセット化、`loadScene`で切替可能)まで
   実装済み。D9/D34/D35/D36は力学剛体を1つも持たないギャラリーシーン(熱/天体
   ドメインのみ)であり、これに伴い`sim-wasm`/`main.ts`双方の「ボディ0個」対応
   (増分B3、詳細は§7 D9の行)を実装済み。**増分G1**でD8(球50個の散乱)・
@@ -43,8 +43,8 @@
   新設した(それまで`Scenario`にはボールジョイントを張る手段が無く、ラグドールを
   静的シーンとして表現できなかった)。
 
-**カウント(本増分後の実測値)**: チェックボックス総数 **262** / 済 **224** / 未 **38**
-(完了率 85.5%)。節別内訳:
+**カウント(本増分後の実測値)**: チェックボックス総数 **262** / 済 **226** / 未 **36**
+(完了率 86.3%)。節別内訳:
 
 | 節 | 総数 | 済 | 未 | 未チェック項目の性質 |
 |---|---:|---:|---:|---|
@@ -52,10 +52,10 @@
 | §3 Phase B | — | — | 0 | **並列リダクション決定性(C-1)は増分F1で「導入しない」判断を根拠付きで記録して完了** |
 | §4 Phase C | — | — | 3 | 結合行列(pre/post 2相分離が残る)・World API(§2の他項目が残る)・全デモD1–D39合格(§7参照の重複行)。**性能ベンチ回帰ゲート(D1)・couplings排他検査/filter引数(F1)は完了** |
 | §5 Phase D | — | — | 2 | 分光レンダリング本体(hero wavelength法)・物理カメラ/トーンマッピング残部(分光→CIE→sRGB、ACES filmic)。**デモD40–D43合格は増分C6で完了** |
-| §6 フロントエンド | — | — | 8 | Console連動、Inspector Component、Hierarchy の Circuits、Toolbarシーン選択等。**Probe対数軸/CSV(E1)・HierarchyのProbes(E2)・レイアウト4種+ドロワー開閉(E3)は完了** |
-| §7 デモ合格管理表 | — | — | 23 | うち19件が「ヘッドレスGreen、目視チェック保留」で同一理由滞留(増分B2でD1/D2/D3/D7/D21/D26、増分B3でD9/D34/D35、増分C6でD40/D41/D42/D43、**増分G1でD8/D12/D36**を目視チェック完了)。D24は新規物理待ちでスコープ外明記 |
+| §6 フロントエンド | — | — | 7 | Console連動、Inspector Component、Toolbarシーン選択等。**Probe対数軸/CSV(E1)・HierarchyのProbes(E2)・レイアウト4種+ドロワー開閉(E3)・Hierarchyの Circuits(G2、回路素子の列挙APIを新設)は完了** |
+| §7 デモ合格管理表 | — | — | 22 | うち18件が「ヘッドレスGreen、目視チェック保留」で同一理由滞留(増分B2でD1/D2/D3/D7/D21/D26、増分B3でD9/D34/D35、増分C6でD40/D41/D42/D43、増分G1でD8/D12/D36、**増分G2でD19**を目視チェック完了)。D24は新規物理待ちでスコープ外明記 |
 | §8 解析解テストGreen管理表 | — | — | 1 | R3(分光レンダリング本体・コースティクス未接続) |
-| 合計 | 262 | 224 | 38 | |
+| 合計 | 262 | 226 | 36 | |
 
 (§2の「8」は本表内の主要チェック項目の概数——型スケルトン7行+テスト記述群の代表値であり、
 厳密な小計はセクション本文参照。§3–§8列の「総数」「済」はここでは示さず未チェック件数のみ
@@ -72,7 +72,13 @@
 | E | フロントエンド残り(Probe対数軸/CSV、Consoleオブジェクト連動、Inspector Component、Hierarchy未接続ドメイン等) | §6 |
 | F | 残りの設計項目(シーンJSON couplings自動解決+排他結合検査接続、World APIのfilter引数、並列リダクション決定性C-1) | §3・§4 |
 
-**次の一手**: **増分G1(§7シーン書き起こし: D8/D12/D36)完了** —— 3シーンを
+**次の一手**: **増分G2(D19 電気工作台 + 回路スキーマ拡張)完了** —— `capacitors`/
+`inductors`/`diodes`/`switches`/`couplings[].joule_heat`/
+`probes[].circuit_node_voltage` をシーンJSONへ追加し、D19をギャラリーへ出した。
+あわせて**Circuitタブが固定デモ回路の嘘の数字を表示し続けていた表示バグ**を
+目視確認で発見し、`sim_em::Circuit`の素子アクセサ新設 → Circuitタブ/Hierarchyの
+Circuitsサブツリーを実回路から描く形に直した(§6の1件も完了)。
+以前の記録: **増分G1(§7シーン書き起こし: D8/D12/D36)完了** —— 3シーンを
 `scenes/`へ追加し、`JointJson::Ball`を新設、Rust側に解析解突き合わせテスト3本と
 Playwrightテスト1本を追加した上で、ブラウザで実際に読み込んで目視確認した。
 残り38件の内訳は上表のとおり。大きい塊は§7の19件で、その大半は
@@ -2024,7 +2030,7 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       現時点は概要表示のみの縮約実装)。Playwrightで、2回スポーンすると
       Hierarchyが「Fluids (1塊, 27粒子)」→「Fluids (2塊, 54粒子)」と正しく
       更新され、Scene View上でも2つの水塊が別々の位置に落下することを確認した)
-- [ ] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
+- [x] Hierarchy: シーングラフツリー(Bodies/Joints/Circuits/Fluids/Probes/Frames)、双方向選択
       (Bodies配下は`sim-wasm`に新設した`body_count`/`body_label_at`経由で実際の
       World状態(床の静的平面+箱+スポーンしたボディ)を列挙・クリックでInspector
       及びScene Viewピックと双方向に連動(共通の`selectBody`経由)。Bodiesの
@@ -2046,12 +2052,29 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       **縮約**: プローブは選択対象にしない(Inspectorに専用のComponent表示が
       無いためクリックしても見せるものが無い。現在値はProbe Graphsパネルの凡例が
       既に出している)。
-      **Circuitsは意図的に未対応のまま残す**: `sim_em::Circuit`は素子を配列で
-      持つがノード/素子を個別に列挙する公開APIが無く、ツリーに並べるには
-      `sim-wasm`側へ列挙APIを新設する必要がある。一方でCircuitタブの自由配線
-      エディタが既に素子一覧と各ノード電圧の表を出しており、ツリーへ重複表示する
-      実利が薄いと判断した(必要になった時点で列挙APIごと追加する)。
-      この1点が残るためチェックボックスは未チェックのままとする)
+      **増分G2でCircuitsサブツリーを追加し、本項目を完了とした**。
+      それまでは「`sim_em::Circuit`に素子の列挙APIが無く、Circuitタブの自由配線
+      エディタが既に素子一覧を出しているので重複表示の実利が薄い」として
+      未対応にしていたが、**その前提が誤っていたことがD19の目視確認で判明した**
+      ——Circuitタブが出していた素子一覧は**自由配線エディタでこのセッション中に
+      組んだ素子だけ**であり、シーンギャラリーから読み込んだ回路は1件も出ない。
+      それどころかタブ冒頭の固定デモ回路の図(`Node1 (10V 電源) --[100Ω]--
+      Node2 --[200Ω]-- GND`)がハードコードのまま残り、D19(実際は9V / 1kΩ /
+      2kΩ + コンデンサ + スイッチ + ダイオード)を読み込んでも**実態と違う数字を
+      表示し続けていた**。「無効です」の注記は出るが数字自体が嘘だった。
+      そこで`sim_em::Circuit`へ素子アクセサ(`resistors`/`capacitors`/
+      `inductors`/`voltage_sources`/`diodes`/`switches`/`num_nodes`、それまで
+      全フィールドがprivate)を、`sim-wasm`へ`circuit_element_count`/
+      `circuit_element_label_at`を足し、**Circuitタブの図とHierarchyの
+      Circuitsサブツリーの両方を実際の回路から描く**ようにした。
+      スイッチは`Command::SetSwitch`で実行中に変わる唯一の素子なので開閉状態も
+      ラベルに出す。Playwrightで、D19読み込み後にHierarchyへ
+      `V0: GND → N1 9 V`/`R: N1 – N2 1000 Ω`/`C: N3 – GND 0.001 F`/
+      `SW0: N1 – N4 (閉)`/`D: N4 → GND`が並ぶこと、Circuitタブが
+      「回路の素子(実際に配線されているもの、7件)」を出し**`100Ω`と
+      `10V 電源`をもう含まないこと**を確認した。
+      **縮約**: Probesと同じ理由で個々の素子は選択対象にしない
+      (Inspectorに回路素子用のComponent表示が無い))
 - [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
       (選択中ボディのTransform(Position/Rotation/Velocity)は`sim-wasm`に新設した
       `body_position_at_f32`/`body_rotation_at_f32`/`body_velocity_at_f32`
@@ -2880,16 +2903,41 @@ Phase 2〜3:
 
 Phase 4:
 
-- [ ] D19 電気工作台(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
+- [x] D19 電気工作台(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
       `circuit`ドメイン(既に`World`の常時合成ドメイン)に分圧回路+コンデンサ
       放電回路+スイッチ付きLED回路を単一`Circuit`に自由配線し、E5(分圧、
       機械精度)・E3(放電形、rel<1%)・`Command::SetSwitch`によるLED分岐の
       実行中開閉・`JouleHeat`(Coupling registry経由)による熱ノード温度上昇を
       確認。E4(RLC)は`sim-em`側で既にGreenのため重複実装しない。
-      ワークストリームDの自由配線回路エディタ(上記「回路エディタ」の項目参照)
-      によりフォームベースの目視確認自体は可能になったが、このD19固有の3回路
-      (分圧+放電+LED)構成をエディタから直接組み立てて目視確認する専用の
-      デモシナリオ読み込みはまだ実装していない、チェックは保留のまま)
+      **目視チェック完了(増分G2)**: `scenes/d19-electric-workbench.json`を
+      ギャラリーへ追加し、ブラウザで実際に読み込んで確認した。
+      **本増分で回路まわりのシーンJSONスキーマを大きく広げた**——それまで
+      `CircuitScenarioJson`は抵抗と電圧源しか書けず、D19の合格基準3つのうち
+      分圧しか表現できなかった(`sim_em::Circuit`側には`add_capacitor`/
+      `add_inductor`/`add_diode`/`add_switch`が揃っていて、シーンJSON側だけが
+      追いついていなかった)。追加したのは `capacitors`(充電済み初期電圧つき——
+      これが無いとRC放電が初期電圧0から始まって指数減衰そのものが起きない)・
+      `inductors`・`diodes`・`switches`・`couplings[].joule_heat`・
+      `probes[].circuit_node_voltage`(+`circuit_current`)。
+      `ProbeTarget::CircuitNodeVoltage`は`World`側にも新設した——D19の合格基準は
+      3つとも**節点電圧で観測する現象**で、既存の`CircuitCurrent`(電圧源の電流)
+      では1つも再構成できなかった。
+      ブラウザでの実測: HUDが`circuit V = 6.000 V`(E5の解析解
+      9V×2k/(1k+2k) と一致)、Probe Graphsが CircuitV[2] は 6.00 で一定、
+      CircuitV[3] が 8.85→0.02 の指数減衰(τ=R3·C=0.5 s に対し t=3.04 s なので
+      9·e^-6.08=0.021、グラフの min=0.02 と一致)、CircuitV[4] max=9.00、
+      NodeTemp[0] 293.15。Scene Viewには何も描かれない(回路+熱ドメインのみで
+      力学剛体が0体、D9/D34/D35/D36と同じ既知の限界)。
+      Rust側は`scenario.rs`の
+      `run_headless_scenario_electric_workbench_matches_divider_and_rc_discharge_and_switch`
+      が、E5(分圧、|誤差|<1e-9)・スイッチ開閉によるLED分岐電圧の低下
+      (閉 8.999999978 → 開 0.2347)・E3(6step後の放電電圧が解析解と rel 8.2e-4)・
+      `joule_heat`結合による熱ノードの温度上昇(293.15 → 293.1500086)を確認し、
+      さらに`circuit_node_voltage`プローブが`circuit_probe`と1e-12以内で
+      同じ値を積むことも確認する。
+      **この目視確認で表示バグを1件発見して直した**: Circuitタブが固定デモ回路の
+      図をハードコードで描いており、D19を読み込んでも「10V 電源 / 100Ω / 200Ω」
+      のままだった。詳細と修正内容は§6のHierarchy項目参照)
 - [ ] D20 モーターと発電(合格基準「E6、台帳(効率)」のうち、「手回し発電」部分は
       `crates/sim-world/src/integration_scenarios.rs`の
       `hand_crank_generator_scenario_converts_mechanical_work_to_joule_heat`が既に
