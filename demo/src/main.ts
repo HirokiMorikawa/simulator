@@ -102,6 +102,12 @@ const CONSOLE_LOG_CAPACITY = 200;
 // 直接コールバックを渡せず可変の参照オブジェクト越しに後から配線する。
 type JumpToStepRef = { current: ((step: number) => void) | null };
 
+// Consoleのオブジェクト連動(設計§1.5「クリックでTimeline/Scene Viewと連動」の
+// オブジェクト側、増分E4)。イベント行に埋め込まれた発生源ボディを選択させる。
+// `JumpToStepRef`と全く同じ理由(Consoleは`world`より先に構築される)で、
+// 可変の参照オブジェクト越しに`setUpSceneView`が後から`selectBody`を配線する。
+type SelectBodyRef = { current: ((index: number) => void) | null };
+
 // Projectドロワー Materials タブ(設計§1.6「Materials: MaterialDbプリセット一覧」)向け。
 // Console/jumpToStepRefと同じ理由(worldより先にパネルが構築される)で、
 // 可変の参照オブジェクト越しに`setUpSceneView`がworld生成後にコールバックを配線する。
@@ -264,7 +270,10 @@ function sceneGalleryManifest(): SceneGalleryManifestEntry[] {
   return (JSON.parse(indexJson) as { scenes: SceneGalleryManifestEntry[] }).scenes;
 }
 
-function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => void {
+function setUpConsole(
+  jumpToStepRef: JumpToStepRef,
+  selectBodyRef: SelectBodyRef,
+): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
   let activeLevel = "all";
@@ -290,6 +299,10 @@ function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => voi
     if (step && jumpToStepRef.current) {
       jumpToStepRef.current(Number(step));
     }
+    const bodyIndex = li?.dataset.bodyIndex;
+    if (bodyIndex && selectBodyRef.current) {
+      selectBodyRef.current(Number(bodyIndex));
+    }
   });
 
   const initial = document.createElement("li");
@@ -308,6 +321,19 @@ function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => voi
         li.dataset.step = stepMatch[1];
         li.classList.add("console-entry-clickable");
         li.title = "クリックでその時点のTimelineへジャンプ";
+      }
+      // オブジェクト連動(設計§1.5「クリックで…Scene Viewと連動」、増分E4)。
+      // 接触イベントは `bodies=a,b` を持つ(`sim-wasm::drain_events_text` が
+      // `SourceId` の符号化を復号して出す)。**先頭のボディを選択対象にする**
+      // ——接触は2体の間で起きるが、選択は1体しか持てないため。どちらを選ぶかは
+      // 任意なので、決定的になるよう常に先頭(a)にする(縮約、正直な記録)。
+      const bodiesMatch = message.match(/bodies=(\d+),(\d+)/);
+      if (bodiesMatch) {
+        li.dataset.bodyIndex = bodiesMatch[1];
+        li.classList.add("console-entry-clickable");
+        li.title = stepMatch
+          ? `クリックでその時点のTimelineへジャンプ + ボディ${bodiesMatch[1]}を選択`
+          : `クリックでボディ${bodiesMatch[1]}を選択`;
       }
       li.textContent = `[${level.toUpperCase()}] ${message}`;
       log.appendChild(li);
@@ -1193,6 +1219,7 @@ async function setUpSceneView(
   circuitFreeWiringState: CircuitFreeWiringState,
   prefabRef: PrefabRef,
   sceneGalleryRef: SceneGalleryRef,
+  selectBodyRef: SelectBodyRef,
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -1512,6 +1539,15 @@ async function setUpSceneView(
     highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
   }
   let highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
+  // Consoleのオブジェクト連動(増分E4、`SelectBodyRef`のdoc参照)。イベント行が
+  // 持つ発生源ボディを選択できるようにする。**範囲外は無視する**——イベントは
+  // 過去のstepで発生したものが表示され続けるため、その後シーンギャラリーで
+  // ボディ数の少ないワールドへ差し替えると古いイベントのindexが範囲外になり得る
+  // (`body_position_at_f32`等がErrをthrowしてrender()ループが壊れるのを防ぐ)。
+  selectBodyRef.current = (index: number) => {
+    if (index < 0 || index >= world.body_count()) return;
+    selectBody(index);
+  };
   renderInspectorFor(world, selectedBodyIndex);
 
   // Scene Viewピック(設計docs/23-frontend/01-editor.md §1.2「クリックでbody/
@@ -2757,7 +2793,8 @@ function main() {
   setUpLayoutPresetSwitcher();
   const updateProbeGraph = setUpProbeGraph();
   const jumpToStepRef: JumpToStepRef = { current: null };
-  const appendConsoleEntries = setUpConsole(jumpToStepRef);
+  const selectBodyRef: SelectBodyRef = { current: null };
+  const appendConsoleEntries = setUpConsole(jumpToStepRef, selectBodyRef);
   const materialsRef: MaterialsRef = { current: null };
   const circuitRef: CircuitRef = { current: null };
   const sceneExportRef: SceneExportRef = { current: null };
@@ -2791,6 +2828,7 @@ function main() {
     circuitFreeWiringState,
     prefabRef,
     sceneGalleryRef,
+    selectBodyRef,
   ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;

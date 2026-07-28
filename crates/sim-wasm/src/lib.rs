@@ -1624,10 +1624,28 @@ impl WasmWorld {
                     | sim_core::EventKind::JointBroken => "warnings",
                     _ => "info",
                 };
-                format!(
-                    "{level}::step={} {:?} (source={})",
-                    e.step, e.kind, e.source.0
-                )
+                // **接触イベントの`source`はボディ対を符号化している**
+                // (`sim_mechanics::MechanicsSolver::emit_contact_events`の
+                // `source_id = |a, b| SourceId((a << 32) | b)`)。生の`u64`
+                // (例: ボディ(1,1)なら4294967297)は人間には読めないうえ、
+                // フロントエンドが復号すると符号化の知識が2箇所に分かれる。
+                // ここで復号して`bodies=a,b`として出し、**Consoleがイベント行から
+                // 発生源ボディを選択できる**ようにする(設計docs/23-frontend/
+                // 01-editor.md §1.5「クリックでTimeline/Scene Viewと連動」の
+                // オブジェクト側、増分E4)。
+                //
+                // **`SourceId`の意味は生産者ごとに異なる**(例:
+                // `sim_thermal`の`SolverDiverged`は`SourceId(0)`固定)ため、
+                // 復号は接触イベントに限定する。他の種別は生値のまま出す。
+                let detail = match e.kind {
+                    sim_core::EventKind::ContactStarted | sim_core::EventKind::ContactEnded => {
+                        let a = (e.source.0 >> 32) as usize;
+                        let b = (e.source.0 & 0xFFFF_FFFF) as usize;
+                        format!("bodies={a},{b}")
+                    }
+                    _ => format!("source={}", e.source.0),
+                };
+                format!("{level}::step={} {:?} ({detail})", e.step, e.kind)
             })
             .collect::<Vec<_>>()
             .join("\n")

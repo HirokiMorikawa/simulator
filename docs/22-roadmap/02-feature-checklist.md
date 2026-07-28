@@ -2040,8 +2040,23 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       対応するContactStarted/ContactEndedイベントがログに現れ、タブでlevel別に
       絞り込めること、イベント行クリックで実際に最寄りのスナップショット時刻へ
       巻き戻り一時停止すること(ジャンプ後0.8秒待っても時刻が不変)を確認した。
-      オブジェクトへの連動(クリックでそのイベントの発生源ボディを選択)・
-      発散/CFL警告バッジ・Contacts/Eventsタブ(設計は6タブ)は未実装)
+      **増分E4でオブジェクト連動を実装した**(設計§1.5「クリックで…Scene Viewと
+      連動」のオブジェクト側)。接触イベントの`SourceId`は
+      `sim_mechanics::MechanicsSolver::emit_contact_events`が
+      `|a,b| SourceId((a<<32)|b)`でボディ対を符号化しているが、生の`u64`
+      (ボディ(1,1)なら4294967297)は人間に読めず、フロントエンドで復号すると
+      符号化の知識が2箇所に分かれる。そこで`drain_events_text`側で復号して
+      `bodies=a,b`として出し、Consoleがそれを読んで発生源ボディを選択する。
+      **`SourceId`の意味は生産者ごとに異なる**(`sim_thermal`の`SolverDiverged`は
+      `SourceId(0)`固定)ため復号は接触イベントに限定し、他の種別は生値のまま出す。
+      選択は`SelectBodyRef`(`JumpToStepRef`と同じ「Consoleは`world`より先に
+      構築されるため可変参照越しに後から配線する」パターン)で`selectBody`へ繋ぐ。
+      **接触は2体の間で起きるが選択は1体しか持てないため、決定的になるよう常に
+      先頭(a)を選ぶ**(縮約)。また**範囲外のindexは無視する**——イベントは過去の
+      stepのものが表示され続けるため、その後ギャラリーでボディ数の少ないワールドへ
+      差し替えると古いイベントのindexが範囲外になりrender()ループが壊れ得る。
+      発散/CFL警告バッジ・Contacts/Eventsタブ(設計は6タブ)は引き続き未実装のため
+      チェックボックスは未チェックのままとする)
 - [x] Probe Graphs パネル: 複数系列・対数軸・CSV エクスポート
       (2系列(箱のy座標`ProbeTarget::BodyPosY`+箱の速さ`ProbeTarget::BodySpeed`、
       いずれも`sim_world::World::add_probe`で登録し`step()`内で毎step自動

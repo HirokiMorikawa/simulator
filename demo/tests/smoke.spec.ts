@@ -47,9 +47,10 @@ test("Play モードでシミュレーションが進み、時刻と step が増
   await page.goto("/");
   await waitForWorld(page);
 
-  // 起動時は Edit モードで再生系ボタンが無効。
+  // 起動時は Edit モードで再生系ボタンが無効。**`#btn-mode-play` を押した時点で
+  // 再生が始まる**(`setMode` が `playing = true` にする)ため、ここでは
+  // `#btn-play` を押さずに時刻が進むことだけを見る。
   await page.click("#btn-mode-play");
-  await page.click("#btn-play");
   await expect(page.locator("#hud")).not.toContainText("step = 0", { timeout: 15_000 });
   await page.click("#btn-play"); // 一時停止
 
@@ -213,6 +214,34 @@ test("Circuit-focus レイアウトでドロワーが開いた状態になる(�
   });
   expect(visible.inside).toBe(true);
   expect(visible.height).toBeGreaterThan(200);
+
+  expect(errors).toEqual([]);
+});
+
+test("Console のイベント行クリックで発生源ボディが選択される(増分E4)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // 箱が床に着地すると ContactStarted が発生する。
+  // **`#btn-mode-play` の時点で既に再生が始まる**(`setMode` が `playing = true`
+  // にする)。ここで `#btn-play` を押すと逆に一時停止してしまうので押さない。
+  await page.click("#btn-mode-play");
+  // **`hasText: "ContactStarted"` では絞れない**——起動時のINFO行が文言として
+  // 「ContactStarted/ContactEndedを表示」を含むため誤マッチする。実イベント固有の
+  // `bodies=`(sim-wasm が SourceId の符号化を復号して出す)で絞る。
+  const contactEntry = page.locator("#console-log li", { hasText: "bodies=" }).first();
+  await expect(contactEntry).toBeVisible({ timeout: 30_000 });
+  await page.click("#btn-play"); // 一時停止
+  await expect(contactEntry).toContainText("ContactStarted");
+
+  // Inspector の見出しを Ground へ変えてから、イベント行クリックで箱側へ戻ることを見る。
+  await page.locator("#hierarchy-tree").getByText("Ground", { exact: true }).click();
+  await expect(page.locator("#inspector-body")).toContainText("Ground");
+
+  await contactEntry.click();
+  // 接触は 床(0) と 箱(1) の間で起きるので、先頭のボディが選択される。
+  await expect(page.locator("#inspector-body")).toContainText("Ground");
 
   expect(errors).toEqual([]);
 });
