@@ -66,8 +66,8 @@
 | E | フロントエンド残り(Probe対数軸/CSV、Consoleオブジェクト連動、Inspector Component、Hierarchy未接続ドメイン等) | §6 |
 | F | 残りの設計項目(シーンJSON couplings自動解決+排他結合検査接続、World APIのfilter引数、並列リダクション決定性C-1) | §3・§4 |
 
-**次の一手**: 増分群C残り(C2以降: 露出のEV換算・モーションブラー・`MaterialDb`ブリッジ・
-コースティクス・デモD40–D43の目視チェック)。
+**次の一手**: 増分群C残り(**C2(露出のEV換算)完了済み**。C3以降:
+モーションブラー・`MaterialDb`ブリッジ・コースティクス・デモD40–D43の目視チェック)。
 
 ### 増分の履歴(詳細)
 
@@ -1568,6 +1568,23 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       露出(シャッター速度・ISOを考慮した実際のEV換算)・モーションブラー・
       `MaterialDb`ブリッジ・コースティクスは未実装のまま、`camera.rs`/
       `tonemap.rs`/`png.rs`/`framebuffer.rs`モジュールdoc「縮約実装の理由」参照)
+      **増分C2(露出)**: `camera.rs`に写真測光の標準的な露出方程式
+      $H \propto t \cdot \mathrm{ISO}/N^2$(設計§4.1)を実装した
+      `relative_exposure(shutter_time, iso, f_number)`と、EV(ISO100基準、
+      $\mathrm{EV}=\log_2(N^2/t)$)を返す`exposure_value_at_iso100(f_number,
+      shutter_time)`を追加(`lib.rs`で再エクスポート)。比例定数(センサー較正の
+      "K"値)は導入せず相対値のみを返す縮約(絶対的な物理単位cd/m²への較正は
+      引き続き未実装、`camera.rs`モジュールdoc「増分C2」参照)。新規テスト5本:
+      絞りを1段絞る(N→N√2)と露出が厳密に半分・シャッター時間2倍で露出が厳密に
+      2倍・ISO2倍で露出が厳密に2倍(以上3本は全て閉形式で厳密比較)・EVの閉形式
+      一致と「1段=EV+1=露出半分」の整合、および`framebuffer.rs`に画像レベルの
+      検証1本(EV−1段(絞りを1段絞る)で**トーンマップ前**の線形放射輝度が厳密に
+      半分になることと、トーンマップ後(Reinhard、非線形)のバイト値は厳密には
+      半分にならず閉形式予測とのみ一致することを対照実験として確認、設計§7の
+      受け入れ基準「EV変化に対する像の明るさが物理的にスケール」の字面上の誤読
+      ——トーンマップ後の画素値を素朴に半分と期待すること——を避ける)。
+      既存85テスト+新規5テストで計90テスト、`cargo test -p sim-render`は
+      2.00秒(既存約2秒からほぼ増加なし)。
 - [x] R1 — `crates/sim-render/src/path_tracer.rs::tests::r1_white_furnace_diffuse_surface_matches_background_radiance_exactly`。
       Lambertian BSDFをコサイン重み付き半球サンプリング(pdf=cosθ/π)と対にすると
       `bsdf*cosθ/pdf=albedo`が方向によらず恒等的に成り立つ(重要度サンプリングの

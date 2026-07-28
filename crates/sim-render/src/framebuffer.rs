@@ -9,10 +9,15 @@
 //! まだ分光レンダリング本体(hero wavelength法、`bsdf.rs`/`prism.rs`モジュールdoc
 //! 参照)を持たないため、本モジュールは既にRGB化された線形放射輝度(`render`
 //! モジュールのチャンネル別レンダリングが作る)を受け取るところから始める。
-//! 露出は単純なスカラー倍率(シャッター速度・ISOを考慮した実際の露出値(EV)換算は
-//! 未実装、`camera.rs`モジュールdoc参照)。トーンマッピングは既存の
-//! `tonemap::reinhard_tonemap_color`(色相を保つ輝度ベース版、既に単体で検証済み)
-//! をそのまま再利用する——ここで新しい圧縮アルゴリズムは実装しない。
+//! 露出は単純なスカラー倍率(`to_srgb8`/`write_png`の`exposure`引数)。**増分C2**で
+//! この倍率をシャッター速度・ISO・絞りから物理的に求める関数
+//! (`camera::relative_exposure`/`camera::exposure_value_at_iso100`)を追加した——
+//! 本モジュール自体は相変わらず「渡された倍率をそのまま掛けるだけ」であり、
+//! EV↔倍率の変換は`camera.rs`側の責務のまま(本モジュールのAPIは変更していない)。
+//! トーンマッピングは既存の`tonemap::reinhard_tonemap_color`(色相を保つ輝度ベース版、
+//! 既に単体で検証済み)をそのまま再利用する——ここで新しい圧縮アルゴリズムは
+//! 実装しない(フィルミック/ACES演算子・分光→CIE→sRGBの完全な`spectrum_to_display`
+//! (設計§4.2)は引き続き未実装)。
 
 use std::io;
 use std::path::Path;
@@ -245,5 +250,68 @@ mod tests {
         assert_eq!(ihdr_height, height);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 増分C2・設計§7「露出: EV変化に対する像の明るさが物理的にスケール」の
+    /// 画像レベルの検証。絞りを1段絞る(EV+1、`camera::relative_exposure`が
+    /// 半分の倍率を返す)と、**トーンマップ前**の線形放射輝度は`to_srgb8`の出力段
+    /// (モジュールdoc「露出倍率→トーンマップ→ガンマ→u8」)のうち露出倍率を掛ける
+    /// 工程が単純な線形スケールであるため厳密に半分になる。一方トーンマップ後
+    /// (Reinhard)は非線形圧縮のため出力バイト値は厳密には半分にならない――これを
+    /// 閉形式で予測した値と突き合わせて確認し、設計の受け入れ基準を「トーンマップ後の
+    /// 画素値が半分になる」と誤読しないための対照とする。
+    #[test]
+    fn stopping_down_by_one_stop_halves_pre_tonemap_radiance_but_not_the_tonemapped_byte() {
+        use crate::camera::relative_exposure;
+
+        let shutter_time = 1.0 / 60.0;
+        let iso = 100.0;
+        let f_number = 2.8;
+        let exposure_a = relative_exposure(shutter_time, iso, f_number);
+        let exposure_b = relative_exposure(shutter_time, iso, f_number * std::f64::consts::SQRT_2);
+
+        let radiance = Vec3::new(0.6, 0.6, 0.6);
+        let mut fb = Framebuffer::new(1, 1);
+        fb.pixels[0] = radiance;
+
+        // トーンマップ前(露出を掛けただけ)の値は厳密に半分。
+        let pre_a = radiance.scale(exposure_a);
+        let pre_b = radiance.scale(exposure_b);
+        assert!(
+            (pre_b.x - pre_a.x / 2.0).abs() < 1e-9,
+            "pre_a={pre_a:?} pre_b={pre_b:?}"
+        );
+
+        // トーンマップ後の閉形式予測(グレースケールなので`reinhard_tonemap_color`は
+        // `reinhard_tonemap`をそのまま各チャンネルへ適用するのと同じになる、
+        // `tonemap.rs`のテストと同じ根拠)。
+        let gamma_of = |c: f64| -> f64 {
+            if c <= 0.0031308 {
+                12.92 * c
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        let expected_byte = |pre: f64| -> u8 {
+            let tonemapped = pre / (1.0 + pre);
+            (gamma_of(tonemapped.clamp(0.0, 1.0)) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        let byte_a = expected_byte(pre_a.x);
+        let byte_b = expected_byte(pre_b.x);
+
+        let rgb_a = fb.to_srgb8(exposure_a);
+        let rgb_b = fb.to_srgb8(exposure_b);
+        assert_eq!(rgb_a[0], byte_a, "channel R at exposure_a");
+        assert_eq!(rgb_b[0], byte_b, "channel R at exposure_b");
+
+        // 非線形性そのものの確認: トーンマップ後のバイト値は厳密には半分になって
+        // いない(設計の受け入れ基準の誤読を防ぐ対照実験)。
+        assert!(
+            (byte_b as f64 - byte_a as f64 / 2.0).abs() > 1.0,
+            "post-tonemap byte should NOT simply halve (tonemap is nonlinear): \
+             byte_a={byte_a} byte_b={byte_b}"
+        );
     }
 }

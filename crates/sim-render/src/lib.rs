@@ -77,7 +77,7 @@ mod tonemap;
 
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal, RoughConductor};
 pub use bvh::{Bvh, BvhDiagnostics};
-pub use camera::Camera;
+pub use camera::{exposure_value_at_iso100, relative_exposure, Camera};
 pub use framebuffer::Framebuffer;
 pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
 pub use microfacet::{ggx_distribution, sample_ggx_half_vector, smith_g, smith_g1};

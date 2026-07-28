@@ -7,7 +7,18 @@
 //! `lens_radius`(開口半径)を直接パラメータとする縮約(Ray Tracing in One Weekend
 //! 等の標準的な薄レンズカメラの構成)。ピンホール方向のレイをレンズ円板上の点から
 //! 再構成し、焦点距離面上の同じ点(`focus_point`)を通すことでボケを再現する——
-//! 露出・シャッター速度・モーションブラーは後続増分。
+//! モーションブラーは後続増分(`motion_blur`モジュールdoc参照)。
+//!
+//! **増分C2(露出)**: `relative_exposure`・`exposure_value_at_iso100`(本ファイル
+//! 下部)を追加した。設計§4.1「露出: シャッター速度・ISO・絞りから露出値(EV)。
+//! 物理的な光量→センサー応答」に対応する、写真測光の標準的な露出方程式
+//! ($H \propto t \cdot \mathrm{ISO}/N^2$)の実装。**縮約実装の理由**:
+//! 比例定数(センサー較正定数、いわゆる"K"値)は導入せず、比例関係そのもの
+//! (相対露出)のみを返す——`RenderSettings.exposure`に渡す倍率としては
+//! 比例定数は掛け捨てられる(スケールが変わるだけで「EV変化に対する像の明るさが
+//! 物理的にスケールする」という設計§7の検証基準には影響しない)ため、絶対的な
+//! 物理単位(cd/m²等)への較正は引き続き行わない。また実際のセンサーの反射率
+//! 較正・回折・相反則不軌(reciprocity failure)等は対象外。
 
 use sim_math::{SimRng, Vec3};
 
@@ -61,6 +72,33 @@ impl Camera {
         (self.forward + self.right.scale(ndc_x * half_width) + self.up.scale(ndc_y * half_height))
             .normalize_or_zero()
     }
+}
+
+/// 相対露出(露出倍率)。設計§4.1「露出: シャッター速度・ISO・絞りから露出値(EV)。
+/// 物理的な光量→センサー応答」(モジュールdoc「増分C2」参照)。
+///
+/// 写真測光の標準的な露出方程式: センサーに届く光量(露出量)$H$は、シャッター時間
+/// $t$・ISO感度に比例し、絞りのF値$N$の2乗に反比例する:
+/// $$H \propto t \cdot \mathrm{ISO} / N^2$$
+/// (絞りのF値は「開口径 = 焦点距離/N」の定義上、開口面積(ひいては集める光量)が
+/// $1/N^2$に比例することの直接の帰結——`aperture_radius_from_f_number`が使うのと
+/// 同じ$N$の定義)。本関数は比例定数を1として、この関係をそのまま
+/// `RenderSettings.exposure`へ渡す倍率として計算する。
+pub fn relative_exposure(shutter_time: f64, iso: f64, f_number: f64) -> f64 {
+    shutter_time * iso / (f_number * f_number)
+}
+
+/// 露出値(EV、ISO100基準): $\mathrm{EV} = \log_2(N^2/t)$(設計§4.1、モジュールdoc
+/// 「増分C2」参照)。
+///
+/// EVは写真の「段(stop)」の定義そのもの——EVが1増える(絞りを1段絞る、または
+/// シャッター時間を半分にする)ごとに、センサーに届く光量(`relative_exposure`)は
+/// ちょうど半分になる。ISO100以外での実効EVは`exposure_value_at_iso100(N,t) -
+/// (iso/100.0).log2()`で得られる(ISOを2倍にすると同じ光量でも実効EVが1段下がる、
+/// すなわちセンサー側の感度が2倍になった分だけ「同じ露出」を得るのに必要な光量が
+/// 半分で済む、という標準的なISOの扱い)。
+pub fn exposure_value_at_iso100(f_number: f64, shutter_time: f64) -> f64 {
+    (f_number * f_number / shutter_time).log2()
 }
 
 #[cfg(test)]
@@ -196,5 +234,76 @@ mod tests {
             // 常に単位ベクトルであること。
             assert!((direction.length() - 1.0).abs() < 1e-12);
         }
+    }
+
+    /// 増分C2・設計§7「露出: EV変化に対する像の明るさが物理的にスケール」の
+    /// 検証基準その1——**絞りを1段絞る**(F値をN→N√2にする)と、開口面積が
+    /// ちょうど半分になるので相対露出もちょうど半分になる。
+    #[test]
+    fn stopping_down_the_aperture_by_one_stop_halves_relative_exposure() {
+        let shutter_time = 1.0 / 125.0;
+        let iso = 200.0;
+        let f_number = 4.0;
+        let baseline = relative_exposure(shutter_time, iso, f_number);
+        let stopped_down =
+            relative_exposure(shutter_time, iso, f_number * std::f64::consts::SQRT_2);
+        let rel_err = (stopped_down - baseline / 2.0).abs() / (baseline / 2.0);
+        assert!(
+            rel_err < 1e-9,
+            "baseline={baseline} stopped_down={stopped_down} rel_err={rel_err}"
+        );
+    }
+
+    /// 検証基準その2——**シャッター時間を2倍**にすると露出はちょうど2倍
+    /// ($H \propto t$の直接の帰結)。
+    #[test]
+    fn doubling_shutter_time_doubles_relative_exposure() {
+        let iso = 100.0;
+        let f_number = 2.8;
+        let a = relative_exposure(1.0 / 60.0, iso, f_number);
+        let b = relative_exposure(2.0 / 60.0, iso, f_number);
+        assert!((b - 2.0 * a).abs() < 1e-12, "a={a} b={b}");
+    }
+
+    /// 検証基準その3——**ISOを2倍**にすると露出はちょうど2倍
+    /// ($H \propto \mathrm{ISO}$の直接の帰結)。
+    #[test]
+    fn doubling_iso_doubles_relative_exposure() {
+        let shutter_time = 1.0 / 250.0;
+        let f_number = 5.6;
+        let a = relative_exposure(shutter_time, 100.0, f_number);
+        let b = relative_exposure(shutter_time, 200.0, f_number);
+        assert!((b - 2.0 * a).abs() < 1e-12, "a={a} b={b}");
+    }
+
+    /// EV(ISO100基準)が閉形式$\log_2(N^2/t)$と厳密一致すること、および
+    /// 「絞りを1段絞るとEVがちょうど+1、対応する相対露出がちょうど半分になる」
+    /// という段(stop)の定義との整合を確認する。
+    #[test]
+    fn exposure_value_matches_closed_form_and_one_stop_is_a_factor_of_two_in_relative_exposure() {
+        let f_number = 2.8;
+        let shutter_time = 1.0 / 200.0;
+        let ev = exposure_value_at_iso100(f_number, shutter_time);
+        let expected_ev = (f_number * f_number / shutter_time).log2();
+        assert!(
+            (ev - expected_ev).abs() < 1e-12,
+            "ev={ev} expected_ev={expected_ev}"
+        );
+
+        let f_number_stopped_down = f_number * std::f64::consts::SQRT_2;
+        let ev_stopped_down = exposure_value_at_iso100(f_number_stopped_down, shutter_time);
+        assert!(
+            (ev_stopped_down - (ev + 1.0)).abs() < 1e-9,
+            "ev={ev} ev_stopped_down={ev_stopped_down}"
+        );
+
+        let iso = 100.0;
+        let exposure_before = relative_exposure(shutter_time, iso, f_number);
+        let exposure_after = relative_exposure(shutter_time, iso, f_number_stopped_down);
+        let rel_err = (exposure_after - exposure_before / 2.0).abs() / (exposure_before / 2.0);
+        assert!(
+            rel_err < 1e-9,
+            "exposure_before={exposure_before} exposure_after={exposure_after}"
+        );
     }
 }
