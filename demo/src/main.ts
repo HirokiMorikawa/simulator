@@ -1011,9 +1011,44 @@ function setUpProjectDrawer(
 // シーン定義の観測量を時系列表示」)のデモ。複数系列(箱のy座標・箱の速さ)を
 // 各系列独立の自動スケーリングで重ね描きする(値のレンジが大きく異なる系列
 // (m単位のy座標 vs m/s単位の速さ)を同一軸に正規化すると見づらいため、
-// 系列ごとに独立してmin/maxを取り0..canvas高さへ正規化する設計)。縮約実装の
-// 理由: 対数軸・CSVエクスポート(design§1.4のフル仕様)は後続増分。
+// 系列ごとに独立してmin/maxを取り0..canvas高さへ正規化する設計)。
+//
+// **増分E1で対数軸とCSVエクスポートを追加した**(設計§1.4のフル仕様):
+// - **対数軸**: 桁の異なる量(例: 指数減衰する温度と線形に進む座標)を比べる
+//   ための表示。放射輝度・温度・エネルギー等は正だが座標・速度は負にもなり得る
+//   ため、素直な`log10(v)`では大半の系列が描けなくなる。そこで**符号を保つ
+//   対数変換** `sign(v)*log10(1+|v|)`(いわゆる symlog)を使う——これは
+//   v=0で0、|v|が小さい領域では線形に振る舞い、大きい領域で対数になる連続かつ
+//   単調な変換なので、負値・ゼロを含む系列でも破綻しない。純粋な`log10`では
+//   ないことを正直に明記する(真の対数軸が要るなら正の量に限る必要がある)。
+// - **CSVエクスポート**: 表示中の全系列の履歴をダウンロードする。系列ごとに
+//   履歴長が異なり得る(プローブの登録タイミングが違う)ため、**最長の系列に
+//   合わせて短い系列の末尾を空欄で埋める**。Probeのリングバッファは絶対時刻を
+//   持たないため、時刻列ではなく**サンプル番号**を出す(縮約、下記doc参照)。
 type ProbeSeries = { label: string; color: string; history: Float64Array };
+
+/// 符号を保つ対数変換(symlog)。`type ProbeSeries`のdoc参照。
+function signedLog(v: number): number {
+  return Math.sign(v) * Math.log10(1 + Math.abs(v));
+}
+
+/// 表示中の全系列をCSV文字列にする。1列目はサンプル番号
+/// (`sim_math::RingBuffer`は絶対時刻を保持しないため、時刻列は出せない——
+/// 出すなら`World`側にサンプル時刻も積む変更が要るので後続増分の対象)。
+/// 系列ごとに履歴長が違い得るので最長に合わせ、短い系列は空欄で埋める。
+function probeSeriesToCsv(series: ProbeSeries[]): string {
+  const rows = series.reduce((m, s) => Math.max(m, s.history.length), 0);
+  const escape = (s: string) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
+  const lines = [["sample", ...series.map((s) => s.label)].map(escape).join(",")];
+  for (let i = 0; i < rows; i++) {
+    const cells = [String(i)];
+    for (const s of series) {
+      cells.push(i < s.history.length ? String(s.history[i]) : "");
+    }
+    lines.push(cells.join(","));
+  }
+  return lines.join("\n");
+}
 
 // シーンギャラリー読み込み時(`isGalleryScene`参照)は、`scenario.probes`が
 // 宣言した本数の系列を動的に束ねる(D6=1本・D11=2本のように既定シーンの2系列
@@ -1025,8 +1060,27 @@ const PROBE_GRAPH_COLORS = ["#9cf", "#fc6", "#f9c", "#9fc", "#c9f", "#ffcc99"];
 function setUpProbeGraph(): (series: ProbeSeries[]) => void {
   const canvas = document.getElementById("probe-canvas") as HTMLCanvasElement;
   const ctx = canvas.getContext("2d")!;
+  const logToggle = document.getElementById("toggle-probe-log") as HTMLInputElement;
+  const csvButton = document.getElementById("btn-probe-csv") as HTMLButtonElement;
+
+  // CSVボタンは「今まさに描かれている系列」を書き出す。`render()`が毎フレーム
+  // 渡してくる最新の配列をここで覚えておく(描画とエクスポートで同じデータを
+  // 使うため、別経路でクエリし直して食い違うのを避ける)。
+  let latest: ProbeSeries[] = [];
+  csvButton.addEventListener("click", () => {
+    if (latest.length === 0) return;
+    const blob = new Blob([probeSeriesToCsv(latest)], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "probes.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
 
   return (series: ProbeSeries[]) => {
+    latest = series;
+    const useLog = logToggle.checked;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
     if (canvas.width !== w || canvas.height !== h) {
@@ -1040,27 +1094,38 @@ function setUpProbeGraph(): (series: ProbeSeries[]) => void {
     for (const s of series) {
       if (s.history.length < 2) continue;
 
+      // 凡例には**元の値**のmin/maxを出す(対数軸はあくまで表示上の変換であり、
+      // 観測値そのものは変わらないため。ここで変換後の値を出すと読み手が
+      // 実測値を誤読する)。正規化には変換後の値を使う。
       let min = Infinity;
       let max = -Infinity;
       for (const v of s.history) {
         if (v < min) min = v;
         if (v > max) max = v;
       }
-      const range = max - min > 1e-9 ? max - min : 1.0;
+      const plot = (v: number) => (useLog ? signedLog(v) : v);
+      const plotMin = Math.min(plot(min), plot(max));
+      const plotMax = Math.max(plot(min), plot(max));
+      const range = plotMax - plotMin > 1e-12 ? plotMax - plotMin : 1.0;
 
       ctx.strokeStyle = s.color;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       for (let i = 0; i < s.history.length; i++) {
         const x = (i / (s.history.length - 1)) * w;
-        const y = h - ((s.history[i] - min) / range) * h;
+        const y = h - ((plot(s.history[i]) - plotMin) / range) * h;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
 
       ctx.fillStyle = s.color;
-      ctx.fillText(`${s.label}: max=${max.toFixed(2)} min=${min.toFixed(2)}`, 4, legendY);
+      const suffix = useLog ? " [log]" : "";
+      ctx.fillText(
+        `${s.label}: max=${max.toFixed(2)} min=${min.toFixed(2)}${suffix}`,
+        4,
+        legendY,
+      );
       legendY += 12;
     }
   };

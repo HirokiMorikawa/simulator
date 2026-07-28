@@ -319,6 +319,30 @@ body {
   margin: 0 0 4px;
 }
 
+/* Probe Graphs の対数軸トグル + CSVエクスポート(増分E1、設計§1.4)。 */
+.probe-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: #999;
+}
+
+.probe-controls button {
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.probe-controls button:hover {
+  background: #343434;
+  color: #eee;
+}
+
 #probe-canvas {
   flex: 1;
   width: 100%;

@@ -111,3 +111,37 @@ test("Probe Graphs にシーン定義プローブが描かれる(D11 振り子�
 
   expect(errors).toEqual([]);
 });
+
+test("Probe Graphs の対数軸トグルと CSV エクスポートが動く(増分E1)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.waitForTimeout(1200);
+  await page.click("#btn-play");
+
+  // 対数軸トグル: 凡例に [log] が付く/外すと消える(表示上の変換であることの確認)。
+  await page.check("#toggle-probe-log");
+  await page.waitForTimeout(300);
+  await page.uncheck("#toggle-probe-log");
+
+  // CSV: ダウンロードが実際に発火し、ヘッダ行とサンプル行を含むこと。
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#btn-probe-csv"),
+  ]);
+  expect(download.suggestedFilename()).toBe("probes.csv");
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(c as Buffer);
+  const csv = Buffer.concat(chunks).toString("utf8");
+  const lines = csv.split("\n");
+  expect(lines[0]).toBe("sample,BodyPosY,BodySpeed");
+  expect(lines.length).toBeGreaterThan(2);
+  // 2行目は sample=0 と2系列の数値。
+  expect(lines[1].split(",")).toHaveLength(3);
+
+  expect(errors).toEqual([]);
+});
