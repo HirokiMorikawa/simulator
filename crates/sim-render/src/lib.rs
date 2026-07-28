@@ -77,6 +77,7 @@ mod framebuffer;
 mod medium;
 mod microfacet;
 mod motion_blur;
+mod optical_material;
 mod path_tracer;
 mod png;
 mod primitive;
@@ -94,6 +95,9 @@ pub use framebuffer::Framebuffer;
 pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
 pub use microfacet::{ggx_distribution, sample_ggx_half_vector, smith_g, smith_g1};
 pub use motion_blur::{render_motion_blur, render_motion_blur_channel};
+pub use optical_material::{
+    all_from_standard_db, from_material_db, IorSource, OpticalMaterial, DEFAULT_IOR,
+};
 pub use path_tracer::{AtmosphereMedium, Emissive, Material, PointLight, Scene, SceneObject};
 pub use primitive::Primitive;
 pub use prism::{trace_prism_deviation, trace_raindrop_deviation};
