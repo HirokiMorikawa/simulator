@@ -145,3 +145,27 @@ test("Probe Graphs の対数軸トグルと CSV エクスポートが動く(増�
 
   expect(errors).toEqual([]);
 });
+
+test("Hierarchy に Probes サブツリーが出る(D11 は body_pos_x/y の2本、増分E2)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // **葉ノード(プローブのラベル)で検証する**。"Probes" の `li` は入れ子の `ul` を
+  // 含むため textContent が "ProbesBodyPosX(bob)..." になり `exact: true` に
+  // 一致しない(Bodies/Frames も同じ構造)。
+  const hierarchy = page.locator("#hierarchy-tree");
+  // 既定シーンは scenario.probes を持たないのでプローブのラベルは1つも出ない。
+  await expect(hierarchy.getByText("BodyPosX(", { exact: false })).toHaveCount(0);
+
+  await page.click('.project-tab[data-tab="scenes"]');
+  await page.click('.scene-gallery-list button[data-scene-file="d11-pendulum.json"]');
+
+  // ラベルは sim-wasm の probe_target_label が生成する(ボディ名 "bob" 込み)。
+  await expect(hierarchy.getByText("BodyPosX(bob)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("BodyPosY(bob)", { exact: true })).toBeVisible();
+
+  expect(errors).toEqual([]);
+});

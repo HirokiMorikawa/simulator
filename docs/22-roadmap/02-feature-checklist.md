@@ -1983,8 +1983,25 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       ボディを`DistanceJoint (ラベル)`として列挙、クリックで対応するボディを
       選択)。Playwrightで、振り子をスポーンする前はHierarchyに"Joints"が
       現れず、スポーン後に実際に現れてクリックで対応するPendulumボディへ
-      選択が切り替わることを確認した。Circuits/Fluids/Probes/Framesはこれら
-      のドメインが未接続のため未対応)
+      選択が切り替わることを確認した。Fluidsは概要行(塊数+総粒子数)、Framesは
+      ドリルインUIとして接続済み。
+      **増分E2でProbesサブツリーを追加した**——シーンJSONの`probes`セクションが
+      宣言したプローブを、増分B1の`imported_probe_count`/`imported_probe_label_at`
+      (`ProbeTarget`11変種の人間可読ラベル)から列挙する。**D9(熱のみ)・
+      D34/D35(天体のみ)のようにScene Viewに何も描かれないシーンでは、これが
+      シーンに何が定義されているかを知る唯一のツリー上の手がかりになる**。
+      既定シーンは`scenario.probes`を持たないため0本でサブツリー自体を出さない。
+      Playwrightで、既定シーンではプローブラベルが1つも無く、D11を読み込むと
+      `BodyPosX(bob)`/`BodyPosY(bob)`が実際に現れることを確認した。
+      **縮約**: プローブは選択対象にしない(Inspectorに専用のComponent表示が
+      無いためクリックしても見せるものが無い。現在値はProbe Graphsパネルの凡例が
+      既に出している)。
+      **Circuitsは意図的に未対応のまま残す**: `sim_em::Circuit`は素子を配列で
+      持つがノード/素子を個別に列挙する公開APIが無く、ツリーに並べるには
+      `sim-wasm`側へ列挙APIを新設する必要がある。一方でCircuitタブの自由配線
+      エディタが既に素子一覧と各ノード電圧の表を出しており、ツリーへ重複表示する
+      実利が薄いと判断した(必要になった時点で列挙APIごと追加する)。
+      この1点が残るためチェックボックスは未チェックのままとする)
 - [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
       (選択中ボディのTransform(Position/Rotation/Velocity)は`sim-wasm`に新設した
       `body_position_at_f32`/`body_rotation_at_f32`/`body_velocity_at_f32`

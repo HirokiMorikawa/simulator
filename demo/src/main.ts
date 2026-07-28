@@ -328,7 +328,12 @@ function setUpConsole(jumpToStepRef: JumpToStepRef): (eventsText: string) => voi
 // 場合)向けに、外部からハイライトだけを同期させる手段として公開する。
 // Bodiesの兄弟としてJointsサブツリーも実装済み(振り子スポーンが追加した
 // DistanceJointのみが対象、`constraint_anchor_points_at`で判定)。
-// Circuits/Fluids/Probes/Framesはこれらのドメインが未接続のため未対応。
+// Fluids(概要行)・Frames(ドリルイン)・**Probes(増分E2)**は接続済み。
+// **Circuitsは意図的に未対応のまま残す**: `sim_em::Circuit`は素子(抵抗・電圧源・
+// スイッチ)を配列で持つがノード/素子を個別に列挙する公開APIが無く、ツリーに
+// 並べるには`sim-wasm`側へ列挙APIを新設する必要がある。一方でCircuitタブの
+// 自由配線エディタが既に素子一覧と各ノード電圧の表を出しており、ツリーへ
+// 重複表示する実利が薄いと判断した(必要になった時点で列挙APIごと追加する)。
 function setUpHierarchy(
   world: WasmWorld,
   onSelect: (index: number) => void,
@@ -438,6 +443,32 @@ function setUpHierarchy(
     const fluidItem = document.createElement("li");
     fluidItem.textContent = `Fluids (${fluidSpawnCount}塊, ${world.fluid_particle_count()}粒子)`;
     bodies.appendChild(fluidItem);
+  }
+
+  // Probes(設計§1.1「シーングラフツリー(...Probes)」、増分E2で追加)。
+  // シーンJSONの`probes`セクションが宣言したプローブを、増分B1で追加した
+  // `imported_probe_count`/`imported_probe_label_at`(`ProbeTarget`の11変種を
+  // 人間可読ラベルへ変換したもの)から列挙する。**D9(熱のみ)・D34/D35
+  // (天体のみ)のようにScene Viewに何も描かれないシーンでは、これがシーンに
+  // 何が定義されているかを知る唯一のツリー上の手がかりになる**。
+  // 既定シーン(`WasmWorld::new`)は`scenario.probes`を持たないため0本で、
+  // その場合はサブツリー自体を出さない。
+  // **縮約**: プローブは選択対象にしない(Inspectorに専用のComponent表示が
+  // 無いため、クリックしても見せるものが無い)。現在値はProbe Graphsパネルの
+  // 凡例が既に出している。
+  const probeCount = world.imported_probe_count();
+  if (probeCount > 0) {
+    const probeItem = document.createElement("li");
+    probeItem.textContent = "Probes";
+    const probeList = document.createElement("ul");
+    probeList.className = "tree-nested";
+    for (let i = 0; i < probeCount; i++) {
+      const item = document.createElement("li");
+      item.textContent = world.imported_probe_label_at(i);
+      probeList.appendChild(item);
+    }
+    probeItem.appendChild(probeList);
+    bodies.appendChild(probeItem);
   }
 
   root.appendChild(bodies);
