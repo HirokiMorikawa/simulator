@@ -1,0 +1,11 @@
+{
+  "name": "d3-bounce",
+  "world": { "gravity": 9.80665, "dt": 0.004166666666666667, "restitution_velocity_threshold": 0.0 },
+  "bodies": [
+    { "shape": { "plane": { "normal": [0, 1, 0], "d": 0 } },
+      "type": "static", "material": "ゴム(天然)" },
+    { "shape": { "sphere": { "radius": 0.1 } }, "material": "ゴム(天然)",
+      "position": [0.0, 2, 0.0], "name": "ball" }
+  ],
+  "probes": [ { "body_pos_y": "ball" } ]
+}

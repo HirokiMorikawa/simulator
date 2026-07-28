@@ -1,0 +1,16 @@
+{
+  "name": "d26-balloon-qualitative",
+  "world": { "gravity": 0.0, "dt": 0.008333333 },
+  "materials": [
+    { "extends": "木材(松)", "name": "d26-foam", "density": 30.0 }
+  ],
+  "bodies": [
+    { "shape": { "sphere": { "radius": 0.02 } }, "material": "d26-foam",
+      "position": [0.2, 0, 0], "name": "balloon" }
+  ],
+  "couplings": [
+    { "image_charge_force": { "body": "balloon", "charge": 1.0e-7,
+      "plane_normal": [1, 0, 0], "plane_d": 0 } }
+  ],
+  "probes": [ { "body_pos_x": "balloon" } ]
+}

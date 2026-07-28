@@ -113,11 +113,23 @@ impl Circuit {
         self.switches[index].2 = closed;
     }
 
+    /// `node`が現在の回路のノード数を超える場合は0を返す(パニックしない)。
+    ///
+    /// **修正の経緯(シーンギャラリー増分B2で発見)**: 以前は
+    /// `self.last_node_voltage[node]`の直接インデックスで、範囲外ノードを渡すと
+    /// パニックしていた(`last_node_voltage`は`new()`で`vec![0.0; num_nodes]`に
+    /// 初期化されるため、step()未呼び出しでは0を返せていた——docが保証していたのは
+    /// そちらの経路のみで、範囲外は単に未処理だった)。シーンギャラリーでD21
+    /// (銅管落下、`num_nodes=2`なのでノードは0/1のみ)を読み込むと、HUDが毎フレーム
+    /// 呼ぶ`sim-wasm::circuit_divider_voltage`が固定デモ回路前提のノード番号2
+    /// (`CIRCUIT_DIVIDER_NODE`)を無条件に読みに行き、この範囲外パニックを踏むことを
+    /// Playwrightでの目視確認中に発見した。兄弟の`source_current`は既に
+    /// `.get().copied().unwrap_or(0.0)`で範囲外を許容しており、こちらを揃えた形。
     pub fn node_voltage(&self, node: usize) -> f64 {
         if node == GROUND {
             0.0
         } else {
-            self.last_node_voltage[node]
+            self.last_node_voltage.get(node).copied().unwrap_or(0.0)
         }
     }
 
@@ -401,6 +413,31 @@ fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `node_voltage`の範囲外パニック回帰テスト(シーンギャラリー増分B2で発見)。
+    /// `sim-wasm::WasmWorld::circuit_divider_voltage`は固定デモ回路のノード番号
+    /// (`CIRCUIT_DIVIDER_NODE=2`)を無条件に読むため、シーンギャラリー経由で
+    /// それより少ないノード数の回路(D21銅管落下、`num_nodes=2`→ノードは0/1のみ)
+    /// を読み込むと、修正前は`self.last_node_voltage[node]`の直接インデックスで
+    /// パニックしていた。
+    #[test]
+    fn node_voltage_out_of_range_returns_zero_instead_of_panicking() {
+        let mut circuit = Circuit::new(2); // ノードは0(GND)・1のみ
+        circuit.add_resistor(1, GROUND, 100.0);
+        circuit.add_voltage_source(1, GROUND, 5.0);
+        circuit.step(1.0);
+
+        assert_eq!(
+            circuit.node_voltage(2),
+            0.0,
+            "node 2 does not exist in a 2-node circuit"
+        );
+        assert_eq!(
+            circuit.node_voltage(100),
+            0.0,
+            "far out-of-range node should also return 0"
+        );
+    }
 
     /// ダイオード整流: 半波整流の平均電圧、rel 2%(設計 docs/13-electromagnetism/02-circuits.md
     /// §7「ダイオード整流: 半波整流の平均電圧(±2%)」。対応するE番号は無い)。

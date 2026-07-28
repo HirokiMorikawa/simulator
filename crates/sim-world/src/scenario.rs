@@ -707,7 +707,6 @@ pub fn run_headless_scenario(json: &str, steps: u32) -> Result<HeadlessRunResult
 mod tests {
     use super::*;
     use crate::BodyId;
-    use sim_math::Quat;
 
     /// 設計docs/20-integration/04-world-api.md §3の例示JSON(浮力デモの縮約版、
     /// `fluids`/`couplings`/`probes`セクションを除く)を実際にパースして`World`を構築し、
@@ -1056,32 +1055,19 @@ mod tests {
     fn run_headless_scenario_floating_box_oscillates_at_the_f5_analytic_period() {
         let water_density: f64 = 998.2;
         let ratio: f64 = 0.5;
-        let density = ratio * water_density;
         let half: f64 = 0.5;
         let side = 2.0 * half;
-        let equilibrium_y = -(ratio * side) + half;
-        let amplitude: f64 = 0.1;
         let dt: f64 = 0.008333333;
-        let start_y = equilibrium_y + amplitude;
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d6-floating-box-f5",
-          "world": {{ "gravity": 9.80665, "dt": {dt} }},
-          "materials": [ {{ "extends": "木材(松)", "name": "d6-f5-density", "density": {density} }} ],
-          "bodies": [
-            {{ "shape": {{ "box": {{ "half": [{half}, {half}, {half}] }} }}, "material": "d6-f5-density",
-              "position": [0, {start_y}, 0], "name": "box" }}
-          ],
-          "fluids": [ {{ "static_water": {{ "water_level": 0.0, "density": {water_density} }} }} ],
-          "probes": [ {{ "body_pos_y": "box" }} ]
-        }}
-        "#
-        );
+        // シーンJSONは`scenes/d6-floating-box-f5.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分B2)。派生密度(=ratio*water_density=499.1)・平衡位置
+        // からamplitude(0.1)だけ高い初期位置(=-(ratio*side)+half+amplitude=0.1)は
+        // 事前計算した値をそのまま焼き込んである(Rustの`{}`は往復可能な最短表現を
+        // 出すため、下の期待値計算と1ビットも変わらない)。
+        let json = include_str!("../../../scenes/d6-floating-box-f5.json");
 
         let steps = 400; // ネイティブ側と同じ既定dt換算での歩数。
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let pos_y = &result.probe_histories[0];
 
         // 谷(最初にheightが上昇へ転じる点)。
@@ -1146,43 +1132,17 @@ mod tests {
     #[test]
     fn run_headless_scenario_slides_down_an_incline_above_the_friction_angle_matching_m8() {
         let theta: f64 = 45.0_f64.to_radians();
-        let normal = Vec3::new(-theta.sin(), theta.cos(), 0.0);
-        let half_extent = 0.5;
-        let position = normal.scale(half_extent);
-        let rotation = Quat::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), theta);
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d5-incline-slide",
-          "world": {{ "gravity": 9.80665, "dt": 0.008333333 }},
-          "bodies": [
-            {{ "shape": {{ "plane": {{ "normal": [{nx}, {ny}, {nz}], "d": 0 }} }},
-              "type": "static", "material": "鋼(炭素鋼)" }},
-            {{ "shape": {{ "box": {{ "half": [{half_extent}, {half_extent}, {half_extent}] }} }},
-              "material": "鋼(炭素鋼)",
-              "position": [{px}, {py}, {pz}],
-              "rotation": [{qx}, {qy}, {qz}, {qw}],
-              "name": "box" }}
-          ],
-          "probes": [ {{ "body_speed": "box" }} ]
-        }}
-        "#,
-            nx = normal.x,
-            ny = normal.y,
-            nz = normal.z,
-            px = position.x,
-            py = position.y,
-            pz = position.z,
-            qx = rotation.x,
-            qy = rotation.y,
-            qz = rotation.z,
-            qw = rotation.w,
-        );
+        // シーンJSONは`scenes/d5-incline-slide.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分B2)。45°の傾いた平面(`Plane`)+それに合わせて回転
+        // させた箱の法線・座標・クォータニオンは事前に計算した値をそのまま
+        // 焼き込んである(計算式は本テストのgit履歴参照。Rustの`{}`は往復可能な
+        // 最短表現を出すため、下の期待値計算と1ビットも変わらない)。
+        let json = include_str!("../../../scenes/d5-incline-slide.json");
 
         let steps = 60; // 0.5秒(既定dt) — demos.rsのM8アサーションと同じ経過時間
         let dt: f64 = 0.008333333;
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
 
         let measured_speed = *result.probe_histories[0]
             .last()
@@ -1212,25 +1172,17 @@ mod tests {
     #[test]
     fn run_headless_scenario_wind_and_terminal_velocity_matches_high_and_low_reynolds_formulas() {
         // F1: 高Re(鋼球、Cd=0.47相当の二次抗力)。
+        // シーンJSONは`scenes/d7-wind-high-re.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分B2。F1/F3は大気パラメータと球半径が異なり、収束する
+        // 終端速度・到達までの時間スケールも大きく異なる別ドメインの見え方をする
+        // ため、ギャラリーでは2ファイルに分けた——1ファイルにまとめると片方の挙動
+        // しか目視できない)。
         {
             let radius: f64 = 0.005;
-            let json = format!(
-                r#"
-            {{
-              "name": "d7-wind-high-re",
-              "world": {{ "gravity": 9.80665, "dt": 0.008333333,
-                "atmosphere": {{ "density": 1.225, "viscosity": 1.81e-5 }} }},
-              "bodies": [
-                {{ "shape": {{ "sphere": {{ "radius": {radius} }} }},
-                  "material": "鋼(炭素鋼)", "drag": true, "name": "ball" }}
-              ],
-              "probes": [ {{ "body_speed": "ball" }} ]
-            }}
-            "#
-            );
+            let json = include_str!("../../../scenes/d7-wind-high-re.json");
 
             let steps = 3600; // 30秒(既定dt)
-            let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+            let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
             let measured = *result.probe_histories[0]
                 .last()
                 .expect("history should not be empty");
@@ -1248,27 +1200,16 @@ mod tests {
         }
 
         // F3: 低Re(ストークス沈降、v=2r²Δρg/(9μ))。
+        // シーンJSONは`scenes/d7-wind-low-re.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分B2、上記F1と分けた理由は同所参照)。
         {
             let radius: f64 = 0.01;
             let fluid_density: f64 = 0.5;
             let viscosity: f64 = 1.0;
-            let json = format!(
-                r#"
-            {{
-              "name": "d7-wind-low-re",
-              "world": {{ "gravity": 9.80665, "dt": 0.008333333,
-                "atmosphere": {{ "density": {fluid_density}, "viscosity": {viscosity} }} }},
-              "bodies": [
-                {{ "shape": {{ "sphere": {{ "radius": {radius} }} }},
-                  "material": "鋼(炭素鋼)", "drag": true, "name": "ball" }}
-              ],
-              "probes": [ {{ "body_speed": "ball" }} ]
-            }}
-            "#
-            );
+            let json = include_str!("../../../scenes/d7-wind-low-re.json");
 
             let steps = 240; // 2秒(既定dt)
-            let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+            let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
             let measured = *result.probe_histories[0]
                 .last()
                 .expect("history should not be empty");
@@ -1401,25 +1342,14 @@ mod tests {
         let charge = 1.0e-7; // 摩擦帯電した風船オーダー
 
         // 定性: 壁から離れた位置で静止させた帯電風船が鏡像力のみで壁(x=0)へ到達する。
+        // シーンJSONは`scenes/d26-balloon-qualitative.json`として出荷する(残タスク
+        // 完遂のシーンギャラリー増分B2)。逆二乗則側(下の`initial_acceleration_at`)
+        // は1step目の速度のみを見る数値検定でしかなく、初期距離0.1と0.2のどちらも
+        // Scene Viewで動かしても「風船が壁へ寄っていく」という見た目上は定性側と
+        // 区別が付かない(動きを目視する意味のある別デモにならない)ため、
+        // ギャラリーへは定性側の1ファイルのみを切り出した。
         {
-            let json = r#"
-            {
-              "name": "d26-balloon-qualitative",
-              "world": { "gravity": 0.0, "dt": 0.008333333 },
-              "materials": [
-                { "extends": "木材(松)", "name": "d26-foam", "density": 30.0 }
-              ],
-              "bodies": [
-                { "shape": { "sphere": { "radius": 0.02 } }, "material": "d26-foam",
-                  "position": [0.2, 0, 0], "name": "balloon" }
-              ],
-              "couplings": [
-                { "image_charge_force": { "body": "balloon", "charge": 1.0e-7,
-                  "plane_normal": [1, 0, 0], "plane_d": 0 } }
-              ],
-              "probes": [ { "body_pos_x": "balloon" } ]
-            }
-            "#;
+            let json = include_str!("../../../scenes/d26-balloon-qualitative.json");
             let result = run_headless_scenario(json, 6000).expect("valid scenario JSON");
             let final_x = *result.probe_histories[0]
                 .last()
@@ -1583,30 +1513,12 @@ mod tests {
         let tau = mass * r / (b * length).powi(2);
         let steps = (5.0 * tau / dt) as u32;
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d21-copper-tube-drop",
-          "world": {{ "gravity": {gravity}, "dt": {dt} }},
-          "bodies": [
-            {{ "shape": {{ "sphere": {{ "radius": 0.01 }} }},
-              "material": "鋼(炭素鋼)", "mass_override": {mass}, "name": "rod" }}
-          ],
-          "circuit": {{
-            "num_nodes": 2,
-            "resistors": [ {{ "a": 1, "b": 0, "resistance": {r} }} ],
-            "voltage_sources": [ {{ "a": 1, "b": 0, "voltage": 0.0 }} ]
-          }},
-          "couplings": [
-            {{ "induction_coupling": {{ "body": "rod", "voltage_source_index": 0,
-              "length": {length}, "magnetic_field": {b}, "axis": [0, 1, 0] }} }}
-          ],
-          "probes": [ {{ "body_speed": "rod" }} ]
-        }}
-        "#
-        );
+        // シーンJSONは`scenes/d21-copper-tube-drop.json`として出荷する(残タスク
+        // 完遂のシーンギャラリー増分B2)。全値がリテラルなので焼き込みに計算は
+        // 不要。
+        let json = include_str!("../../../scenes/d21-copper-tube-drop.json");
 
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let measured_v = *result.probe_histories[0]
             .last()
             .expect("history should not be empty");
@@ -1760,30 +1672,19 @@ mod tests {
         let theta: f64 = std::f64::consts::FRAC_PI_4; // 45°(最大到達距離)
         let g = 9.80665;
         let dt = 0.008333333;
-        let vx = v0 * theta.cos();
-        let vy = v0 * theta.sin();
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d2-ballistic",
-          "world": {{ "gravity": {g}, "dt": {dt} }},
-          "bodies": [
-            {{ "shape": {{ "sphere": {{ "radius": 0.1 }} }},
-              "material": "鋼(炭素鋼)",
-              "linear_velocity": [{vx}, {vy}, 0.0],
-              "name": "shell" }}
-          ],
-          "probes": [ {{ "body_pos_y": "shell" }}, {{ "body_speed": "shell" }} ]
-        }}
-        "#,
-        );
+        // シーンJSONは`scenes/d2-ballistic.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分B2)。`linear_velocity`の[vx, vy]は
+        // `v0*theta.cos()`/`v0*theta.sin()`を事前計算してそのまま焼き込んである
+        // (Rustの`{}`は往復可能な最短表現を出すため、下の期待値計算と1ビットも
+        // 変わらない)。
+        let json = include_str!("../../../scenes/d2-ballistic.json");
 
         // プローブ履歴はリングバッファ(容量`DEFAULT_PROBE_CAPACITY`=600、`run_headless_scenario`
         // 参照)なので、着地ステップ(解析値T≈2.885s→step≈346)より前の区間が上書きされて
         // インデックスと絶対時刻の対応がずれないよう、stepsは容量以下に収める。
         let steps = 500;
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let pos_y = &result.probe_histories[0];
         let speed = &result.probe_histories[1];
 
@@ -1836,24 +1737,12 @@ mod tests {
         let g: f64 = 9.80665;
         let dt: f64 = 0.008333333;
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d1-falling-clock",
-          "world": {{ "gravity": {g}, "dt": {dt} }},
-          "bodies": [
-            {{ "shape": {{ "sphere": {{ "radius": {radius} }} }},
-              "material": "鋼(炭素鋼)",
-              "position": [0.0, {height}, 0.0],
-              "name": "clock" }}
-          ],
-          "probes": [ {{ "body_pos_y": "clock" }} ]
-        }}
-        "#,
-        );
+        // シーンJSONは`scenes/d1-free-fall.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分B2)。全値がリテラルなので焼き込みに計算は不要。
+        let json = include_str!("../../../scenes/d1-free-fall.json");
 
         let steps = 400; // 解析落下時間T≈2.019sに対し十分な余裕(dt=1/120で約243step)
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let pos_y = &result.probe_histories[0];
 
         let landing_step = (0..pos_y.len())
@@ -1884,7 +1773,8 @@ mod tests {
     fn run_headless_scenario_bounce_height_matches_restitution_squared_for_rubber() {
         let radius: f64 = 0.1;
         let drop_height: f64 = 1.9;
-        let dt: f64 = 1.0 / 240.0; // 反発の数値精度のため既定よりやや細かく(D1弾道と同じ理由)。
+        // dt=1.0/240.0(反発の数値精度のため既定よりやや細かく、D1弾道と同じ理由)は
+        // `scenes/d3-bounce.json`に焼き込み済み。
         let material_name = "ゴム(天然)";
 
         // 期待値(反発係数の2乗)はMaterialDbから実際にクエリする(ネイティブ側の
@@ -1897,25 +1787,14 @@ mod tests {
             .expect("standard DB has rubber");
         let expected_e = reference_world.materials().get(material_id).restitution;
 
-        let json = format!(
-            r#"
-        {{
-          "name": "d3-bounce",
-          "world": {{ "gravity": 9.80665, "dt": {dt}, "restitution_velocity_threshold": 0.0 }},
-          "bodies": [
-            {{ "shape": {{ "plane": {{ "normal": [0, 1, 0], "d": 0 }} }},
-              "type": "static", "material": "{material_name}" }},
-            {{ "shape": {{ "sphere": {{ "radius": {radius} }} }}, "material": "{material_name}",
-              "position": [0.0, {y0}, 0.0], "name": "ball" }}
-          ],
-          "probes": [ {{ "body_pos_y": "ball" }} ]
-        }}
-        "#,
-            y0 = drop_height + radius,
-        );
+        // シーンJSONは`scenes/d3-bounce.json`として出荷する(残タスク完遂の
+        // シーンギャラリー増分B2)。`dt`(=1.0/240.0)・`position.y`(=drop_height+radius)
+        // は事前計算した値をそのまま焼き込んである(Rustの`{}`は往復可能な最短表現を
+        // 出すため、下の期待値計算と1ビットも変わらない)。
+        let json = include_str!("../../../scenes/d3-bounce.json");
 
         let steps = 500; // リングバッファ容量600以下(D1/D2の増分で確立した配慮)。
-        let result = run_headless_scenario(&json, steps).expect("valid scenario JSON");
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let pos_y = &result.probe_histories[0];
         let height: Vec<f64> = pos_y.iter().map(|y| y - radius).collect();
 

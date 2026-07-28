@@ -1,0 +1,11 @@
+{
+  "name": "d6-floating-box-f5",
+  "world": { "gravity": 9.80665, "dt": 0.008333333 },
+  "materials": [ { "extends": "木材(松)", "name": "d6-f5-density", "density": 499.1 } ],
+  "bodies": [
+    { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "d6-f5-density",
+      "position": [0, 0.1, 0], "name": "box" }
+  ],
+  "fluids": [ { "static_water": { "water_level": 0.0, "density": 998.2 } } ],
+  "probes": [ { "body_pos_y": "box" } ]
+}

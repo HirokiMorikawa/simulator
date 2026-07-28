@@ -1,6 +1,27 @@
 {
   "scenes": [
     {
+      "file": "d1-free-fall.json",
+      "demo": "D1",
+      "title": "落下時計",
+      "description": "高さ20mから落下する球(真空、抗力なし)。落下時間が解析解t=√(2h/g)と一致することを確認する(M1)。",
+      "domains": ["mechanics"]
+    },
+    {
+      "file": "d2-ballistic.json",
+      "demo": "D2",
+      "title": "弾道(45°射出)",
+      "description": "初速20m/sで45°射出した球の真空放物運動。飛翔時間・着地速度・頂点速度が解析解と一致することを確認する。",
+      "domains": ["mechanics"]
+    },
+    {
+      "file": "d3-bounce.json",
+      "demo": "D3",
+      "title": "バウンド(ゴム)",
+      "description": "ゴム球が床に落下し跳ね返る。跳ね返り後の到達高さが反発係数の2乗どおりであることを確認する。",
+      "domains": ["mechanics"]
+    },
+    {
       "file": "d4-box-stack.json",
       "demo": "D4",
       "title": "積み木",
@@ -15,17 +36,59 @@
       "domains": ["mechanics"]
     },
     {
+      "file": "d5-incline-slide.json",
+      "demo": "D5",
+      "title": "斜面(滑走)",
+      "description": "45°の斜面上の箱。摩擦角を超えるため滑り出し、加速度が解析解a=g(sinθ-μkcosθ)と一致することを確認する(M8)。",
+      "domains": ["mechanics"]
+    },
+    {
       "file": "d6-floating-box-f4.json",
       "demo": "D6",
-      "title": "浮き沈み",
+      "title": "浮き沈み(静止)",
       "description": "密度比0.6の箱を水域に浮かべ、解析解どおりの喫水位置で釣り合うことを確認する(F4)。",
       "domains": ["mechanics", "fluid"]
+    },
+    {
+      "file": "d6-floating-box-f5.json",
+      "demo": "D6",
+      "title": "浮き沈み(振動)",
+      "description": "密度比0.5の箱を平衡位置より0.1m高い位置から静かに離し、上下振動の周期が解析解(浮力ばね)と一致することを確認する(F5)。",
+      "domains": ["mechanics", "fluid"]
+    },
+    {
+      "file": "d7-wind-high-re.json",
+      "demo": "D7",
+      "title": "風と終端速度(高Re)",
+      "description": "半径5mmの鋼球が空気中(密度1.225kg/m³)を落下し、慣性抗力領域の終端速度(v=√(2mg/(ρCdA)))へ収束することを確認する(F1)。",
+      "domains": ["mechanics"]
+    },
+    {
+      "file": "d7-wind-low-re.json",
+      "demo": "D7",
+      "title": "風と終端速度(低Re)",
+      "description": "半径1cmの鋼球が高粘性流体(粘性1.0Pa·s)中を沈降し、ストークス沈降の終端速度(v=2r²Δρg/(9μ))へ収束することを確認する(F3)。",
+      "domains": ["mechanics"]
     },
     {
       "file": "d11-pendulum.json",
       "demo": "D11",
       "title": "振り子",
       "description": "小振幅の単振り子。周期が解析解(2π√(L/g))と一致することを確認する(M3)。",
+      "domains": ["mechanics"]
+    },
+    {
+      "file": "d21-copper-tube-drop.json",
+      "demo": "D21",
+      "title": "銅管落下(渦電流ブレーキ)",
+      "description": "導体管を模した抵抗回路+誘導結合の中を磁石が落下し、渦電流ブレーキで解析解どおりの終端速度(v=mgR/(Bl)²)へ収束することを確認する。",
+      "domains": ["mechanics", "circuit"]
+    },
+    {
+      "file": "d26-balloon-qualitative.json",
+      "demo": "D26",
+      "title": "帯電風船",
+      "description": "壁から0.2m離れた帯電風船が、鏡像電荷力のみで壁(x=0)へ向けて加速しながら引き寄せられることを確認する(壁の反発力はモデル化されていないため、到達後は力が切れてそのまま通過する)。",
       "domains": ["mechanics"]
     }
   ]
