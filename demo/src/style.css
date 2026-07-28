@@ -18,11 +18,15 @@ body {
   font-size: 13px;
 }
 
+/* Project ドロワーの高さは CSS 変数にする(増分E3)。レイアウトプリセットと
+ * ドロワーの開閉が同じ `grid-template-rows` を奪い合わないようにするため——
+ * 変数にしておけば両者が独立に効く。 */
 #app {
+  --project-row: 28px;
   display: grid;
   height: 100vh;
   grid-template-columns: 220px 1fr 260px;
-  grid-template-rows: auto 1fr auto 160px 28px;
+  grid-template-rows: auto 1fr auto 160px var(--project-row);
   grid-template-areas:
     "toolbar   toolbar     toolbar"
     "hierarchy sceneview   inspector"
@@ -31,14 +35,32 @@ body {
     "project   project     project";
 }
 
+/* **増分E3で修正した重大なUIバグ**: 既定の `--project-row: 28px` はタブバーの
+ * 高さぶんしかなく、Project ドロワーの本体(Scenes/Materials/Circuit/Prefabs/
+ * Replays の中身)は画面外へ押し出されて**実ユーザーには一切到達不能**だった
+ * (実測: viewport 900px に対し `#project-body` の top が 903px)。タブを
+ * クリックしたら開くようにし、開いている間は本体が入る高さを与える。 */
+#app[data-drawer="open"] {
+  --project-row: 260px;
+}
+
 #app[data-layout="physics-focus"] {
-  grid-template-rows: auto 1fr auto 320px 28px;
+  grid-template-rows: auto 1fr auto 320px var(--project-row);
 }
 
 /* Astro(タイムライン重視、設計§2「Astro(タイムライン重視)」): タイムライン行を
  * 固定の大きな高さにし、その分コンソール行を縮める。 */
 #app[data-layout="astro"] {
-  grid-template-rows: auto 1fr 140px 120px 28px;
+  grid-template-rows: auto 1fr 140px 120px var(--project-row);
+}
+
+/* Circuit-focus(設計§2「Circuit-focus(回路サブモード + プローブ大)」、増分E3)。
+ * 回路エディタは Project ドロワーの Circuit タブにあるので、**ドロワーを常時
+ * 大きく開いた状態**にし、あわせてプローブ行も広げる(回路の電圧をグラフで
+ * 追うため)。Scene View は回路作業中は使わないので圧縮してよい。 */
+#app[data-layout="circuit-focus"] {
+  --project-row: 360px;
+  grid-template-rows: auto 1fr auto 220px var(--project-row);
 }
 
 .panel {
@@ -355,9 +377,14 @@ body {
   flex-direction: column;
 }
 
+/* ドロワーが開いたときに本体がはみ出さずスクロールするようにする(増分E3)。
+ * `min-height: 0` はflexアイテムが内容の最小サイズより縮めるようにする定型。 */
 #project-body {
   padding: 4px 10px;
   color: #888;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .materials-table {

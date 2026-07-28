@@ -1032,8 +1032,26 @@ function setUpProjectDrawer(
     }
     body.textContent = staticContentByTab[tab] ?? "";
   }
+  // **Project ドロワーの開閉(増分E3)**。既定のグリッド行はタブバーの高さ(28px)
+  // しか無く、本体は画面外に押し出されて実ユーザーには到達不能だった(実測: viewport
+  // 900px に対し `#project-body` の top が 903px)。タブをクリックしたら開き、
+  // **開いている状態で同じタブをもう一度クリックしたら閉じる**(Scene View を
+  // 広く使いたいときに戻せるようにする)。開閉状態は `#app` の `data-drawer` に
+  // 持たせ、CSS変数 `--project-row` で高さを切り替える——レイアウトプリセットと
+  // `grid-template-rows` を奪い合わないようにするため(`style.css` 参照)。
+  const app = document.getElementById("app")!;
   tabs.forEach((tab) => {
-    tab.addEventListener("click", () => show(tab.dataset.tab!));
+    tab.addEventListener("click", () => {
+      const name = tab.dataset.tab!;
+      const isActive = tab.classList.contains("active");
+      const isOpen = app.dataset.drawer === "open";
+      if (isActive && isOpen) {
+        delete app.dataset.drawer;
+        return;
+      }
+      app.dataset.drawer = "open";
+      show(name);
+    });
   });
   show("scenes");
 }

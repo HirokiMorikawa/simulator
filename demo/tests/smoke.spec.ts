@@ -169,3 +169,50 @@ test("Hierarchy に Probes サブツリーが出る(D11 は body_pos_x/y の2本
 
   expect(errors).toEqual([]);
 });
+
+test("Project ドロワーがタブクリックで開き、中身が画面内に入る(増分E3)", async ({ page }) => {
+  // **増分E3で修正した重大なUIバグの回帰テスト**: 既定のグリッド行はタブバーの
+  // 高さしか無く、ドロワー本体(Scenes/Materials/... の中身)は画面外へ押し出されて
+  // 実ユーザーには到達不能だった。Playwright は viewport 外の要素もクリックできて
+  // しまうため、既存のスモークテストはこれを見逃していた——**「画面内にあるか」を
+  // 座標で明示的に検証する**のがこのテストの要点。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const insideViewport = async () =>
+    page.evaluate(() => {
+      const r = document.getElementById("project-body")!.getBoundingClientRect();
+      return r.top < window.innerHeight;
+    });
+
+  // 起動直後は閉じており本体は画面外。
+  expect(await insideViewport()).toBe(false);
+
+  await page.click('.project-tab[data-tab="materials"]');
+  expect(await insideViewport()).toBe(true);
+  // 中身(材質表)が実際に見えること。
+  await expect(page.locator("#project-body .materials-table")).toBeVisible();
+
+  // 同じタブをもう一度クリックすると閉じる。
+  await page.click('.project-tab[data-tab="materials"]');
+  expect(await insideViewport()).toBe(false);
+
+  expect(errors).toEqual([]);
+});
+
+test("Circuit-focus レイアウトでドロワーが開いた状態になる(増分E3)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  await page.selectOption("#select-layout", "circuit-focus");
+  const visible = await page.evaluate(() => {
+    const r = document.getElementById("project-body")!.getBoundingClientRect();
+    return { inside: r.top < window.innerHeight, height: r.height };
+  });
+  expect(visible.inside).toBe(true);
+  expect(visible.height).toBeGreaterThan(200);
+
+  expect(errors).toEqual([]);
+});
