@@ -47,6 +47,13 @@ pub enum SceneError {
     UnknownMaterial(String),
     /// `probes[].body_pos_y`等が`bodies[].name`のいずれとも一致しない。
     UnknownBodyName(String),
+    /// **排他であるべき結合が同一シーンで同時に有効になっている**(増分F1で接続)。
+    /// 設計 docs/20-integration/01-coupling-matrix.md §2規則2 が列挙する3組
+    /// (浮力: 静的水域×解像流体、空気抗力: 集中定数×格子結合、コンデンサ電場
+    /// エネルギー: 回路×静電場)を`sim_coupling::validate_exclusive_couplings`で
+    /// 検出したもの。**同じ物理量を二重計上するとエネルギー台帳が静かに壊れる**
+    /// ため、シーン読み込みの時点で弾く。
+    ExclusiveCouplingViolation(Vec<sim_coupling::ExclusiveCouplingViolation>),
 }
 
 #[derive(Deserialize)]
@@ -310,6 +317,25 @@ pub enum CouplingJson {
         magnetic_field: f64,
         axis: [f64; 3],
     },
+    /// 浮力・抗力を**Coupling registry経由で**剛体単位に適用する
+    /// (`sim_coupling::BuoyancyDrag`、増分F1で追加)。
+    ///
+    /// **なぜこの変種を足したか**: 設計 docs/20-integration/01-coupling-matrix.md
+    /// §2規則2 の「浮力: 静的水域(集中定数)と解像流体(SPH/格子)は排他」という
+    /// 検査を`from_scenario`へ接続したかったが、**排他の相手側をシーンJSONで
+    /// 表現する手段が無いと検査は絶対に発火しない**——つまり「接続した」と言い
+    /// ながら実質何もしないゲートになってしまう。この変種があって初めて、
+    /// `fluids[].static_water`(埋め込み浮力)と本変種を同時に書いたシーンが
+    /// 実際に弾かれる。
+    ///
+    /// **縮約**: `water`は`fluids[].static_water`とは独立にここで指定する
+    /// (registry経由の適用は`MechanicsSolver::water`の埋め込み経路とは別物で
+    /// あることを明示するため)。`atmosphere`は`world.atmosphere`と同じ形。
+    BuoyancyDrag {
+        body: String,
+        water_level: f64,
+        water_density: f64,
+    },
 }
 
 /// `Scenario::circuit`(モジュールdoc「縮約実装の理由」参照)。
@@ -458,6 +484,37 @@ impl World {
     pub fn from_scenario_with_body_ids(
         scenario: &Scenario,
     ) -> Result<(World, Vec<BodyId>), SceneError> {
+        // **排他結合の静的検査(増分F1で接続)**。設計 docs/20-integration/
+        // 01-coupling-matrix.md §2規則2 が列挙する3組を、シーンを構築する**前に**
+        // 弾く——同じ物理量を二重計上したワールドは、走らせてもエラーにならず
+        // エネルギー台帳の残差だけが静かに増えるため、読み込み時点で止めるのが
+        // 唯一の実用的な防ぎ方である。
+        //
+        // **判定の対応付け(縮約と正直な記録)**: `SceneCouplingConfig`の6フラグの
+        // うち、シーンJSONから実際に判定できるのは浮力の2つだけである——
+        // `fluids[].static_water`があれば静的水域の浮力、`couplings`に
+        // `BuoyancyDrag`があれば registry 経由の浮力。
+        // 空気抗力とコンデンサ電場エネルギーは、そもそも`CouplingJson`に対応する
+        // 変種が無く(現状は`ImageChargeForce`/`BrownianForce`/`InductionCoupling`
+        // の3種のみ)、シーンJSONから両方を有効にする手段が存在しないため常に
+        // `false`のままになる。**この検査が実際に働くのは浮力の組だけ**であり、
+        // 残り2組は対応する`CouplingJson`変種が増えた時点で意味を持ち始める。
+        let coupling_config = sim_coupling::SceneCouplingConfig {
+            static_water_buoyancy: scenario
+                .fluids
+                .iter()
+                .any(|f| matches!(f, FluidJson::StaticWater { .. })),
+            resolved_fluid_buoyancy: scenario
+                .couplings
+                .iter()
+                .any(|c| matches!(c, CouplingJson::BuoyancyDrag { .. })),
+            ..Default::default()
+        };
+        let violations = sim_coupling::validate_exclusive_couplings(&coupling_config);
+        if !violations.is_empty() {
+            return Err(SceneError::ExclusiveCouplingViolation(violations));
+        }
+
         let options = WorldOptions {
             gravity: scenario.world.gravity,
             dt: scenario.world.dt,
@@ -558,6 +615,23 @@ impl World {
 
         for coupling in &scenario.couplings {
             match coupling {
+                CouplingJson::BuoyancyDrag {
+                    body,
+                    water_level,
+                    water_density,
+                } => {
+                    let id = body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    world.add_coupling(Box::new(sim_coupling::BuoyancyDrag {
+                        body_index: id.index as usize,
+                        water: Some(sim_fluid::StaticWaterRegion::new(
+                            *water_level,
+                            *water_density,
+                        )),
+                        atmosphere: None,
+                    }));
+                }
                 CouplingJson::ImageChargeForce {
                     body,
                     charge,
@@ -960,6 +1034,64 @@ mod tests {
     /// シーンJSONが不正(存在しない材料参照)なら、`Scenario::from_json`/
     /// `World::from_scenario`と同じ`SceneError`をそのまま返す(ヘッドレスランナーは
     /// バリデーションを迂回しない)。
+    /// **増分F1: 排他結合の静的検査が実際に発火すること**。設計
+    /// docs/20-integration/01-coupling-matrix.md §2規則2「浮力: 静的水域
+    /// (集中定数)と解像流体は排他」を、シーン読み込みの時点で弾く。
+    ///
+    /// **発火しない検査は無意味**なので、①両方書いたシーンが実際に`Err`になる
+    /// ②片方だけなら通る、の両方を確認する(片方だけで落ちるなら過検出になる)。
+    #[test]
+    fn from_scenario_rejects_a_scene_that_double_counts_buoyancy() {
+        let both = r#"
+        {
+          "name": "buoyancy-double-count",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [
+            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "木材(松)",
+              "position": [0, 2, 0], "name": "box" }
+          ],
+          "fluids": [ { "static_water": { "water_level": 0.0, "density": 998.2 } } ],
+          "couplings": [
+            { "buoyancy_drag": { "body": "box", "water_level": 0.0, "water_density": 998.2 } }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(both).expect("JSON自体は妥当");
+        match World::from_scenario(&scenario) {
+            Err(SceneError::ExclusiveCouplingViolation(v)) => {
+                assert!(
+                    v.contains(&sim_coupling::ExclusiveCouplingViolation::BuoyancyDoubleCounted),
+                    "浮力の二重計上として検出されるべき: {v:?}"
+                );
+            }
+            Err(other) => panic!("排他結合違反で弾かれるべきだが別のエラー: {other:?}"),
+            Ok(_) => panic!("排他結合違反のシーンが通ってしまった"),
+        }
+
+        // 片方だけなら通る(過検出でないことの確認)。
+        let only_static = both.replace(
+            r#""couplings": [
+            { "buoyancy_drag": { "body": "box", "water_level": 0.0, "water_density": 998.2 } }
+          ]"#,
+            r#""couplings": []"#,
+        );
+        let scenario = Scenario::from_json(&only_static).expect("JSON自体は妥当");
+        assert!(
+            World::from_scenario(&scenario).is_ok(),
+            "静的水域だけなら二重計上ではない"
+        );
+
+        let only_coupling = both.replace(
+            r#""fluids": [ { "static_water": { "water_level": 0.0, "density": 998.2 } } ],"#,
+            "",
+        );
+        let scenario = Scenario::from_json(&only_coupling).expect("JSON自体は妥当");
+        assert!(
+            World::from_scenario(&scenario).is_ok(),
+            "registry経由の浮力だけなら二重計上ではない"
+        );
+    }
+
     #[test]
     fn run_headless_scenario_propagates_scene_validation_errors() {
         let json = r#"

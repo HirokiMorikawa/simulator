@@ -154,6 +154,28 @@ pub enum Command {
     Release { body: BodyId },
 }
 
+/// `raycast`/`overlap_sphere`のフィルタ(設計docs/20-integration/04-world-api.md §2
+/// が引数に取る`Filter`、増分F1で追加)。
+///
+/// **設計は`Filter`の中身を定義していない**ため、クエリの用途から必要最小限を
+/// 決めた: ①静的/動的の別で絞る(例: 「地面以外に当たったか」)②特定のボディを
+/// 除外する(例: 自分自身を無視してレイを飛ばす)。レイヤーマスクや衝突グループは
+/// `RigidBodySet`側にその概念自体が無いため対象外(必要になった時点で
+/// `sim-mechanics`のボディ表現ごと拡張する)。
+///
+/// `default()`は**何も除外しない**ので、フィルタ不要な呼び出しはそれを渡せばよい。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct QueryFilter {
+    /// 静的ボディ(床・壁等)を除外する。
+    pub exclude_static: bool,
+    /// 動的ボディを除外する(静的な地形だけを拾いたい場合)。
+    pub exclude_dynamic: bool,
+    /// 明示的に除外するボディ。**世代も一致した場合のみ除外する**——削除後に
+    /// index が再利用された別のボディを巻き添えにしないため(`BodyId`が
+    /// 世代付きである理由そのもの)。
+    pub exclude: Vec<BodyId>,
+}
+
 /// `raycast`の結果(`raycast`モジュールdoc参照)。生の`RigidBodySet`indexではなく
 /// 世代付き`BodyId`を返す(削除済み剛体の再利用indexと取り違えないため)。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1125,25 +1147,60 @@ impl World {
             .collect()
     }
 
-    /// レイキャストクエリ(設計docs/20-integration/04-world-api.md §2、`raycast`
-    /// モジュールdoc参照。`filter`引数は未実装、同モジュールdoc参照)。
-    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_distance: f64) -> Option<RayHit> {
-        raycast::raycast(&self.mechanics.bodies, origin, dir, max_distance).map(|hit| RayHit {
-            body: BodyId {
-                index: hit.body_index as u32,
-                generation: self.generations[hit.body_index],
-            },
-            point: hit.point,
-            normal: hit.normal,
-            distance: hit.distance,
-        })
+    /// `filter`が`index`のボディを受け入れるか。
+    fn filter_accepts(&self, filter: &QueryFilter, index: usize) -> bool {
+        // `body_type`はメソッドではなく`Vec<BodyType>`フィールド。
+        let is_static = self.mechanics.bodies.body_type[index] == sim_mechanics::BodyType::Static;
+        if filter.exclude_static && is_static {
+            return false;
+        }
+        if filter.exclude_dynamic && !is_static {
+            return false;
+        }
+        !filter
+            .exclude
+            .iter()
+            .any(|id| id.index as usize == index && self.generations[index] == id.generation)
     }
 
-    /// 球オーバーラップクエリ(設計docs/20-integration/04-world-api.md §2、`overlap`
-    /// モジュールdoc参照。`filter`引数は未実装)。
-    pub fn overlap_sphere(&self, center: Vec3, r: f64) -> Vec<BodyId> {
+    /// レイキャストクエリ(設計docs/20-integration/04-world-api.md §2
+    /// `raycast(origin, dir, max, filter)`、`raycast`モジュールdoc参照)。
+    ///
+    /// **増分F1で`filter`引数を追加した**。`QueryFilter::default()`は全て受け入れる
+    /// ので、フィルタ不要な呼び出しはそれを渡せばよい。
+    ///
+    /// **縮約(正直な記録)**: フィルタは受理判定を**ヒット後**に適用する。
+    /// `raycast::raycast`は最近傍1件だけを返す実装なので、「最近傍が除外対象
+    /// だった場合に次の候補を返す」ことはできず`None`になる。除外対象を跨いだ
+    /// 背後のボディを取りたい場合は、`raycast`側に「全ヒットを距離順に返す」
+    /// APIを足す必要があり、それは後続増分の対象とする。
+    pub fn raycast(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_distance: f64,
+        filter: &QueryFilter,
+    ) -> Option<RayHit> {
+        raycast::raycast(&self.mechanics.bodies, origin, dir, max_distance)
+            .filter(|hit| self.filter_accepts(filter, hit.body_index))
+            .map(|hit| RayHit {
+                body: BodyId {
+                    index: hit.body_index as u32,
+                    generation: self.generations[hit.body_index],
+                },
+                point: hit.point,
+                normal: hit.normal,
+                distance: hit.distance,
+            })
+    }
+
+    /// 球オーバーラップクエリ(設計docs/20-integration/04-world-api.md §2
+    /// `overlap_sphere(center, r, filter)`、`overlap`モジュールdoc参照)。
+    /// `raycast`と違い全件を返すので、フィルタは素直に絞り込みとして効く。
+    pub fn overlap_sphere(&self, center: Vec3, r: f64, filter: &QueryFilter) -> Vec<BodyId> {
         overlap::overlap_sphere(&self.mechanics.bodies, center, r)
             .into_iter()
+            .filter(|&index| self.filter_accepts(filter, index))
             .map(|index| BodyId {
                 index: index as u32,
                 generation: self.generations[index],
@@ -2267,6 +2324,7 @@ mod tests {
                 Vec3::new(0.0, y0 + 10.0, 0.0),
                 Vec3::new(0.0, -1.0, 0.0),
                 100.0,
+                &QueryFilter::default(),
             )
             .expect("ray straight down should hit the box");
         assert_eq!(hit.body, box_id);
@@ -2278,6 +2336,75 @@ mod tests {
         );
     }
 
+    /// **増分F1**: `QueryFilter`が実際に絞り込むこと。`exclude`(自分自身を無視して
+    /// レイを飛ばす典型的な用途)と`exclude_dynamic`(静的な地形だけ拾う)を確認する。
+    #[test]
+    fn query_filter_excludes_bodies_by_id_and_by_static_dynamic_kind() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let mut ground_desc = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            steel,
+        );
+        ground_desc.body_type = sim_mechanics::BodyType::Static;
+        let ground = world.create_body(ground_desc);
+        let box_id = create_falling_box(&mut world);
+        let y0 = world.body_position(box_id).unwrap().y;
+        let origin = Vec3::new(0.0, y0 + 10.0, 0.0);
+        let down = Vec3::new(0.0, -1.0, 0.0);
+
+        // フィルタ無しなら手前の箱に当たる。
+        let hit = world
+            .raycast(origin, down, 100.0, &QueryFilter::default())
+            .expect("フィルタ無しでは箱に当たる");
+        assert_eq!(hit.body, box_id);
+
+        // 箱を除外すると、`raycast`が最近傍1件しか返さない縮約(doc参照)により
+        // **背後の地面ではなく`None`になる**。この挙動自体を固定する。
+        let excluded = QueryFilter {
+            exclude: vec![box_id],
+            ..QueryFilter::default()
+        };
+        assert!(
+            world.raycast(origin, down, 100.0, &excluded).is_none(),
+            "最近傍が除外対象なら次の候補は返さない(縮約、raycastのdoc参照)"
+        );
+
+        // overlap_sphere は全件を返すので、フィルタは素直に絞り込みとして効く。
+        let both = world.overlap_sphere(Vec3::new(0.0, y0, 0.0), 2.0, &QueryFilter::default());
+        assert!(both.contains(&box_id), "フィルタ無しなら箱が含まれる");
+
+        let dynamic_only = world.overlap_sphere(
+            Vec3::new(0.0, y0, 0.0),
+            2.0,
+            &QueryFilter {
+                exclude_static: true,
+                ..QueryFilter::default()
+            },
+        );
+        assert!(dynamic_only.contains(&box_id));
+        assert!(
+            !dynamic_only.contains(&ground),
+            "exclude_static は静的な地面を落とすべき"
+        );
+
+        let static_only = world.overlap_sphere(
+            Vec3::new(0.0, y0, 0.0),
+            2.0,
+            &QueryFilter {
+                exclude_dynamic: true,
+                ..QueryFilter::default()
+            },
+        );
+        assert!(
+            !static_only.contains(&box_id),
+            "exclude_dynamic は動的な箱を落とすべき"
+        );
+    }
+
     /// `World::overlap_sphere`(設計docs/20-integration/04-world-api.md §2、`overlap`
     /// モジュールdoc参照): 重なる剛体の`BodyId`(世代付き)を正しく返すことを確認する。
     #[test]
@@ -2286,10 +2413,14 @@ mod tests {
         let box_id = create_falling_box(&mut world);
         let position = world.body_position(box_id).unwrap();
 
-        let near_hits = world.overlap_sphere(position, 0.1);
+        let near_hits = world.overlap_sphere(position, 0.1, &QueryFilter::default());
         assert_eq!(near_hits, vec![box_id]);
 
-        let far_hits = world.overlap_sphere(position + Vec3::new(1000.0, 0.0, 0.0), 0.1);
+        let far_hits = world.overlap_sphere(
+            position + Vec3::new(1000.0, 0.0, 0.0),
+            0.1,
+            &QueryFilter::default(),
+        );
         assert!(far_hits.is_empty());
     }
 
