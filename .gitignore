@@ -9,3 +9,10 @@ demo/pkg/
 
 # Editor / OS
 .DS_Store
+
+# Playwright(demo/tests のスモークテスト実行時に生成される)
+demo/playwright-report/
+demo/test-results/
+
+# Python(scripts/ のヘルパを import して試した際に生成される)
+__pycache__/
