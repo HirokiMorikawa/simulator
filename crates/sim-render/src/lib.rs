@@ -73,6 +73,7 @@
 mod bsdf;
 mod bvh;
 mod camera;
+mod caustic;
 mod framebuffer;
 mod medium;
 mod microfacet;
@@ -91,6 +92,10 @@ mod tonemap;
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal, RoughConductor};
 pub use bvh::{Bvh, BvhDiagnostics};
 pub use camera::{exposure_value_at_iso100, relative_exposure, Camera};
+pub use caustic::{
+    ball_lens_paraxial_focal_distance, ball_lens_ray_focus_distance, trace_ball_lens_caustic,
+    CausticMap,
+};
 pub use framebuffer::Framebuffer;
 pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
 pub use microfacet::{ggx_distribution, sample_ggx_half_vector, smith_g, smith_g1};
