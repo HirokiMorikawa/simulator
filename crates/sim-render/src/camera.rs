@@ -45,6 +45,22 @@ impl Camera {
         let ray_origin = self.origin + lens_offset;
         Ray::new(ray_origin, focus_point - ray_origin)
     }
+
+    /// ピンホール方向: 正規化デバイス座標`(ndc_x, ndc_y)`(それぞれ`[-1,1]`、
+    /// `ndc_x`は右方向・`ndc_y`は上方向が正)・画角`vfov`(垂直、ラジアン)・
+    /// アスペクト比`aspect`(width/height)から、`generate_ray`が要求する
+    /// 「既に計算済みの方向」を作る(`lib.rs`モジュールdoc「ピクセル→方向の対応
+    /// だけが欠けていた」を埋める本増分の核)。
+    ///
+    /// 標準的なピンホールカメラの視錐台パラメータ化: 画面中央(`ndc=(0,0)`)は
+    /// `forward`そのもの、画面端は`forward`から`right`/`up`方向に
+    /// `tan(vfov/2)`(垂直)・`tan(vfov/2)*aspect`(水平)だけ傾く。
+    pub fn pinhole_direction(&self, ndc_x: f64, ndc_y: f64, aspect: f64, vfov: f64) -> Vec3 {
+        let half_height = (vfov / 2.0).tan();
+        let half_width = half_height * aspect;
+        (self.forward + self.right.scale(ndc_x * half_width) + self.up.scale(ndc_y * half_height))
+            .normalize_or_zero()
+    }
 }
 
 #[cfg(test)]
@@ -143,5 +159,42 @@ mod tests {
         let f_number = 2.8;
         let r = Camera::aperture_radius_from_f_number(focal_length, f_number);
         assert!((r - focal_length / (2.0 * f_number)).abs() < 1e-12);
+    }
+
+    /// 画面中央(`ndc=(0,0)`)は常に`forward`方向そのもの(オフセット無し)。
+    #[test]
+    fn pinhole_direction_at_screen_center_matches_forward_exactly() {
+        let camera = test_camera(0.0, 5.0);
+        let direction = camera.pinhole_direction(0.0, 0.0, 4.0 / 3.0, 0.9);
+        assert!(
+            (direction - camera.forward).length() < 1e-12,
+            "direction={direction:?} forward={:?}",
+            camera.forward
+        );
+    }
+
+    /// 画面端では`forward`から`right`/`up`方向に`tan(vfov/2)`
+    /// (アスペクト比ぶん水平方向はスケールされる)だけ傾く、という視錐台の
+    /// 定義式そのものと厳密一致する。
+    #[test]
+    fn pinhole_direction_at_screen_edges_matches_the_frustum_formula() {
+        let camera = test_camera(0.0, 5.0);
+        let aspect = 16.0 / 9.0;
+        let vfov = 1.2_f64;
+        for &(ndc_x, ndc_y) in &[(1.0, 0.0), (0.0, 1.0), (-1.0, -1.0), (0.7, -0.4)] {
+            let direction = camera.pinhole_direction(ndc_x, ndc_y, aspect, vfov);
+            let half_height = (vfov / 2.0).tan();
+            let half_width = half_height * aspect;
+            let expected = (camera.forward
+                + camera.right.scale(ndc_x * half_width)
+                + camera.up.scale(ndc_y * half_height))
+            .normalize_or_zero();
+            assert!(
+                (direction - expected).length() < 1e-12,
+                "ndc=({ndc_x},{ndc_y}) direction={direction:?} expected={expected:?}"
+            );
+            // 常に単位ベクトルであること。
+            assert!((direction.length() - 1.0).abs() < 1e-12);
+        }
     }
 }

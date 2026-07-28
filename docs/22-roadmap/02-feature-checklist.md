@@ -25,8 +25,10 @@
   ほぼ全てGreen)・Phase C(`World`全ドメイン合成・`Coupling`14種・`Orchestrator`・
   公開API・統合シナリオ5本・CIゲート決定論/保存則)は完了。
 - Phase D(`sim-render`)はR1–R7全ての担当テストがGreen(R4のみ設計改訂の上での代替検証)
-  まで実装済み。残るは画像出力パイプライン本体(フレームバッファ・自前PNG出力・
-  カメラ接続・露出・モーションブラー・`MaterialDb`ブリッジ・コースティクス)のみ。
+  まで実装済み。**増分C1**で画像出力パイプライン本体(フレームバッファ・自前PNG出力・
+  `Camera`→`Scene::trace`のカメラ接続)を新設した(詳細は§5「物理カメラ・
+  トーンマッピング」の行参照)。残るは露出(EV換算)・モーションブラー・
+  `MaterialDb`ブリッジ・コースティクス・デモD40–D43の目視チェックのみ。
 - フロントエンドは6パネルドッキングレイアウト(Scene View/Hierarchy/Inspector/
   Probe Graphs/Timeline/Console)+ Project ドロワー各タブ + シーンギャラリー
   (D1/D2/D3/D4/D5(静止+滑走)/D6(静止+振動)/D7(高Re+低Re)/D9/D11/D21/D26/
@@ -59,12 +61,13 @@
 |---|---|---|
 | A(本増分) | 現在地の更新・陳腐化記述の訂正 | §2の7件中6件をclose(1件は未実施のまま保持)・D24をスコープ外明記 |
 | B | シーンギャラリー拡張(シーン定義プローブのProbe Graphs配線 + 力学/熱/天体デモのシーン切り出し)。B1(Probe Graphs配線)完了済み、B2(力学デモ8件のシーン切り出し: D1/D2/D3/D5滑走/D6振動/D7高低Re/D21/D26)完了済み、B3(D9/D34/D35のシーン切り出し+「ボディ0個のシーン」対応)完了済み。D25(ブラウン運動、300粒子を`format!`で動的生成)は静的ファイル化に不向きなためインラインのまま維持(§7 D25の行に理由を明記)——D36–D39(スイングバイ/再突入/潮汐/相対論)は現行の`Scenario::astro`スキーマでは表現できない要素(双曲線軌道・大気抗力・潮汐力場・相対論補正)を要するため対象外のまま | §7の多数(「ヘッドレスGreen、目視チェック保留」で滞留する22件が主対象) |
-| C | Phase D画像出力パイプライン(フレームバッファ+自前PNG出力+カメラ接続、露出、モーションブラー、MaterialDbブリッジ、コースティクス) | §5の3件・§7のD40–D43・§8のR3 |
+| C | Phase D画像出力パイプライン(フレームバッファ+自前PNG出力+カメラ接続、露出、モーションブラー、MaterialDbブリッジ、コースティクス)。**C1(フレームバッファ+自前PNG出力+カメラ接続)完了済み** | §5の3件・§7のD40–D43・§8のR3 |
 | D | CIゲート(性能ベンチ回帰の実ゲート化=DoD④、PlaywrightのCI追加) | §4の1件 |
 | E | フロントエンド残り(Probe対数軸/CSV、Consoleオブジェクト連動、Inspector Component、Hierarchy未接続ドメイン等) | §6 |
 | F | 残りの設計項目(シーンJSON couplings自動解決+排他結合検査接続、World APIのfilter引数、並列リダクション決定性C-1) | §3・§4 |
 
-**次の一手**: 増分群B(シーンギャラリー拡張)。
+**次の一手**: 増分群C残り(C2以降: 露出のEV換算・モーションブラー・`MaterialDb`ブリッジ・
+コースティクス・デモD40–D43の目視チェック)。
 
 ### 増分の履歴(詳細)
 
@@ -1510,17 +1513,61 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [ ] 物理カメラ・トーンマッピング(薄レンズモデルの物理カメラ`sim_render::Camera`は
       実装済み——焦点距離・開口半径(絞りF値から`r=f/(2N)`)・レンズ円板サンプリング
       による被写界深度(R6、下記参照)。
-      **トーンマッピング(本増分で追加)**: 新規`crates/sim-render/src/
+      **トーンマッピング**: 新規`crates/sim-render/src/
       tonemap.rs`に輝度ベースのReinhard演算子(`reinhard_tonemap`:
       $L_{out}=L_{in}/(1+L_{in})$)+色相を保つ版(`reinhard_tonemap_color`:
       Rec.709相対輝度のみを圧縮しチャンネルへ均等にスケールを掛け戻す)を実装。
-      `sim-render`はまだ実際の画像出力パイプライン(フレームバッファ)を
-      持たないため(R1–R7は単一レイ/解析値比較)、純粋関数として実装し
-      実際のレンダリングパイプラインへの配線は後続増分とした。テスト6本
-      (式の厳密評価・単調増加・高輝度で1へ漸近・輝度0で0・色相保存・
+      テスト6本(式の厳密評価・単調増加・高輝度で1へ漸近・輝度0で0・色相保存・
       放射輝度0で黒のまま)がGreen。
-      露出・シャッター速度・モーションブラーは未実装、`camera.rs`/
-      `tonemap.rs`モジュールdoc「縮約実装の理由」参照)
+      **画像出力パイプライン本体(増分C1で追加)**: これまで`sim-render`は
+      フレームバッファ・解像度・ピクセルループ・ファイル出力を一切持たず、
+      `Camera`と`Scene::trace`が一度も接続されていなかった(R1–R7は全て単一
+      レイ/点推定)。本増分で以下を追加し、初めて実際に画像を1枚描けるように
+      した:
+      ①`Camera::pinhole_direction`(`camera.rs`、NDC座標`(ndc_x,ndc_y)`+画角
+      `vfov`+アスペクト比から、既存`generate_ray`が要求する「既に計算済みの
+      方向」を作る視錐台パラメータ化。**既存`generate_ray`のシグネチャは変更
+      していない**——R6の既存4テストへの影響ゼロ)。
+      ②新規`crates/sim-render/src/render.rs`(`RenderSettings{spp,max_depth,
+      exposure}`・`render_channel`(カメラ→ピクセル→`pinhole_direction`→
+      `generate_ray`→`trace`→放射輝度配列)・`render_rgb`(3チャンネル合成))。
+      色はまだ分光レンダリング本体(hero wavelength法)が無いため、R4
+      (コーネルボックス)の`cornell_box_shows_color_bleeding_from_the_red_and_
+      green_side_walls`が実証済みの「同一形状・アルベドだけチャンネルごとに
+      差し替えた`Scene`を3つ用意し、モノクロの`trace`を3回走らせる」手法を
+      そのまま流用し、**`Scene::trace`には一切手を入れていない**(既存75
+      テストへの回帰リスクをゼロにする設計判断)。ピクセル内ジッタ
+      (アンチエイリアス)は既存`SimRng`で決定的に行う。
+      ③新規`crates/sim-render/src/framebuffer.rs`(`Framebuffer{width,height,
+      pixels:Vec<Vec3>}`、線形RGB放射輝度を保持。`to_srgb8(exposure)`が
+      露出倍率→既存`tonemap::reinhard_tonemap_color`→sRGBガンマ符号化
+      (`gamma_encode`、IEC 61966-2-1の区分関数、新規実装)→u8量子化の順に
+      適用、`write_png`)。
+      ④新規`crates/sim-render/src/png.rs`(依存追加なしの自前最小PNG
+      エンコーダ——CRC32テーブル+Adler32+zlib`stored`(非圧縮)deflate
+      ブロック+PNGチャンク(IHDR/IDAT/IEND、8bit・RGB・非インターレースのみ)。
+      **圧縮しない縮約実装であり出力ファイルサイズは最適化しない**、
+      モジュールdocに明記)。
+      あわせて、`path_tracer::AtmosphereMedium`が`pub`でありながら`lib.rs`の
+      再エクスポートに含まれておらず(`path_tracer`モジュール自体が非公開の
+      ため)クレート外から型を名指しできず`Scene::new`の第4引数に`None`しか
+      渡せなかった実装漏れ(バグ)を発見・修正した(`pub use`に追加)。
+      新規テスト3本: 白色炉(R1)の画像版(8×8極小解像度で全画素が環境放射輝度と
+      厳密一致、画像パイプライン全体をカバー、`render.rs::tests::
+      r1_white_furnace_image_pipeline_matches_environment_radiance_at_every_
+      pixel`)・PNGラウンドトリップ(書き出したファイルのシグネチャ/IHDR/
+      全チャンクCRC32を自前で再計算して検証、`framebuffer.rs::tests::
+      write_png_round_trips_through_a_real_file_with_valid_signature_ihdr_and_
+      chunk_crcs`)・`to_srgb8`の既知値(黒→0・高輝度→255・中間値が閉形式と
+      一致)。既存75テスト+新規10テスト(上記3本+`render_rgb`配線・
+      `pinhole_direction`2本・PNG内部関数(CRC32/Adler32)2本)で計85テスト、
+      `cargo test -p sim-render`は約2秒(既存の約1.6秒から大きく増えていない
+      ——重いレンダリングをテストに含めない設計方針を維持)。
+      実際に256×192・spp=64の2球+地面シーンをrelease exampleでレンダリング
+      してPNG出力を目視確認済み(`crates/sim-render/examples/render_demo.rs`)。
+      露出(シャッター速度・ISOを考慮した実際のEV換算)・モーションブラー・
+      `MaterialDb`ブリッジ・コースティクスは未実装のまま、`camera.rs`/
+      `tonemap.rs`/`png.rs`/`framebuffer.rs`モジュールdoc「縮約実装の理由」参照)
 - [x] R1 — `crates/sim-render/src/path_tracer.rs::tests::r1_white_furnace_diffuse_surface_matches_background_radiance_exactly`。
       Lambertian BSDFをコサイン重み付き半球サンプリング(pdf=cosθ/π)と対にすると
       `bsdf*cosθ/pdf=albedo`が方向によらず恒等的に成り立つ(重要度サンプリングの

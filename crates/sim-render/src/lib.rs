@@ -39,32 +39,53 @@
 //! BSDFサンプリングのパストレースとする(不偏、二重計上が原理的に起きない)。
 //!
 //! GGX粗い誘電体・完全な分光レンダリング(hero wavelength法)・マルチスキャッ
-//! タリング・ミー散乱・煙/水の体積散乱・MIS・三角形メッシュ・SAH分割・露出調整/
-//! シャッター速度/モーションブラー・実際のフレームバッファへの配線は後続増分
+//! タリング・ミー散乱・煙/水の体積散乱・MIS・三角形メッシュ・SAH分割・露出調整
+//! (EV換算)/シャッター速度/モーションブラーは引き続き後続増分
 //! (各モジュールdoc「縮約実装の理由」参照)。
+//!
+//! **増分C1(画像出力パイプライン)**: 上記のとおりR1–R7は全て単一レイ/点推定の
+//! 検証であり、実際に画像を1枚も描いたことが無かった——フレームバッファ・
+//! 解像度・ピクセルループ・ファイル出力が存在せず、`Camera`(薄レンズ、R6で
+//! 検証済み)と`Scene::trace`が一度も接続されていなかった。本増分でこれを解消
+//! する: ①`Camera::pinhole_direction`(`camera.rs`、NDC座標→ピンホール方向、
+//! 既存の`generate_ray`のシグネチャは変更しない)、②`render`モジュール
+//! (カメラ→ピクセル→レイ生成→`trace`→フレームバッファの配線、色は分光本体が
+//! 無いためR4で実証済みの「チャンネル別レンダリング」を流用——`Scene::trace`
+//! 自体には一切手を入れない)、③`framebuffer`モジュール(線形RGB放射輝度の
+//! 画素配列、露出倍率→トーンマッピング→sRGBガンマ符号化→u8量子化)、
+//! ④`png`モジュール(依存追加なしの自前最小PNGエンコーダ、非圧縮のstored
+//! deflateブロックのみ)を追加した。あわせて、`path_tracer::AtmosphereMedium`
+//! が`pub`でありながら`lib.rs`の再エクスポートに含まれておらず(`path_tracer`
+//! モジュール自体が非公開のため)クレート外から型を名指しできなかった実装漏れ
+//! (`Scene::new`の第4引数に`None`しか渡せなかった)を修正した。
 
 mod bsdf;
 mod bvh;
 mod camera;
+mod framebuffer;
 mod medium;
 mod microfacet;
 mod path_tracer;
+mod png;
 mod primitive;
 mod prism;
 mod quad;
 mod ray;
+mod render;
 mod sphere;
 mod tonemap;
 
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal, RoughConductor};
 pub use bvh::{Bvh, BvhDiagnostics};
 pub use camera::Camera;
+pub use framebuffer::Framebuffer;
 pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
 pub use microfacet::{ggx_distribution, sample_ggx_half_vector, smith_g, smith_g1};
-pub use path_tracer::{Emissive, Material, PointLight, Scene, SceneObject};
+pub use path_tracer::{AtmosphereMedium, Emissive, Material, PointLight, Scene, SceneObject};
 pub use primitive::Primitive;
 pub use prism::{trace_prism_deviation, trace_raindrop_deviation};
 pub use quad::Quad;
 pub use ray::Ray;
+pub use render::{render_channel, render_rgb, RenderSettings};
 pub use sphere::{Hit, Sphere};
 pub use tonemap::{reinhard_tonemap, reinhard_tonemap_color, relative_luminance};
