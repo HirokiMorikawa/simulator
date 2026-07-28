@@ -997,6 +997,13 @@ function setUpProjectDrawer(
 // 理由: 対数軸・CSVエクスポート(design§1.4のフル仕様)は後続増分。
 type ProbeSeries = { label: string; color: string; history: Float64Array };
 
+// シーンギャラリー読み込み時(`isGalleryScene`参照)は、`scenario.probes`が
+// 宣言した本数の系列を動的に束ねる(D6=1本・D11=2本のように既定シーンの2系列
+// 固定とは限らない)。乱数は決定論を重視するこのプロジェクトの流儀に反するため
+// 使わず、この配列を`index % PROBE_GRAPH_COLORS.length`で決定的に巡回させる
+// (`render()`内の`isGalleryScene`分岐参照)。
+const PROBE_GRAPH_COLORS = ["#9cf", "#fc6", "#f9c", "#9fc", "#c9f", "#ffcc99"];
+
 function setUpProbeGraph(): (series: ProbeSeries[]) => void {
   const canvas = document.getElementById("probe-canvas") as HTMLCanvasElement;
   const ctx = canvas.getContext("2d")!;
@@ -1057,6 +1064,13 @@ async function setUpSceneView(
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
+  // ギャラリーシーン(`sceneGalleryRef.current`)を読み込み中かどうか
+  // (増分B1「シーン定義プローブをProbe Graphsパネルへ配線」)。既定シーンでは
+  // `y_probe`/`speed_probe`(BodyPosY/BodySpeedの固定2系列)をそのまま表示し、
+  // ギャラリーシーンでは`world.imported_probe_count()`本のシーン定義プローブへ
+  // 切り替える(`render()`内`updateProbeGraph`呼び出し参照)。既定シーンへ戻す
+  // UI(リロード以外)は現状無いため、falseへ戻す経路は無い(正直な制約)。
+  let isGalleryScene = false;
   circuitEditorRef.current = {
     reset: (numNodes: number) => world.circuit_editor_reset(numNodes),
     addResistor: (a, b, resistance) => world.circuit_editor_add_resistor(a, b, resistance),
@@ -1959,6 +1973,7 @@ async function setUpSceneView(
     circuitSwitchToggle.disabled = true;
 
     world = WasmWorld.from_scene_json(json);
+    isGalleryScene = true;
     sceneBaseBodyCount = bodies.length;
 
     currentPredictionPrompts = parsed.prediction_prompts ?? [];
@@ -2443,10 +2458,27 @@ async function setUpSceneView(
     inspectorRotation.setFromQuaternion(inspectorRotationQuat);
     inspectorVelocity.set(selectedVelocity[0], selectedVelocity[1], selectedVelocity[2]);
     updateInspectorTransformFields(inspectorPosition, inspectorRotation, inspectorVelocity);
-    updateProbeGraph([
-      { label: "BodyPosY", color: "#9cf", history: world.y_probe_history_f64() },
-      { label: "BodySpeed", color: "#fc6", history: world.speed_probe_history_f64() },
-    ]);
+    if (isGalleryScene) {
+      // シーンギャラリー読み込み中(D6/D11のような、Scene Viewに描く物が
+      // 乏しい/無いデモを含む)は、シーンJSONの`probes`セクションが宣言した
+      // 本数の系列を全て束ねる(0本でも`updateProbeGraph([])`が安全に空描画
+      // する、`setUpProbeGraph`のdoc参照)。
+      const probeCount = world.imported_probe_count();
+      const series: ProbeSeries[] = [];
+      for (let i = 0; i < probeCount; i++) {
+        series.push({
+          label: world.imported_probe_label_at(i),
+          color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
+          history: world.imported_probe_history_f64(i),
+        });
+      }
+      updateProbeGraph(series);
+    } else {
+      updateProbeGraph([
+        { label: "BodyPosY", color: "#9cf", history: world.y_probe_history_f64() },
+        { label: "BodySpeed", color: "#fc6", history: world.speed_probe_history_f64() },
+      ]);
+    }
 
     const speed = inspectorVelocity.length();
     if (velocityOverlayToggle.checked && speed > 1e-6) {

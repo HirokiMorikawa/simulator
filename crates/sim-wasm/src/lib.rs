@@ -580,6 +580,104 @@ impl WasmWorld {
             .unwrap_or(0.0)
     }
 
+    /// `index`を`imported_probe_handles`内の`World::probe`ハンドルへ解決する。
+    /// 範囲外なら`JsValue`エラー(`try_body_id_at`のdocと同じ理由でResult化)。
+    fn try_imported_probe_handle_at(&self, index: usize) -> Result<usize, JsValue> {
+        self.imported_probe_handles
+            .get(index)
+            .copied()
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "imported probe index {index} out of range (imported_probe_count={})",
+                    self.imported_probe_count()
+                ))
+            })
+    }
+
+    /// `handle`(`World::probe`用index)を実際の`Probe`へ解決する。
+    /// `imported_probe_handles`に積まれたhandleは`add_scenario_probes`が
+    /// `World::add_probe`から受け取った直後のものであり、`World`側でprobeが
+    /// 削除される経路が現状無いため、この解決が失敗することは実際には
+    /// 想定していない(それでも`Result`化するのはQ5の全面Result化方針を
+    /// 一貫させるため——`try_body_id_at`のdoc参照)。
+    fn try_imported_probe_at(&self, handle: usize) -> Result<&sim_world::Probe, JsValue> {
+        self.inner.probe(handle).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "imported probe handle {handle} has no matching World::probe (World-side removal is not implemented, this should not happen)"
+            ))
+        })
+    }
+
+    /// Probe Graphsパネル(設計docs/23-frontend/01-editor.md §1.4、docs/
+    /// 21-verification/03-demo-scenarios.md「UI共通仕様 2. Probeグラフ」)向けに、
+    /// 直近の`from_scene_json`/`import_scene_json`が`scenario.probes`から作成した
+    /// プローブの本数を返す(`imported_probe_label_at`/`imported_probe_history_f64`
+    /// の`index`引数の有効範囲は`0..imported_probe_count()`)。
+    pub fn imported_probe_count(&self) -> usize {
+        self.imported_probe_handles.len()
+    }
+
+    /// `index`番目のインポート済みプローブの人間可読ラベル(Probe Graphsパネルの
+    /// 凡例表示用)。`probe_target_label`のdoc参照。
+    pub fn imported_probe_label_at(&self, index: usize) -> Result<String, JsValue> {
+        let handle = self.try_imported_probe_handle_at(index)?;
+        let probe = self.try_imported_probe_at(handle)?;
+        Ok(self.probe_target_label(probe.target))
+    }
+
+    /// `index`番目のインポート済みプローブの観測履歴(古い順、`y_probe_history_f64`
+    /// と同じ実装パターン)。既定シーン専用の`y_probe_history_f64`/
+    /// `speed_probe_history_f64`とは独立に、シーンJSONが宣言した任意本数の
+    /// プローブをProbe Graphsパネルへ配線するために追加した
+    /// (docs/22-roadmap/02-feature-checklist.md 増分B1)。
+    pub fn imported_probe_history_f64(&self, index: usize) -> Result<Float64Array, JsValue> {
+        let handle = self.try_imported_probe_handle_at(index)?;
+        let probe = self.try_imported_probe_at(handle)?;
+        let values: Vec<f64> = probe.history().copied().collect();
+        Ok(Float64Array::from(values.as_slice()))
+    }
+
+    /// `ProbeTarget`の11変種をProbe Graphsパネル表示用の人間可読ラベルへ変換する
+    /// (`imported_probe_label_at`から使う)。既存の既定シーン向け固定ラベル
+    /// (`demo/src/main.ts`が`y_probe_history_f64`/`speed_probe_history_f64`に
+    /// 振っている"BodyPosY"/"BodySpeed"という表記)に揃え、ボディを指す変種は
+    /// 括弧内に表示名を添える(例: `"BodyPosY(box)"`)。
+    ///
+    /// **縮約実装(正直な記録)**: ボディを指す変種(`BodyPosY`/`BodyPosX`/
+    /// `BodySpeed`)の表示名は、`self.bodies`(`WasmWorld`がボディごとに覚えている
+    /// `SpawnedBodyMeta`)を線形探索して`BodyId`が一致するエントリを探し、その
+    /// `label`を使う——`World`自体は`BodyId`から表示名を逆引きする公開APIを
+    /// 持たないため(`body_label_at`が`try_body_id_at`経由でindex→`BodyId`の
+    /// 一方向にしか対応していないのと対称の制約)。一致が見つからない場合は
+    /// `format!("body#{}", id.index)`という**index表記への縮約フォールバック**を
+    /// 使う——`imported_probe_handles`に積まれる`BodyId`は常に
+    /// `append_scenario_bodies`が直前に`self.bodies`へpushしたものである
+    /// (`import_scene_json`/`from_scene_json`のdoc参照)ため、実際にはこの
+    /// フォールバックは踏まれない想定だが、将来ボディ削除が実装された場合の
+    /// 保険として残す。
+    fn probe_target_label(&self, target: ProbeTarget) -> String {
+        let body_label = |id: BodyId| -> String {
+            self.bodies
+                .iter()
+                .find(|meta| meta.id == id)
+                .map(|meta| meta.label.clone())
+                .unwrap_or_else(|| format!("body#{}", id.index))
+        };
+        match target {
+            ProbeTarget::BodyPosY(id) => format!("BodyPosY({})", body_label(id)),
+            ProbeTarget::BodyPosX(id) => format!("BodyPosX({})", body_label(id)),
+            ProbeTarget::BodySpeed(id) => format!("BodySpeed({})", body_label(id)),
+            ProbeTarget::NodeTemp(idx) => format!("NodeTemp[{idx}]"),
+            ProbeTarget::AstroPosX(idx) => format!("AstroPosX[{idx}]"),
+            ProbeTarget::AstroPosY(idx) => format!("AstroPosY[{idx}]"),
+            ProbeTarget::AstroVelX(idx) => format!("AstroVelX[{idx}]"),
+            ProbeTarget::AstroVelY(idx) => format!("AstroVelY[{idx}]"),
+            ProbeTarget::CircuitCurrent(idx) => format!("CircuitCurrent[{idx}]"),
+            ProbeTarget::LedgerKinetic => "LedgerKinetic".to_string(),
+            ProbeTarget::StateHashDigest => "StateHashDigest".to_string(),
+        }
+    }
+
     /// スポーンパレット——振り子(拘束オーバーレイの実証用)。ワールド固定点
     /// `(pivot_x, pivot_y, pivot_z)`から`DistanceJoint`(`World::
     /// add_distance_joint_to_world_point`)で距離`arm_length`に保たれる球を
@@ -1658,5 +1756,42 @@ mod tests {
         world.push_grab(1, 0.0, 1.0, 0.0).unwrap();
         world.push_move_grab(1, 0.0, 1.0, 0.0).unwrap();
         world.push_release(1).unwrap();
+    }
+
+    /// **増分B1(シーン定義プローブをProbe Graphsパネルへ配線)**: 既定シーン
+    /// (`WasmWorld::new`)は`scenario.probes`を持たない(`imported_probe_handles`は
+    /// `Vec::new()`のまま、`new()`のdoc参照)ため、`imported_probe_count()`は
+    /// 常に0を返すこと。フロントエンド側(`demo/main.ts`)が「プローブ0本の
+    /// シーンでも壊れない」ことを要求するケースの最も単純な実例でもある。
+    #[test]
+    fn imported_probe_count_is_zero_for_the_default_scene() {
+        let world = new_world();
+        assert_eq!(world.imported_probe_count(), 0);
+    }
+
+    /// D6(浮き沈み、`scenes/d6-floating-box-f4.json`)は`probes`に
+    /// `{ "body_pos_y": "box" }`を1本だけ持つ。`imported_probe_count`/
+    /// `imported_probe_label_at`がこれを正しく反映し、ラベルにボディ名"box"が
+    /// 含まれること(`probe_target_label`のdoc参照)。
+    #[test]
+    fn imported_probe_label_reflects_the_d6_floating_box_scene_probe() {
+        let json = include_str!("../../../scenes/d6-floating-box-f4.json");
+        let world = WasmWorld::from_scene_json(json.to_string())
+            .expect("scenes/d6-floating-box-f4.json must be a valid scene");
+        assert_eq!(world.imported_probe_count(), 1);
+        assert_eq!(world.imported_probe_label_at(0).unwrap(), "BodyPosY(box)");
+    }
+
+    /// D11(振り子、`scenes/d11-pendulum.json`)は`probes`に`body_pos_x`/
+    /// `body_pos_y`の2本(いずれも"bob")を持つ。両方が順序どおり・正しいラベルで
+    /// 読めること(Probe Graphsパネルが複数系列を束ねられることの前提)。
+    #[test]
+    fn imported_probe_labels_reflect_the_d11_pendulum_scene_probes_in_order() {
+        let json = include_str!("../../../scenes/d11-pendulum.json");
+        let world = WasmWorld::from_scene_json(json.to_string())
+            .expect("scenes/d11-pendulum.json must be a valid scene");
+        assert_eq!(world.imported_probe_count(), 2);
+        assert_eq!(world.imported_probe_label_at(0).unwrap(), "BodyPosX(bob)");
+        assert_eq!(world.imported_probe_label_at(1).unwrap(), "BodyPosY(bob)");
     }
 }

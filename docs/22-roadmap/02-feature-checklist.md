@@ -1883,6 +1883,41 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       (BodyPosY: max=10.00→min≈0.45)と速さの脈動曲線(BodySpeed: 落下中に
       max≈13.65まで上昇し着地後min=0.00へ収束)が同一canvasに重ねて正しく
       表示されることを確認した。対数軸・CSVエクスポートは未実装)
+      **増分B1(シーン定義プローブの配線)**: 上記の2系列は既定シーン
+      (`WasmWorld::new`)専用の固定配線で、シーンギャラリー(`from_scene_json`)
+      が読み込んだシーンの`scenario.probes`(D6=1本・D11=2本のように任意本数)
+      は一切グラフに出せなかった(D9冷めるコーヒー・D34太陽系儀のような
+      Scene Viewに描く物が乏しい/無いデモにとって、これが唯一の目視確認手段に
+      なるため致命的だった)。`sim-wasm`に`imported_probe_count`/
+      `imported_probe_label_at`/`imported_probe_history_f64`の3メソッドを追加し
+      (`imported_probe_handles`——予測→実験ミニパネル向けに既にあった——を
+      流用)、`ProbeTarget`の11変種(`BodyPosY`/`BodyPosX`/`BodySpeed`/
+      `NodeTemp`/`AstroPosX`/`AstroPosY`/`AstroVelX`/`AstroVelY`/
+      `CircuitCurrent`/`LedgerKinetic`/`StateHashDigest`)全てに人間可読ラベルを
+      振る`probe_target_label`を実装した。ボディを指す3変種は`self.bodies`を
+      `BodyId`で線形探索してボディ表示名を括弧内に添える(例:
+      `"BodyPosY(box)"`)——`World`自体はBodyIdから表示名を逆引きする公開APIを
+      持たないため、この探索が失敗した場合は`format!("body#{}", id.index)`と
+      いう**index表記への縮約フォールバック**を用意した(現状のシーンJSON
+      読み込み経路では実際には踏まれない想定、`probe_target_label`のdoc参照)。
+      `main.ts`は`isGalleryScene`フラグ(`loadScene`=`sceneGalleryRef.current`
+      内で立てる、既定シーンではfalseのまま)で分岐し、ギャラリー読み込み中は
+      `imported_probe_count()`本の系列を動的に組み立てる(0本のシーンでも
+      `updateProbeGraph([])`が安全に空描画する)。系列色は乱数を使わず
+      `PROBE_GRAPH_COLORS`という固定配列を`index %`で決定的に巡回させる
+      (このプロジェクトの決定論重視の流儀に合わせた)。PlaywrightでD6
+      (`scenes/d6-floating-box-f4.json`)を読み込むと実際に**"BodyPosY(box)"
+      の1系列**、D11(`scenes/d11-pendulum.json`)を読み込むと**"BodyPosX(bob)"/
+      "BodyPosY(bob)"の2系列**がProbe Graphsパネルに描かれ、既定シーンでは
+      従来どおり"BodyPosY"/"BodySpeed"のままであることを確認した(コンソール
+      エラー無し、詳細はD6/D11の§7該当行)。**対数軸・CSVエクスポートは
+      本増分の対象外のまま未実装**(このチェックボックスは`[x]`にしない)。
+      ネイティブテストの制約(`js_sys::Float64Array`/`JsValue::from_str`は
+      wasmホスト外で構築できない、モジュールdoc「正直な制約」参照)により、
+      `imported_probe_history_f64`自体の戻り値検証は既存の
+      `y_probe_history_f64`/`speed_probe_history_f64`と同様ネイティブでは
+      不可能——新規テストは`imported_probe_count`/`imported_probe_label_at`
+      (ラベル整形ロジック、String返却のため検証可能)の3本に絞った)
 - [x] Project ドロワー: Scenes/Materials/Prefabs/Replays
       (タブ切替UIの骨格は実装済み。Materialsタブは実データ接続済み——
       `sim-wasm`に新設した`material_properties_f64(name)`(`World::materials()`
@@ -2297,6 +2332,17 @@ Phase 1(P1〜P2 スモーク):
       (1ボディ、`fluids`セクションは剛体を持たないため非表示)・HUD・
       コンソールエラー無しをPlaywrightで確認した(F4部分のみ、静水面自体の
       可視化・F5の振動観察は対象外)。
+      **Probe Graphs配線を確認(増分B1)**: 従来はギャラリー読み込み後も
+      Probe Graphsパネルが既定シーン専用の固定2系列(先頭ボディの`BodyPosY`/
+      `BodySpeed`)を表示し続けており、たまたまD6の先頭(かつ唯一の)ボディが
+      "box"だったため値自体はシーンの`probes`(`{ "body_pos_y": "box" }`)と
+      一致して見えていたが、ラベルは"BodyPosY"のままでシーン定義プローブを
+      指しているとは分からなかった。`WasmWorld::imported_probe_count`/
+      `imported_probe_label_at`/`imported_probe_history_f64`を新設し、
+      ギャラリー読み込み中は`main.ts`がこれらへ束ね直すことで、Probe Graphs
+      パネルに実際に**"BodyPosY(box)"という1系列**が表示されることを
+      Playwrightで確認した(コンソールエラー無し、favicon.ico 404のみ
+      ——既存の無関係な挙動)。
       **シーンJSON経由の3本目の適用例(本増分で追加)**: F4部分を
       `run_headless_scenario_settles_a_floating_box_at_the_f4_equilibrium_
       waterline`(`scenario.rs`)としてヘッドレスランナー経由でも実装した——
@@ -2364,6 +2410,13 @@ Phase 2〜3:
       をギャラリーから読み込み、Playモードで実行してHierarchy(1ボディ)・
       HUD・コンソールエラー無しをPlaywrightで確認した(M3部分のみ、二重振り子の
       リプレイ決定論は`Scenario`と無関係な`World`直接操作のため対象外)。
+      **Probe Graphs配線を確認(増分B1)**: D11は`probes`に`body_pos_x`/
+      `body_pos_y`(いずれも"bob")の2本を持つが、従来のProbe Graphsパネルは
+      先頭ボディの`BodyPosY`/`BodySpeed`固定2系列しか描けず、`BodyPosX`(振れ角
+      判定に要る水平位置)はそもそも表示手段が無かった。`imported_probe_*`系の
+      新設APIで、Probe Graphsパネルに実際に**"BodyPosX(bob)"と"BodyPosY(bob)"の
+      2系列**(前者が振れ角に応じて振動、後者は小振幅のため画面上はほぼ一定)が
+      表示されることをPlaywrightで確認した(コンソールエラー無し)。
       **シーンJSON経由の12本目の適用例+スキーマ拡張(本増分で追加)**: M3
       (単振り子の小振幅周期)部分のみシーンJSON化した——これまで`Scenario`に
       剛体間拘束(設計の例示JSONにも無い項目)を構成する手段が無かったため
