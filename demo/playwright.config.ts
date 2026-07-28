@@ -40,9 +40,19 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "npx vite preview --port 4173 --strictPort",
+    // **`--host 127.0.0.1` を明示するのが要点**。`vite preview` の既定ホストは
+    // `localhost` で、GitHub Actions のランナーではこれが IPv6 (`::1`) に解決
+    // される一方、Playwright は上の `url`(IPv4 の 127.0.0.1)を叩きに行くため
+    // 到達できず `Timed out waiting 60000ms from config.webServer` で落ちる
+    // (ローカルの開発コンテナでは `localhost` が IPv4 に解決されるため再現せず、
+    // CI で初めて表面化した)。バインド先を明示して両者を一致させる。
+    command: "npx vite preview --port 4173 --strictPort --host 127.0.0.1",
     url: "http://127.0.0.1:4173",
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
+    // 起動に失敗したときに原因がログへ出るようにする(上記の不一致を突き止める
+    // のに実際に必要だった)。
+    stdout: "pipe",
+    stderr: "pipe",
   },
 });
