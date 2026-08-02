@@ -1,0 +1,78 @@
+{
+  "name": "d18-ice-in-drink",
+  "world": {
+    "gravity": 9.80665,
+    "dt": 0.008333333
+  },
+  "materials": [
+    {
+      "extends": "木材(松)",
+      "name": "ice",
+      "density": 900.0
+    }
+  ],
+  "bodies": [
+    {
+      "shape": {
+        "box": {
+          "half": [
+            0.05,
+            0.05,
+            0.05
+          ]
+        }
+      },
+      "material": "ice",
+      "position": [
+        0,
+        -0.04016229212582649,
+        0
+      ],
+      "mass_override": 0.9000000000000002,
+      "name": "ice_cube"
+    }
+  ],
+  "fluids": [
+    {
+      "static_water": {
+        "water_level": 0.0,
+        "density": 998.2
+      }
+    }
+  ],
+  "thermal": {
+    "ambient_temperature": 350.0,
+    "nodes": [
+      {
+        "temperature": 350.0,
+        "heat_capacity": 200000.0
+      }
+    ]
+  },
+  "couplings": [
+    {
+      "phase_change_morph": {
+        "body": "ice_cube",
+        "thermal_node": 0,
+        "melting_temperature": 273.15,
+        "latent_heat_fusion": 334000.0,
+        "specific_heat_solid": 2100.0,
+        "specific_heat_liquid": 4186.0,
+        "initial_mass": 0.9000000000000002,
+        "conductance": 50.0,
+        "initial_enthalpy": -10000.0
+      }
+    }
+  ],
+  "probes": [
+    {
+      "body_pos_y": "ice_cube"
+    },
+    {
+      "node_temp": 0
+    },
+    {
+      "body_speed": "ice_cube"
+    }
+  ]
+}

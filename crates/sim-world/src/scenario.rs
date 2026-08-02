@@ -123,6 +123,9 @@ pub struct Scenario {
     /// SPH流体(`sim_fluid::SphFluid`、**増分Hで追加**)。D23(注ぐ水)。
     #[serde(default)]
     pub sph: Option<SphScenarioJson>,
+    /// 気体区画(`sim_thermal::GasCompartment`、**増分H3で追加**)。D17(ピストン)。
+    #[serde(default)]
+    pub gas: Option<GasScenarioJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
@@ -202,6 +205,10 @@ pub struct BodyScenarioDesc {
     /// シナリオに対応するため追加、`[f64;3]`の`Default`はゼロ配列)。
     #[serde(default)]
     pub linear_velocity: [f64; 3],
+    /// 初期角速度(**増分H3で追加**)。D20(手回し発電)はキネマティック剛体を
+    /// 一定角速度で回すのが構成そのものなので、これが無いと書けなかった。
+    #[serde(default)]
+    pub angular_velocity: [f64; 3],
     #[serde(default, rename = "type")]
     pub body_type: Option<String>,
     #[serde(default)]
@@ -333,6 +340,19 @@ pub enum ProbeJson {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JointJson {
+    /// 直線スライダ拘束(`sim_mechanics::SliderJoint`、**増分H3で追加**)。
+    /// D17(ピストン)は「1軸に沿ってのみ動けるピストン」が構成そのもの。
+    /// `body_b`未指定ならワールドに対する拘束。
+    Slider {
+        body_a: String,
+        #[serde(default)]
+        anchor_a: [f64; 3],
+        axis: [f64; 3],
+        #[serde(default)]
+        body_b: Option<String>,
+        #[serde(default)]
+        anchor_b: [f64; 3],
+    },
     Distance {
         body_a: String,
         #[serde(default)]
@@ -428,6 +448,14 @@ pub enum CouplingJson {
         fluid_thermal_conductivity: f64,
         kinematic_viscosity: f64,
         prandtl_number: f64,
+    },
+    /// D17(ピストン)向け(`sim_coupling::PistonGas`、**増分H3で追加**)。
+    /// `initial_volume`は`gas.volume`と同じ値を書く(結合が基準体積として使う)。
+    PistonGas {
+        body: String,
+        axis: [f64; 3],
+        area: f64,
+        initial_volume: f64,
     },
     /// D19(電気工作台)向け(`sim_coupling::JouleHeat`、**増分G2で追加**)。
     /// 回路の抵抗損失を熱ノードへ注入する。`thermal_node`は`thermal.nodes`配列の
@@ -743,6 +771,27 @@ pub struct SphBlockJson {
     pub velocity: [f64; 3],
 }
 
+/// `Scenario::gas`(`sim_thermal::GasCompartment`、**増分H3で追加**)。
+///
+/// **注意(縮約)**: `GasCompartment`は`Solver`を実装しておらず`World::step()`は
+/// これを回さない。気体の状態を変えるのは`couplings[].piston_gas`(ピストンの
+/// 変位から体積を決め、断熱関係で圧力・温度を更新して反力を返す)であり、
+/// 気体単独では時間発展しない——これは`SoftBody`/`ConductionRod1D`の
+/// 「回されていなかった」問題とは違い、**気体区画に固有の時間発展が無い**
+/// (準静的モデル)という物理側の性質である。
+#[derive(Deserialize)]
+pub struct GasScenarioJson {
+    pub n_moles: f64,
+    pub volume: f64,
+    pub temperature: f64,
+    /// 分子の自由度 f(単原子3・二原子5)。未指定なら空気(5)。
+    #[serde(default)]
+    pub degrees_of_freedom: Option<f64>,
+    /// モル質量 [kg/mol]。未指定なら空気(28.97e-3)。
+    #[serde(default)]
+    pub molar_mass: Option<f64>,
+}
+
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
@@ -813,6 +862,7 @@ impl World {
                 };
             }
             desc.linear_velocity = array_to_vec3(body.linear_velocity);
+            desc.angular_velocity = array_to_vec3(body.angular_velocity);
             desc.mass_override = body.mass_override;
             desc.body_type = match body.body_type.as_deref() {
                 Some("static") => BodyType::Static,
@@ -1113,8 +1163,52 @@ impl World {
             world.enable_sph(fluid);
         }
 
+        if let Some(gas) = &scenario.gas {
+            world.enable_gas(sim_thermal::GasCompartment {
+                n_moles: gas.n_moles,
+                volume: gas.volume,
+                temperature: gas.temperature,
+                gas: sim_thermal::GasSpecies {
+                    degrees_of_freedom: gas
+                        .degrees_of_freedom
+                        .unwrap_or(sim_thermal::GasSpecies::AIR.degrees_of_freedom),
+                    molar_mass: gas
+                        .molar_mass
+                        .unwrap_or(sim_thermal::GasSpecies::AIR.molar_mass),
+                },
+            });
+        }
+
         for joint in &scenario.joints {
             match joint {
+                JointJson::Slider {
+                    body_a,
+                    anchor_a,
+                    axis,
+                    body_b,
+                    anchor_b,
+                } => {
+                    let a_id = *body_ids_by_name
+                        .get(body_a)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body_a.clone()))?;
+                    let b_id = match body_b {
+                        Some(name) => Some(
+                            *body_ids_by_name
+                                .get(name)
+                                .ok_or_else(|| SceneError::UnknownBodyName(name.clone()))?,
+                        ),
+                        None => None,
+                    };
+                    let joint = sim_mechanics::SliderJoint::new(
+                        &world.mechanics_mut().bodies,
+                        a_id.index as usize,
+                        array_to_vec3(*anchor_a),
+                        array_to_vec3(*axis),
+                        b_id.map(|id| id.index as usize),
+                        array_to_vec3(*anchor_b),
+                    );
+                    world.mechanics_mut().add_slider_joint(joint);
+                }
                 JointJson::Distance {
                     body_a,
                     anchor_a,
@@ -1338,6 +1432,26 @@ impl World {
                         kinematic_viscosity: *kinematic_viscosity,
                         prandtl_number: *prandtl_number,
                     }));
+                }
+                CouplingJson::PistonGas {
+                    body,
+                    axis,
+                    area,
+                    initial_volume,
+                } => {
+                    let id = *body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    // `PistonGas::new`は現在のピストン位置を変位0の基準として取り込むため、
+                    // 剛体が既に構成済みである必要がある(couplingsはbodiesより後に処理される)。
+                    let coupling = sim_coupling::PistonGas::new(
+                        &world.mechanics().bodies,
+                        id.index as usize,
+                        array_to_vec3(*axis),
+                        *area,
+                        *initial_volume,
+                    );
+                    world.add_coupling(Box::new(coupling));
                 }
                 CouplingJson::JouleHeat { thermal_node } => {
                     world.add_coupling(Box::new(sim_coupling::JouleHeat {
@@ -2889,6 +3003,208 @@ mod tests {
         assert!(
             drift_on.abs() > 10.0 * drift_off.abs().max(1.0e-12),
             "相対論補正を有効にすると近点方向が有意に回るべき: on={drift_on} off={drift_off}"
+        );
+    }
+
+    /// **増分H3** D10(摩擦の熱): 滑る箱が摩擦で止まり、失われた運動エネルギーが
+    /// `couplings[].dissipation_to_heat`経由で熱ノードの温度上昇として現れる。
+    /// 実測: 速さ 3.0 → 0、温度 293.15 → 331.70 K(+38.55 K)、移動距離 0.73 m。
+    #[test]
+    fn run_headless_scenario_brake_heat_converts_kinetic_energy_into_temperature_rise() {
+        let json = include_str!("../../../scenes/d10-brake-heat.json");
+        let result = run_headless_scenario(json, 300).expect("valid scenario JSON");
+        let first = |i: usize| result.probe_histories[i][0];
+        let last = |i: usize| *result.probe_histories[i].last().expect("履歴が空でない");
+
+        assert!(last(0) < 0.01, "摩擦で静止するべき: {}", last(0));
+        assert!(
+            last(2) - first(2) > 0.5,
+            "止まるまでに実際に滑るべき: {} -> {}",
+            first(2),
+            last(2)
+        );
+
+        // **エネルギーの行き先を数値で確かめる**: 初期運動エネルギー ½mv² が
+        // そのまま熱容量 C の温度上昇になる。箱は 1m³ の鋼(密度7850)なので
+        // m=7850 kg、v=3 m/s → ½mv² = 35325 J。C=1000 J/K なので ΔT ≈ 35.3 K。
+        // 実測 38.55 K(接触の法線方向の散逸ぶんが上乗せされる)。
+        let delta_t = last(1) - first(1);
+        let predicted = 0.5 * 7850.0 * 3.0 * 3.0 / 1000.0;
+        assert!(
+            delta_t > 30.0 && (delta_t - predicted).abs() / predicted < 0.25,
+            "散逸した運動エネルギーが温度上昇として現れるべき: \
+             delta_t={delta_t} predicted={predicted}"
+        );
+    }
+
+    /// **増分H3** D20(モーターと発電): キネマティックに一定角速度で回すクランクが
+    /// `couplings[].motor_coupling`経由で起電力を生み、`joule_heat`が抵抗損失を
+    /// 熱ノードへ移す。
+    ///
+    /// **実測が解析値と厳密に一致した**: 起電力 = k·ω = 0.05 × 10 = **0.5 V**
+    /// (実測 0.500000)、電流 = V/R = 0.5/10 = **0.05 A**(実測 -0.05、符号は
+    /// `MotorCoupling`の向きの規約)、電力 = 0.025 W を1秒ぶん(120step × dt)で
+    /// 0.025 J、熱容量1000 J/K なので **ΔT = 2.5e-5 K**(実測 293.150025)。
+    #[test]
+    fn run_headless_scenario_hand_crank_generator_matches_emf_and_joule_heating() {
+        let (k, omega, r) = (0.05_f64, 10.0_f64, 10.0_f64);
+        let json = include_str!("../../../scenes/d20-hand-crank-generator.json");
+        let steps = 120u32;
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
+        let last = |i: usize| *result.probe_histories[i].last().expect("履歴が空でない");
+
+        let expected_emf = k * omega;
+        assert!(
+            (last(0) - expected_emf).abs() < 1.0e-9,
+            "E6の起電力 k·ω と一致すべき: {} vs {expected_emf}",
+            last(0)
+        );
+        let expected_current = expected_emf / r;
+        assert!(
+            (last(1).abs() - expected_current).abs() < 1.0e-9,
+            "電流は V/R と一致すべき: {} vs {expected_current}",
+            last(1)
+        );
+
+        // 台帳(効率): 発電電力がそのままジュール熱として熱ノードへ入る。
+        let dt = 0.008333333;
+        let expected_delta_t = expected_emf * expected_current * (steps as f64 * dt) / 1000.0;
+        let delta_t = last(2) - 293.15;
+        assert!(
+            (delta_t - expected_delta_t).abs() / expected_delta_t < 0.02,
+            "ジュール熱による温度上昇が発電電力と一致すべき: \
+             delta_t={delta_t} expected={expected_delta_t}"
+        );
+    }
+
+    /// **増分H3** D17(ピストン): 1軸スライダ拘束のピストンが気体を圧縮し、
+    /// 気体ばねが押し返してエネルギーを返すことを`scenes/d17-piston.json`経由で
+    /// 確認する(`gas`セクション・`joints[].slider`・`couplings[].piston_gas`は
+    /// いずれも本増分で追加)。
+    ///
+    /// **実測の往復**: 初速 0.5 m/s(-x方向)で x=-0.0042 から圧縮を始め、
+    /// x=-0.0364 で反転し、step 30 で出発点付近(x=-0.0041)へ戻ったとき
+    /// 速さ **0.4774**(初速の95.5%)。差は数値散逸。
+    ///
+    /// **既知の性質(バグではない)**: 基準体積を超えて膨張し続けると、気体は
+    /// 片側からしか押さないので圧力は正のままピストンを加速し続ける
+    /// (200step走らせると速さ1.03まで上がる)。ストッパの無い片側気体ばねの
+    /// 正しい挙動なので、判定は**圧縮ストロークの往復**に限定する。
+    #[test]
+    fn run_headless_scenario_piston_gas_spring_returns_the_compression_energy() {
+        let json = include_str!("../../../scenes/d17-piston.json");
+        let result = run_headless_scenario(json, 60).expect("valid scenario JSON");
+        let x = &result.probe_histories[0];
+        let v = &result.probe_histories[1];
+
+        let (x0, v0) = (x[0], v[0]);
+        let min_x = x.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            min_x < x0 - 0.03,
+            "ピストンは実際に気体を圧縮すべき: x0={x0} min_x={min_x}"
+        );
+
+        // 圧縮の後、出発点へ戻ってくる最初のstepで速さを見る。
+        let turning = x
+            .iter()
+            .position(|&xi| xi <= min_x + 1.0e-12)
+            .expect("反転点があるはず");
+        let back = (turning..x.len())
+            .find(|&i| x[i] >= x0)
+            .expect("出発点へ戻るはず");
+        let returned_speed = v[back];
+        assert!(
+            returned_speed > 0.9 * v0 && returned_speed < 1.05 * v0,
+            "気体ばねは圧縮エネルギーをほぼ返すべき: v0={v0} returned={returned_speed}"
+        );
+    }
+
+    /// **増分H3** D18(氷と飲み物): 浮いた氷が`couplings[].phase_change_morph`で
+    /// 融解して質量を失い、**喫水が浅くなって浮き上がる**(アルキメデスとの統合)。
+    ///
+    /// 実測(6000step = 50秒): 質量 0.900 → 0.3545 kg(61%融解)、
+    /// 重心 y = -0.0402 → +0.0098(浮き上がり)、飲み物 350.0 → 349.04 K。
+    /// 「水位不変」は自由表面を追跡しない本実装の対象外(既存の記載どおり)。
+    #[test]
+    fn run_headless_scenario_melting_ice_rises_as_it_loses_mass() {
+        let json = include_str!("../../../scenes/d18-ice-in-drink.json");
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let mut world = World::from_scenario(&scenario).expect("valid world");
+        let y0 = world.mechanics().bodies.position[0].y;
+        let m0 = world.mechanics().bodies.mass(0);
+        let drink0 = world.thermal().expect("熱ドメイン").nodes[0].temperature;
+        for _ in 0..6000 {
+            world.step();
+        }
+        let (y1, m1) = (
+            world.mechanics().bodies.position[0].y,
+            world.mechanics().bodies.mass(0),
+        );
+        let drink1 = world.thermal().expect("熱ドメイン").nodes[0].temperature;
+
+        assert!(
+            m1 < 0.5 * m0 && m1 > 0.0,
+            "融解して質量が部分的に減るべき(T7の融解プラトー): {m0} -> {m1}"
+        );
+        assert!(
+            y1 > y0 + 0.03,
+            "質量が減ったぶん喫水が浅くなって浮き上がるべき: {y0} -> {y1}"
+        );
+        assert!(
+            drink1 < drink0,
+            "融解熱を奪われて飲み物は冷えるべき: {drink0} -> {drink1}"
+        );
+    }
+
+    /// **増分H3** D25(ブラウン運動): 300粒子のアンサンブル平均二乗変位が
+    /// アインシュタインの関係 $\langle r^2\rangle = 6Dt$($D=k_BT/(6\pi\eta a)$)
+    /// と一致することを`scenes/d25-brownian.json`経由で確認する。
+    ///
+    /// **これまでインラインのままだった理由が解消した**: 「300粒子を`format!`で
+    /// 動的生成するので静的ファイル化に不向き」と記録していたが、生成物は
+    /// ただのJSONなので**書き出してしまえば静的アセットとして成立する**
+    /// (`bodies`300件 + `couplings`300件)。ギャラリー最大のシーンになる。
+    ///
+    /// 実測: msd = 5.673e-17 に対し解析値 6Dt = 5.988e-17、**比 0.947**。
+    /// 300粒子の統計誤差は $1/\sqrt{300}\approx 5.8\%$ なので1標準誤差以内。
+    /// `world.dt`は $\tau/50$($\tau=m/\gamma$ は慣性時間)——`World`既定の
+    /// 1/120秒では明示的Euler-Maruyamaが発散する(既存の記録どおり)。
+    #[test]
+    fn run_headless_scenario_brownian_ensemble_msd_matches_the_einstein_relation() {
+        let json = include_str!("../../../scenes/d25-brownian.json");
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let dt = scenario.world.dt;
+        let mut world = World::from_scenario(&scenario).expect("valid world");
+        let n = world.mechanics().bodies.position.len();
+        assert_eq!(n, 300, "アンサンブルは300粒子");
+
+        for _ in 0..2000 {
+            world.step(); // 慣性の過渡を落とす
+        }
+        let start: Vec<sim_math::Vec3> = (0..n)
+            .map(|i| world.mechanics().bodies.position[i])
+            .collect();
+        let steps = 10_000u32;
+        for _ in 0..steps {
+            world.step();
+        }
+        let msd = (0..n)
+            .map(|i| {
+                let d = world.mechanics().bodies.position[i] - start[i];
+                d.x * d.x + d.y * d.y + d.z * d.z
+            })
+            .sum::<f64>()
+            / n as f64;
+
+        let (k_b, radius, viscosity, temperature) = (1.380649e-23, 1.0e-6, 1.002e-3, 293.15);
+        let gamma = 6.0 * std::f64::consts::PI * viscosity * radius;
+        let diffusion = k_b * temperature / gamma;
+        let expected = 6.0 * diffusion * (steps as f64 * dt);
+        let ratio = msd / expected;
+        assert!(
+            (ratio - 1.0).abs() < 0.15,
+            "アンサンブルMSDは6Dtと一致すべき(300粒子の統計誤差は約5.8%): \
+             msd={msd:e} expected={expected:e} ratio={ratio}"
         );
     }
 

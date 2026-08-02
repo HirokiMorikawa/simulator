@@ -1,0 +1,20 @@
+{
+  "name": "d10-brake-heat",
+  "world": { "gravity": 9.80665, "dt": 0.008333333 },
+  "bodies": [
+    { "shape": { "plane": { "normal": [0,1,0], "d": 0 } }, "type": "static",
+      "material": "鋼(炭素鋼)", "name": "floor" },
+    { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "鋼(炭素鋼)",
+      "position": [0, 0.5, 0], "linear_velocity": [3.0, 0, 0], "name": "brake_pad" }
+  ],
+  "thermal": {
+    "ambient_temperature": 293.15,
+    "nodes": [ { "temperature": 293.15, "heat_capacity": 1000.0 } ]
+  },
+  "couplings": [ { "dissipation_to_heat": { "thermal_node": 0 } } ],
+  "probes": [
+    { "body_speed": "brake_pad" },
+    { "node_temp": 0 },
+    { "body_pos_x": "brake_pad" }
+  ]
+}

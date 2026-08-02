@@ -248,6 +248,57 @@
       "domains": [
         "astro"
       ]
+    },
+    {
+      "file": "d10-brake-heat.json",
+      "demo": "D10",
+      "title": "摩擦の熱",
+      "description": "滑る箱が摩擦で止まり、失われた運動エネルギーが熱ノードの温度上昇として現れる(293.15→331.70 K)(D10)。",
+      "domains": [
+        "mechanics",
+        "thermal"
+      ]
+    },
+    {
+      "file": "d17-piston.json",
+      "demo": "D17",
+      "title": "ピストン",
+      "description": "1軸スライダ拘束のピストンが気体を圧縮し、気体ばねが押し返してエネルギーを返す(D17)。",
+      "domains": [
+        "mechanics",
+        "gas"
+      ]
+    },
+    {
+      "file": "d18-ice-in-drink.json",
+      "demo": "D18",
+      "title": "氷と飲み物",
+      "description": "浮いた氷が融けて質量を失い、喫水が浅くなって浮き上がる(D18)。",
+      "domains": [
+        "mechanics",
+        "thermal"
+      ]
+    },
+    {
+      "file": "d20-hand-crank-generator.json",
+      "demo": "D20",
+      "title": "モーターと発電",
+      "description": "一定角速度のクランクが起電力0.5Vを生み、抵抗損失がジュール熱として熱ノードへ入る(D20)。",
+      "domains": [
+        "circuit",
+        "thermal",
+        "mechanics"
+      ]
+    },
+    {
+      "file": "d25-brownian.json",
+      "demo": "D25",
+      "title": "ブラウン運動",
+      "description": "300粒子のアンサンブル平均二乗変位がアインシュタインの関係6Dtと一致する。ギャラリー最大のシーン(D25)。",
+      "domains": [
+        "mechanics",
+        "thermal"
+      ]
     }
   ]
 }
