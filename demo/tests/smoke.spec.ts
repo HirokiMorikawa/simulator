@@ -301,6 +301,63 @@ test("増分Hで追加した5シーン(D13/D14/D15/D16/D23)がギャラリーか
   expect(errors).toEqual([]);
 });
 
+test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Consoleの種別タブ", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // ① Toolbar のシーン選択ドロップダウン: ドロワーを開かずにシーンを差し替える。
+  await page.selectOption("#select-scene", "d19-electric-workbench.json");
+  const hierarchy = page.locator("#hierarchy-tree");
+  await expect(hierarchy.getByText("CircuitV[2]", { exact: true })).toBeVisible();
+
+  // ② Inspector の追加 Component。D19 は剛体を持たないので、まず剛体のある
+  //    シーンへ切り替えてからボディを選ぶ。
+  await page.selectOption("#select-scene", "d11-pendulum.json");
+  await hierarchy.getByText("bob", { exact: true }).click();
+  const inspector = page.locator("#inspector-body");
+  // Probe セクション(シーン定義プローブ)と現在値。
+  await expect(inspector.getByText("Probe", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("BodyPosX(bob)", { exact: true })).toBeVisible();
+  // 近似バッジと Coupling セクションは**有効なドメインがあるシーンにだけ**出る
+  // (D11は純粋な力学シーンなので該当する縮約が無く、何も表示しないのが正しい)。
+  // 熱ドメイン + dissipation_to_heat 結合を持つ D10 で確認する。
+  await expect(inspector.locator(".approximation-badge")).toHaveCount(0);
+  await page.selectOption("#select-scene", "d10-brake-heat.json");
+  await hierarchy.getByText("brake_pad", { exact: true }).click();
+  await expect(inspector.locator(".approximation-badge").first()).toBeVisible();
+  await expect(inspector.getByText("Coupling", { exact: true })).toBeVisible();
+
+  // Joint セクションは `constraint_anchor_points_at` がアンカーを返すボディに
+  // 出る。スポーンした振り子(ワールド固定点への DistanceJoint)で確認する。
+  await page.reload();
+  await waitForWorld(page);
+  await page.click("#btn-spawn-pendulum");
+  await hierarchy.getByText("Pendulum", { exact: false }).first().click();
+  await expect(inspector.getByText("Joint", { exact: true })).toBeVisible();
+
+  // ③ Console の種別タブ。既定シーンへ戻して接触を起こす。
+  await page.selectOption("#select-scene", "d4-box-stack.json");
+  await page.click("#btn-mode-play");
+  const contactEntry = page.locator("#console-log li", { hasText: "bodies=" }).first();
+  await expect(contactEntry).toBeVisible({ timeout: 30_000 });
+  await page.click("#btn-play"); // 一時停止
+
+  // Contacts タブは接触行だけを残す。
+  await page.click('.console-tab[data-tab="contacts"]');
+  await expect(contactEntry).toBeVisible();
+  // 起動時の INFO 行(接触ではない)は隠れる。
+  const startupLine = page.locator("#console-log li", { hasText: "World起動" }).first();
+  await expect(startupLine).toBeHidden();
+  // All へ戻すと再び見える。
+  await page.click('.console-tab[data-tab="all"]');
+  await expect(startupLine).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
 test("Project ドロワーがタブクリックで開き、中身が画面内に入る(増分E3)", async ({ page }) => {
   // **増分E3で修正した重大なUIバグの回帰テスト**: 既定のグリッド行はタブバーの
   // 高さしか無く、ドロワー本体(Scenes/Materials/... の中身)は画面外へ押し出されて

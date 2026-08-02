@@ -419,3 +419,19 @@ body {
   white-space: pre;
   overflow-x: auto;
 }
+
+/* Console の診断バッジ(増分K)。発散・CFL警告を色で即座に伝える。 */
+.console-badges { margin-left: auto; display: inline-flex; gap: 6px; }
+.console-badge {
+  font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  background: #b33; color: #fff; white-space: nowrap;
+}
+.console-badge[data-kind="cfl"] { background: #b83; }
+.console-badge[data-kind="ok"] { background: #363; }
+
+/* Inspector の近似バッジ(増分K)。今の挙動がどの縮約の上に乗っているかを示す。 */
+.approximation-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.approximation-badge {
+  font-size: 10px; line-height: 1.4; padding: 2px 6px; border-radius: 3px;
+  background: #2c3550; color: #cdd6f4; border: 1px solid #3b4668;
+}

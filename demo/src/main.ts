@@ -106,6 +106,12 @@ type JumpToStepRef = { current: ((step: number) => void) | null };
 // オブジェクト側、増分E4)。イベント行に埋め込まれた発生源ボディを選択させる。
 // `JumpToStepRef`と全く同じ理由(Consoleは`world`より先に構築される)で、
 // 可変の参照オブジェクト越しに`setUpSceneView`が後から`selectBody`を配線する。
+/// Console の診断バッジ更新関数(増分K)。`render()`ループから毎フレーム
+/// 呼ばれる(パネル構築が world 生成より先に走るため ref を介す)。
+type ConsoleDiagnosticsRef = {
+  current: ((residual: number, maxSpeed: number, dt: number) => void) | null;
+};
+
 type SelectBodyRef = { current: ((index: number) => void) | null };
 
 // Projectドロワー Materials タブ(設計§1.6「Materials: MaterialDbプリセット一覧」)向け。
@@ -279,15 +285,30 @@ function sceneGalleryManifest(): SceneGalleryManifestEntry[] {
 function setUpConsole(
   jumpToStepRef: JumpToStepRef,
   selectBodyRef: SelectBodyRef,
+  consoleDiagnosticsRef: ConsoleDiagnosticsRef,
 ): (eventsText: string) => void {
   const log = document.getElementById("console-log")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
   let activeLevel = "all";
 
+  // **増分K**: タブは「重大度(all/errors/warnings/info)」に加えて
+  // 「種別(contacts/events)」でも絞れるようにした(設計§1.5の6タブ)。
+  // 種別は行の内容から決まる——接触イベントは `bodies=` を持つ(sim-wasm が
+  // SourceId を復号して出す)ので、それを持つ行が contacts、それ以外で
+  // `step=` を持つ実イベント行が events。
+  const CATEGORY_TABS = new Set(["contacts", "events"]);
   function applyFilter() {
     for (const li of log.children) {
-      const level = (li as HTMLElement).dataset.level;
-      (li as HTMLElement).style.display = activeLevel === "all" || level === activeLevel ? "" : "none";
+      const el = li as HTMLElement;
+      let visible: boolean;
+      if (activeLevel === "all") {
+        visible = true;
+      } else if (CATEGORY_TABS.has(activeLevel)) {
+        visible = el.dataset.category === activeLevel;
+      } else {
+        visible = el.dataset.level === activeLevel;
+      }
+      el.style.display = visible ? "" : "none";
     }
   }
 
@@ -313,8 +334,52 @@ function setUpConsole(
 
   const initial = document.createElement("li");
   initial.dataset.level = "info";
+  initial.dataset.category = "info";
   initial.textContent = "[INFO] World起動 — SolverDiagnostics接続済み(ContactStarted/ContactEndedを表示)";
   log.appendChild(initial);
+
+  // **診断バッジ(増分K)**。設計§1.5「発散・CFL警告バッジ」。
+  // 判定材料は sim-wasm へ足した `energy_residual` と `max_body_speed`。
+  //  - 発散: エネルギー台帳の残差が有限でない、または初期比で桁違いに増えた
+  //  - CFL: 最大速度 × dt が代表長さを超える(1stepで自分の大きさ以上動く)
+  // **どちらも「厳密な安定性判定」ではない**——本物のCFL数はソルバごとの
+  // 空間離散化に依存する。ここは「ユーザーが画面を見て気づける粗い警告」として
+  // の縮約であり、その旨をバッジのtitleにも書く。
+  const badges = document.getElementById("console-badges")!;
+  const CFL_CHARACTERISTIC_LENGTH = 0.5; // 既定シーンの箱の代表寸法。
+  function updateDiagnostics(residual: number, maxSpeed: number, dt: number) {
+    const entries: { kind: string; text: string; title: string }[] = [];
+    if (!Number.isFinite(residual)) {
+      entries.push({
+        kind: "divergence",
+        text: "発散",
+        title: "エネルギー台帳の残差が有限でありません(発散)",
+      });
+    }
+    const courant = (maxSpeed * dt) / CFL_CHARACTERISTIC_LENGTH;
+    if (courant > 1.0) {
+      entries.push({
+        kind: "cfl",
+        text: `CFL ${courant.toFixed(2)}`,
+        title:
+          "1ステップで代表長さ以上動いています(粗い目安であり厳密なCFL数では" +
+          "ありません)。dtを小さくするか時間倍率を下げてください。",
+      });
+    }
+    const signature = entries.map((e) => e.kind + e.text).join("|");
+    if (badges.dataset.signature === signature) return;
+    badges.dataset.signature = signature;
+    badges.innerHTML = "";
+    for (const e of entries) {
+      const span = document.createElement("span");
+      span.className = "console-badge";
+      span.dataset.kind = e.kind;
+      span.textContent = e.text;
+      span.title = e.title;
+      badges.appendChild(span);
+    }
+  }
+  consoleDiagnosticsRef.current = updateDiagnostics;
 
   return (eventsText: string) => {
     if (!eventsText) return;
@@ -334,6 +399,8 @@ function setUpConsole(
       // ——接触は2体の間で起きるが、選択は1体しか持てないため。どちらを選ぶかは
       // 任意なので、決定的になるよう常に先頭(a)にする(縮約、正直な記録)。
       const bodiesMatch = message.match(/bodies=(\d+),(\d+)/);
+      // 種別タグ(増分K、Contacts/Events タブが使う)。
+      li.dataset.category = bodiesMatch ? "contacts" : stepMatch ? "events" : "info";
       if (bodiesMatch) {
         li.dataset.bodyIndex = bodiesMatch[1];
         li.classList.add("console-entry-clickable");
@@ -570,7 +637,98 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
       <h3>RigidBody</h3>
       <div class="inspector-field"><span>Material</span><span>${world.body_material_label_at(index)}</span></div>
     </div>
+    ${renderInspectorExtraComponents(world, index)}
   `;
+}
+
+/// **増分K: Componentビューの残り(Joint/Circuit/Coupling/Probe/近似バッジ)**。
+///
+/// 設計 docs/23-frontend/01-editor.md §1.3 が挙げる Component のうち、
+/// Transform/RigidBody/Shape/Material だけが実データに繋がっていて、残りは
+/// 未実装のままだった。それぞれ既存または本増分で足した wasm API から引く:
+///
+/// - **Joint**: `constraint_anchor_points_at`(選択中ボディが持つ拘束のアンカー)
+/// - **Circuit**: `circuit_element_count`/`circuit_element_label_at`(増分G2)
+/// - **Coupling**: `coupling_count`(本増分)——**個々の結合の種別名は出せない**。
+///   `Coupling`トレイトが名前を持たないためで、`domains()`のペアから推測する
+///   ことはできるが名前を捏造するより件数だけを正直に出す
+/// - **Probe**: `imported_probe_count`/`imported_probe_label_at`(増分B1)
+/// - **近似バッジ**: `active_approximations_text`(本増分)——各ソルバが自己申告
+///   するAPIは無いので、**どのドメインが有効かという観測可能な事実**から
+///   設計文書に記録済みの既知の縮約を引き当てる
+///
+/// FluidRegion は SPH 粒子が個別ID体系を持たないため対象外(Hierarchy の
+/// 概要行と同じ既知の限界)。
+function renderInspectorExtraComponents(world: WasmWorld, index: number): string {
+  const escape = (text: string) =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const sections: string[] = [];
+
+  // Joint: 選択中ボディが持つ拘束のアンカー点(3成分×N)。
+  const anchors = world.constraint_anchor_points_at(index);
+  if (anchors.length >= 3) {
+    const rows: string[] = [];
+    for (let k = 0; k + 2 < anchors.length; k += 3) {
+      rows.push(
+        `<div class="inspector-field"><span>Anchor ${k / 3}</span><span>` +
+          `${anchors[k].toFixed(3)}, ${anchors[k + 1].toFixed(3)}, ${anchors[k + 2].toFixed(3)}` +
+          `</span></div>`,
+      );
+    }
+    sections.push(`<div class="inspector-component"><h3>Joint</h3>${rows.join("")}</div>`);
+  }
+
+  // Circuit: ワールドに載っている回路素子(ボディ単位ではなくシーン単位)。
+  const circuitCount = world.circuit_element_count();
+  if (circuitCount > 0) {
+    const rows: string[] = [];
+    for (let k = 0; k < circuitCount; k += 1) {
+      rows.push(
+        `<div class="inspector-field"><span>#${k}</span><span>` +
+          `${escape(world.circuit_element_label_at(k))}</span></div>`,
+      );
+    }
+    sections.push(`<div class="inspector-component"><h3>Circuit</h3>${rows.join("")}</div>`);
+  }
+
+  // Coupling: 件数のみ(種別名は出せない、上のdoc参照)。
+  const couplingCount = world.coupling_count();
+  if (couplingCount > 0) {
+    sections.push(
+      `<div class="inspector-component"><h3>Coupling</h3>` +
+        `<div class="inspector-field"><span>登録数</span><span>${couplingCount}</span></div>` +
+        `<div class="inspector-field"><span>種別</span><span>—(トレイトが名前を持たないため非表示)</span></div>` +
+        `</div>`,
+    );
+  }
+
+  // Probe: シーンJSONが宣言した観測量。
+  const probeCount = world.imported_probe_count();
+  if (probeCount > 0) {
+    const rows: string[] = [];
+    for (let k = 0; k < probeCount; k += 1) {
+      rows.push(
+        `<div class="inspector-field"><span>${escape(world.imported_probe_label_at(k))}</span>` +
+          `<span>${world.imported_probe_value_at(k).toFixed(4)}</span></div>`,
+      );
+    }
+    sections.push(`<div class="inspector-component"><h3>Probe</h3>${rows.join("")}</div>`);
+  }
+
+  // 近似バッジ: 有効な縮約の一覧。
+  const approximations = world.active_approximations_text();
+  if (approximations.length > 0) {
+    const badges = approximations
+      .split("\n")
+      .map((text) => `<span class="approximation-badge">${escape(text)}</span>`)
+      .join("");
+    sections.push(
+      `<div class="inspector-component"><h3>近似</h3>` +
+        `<div class="approximation-badges">${badges}</div></div>`,
+    );
+  }
+
+  return sections.join("");
 }
 
 function updateInspectorTransformFields(
@@ -1261,6 +1419,7 @@ async function setUpSceneView(
   sceneGalleryRef: SceneGalleryRef,
   selectBodyRef: SelectBodyRef,
   circuitElementsRef: CircuitElementsRef,
+  consoleDiagnosticsRef: ConsoleDiagnosticsRef,
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -2481,6 +2640,10 @@ async function setUpSceneView(
     if (mode === "play" && !playing) {
       world.step();
       appendConsoleEntries(world.drain_events_text());
+      // 診断バッジ(増分K)。毎フレーム最新の残差・最大速度で更新する。
+      if (consoleDiagnosticsRef.current) {
+        consoleDiagnosticsRef.current(world.energy_residual(), world.max_body_speed(), DT);
+      }
       render();
     }
   });
@@ -2830,6 +2993,10 @@ async function setUpSceneView(
         steps += 1;
       }
       appendConsoleEntries(world.drain_events_text());
+      // 診断バッジ(増分K)。毎フレーム最新の残差・最大速度で更新する。
+      if (consoleDiagnosticsRef.current) {
+        consoleDiagnosticsRef.current(world.energy_residual(), world.max_body_speed(), DT);
+      }
     }
 
     render();
@@ -2844,7 +3011,29 @@ function main() {
   const updateProbeGraph = setUpProbeGraph();
   const jumpToStepRef: JumpToStepRef = { current: null };
   const selectBodyRef: SelectBodyRef = { current: null };
-  const appendConsoleEntries = setUpConsole(jumpToStepRef, selectBodyRef);
+  // **増分K: Toolbarのシーン選択ドロップダウン**(設計§1.1「Toolbar: …
+  // シーン選択」)。Projectドロワーを開かずに主要シーンを切り替えられるように
+  // する——ギャラリーのマニフェスト(`scenes/index.json`)をそのまま再利用し、
+  // 二重管理を作らない。読み込み自体は`sceneGalleryRef`(ドロワーのギャラリーと
+  // 同じ経路)へ委譲する。
+  const sceneSelect = document.getElementById("select-scene") as HTMLSelectElement | null;
+  if (sceneSelect) {
+    for (const entry of sceneGalleryManifest()) {
+      const option = document.createElement("option");
+      option.value = entry.file;
+      option.textContent = `${entry.demo} ${entry.title}`;
+      sceneSelect.appendChild(option);
+    }
+    sceneSelect.addEventListener("change", () => {
+      const file = sceneSelect.value;
+      if (!file) return;
+      const json = sceneGalleryFileContent(file);
+      if (json && sceneGalleryRef.current) sceneGalleryRef.current(json);
+    });
+  }
+
+  const consoleDiagnosticsRef: ConsoleDiagnosticsRef = { current: null };
+  const appendConsoleEntries = setUpConsole(jumpToStepRef, selectBodyRef, consoleDiagnosticsRef);
   const materialsRef: MaterialsRef = { current: null };
   const circuitRef: CircuitRef = { current: null };
   const sceneExportRef: SceneExportRef = { current: null };
@@ -2882,6 +3071,7 @@ function main() {
     sceneGalleryRef,
     selectBodyRef,
     circuitElementsRef,
+    consoleDiagnosticsRef,
   ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;

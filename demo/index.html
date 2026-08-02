@@ -71,6 +71,8 @@
           </select>
         </div>
         <div class="toolbar-group">
+          <label for="select-scene">Scene</label>
+          <select id="select-scene"><option value="">(既定シーン)</option></select>
           <label for="select-layout">Layout</label>
           <select id="select-layout">
             <option value="default">Default</option>
@@ -121,6 +123,9 @@
           <button class="console-tab" data-tab="errors">Errors</button>
           <button class="console-tab" data-tab="warnings">Warnings</button>
           <button class="console-tab" data-tab="info">Info</button>
+          <button class="console-tab" data-tab="contacts">Contacts</button>
+          <button class="console-tab" data-tab="events">Events</button>
+          <span id="console-badges" class="console-badges"></span>
         </div>
         <ul id="console-log"></ul>
       </section>

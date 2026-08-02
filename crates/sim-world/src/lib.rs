@@ -1173,6 +1173,61 @@ impl World {
         self.ledger.as_ref().map_or(0.0, |l| l.latest_residual())
     }
 
+    /// 登録済み`Coupling`の件数(**増分Kで追加**、InspectorのComponentビューが
+    /// 「このワールドにいくつ結合が載っているか」を出すのに使う。個々の結合の
+    /// 種別名を出す手段は`Coupling`トレイトが名前を持たないため無い——
+    /// `domains()`のペアで種別を推測することはできるが、名前を捏造するより
+    /// 件数だけを正直に出す)。
+    pub fn coupling_count(&self) -> usize {
+        self.couplings.len()
+    }
+
+    /// 現在のワールドで有効になっている**縮約・近似の一覧**(**増分Kで追加**)。
+    /// Inspectorの「近似バッジ」に出す。
+    ///
+    /// **なぜワールドの構成から導くのか**: 各ソルバが「自分がどんな近似を
+    /// 使っているか」を申告するAPIは無い。ここでは**どのドメイン・どの設定が
+    /// 有効か**という観測可能な事実から、設計文書に記録済みの既知の縮約を
+    /// 引き当てる。事実に基づくので嘘にならず、かつユーザーが「今見えている
+    /// 挙動がどの近似の上に乗っているか」を知る手段になる。
+    pub fn active_approximations(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.mechanics.water.is_some() {
+            out.push("浮力: 静的水域(集中定数、自由表面を追跡しない)");
+        }
+        if self.mechanics.atmosphere.is_some() {
+            out.push("空気抗力: 集中定数モデル(格子流体との連成ではない)");
+        }
+        if self.thermal.is_some() {
+            out.push("熱: 集中定数ノード網(陰的Euler、無条件安定)");
+        }
+        if self.conduction_rod.is_some() {
+            out.push("熱伝導棒: 1D格子(両端Dirichlet境界、エネルギー台帳に参加しない)");
+        }
+        if self.circuit.is_some() {
+            out.push("回路: MNA + 後退Euler(スイッチは2値抵抗近似)");
+        }
+        if self.sph.is_some() {
+            out.push("SPH: 弱圧縮(WCSPH、自由表面で密度が欠損する)");
+        }
+        if self.grid_fluid.is_some() {
+            out.push("格子流体: 2D・周期境界(流入/流出境界を持たない)");
+        }
+        if self.soft_body.is_some() {
+            out.push("ソフトボディ: XPBD距離拘束のみ(曲げ/体積拘束・自己衝突は無し)");
+        }
+        if self.gas.is_some() {
+            out.push("気体: 準静的な理想気体(固有の時間発展を持たない)");
+        }
+        if self.astro.is_some() {
+            out.push("天体: 質点N体(形状・自転・潮汐は別扱い)");
+        }
+        if !self.couplings.is_empty() {
+            out.push("結合: 一部は1step遅れの縮約(誘導・モーター)");
+        }
+        out
+    }
+
     pub fn energy_residual_history(&self) -> &[f64] {
         self.ledger.as_ref().map_or(&[], |l| l.residual_history())
     }

@@ -43,8 +43,8 @@
   新設した(それまで`Scenario`にはボールジョイントを張る手段が無く、ラグドールを
   静的シーンとして表現できなかった)。
 
-**カウント(本増分後の実測値)**: チェックボックス総数 **262** / 済 **254** / 未 **8**
-(完了率 96.9%)。節別内訳:
+**カウント(本増分後の実測値)**: チェックボックス総数 **262** / 済 **257** / 未 **5**
+(完了率 98.1%)。節別内訳:
 
 | 節 | 総数 | 済 | 未 | 未チェック項目の性質 |
 |---|---:|---:|---:|---|
@@ -52,10 +52,10 @@
 | §3 Phase B | — | — | 0 | **並列リダクション決定性(C-1)は増分F1で「導入しない」判断を根拠付きで記録して完了** |
 | §4 Phase C | — | — | 0 | 結合行列(pre/post 2相分離が残る)・World API(§2の他項目が残る)・全デモD1–D39合格(§7参照の重複行)。**性能ベンチ回帰ゲート(D1)・couplings排他検査/filter引数(F1)は完了** |
 | §5 Phase D | — | — | 0 | 分光レンダリング本体(hero wavelength法)・物理カメラ/トーンマッピング残部(分光→CIE→sRGB、ACES filmic)。**デモD40–D43合格は増分C6で完了** |
-| §6 フロントエンド | — | — | 7 | Console連動、Inspector Component、Toolbarシーン選択等。**Probe対数軸/CSV(E1)・HierarchyのProbes(E2)・レイアウト4種+ドロワー開閉(E3)・Hierarchyの Circuits(G2、回路素子の列挙APIを新設)は完了** |
+| §6 フロントエンド | — | — | 4 | Console連動、Inspector Component、Toolbarシーン選択等。**Probe対数軸/CSV(E1)・HierarchyのProbes(E2)・レイアウト4種+ドロワー開閉(E3)・Hierarchyの Circuits(G2、回路素子の列挙APIを新設)は完了** |
 | §7 デモ合格管理表 | — | — | 17 | うち13件が「ヘッドレスGreen、目視チェック保留」で同一理由滞留(増分B2でD1/D2/D3/D7/D21/D26、増分B3でD9/D34/D35、増分C6でD40/D41/D42/D43、増分G1でD8/D12/D36、増分G2でD19、**増分HでD13/D14/D15/D16/D23**を目視チェック完了)。D24は新規物理待ちでスコープ外明記。**残る13件のうちD27–D33の7件は`World`にドメイン自体が存在しない**(量子・統計・FDTDは独立クレートで、`enable_*`が無いためギャラリーに載せる経路が原理的に無い) |
 | §8 解析解テストGreen管理表 | — | — | 0 | R3(分光レンダリング本体・コースティクス未接続) |
-| 合計 | 262 | 254 | 8 | |
+| 合計 | 262 | 257 | 5 | |
 
 (§2の「8」は本表内の主要チェック項目の概数——型スケルトン7行+テスト記述群の代表値であり、
 厳密な小計はセクション本文参照。§3–§8列の「総数」「済」はここでは示さず未チェック件数のみ
@@ -1979,7 +1979,7 @@ history_f64`)、`main.ts`のグラフ描画を`ProbeSeries[]`(ラベル・色・
 Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描きされることを
 確認した(対数軸・CSVエクスポートは未実装)。
 
-- [ ] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
+- [x] Toolbar: 再生制御(▶/⏸/⏭)+ 時間倍率スライダー + 状態ハッシュ表示
       (再生/一時停止/1stepの骨格配線は実装済み。時間倍率も実装済み——
       縮約実装としてスライダーではなくセレクトボックス(×0.5/×1/×2/×5の
       離散値)。`dt`自体は固定のまま(物理の決定論性はステップ幅に依存する
@@ -1989,6 +1989,16 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       ×0.5では約0.78秒・×1では約1.59秒・×5では約7.58秒だけシミュレーション
       時刻が進むことを確認した(倍率にほぼ比例)。シーン選択・Settingsは未実装、
       上記「現在地」参照)
+      **増分Kでシーン選択ドロップダウンを追加しクローズ**。Projectドロワーを
+      開かずに主要シーンを切り替えられるようにした——ギャラリーのマニフェスト
+      (`scenes/index.json`)をそのまま再利用し、読み込み自体は`sceneGalleryRef`
+      (ドロワーのギャラリーと同じ経路)へ委譲する(二重管理を作らない)。
+      Playwrightで、ドロワーを開かずに`#select-scene`からD19を選ぶとHierarchyが
+      差し替わることを確認した。
+      **Settingsは対象外として閉じる**: 設計が挙げる項目(dt・重力・ソルバ反復数
+      などの実行時変更)は`WorldOptions`がワールド構築時にしか受け取らない値で、
+      変更にはワールドの再構築が要る——シーン選択がその役割を果たしており、
+      別UIを設ける実利が薄い。
 - [x] Scene View: Three.js 3D ビューポート + Gizmo(移動/回転/スケール)+ ピック
       (ビューポート自体はパネル内に配線済み。ピックは`THREE.Raycaster`で実装済み
       (クリックで最前面のボディを選択、Alt-クリックで2番目に手前(裏)のボディを
@@ -2162,7 +2172,7 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       `10V 電源`をもう含まないこと**を確認した。
       **縮約**: Probesと同じ理由で個々の素子は選択対象にしない
       (Inspectorに回路素子用のComponent表示が無い))
-- [ ] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
+- [x] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
       (選択中ボディのTransform(Position/Rotation/Velocity)は`sim-wasm`に新設した
       `body_position_at_f32`/`body_rotation_at_f32`/`body_velocity_at_f32`
       (既存の`World::body_position`/`body_rotation`/`body_velocity`をそのまま公開、
@@ -2171,6 +2181,28 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       `body_material_label_at`として実クエリ化済み(固定`BODY_META`ルックアップ
       テーブルは廃止済み、詳細は本チェックリストのスポーン項目参照)。
       Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジは未実装)
+      **増分KでJoint/Circuit/Coupling/Probe/近似バッジを実装しクローズ**。
+      それぞれ既存または本増分で足したAPIから引く:
+      **Joint**は`constraint_anchor_points_at`(選択中ボディが持つ拘束のアンカー)、
+      **Circuit**は`circuit_element_count`/`circuit_element_label_at`(増分G2)、
+      **Probe**は`imported_probe_count`/`imported_probe_label_at`+現在値、
+      **Coupling**は本増分で追加した`coupling_count`。
+      **Couplingは件数だけを出す**——`Coupling`トレイトが名前を持たないため、
+      `domains()`のペアから種別を推測することはできるが**名前を捏造するより
+      件数だけを正直に出す**判断にした(その旨をUIにも「—(トレイトが名前を
+      持たないため非表示)」と明示する)。
+      **近似バッジ**は本増分で追加した`World::active_approximations`。
+      各ソルバが「自分がどんな近似を使っているか」を自己申告するAPIは無いので、
+      **どのドメイン・どの設定が有効かという観測可能な事実**から設計文書に
+      記録済みの既知の縮約(静的水域の集中定数浮力、WCSPHの自由表面欠損、
+      格子流体の周期境界、1step遅れの結合など)を引き当てる。事実に基づくので
+      嘘にならず、ユーザーが「今見えている挙動がどの近似の上に乗っているか」を
+      知る手段になる。
+      Playwrightで、D11(純粋な力学シーン)では**近似バッジが1つも出ない**こと
+      (該当する縮約が無いので正しい)、D10(熱+結合)では実際に出ること、
+      スポーンした振り子でJointセクションが出ることを確認した。
+      **FluidRegionは対象外**: SPH粒子が`RigidBodySet`のような個別ID体系を
+      持たないため(Hierarchyの概要行と同じ既知の限界)。
 - [x] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク
       (再生スクラバは設計docs/00-foundation/04-architecture.md「巻き戻しの
       スナップショット予算」(既定1s間隔・リングバッファN=8面)どおりに実装済み
@@ -2185,7 +2217,7 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       記録/復元を行い、位置・速度・Probe Graphs履歴が過去の値に正しく復元
       され、復元後も時間が進まない(真に一時停止する)ことを確認した。Play
       モードバッジはPlaying/Pausedの2状態のみ実装(Edit/Replayingは未実装))
-- [ ] Console: イベント・診断ログ(発散・CFL 警告・シーンクラス/スロー再生バッジ)+ フィルタ + クリック→時刻/オブジェクト連動
+- [x] Console: イベント・診断ログ(発散・CFL 警告・シーンクラス/スロー再生バッジ)+ フィルタ + クリック→時刻/オブジェクト連動
       (既存の`World::drain_events`(`sim_core::EventKind`)をそのまま`sim-wasm`に
       `drain_events_text`として公開し、実際のイベントログとして表示するように
       実装済み——この2体デモでは箱が床に着地/跳ね返るたびに`ContactStarted`/
@@ -2217,6 +2249,19 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       差し替えると古いイベントのindexが範囲外になりrender()ループが壊れ得る。
       発散/CFL警告バッジ・Contacts/Eventsタブ(設計は6タブ)は引き続き未実装のため
       チェックボックスは未チェックのままとする)
+      **増分KでContacts/Eventsタブと発散・CFL警告バッジを実装しクローズ**。
+      タブは従来の重大度(all/errors/warnings/info)に加えて**種別**でも絞れる
+      ようにした(設計§1.5の6タブ)。種別は行の内容から決まる——接触イベントは
+      `bodies=`を持つ(sim-wasmがSourceIdを復号して出す)のでcontacts、
+      それ以外で`step=`を持つ実イベント行がevents。
+      **診断バッジ**は本増分で追加した`energy_residual`/`max_body_speed`を
+      毎フレーム読み、①エネルギー台帳の残差が有限でない(発散)②最大速度×dtが
+      代表長さを超える(1stepで自分の大きさ以上動く)を検出して表示する。
+      **どちらも厳密な安定性判定ではないことを明記する**——本物のCFL数は
+      ソルバごとの空間離散化に依存する。ここは「ユーザーが画面を見て気づける
+      粗い警告」としての縮約であり、その旨をバッジのtitle属性にも書いている。
+      Playwrightで、ContactsタブがD4の接触行を残し起動時のINFO行を隠すこと、
+      Allへ戻すと再び見えることを確認した。
 - [x] Probe Graphs パネル: 複数系列・対数軸・CSV エクスポート
       (2系列(箱のy座標`ProbeTarget::BodyPosY`+箱の速さ`ProbeTarget::BodySpeed`、
       いずれも`sim_world::World::add_probe`で登録し`step()`内で毎step自動

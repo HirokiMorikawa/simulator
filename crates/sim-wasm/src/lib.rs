@@ -636,6 +636,32 @@ impl WasmWorld {
         self.imported_probe_handles.len()
     }
 
+    /// エネルギー台帳の残差(**増分Kで追加**)。Consoleの発散警告バッジが使う
+    /// ——保存則が壊れた(発散した)ことは、残差が有限でなくなるか急激に増える
+    /// ことに現れる。
+    pub fn energy_residual(&self) -> f64 {
+        self.inner.energy_residual()
+    }
+
+    /// 全剛体の速さの最大値(**増分Kで追加**)。ConsoleのCFL警告バッジが使う
+    /// ——CFL条件の目安 `v·dt/L` を出すのに要る。
+    pub fn max_body_speed(&self) -> f64 {
+        (0..self.inner.mechanics().bodies.position.len())
+            .map(|i| self.inner.mechanics().bodies.linear_velocity[i].length())
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// 登録済み結合の件数(**増分Kで追加**、InspectorのComponentビュー用)。
+    pub fn coupling_count(&self) -> usize {
+        self.inner.coupling_count()
+    }
+
+    /// 有効な近似・縮約の一覧を改行区切りで返す(**増分Kで追加**、
+    /// Inspectorの「近似バッジ」用。`World::active_approximations`のdoc参照)。
+    pub fn active_approximations_text(&self) -> String {
+        self.inner.active_approximations().join("\n")
+    }
+
     /// 現在の回路に実際に配線されている素子の本数(**増分G2で追加**)。
     /// `circuit_element_label_at`の`index`引数の有効範囲は
     /// `0..circuit_element_count()`。回路ドメインが無効なら0。
