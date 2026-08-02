@@ -275,6 +275,13 @@ impl WasmWorld {
                         half_extents: Vec3::new(half[0], half[1], half[2]),
                     },
                     sim_world::ShapeJson::Sphere { radius } => Shape::Sphere { radius },
+                    sim_world::ShapeJson::Capsule {
+                        radius,
+                        half_height,
+                    } => Shape::Capsule {
+                        radius,
+                        half_height,
+                    },
                     sim_world::ShapeJson::Plane { normal, d } => Shape::Plane {
                         normal: Vec3::new(normal[0], normal[1], normal[2]),
                         d,
@@ -484,6 +491,85 @@ impl WasmWorld {
         Ok(index)
     }
 
+    /// スポーンパレット——カプセル(**増分Lで追加**、ローカル+y軸が長軸)。
+    /// `spawn_sphere`と同じ規約。`sim-mechanics`側の体積・慣性・接触
+    /// (平面/球/カプセル)を同増分で実装した。
+    /// **カプセル×箱の接触は未実装**なので、箱と並べても衝突しない
+    /// (パニックはしない、`collision.rs`の該当arm参照)。
+    pub fn spawn_capsule(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f64,
+        half_height: f64,
+        material_name: String,
+    ) -> Result<usize, JsValue> {
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(&material_name)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+        let shape = Shape::Capsule {
+            radius,
+            half_height,
+        };
+        let mut desc = RigidBodyDesc::dynamic(shape.clone(), material);
+        desc.transform.position = sim_math::Vec3::new(x, y, z);
+        let id = self.inner.create_body(desc);
+        let index = self.body_count();
+        let label = format!("Capsule_{index}");
+        self.bodies.push(SpawnedBodyMeta {
+            id,
+            label,
+            material_label: material_name,
+            base_shape: shape,
+            constraint_joint_index: None,
+            hinge_motor_index: None,
+        });
+        Ok(index)
+    }
+
+    /// 材料派生(**増分Lで追加**)。既存材料`base_name`を基に、密度だけを
+    /// 差し替えた新しい材料`new_name`を`MaterialDb`へ追加する
+    /// (シーンJSONの`materials[].extends`と同じ仕組みを実行時に開く)。
+    ///
+    /// **縮約**: 派生できるのは密度のみ。設計は任意の物性の上書きを想定するが、
+    /// `MaterialOverride`(シーンJSON側)も密度だけを持つので、そちらと
+    /// 揃えた——両者で表現力が食い違うと、エディタで作った材料をシーンJSONへ
+    /// 書き出せなくなるため。
+    pub fn derive_material(
+        &mut self,
+        base_name: String,
+        new_name: String,
+        density: f64,
+    ) -> Result<(), JsValue> {
+        let base_id = self
+            .inner
+            .materials()
+            .find_by_name(&base_name)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {base_name}")))?;
+        if self.inner.materials().find_by_name(&new_name).is_some() {
+            return Err(JsValue::from_str(&format!(
+                "material already exists: {new_name}"
+            )));
+        }
+        if !(density.is_finite() && density > 0.0) {
+            return Err(JsValue::from_str(
+                "density must be a positive finite number",
+            ));
+        }
+        let mut derived = self.inner.materials().get(base_id).clone();
+        // `Material::name`は`&'static str`なので、実行時に作った文字列を入れるには
+        // リークさせる必要がある(材料は一度作ったらワールドの寿命の間保持され、
+        // 削除する経路も無いため、実質的な漏れにはならない)。
+        derived.name = Box::leak(new_name.into_boxed_str());
+        derived.density = density;
+        derived.source = "editor derived";
+        self.inner.materials_mut().push(derived);
+        Ok(())
+    }
+
     /// スポーンパレット——箱(半辺長`half_extent`の立方体)を`material_name`で
     /// `(x,y,z)`に配置する。`spawn_sphere`と同じ規約。
     pub fn spawn_box(
@@ -553,6 +639,13 @@ impl WasmWorld {
                     half_extents: Vec3::new(half[0], half[1], half[2]),
                 },
                 sim_world::ShapeJson::Sphere { radius } => Shape::Sphere { radius },
+                sim_world::ShapeJson::Capsule {
+                    radius,
+                    half_height,
+                } => Shape::Capsule {
+                    radius,
+                    half_height,
+                },
                 sim_world::ShapeJson::Plane { normal, d } => Shape::Plane {
                     normal: Vec3::new(normal[0], normal[1], normal[2]),
                     d,
@@ -634,6 +727,40 @@ impl WasmWorld {
     /// の`index`引数の有効範囲は`0..imported_probe_count()`)。
     pub fn imported_probe_count(&self) -> usize {
         self.imported_probe_handles.len()
+    }
+
+    /// 格子流体の速度場を、Scene Viewのベクトル表示用に平坦化して返す
+    /// (**増分Lで追加**)。1セルあたり4要素
+    /// `[world_x, world_y, u, v]` を並べる(セル中心のワールド座標と速度成分)。
+    /// 格子流体ドメインが無効なら空配列。
+    ///
+    /// **追加した理由**: 設計 docs/23-frontend/01-editor.md §1.2 の
+    /// 「流体場オーバーレイ」のうち、SPHの粒子表示は実装済みだったが
+    /// **格子流体(`GridFluid2D`)の速度場は表示手段が無かった**。D14(渦)・
+    /// D15(対流)はどちらも格子流体だけのシーンで、Scene Viewに何も描かれず
+    /// Probe Graphsでしか観測できない状態だった。
+    ///
+    /// **縮約**: `GridFluid2D`は2D(x-y平面)なのでz=0の平面上に描く。
+    /// セル数が多いと矢印が密になりすぎるため`stride`で間引く
+    /// (1なら全セル、2なら1つ飛ばし)。
+    pub fn grid_fluid_velocity_field_f32(&self, stride: usize) -> Vec<f32> {
+        let Some(grid) = self.inner.grid_fluid() else {
+            return Vec::new();
+        };
+        let step = stride.max(1);
+        let mut out = Vec::new();
+        for j in (0..grid.ny).step_by(step) {
+            for i in (0..grid.nx).step_by(step) {
+                // セル中心のワールド座標(格子は原点から+x/+y方向へ h 刻み)。
+                let x = (i as f64 + 0.5) * grid.h;
+                let y = (j as f64 + 0.5) * grid.h;
+                out.push(x as f32);
+                out.push(y as f32);
+                out.push(grid.u_at(i as i64, j as i64) as f32);
+                out.push(grid.v_at(i as i64, j as i64) as f32);
+            }
+        }
+        out
     }
 
     /// エネルギー台帳の残差(**増分Kで追加**)。Consoleの発散警告バッジが使う

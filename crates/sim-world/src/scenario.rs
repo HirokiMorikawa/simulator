@@ -232,9 +232,23 @@ pub struct BodyScenarioDesc {
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ShapeJson {
-    Box { half: [f64; 3] },
-    Sphere { radius: f64 },
-    Plane { normal: [f64; 3], d: f64 },
+    Box {
+        half: [f64; 3],
+    },
+    Sphere {
+        radius: f64,
+    },
+    /// カプセル(**増分Lで追加**、ローカル+y軸が長軸)。`sim-mechanics`側の
+    /// 体積・慣性・接触(平面/球/カプセル)を同増分で実装した。
+    /// **カプセル×箱の接触は未実装**(`None`を返す)。
+    Capsule {
+        radius: f64,
+        half_height: f64,
+    },
+    Plane {
+        normal: [f64; 3],
+        d: f64,
+    },
 }
 
 /// モジュールdoc「縮約実装の理由」参照 — 設計例示のAABBではなく`water_level`+
@@ -841,6 +855,13 @@ impl World {
                     half_extents: array_to_vec3(half),
                 },
                 ShapeJson::Sphere { radius } => Shape::Sphere { radius },
+                ShapeJson::Capsule {
+                    radius,
+                    half_height,
+                } => Shape::Capsule {
+                    radius,
+                    half_height,
+                },
                 ShapeJson::Plane { normal, d } => Shape::Plane {
                     normal: array_to_vec3(normal),
                     d,

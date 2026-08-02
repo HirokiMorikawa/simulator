@@ -1616,6 +1616,50 @@ async function setUpSceneView(
   scene.add(fluidPoints);
   let fluidPositionAttribute: THREE.BufferAttribute | null = null;
 
+  // **格子流体の速度場オーバーレイ(増分L)**。セルごとに`ArrowHelper`を作ると
+  // 数百オブジェクトになるので、**1本の`LineSegments`**で全ベクトルを描く
+  // (頂点2つで1本の線分。矢じりは付けない縮約——密なベクトル場では矢じりが
+  // 潰れて視認性がむしろ落ちるため、長さと向きで表現する)。
+  const GRID_FLUID_OVERLAY_STRIDE = 2; // 1つ飛ばし。全セルだと矢印が密すぎる。
+  const GRID_FLUID_OVERLAY_SCALE = 0.05; // 速度[m/s] → 線分長[m] の表示倍率。
+  const GRID_FLUID_MAX_CELLS = 4096;
+  const gridFluidGeometry = new THREE.BufferGeometry();
+  const gridFluidVertices = new Float32Array(GRID_FLUID_MAX_CELLS * 2 * 3);
+  const gridFluidPositionAttribute = new THREE.BufferAttribute(gridFluidVertices, 3);
+  gridFluidGeometry.setAttribute("position", gridFluidPositionAttribute);
+  const gridFluidLines = new THREE.LineSegments(
+    gridFluidGeometry,
+    new THREE.LineBasicMaterial({ color: 0x66ccff }),
+  );
+  gridFluidLines.visible = false;
+  scene.add(gridFluidLines);
+
+  function updateGridFluidOverlay(currentWorld: WasmWorld) {
+    const enabled = (document.getElementById("toggle-grid-fluid-overlay") as HTMLInputElement | null)
+      ?.checked;
+    const field = enabled ? currentWorld.grid_fluid_velocity_field_f32(GRID_FLUID_OVERLAY_STRIDE) : new Float32Array(0);
+    const cells = Math.min(field.length / 4, GRID_FLUID_MAX_CELLS);
+    if (cells === 0) {
+      gridFluidLines.visible = false;
+      return;
+    }
+    for (let c = 0; c < cells; c += 1) {
+      const [x, y, u, v] = [field[c * 4], field[c * 4 + 1], field[c * 4 + 2], field[c * 4 + 3]];
+      const base = c * 6;
+      // 始点(セル中心)。格子流体は2Dなのでz=0平面に描く。
+      gridFluidVertices[base] = x;
+      gridFluidVertices[base + 1] = y;
+      gridFluidVertices[base + 2] = 0;
+      // 終点(速度ベクトルぶんだけ伸ばす)。
+      gridFluidVertices[base + 3] = x + u * GRID_FLUID_OVERLAY_SCALE;
+      gridFluidVertices[base + 4] = y + v * GRID_FLUID_OVERLAY_SCALE;
+      gridFluidVertices[base + 5] = 0;
+    }
+    gridFluidGeometry.setDrawRange(0, cells * 2);
+    gridFluidPositionAttribute.needsUpdate = true;
+    gridFluidLines.visible = true;
+  }
+
   function showForceOverlay(origin: THREE.Vector3, force: THREE.Vector3) {
     const magnitude = force.length();
     if (magnitude < 1e-6) return;
@@ -2573,6 +2617,54 @@ async function setUpSceneView(
     addSpawnedMesh(bodyIndex, mesh);
   });
 
+  // **カプセルのスポーン(増分L)**。`sim-mechanics`側で体積・慣性・接触
+  // (平面/球/カプセル)を実装したので、床へ落として寝かせるところまで動く。
+  // **カプセル×箱の接触は未実装**なので箱と並べてもすり抜ける(パニックは
+  // しない)——ボタンのtitleにもその制約を書いてある。
+  const SPAWN_CAPSULE_RADIUS = 0.2;
+  const SPAWN_CAPSULE_HALF_HEIGHT = 0.35;
+  document.getElementById("btn-spawn-capsule")!.addEventListener("click", () => {
+    const { x, z } = nextSpawnPosition();
+    const material = spawnMaterialSelect.value;
+    const bodyIndex = world.spawn_capsule(
+      x,
+      SPAWN_HEIGHT,
+      z,
+      SPAWN_CAPSULE_RADIUS,
+      SPAWN_CAPSULE_HALF_HEIGHT,
+      material,
+    );
+    // THREE.CapsuleGeometry の length は「円柱部の長さ」= 2*half_height。
+    const mesh = new THREE.Mesh(
+      new THREE.CapsuleGeometry(SPAWN_CAPSULE_RADIUS, SPAWN_CAPSULE_HALF_HEIGHT * 2, 8, 16),
+      new THREE.MeshStandardMaterial({ color: 0xcc88ff }),
+    );
+    addSpawnedMesh(bodyIndex, mesh);
+  });
+
+  // **材料派生(増分L)**。シーンJSONの`materials[].extends`と同じ仕組みを
+  // 実行時に開く。**派生できるのは密度のみ**——`MaterialOverride`(シーンJSON側)
+  // も密度だけを持つので、そちらと表現力を揃えた(食い違うとエディタで作った
+  // 材料をシーンJSONへ書き出せなくなる)。
+  document.getElementById("btn-derive-material")!.addEventListener("click", () => {
+    const base = spawnMaterialSelect.value;
+    const name = window.prompt(`「${base}」から派生する新しい材料名`, `${base}-軽量`);
+    if (!name) return;
+    const densityText = window.prompt("新しい密度 [kg/m³]", "500");
+    if (!densityText) return;
+    const density = Number(densityText);
+    try {
+      world.derive_material(base, name, density);
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      spawnMaterialSelect.appendChild(option);
+      spawnMaterialSelect.value = name;
+    } catch (err) {
+      window.alert(`材料派生に失敗しました: ${String(err)}`);
+    }
+  });
+
   document.getElementById("btn-spawn-pendulum")!.addEventListener("click", () => {
     const { x, z } = nextSpawnPosition();
     const material = spawnMaterialSelect.value;
@@ -2862,6 +2954,15 @@ async function setUpSceneView(
       (fluidPositionAttribute.array as Float32Array).set(positions);
       fluidPositionAttribute.needsUpdate = true;
     }
+
+    // **格子流体の速度場オーバーレイ(増分L)**。設計§1.2「流体場」のうち
+    // SPHの粒子表示は実装済みだったが、**`GridFluid2D`の速度場は表示手段が
+    // 無かった**——D14(渦)・D15(対流)はどちらも格子流体だけのシーンで、
+    // Scene Viewに何も描かれずProbe Graphsでしか観測できなかった。
+    // `grid_fluid_velocity_field_f32`(1セル4要素 `[x, y, u, v]`)を
+    // LineSegmentsの頂点バッファへ直接書き込む(セルごとに`ArrowHelper`を
+    // 作ると数百オブジェクトになるため、1本のジオメトリで描く)。
+    updateGridFluidOverlay(world);
 
     // **2026-07-28のD9/D34/D35増分で追加したガード**: `hasSelectedBody()`が
     // falseのとき(D9/D34/D35のように力学ボディを1つも持たないギャラリー

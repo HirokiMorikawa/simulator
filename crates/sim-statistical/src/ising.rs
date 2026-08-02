@@ -261,3 +261,52 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    /// **設計 docs/15-statistical/04-monte-carlo.md §7「高温極限: $M\to0$、
+    /// $E\to0$(乱雑)。低温極限: $|M|\to1$」**(§7網羅監査で未カバーと判明し
+    /// 本増分で追加)。S7(帯磁率ピーク)/S8(自発磁化のOnsager式)は臨界点
+    /// 近傍を見るテストで、**両極限そのものは検証されていなかった**。
+    ///
+    /// 極限は解析解を要さない定性的な主張だが、**モンテカルロが正しく
+    /// 熱平衡へ緩和しているかの最も基本的な健全性検査**である——ここが外れる
+    /// なら臨界点近傍の一致は偶然でしかない。
+    #[test]
+    fn ising_reaches_the_disordered_and_ordered_limits() {
+        let l = 16;
+        let j = 1.0;
+
+        // 高温極限(T >> Tc≈2.269): スピンは乱雑になり、磁化・エネルギーとも0付近。
+        let mut hot = IsingSim::new(l, j, 50.0, SimRng::new(7, 1));
+        for _ in 0..2000 {
+            hot.metropolis_sweep();
+        }
+        let hot_m = hot.magnetization().abs();
+        let hot_e = hot.energy_per_spin().abs();
+        assert!(hot_m < 0.15, "高温では磁化が0へ向かうべき: |M|={hot_m}");
+        assert!(
+            hot_e < 0.15,
+            "高温ではスピン間の相関が消えエネルギーも0へ向かうべき: |E|={hot_e}"
+        );
+
+        // 低温極限(T << Tc): 整列して |M| → 1。
+        let mut cold = IsingSim::new(l, j, 0.4, SimRng::new(7, 2));
+        for _ in 0..2000 {
+            cold.wolff_step();
+        }
+        let cold_m = cold.magnetization().abs();
+        assert!(
+            cold_m > 0.95,
+            "低温では自発磁化が飽和し |M|→1 になるべき: |M|={cold_m}"
+        );
+        // 完全整列なら最近接4本すべて揃うので E/N → -2J。
+        let cold_e = cold.energy_per_spin();
+        assert!(
+            (cold_e + 2.0 * j).abs() < 0.1,
+            "低温のエネルギーは完全整列の -2J へ向かうべき: E/N={cold_e}"
+        );
+    }
+}

@@ -70,8 +70,21 @@ fn aabb_of(shape: &Shape, xf: Transform) -> Aabb {
             min: Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
             max: Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
         },
-        Shape::Capsule { .. } | Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
-            todo!("Phase 2/5 で実装")
+        // **増分Lで実装**。ローカル+y軸を長軸とする線分の両端を世界へ移し、
+        // その包絡へ半径ぶんのマージンを足す。
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => {
+            let (a, b) = capsule_segment(xf, *half_height);
+            let r = Vec3::new(*radius, *radius, *radius);
+            Aabb {
+                min: Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)) - r,
+                max: Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)) + r,
+            }
+        }
+        Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
+            todo!("Phase 5 で実装")
         }
     }
 }
@@ -117,6 +130,161 @@ fn sphere_sphere(
 }
 
 /// 球 と 無限平面(法線は正規化済み前提)。
+/// カプセルの芯線(ローカル+y軸方向の線分)をワールド座標で返す(**増分L**)。
+fn capsule_segment(xf: Transform, half_height: f64) -> (Vec3, Vec3) {
+    let axis = xf.rotation.rotate(Vec3::new(0.0, 1.0, 0.0));
+    (
+        xf.position.addcarry_scaled(axis, -half_height),
+        xf.position.addcarry_scaled(axis, half_height),
+    )
+}
+
+/// 線分`a`-`b`上で点`p`にもっとも近い点(**増分L**)。
+fn closest_point_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
+    let ab = b - a;
+    let denom = ab.dot(ab);
+    if denom <= 1e-18 {
+        return a;
+    }
+    let t = ((p - a).dot(ab) / denom).clamp(0.0, 1.0);
+    a.addcarry_scaled(ab, t)
+}
+
+/// 2線分の最近接点対(**増分L**、Ericson "Real-Time Collision Detection" §5.1.9)。
+fn closest_points_between_segments(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Vec3, Vec3) {
+    let d1 = q1 - p1;
+    let d2 = q2 - p2;
+    let r = p1 - p2;
+    let a = d1.dot(d1);
+    let e = d2.dot(d2);
+    let f = d2.dot(r);
+    const EPS: f64 = 1e-18;
+
+    if a <= EPS && e <= EPS {
+        return (p1, p2);
+    }
+    if a <= EPS {
+        return (p1, closest_point_on_segment(p2, q2, p1));
+    }
+    if e <= EPS {
+        return (closest_point_on_segment(p1, q1, p2), p2);
+    }
+
+    let c = d1.dot(r);
+    let b = d1.dot(d2);
+    let denom = a * e - b * b;
+    // 平行(denom≈0)なら s=0 から始めて t を解き、必要なら s を解き直す。
+    let mut s = if denom > EPS {
+        ((b * f - c * e) / denom).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mut t = (b * s + f) / e;
+    if t < 0.0 {
+        t = 0.0;
+        s = (-c / a).clamp(0.0, 1.0);
+    } else if t > 1.0 {
+        t = 1.0;
+        s = ((b - c) / a).clamp(0.0, 1.0);
+    }
+    (p1.addcarry_scaled(d1, s), p2.addcarry_scaled(d2, t))
+}
+
+/// カプセル と 無限平面(**増分L**)。芯線の両端それぞれの平面距離を見て、
+/// 貫入している端を接触点にする(最大2点——寝たカプセルが床で安定するには
+/// 2点要る。1点だけだと転がり続けて静止しない)。
+fn capsule_plane(
+    xf: Transform,
+    radius: f64,
+    half_height: f64,
+    plane_normal: Vec3,
+    plane_d: f64,
+) -> Option<(Vec3, Vec<ContactPoint>)> {
+    let (a, b) = capsule_segment(xf, half_height);
+    let mut points = Vec::new();
+    for (feature_id, end) in [a, b].into_iter().enumerate() {
+        let dist = plane_normal.dot(end) - plane_d;
+        if dist < radius {
+            points.push(ContactPoint {
+                world_point: end.addcarry_scaled(plane_normal, -dist),
+                penetration: radius - dist,
+                feature_id: feature_id as u32,
+            });
+        }
+    }
+    if points.is_empty() {
+        None
+    } else {
+        Some((plane_normal, points))
+    }
+}
+
+/// カプセル と 球(**増分L**)。芯線上の最近接点を中心とする球として扱えば
+/// 球-球と同じ問題になる。
+fn capsule_sphere(
+    capsule_xf: Transform,
+    radius: f64,
+    half_height: f64,
+    sphere_center: Vec3,
+    sphere_radius: f64,
+) -> Option<(Vec3, ContactPoint)> {
+    let (a, b) = capsule_segment(capsule_xf, half_height);
+    let closest = closest_point_on_segment(a, b, sphere_center);
+    let delta = sphere_center - closest;
+    let distance = delta.length();
+    let sum = radius + sphere_radius;
+    if distance >= sum {
+        return None;
+    }
+    // 完全に中心が一致する退化ケースでは法線を任意に決める(+y)。
+    let normal = if distance > 1e-12 {
+        delta.scale(1.0 / distance)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    Some((
+        normal,
+        ContactPoint {
+            world_point: closest.addcarry_scaled(normal, radius),
+            penetration: sum - distance,
+            feature_id: 0,
+        },
+    ))
+}
+
+/// カプセル同士(**増分L**)。2本の芯線の最近接点対を求めれば球-球に帰着する。
+fn capsule_capsule(
+    xf_a: Transform,
+    radius_a: f64,
+    half_height_a: f64,
+    xf_b: Transform,
+    radius_b: f64,
+    half_height_b: f64,
+) -> Option<(Vec3, ContactPoint)> {
+    let (a0, a1) = capsule_segment(xf_a, half_height_a);
+    let (b0, b1) = capsule_segment(xf_b, half_height_b);
+    let (pa, pb) = closest_points_between_segments(a0, a1, b0, b1);
+    let delta = pb - pa;
+    let distance = delta.length();
+    let sum = radius_a + radius_b;
+    if distance >= sum {
+        return None;
+    }
+    let normal = if distance > 1e-12 {
+        delta.scale(1.0 / distance)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    Some((
+        normal,
+        ContactPoint {
+            world_point: pa.addcarry_scaled(normal, radius_a),
+            penetration: sum - distance,
+            feature_id: 0,
+        },
+    ))
+}
+
 fn sphere_plane(
     center: Vec3,
     radius: f64,
@@ -707,7 +875,61 @@ fn shape_pair_manifold(
             box_box(xf_a, *ha, xf_b, *hb, None).map(|(n, p, _)| (n, p))
         }
         (Shape::Plane { .. }, Shape::Plane { .. }) => None, // static同士は broadphase で除外すべき無意味ペア
-        _ => todo!("Capsule/Compound/ConvexMesh は Phase 2/5"),
+
+        // **カプセル(増分Lで追加)**。芯線(線分)への最近接点を取れば、
+        // 平面/球/カプセルのいずれもすでにある問題へ帰着する。
+        // 法線の向きは上と同じA→B規約に合わせて必要なら反転する。
+        (
+            Shape::Capsule {
+                radius,
+                half_height,
+            },
+            Shape::Plane { normal, d },
+        ) => capsule_plane(xf_a, *radius, *half_height, *normal, *d).map(|(n, pts)| (-n, pts)),
+        (
+            Shape::Plane { normal, d },
+            Shape::Capsule {
+                radius,
+                half_height,
+            },
+        ) => capsule_plane(xf_b, *radius, *half_height, *normal, *d),
+        (
+            Shape::Capsule {
+                radius,
+                half_height,
+            },
+            Shape::Sphere { radius: sr },
+        ) => capsule_sphere(xf_a, *radius, *half_height, xf_b.position, *sr)
+            .map(|(n, p)| (n, vec![p])),
+        (
+            Shape::Sphere { radius: sr },
+            Shape::Capsule {
+                radius,
+                half_height,
+            },
+        ) => capsule_sphere(xf_b, *radius, *half_height, xf_a.position, *sr)
+            .map(|(n, p)| (-n, vec![p])),
+        (
+            Shape::Capsule {
+                radius: ra,
+                half_height: ha,
+            },
+            Shape::Capsule {
+                radius: rb,
+                half_height: hb,
+            },
+        ) => capsule_capsule(xf_a, *ra, *ha, xf_b, *rb, *hb).map(|(n, p)| (n, vec![p])),
+
+        // **カプセル × 箱は未実装**(増分Lの正直な限界)。線分-OBBの最近接点は
+        // 面/辺/頂点の場合分けが要り、上の3組のように既存の問題へ素直に
+        // 帰着しない。**`todo!()`でパニックさせず`None`を返す**——エディタで
+        // カプセルと箱を並べても落ちないことを優先する(接触が起きないという
+        // 挙動は目に見えるので、黙って壊れるより気づきやすい)。
+        (Shape::Capsule { .. }, Shape::Box { .. }) | (Shape::Box { .. }, Shape::Capsule { .. }) => {
+            None
+        }
+
+        _ => todo!("Compound/ConvexMesh は Phase 5"),
     }
 }
 
@@ -956,7 +1178,7 @@ mod tests {
     fn identity_xf(p: Vec3) -> Transform {
         Transform {
             position: p,
-            rotation: Quat::IDENTITY,
+            rotation: sim_math::Quat::IDENTITY,
         }
     }
 
@@ -1276,5 +1498,211 @@ mod tests {
             points[0].penetration,
             penetration_target
         );
+    }
+}
+
+#[cfg(test)]
+mod capsule_tests {
+    use super::*;
+
+    fn xf(position: Vec3) -> Transform {
+        Transform {
+            position,
+            rotation: sim_math::Quat::IDENTITY,
+        }
+    }
+
+    /// **カプセルの体積と慣性が解析式と一致すること**(増分L)。
+    /// 体積は円柱 $\pi r^2\cdot 2h$ + 球 $\frac43\pi r^3$。
+    /// **極限で既知の形状へ縮退することも確認する**——half_height→0 で球、
+    /// r を固定して h を大きくすると長軸慣性が円柱の $r^2/2$ へ近づく。
+    /// これが縮退しないなら合成の重み付けが誤っている。
+    #[test]
+    fn capsule_volume_and_inertia_match_the_analytic_composite() {
+        let (r, h) = (0.3_f64, 0.5_f64);
+        let capsule = Shape::Capsule {
+            radius: r,
+            half_height: h,
+        };
+        let expected_volume =
+            std::f64::consts::PI * r * r * 2.0 * h + 4.0 / 3.0 * std::f64::consts::PI * r.powi(3);
+        assert!(
+            (capsule.volume().unwrap() - expected_volume).abs() / expected_volume < 1e-12,
+            "体積が解析式と一致すべき: {:?}",
+            capsule.volume()
+        );
+
+        // half_height→0 は球そのもの。
+        let degenerate = Shape::Capsule {
+            radius: r,
+            half_height: 0.0,
+        };
+        let sphere = Shape::Sphere { radius: r };
+        let (a, b) = (
+            degenerate.unit_mass_inertia_diagonal(),
+            sphere.unit_mass_inertia_diagonal(),
+        );
+        for (axis, (x, y)) in [(a.x, b.x), (a.y, b.y), (a.z, b.z)].iter().enumerate() {
+            assert!(
+                (x - y).abs() < 1e-12,
+                "half_height=0 のカプセルは球へ縮退すべき: axis={axis} {x} vs {y}"
+            );
+        }
+
+        // 細長くすると長軸慣性は円柱の r²/2 へ近づく(半球の寄与が相対的に減る)。
+        let slender = Shape::Capsule {
+            radius: 0.05,
+            half_height: 5.0,
+        };
+        let axial = slender.unit_mass_inertia_diagonal().y;
+        let cylinder_axial = 0.5 * 0.05 * 0.05;
+        assert!(
+            (axial - cylinder_axial).abs() / cylinder_axial < 0.02,
+            "細長いカプセルの長軸慣性は円柱の r²/2 に近づくべき: {axial} vs {cylinder_axial}"
+        );
+        // 横軸慣性は長さ² 支配になる(細長い棒の 1/3 L² オーダー)。
+        assert!(
+            slender.unit_mass_inertia_diagonal().x > 5.0,
+            "細長いカプセルの横軸慣性は長さ²で効くべき: {}",
+            slender.unit_mass_inertia_diagonal().x
+        );
+    }
+
+    /// **立てたカプセルと床平面の貫入量が解析値と一致する**(増分L)。
+    /// 芯線の下端が平面から `dist` にあるとき、貫入は `radius - dist`。
+    #[test]
+    fn capsule_plane_penetration_matches_the_segment_distance() {
+        let (r, h) = (0.25_f64, 0.6_f64);
+        let capsule = Shape::Capsule {
+            radius: r,
+            half_height: h,
+        };
+        let plane = Shape::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+        // 重心を y = h + r - 0.05 に置く = 下端が y = r - 0.05、貫入 0.05。
+        let center_y = h + r - 0.05;
+        let (normal, points) = shape_pair_manifold(
+            &capsule,
+            xf(Vec3::new(0.0, center_y, 0.0)),
+            &plane,
+            xf(Vec3::ZERO),
+        )
+        .expect("床に触れているはず");
+        assert_eq!(points.len(), 1, "立てたカプセルは下端の1点だけが触れる");
+        assert!(
+            (points[0].penetration - 0.05).abs() < 1e-12,
+            "貫入量が解析値と一致すべき: {}",
+            points[0].penetration
+        );
+        // A→B規約(カプセル→平面)なので法線は下向き。
+        assert!(normal.y < 0.0, "A→B規約では法線は-y向き: {normal:?}");
+
+        // 十分高い位置では接触しない。
+        assert!(
+            shape_pair_manifold(
+                &capsule,
+                xf(Vec3::new(0.0, h + r + 0.01, 0.0)),
+                &plane,
+                xf(Vec3::ZERO)
+            )
+            .is_none(),
+            "浮いているカプセルは接触しない"
+        );
+    }
+
+    /// **寝かせたカプセルは床と2点で接触する**(増分L)。1点しか返さないと
+    /// 転がり続けて静止しないため、安定に寝かせるには両端の2点が要る。
+    #[test]
+    fn a_lying_capsule_touches_the_floor_at_both_ends() {
+        let (r, h) = (0.2_f64, 0.7_f64);
+        let capsule = Shape::Capsule {
+            radius: r,
+            half_height: h,
+        };
+        let plane = Shape::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+        // ローカル+y(長軸)をワールド+xへ倒す。
+        let lying = Transform {
+            position: Vec3::new(0.0, r - 0.02, 0.0),
+            rotation: sim_math::Quat::from_axis_angle(
+                Vec3::new(0.0, 0.0, 1.0),
+                -std::f64::consts::FRAC_PI_2,
+            ),
+        };
+        let (_, points) = shape_pair_manifold(&capsule, lying, &plane, xf(Vec3::ZERO))
+            .expect("寝たカプセルは床に触れる");
+        assert_eq!(points.len(), 2, "両端の2点で接触すべき: {points:?}");
+        for p in &points {
+            assert!(
+                (p.penetration - 0.02).abs() < 1e-9,
+                "両端とも同じ貫入量になるはず: {}",
+                p.penetration
+            );
+        }
+    }
+
+    /// **カプセル-球とカプセル-カプセルが球-球へ正しく帰着すること**(増分L)。
+    #[test]
+    fn capsule_sphere_and_capsule_capsule_reduce_to_the_sphere_case() {
+        let capsule = Shape::Capsule {
+            radius: 0.2,
+            half_height: 0.5,
+        };
+        let sphere = Shape::Sphere { radius: 0.3 };
+
+        // 芯線の真横 0.4 に球中心 → 距離0.4、半径和0.5、貫入0.1。
+        let (normal, points) = shape_pair_manifold(
+            &capsule,
+            xf(Vec3::ZERO),
+            &sphere,
+            xf(Vec3::new(0.4, 0.0, 0.0)),
+        )
+        .expect("接触するはず");
+        assert!((points[0].penetration - 0.1).abs() < 1e-12, "{points:?}");
+        assert!((normal.x - 1.0).abs() < 1e-12, "法線はA→B(+x): {normal:?}");
+
+        // 芯線の端より外(y=1.0)にある球は、端点からの距離で判定される。
+        // 端点 y=0.5 から距離0.5 → 半径和0.5なのでちょうど接する=貫入0。
+        assert!(
+            shape_pair_manifold(
+                &capsule,
+                xf(Vec3::ZERO),
+                &sphere,
+                xf(Vec3::new(0.0, 1.01, 0.0))
+            )
+            .is_none(),
+            "端点から半径和より遠ければ接触しない"
+        );
+
+        // カプセル同士: 平行に置いて距離0.3、半径和0.4 → 貫入0.1。
+        let (n2, p2) = shape_pair_manifold(
+            &capsule,
+            xf(Vec3::ZERO),
+            &capsule,
+            xf(Vec3::new(0.3, 0.0, 0.0)),
+        )
+        .expect("接触するはず");
+        assert!((p2[0].penetration - 0.1).abs() < 1e-12, "{p2:?}");
+        assert!((n2.x - 1.0).abs() < 1e-12, "{n2:?}");
+    }
+
+    /// **カプセル×箱は`None`を返す(パニックしない)**——増分Lの正直な限界。
+    /// 線分-OBBの最近接点は面/辺/頂点の場合分けが要り未実装だが、エディタで
+    /// 並べても落ちないことを優先した。この挙動を固定しておく。
+    #[test]
+    fn capsule_versus_box_returns_none_instead_of_panicking() {
+        let capsule = Shape::Capsule {
+            radius: 0.2,
+            half_height: 0.5,
+        };
+        let boxed = Shape::Box {
+            half_extents: Vec3::new(0.5, 0.5, 0.5),
+        };
+        assert!(shape_pair_manifold(&capsule, xf(Vec3::ZERO), &boxed, xf(Vec3::ZERO)).is_none());
+        assert!(shape_pair_manifold(&boxed, xf(Vec3::ZERO), &capsule, xf(Vec3::ZERO)).is_none());
     }
 }

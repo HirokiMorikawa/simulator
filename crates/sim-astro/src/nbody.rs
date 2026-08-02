@@ -838,3 +838,108 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod lagrange_tests {
+    use super::*;
+    use sim_core::{EventQueue, MaterialDb, Solver, SolverContext};
+    use sim_math::SimRng;
+
+    /// **設計 docs/16-astro/01-gravitation-nbody.md §7「ラグランジュ点 L4/L5 の
+    /// トロヤ群の安定滞在」**(§7網羅監査で未カバーと判明し増分Lで追加)。
+    ///
+    /// L4 は主星-伴星を結ぶ線と正三角形をなす点で、**質量比が十分小さければ
+    /// 線形安定**(Routh の条件 $m_2/(m_1+m_2) < 0.0385$)。太陽-木星系はこの
+    /// 条件を満たし、実際にトロヤ群小惑星が滞在している。
+    ///
+    /// **判定**: L4 に静止衛星を置き(共回転系で静止 = 慣性系では主星まわりを
+    /// 伴星と同じ角速度で回る)、複数周期にわたって**主星からの距離と伴星との
+    /// 角度差が保たれる**ことを見る。不安定なら角度差が単調にずれていく。
+    ///
+    /// **対照実験を併せて行う**: 同じ構成で L4 から意図的に外した初期条件
+    /// (角度を10°ずらす)は、同じ時間で角度差が大きく変動する。これにより
+    /// 「たまたま動かないだけ」ではなく L4 が特別な点であることを示す。
+    #[test]
+    fn trojan_at_l4_stays_near_the_equilateral_point() {
+        let m1 = 1.0e6; // 主星
+        let m2 = 1.0e3; // 伴星(質量比 ≈ 1e-3 << 0.0385 なので安定条件を満たす)
+        let separation = 1.0_f64;
+        let gm_total = GRAVITATIONAL_CONSTANT * (m1 + m2);
+        let omega = (gm_total / separation.powi(3)).sqrt(); // 共回転角速度
+        let period = 2.0 * std::f64::consts::PI / omega;
+
+        // 重心を原点に置く(そうしないと系全体が並進してしまう)。
+        let r1 = -separation * m2 / (m1 + m2);
+        let r2 = separation * m1 / (m1 + m2);
+
+        // L4: 主星-伴星と正三角形をなす点(重心まわりに同じ角速度で回る)。
+        let build = |angle_offset_deg: f64| -> (NBodySystem, usize) {
+            let mut sys = NBodySystem::new(0.0);
+            sys.add_body(Vec3::new(r1, 0.0, 0.0), Vec3::new(0.0, omega * r1, 0.0), m1);
+            sys.add_body(Vec3::new(r2, 0.0, 0.0), Vec3::new(0.0, omega * r2, 0.0), m2);
+            // L4 は主星から見て伴星より60°先。重心からの位置で書く。
+            let theta = (60.0 + angle_offset_deg).to_radians();
+            // 正三角形の頂点(主星・伴星のどちらからも `separation` の距離)。
+            let x = r1 + separation * theta.cos();
+            let y = separation * theta.sin();
+            // 共回転: v = ω × r(重心まわり)。
+            let trojan = sys.add_body(
+                Vec3::new(x, y, 0.0),
+                Vec3::new(-omega * y, omega * x, 0.0),
+                0.0, // 試験粒子(制限3体問題)
+            );
+            (sys, trojan)
+        };
+
+        // 伴星から見たトロヤ群の角度差(重心を頂点とする角)の振れ幅を測る。
+        let angular_spread = |offset_deg: f64| -> f64 {
+            let (mut sys, trojan) = build(offset_deg);
+            let materials = MaterialDb::standard();
+            let mut rng = SimRng::new(3, 1);
+            let mut events = EventQueue::new();
+            let steps = 20_000;
+            let dt = 5.0 * period / steps as f64; // 5周期ぶん
+            let angle_of = |sys: &NBodySystem| -> f64 {
+                let secondary = sys.position[1];
+                let t = sys.position[trojan];
+                let a = secondary.y.atan2(secondary.x);
+                let b = t.y.atan2(t.x);
+                let mut d = (b - a).to_degrees();
+                while d > 180.0 {
+                    d -= 360.0;
+                }
+                while d < -180.0 {
+                    d += 360.0;
+                }
+                d
+            };
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for _ in 0..steps {
+                let mut ctx = SolverContext {
+                    materials: &materials,
+                    rng: &mut rng,
+                    events: &mut events,
+                };
+                sys.step(dt, &mut ctx);
+                let d = angle_of(&sys);
+                lo = lo.min(d);
+                hi = hi.max(d);
+            }
+            hi - lo
+        };
+
+        let at_l4 = angular_spread(0.0);
+        assert!(
+            at_l4 < 1.0,
+            "L4に置いたトロヤ群は5周期にわたり正三角形配置を保つべき: 角度振れ幅={at_l4}°"
+        );
+
+        // 対照: L4から10°外すと振れ幅が桁違いに大きくなる(秤動が始まる)。
+        let displaced = angular_spread(10.0);
+        assert!(
+            displaced > 5.0 * at_l4.max(1e-6),
+            "L4から外すと秤動して振れ幅が大きくなるはず(L4が特別な点である証拠): \
+             at_l4={at_l4}° displaced={displaced}°"
+        );
+    }
+}

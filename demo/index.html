@@ -40,6 +40,8 @@
           <select id="select-spawn-material" title="スポーンする材質"></select>
           <button id="btn-spawn-sphere" title="球を配置(Command経由ではなくcreate_body)">+ 球</button>
           <button id="btn-spawn-box" title="箱を配置(Command経由ではなくcreate_body)">+ 箱</button>
+          <button id="btn-spawn-capsule" title="カプセルを配置(増分L。カプセル×箱の接触は未実装)">+ カプセル</button>
+          <button id="btn-derive-material" title="選択中の材質から密度違いの派生材料を作る">材料派生</button>
           <button id="btn-spawn-pendulum" title="振り子を配置(DistanceJointでワールド固定点へ拘束)">+ 振り子</button>
           <button id="btn-spawn-motor" title="モーターアームを配置(BallJoint+HingeMotorPdでワールド固定点へピン留め)">+ モーター</button>
           <button id="btn-spawn-fluid" title="SPH流体塊を配置(水塊+床の境界粒子)">+ 流体</button>
@@ -60,6 +62,7 @@
           <label><input type="checkbox" id="toggle-force-overlay" checked /> 力オーバーレイ</label>
           <label><input type="checkbox" id="toggle-constraint-overlay" checked /> 拘束オーバーレイ</label>
           <label><input type="checkbox" id="toggle-frame-overlay" checked /> フレーム軸オーバーレイ</label>
+          <label><input type="checkbox" id="toggle-grid-fluid-overlay" checked /> 流体場オーバーレイ</label>
         </div>
         <div class="toolbar-group">
           <label for="select-timescale">時間倍率</label>

@@ -358,6 +358,49 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   expect(errors).toEqual([]);
 });
 
+test("増分L: 流体場オーバーレイ・カプセル・材料派生", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+  const hierarchy = page.locator("#hierarchy-tree");
+
+  // ① カプセルのスポーン(sim-mechanics 側で体積・慣性・接触を実装した)。
+  await page.click("#btn-spawn-capsule");
+  await expect(hierarchy.getByText("Capsule_", { exact: false }).first()).toBeVisible();
+  // 落として床に載る(接触が起きる = カプセル-平面の接触が働いている)。
+  await page.click("#btn-mode-play");
+  const contact = page.locator("#console-log li", { hasText: "bodies=" }).first();
+  await expect(contact).toBeVisible({ timeout: 30_000 });
+  await page.click("#btn-play");
+
+  // ② 材料派生: 新しい材料がセレクタへ増え、選択状態になる。
+  await page.reload();
+  await waitForWorld(page);
+  const before = await page.locator("#select-spawn-material option").count();
+  // prompt が2回連続で出る(材料名 → 密度)。`page.once` を2つ積むより、
+  // 順番にキューから answers を取り出すハンドラのほうが確実。
+  const answers = ["テスト軽量材", "321"];
+  page.on("dialog", (d) => d.accept(answers.shift() ?? ""));
+  await page.click("#btn-derive-material");
+  await expect(page.locator("#select-spawn-material option")).toHaveCount(before + 1);
+  await expect(page.locator("#select-spawn-material")).toHaveValue("テスト軽量材");
+
+  // ③ 格子流体の速度場オーバーレイ。D15(対流)は格子流体だけのシーンで、
+  //    これまで Scene View に何も描かれなかった。
+  await page.selectOption("#select-scene", "d15-convection.json");
+  await page.click("#btn-mode-play");
+  await page.waitForTimeout(600);
+  await page.click("#btn-play");
+  // トグルが存在し、既定でONであること(描画自体はcanvas内なので直接は見えない)。
+  const toggle = page.locator("#toggle-grid-fluid-overlay");
+  await expect(toggle).toBeChecked();
+  await toggle.uncheck();
+  await page.waitForTimeout(200);
+  await toggle.check();
+
+  expect(errors).toEqual([]);
+});
+
 test("Project ドロワーがタブクリックで開き、中身が画面内に入る(増分E3)", async ({ page }) => {
   // **増分E3で修正した重大なUIバグの回帰テスト**: 既定のグリッド行はタブバーの
   // 高さしか無く、ドロワー本体(Scenes/Materials/... の中身)は画面外へ押し出されて
