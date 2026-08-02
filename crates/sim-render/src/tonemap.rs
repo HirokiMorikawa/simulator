@@ -112,3 +112,114 @@ mod tests {
         assert_eq!(tonemapped, Vec3::ZERO);
     }
 }
+
+/// ACESフィルミックトーンマップ(Narkowicz 2015の有理関数近似、設計§4.2)。
+///
+/// **Reinhardとの違い**: Reinhard $L/(1+L)$ は単調で扱いやすいが、
+/// 中間調が眠く(コントラストが低く)なりハイライトの立ち上がりが緩い。
+/// ACESのフィルミックカーブは肩(shoulder)と足(toe)を持ち、暗部を締め
+/// ハイライトを滑らかに丸める——設計§4.2が「フィルミック(ACES等)」を
+/// 要求しているのはこの見えのため。
+///
+/// **縮約であることを明記する**: 本物のACESは入力をAP1色空間へ変換し、
+/// RRT(Reference Rendering Transform)+ODT(Output Device Transform)を
+/// 通す。ここで使うのはそのカーブだけを1本の有理関数で近似した
+/// $f(x)=\frac{x(2.51x+0.03)}{x(2.43x+0.59)+0.14}$ であり、色空間変換は行わない。
+/// 各チャンネルへ独立に適用するため**厳密には色相が保たれない**
+/// (`reinhard_tonemap_color`が色相を保つのとは対照的)——これはフィルミック
+/// カーブの意図された挙動(高輝度で白へ寄る desaturation)でもある。
+pub fn aces_filmic_tonemap(x: f64) -> f64 {
+    let v = x.max(0.0);
+    let numerator = v * (2.51 * v + 0.03);
+    let denominator = v * (2.43 * v + 0.59) + 0.14;
+    (numerator / denominator).clamp(0.0, 1.0)
+}
+
+/// `aces_filmic_tonemap`をRGB各チャンネルへ独立に適用する。
+pub fn aces_filmic_tonemap_color(color: sim_math::Vec3) -> sim_math::Vec3 {
+    sim_math::Vec3::new(
+        aces_filmic_tonemap(color.x),
+        aces_filmic_tonemap(color.y),
+        aces_filmic_tonemap(color.z),
+    )
+}
+
+#[cfg(test)]
+mod aces_tests {
+    use super::*;
+
+    /// 黒は黒のまま、輝度を上げると単調に増加し、高輝度で1へ漸近する
+    /// (トーンマップ演算子として満たすべき最低限の性質)。
+    #[test]
+    fn aces_is_monotonic_maps_zero_to_zero_and_saturates_at_one() {
+        assert_eq!(aces_filmic_tonemap(0.0), 0.0);
+        let mut previous = 0.0;
+        let mut x = 0.0;
+        while x < 50.0 {
+            let v = aces_filmic_tonemap(x);
+            assert!(v >= previous - 1e-12, "単調増加であるべき: x={x}");
+            assert!((0.0..=1.0).contains(&v), "[0,1]に収まるべき: x={x} v={v}");
+            previous = v;
+            x += 0.01;
+        }
+        assert!(
+            aces_filmic_tonemap(1.0e6) > 0.99,
+            "高輝度では1へ漸近すべき: {}",
+            aces_filmic_tonemap(1.0e6)
+        );
+    }
+
+    /// **ACESとReinhardの形の違いをS字カーブとして固定する**。
+    ///
+    /// 実装時に「ACESは全域でReinhardより暗い」と思い込んで書いたテストが落ち、
+    /// 実測して分かった正しい姿を記録する——**ACESが暗いのは深い暗部だけ**で、
+    /// 中間調以上ではむしろ明るい。交差点は x≈0.0565(実測)。
+    ///
+    /// | x | ACES | Reinhard |
+    /// |---|---|---|
+    /// | 0.01 | 0.00377 | 0.00990 |
+    /// | 0.05 | 0.04428 | 0.04762 |
+    /// | 0.10 | 0.12584 | 0.09091 |
+    /// | 1.00 | 0.80380 | 0.50000 |
+    ///
+    /// これがフィルミックカーブの意図する見え(足で暗部を締め、肩で中間調を
+    /// 持ち上げてからハイライトを丸める)そのものである。
+    #[test]
+    fn aces_has_a_darker_toe_but_lifts_the_midtones_compared_to_reinhard() {
+        // 足(toe): 深い暗部ではACESの方が暗い。
+        for &x in &[0.005, 0.01, 0.02, 0.05] {
+            assert!(
+                aces_filmic_tonemap(x) < reinhard_tonemap(x),
+                "深い暗部ではACESの方が暗いはず: x={x} aces={} reinhard={}",
+                aces_filmic_tonemap(x),
+                reinhard_tonemap(x)
+            );
+        }
+        // 肩(shoulder): 中間調以上ではACESの方が明るい。
+        for &x in &[0.1, 0.5, 1.0, 2.0] {
+            assert!(
+                aces_filmic_tonemap(x) > reinhard_tonemap(x),
+                "中間調以上ではACESの方が明るいはず: x={x} aces={} reinhard={}",
+                aces_filmic_tonemap(x),
+                reinhard_tonemap(x)
+            );
+        }
+        // 交差点は 0.05〜0.06 の間に1つだけ存在する。
+        let crossings = (1..3000)
+            .filter(|i| {
+                let (a, b) = (*i as f64 * 0.001, (*i + 1) as f64 * 0.001);
+                let da = aces_filmic_tonemap(a) - reinhard_tonemap(a);
+                let db = aces_filmic_tonemap(b) - reinhard_tonemap(b);
+                (da < 0.0) != (db < 0.0)
+            })
+            .count();
+        assert_eq!(crossings, 1, "交差は1点だけのはず(単純なS字)");
+    }
+
+    /// 負の入力(サンプリングノイズやsRGB色域外の値)を0へ落とし、NaNを出さない。
+    #[test]
+    fn aces_clamps_negative_input_to_zero() {
+        assert_eq!(aces_filmic_tonemap(-1.0), 0.0);
+        assert!(aces_filmic_tonemap(-1e-9).is_finite());
+    }
+}

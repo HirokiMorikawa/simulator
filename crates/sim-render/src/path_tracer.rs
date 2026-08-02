@@ -28,7 +28,7 @@
 //! 加法的な光学的厚みに対応)として合成される。マルチスキャッタリング・レイ
 //! マーチングによる不均質媒質は対象外(`medium`モジュールdoc参照、変わらず)。
 
-use crate::bsdf::{Dielectric, Lambertian, Metal, RoughConductor};
+use crate::bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal, RoughConductor};
 use crate::bvh::Bvh;
 use crate::primitive::Primitive;
 use crate::quad::Quad;
@@ -44,9 +44,20 @@ pub enum Material {
     Dielectric(Dielectric),
     Metal(Metal),
     RoughConductor(RoughConductor),
+    /// 分散を持つ誘電体(**分光レンダリング増分で追加**)。Cauchy式で波長ごとに
+    /// 屈折率が変わるため、**`trace_spectral`で波長を指定したときだけ**その波長で
+    /// 具体化される。波長を指定しない従来の`trace`では`REFERENCE_WAVELENGTH_NM`
+    /// (視感度ピーク付近の緑)で具体化する——モノクロ経路の既存の挙動を壊さず、
+    /// かつ「代表波長で見た1枚」として妥当な既定にするため。
+    CauchyDielectric(CauchyDielectric),
     /// 面光源(自ら放射輝度を放つ拡散面、`Emissive`のdoc参照)。
     Emissive(Emissive),
 }
+
+/// 波長を指定しないモノクロ経路で`CauchyDielectric`を具体化するときの代表波長[nm]。
+/// 明所視の視感度ピーク(555nm)付近の緑を採る——「代表波長で見た1枚」として
+/// もっとも妥当で、既存のモノクロ`trace`の意味を変えないため。
+pub const REFERENCE_WAVELENGTH_NM: f64 = 550.0;
 
 /// 発光する拡散面(面光源)。R4(コーネルボックス)の天井パネルのように、
 /// 幾何を持つ可視の光源を表す。
@@ -239,7 +250,35 @@ impl Scene {
     /// 単純打切り(設計§9の値より小さくてよい——白色炉テストは1回の追加バウンスで
     /// 解析値に一致するため、`max_depth`を大きくしても結果は変わらない、モジュール
     /// doc参照)。
+    /// モノクロ経路(既存)。`CauchyDielectric`は代表波長で具体化される。
     pub fn trace(&self, ray: &Ray, rng: &mut SimRng, max_depth: u32) -> f64 {
+        self.trace_at_wavelength(ray, rng, max_depth, None)
+    }
+
+    /// **分光経路(分光レンダリング増分で追加)**。`wavelength_nm`をシーン中の
+    /// 分散を持つ材質(`Material::CauchyDielectric`)へ伝え、その波長での屈折率で
+    /// 経路を追う。返すのはその波長における分光放射輝度。
+    ///
+    /// これが無かったあいだ、分散は`prism.rs`が波長ごとに`Dielectric`を手で
+    /// 具体化して個別に呼ぶ形でしか検証できず、**パストレの経路には一度も
+    /// 波長が入っていなかった**。
+    pub fn trace_spectral(
+        &self,
+        ray: &Ray,
+        rng: &mut SimRng,
+        max_depth: u32,
+        wavelength_nm: f64,
+    ) -> f64 {
+        self.trace_at_wavelength(ray, rng, max_depth, Some(wavelength_nm))
+    }
+
+    fn trace_at_wavelength(
+        &self,
+        ray: &Ray,
+        rng: &mut SimRng,
+        max_depth: u32,
+        wavelength_nm: Option<f64>,
+    ) -> f64 {
         let Some((hit, material)) = self.closest_hit(ray, 1e-6) else {
             return match &self.medium {
                 None => self.environment_radiance,
@@ -256,7 +295,22 @@ impl Scene {
             return 0.0; // 打ち切り(エネルギーを捨てる、通常のロシアンルーレット無し打切りと同じ)。
         }
 
+        // **分散を持つ材質は、追跡中の波長で単色の誘電体へ具体化してから
+        // 通常の分岐に入る**(`Dielectric`のreflect/refract/reflectanceは屈折率
+        // だけに依存するので、これだけで既存の誘電体経路をそのまま再利用できる)。
+        let specialized;
+        let material = match material {
+            Material::CauchyDielectric(cauchy) => {
+                let lambda = wavelength_nm.unwrap_or(REFERENCE_WAVELENGTH_NM);
+                specialized = Material::Dielectric(cauchy.to_dielectric_at(lambda));
+                &specialized
+            }
+            other => other,
+        };
+
         let surface_radiance = match material {
+            // 直前で単色の`Dielectric`へ具体化済みなので、ここには到達しない。
+            Material::CauchyDielectric(_) => unreachable!("上で具体化済み"),
             Material::Lambertian(lambertian) => {
                 let direct = self.direct_lighting(hit.point, hit.normal, lambertian.eval());
 
@@ -264,7 +318,11 @@ impl Scene {
                 let cos_theta = direction.dot(hit.normal);
                 let bsdf = lambertian.eval();
                 let next_ray = Ray::new(hit.point, direction);
-                let indirect = self.trace(&next_ray, rng, max_depth - 1) * bsdf * cos_theta / pdf;
+                let indirect =
+                    self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm)
+                        * bsdf
+                        * cos_theta
+                        / pdf;
 
                 direct + indirect
             }
@@ -294,12 +352,14 @@ impl Scene {
                         // 1回貫通する経路では入射時のeta=1/iorと出射時のeta=iorの二乗が
                         // 厳密に相殺する(1/ior^2 * ior^2 = 1)ため、この因子を含めても
                         // 白色炉テストの厳密一致(誤差ゼロ)が保たれる。
-                        self.trace(&next_ray, rng, max_depth - 1) * eta * eta
+                        self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm)
+                            * eta
+                            * eta
                     }
                     _ => {
                         let direction = Dielectric::reflect(ray.direction, outward_normal);
                         let next_ray = Ray::new(hit.point, direction);
-                        self.trace(&next_ray, rng, max_depth - 1)
+                        self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm)
                     }
                 }
             }
@@ -312,7 +372,7 @@ impl Scene {
                 let r = metal.reflectance(cos_theta_i);
                 let direction = Dielectric::reflect(ray.direction, hit.normal);
                 let next_ray = Ray::new(hit.point, direction);
-                self.trace(&next_ray, rng, max_depth - 1) * r
+                self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm) * r
             }
             Material::Emissive(emissive) => {
                 // 自己発光分をそのまま加算する(NEEは行わない、`Emissive`のdoc参照)。
@@ -328,7 +388,11 @@ impl Scene {
                     let cos_theta = direction.dot(hit.normal);
                     let bsdf = lambertian.eval();
                     let next_ray = Ray::new(hit.point, direction);
-                    radiance += self.trace(&next_ray, rng, max_depth - 1) * bsdf * cos_theta / pdf;
+                    radiance +=
+                        self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm)
+                            * bsdf
+                            * cos_theta
+                            / pdf;
                 }
                 radiance
             }
@@ -342,7 +406,7 @@ impl Scene {
                     return 0.0;
                 }
                 let next_ray = Ray::new(hit.point, direction);
-                self.trace(&next_ray, rng, max_depth - 1) * weight
+                self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm) * weight
             }
         };
 

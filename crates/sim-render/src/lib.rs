@@ -86,6 +86,7 @@ mod prism;
 mod quad;
 mod ray;
 mod render;
+mod spectrum;
 mod sphere;
 mod tonemap;
 
@@ -108,6 +109,13 @@ pub use primitive::Primitive;
 pub use prism::{trace_prism_deviation, trace_raindrop_deviation};
 pub use quad::Quad;
 pub use ray::Ray;
-pub use render::{render_channel, render_rgb, RenderSettings};
+pub use render::{render_channel, render_rgb, render_spectral, RenderSettings};
+pub use spectrum::{
+    cie_xyz_at, hero_wavelengths, spectral_samples_to_linear_srgb, xyz_to_linear_srgb,
+    LAMBDA_MAX_NM, LAMBDA_MIN_NM, Y_INTEGRAL,
+};
 pub use sphere::{Hit, Sphere};
-pub use tonemap::{reinhard_tonemap, reinhard_tonemap_color, relative_luminance};
+pub use tonemap::{
+    aces_filmic_tonemap, aces_filmic_tonemap_color, reinhard_tonemap, reinhard_tonemap_color,
+    relative_luminance,
+};
