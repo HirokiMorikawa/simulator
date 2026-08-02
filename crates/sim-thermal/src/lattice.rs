@@ -5,6 +5,7 @@
 //! 線形系の未知数から除外する(内部点のみを解く、標準的な境界処理)。3D `Grid3<f64>`
 //! への一般化(7点ステンステンシル)はPhase 3の後続増分で拡張する。
 
+use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{pcg, Preconditioner};
 
 /// 1D棒の格子熱伝導ソルバ。両端(`temperature[0]`・`temperature[n-1]`)はDirichlet境界。
@@ -76,6 +77,44 @@ impl ConductionRod1D {
         );
 
         self.temperature[1..n - 1].copy_from_slice(&x);
+    }
+}
+
+/// **増分Hで追加**。これが無いあいだ`ConductionRod1D`は`World::step()`が回す
+/// ドメイン一覧から漏れており、`enable_conduction_rod`で載せても**再生しても
+/// 一切温度が動かなかった**(D16のテストが
+/// `world.conduction_rod_mut().unwrap().step(dt)`と手で回していたのはこのため)。
+/// シーンギャラリーへD16を出すには自動ステップが要る。
+///
+/// **縮約**: 両端のDirichlet境界温度は`set_boundary_temperatures`で設定した値が
+/// `temperature[0]`/`temperature[n-1]`にそのまま残り、`step`はそれを固定として
+/// 内部点だけを解く(既存の実装どおり)。したがって自動ステップでも境界は保たれる。
+impl Solver for ConductionRod1D {
+    /// 陰的Euler + PCGなので無条件安定(`ThermalSolver`と同じ理由)。
+    fn max_stable_dt(&self) -> f64 {
+        f64::INFINITY
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        ConductionRod1D::step(self, dt);
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.temperature.len() as u64);
+        for t in &self.temperature {
+            hasher.write_f64(*t);
+        }
+    }
+
+    /// **熱容量を持たないモデルなので絶対的なエネルギーは出せない**。
+    /// `ConductionRod1D`が持つのは温度場・格子間隔・熱拡散率
+    /// $\alpha=k/(\rho c_p)$だけで、$\rho c_p$ 自体は分離して保持していない
+    /// (T3のフーリエ級数解の検証には $\alpha$ しか要らなかったため)。
+    /// 台帳へ嘘の数字を入れないよう**ゼロを返す**——「このドメインはエネルギー
+    /// 台帳に参加しない」という明示であり、単位体積あたり熱容量1と暗に仮定した
+    /// 値を捏造するよりは正直である。
+    fn total_energy(&self) -> EnergyBreakdown {
+        EnergyBreakdown::default()
     }
 }
 

@@ -224,6 +224,27 @@ pub enum ProbeTarget {
     AstroVelY(usize),
     /// 回路の電圧源index(モジュールdoc「縮約実装の理由」参照)。
     CircuitCurrent(usize),
+    /// **増分Hで追加した4ドメインの観測量**。ここまで`ProbeTarget`は力学・熱ノード・
+    /// 天体・回路しか観測できず、`soft_body`/`grid_fluid`/`conduction_rod`/`sph`は
+    /// **シーンに載せても一切グラフに出せなかった**。Scene Viewに何も描かれない
+    /// ドメインではProbe Graphsが唯一の観測手段なので、これが無いとギャラリーに
+    /// 出す意味自体が無い。
+    ///
+    /// ソフトボディの粒子index。
+    SoftBodyPosX(usize),
+    SoftBodyPosY(usize),
+    /// 1D熱伝導棒の格子点index。
+    RodTemp(usize),
+    /// 格子流体の平均鉛直速度(D15対流の「上昇流が立つ」の観測量そのもの)。
+    GridFluidMeanV,
+    /// 格子流体の鉛直速度のRMS。**D14(渦)にはこちらが要る**——一様な水平流を
+    /// 障害物が乱すと上下対称に渦が立つため`GridFluidMeanV`は打ち消し合って0の
+    /// ままになる(実測で確認)。RMSなら符号が消えるので擾乱の大きさが見える。
+    GridFluidRmsV,
+    /// SPH粒子index。
+    SphParticlePosY(usize),
+    /// SPH粒子index の密度(F10ダム崩壊・D23注ぐ水の非圧縮性の目安)。
+    SphParticleDensity(usize),
     /// 回路のノードindex(`circuit_probe(node)`と同じ量をプローブ履歴に積む、
     /// **増分G2で追加**)。D19(電気工作台)は分圧比・RC放電の指数減衰・LED分岐の
     /// スイッチ開閉という**3つとも節点電圧で観測する現象**であり、電流だけを見る
@@ -569,6 +590,47 @@ impl World {
                 self.circuit.as_ref().map_or(0.0, |c| c.source_current(idx))
             }
             ProbeTarget::CircuitNodeVoltage(idx) => self.circuit_probe(idx).unwrap_or(0.0),
+            ProbeTarget::SoftBodyPosX(idx) => self
+                .soft_body
+                .as_ref()
+                .and_then(|b| b.position.get(idx))
+                .map_or(0.0, |p| p.x),
+            ProbeTarget::SoftBodyPosY(idx) => self
+                .soft_body
+                .as_ref()
+                .and_then(|b| b.position.get(idx))
+                .map_or(0.0, |p| p.y),
+            ProbeTarget::RodTemp(idx) => self
+                .conduction_rod
+                .as_ref()
+                .and_then(|r| r.temperature.get(idx))
+                .copied()
+                .unwrap_or(0.0),
+            ProbeTarget::GridFluidMeanV => self.grid_fluid.as_ref().map_or(0.0, |g| {
+                if g.v.is_empty() {
+                    0.0
+                } else {
+                    g.v.iter().sum::<f64>() / g.v.len() as f64
+                }
+            }),
+            ProbeTarget::GridFluidRmsV => self.grid_fluid.as_ref().map_or(0.0, |g| {
+                if g.v.is_empty() {
+                    0.0
+                } else {
+                    (g.v.iter().map(|x| x * x).sum::<f64>() / g.v.len() as f64).sqrt()
+                }
+            }),
+            ProbeTarget::SphParticlePosY(idx) => self
+                .sph
+                .as_ref()
+                .and_then(|s| s.position.get(idx))
+                .map_or(0.0, |p| p.y),
+            ProbeTarget::SphParticleDensity(idx) => self
+                .sph
+                .as_ref()
+                .and_then(|s| s.density.get(idx))
+                .copied()
+                .unwrap_or(0.0),
             ProbeTarget::LedgerKinetic => self.mechanics.total_energy().kinetic,
             ProbeTarget::StateHashDigest => self.state_hash() as f64,
         }
@@ -958,6 +1020,17 @@ impl World {
                 if let Some(g) = &mut self.grid_fluid {
                     run_domain_substeps(g, dt, &self.materials, &mut self.rng, &mut self.events);
                 }
+                // **増分Hで追加**。`soft_body`と`conduction_rod`はここに無かったため、
+                // `enable_soft_body`/`enable_conduction_rod`で載せても`World::step()`
+                // では一切動かなかった(D13/D16のテストがドメインを直接取り出して
+                // 手で`step`を呼んでいたのはこのため)。シーンギャラリーへ出すには
+                // 自動ステップが要るので、両者に`Solver`を実装した上でここへ繋ぐ。
+                if let Some(b) = &mut self.soft_body {
+                    run_domain_substeps(b, dt, &self.materials, &mut self.rng, &mut self.events);
+                }
+                if let Some(r) = &mut self.conduction_rod {
+                    run_domain_substeps(r, dt, &self.materials, &mut self.rng, &mut self.events);
+                }
             }
             // 天体レンジ(設計docs/20-integration/06-regime-switching.md §1「天体専用
             // レジームに切り替え、天体状態のみを独立時間軸で進める…ローカル物理ソルバは
@@ -1316,6 +1389,17 @@ impl World {
         hasher.write_u64(self.grid_fluid.is_some() as u64);
         if let Some(g) = &self.grid_fluid {
             g.state_hash(&mut hasher);
+        }
+        // **増分Hで追加**。`World::step()`が回すようになった以上、状態ハッシュにも
+        // 含めないと決定論の検証(D8のようなハッシュ一致)がこの2ドメインの
+        // 差分を見逃す。
+        hasher.write_u64(self.soft_body.is_some() as u64);
+        if let Some(b) = &self.soft_body {
+            b.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.conduction_rod.is_some() as u64);
+        if let Some(r) = &self.conduction_rod {
+            r.state_hash(&mut hasher);
         }
         match self.time_regime {
             sim_astro::TimeRegime::Local { steps_per_frame } => {

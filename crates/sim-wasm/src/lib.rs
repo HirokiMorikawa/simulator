@@ -773,6 +773,13 @@ impl WasmWorld {
             ProbeTarget::AstroVelY(idx) => format!("AstroVelY[{idx}]"),
             ProbeTarget::CircuitCurrent(idx) => format!("CircuitCurrent[{idx}]"),
             ProbeTarget::CircuitNodeVoltage(node) => format!("CircuitV[{node}]"),
+            ProbeTarget::SoftBodyPosX(idx) => format!("SoftBodyPosX[{idx}]"),
+            ProbeTarget::SoftBodyPosY(idx) => format!("SoftBodyPosY[{idx}]"),
+            ProbeTarget::RodTemp(idx) => format!("RodTemp[{idx}]"),
+            ProbeTarget::GridFluidMeanV => "GridFluidMeanV".to_string(),
+            ProbeTarget::GridFluidRmsV => "GridFluidRmsV".to_string(),
+            ProbeTarget::SphParticlePosY(idx) => format!("SphPosY[{idx}]"),
+            ProbeTarget::SphParticleDensity(idx) => format!("SphDensity[{idx}]"),
             ProbeTarget::LedgerKinetic => "LedgerKinetic".to_string(),
             ProbeTarget::StateHashDigest => "StateHashDigest".to_string(),
         }

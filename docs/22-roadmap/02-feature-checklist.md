@@ -35,7 +35,7 @@
 - フロントエンドは6パネルドッキングレイアウト(Scene View/Hierarchy/Inspector/
   Probe Graphs/Timeline/Console)+ Project ドロワー各タブ + シーンギャラリー
   (D1/D2/D3/D4/D5(静止+滑走)/D6(静止+振動)/D7(高Re+低Re)/D8/D9/D11/D12/
-  D19/D21/D26/D34/D35/D36の20シーンをJSONアセット化、`loadScene`で切替可能)まで
+  D13/D14/D15/D16/D19/D21/D23/D26/D34/D35/D36の25シーンをJSONアセット化、`loadScene`で切替可能)まで
   実装済み。D9/D34/D35/D36は力学剛体を1つも持たないギャラリーシーン(熱/天体
   ドメインのみ)であり、これに伴い`sim-wasm`/`main.ts`双方の「ボディ0個」対応
   (増分B3、詳細は§7 D9の行)を実装済み。**増分G1**でD8(球50個の散乱)・
@@ -43,8 +43,8 @@
   新設した(それまで`Scenario`にはボールジョイントを張る手段が無く、ラグドールを
   静的シーンとして表現できなかった)。
 
-**カウント(本増分後の実測値)**: チェックボックス総数 **262** / 済 **226** / 未 **36**
-(完了率 86.3%)。節別内訳:
+**カウント(本増分後の実測値)**: チェックボックス総数 **262** / 済 **231** / 未 **31**
+(完了率 88.2%)。節別内訳:
 
 | 節 | 総数 | 済 | 未 | 未チェック項目の性質 |
 |---|---:|---:|---:|---|
@@ -53,9 +53,9 @@
 | §4 Phase C | — | — | 3 | 結合行列(pre/post 2相分離が残る)・World API(§2の他項目が残る)・全デモD1–D39合格(§7参照の重複行)。**性能ベンチ回帰ゲート(D1)・couplings排他検査/filter引数(F1)は完了** |
 | §5 Phase D | — | — | 2 | 分光レンダリング本体(hero wavelength法)・物理カメラ/トーンマッピング残部(分光→CIE→sRGB、ACES filmic)。**デモD40–D43合格は増分C6で完了** |
 | §6 フロントエンド | — | — | 7 | Console連動、Inspector Component、Toolbarシーン選択等。**Probe対数軸/CSV(E1)・HierarchyのProbes(E2)・レイアウト4種+ドロワー開閉(E3)・Hierarchyの Circuits(G2、回路素子の列挙APIを新設)は完了** |
-| §7 デモ合格管理表 | — | — | 22 | うち18件が「ヘッドレスGreen、目視チェック保留」で同一理由滞留(増分B2でD1/D2/D3/D7/D21/D26、増分B3でD9/D34/D35、増分C6でD40/D41/D42/D43、増分G1でD8/D12/D36、**増分G2でD19**を目視チェック完了)。D24は新規物理待ちでスコープ外明記 |
+| §7 デモ合格管理表 | — | — | 17 | うち13件が「ヘッドレスGreen、目視チェック保留」で同一理由滞留(増分B2でD1/D2/D3/D7/D21/D26、増分B3でD9/D34/D35、増分C6でD40/D41/D42/D43、増分G1でD8/D12/D36、増分G2でD19、**増分HでD13/D14/D15/D16/D23**を目視チェック完了)。D24は新規物理待ちでスコープ外明記。**残る13件のうちD27–D33の7件は`World`にドメイン自体が存在しない**(量子・統計・FDTDは独立クレートで、`enable_*`が無いためギャラリーに載せる経路が原理的に無い) |
 | §8 解析解テストGreen管理表 | — | — | 1 | R3(分光レンダリング本体・コースティクス未接続) |
-| 合計 | 262 | 226 | 36 | |
+| 合計 | 262 | 231 | 31 | |
 
 (§2の「8」は本表内の主要チェック項目の概数——型スケルトン7行+テスト記述群の代表値であり、
 厳密な小計はセクション本文参照。§3–§8列の「総数」「済」はここでは示さず未チェック件数のみ
@@ -72,7 +72,14 @@
 | E | フロントエンド残り(Probe対数軸/CSV、Consoleオブジェクト連動、Inspector Component、Hierarchy未接続ドメイン等) | §6 |
 | F | 残りの設計項目(シーンJSON couplings自動解決+排他結合検査接続、World APIのfilter引数、並列リダクション決定性C-1) | §3・§4 |
 
-**次の一手**: **増分G2(D19 電気工作台 + 回路スキーマ拡張)完了** —— `capacitors`/
+**次の一手**: **増分H(スキーマ一括拡張)完了** —— `soft_body`/`grid_fluid`/
+`conduction_rod`/`sph`の4ドメイン、熱ドメインの`links`/`emissivity`、結合8種
+(`boussinesq_buoyancy`/`dissipation_to_heat`/`phase_change_morph`/`motor_coupling`/
+`sph_rigid`/`grid_fluid_rigid`/`lorentz_force`/`convection_link`)、プローブ7種を
+**一度にシーンJSONスキーマへ追加**し、D13/D14/D15/D16/D23の5シーンを出した。
+**あわせて`SoftBody`と`ConductionRod1D`に`Solver`を実装した**——この2ドメインは
+`World::step()`の対象外で、載せても再生しても一切動かなかった。
+以前の記録: **増分G2(D19 電気工作台 + 回路スキーマ拡張)完了** —— `capacitors`/
 `inductors`/`diodes`/`switches`/`couplings[].joule_heat`/
 `probes[].circuit_node_voltage` をシーンJSONへ追加し、D19をギャラリーへ出した。
 あわせて**Circuitタブが固定デモ回路の嘘の数字を表示し続けていた表示バグ**を
@@ -2867,29 +2874,78 @@ Phase 2〜3:
       エネルギーの約1.05%相当の単発的な増加を確認したため、閾値をその2倍のrel<2%に
       設定した。全体では初期力学的エネルギーの95%超が接触・関節の摩擦的散逸で
       失われほぼ静止すること、床への貫入が無いことも確認)
-- [ ] D13 ロープと旗(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
+- [x] D13 ロープと旗(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
       ワークストリームD未着手のため保留。「旗のはためき」は`SoftBody`(XPBDロープ)が
       距離拘束のみ(布・曲げ拘束は未実装)のため対象外。`World`に新設した`soft_body`
       ドメイン(`gas`・`conduction_rod`と同じ「呼び出し側が明示的に`step`する」縮約)
       経由でM13(カテナリー静止形状)を再現(`sim-mechanics`側のM13単体テストと同じ
       構成・許容誤差)。M14(ロープの伸び)は`sim-mechanics`側で既にGreenのため
       重複実装しない)
-- [ ] D14 煙と渦(合格基準は「F11(St数)、渦度強化OFFで検証モード」のみで、「煙」自体は
+      **目視チェック完了(増分H)**: `scenes/d13-rope.json`をギャラリーへ追加。
+      **これを出すのに増分Hの2つの変更が要った**——①`Scenario`に`soft_body`
+      セクションが無かった ②**`SoftBody`が`Solver`を実装しておらず
+      `World::step()`のドメイン一覧から漏れていた**(=載せても再生しても
+      一切動かなかった。D13のテストが`world.soft_body_mut().unwrap().step(...)`と
+      手回ししていたのはこれが理由)。`Solver`を実装して`World::step`・
+      `state_hash`へ繋いだ。積分設定(重力・サブステップ・反復・減衰)は
+      `SolverContext`が運べないため`SoftBody`のフィールドとして持たせている。
+      Rust側は`scenario.rs`の`run_headless_scenario_rope_settles_into_catenary_shape`
+      が、2400step後の静止形状が懸垂線$y=a\cosh(x/a)$とスパン正規化の最大偏差
+      1.7%(<2%)で一致し、端点のピン留めが保たれることを確認する。
+      ブラウザでは Probe Graphs に過渡振動が減衰して定常値へ落ち着く様子が出る。
+      **正直な限界**: Scene Viewにソフトボディの粒子は描かれない(剛体しか
+      描画対象になっていない)。力学ドメインでありながらD9/D34/D35/D36と同じく
+      Probe Graphsが唯一の観測手段になる。
+- [x] D14 煙と渦(合格基準は「F11(St数)、渦度強化OFFで検証モード」のみで、「煙」自体は
       可視化(ワークストリームD)の領域であり新規の物理・World状態を要しない。
       `crates/sim-fluid/src/karman.rs::tests::f11_karman_vortex_shedding_matches_analytic_strouhal_number`
       が既にカバー済みと見なす(設計§4.5が明記する代替経路(検証モードでも渦度強化を
       許容し強化係数を合格条件として記録する、ε=1.0)を採用した経緯は同テストのdoc
       参照)。目視チェック保留)
-- [ ] D15 対流(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
+      **目視チェック完了(増分H)**: `scenes/d14-vortex.json`をギャラリーへ追加。
+      **実装中に落とし穴を2つ踏んだので記録する**——①障害物を`"type": "static"`に
+      すると**エラーも警告も無いまま結合が一度も発火しない**
+      (`sim_coupling::GridFluidRigid::apply`は冒頭で`mass <= 0.0`の剛体を無言で
+      returnする)。動的剛体に変えて初めて`solid`マスクが書かれる。
+      ②観測量に平均鉛直速度を使うと**0のまま動かない**——後流は上下対称なので
+      格子全体の平均では打ち消し合う(実測 4.07e-16)。そこで
+      `ProbeTarget::GridFluidRmsV`を追加した(実測 0 → 0.0443)。
+      また`GridFluid2D`は周期境界で流入境界を持たないため、静止状態から始めると
+      何も起きない。`grid_fluid.initial_velocity`(一様流で満たす)を追加した。
+      **正直な限界**: 周期境界なので下流の後流が上流へ回り込む。このシーンが
+      示すのは「障害物が一様流を実際に乱すこと」までで、St数(F11)の定量検証は
+      `sim-fluid`側の専用テストが担う。
+- [x] D15 対流(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視チェックは
       ワークストリームD未着手のため保留。`grid_fluid`+`thermal`ドメインを
       `sim_coupling::BoussinesqBuoyancy`(Coupling registry経由)で結合し、熱源
       (ろうそく相当の`ThermalNode`)近傍で格子流体の平均鉛直速度が単調に上昇すること
       (合格基準「Boussinesqの定性」)+エネルギー台帳残差が有界であること(合格基準
       「台帳」)を確認)
-- [ ] D16 熱伝導レース(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
+      **目視チェック完了(増分H)**: `scenes/d15-convection.json`をギャラリーへ追加。
+      `grid_fluid`セクション・`couplings[].boussinesq_buoyancy`・
+      `ProbeTarget::GridFluidMeanV`の3つを増分Hで追加して初めて書けるようになった
+      ——とくに最後が無いと、剛体を1つも持たないこのシーンは**ギャラリーで観測する
+      手段が一切無い**(合格基準「Boussinesqの定性」は平均鉛直速度そのもの)。
+      Rust側は`run_headless_scenario_convection_raises_mean_vertical_velocity_monotonically`
+      が60stepにわたる単調増加・最終値0.1142・台帳残差の有界性を確認する。
+- [x] D16 熱伝導レース(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
       目視チェックはワークストリームD未着手のため保留。`World`に新設した
       `conduction_rod`ドメイン(`ConductionRod1D`、`gas`と同じ縮約)経由で銅・鋼・
       木材の3本の棒を構築し、熱拡散率どおりの立ち上がり順(銅>鋼>木材)を確認)
+      **目視チェック完了(増分H)**: `scenes/d16-conduction-race.json`をギャラリーへ追加。
+      **`ConductionRod1D`も`SoftBody`と同じく`Solver`未実装で`World::step()`の
+      対象外だった**(=載せても再生しても温度が動かなかった)。増分Hで実装した。
+      `conduction_rod.material`に材質名を書くと`MaterialDb`から
+      $\alpha=k/(\rho c_p)$ を引く経路を用意した——「材質のk比がそのまま
+      立ち上がり順を決める」というD16の主旨がスキーマに直接現れる。
+      ギャラリー本体は銅とし、テストは材質名だけ差し替えて3回読み込む
+      (D8の`seed`差し替えと同じ手口)。実測の中点温度(60秒後)は
+      銅 5.55e-3 / 鋼 8.2e-9 / 木材 ≈0 で、順序は熱拡散率どおり。
+      空間プロファイルの単調性(高温端寄り3.597 > 中点5.55e-3 > 低温端寄り1e-6)も
+      あわせて確認する——順序だけでは「全部ゼロに近い」場合に空虚になるため。
+      **`ConductionRod1D::total_energy`は0を返す縮約とした**: このモデルは
+      $\alpha$ しか持たず $\rho c_p$ を分離保持していないため絶対エネルギーを
+      出せない。台帳へ嘘の数字を入れるより「参加しない」と明示するほうが正直である。
 - [ ] D17 ピストン(ヘッドレス部分(T5、断熱圧縮)は`integration_scenarios.rs`の
       `adiabatic_compression_scenario_conserves_piston_kinetic_and_gas_internal_energy`
       が既にカバー済みと見なす。等温圧縮側は`PistonGas`結合が対応していないため
@@ -2997,7 +3053,7 @@ Phase 4:
       (`e11_thin_lens_focal_length_matches_paraxial_ray_trace`)・E12
       (`e12_prism_minimum_deviation_index_round_trip`)が既にカバー済みと見なす。
       目視チェック保留)
-- [ ] D23 注ぐ水(SPH、合格基準「F10、SPH浮力F4相互検証」——検証の結果、新規
+- [x] D23 注ぐ水(SPH、合格基準「F10、SPH浮力F4相互検証」——検証の結果、新規
       テストコードは追加しない判断とした。F10(ダム崩壊)は既存の代替検証
       (WCSPHの全運動量保存+静水圧平衡、上記F10注記参照)で既に完了済み。
       「SPH浮力F4相互検証」(密な剛体をSPH流体に浮かべ解析解の浮力深度と一致する
@@ -3012,6 +3068,17 @@ Phase 4:
       とした。「コップに注ぐ・ダム崩壊・王冠スプラッシュ」はいずれもビジュアル
       演出(自由表面の複雑な形状)であり、ヘッドレスで検証すべき本質は上記2点に
       尽きると判断した)
+      **目視チェック完了(増分H)**: `scenes/d23-pouring-water.json`をギャラリーへ追加
+      (`sph`セクション + `ProbeTarget::SphParticlePosY`/`SphParticleDensity`)。
+      **測って分かった、主張を弱めるべき点**: 密度を見る粒子の選び方で結論が
+      全く変わる。6×6×6ブロックの**角の粒子(index 0)は近傍が足りず密度が
+      606.6 → 318.3 と静止密度から大きく外れる**——SPHの自由表面欠損
+      (free-surface deficiency)として知られた正しい挙動でありバグではない。
+      一方**内部粒子(index 86)は初期 999.97**(静止密度1000に対し相対誤差
+      2.8e-5)、着水後も 966.2(3.4%以内)に留まる。したがって
+      「SPHが非圧縮である」ではなく**「内部粒子について弱圧縮性が保たれる」**
+      という弱いほうの主張だけをテストにし、角粒子の欠損は
+      「将来バグとして誤って直されない」よう既知の限界として固定した。
 - [ ] D24 車の実験場(**スコープ外**: 合格基準「エンティティ §7(制動距離 ±10%)」自体は
       `crates/sim-mechanics/src/vehicle.rs`の
       `braking_distance_matches_v_squared_over_two_mu_g`・

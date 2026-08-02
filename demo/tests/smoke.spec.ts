@@ -254,6 +254,53 @@ test("D19(電気工作台)を読み込むと Circuit タブと Hierarchy が実�
   expect(errors).toEqual([]);
 });
 
+test("増分Hで追加した5シーン(D13/D14/D15/D16/D23)がギャラリーから読み込める", async ({
+  page,
+}) => {
+  // 増分H で `Scenario` に soft_body / grid_fluid / conduction_rod / sph の
+  // 4ドメインを追加し、あわせて SoftBody と ConductionRod1D に `Solver` を
+  // 実装して `World::step()` の対象に入れた(それまでは載せても**再生しても
+  // 一切動かなかった**)。ここが守るのは同じ JSON がフロントエンドの経路でも
+  // 壊れずに載り、再生してクラッシュしないことだけ。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+  const hierarchy = page.locator("#hierarchy-tree");
+  await page.click('.project-tab[data-tab="scenes"]');
+
+  // D13 ロープ: 剛体0体・ソフトボディ21粒子。プローブで観測する。
+  await page.click('.scene-gallery-list button[data-scene-file="d13-rope.json"]');
+  await expect(hierarchy.getByText("SoftBodyPosY[10]", { exact: true })).toBeVisible();
+
+  // D16 熱伝導レース: 1D棒の格子点温度。
+  await page.click('.scene-gallery-list button[data-scene-file="d16-conduction-race.json"]');
+  await expect(hierarchy.getByText("RodTemp[20]", { exact: true })).toBeVisible();
+
+  // D15 対流: 格子流体の平均鉛直速度 + 熱ノード。
+  await page.click('.scene-gallery-list button[data-scene-file="d15-convection.json"]');
+  await expect(hierarchy.getByText("GridFluidMeanV", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("NodeTemp[0]", { exact: true })).toBeVisible();
+
+  // D14 渦: 鉛直速度のRMS(平均だと上下対称で打ち消し合って0のまま)。
+  await page.click('.scene-gallery-list button[data-scene-file="d14-vortex.json"]');
+  await expect(hierarchy.getByText("GridFluidRmsV", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("obstacle", { exact: true })).toBeVisible();
+
+  // D23 注ぐ水: SPH粒子。
+  await page.click('.scene-gallery-list button[data-scene-file="d23-pouring-water.json"]');
+  await expect(hierarchy.getByText("SphPosY[0]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("SphDensity[86]", { exact: true })).toBeVisible();
+
+  // 再生してもクラッシュしないこと。
+  await page.click('.project-tab[data-tab="scenes"]');
+  await page.click("#btn-mode-play");
+  await page.waitForTimeout(800);
+  await page.click("#btn-play");
+  await expect(page.locator("#probe-canvas")).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
 test("Project ドロワーがタブクリックで開き、中身が画面内に入る(増分E3)", async ({ page }) => {
   // **増分E3で修正した重大なUIバグの回帰テスト**: 既定のグリッド行はタブバーの
   // 高さしか無く、ドロワー本体(Scenes/Materials/... の中身)は画面外へ押し出されて

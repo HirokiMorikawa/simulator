@@ -31,6 +31,21 @@ pub struct SoftBody {
     pub velocity: Vec<Vec3>,
     pub inv_mass: Vec<f64>,
     pub constraints: Vec<DistanceConstraint>,
+    /// **増分Hで追加した自動ステップ用の積分設定**。
+    ///
+    /// **なぜフィールドとして持つのか**: `SoftBody`は長らく`Solver`を実装しておらず、
+    /// `World::step()`が回すドメイン一覧から漏れていた——つまり`enable_soft_body`で
+    /// 載せても**シーンを再生しても一切動かなかった**(D13のテストが
+    /// `world.soft_body_mut().unwrap().step(...)`と手で回していたのはこのため)。
+    /// シーンギャラリーへ出すには自動ステップが要るが、`Solver::step`の引数は
+    /// `(dt, &mut SolverContext)`で、`SolverContext`は`materials`/`rng`/`events`
+    /// しか持たず**重力もサブステップ数も渡す口が無い**。そこでソルバ自身の設定として
+    /// ここに置く。既存の`step(dt, gravity, n_sub, n_iter, damping)`は引数で
+    /// 上書きする形のまま残す(呼び出し側の回帰ゼロ)。
+    pub gravity: Vec3,
+    pub substeps: u32,
+    pub iterations: u32,
+    pub damping: f64,
 }
 
 impl Default for SoftBody {
@@ -47,6 +62,12 @@ impl SoftBody {
             velocity: Vec::new(),
             inv_mass: Vec::new(),
             constraints: Vec::new(),
+            // 既定はD13(ロープ)のテストが手回しで使っていた値をそのまま採る
+            // (damping=2.0 は`DEFAULT_DAMPING`ではない——D13/M13が実際に渡していた値)。
+            gravity: Vec3::new(0.0, -9.80665, 0.0),
+            substeps: DEFAULT_SUBSTEPS,
+            iterations: DEFAULT_ITERATIONS,
+            damping: 2.0,
         }
     }
 
@@ -148,6 +169,60 @@ pub fn rope(
         body.add_distance_constraint(k, k + 1, rest, compliance);
     }
     body
+}
+
+/// **増分Hで追加**。これが無いあいだ`SoftBody`は`World::step()`のドメイン一覧から
+/// 漏れており、`enable_soft_body`で載せても再生しても一切動かなかった
+/// (D13のテストが`world.soft_body_mut().unwrap().step(...)`と手で回していたのは
+/// このため)。シーンギャラリーへD13を出すには自動ステップが要る。
+///
+/// 積分パラメータ(重力・サブステップ数・反復数・減衰)は`SolverContext`が
+/// 運べないため`SoftBody`自身のフィールドから採る(フィールドのdoc参照)。
+impl sim_core::Solver for SoftBody {
+    /// XPBDは拘束を反復で解くため陽的な安定限界を持たない(サブステップ分割で
+    /// 剛性を稼ぐ設計)。`ThermalSolver`の陰的Eulerと同じく無制限を返す。
+    fn max_stable_dt(&self) -> f64 {
+        f64::INFINITY
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut sim_core::SolverContext) {
+        let (gravity, substeps, iterations, damping) =
+            (self.gravity, self.substeps, self.iterations, self.damping);
+        SoftBody::step(self, dt, gravity, substeps, iterations, damping);
+    }
+
+    fn state_hash(&self, hasher: &mut sim_core::StateHasher) {
+        hasher.write_u64(self.position.len() as u64);
+        for p in &self.position {
+            hasher.write_f64(p.x);
+            hasher.write_f64(p.y);
+            hasher.write_f64(p.z);
+        }
+    }
+
+    /// 運動エネルギー Σ½mv² と重力ポテンシャル Σ m·(−g)·r。**ピン留め粒子
+    /// (`inv_mass=0`)は無限質量なので両方から除く**——含めると発散する。
+    /// 距離拘束の弾性エネルギーは、XPBDのコンプライアンスが実質0(D13は1e-10)で
+    /// 拘束が剛体的に効く運用のため計上しない(縮約、`elastic`は0のまま)。
+    fn total_energy(&self) -> sim_core::EnergyBreakdown {
+        let mut kinetic = 0.0;
+        let mut potential = 0.0;
+        for i in 0..self.position.len() {
+            if self.inv_mass[i] <= 0.0 {
+                continue;
+            }
+            let m = 1.0 / self.inv_mass[i];
+            let v = self.velocity[i];
+            kinetic += 0.5 * m * (v.x * v.x + v.y * v.y + v.z * v.z);
+            let r = self.position[i];
+            potential -= m * (self.gravity.x * r.x + self.gravity.y * r.y + self.gravity.z * r.z);
+        }
+        sim_core::EnergyBreakdown {
+            kinetic,
+            potential,
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]

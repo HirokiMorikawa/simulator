@@ -54,6 +54,13 @@ pub enum SceneError {
     /// 検出したもの。**同じ物理量を二重計上するとエネルギー台帳が静かに壊れる**
     /// ため、シーン読み込みの時点で弾く。
     ExclusiveCouplingViolation(Vec<sim_coupling::ExclusiveCouplingViolation>),
+    /// スキーマとしては妥当だが値が構成不能(**増分Hで追加**)。増分Hで足した
+    /// 4ドメインは、既存の`UnknownMaterial`のような「名前が引けない」型の誤りでは
+    /// 表せない不正値を持つ——粒子数を超えるピン留めindex、2未満の格子点数、
+    /// 熱拡散率と材質名がどちらも無い棒、など。**構成できない値で`panic!`させない**
+    /// のがこのバリアントの役目(シーンJSONはユーザーが書くデータであり、
+    /// 不正入力でプロセスを落としてよい相手ではない)。
+    InvalidValue(String),
 }
 
 #[derive(Deserialize)]
@@ -104,6 +111,18 @@ pub struct Scenario {
     /// (大気抗力・相対論補正は後続増分)。
     #[serde(default)]
     pub astro: Option<AstroScenarioJson>,
+    /// ソフトボディ(`sim_mechanics::SoftBody`、**増分Hで追加**)。D13(ロープと旗)。
+    #[serde(default)]
+    pub soft_body: Option<SoftBodyScenarioJson>,
+    /// 2D格子流体(`sim_fluid::GridFluid2D`、**増分Hで追加**)。D14(煙と渦)・D15(対流)。
+    #[serde(default)]
+    pub grid_fluid: Option<GridFluidScenarioJson>,
+    /// 1D熱伝導棒(`sim_thermal::ConductionRod1D`、**増分Hで追加**)。D16(熱伝導レース)。
+    #[serde(default)]
+    pub conduction_rod: Option<ConductionRodScenarioJson>,
+    /// SPH流体(`sim_fluid::SphFluid`、**増分Hで追加**)。D23(注ぐ水)。
+    #[serde(default)]
+    pub sph: Option<SphScenarioJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
@@ -225,6 +244,25 @@ pub struct ThermalScenarioJson {
     pub ambient_temperature: f64,
     #[serde(default)]
     pub nodes: Vec<ThermalNodeJson>,
+    /// ノード間の伝導リンク(`ThermalSolver::add_link`、**増分Hで追加**)。
+    /// これが無いあいだ熱ドメインは「互いに繋がっていない単独ノードの集まり」
+    /// しか書けず、伝導ネットワークを持つシーン(D10の摩擦熱→周囲、D18の氷↔飲み物)
+    /// が表現できなかった。
+    #[serde(default)]
+    pub links: Vec<ThermalLinkJson>,
+    /// 放射の相手側温度(`ThermalSolver::environment_radiation_temperature`)。
+    /// 未指定なら`ThermalSolver::new`の既定のまま。
+    #[serde(default)]
+    pub environment_radiation_temperature: Option<f64>,
+}
+
+/// `ThermalScenarioJson::links`の1件(`sim_thermal::ThermalLink`、**増分Hで追加**)。
+/// `a`/`b`は`thermal.nodes`配列のインデックス。
+#[derive(Deserialize)]
+pub struct ThermalLinkJson {
+    pub a: usize,
+    pub b: usize,
+    pub conductance: f64,
 }
 
 /// `ThermalScenarioJson::nodes`の1件(`sim_thermal::ThermalNode`の縮約表現、
@@ -238,6 +276,10 @@ pub struct ThermalNodeJson {
     pub convection_coefficient: f64,
     #[serde(default)]
     pub area: f64,
+    /// 放射率(**増分Hで追加**)。`ThermalSolver`は`radiation_coefficient`で
+    /// 既に放射項を解いているのに、シーンJSON側から設定する手段が無かった。
+    #[serde(default)]
+    pub emissivity: f64,
 }
 
 /// モジュールdoc「縮約実装の理由」参照 — `body_pos_y`/`body_speed`は
@@ -261,6 +303,19 @@ pub enum ProbeJson {
     /// 判定に使う)。
     AstroVelX(usize),
     AstroVelY(usize),
+    /// **増分Hで追加**。`soft_body`(粒子index)・`conduction_rod`(格子点index)・
+    /// `grid_fluid`(平均鉛直速度)・`sph`(粒子index)の観測量。これらのドメインは
+    /// Scene Viewに何も描かれないため、Probe Graphsが唯一の観測手段になる。
+    SoftBodyPosX(usize),
+    SoftBodyPosY(usize),
+    RodTemp(usize),
+    /// 引数を取らない(格子全体の平均)。JSONでは `{"grid_fluid_mean_v": null}` ではなく
+    /// `"grid_fluid_mean_v"` という文字列で書く(serdeのunit variant表現)。
+    GridFluidMeanV,
+    /// 鉛直速度のRMS(D14の渦)。`grid_fluid_mean_v`同様 unit variant。
+    GridFluidRmsV,
+    SphParticlePosY(usize),
+    SphParticleDensity(usize),
     /// 回路の節点電圧(`circuit.num_nodes`の範囲のインデックス、0=接地。
     /// **増分G2で追加** — D19の合格基準 E5(分圧)・E3(RC放電)・スイッチによる
     /// LED分岐の開閉はいずれも節点電圧で観測する現象で、既存の`CircuitCurrent`
@@ -315,6 +370,64 @@ pub enum CouplingJson {
         charge: f64,
         plane_normal: [f64; 3],
         plane_d: f64,
+    },
+    /// **増分Hで追加した結合群**。ここまで`couplings`は14種の`Coupling`実装のうち
+    /// 4種(`ImageChargeForce`/`BrownianForce`/`InductionCoupling`/`BuoyancyDrag`)
+    /// + G2の`JouleHeat`しか書けなかった。残りをまとめて開通させる。
+    ///
+    /// D15(対流)向け(`sim_coupling::BoussinesqBuoyancy`)。
+    BoussinesqBuoyancy {
+        thermal_node: usize,
+        ambient_temperature: f64,
+        thermal_expansion_coefficient: f64,
+    },
+    /// D10(摩擦の熱)向け(`sim_coupling::DissipationToHeat`)。力学の散逸を熱ノードへ。
+    DissipationToHeat { thermal_node: usize },
+    /// D18(氷と飲み物)向け(`sim_coupling::PhaseChangeMorph`)。
+    /// `initial_enthalpy`が負なら融点未満の固相から始まる。
+    PhaseChangeMorph {
+        body: String,
+        thermal_node: usize,
+        melting_temperature: f64,
+        latent_heat_fusion: f64,
+        specific_heat_solid: f64,
+        specific_heat_liquid: f64,
+        initial_mass: f64,
+        conductance: f64,
+        #[serde(default)]
+        initial_enthalpy: f64,
+    },
+    /// D20(モーターと発電)向け(`sim_coupling::MotorCoupling`)。
+    MotorCoupling {
+        body: String,
+        axis: [f64; 3],
+        voltage_source_index: usize,
+        torque_constant: f64,
+    },
+    /// D23(注ぐ水)向け(`sim_coupling::SphRigid`)。SPH粒子と剛体の双方向。
+    SphRigid {
+        body: String,
+        radius: f64,
+        /// 剛体表面を表す境界粒子の個数(`SphRigid::new`が`SphFluid`側へ確保する)。
+        boundary_points: usize,
+    },
+    /// D14(煙と渦)向け(`sim_coupling::GridFluidRigid`)。格子流体と剛体の双方向。
+    GridFluidRigid {
+        body: String,
+        half_width: f64,
+        half_height: f64,
+    },
+    /// 静電場中の荷電粒子(`sim_coupling::LorentzForce`)。
+    LorentzForce { body: String, charge: f64 },
+    /// 対流の相関式による熱リンク(`sim_coupling::ConvectionLink`)。
+    ConvectionLink {
+        fluid_node: usize,
+        surface_node: usize,
+        area: f64,
+        characteristic_length: f64,
+        fluid_thermal_conductivity: f64,
+        kinematic_viscosity: f64,
+        prandtl_number: f64,
     },
     /// D19(電気工作台)向け(`sim_coupling::JouleHeat`、**増分G2で追加**)。
     /// 回路の抵抗損失を熱ノードへ注入する。`thermal_node`は`thermal.nodes`配列の
@@ -463,6 +576,145 @@ pub struct AstroBodyJson {
     pub position: [f64; 3],
     pub velocity: [f64; 3],
     pub mass: f64,
+}
+
+/// `Scenario::soft_body`(`sim_mechanics::SoftBody`、**増分Hで追加**)。
+///
+/// **縮約**: 粒子と距離拘束を直接並べるほか、D13(ロープ)向けに
+/// `rope`ヘルパ相当の生成を`rope`フィールドで書ける近道を用意する
+/// (20分割のロープを粒子21個+拘束20本として手で書くのは現実的でないため)。
+/// `rope`と`particles`は排他ではなく、`rope`を展開した後に`particles`を足す。
+#[derive(Deserialize)]
+pub struct SoftBodyScenarioJson {
+    /// 直線ロープの生成(`sim_mechanics::rope`と同じ引数)。
+    #[serde(default)]
+    pub rope: Option<RopeJson>,
+    #[serde(default)]
+    pub particles: Vec<SoftParticleJson>,
+    #[serde(default)]
+    pub constraints: Vec<SoftConstraintJson>,
+    /// 追加でピン留めする粒子のインデックス(`rope`の端点固定などに使う)。
+    #[serde(default)]
+    pub pinned: Vec<usize>,
+    /// 自動ステップ用の積分設定(`SoftBody`の同名フィールド、未指定なら既定値)。
+    #[serde(default)]
+    pub gravity: Option<[f64; 3]>,
+    #[serde(default)]
+    pub substeps: Option<u32>,
+    #[serde(default)]
+    pub iterations: Option<u32>,
+    #[serde(default)]
+    pub damping: Option<f64>,
+}
+
+/// `SoftBodyScenarioJson::rope`(`sim_mechanics::rope`ヘルパの引数)。
+#[derive(Deserialize)]
+pub struct RopeJson {
+    pub from: [f64; 3],
+    pub to: [f64; 3],
+    pub segments: usize,
+    pub mass_per_particle: f64,
+    pub total_rest_length: f64,
+    #[serde(default)]
+    pub compliance: f64,
+}
+
+/// `SoftBodyScenarioJson::particles`の1件。`mass`が0以下ならピン留め
+/// (`SoftBody::add_particle`の規約そのまま)。
+#[derive(Deserialize)]
+pub struct SoftParticleJson {
+    pub position: [f64; 3],
+    pub mass: f64,
+}
+
+/// `SoftBodyScenarioJson::constraints`の1件。
+#[derive(Deserialize)]
+pub struct SoftConstraintJson {
+    pub i: usize,
+    pub j: usize,
+    pub rest: f64,
+    #[serde(default)]
+    pub compliance: f64,
+}
+
+/// `Scenario::grid_fluid`(`sim_fluid::GridFluid2D`、**増分Hで追加**)。
+#[derive(Deserialize)]
+pub struct GridFluidScenarioJson {
+    pub nx: usize,
+    pub ny: usize,
+    pub h: f64,
+    /// `Solver::step`が使う既定密度。未指定なら`GridFluid2D::new`の既定。
+    #[serde(default)]
+    pub density: Option<f64>,
+    #[serde(default)]
+    pub kinematic_viscosity: Option<f64>,
+    /// 格子全体を一様な初期速度で満たす `[u, v]`(**増分Hで追加**)。
+    ///
+    /// **なぜ要ったか**: `GridFluid2D`は周期境界で、流入境界を設定する手段が無い。
+    /// 静止状態から始めると外力の無いD14(カルマン渦列)は**何も起きない**
+    /// (実測で平均鉛直速度が 0 のまま動かないことを確認した)。一様流で満たせば
+    /// 周期境界がそのまま流れを循環させ、障害物まわりの擾乱が観測できる。
+    /// **縮約**: 本物の流入・流出境界ではないので、下流の後流が上流へ回り込む。
+    /// レイノルズ数の定量的な検証(F11のSt数)は`sim-fluid`側の専用テストが担い、
+    /// このシーンが示すのは「障害物が一様流を実際に乱すこと」までである。
+    #[serde(default)]
+    pub initial_velocity: Option<[f64; 2]>,
+}
+
+/// `Scenario::conduction_rod`(`sim_thermal::ConductionRod1D`、**増分Hで追加**)。
+///
+/// **縮約**: `thermal_diffusivity`は直接指定するほか、`material`(材質名)を
+/// 書けば`MaterialDb`から $\alpha = k/(\rho c_p)$ を計算する。D16(熱伝導レース)は
+/// 「銅・鋼・木材の $\alpha$ の比が立ち上がり順を決める」デモなので、
+/// 材質名で書けることがそのままデモの主旨になる。
+#[derive(Deserialize)]
+pub struct ConductionRodScenarioJson {
+    pub node_count: usize,
+    pub length: f64,
+    pub initial_temperature: f64,
+    #[serde(default)]
+    pub thermal_diffusivity: Option<f64>,
+    #[serde(default)]
+    pub material: Option<String>,
+    /// 両端のDirichlet境界温度(`set_boundary_temperatures`)。
+    #[serde(default)]
+    pub boundary_left: Option<f64>,
+    #[serde(default)]
+    pub boundary_right: Option<f64>,
+}
+
+/// `Scenario::sph`(`sim_fluid::SphFluid`、**増分Hで追加**)。
+///
+/// **縮約**: 粒子を1つずつ並べるのは非現実的なので、直方体ブロックを格子状に
+/// 敷き詰める`blocks`と、境界粒子を敷く`boundary_blocks`で書く。
+#[derive(Deserialize)]
+pub struct SphScenarioJson {
+    /// 平滑化長。
+    pub h: f64,
+    /// 静止密度。
+    pub rest_density: f64,
+    /// 数値音速。
+    pub sound_speed: f64,
+    /// 1粒子の質量。**未指定だと`SphFluid`の既定のままになり密度が静止密度から
+    /// 大きく外れる**ので、通常は `rest_density * spacing^3` を明示する
+    /// (`sim-fluid`のテスト群がすべてそうしている)。
+    #[serde(default)]
+    pub particle_mass: Option<f64>,
+    #[serde(default)]
+    pub blocks: Vec<SphBlockJson>,
+    #[serde(default)]
+    pub boundary_blocks: Vec<SphBlockJson>,
+}
+
+/// `SphScenarioJson::blocks`の1件。`min`から`spacing`刻みで各軸`counts`個の
+/// 粒子を格子状に置く。
+#[derive(Deserialize)]
+pub struct SphBlockJson {
+    pub min: [f64; 3],
+    pub counts: [usize; 3],
+    pub spacing: f64,
+    #[serde(default)]
+    pub velocity: [f64; 3],
 }
 
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
@@ -635,7 +887,15 @@ impl World {
                 let mut node = sim_thermal::ThermalNode::new(n.temperature, n.heat_capacity);
                 node.convection_coefficient = n.convection_coefficient;
                 node.area = n.area;
+                node.emissivity = n.emissivity;
                 solver.add_node(node);
+            }
+            // **増分Hで追加**: ノード間の伝導リンク。
+            for link in &thermal_json.links {
+                solver.add_link(link.a, link.b, link.conductance);
+            }
+            if let Some(t) = thermal_json.environment_radiation_temperature {
+                solver.environment_radiation_temperature = t;
             }
             world.enable_thermal(solver);
         }
@@ -671,6 +931,144 @@ impl World {
                 sys.add_body(array_to_vec3(b.position), array_to_vec3(b.velocity), b.mass);
             }
             world.enable_astro(sys);
+        }
+
+        // **増分Hで追加した4ドメイン**。ここまで`World`は`enable_soft_body`/
+        // `enable_grid_fluid`/`enable_conduction_rod`/`enable_sph`を持ちながら、
+        // シーンJSONからは1つも構成できなかった(D13/D14/D15/D16/D23が
+        // 「ヘッドレスGreen・目視チェック保留」で滞留していた根本原因)。
+        if let Some(sb) = &scenario.soft_body {
+            let mut body = if let Some(r) = &sb.rope {
+                sim_mechanics::rope(
+                    array_to_vec3(r.from),
+                    array_to_vec3(r.to),
+                    r.segments,
+                    r.mass_per_particle,
+                    r.total_rest_length,
+                    r.compliance,
+                )
+            } else {
+                sim_mechanics::SoftBody::new()
+            };
+            for particle in &sb.particles {
+                body.add_particle(array_to_vec3(particle.position), particle.mass);
+            }
+            for c in &sb.constraints {
+                body.add_distance_constraint(c.i, c.j, c.rest, c.compliance);
+            }
+            for &index in &sb.pinned {
+                if index >= body.position.len() {
+                    return Err(SceneError::InvalidValue(format!(
+                        "soft_body.pinned references particle {index} but only {} exist",
+                        body.position.len()
+                    )));
+                }
+                body.pin(index);
+            }
+            if let Some(g) = sb.gravity {
+                body.gravity = array_to_vec3(g);
+            }
+            if let Some(n) = sb.substeps {
+                body.substeps = n;
+            }
+            if let Some(n) = sb.iterations {
+                body.iterations = n;
+            }
+            if let Some(d) = sb.damping {
+                body.damping = d;
+            }
+            world.enable_soft_body(body);
+        }
+
+        if let Some(gf) = &scenario.grid_fluid {
+            let mut fluid = sim_fluid::GridFluid2D::new(gf.nx, gf.ny, gf.h);
+            if let Some(d) = gf.density {
+                fluid.density = d;
+            }
+            if let Some(v) = gf.kinematic_viscosity {
+                fluid.kinematic_viscosity = v;
+            }
+            if let Some([u0, v0]) = gf.initial_velocity {
+                fluid.u.iter_mut().for_each(|x| *x = u0);
+                fluid.v.iter_mut().for_each(|x| *x = v0);
+            }
+            world.enable_grid_fluid(fluid);
+        }
+
+        if let Some(rod) = &scenario.conduction_rod {
+            // 熱拡散率は直接指定が最優先、無ければ材質名から α=k/(ρ·c_p) を計算する
+            // (D16「熱伝導レース」は材質ごとのαの比がそのままデモの主旨なので、
+            // 材質名で書けることに意味がある)。
+            let alpha = match (&rod.thermal_diffusivity, &rod.material) {
+                (Some(a), _) => *a,
+                (None, Some(name)) => {
+                    let id = world
+                        .materials()
+                        .find_by_name(name)
+                        .ok_or_else(|| SceneError::UnknownMaterial(name.clone()))?;
+                    let m = world.materials().get(id);
+                    m.conductivity / (m.density * m.specific_heat)
+                }
+                (None, None) => {
+                    return Err(SceneError::InvalidValue(
+                        "conduction_rod requires either `thermal_diffusivity` or `material`"
+                            .to_string(),
+                    ))
+                }
+            };
+            if rod.node_count < 2 {
+                return Err(SceneError::InvalidValue(format!(
+                    "conduction_rod.node_count must be at least 2 (got {})",
+                    rod.node_count
+                )));
+            }
+            let mut bar = sim_thermal::ConductionRod1D::new(
+                rod.node_count,
+                rod.length,
+                rod.initial_temperature,
+                alpha,
+            );
+            // 片側だけ書いた場合はもう片側を初期温度のままにする。
+            if rod.boundary_left.is_some() || rod.boundary_right.is_some() {
+                bar.set_boundary_temperatures(
+                    rod.boundary_left.unwrap_or(rod.initial_temperature),
+                    rod.boundary_right.unwrap_or(rod.initial_temperature),
+                );
+            }
+            world.enable_conduction_rod(bar);
+        }
+
+        if let Some(sph_json) = &scenario.sph {
+            let mut fluid =
+                sim_fluid::SphFluid::new(sph_json.h, sph_json.rest_density, sph_json.sound_speed);
+            if let Some(m) = sph_json.particle_mass {
+                fluid.mass = m;
+            }
+            let each = |block: &SphBlockJson, f: &mut dyn FnMut(Vec3)| {
+                for ix in 0..block.counts[0] {
+                    for iy in 0..block.counts[1] {
+                        for iz in 0..block.counts[2] {
+                            f(Vec3::new(
+                                block.min[0] + ix as f64 * block.spacing,
+                                block.min[1] + iy as f64 * block.spacing,
+                                block.min[2] + iz as f64 * block.spacing,
+                            ));
+                        }
+                    }
+                }
+            };
+            for block in &sph_json.blocks {
+                let velocity = array_to_vec3(block.velocity);
+                each(block, &mut |p| {
+                    fluid.add_particle(p, velocity);
+                });
+            }
+            for block in &sph_json.boundary_blocks {
+                each(block, &mut |p| {
+                    fluid.add_boundary_particle(p);
+                });
+            }
+            world.enable_sph(fluid);
         }
 
         for joint in &scenario.joints {
@@ -770,6 +1168,135 @@ impl World {
                         plane_d: *plane_d,
                     }));
                 }
+                CouplingJson::BoussinesqBuoyancy {
+                    thermal_node,
+                    ambient_temperature,
+                    thermal_expansion_coefficient,
+                } => {
+                    world.add_coupling(Box::new(sim_coupling::BoussinesqBuoyancy {
+                        thermal_node: *thermal_node,
+                        ambient_temperature: *ambient_temperature,
+                        thermal_expansion_coefficient: *thermal_expansion_coefficient,
+                    }));
+                }
+                CouplingJson::DissipationToHeat { thermal_node } => {
+                    world.add_coupling(Box::new(sim_coupling::DissipationToHeat {
+                        thermal_node: *thermal_node,
+                    }));
+                }
+                CouplingJson::PhaseChangeMorph {
+                    body,
+                    thermal_node,
+                    melting_temperature,
+                    latent_heat_fusion,
+                    specific_heat_solid,
+                    specific_heat_liquid,
+                    initial_mass,
+                    conductance,
+                    initial_enthalpy,
+                } => {
+                    let id = *body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    world.add_coupling(Box::new(sim_coupling::PhaseChangeMorph::new(
+                        id.index as usize,
+                        *thermal_node,
+                        sim_thermal::PhaseMaterial {
+                            melting_temperature: *melting_temperature,
+                            latent_heat_fusion: *latent_heat_fusion,
+                            specific_heat_solid: *specific_heat_solid,
+                            specific_heat_liquid: *specific_heat_liquid,
+                        },
+                        *initial_mass,
+                        *conductance,
+                        *initial_enthalpy,
+                    )));
+                }
+                CouplingJson::MotorCoupling {
+                    body,
+                    axis,
+                    voltage_source_index,
+                    torque_constant,
+                } => {
+                    let id = *body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    world.add_coupling(Box::new(sim_coupling::MotorCoupling {
+                        body_index: id.index as usize,
+                        axis: array_to_vec3(*axis),
+                        voltage_source_index: *voltage_source_index,
+                        torque_constant: *torque_constant,
+                    }));
+                }
+                CouplingJson::SphRigid {
+                    body,
+                    radius,
+                    boundary_points,
+                } => {
+                    let id = *body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    // `SphRigid::new`は剛体表面を表す境界粒子を`SphFluid`側へ
+                    // 実際に確保する(位置は最初の`apply`で埋まる)ため、
+                    // SPHドメインが先に有効化されている必要がある。
+                    let coupling = {
+                        let sph = world.sph_mut().ok_or_else(|| {
+                            SceneError::InvalidValue(
+                                "couplings[].sph_rigid requires the `sph` domain to be defined"
+                                    .to_string(),
+                            )
+                        })?;
+                        sim_coupling::SphRigid::new(
+                            sph,
+                            id.index as usize,
+                            *radius,
+                            *boundary_points,
+                        )
+                    };
+                    world.add_coupling(Box::new(coupling));
+                }
+                CouplingJson::GridFluidRigid {
+                    body,
+                    half_width,
+                    half_height,
+                } => {
+                    let id = *body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    world.add_coupling(Box::new(sim_coupling::GridFluidRigid {
+                        body_index: id.index as usize,
+                        half_width: *half_width,
+                        half_height: *half_height,
+                    }));
+                }
+                CouplingJson::LorentzForce { body, charge } => {
+                    let id = *body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    world.add_coupling(Box::new(sim_coupling::LorentzForce {
+                        body_index: id.index as usize,
+                        charge: *charge,
+                    }));
+                }
+                CouplingJson::ConvectionLink {
+                    fluid_node,
+                    surface_node,
+                    area,
+                    characteristic_length,
+                    fluid_thermal_conductivity,
+                    kinematic_viscosity,
+                    prandtl_number,
+                } => {
+                    world.add_coupling(Box::new(sim_coupling::ConvectionLink {
+                        fluid_node: *fluid_node,
+                        surface_node: *surface_node,
+                        area: *area,
+                        characteristic_length: *characteristic_length,
+                        fluid_thermal_conductivity: *fluid_thermal_conductivity,
+                        kinematic_viscosity: *kinematic_viscosity,
+                        prandtl_number: *prandtl_number,
+                    }));
+                }
                 CouplingJson::JouleHeat { thermal_node } => {
                     world.add_coupling(Box::new(sim_coupling::JouleHeat {
                         thermal_node: *thermal_node,
@@ -856,6 +1383,13 @@ impl World {
                 ProbeJson::AstroVelX(index) => ProbeTarget::AstroVelX(*index),
                 ProbeJson::AstroVelY(index) => ProbeTarget::AstroVelY(*index),
                 ProbeJson::CircuitNodeVoltage(node) => ProbeTarget::CircuitNodeVoltage(*node),
+                ProbeJson::SoftBodyPosX(index) => ProbeTarget::SoftBodyPosX(*index),
+                ProbeJson::SoftBodyPosY(index) => ProbeTarget::SoftBodyPosY(*index),
+                ProbeJson::RodTemp(index) => ProbeTarget::RodTemp(*index),
+                ProbeJson::GridFluidMeanV => ProbeTarget::GridFluidMeanV,
+                ProbeJson::GridFluidRmsV => ProbeTarget::GridFluidRmsV,
+                ProbeJson::SphParticlePosY(index) => ProbeTarget::SphParticlePosY(*index),
+                ProbeJson::SphParticleDensity(index) => ProbeTarget::SphParticleDensity(*index),
                 ProbeJson::CircuitCurrent(index) => ProbeTarget::CircuitCurrent(*index),
             };
             handles.push(self.add_probe(target, DEFAULT_PROBE_CAPACITY));
@@ -1961,6 +2495,260 @@ mod tests {
             vel_err < 0.01,
             "A3 + Kepler's third law: velocity should also return to its initial value: \
              vel_err={vel_err:.4} final_vx={final_vx} final_vy={final_vy}"
+        );
+    }
+
+    /// **増分H** D13(ロープと旗): 吊るしたロープの静止形状が懸垂線(カテナリー)
+    /// $y=a\cosh(x/a)$ と一致することを`scenes/d13-rope.json`経由で確認する。
+    ///
+    /// **このシーンが成立するのに増分Hの2つの変更が要った**: ①`Scenario`に
+    /// `soft_body`セクションが無かった ②`SoftBody`が`Solver`を実装しておらず
+    /// `World::step()`の対象外だった(=シーンに載せても再生しても動かなかった)。
+    /// D13のテストが`world.soft_body_mut().unwrap().step(...)`と手回ししていたのは
+    /// 後者が理由である。
+    ///
+    /// 判定は`demos.rs`のD13・`sim-mechanics`のM13と同じく**スパンで正規化した
+    /// 偏差**を使う(y自体の相対誤差ではない——端点付近ではyがほぼ0になり
+    /// 相対誤差が発散するため)。実測の最大偏差は約1.7%。
+    #[test]
+    fn run_headless_scenario_rope_settles_into_catenary_shape() {
+        let (span, total_length, segments) = (1.0_f64, 1.2_f64, 20usize);
+        let json = include_str!("../../../scenes/d13-rope.json");
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let mut world = World::from_scenario(&scenario).expect("valid world");
+        // 2400step(dt=1/120相当を8.33msで20秒ぶん)。減衰2.0で静止形状へ収束する。
+        for _ in 0..2400 {
+            world.step();
+        }
+
+        // M13と同じ二分法で懸垂線パラメータaを全長・スパンから逆算する。
+        let solve_catenary_a = |length: f64, span: f64| -> f64 {
+            let f = |a: f64| 2.0 * a * (span / (2.0 * a)).sinh() - length;
+            let (mut lo, mut hi) = (span * 1e-3, span * 1000.0);
+            for _ in 0..200 {
+                let mid = 0.5 * (lo + hi);
+                if f(mid) > 0.0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            0.5 * (lo + hi)
+        };
+        let a = solve_catenary_a(total_length, span);
+        let y_at = |x: f64| a * (x / a).cosh();
+        let y_endpoint = y_at(span / 2.0);
+
+        let body = world.soft_body().expect("ソフトボディドメインが有効");
+        assert_eq!(body.position.len(), segments + 1);
+        let mut max_deviation: f64 = 0.0;
+        for k in 0..=segments {
+            let p = body.position[k];
+            let deviation = (p.y - (y_at(p.x) - y_endpoint)).abs() / span;
+            max_deviation = max_deviation.max(deviation);
+        }
+        assert!(
+            max_deviation < 0.02,
+            "静止形状が懸垂線と一致すべき(スパン正規化の最大偏差): {max_deviation}"
+        );
+
+        // 端点はピン留めされたまま動かないこと(`pinned`が効いている直接の証拠)。
+        assert!(body.position[0].y.abs() < 1e-12 && body.position[segments].y.abs() < 1e-12);
+    }
+
+    /// **増分H** D16(熱伝導レース): 銅・鋼・木材の棒で中点の立ち上がりが
+    /// 熱拡散率 $\alpha=k/(\rho c_p)$ の順(銅>鋼>木材)になることを
+    /// `scenes/d16-conduction-race.json`経由で確認する。
+    ///
+    /// **1つのシーンファイルで3材質を走らせる**ため、ギャラリーへ出す本体は銅とし、
+    /// テスト側は材質名だけを差し替えて3回読み込む(D8の`seed`差し替えと同じ手口)。
+    /// `conduction_rod.material`から $\alpha$ を引く経路自体が本増分の追加であり、
+    /// 「材質のk比がそのまま順序を決める」というD16の主旨がスキーマに直接現れる。
+    ///
+    /// `ConductionRod1D`も`SoftBody`と同様に`Solver`未実装で`World::step()`の
+    /// 対象外だった(増分Hで実装)。実測の中点温度は 60秒後に
+    /// 銅 0.005553 / 鋼 8.2e-9 / 木材 0(下位桁までアンダーフロー)。
+    #[test]
+    fn run_headless_scenario_conduction_race_orders_materials_by_thermal_diffusivity() {
+        let json = include_str!("../../../scenes/d16-conduction-race.json");
+        let midpoint_after_60s = |material: &str| -> f64 {
+            let swapped = json.replace(
+                "\"material\": \"銅\"",
+                &format!("\"material\": \"{material}\""),
+            );
+            let result = run_headless_scenario(&swapped, 60).expect("valid scenario JSON");
+            *result.probe_histories[0].last().expect("履歴が空でない")
+        };
+        let (copper, steel, wood) = (
+            midpoint_after_60s("銅"),
+            midpoint_after_60s("鋼(炭素鋼)"),
+            midpoint_after_60s("木材(松)"),
+        );
+        assert!(
+            copper > steel && steel > wood,
+            "熱拡散率の高い材質ほど中点が早く温まるべき: 銅={copper:e} 鋼={steel:e} 木={wood:e}"
+        );
+
+        // 空間プロファイルが単調(高温端に近いほど熱い)であること——順序だけでは
+        // 「全部ゼロに近い」場合に空虚な主張になるので、実際に熱が伝わっている
+        // ことを別途見る。プローブは順に 中点(20)・高温側(10)・低温側(30)。
+        let result = run_headless_scenario(json, 60).expect("valid scenario JSON");
+        let last = |i: usize| *result.probe_histories[i].last().expect("履歴が空でない");
+        let (mid, near_hot, near_cold) = (last(0), last(1), last(2));
+        assert!(
+            near_hot > mid && mid > near_cold,
+            "高温端に近いほど温度が高いべき: near_hot={near_hot} mid={mid} near_cold={near_cold}"
+        );
+        assert!(
+            near_hot > 1.0,
+            "60秒で高温端寄りの格子点は実際に温まっているべき(実測3.597): {near_hot}"
+        );
+    }
+
+    /// **増分H** D15(対流): 熱源(ろうそく相当のノード)による Boussinesq 浮力で
+    /// 格子流体の平均鉛直速度が単調に上昇することを`scenes/d15-convection.json`
+    /// 経由で確認する。
+    ///
+    /// **これが書けるのに増分Hの3つの追加が要った**: `grid_fluid`セクション・
+    /// `couplings[].boussinesq_buoyancy`・`ProbeTarget::GridFluidMeanV`。
+    /// とくに最後が無いと、Scene Viewに何も描かれないこのシーンは
+    /// **ギャラリーで観測する手段が一切無い**(合格基準「Boussinesqの定性」は
+    /// 平均鉛直速度そのもの)。実測: 60step後に 0.114198。
+    #[test]
+    fn run_headless_scenario_convection_raises_mean_vertical_velocity_monotonically() {
+        let json = include_str!("../../../scenes/d15-convection.json");
+        let result = run_headless_scenario(json, 60).expect("valid scenario JSON");
+        let mean_v = &result.probe_histories[0];
+        assert_eq!(mean_v.len(), 60);
+
+        for i in 1..mean_v.len() {
+            assert!(
+                mean_v[i] >= mean_v[i - 1] - 1e-12,
+                "熱源の一定浮力の下では平均上昇速度は単調に上がるべき: \
+                 step={i} previous={} current={}",
+                mean_v[i - 1],
+                mean_v[i]
+            );
+        }
+        let final_v = *mean_v.last().expect("履歴が空でない");
+        assert!(
+            final_v > 0.1,
+            "60step後には実際に上昇流が立っているべき(実測0.1142): {final_v}"
+        );
+
+        // 台帳が発散していないこと(合格基準「台帳」)。
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let mut world = World::from_scenario(&scenario).expect("valid world");
+        for _ in 0..60 {
+            world.step();
+        }
+        let residual = world.energy_residual();
+        assert!(
+            residual.is_finite() && residual < 1.0e6,
+            "エネルギー台帳の残差は有界であるべき: residual={residual}"
+        );
+    }
+
+    /// **増分H** D23(注ぐ水): SPHの水塊が落下して床(境界粒子)の上に溜まり、
+    /// 内部粒子の密度が静止密度付近に保たれる(弱圧縮性)ことを
+    /// `scenes/d23-pouring-water.json`経由で確認する。
+    ///
+    /// **測って分かった、主張を弱めるべき点**: 密度を見る粒子の選び方で結論が
+    /// 全く変わる。6×6×6ブロックの**角の粒子(index 0)は近傍が足りず密度が
+    /// 606.6 → 318.3 と静止密度から大きく外れる**——これはSPHの自由表面欠損
+    /// (free-surface deficiency)として知られた正しい挙動であってバグではない。
+    /// 一方**内部粒子(index 86 = ix2,iy2,iz2)は初期 999.97**(静止密度1000に対し
+    /// 相対誤差 2.8e-5)、着水後も 966.2(3.4%以内)に留まる。
+    /// したがって「SPHが非圧縮である」ではなく**「内部粒子について弱圧縮性が
+    /// 保たれる」**という弱いほうの主張だけをテストにする。
+    #[test]
+    fn run_headless_scenario_pouring_water_keeps_interior_density_near_rest_density() {
+        let json = include_str!("../../../scenes/d23-pouring-water.json");
+        let result = run_headless_scenario(json, 600).expect("valid scenario JSON");
+        let first = |i: usize| result.probe_histories[i][0];
+        let last = |i: usize| *result.probe_histories[i].last().expect("履歴が空でない");
+
+        // ①実際に落ちて床の上に溜まる(境界粒子の床は y=0 の1層)。
+        let (top_start, top_end) = (first(2), last(2));
+        assert!(
+            top_end < top_start - 0.2,
+            "水塊は実際に落下すべき: {top_start} -> {top_end}"
+        );
+        for i in [0usize, 2] {
+            let y = last(i);
+            assert!(
+                y > 0.0,
+                "境界粒子の床をすり抜けてはいけない: probe{i} y={y}"
+            );
+        }
+
+        // ②内部粒子の弱圧縮性。初期は静止密度と 1e-4 以内で一致する。
+        let rest_density = 1000.0;
+        let interior_start = first(1);
+        assert!(
+            (interior_start - rest_density).abs() / rest_density < 1.0e-4,
+            "初期の内部粒子密度は静止密度と一致すべき: {interior_start}"
+        );
+        let interior_end = last(1);
+        assert!(
+            (interior_end - rest_density).abs() / rest_density < 0.10,
+            "着水後も内部粒子の密度は静止密度の10%以内に留まるべき: {interior_end}"
+        );
+
+        // ③自由表面欠損を**既知の限界として固定する**。角の粒子は静止密度を
+        // 大きく下回る。これが「バグとして誤って直される」ことを防ぐための記録。
+        let corner_end = last(3);
+        assert!(
+            corner_end < 0.6 * rest_density,
+            "角の粒子はSPHの自由表面欠損で密度が大きく下がる(既知の正しい挙動): {corner_end}"
+        );
+    }
+
+    /// **増分H** D14(煙と渦): 一様流の中に置いた角柱が実際に流れを乱すことを
+    /// `scenes/d14-vortex.json`経由で確認する。
+    ///
+    /// **実装して分かった2つの落とし穴を記録する**:
+    ///
+    /// ①**障害物を`"type": "static"`にすると何も起きない**。
+    /// `sim_coupling::GridFluidRigid::apply`は冒頭で `mass <= 0.0` の剛体を
+    /// 無言でreturnする(静的/キネマティック剛体は対象外)。静的な角柱で組んだ
+    /// 最初のシーンは、エラーも警告も出ないまま**結合が一度も発火しなかった**。
+    /// 動的剛体(鋼の0.1m角=7.85kg、このシーンは重力0なので落ちない)に変えて
+    /// 初めて`solid`マスクが書かれる。
+    ///
+    /// ②**観測量に平均鉛直速度を使うと0のまま動かない**。障害物の後流は上下
+    /// 対称に立つため、格子全体の平均では打ち消し合う(実測 4.07e-16)。
+    /// そこで`ProbeTarget::GridFluidRmsV`を追加した——符号が消えるので擾乱の
+    /// 大きさが見える(実測 0 → 0.0443)。
+    ///
+    /// **正直な限界**: `GridFluid2D`は周期境界で流入・流出境界を持たないため、
+    /// 下流の後流が上流へ回り込む。したがってこのシーンが示すのは
+    /// 「障害物が一様流を実際に乱すこと」までであり、**カルマン渦列のSt数(F11)
+    /// のような定量的な検証は`sim-fluid`側の専用テストが担う**。
+    #[test]
+    fn run_headless_scenario_vortex_obstacle_perturbs_a_uniform_flow() {
+        let json = include_str!("../../../scenes/d14-vortex.json");
+        let result = run_headless_scenario(json, 120).expect("valid scenario JSON");
+        let rms = &result.probe_histories[0];
+        let mean = &result.probe_histories[1];
+
+        assert_eq!(rms[0], 0.0, "一様な水平流なので初期の鉛直速度はゼロ");
+        let final_rms = *rms.last().expect("履歴が空でない");
+        assert!(
+            final_rms > 0.01,
+            "障害物が一様流を乱して鉛直方向の速度成分が立つべき: {final_rms}"
+        );
+
+        // 後流の上下対称性: 平均はほぼ0のまま(RMSが要る理由の裏取り)。
+        let final_mean = mean.last().copied().expect("履歴が空でない").abs();
+        assert!(
+            final_mean < 1.0e-9,
+            "後流は上下対称なので平均鉛直速度はほぼ0のままであるべき: {final_mean}"
+        );
+        assert!(
+            final_rms > 1.0e6 * final_mean,
+            "RMSは平均より桁違いに大きいはず(これがRMSプローブを足した理由): \
+             rms={final_rms} mean={final_mean}"
         );
     }
 

@@ -183,6 +183,53 @@
         "circuit",
         "thermal"
       ]
+    },
+    {
+      "file": "d13-rope.json",
+      "demo": "D13",
+      "title": "ロープと旗",
+      "description": "両端を固定した20分割のロープが垂れ下がり、静止形状が懸垂線(カテナリー)に一致する(D13)。",
+      "domains": [
+        "soft_body"
+      ]
+    },
+    {
+      "file": "d14-vortex.json",
+      "demo": "D14",
+      "title": "煙と渦",
+      "description": "一様流の中の角柱が流れを乱す。Scene Viewには格子流体そのものは描かれないのでProbeグラフ(鉛直速度のRMS)で観測する(D14)。",
+      "domains": [
+        "grid_fluid",
+        "mechanics"
+      ]
+    },
+    {
+      "file": "d15-convection.json",
+      "demo": "D15",
+      "title": "対流",
+      "description": "熱源のBoussinesq浮力で格子流体に上昇流が立つ。剛体が無いのでProbeグラフ(平均鉛直速度・ノード温度)で観測する(D15)。",
+      "domains": [
+        "grid_fluid",
+        "thermal"
+      ]
+    },
+    {
+      "file": "d16-conduction-race.json",
+      "demo": "D16",
+      "title": "熱伝導レース",
+      "description": "銅の棒の片端を100℃に固定し、熱が拡散していく様子をProbeグラフ(格子点温度)で観測する。材質を変えると立ち上がりの速さが熱拡散率の順に変わる(D16)。",
+      "domains": [
+        "conduction_rod"
+      ]
+    },
+    {
+      "file": "d23-pouring-water.json",
+      "demo": "D23",
+      "title": "注ぐ水",
+      "description": "SPHの水塊が落下して床に溜まる。Scene Viewには粒子が描かれないのでProbeグラフ(粒子高さ・密度)で観測する(D23)。",
+      "domains": [
+        "sph"
+      ]
     }
   ]
 }
