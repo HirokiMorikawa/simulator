@@ -1,0 +1,22 @@
+{
+  "name": "d37-reentry",
+  "world": { "gravity": 0.0, "dt": 0.05 },
+  "astro": {
+    "softening": 0.0,
+    "bodies": [
+      { "position": [0, 0, 0], "velocity": [0, 0, 0], "mass": 5.972e24 },
+      { "position": [6491000.0, 0, 0], "velocity": [-3000.0, 6000.0, 0], "mass": 1000.0 }
+    ],
+    "atmospheric_drag": {
+      "central_body": 0,
+      "surface_density": 1.225,
+      "scale_height": 8500.0,
+      "planet_radius": 6371000.0,
+      "ballistic_coefficients": [[1, 0.5]]
+    }
+  },
+  "probes": [
+    { "astro_pos_x": 1 }, { "astro_pos_y": 1 },
+    { "astro_vel_x": 1 }, { "astro_vel_y": 1 }
+  ]
+}

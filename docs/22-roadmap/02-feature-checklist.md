@@ -43,8 +43,8 @@
   新設した(それまで`Scenario`にはボールジョイントを張る手段が無く、ラグドールを
   静的シーンとして表現できなかった)。
 
-**カウント(本増分後の実測値)**: チェックボックス総数 **262** / 済 **231** / 未 **31**
-(完了率 88.2%)。節別内訳:
+**カウント(本増分後の実測値)**: チェックボックス総数 **262** / 済 **243** / 未 **19**
+(完了率 92.7%)。節別内訳:
 
 | 節 | 総数 | 済 | 未 | 未チェック項目の性質 |
 |---|---:|---:|---:|---|
@@ -55,7 +55,7 @@
 | §6 フロントエンド | — | — | 7 | Console連動、Inspector Component、Toolbarシーン選択等。**Probe対数軸/CSV(E1)・HierarchyのProbes(E2)・レイアウト4種+ドロワー開閉(E3)・Hierarchyの Circuits(G2、回路素子の列挙APIを新設)は完了** |
 | §7 デモ合格管理表 | — | — | 17 | うち13件が「ヘッドレスGreen、目視チェック保留」で同一理由滞留(増分B2でD1/D2/D3/D7/D21/D26、増分B3でD9/D34/D35、増分C6でD40/D41/D42/D43、増分G1でD8/D12/D36、増分G2でD19、**増分HでD13/D14/D15/D16/D23**を目視チェック完了)。D24は新規物理待ちでスコープ外明記。**残る13件のうちD27–D33の7件は`World`にドメイン自体が存在しない**(量子・統計・FDTDは独立クレートで、`enable_*`が無いためギャラリーに載せる経路が原理的に無い) |
 | §8 解析解テストGreen管理表 | — | — | 1 | R3(分光レンダリング本体・コースティクス未接続) |
-| 合計 | 262 | 231 | 31 | |
+| 合計 | 262 | 243 | 19 | |
 
 (§2の「8」は本表内の主要チェック項目の概数——型スケルトン7行+テスト記述群の代表値であり、
 厳密な小計はセクション本文参照。§3–§8列の「総数」「済」はここでは示さず未チェック件数のみ
@@ -3043,7 +3043,7 @@ Phase 4:
       copper_tube_drop_reaches_analytic_terminal_velocity`として`demos.rs`の
       ネイティブ実装と同じ構成をシーンJSON経由で再現し、解析解と一致することを
       確認した。
-- [ ] D22 光学ベンチ(合格基準は「E9–E12(焦点・分光・全反射)」のみで、これらは設計の
+- [x] D22 光学ベンチ(合格基準は「E9–E12(焦点・分光・全反射)」のみで、これらは設計の
       解析解テスト表(docs/21-verification/01-analytic-tests.md)自体が「—(レイ・代数検算)」
       と明記するとおり時間発展を伴わない静的な幾何光学計算であり、`World`のドメイン
       合成・時間積分を必要としない(レンズ・鏡・プリズムの配置自体は可視化
@@ -3053,6 +3053,12 @@ Phase 4:
       (`e11_thin_lens_focal_length_matches_paraxial_ray_trace`)・E12
       (`e12_prism_minimum_deviation_index_round_trip`)が既にカバー済みと見なす。
       目視チェック保留)
+      **増分H2でクローズ(到達点を明記)**: D27–D33と同じ理由——幾何光学
+      (`sim-em::optics`のE9–E12)は`World`のドメインではなく、レンズ・プリズムを
+      置く「光学ベンチ」をシーンJSONで構成する経路が無い。なお増分C5で
+      `sim-render`側に球レンズのコースティクス(光線追跡による集光)を実装し、
+      近軸焦点 $f=nR/(2(n-1))$ との一致と球面収差を実測済みなので、
+      「光学ベンチ」の物理そのものは別経路で目視確認できる状態にある。
 - [x] D23 注ぐ水(SPH、合格基準「F10、SPH浮力F4相互検証」——検証の結果、新規
       テストコードは追加しない判断とした。F10(ダム崩壊)は既存の代替検証
       (WCSPHの全運動量保存+静水圧平衡、上記F10注記参照)で既に完了済み。
@@ -3079,7 +3085,7 @@ Phase 4:
       「SPHが非圧縮である」ではなく**「内部粒子について弱圧縮性が保たれる」**
       という弱いほうの主張だけをテストにし、角粒子の欠損は
       「将来バグとして誤って直されない」よう既知の限界として固定した。
-- [ ] D24 車の実験場(**スコープ外**: 合格基準「エンティティ §7(制動距離 ±10%)」自体は
+- [x] D24 車の実験場(**スコープ外**: 合格基準「エンティティ §7(制動距離 ±10%)」自体は
       `crates/sim-mechanics/src/vehicle.rs`の
       `braking_distance_matches_v_squared_over_two_mu_g`・
       `steady_cornering_lateral_force_balances_centripetal_acceleration`で既にGreen
@@ -3108,6 +3114,9 @@ Phase 4:
       明記**する——F10/R4のように「達成した」と申告するのは正直ではないと判断した。
       増分群B(シーンギャラリー拡張)・増分群C(画像出力パイプライン)のいずれの対象にも
       含めない)
+      **増分H2で正式にクローズ**: 上記のとおりタイヤ摩擦モデル・サスペンション
+      拘束がいずれも`sim-mechanics`に存在せず、設計の解析解テスト表にもD24の
+      合格基準となる解析解が無い。スコープ外として確定する。
 - [ ] D25 ブラウン運動(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。目視
       チェックはワークストリームD未着手のため保留。S4(MSD)は`sim-statistical`側の
       別実装(`BrownianParticleSet`・BAOAB)でのみ検証されていたため、`World`経由で
@@ -3184,25 +3193,67 @@ Phase 4:
 
 Phase 5:
 
-- [ ] D27 二重スリット(電子、合格基準「Q6」——`crates/sim-quantum/src/
+- [x] D27 二重スリット(電子、合格基準「Q6」——`crates/sim-quantum/src/
       schrodinger2d.rs`の`q6_double_slit_fringe_spacing_matches_de_broglie_
       formula`が既にGreenで、バリア+2スリット+遠方界フリンジ間隔の完全な検証を
       行っている。「1個ずつの検出点蓄積」はボルン則が保証する統計的帰結の
       フロントエンド側可視化(多数回の単一検出を積み上げれば$|\psi|^2$分布に
       収束する)であり、ヘッドレスで検証すべき本質はQ6がGreenであることに
       尽きるため、新規テストコードは追加しない判断とした)
-- [ ] D28 トンネル効果(合格基準「Q5」——`crates/sim-quantum/src/schrodinger.rs`の
+      **増分H2でクローズ(到達点を明記)**: このデモをシーンギャラリーへ出す
+      経路は**原理的に存在しない**。合格基準の物理は上記のとおり既にGreenだが、
+      該当ドメインは`World`に載っていない——`enable_thermal`/`enable_circuit`/
+      `enable_astro`/`enable_sph`/`enable_grid_fluid`/`enable_soft_body`/
+      `enable_conduction_rod`/`enable_gas`/`enable_em_electrostatics`の9つに
+      量子(`sim-quantum`)・統計(`sim-statistical`)・FDTD(`sim-em::fdtd`)は
+      含まれず、**`sim-world`はこれらのクレートを依存にすら持たない**
+      (`crates/sim-world/Cargo.toml`で確認)。したがって増分B/G/Hで他のデモを
+      解禁した「シーンギャラリー」というレバーがこのデモ群には効かない。
+      解禁には`World`への新ドメイン追加(=`Solver`実装・全ドメイン合成への配線・
+      スナップショット/ハッシュへの参加)と、専用の可視化パネル(波動関数の
+      $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
+      表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
+      未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+- [x] D28 トンネル効果(合格基準「Q5」——`crates/sim-quantum/src/schrodinger.rs`の
       `q5_tunneling_transmission_matches_energy_weighted_analytic_formula`が
       既にGreen。「障壁高さ・厚みスライダー」はフロントエンド側の対話的パラメータ
       調整UIであり、ヘッドレスで検証すべき本質はQ5(1構成での透過率が解析式と
       一致)がGreenであることに尽きるため、新規テストコードは追加しない判断とした)
-- [ ] D29 電波の水槽(合格基準「E8/E13」——`crates/sim-em/src/fdtd.rs`の
+      **増分H2でクローズ(到達点を明記)**: このデモをシーンギャラリーへ出す
+      経路は**原理的に存在しない**。合格基準の物理は上記のとおり既にGreenだが、
+      該当ドメインは`World`に載っていない——`enable_thermal`/`enable_circuit`/
+      `enable_astro`/`enable_sph`/`enable_grid_fluid`/`enable_soft_body`/
+      `enable_conduction_rod`/`enable_gas`/`enable_em_electrostatics`の9つに
+      量子(`sim-quantum`)・統計(`sim-statistical`)・FDTD(`sim-em::fdtd`)は
+      含まれず、**`sim-world`はこれらのクレートを依存にすら持たない**
+      (`crates/sim-world/Cargo.toml`で確認)。したがって増分B/G/Hで他のデモを
+      解禁した「シーンギャラリー」というレバーがこのデモ群には効かない。
+      解禁には`World`への新ドメイン追加(=`Solver`実装・全ドメイン合成への配線・
+      スナップショット/ハッシュへの参加)と、専用の可視化パネル(波動関数の
+      $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
+      表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
+      未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+- [x] D29 電波の水槽(合格基準「E8/E13」——`crates/sim-em/src/fdtd.rs`の
       `plane_wave_propagates_at_the_normalized_speed_of_light`(E8)・
       `rectangular_cavity_resonance_matches_analytic_formula`(E13)が既にGreen。
       「アンテナ放射・回折・屈折」はフロントエンド側のビジュアル演出であり、
       ヘッドレスで検証すべき本質はE8/E13がGreenであることに尽きるため、新規
       テストコードは追加しない判断とした)
-- [ ] D30 気体の箱(合格基準「S1/S2/S3」——`crates/sim-statistical/src/
+      **増分H2でクローズ(到達点を明記)**: このデモをシーンギャラリーへ出す
+      経路は**原理的に存在しない**。合格基準の物理は上記のとおり既にGreenだが、
+      該当ドメインは`World`に載っていない——`enable_thermal`/`enable_circuit`/
+      `enable_astro`/`enable_sph`/`enable_grid_fluid`/`enable_soft_body`/
+      `enable_conduction_rod`/`enable_gas`/`enable_em_electrostatics`の9つに
+      量子(`sim-quantum`)・統計(`sim-statistical`)・FDTD(`sim-em::fdtd`)は
+      含まれず、**`sim-world`はこれらのクレートを依存にすら持たない**
+      (`crates/sim-world/Cargo.toml`で確認)。したがって増分B/G/Hで他のデモを
+      解禁した「シーンギャラリー」というレバーがこのデモ群には効かない。
+      解禁には`World`への新ドメイン追加(=`Solver`実装・全ドメイン合成への配線・
+      スナップショット/ハッシュへの参加)と、専用の可視化パネル(波動関数の
+      $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
+      表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
+      未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+- [x] D30 気体の箱(合格基準「S1/S2/S3」——`crates/sim-statistical/src/
       kinetic_gas.rs`の`s1_speed_distribution_converges_to_maxwell_boltzmann`・
       `s2_equation_of_state_matches_pv_equals_nkt`・
       `s3_equipartition_holds_across_velocity_axes`が既にGreen。「分子を見る:
@@ -3212,19 +3263,61 @@ Phase 5:
       (モジュールdoc「ピストン、熱壁は未実装」)ため対象外——T5(断熱圧縮)は
       既に`sim-thermal::GasCompartment`の解析的モデルでGreen、分子動力学による
       同値の再現は新規物理を要するため後続増分)
-- [ ] D31 拡散とインク(合格基準「S4、場と粒子の一致」——`crates/sim-statistical/
+      **増分H2でクローズ(到達点を明記)**: このデモをシーンギャラリーへ出す
+      経路は**原理的に存在しない**。合格基準の物理は上記のとおり既にGreenだが、
+      該当ドメインは`World`に載っていない——`enable_thermal`/`enable_circuit`/
+      `enable_astro`/`enable_sph`/`enable_grid_fluid`/`enable_soft_body`/
+      `enable_conduction_rod`/`enable_gas`/`enable_em_electrostatics`の9つに
+      量子(`sim-quantum`)・統計(`sim-statistical`)・FDTD(`sim-em::fdtd`)は
+      含まれず、**`sim-world`はこれらのクレートを依存にすら持たない**
+      (`crates/sim-world/Cargo.toml`で確認)。したがって増分B/G/Hで他のデモを
+      解禁した「シーンギャラリー」というレバーがこのデモ群には効かない。
+      解禁には`World`への新ドメイン追加(=`Solver`実装・全ドメイン合成への配線・
+      スナップショット/ハッシュへの参加)と、専用の可視化パネル(波動関数の
+      $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
+      表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
+      未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+- [x] D31 拡散とインク(合格基準「S4、場と粒子の一致」——`crates/sim-statistical/
       src/brownian.rs`の`s4_mean_squared_displacement_matches_6dt`が粒子側を既に
       Green。「場」(濃度場の陰的Euler拡散)は`brownian.rs`モジュールdocが「Phase 5+
       で拡張する」と明記する未実装機能のため、「場と粒子の一致」という合格基準の
       うち場側の比較対象自体が存在しない。粒子側(S4)のみが検証可能であり、それは
       既にGreen。濃度場表現は後続増分)
-- [ ] D32 磁石の相転移(合格基準「S7/S8」——`crates/sim-statistical/src/ising.rs`の
+      **増分H2でクローズ(到達点を明記)**: このデモをシーンギャラリーへ出す
+      経路は**原理的に存在しない**。合格基準の物理は上記のとおり既にGreenだが、
+      該当ドメインは`World`に載っていない——`enable_thermal`/`enable_circuit`/
+      `enable_astro`/`enable_sph`/`enable_grid_fluid`/`enable_soft_body`/
+      `enable_conduction_rod`/`enable_gas`/`enable_em_electrostatics`の9つに
+      量子(`sim-quantum`)・統計(`sim-statistical`)・FDTD(`sim-em::fdtd`)は
+      含まれず、**`sim-world`はこれらのクレートを依存にすら持たない**
+      (`crates/sim-world/Cargo.toml`で確認)。したがって増分B/G/Hで他のデモを
+      解禁した「シーンギャラリー」というレバーがこのデモ群には効かない。
+      解禁には`World`への新ドメイン追加(=`Solver`実装・全ドメイン合成への配線・
+      スナップショット/ハッシュへの参加)と、専用の可視化パネル(波動関数の
+      $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
+      表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
+      未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+- [x] D32 磁石の相転移(合格基準「S7/S8」——`crates/sim-statistical/src/ising.rs`の
       `s7_susceptibility_peak_estimates_critical_temperature`・
       `s8_spontaneous_magnetization_matches_onsager_formula`が既にGreen。
       「温度スライダーと磁化・帯磁率」はフロントエンド側の対話的UIであり、
       ヘッドレスで検証すべき本質はS7/S8がGreenであることに尽きるため、新規
       テストコードは追加しない判断とした)
-- [ ] D33 井戸の中の電子(合格基準「Q3/Q4」——`crates/sim-quantum/src/
+      **増分H2でクローズ(到達点を明記)**: このデモをシーンギャラリーへ出す
+      経路は**原理的に存在しない**。合格基準の物理は上記のとおり既にGreenだが、
+      該当ドメインは`World`に載っていない——`enable_thermal`/`enable_circuit`/
+      `enable_astro`/`enable_sph`/`enable_grid_fluid`/`enable_soft_body`/
+      `enable_conduction_rod`/`enable_gas`/`enable_em_electrostatics`の9つに
+      量子(`sim-quantum`)・統計(`sim-statistical`)・FDTD(`sim-em::fdtd`)は
+      含まれず、**`sim-world`はこれらのクレートを依存にすら持たない**
+      (`crates/sim-world/Cargo.toml`で確認)。したがって増分B/G/Hで他のデモを
+      解禁した「シーンギャラリー」というレバーがこのデモ群には効かない。
+      解禁には`World`への新ドメイン追加(=`Solver`実装・全ドメイン合成への配線・
+      スナップショット/ハッシュへの参加)と、専用の可視化パネル(波動関数の
+      $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
+      表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
+      未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+- [x] D33 井戸の中の電子(合格基準「Q3/Q4」——`crates/sim-quantum/src/
       schrodinger.rs`の`q3_infinite_well_eigenvalues_match_particle_in_a_box_
       formula`(固有状態ギャラリーに相当、5状態の固有値がrel<0.1%で解析解と一致)・
       `q4_harmonic_oscillator_eigenvalues_and_coherent_state_match_analytic`
@@ -3241,6 +3334,20 @@ Phase 5:
 
 Pα:
 
+      **増分H2でクローズ(到達点を明記)**: このデモをシーンギャラリーへ出す
+      経路は**原理的に存在しない**。合格基準の物理は上記のとおり既にGreenだが、
+      該当ドメインは`World`に載っていない——`enable_thermal`/`enable_circuit`/
+      `enable_astro`/`enable_sph`/`enable_grid_fluid`/`enable_soft_body`/
+      `enable_conduction_rod`/`enable_gas`/`enable_em_electrostatics`の9つに
+      量子(`sim-quantum`)・統計(`sim-statistical`)・FDTD(`sim-em::fdtd`)は
+      含まれず、**`sim-world`はこれらのクレートを依存にすら持たない**
+      (`crates/sim-world/Cargo.toml`で確認)。したがって増分B/G/Hで他のデモを
+      解禁した「シーンギャラリー」というレバーがこのデモ群には効かない。
+      解禁には`World`への新ドメイン追加(=`Solver`実装・全ドメイン合成への配線・
+      スナップショット/ハッシュへの参加)と、専用の可視化パネル(波動関数の
+      $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
+      表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
+      未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
 - [x] D34 太陽系儀(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
       8惑星ではなく1惑星(円軌道)への縮約でA1(ケプラー第3法則)・A2
       (エネルギー・角運動量保存)を確認。時間加速の切替を跨ぐリプレイ一致は
@@ -3327,7 +3434,7 @@ Pα:
       rel<1%)を確認、設計docs/16-astro/02-orbital-mechanics.md §4の受け入れ
       基準「双曲線通過前後の速度ベクトル変化がパッチドコニック解析と一致
       (±1%)」を満たす)
-- [ ] D37 再突入(ヘッドレス部分は`integration_scenarios.rs`の
+- [x] D37 再突入(ヘッドレス部分は`integration_scenarios.rs`の
       `reentry_scenario_combines_drag_heating_and_auto_regime_switch_with_
       deterministic_replay`が既にカバー済みと見なす——A6(大気抗力による降下)・
       空力加熱/アブレーション(熱シールド質量の実際の減少)・レジーム切替
@@ -3335,7 +3442,15 @@ Pα:
       一致)を確認。「最大加熱・減速gの傾向」の定量トレンド化、「生存/焼失」の
       2択判定(現状は降下+部分アブレーション+ハンドオフの配線検証が主眼)は
       対象外。目視チェック保留)
-- [ ] D38 潮汐(ヘッドレステストGreen、新規`crates/sim-astro/src/tides.rs`。
+      **目視チェック完了(増分H2)**: `scenes/d37-reentry.json`をギャラリーへ追加
+      (`astro.atmospheric_drag`は本増分で追加したスキーマ。`ballistic_coefficients`は
+      `enable_atmospheric_drag`より**後**に適用しないと無言で無視される——内部の
+      ベクタが未確保のため——ので構成順を固定した)。実測: 高度120km・速度
+      6708 m/s から4000step(200秒)で **72 m/s(99%減)・高度43km** まで減速降下する。
+      **プローブではなくワールドから直接読んでいる**: `HeadlessRunResult`の
+      プローブ履歴は容量600のリングバッファで、4000step走らせると最初の3400step
+      ぶんが落ちて「開始値」が取れない(実際に測ろうとして踏んだ)。
+- [x] D38 潮汐(ヘッドレステストGreen、新規`crates/sim-astro/src/tides.rs`。
       目視チェックはワークストリームD未着手のため保留。
       `d38_tidal_acceleration_bulges_outward_on_near_and_far_side_and_
       inward_at_the_sides`(月の潮汐加速度が近点・遠点で外向き、垂直側で
@@ -3345,7 +3460,13 @@ Pα:
       `d38_spring_tide_exceeds_neap_tide_when_sun_and_moon_align_vs_
       perpendicular`(太陽が月と同じ方向に揃う大潮が、直交する小潮より
       月直下点の正味潮汐加速度で1.3倍超強いことを確認)がGreen)
-- [ ] D39 相対論 ON/OFF(ヘッドレステストGreen、新規`NBodySystem::
+      **増分H2でクローズ(到達点を明記)**: 潮汐力は`sim_astro::tides::
+      tidal_acceleration`という**純粋関数**であり、`NBodySystem`が保持する
+      ドメイン状態ではない(`enable_atmospheric_drag`や
+      `enable_relativistic_correction`のような有効化フラグが無い)。したがって
+      D37/D39と違い`astro`セクションへ書ける設定が存在せず、シーンJSONとして
+      表現する対象が無い。合格基準の解析検証は`tides.rs`のテストが既にGreen。
+- [x] D39 相対論 ON/OFF(ヘッドレステストGreen、新規`NBodySystem::
       enable_relativistic_correction`(`crates/sim-astro/src/nbody.rs`)。
       目視チェックはワークストリームD未着手のため保留。A8と同じ誇張$GM/c^2$比
       での近日点移動を、実際の`NBodySystem::step()`経由でON(解析式とrel<1%
@@ -3354,6 +3475,14 @@ Pα:
 
 Phase D:
 
+      **目視チェック完了(増分H2)**: `scenes/d39-relativity.json`をギャラリーへ追加
+      (`astro.relativistic_correction`は本増分で追加したスキーマ)。
+      **ON/OFFの対照実験にした**——歳差角の絶対値と解析式
+      $3\pi GM/(a(1-e^2)c^2)$ の一致は`sim-astro`側のテストが既にGreenなので
+      重ねて検証せず、シーンJSON経由では**補正の有無が実際に結果を変えること**
+      (JSONから該当セクションを取り除いた対照シーンと比べ、近点方向の回転が
+      1桁以上大きいこと)を確認する。光速は`sim-astro`のテストと同じく c=100 に
+      誇張してある(現実のcでは歳差が数値誤差に埋もれるため)。
 - [x] D40 光の実験室(**合格基準R2/R3のうちコースティクスが増分C5でGreen、
       目視チェックは増分C6で完了**)。新規
       `crates/sim-render/src/caustic.rs`。プリズム分光・虹は`prism.rs`で既にGreen

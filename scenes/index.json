@@ -230,6 +230,24 @@
       "domains": [
         "sph"
       ]
+    },
+    {
+      "file": "d37-reentry.json",
+      "demo": "D37",
+      "title": "再突入",
+      "description": "高度120kmのカプセルが大気抗力で6708 m/s から72 m/s まで減速する。Scene Viewには何も描かれないのでProbeグラフ(位置・速度)で観測する(D37)。",
+      "domains": [
+        "astro"
+      ]
+    },
+    {
+      "file": "d39-relativity.json",
+      "demo": "D39",
+      "title": "相対論 ON/OFF",
+      "description": "一般相対論の近日点移動補正を有効にした離心軌道。補正セクションを外すと歳差が消える(D39)。",
+      "domains": [
+        "astro"
+      ]
     }
   ]
 }

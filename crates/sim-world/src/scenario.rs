@@ -566,6 +566,32 @@ pub struct AstroScenarioJson {
     pub softening: f64,
     #[serde(default)]
     pub bodies: Vec<AstroBodyJson>,
+    /// 大気抗力(`NBodySystem::enable_atmospheric_drag`、**増分H2で追加**)。D37(再突入)。
+    #[serde(default)]
+    pub atmospheric_drag: Option<AtmosphericDragJson>,
+    /// 一般相対論の近日点移動補正(`enable_relativistic_correction`、**増分H2で追加**)。
+    /// D39(相対論 ON/OFF)。`[central_body, speed_of_light]`。
+    #[serde(default)]
+    pub relativistic_correction: Option<RelativisticCorrectionJson>,
+}
+
+/// `AstroScenarioJson::atmospheric_drag`(**増分H2で追加**)。
+/// `ballistic_coefficients`は`(bodies配列のindex, 弾道係数)`の対。
+#[derive(Deserialize)]
+pub struct AtmosphericDragJson {
+    pub central_body: usize,
+    pub surface_density: f64,
+    pub scale_height: f64,
+    pub planet_radius: f64,
+    #[serde(default)]
+    pub ballistic_coefficients: Vec<(usize, f64)>,
+}
+
+/// `AstroScenarioJson::relativistic_correction`(**増分H2で追加**)。
+#[derive(Deserialize)]
+pub struct RelativisticCorrectionJson {
+    pub central_body: usize,
+    pub speed_of_light: f64,
 }
 
 /// `AstroScenarioJson::bodies`の1件(`sim_astro::NBodySystem::add_body`の
@@ -929,6 +955,22 @@ impl World {
             let mut sys = sim_astro::NBodySystem::new(astro_json.softening);
             for b in &astro_json.bodies {
                 sys.add_body(array_to_vec3(b.position), array_to_vec3(b.velocity), b.mass);
+            }
+            if let Some(drag) = &astro_json.atmospheric_drag {
+                sys.enable_atmospheric_drag(
+                    drag.central_body,
+                    drag.surface_density,
+                    drag.scale_height,
+                    drag.planet_radius,
+                );
+                // `set_ballistic_coefficient`は`enable_atmospheric_drag`より後でないと
+                // 無言で無視される(内部の`ballistic_coefficient`ベクタが未確保のため)。
+                for (body, value) in &drag.ballistic_coefficients {
+                    sys.set_ballistic_coefficient(*body, *value);
+                }
+            }
+            if let Some(rc) = &astro_json.relativistic_correction {
+                sys.enable_relativistic_correction(rc.central_body, rc.speed_of_light);
             }
             world.enable_astro(sys);
         }
@@ -2749,6 +2791,104 @@ mod tests {
             final_rms > 1.0e6 * final_mean,
             "RMSは平均より桁違いに大きいはず(これがRMSプローブを足した理由): \
              rms={final_rms} mean={final_mean}"
+        );
+    }
+
+    /// **増分H2** D37(再突入): 大気抗力でカプセルが減速・降下することを
+    /// `scenes/d37-reentry.json`経由で確認する。`astro.atmospheric_drag`は
+    /// 本増分で追加したスキーマ。
+    ///
+    /// **プローブではなくワールドから直接読む**: `HeadlessRunResult`の
+    /// プローブ履歴は容量600のリングバッファなので、4000step走らせると
+    /// 最初の3400stepぶんが落ちて「開始値」が取れない(実際に測ろうとして
+    /// 踏んだ)。降下量・減速量は開始と終了の差なので、ここは`World`を
+    /// 直接進めて両端を読む。
+    #[test]
+    fn run_headless_scenario_reentry_decelerates_the_capsule_in_the_atmosphere() {
+        let json = include_str!("../../../scenes/d37-reentry.json");
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let mut world = World::from_scenario(&scenario).expect("valid world");
+        const R_EARTH: f64 = 6.371e6;
+
+        let read = |w: &World| -> (f64, f64) {
+            let a = w.astro().expect("天体ドメインが有効");
+            (a.position[1].length() - R_EARTH, a.velocity[1].length())
+        };
+        let (altitude0, speed0) = read(&world);
+        for _ in 0..4000 {
+            world.step();
+        }
+        let (altitude1, speed1) = read(&world);
+
+        // 初期条件は高度120km・速度|(-3000, 6000)| = 6708 m/s。
+        assert!(
+            (altitude0 - 120_000.0).abs() < 1.0,
+            "初期高度は120kmのはず: {altitude0}"
+        );
+        assert!(
+            (speed0 - 6708.2).abs() < 1.0,
+            "初期速度は6708 m/sのはず: {speed0}"
+        );
+
+        // 大気抗力が効いて**大きく減速**する(実測: 6708 → 72 m/s、99%減)。
+        assert!(
+            speed1 < 0.05 * speed0,
+            "大気抗力でカプセルは大幅に減速すべき: {speed0} -> {speed1}"
+        );
+        // 高度も下がる(実測: 120km → 43km)。
+        assert!(
+            altitude1 < altitude0 - 50_000.0 && altitude1 > 0.0,
+            "降下しつつ地表より上に留まるべき: {altitude0} -> {altitude1}"
+        );
+    }
+
+    /// **増分H2** D39(相対論 ON/OFF): 一般相対論の近日点移動補正を有効にすると
+    /// 離心率ベクトルの向きが実際に回ることを`scenes/d39-relativity.json`経由で
+    /// 確認する。`astro.relativistic_correction`は本増分で追加したスキーマ。
+    ///
+    /// **ON/OFFの対照実験にする**: 絶対的な歳差角の値は`sim-astro`の
+    /// `a8`/D39テストが解析式(3πGM/(a(1-e²)c²) per orbit)と突き合わせて
+    /// 既にGreenなので、ここで重ねて検証しない。シーンJSON経由で確認するのは
+    /// **補正の有無が実際に結果を変えること**——JSONから
+    /// `relativistic_correction`セクションを取り除いた版と比べる。
+    /// 光速は`sim-astro`のテストと同じくc=100に誇張してある(現実のc では
+    /// 歳差が小さすぎて数値誤差に埋もれるため)。
+    #[test]
+    fn run_headless_scenario_relativistic_correction_precesses_the_orbit() {
+        let json = include_str!("../../../scenes/d39-relativity.json");
+        // 補正セクションを丸ごと落とした対照シーン。
+        let without = json.replace(
+            ",\n    \"relativistic_correction\": { \"central_body\": 0, \"speed_of_light\": 100.0 }",
+            "",
+        );
+        assert!(
+            !without.contains("relativistic_correction"),
+            "対照シーンの生成に失敗"
+        );
+
+        let gm = sim_astro::GRAVITATIONAL_CONSTANT * 14983518130.056938;
+        let apsidal_angle = |w: &World| -> f64 {
+            let a = w.astro().expect("天体ドメインが有効");
+            let (r, v) = (a.position[1], a.velocity[1]);
+            let h = r.cross(v);
+            let e_vec = v.cross(h).scale(1.0 / gm) - r.scale(1.0 / r.length());
+            e_vec.y.atan2(e_vec.x)
+        };
+        let run = |scene: &str| -> f64 {
+            let scenario = Scenario::from_json(scene).expect("valid scenario JSON");
+            let mut world = World::from_scenario(&scenario).expect("valid world");
+            let start = apsidal_angle(&world);
+            for _ in 0..(20 * 8000) {
+                world.step();
+            }
+            apsidal_angle(&world) - start
+        };
+
+        let drift_on = run(json);
+        let drift_off = run(&without);
+        assert!(
+            drift_on.abs() > 10.0 * drift_off.abs().max(1.0e-12),
+            "相対論補正を有効にすると近点方向が有意に回るべき: on={drift_on} off={drift_off}"
         );
     }
 
