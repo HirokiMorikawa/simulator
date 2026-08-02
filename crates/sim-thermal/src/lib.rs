@@ -15,7 +15,9 @@ pub use gas::{carnot_efficiency_bound, GasCompartment, GasSpecies, GAS_CONSTANT}
 pub use lattice::ConductionRod1D;
 pub use phase::{Phase, PhaseMaterial, PhaseState};
 
-use sim_core::{EnergyBreakdown, Event, EventKind, Solver, SolverContext, SourceId, StateHasher};
+use sim_core::{
+    Approximation, EnergyBreakdown, Event, EventKind, Solver, SolverContext, SourceId, StateHasher,
+};
 use sim_math::{pcg, Preconditioner};
 
 /// 基準温度(台帳の thermal 基準)。設計 09-パラメータ表(01-thermodynamics-laws.md §9)。
@@ -199,6 +201,25 @@ impl Solver for ThermalSolver {
             thermal,
             ..Default::default()
         }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        let mut out = vec![Approximation {
+            name: "熱: 集中定数ノード網",
+            reason: "空間分解した温度場ではなく、熱容量を持つノードとリンクのネットワークで\
+                     近似する(陰的Eulerなので無条件安定)。",
+            doc: "docs/12-thermal/02-heat-transfer.md",
+            can_disable: false,
+        }];
+        if self.nodes.iter().all(|n| n.emissivity == 0.0) {
+            out.push(Approximation {
+                name: "放射を無視",
+                reason: "全ノードのemissivityが0のため、放射項は解いていない(対流と伝導のみ)。",
+                doc: "docs/12-thermal/02-heat-transfer.md",
+                can_disable: true,
+            });
+        }
+        out
     }
 }
 

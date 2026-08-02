@@ -14,7 +14,7 @@
 //! (抗力の仕事は保存力(重力)と共に積分されるため現在の測定窓では分離できない、
 //! 後続増分で追加)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 
 /// 接触解決による運動エネルギー散逸を単一の`ThermalNode`(`thermal_node`インデックス)に
@@ -26,8 +26,20 @@ pub struct DissipationToHeat {
 }
 
 impl Coupling for DissipationToHeat {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Thermal)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::DissipationToHeat
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Thermal]
+    }
+
+    fn describe(&self) -> String {
+        format!("DissipationToHeat -> thermal_node[{}]", self.thermal_node)
+    }
+
+    fn referenced_thermal_nodes(&self) -> Vec<usize> {
+        vec![self.thermal_node]
     }
 
     fn apply(&mut self, world: &mut DomainStates, _dt: f64) {

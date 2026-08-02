@@ -14,7 +14,8 @@ pub use frame::{fictitious_forces, FictitiousForces, Frame, FrameTree};
 pub use ledger::EnergyLedger;
 pub use material::{Material, MaterialDb, MaterialId, PairOverride, PhaseChangeProps};
 pub use solver::{
-    DomainId, EnergyBreakdown, Event, EventKind, EventQueue, Solver, SolverContext, SourceId,
+    Approximation, DomainId, EnergyBreakdown, Event, EventKind, EventQueue, Solver, SolverContext,
+    SourceId,
 };
 
 /// 世代付きインデックス。削除済み ID へのアクセスは `None`(パニックしない)。

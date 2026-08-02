@@ -664,18 +664,23 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
     text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const sections: string[] = [];
 
-  // Joint: 選択中ボディが持つ拘束のアンカー点(3成分×N)。
-  const anchors = world.constraint_anchor_points_at(index);
-  if (anchors.length >= 3) {
-    const rows: string[] = [];
-    for (let k = 0; k + 2 < anchors.length; k += 3) {
-      rows.push(
-        `<div class="inspector-field"><span>Anchor ${k / 3}</span><span>` +
-          `${anchors[k].toFixed(3)}, ${anchors[k + 1].toFixed(3)}, ${anchors[k + 2].toFixed(3)}` +
-          `</span></div>`,
-      );
-    }
-    sections.push(`<div class="inspector-component"><h3>Joint</h3>${rows.join("")}</div>`);
+  // Joint(**群1で内省層へ移行**): 以前は`constraint_anchor_points_at`が返す
+  // アンカー2点だけを出しており、**種別も接続先も軸もモータ設定も見えなかった**。
+  // 設計 §1.3 は「種別(Ball/Hinge/Slider/…)・接続 Body ID・軸・制限・モータ」を
+  // 要求している。`joint_info_text`(タブ区切り)から全項目を出す。
+  const jointLines = world.joint_info_text(index).split("\n").filter((l) => l.length > 0);
+  if (jointLines.length > 0) {
+    const rows = jointLines
+      .map((line) => {
+        const [kind, connection, detail, state] = line.split("\t");
+        return (
+          `<div class="inspector-field"><span>${escape(kind)}</span>` +
+          `<span>${escape(connection)}${detail ? " / " + escape(detail) : ""}` +
+          `${state === "無効" ? " (無効)" : ""}</span></div>`
+        );
+      })
+      .join("");
+    sections.push(`<div class="inspector-component" data-stacked><h3>Joint</h3>${rows}</div>`);
   }
 
   // Circuit: ワールドに載っている回路素子(ボディ単位ではなくシーン単位)。
@@ -691,13 +696,44 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
     sections.push(`<div class="inspector-component"><h3>Circuit</h3>${rows.join("")}</div>`);
   }
 
-  // Coupling: 件数のみ(種別名は出せない、上のdoc参照)。
-  const couplingCount = world.coupling_count();
-  if (couplingCount > 0) {
+  // Coupling(**群1で内省層へ移行**): 以前は件数だけを出し「種別: —(トレイトが
+  // 名前を持たないため非表示)」と表示していた。`Coupling`トレイトに
+  // `kind()`/`describe()`/`referenced_bodies()`を足したので、**選択中ボディに
+  // 作用する結合を種別・パラメータ・跨るドメイン込みで**出せるようになった。
+  //
+  // **ボディ単位とシーン単位を分けて出す**: `DissipationToHeat`や`JouleHeat`のように
+  // 「全体の散逸/損失を読んで熱ノードへ移す」結合は特定の剛体を参照しないため、
+  // 選択ボディで絞ると消えてしまう。しかしそれらもワールドに効いている以上
+  // 見えないと困る(実際D10でこの問題を踏んだ)。回路と同じくシーン単位の
+  // コンポーネントとして別枠で出す。
+  const parseCoupling = (line: string) => {
+    const [kind, description, domains, bodies] = line.split("\t");
+    return { kind, description, domains, bodies };
+  };
+  const allCouplings = world
+    .coupling_info_text(-1)
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map(parseCoupling);
+  const forThisBody = allCouplings.filter((c) =>
+    c.bodies.split(",").filter((b) => b.length > 0).includes(String(index)),
+  );
+  const sceneWide = allCouplings.filter((c) => c.bodies.length === 0);
+  const couplingRow = (c: { kind: string; description: string; domains: string }) =>
+    `<div class="inspector-field" title="${escape(world.coupling_kind_summary(c.kind))}">` +
+    `<span>${escape(c.kind)}</span>` +
+    `<span>${escape(c.description)} <em>[${escape(c.domains)}]</em></span></div>`;
+  if (forThisBody.length > 0) {
     sections.push(
-      `<div class="inspector-component"><h3>Coupling</h3>` +
-        `<div class="inspector-field"><span>登録数</span><span>${couplingCount}</span></div>` +
-        `<div class="inspector-field"><span>種別</span><span>—(トレイトが名前を持たないため非表示)</span></div>` +
+      `<div class="inspector-component" data-stacked><h3>Coupling</h3>` +
+        forThisBody.map(couplingRow).join("") +
+        `</div>`,
+    );
+  }
+  if (sceneWide.length > 0) {
+    sections.push(
+      `<div class="inspector-component" data-stacked><h3>Coupling (シーン全体)</h3>` +
+        sceneWide.map(couplingRow).join("") +
         `</div>`,
     );
   }
@@ -715,12 +751,25 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
     sections.push(`<div class="inspector-component"><h3>Probe</h3>${rows.join("")}</div>`);
   }
 
-  // 近似バッジ: 有効な縮約の一覧。
+  // 近似バッジ(**群1で自己申告へ移行**): 以前はWorld側が「どのドメインが
+  // 有効か」から推測した固定文字列を並べていた。`Solver::approximations()`で
+  // 各ソルバが申告する形になり、設計 §1.3 が要求する「名前・**出典**・
+  // **オフ可否**」が揃った(タブ区切りの4列)。
   const approximations = world.active_approximations_text();
   if (approximations.length > 0) {
     const badges = approximations
       .split("\n")
-      .map((text) => `<span class="approximation-badge">${escape(text)}</span>`)
+      .filter((l) => l.length > 0)
+      .map((line) => {
+        const [name, reason, doc, canDisable] = line.split("\t");
+        // **オフ可否が false のものにトグルを出さない**——「オフにできます」と
+        // いう嘘のUIを出さないため。true のものだけ操作可能に見せる。
+        const suffix = canDisable === "1" ? " ⏻" : "";
+        return (
+          `<span class="approximation-badge" data-can-disable="${escape(canDisable)}" ` +
+          `title="${escape(reason)}&#10;出典: ${escape(doc)}">${escape(name)}${suffix}</span>`
+        );
+      })
       .join("");
     sections.push(
       `<div class="inspector-component"><h3>近似</h3>` +

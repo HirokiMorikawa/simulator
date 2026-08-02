@@ -5,7 +5,7 @@
 //! 線形系の未知数から除外する(内部点のみを解く、標準的な境界処理)。3D `Grid3<f64>`
 //! への一般化(7点ステンステンシル)はPhase 3の後続増分で拡張する。
 
-use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{pcg, Preconditioner};
 
 /// 1D棒の格子熱伝導ソルバ。両端(`temperature[0]`・`temperature[n-1]`)はDirichlet境界。
@@ -115,6 +115,24 @@ impl Solver for ConductionRod1D {
     /// 値を捏造するよりは正直である。
     fn total_energy(&self) -> EnergyBreakdown {
         EnergyBreakdown::default()
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        vec![
+            Approximation {
+                name: "1D棒(3点ステンシル)",
+                reason: "3D格子への一般化は未実装。T3のフーリエ級数解の検証に1Dで足りたため。",
+                doc: "docs/12-thermal/02-heat-transfer.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "エネルギー台帳に参加しない",
+                reason: "熱拡散率αしか保持せずρc_pを分離していないため、絶対エネルギーを出せない。\
+                         嘘の数字を入れるより0を返して不参加を明示している。",
+                doc: "docs/12-thermal/02-heat-transfer.md",
+                can_disable: false,
+            },
+        ]
     }
 }
 

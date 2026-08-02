@@ -778,15 +778,123 @@ impl WasmWorld {
             .fold(0.0_f64, f64::max)
     }
 
-    /// 登録済み結合の件数(**増分Kで追加**、InspectorのComponentビュー用)。
+    /// 登録済み結合の件数。
     pub fn coupling_count(&self) -> usize {
         self.inner.coupling_count()
     }
 
+    /// 結合の内省情報を改行区切りで返す(**群1で追加**)。1行1件で
+    /// `種別\t説明\tドメイン\t関連ボディ(カンマ区切り)` のタブ区切り。
+    ///
+    /// **`body_index`を渡すとその剛体に作用する結合だけに絞る**(負値なら全件)。
+    /// 設計 docs/23-frontend/01-editor.md §1.3 の Coupling コンポーネントは
+    /// 「種別・関連する Body/Fluid/Circuit 参照」を要求しており、
+    /// **選択中のオブジェクトのコンポーネントとして出す**のが本来の形なので、
+    /// 絞り込みをこのAPIの既定の使い方にする。
+    ///
+    /// **なぜJSONではなくタブ区切りか**: `sim-wasm`は`serde_json`を依存に
+    /// 持たない(バイナリサイズを抑える既存の方針)。行・列の区切りだけで
+    /// 表現できる平坦なデータなので、自前のJSON組み立てより素直である。
+    pub fn coupling_info_text(&self, body_index: i32) -> String {
+        let infos = if body_index < 0 {
+            self.inner.couplings()
+        } else {
+            match self.try_body_id_at(body_index as usize) {
+                Ok(id) => self.inner.couplings_for_body(id),
+                Err(_) => Vec::new(),
+            }
+        };
+        infos
+            .iter()
+            .map(|c| {
+                let domains: Vec<String> = c.domains.iter().map(|d| format!("{d:?}")).collect();
+                let bodies: Vec<String> = c.bodies.iter().map(|b| b.to_string()).collect();
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    c.kind.name(),
+                    c.description,
+                    domains.join("+"),
+                    bodies.join(",")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `CouplingKind`の1行説明(Inspectorのツールチップ用、**群1で追加**)。
+    pub fn coupling_kind_summary(&self, kind_name: String) -> String {
+        self.inner
+            .couplings()
+            .iter()
+            .find(|c| c.kind.name() == kind_name)
+            .map(|c| c.kind.summary().to_string())
+            .unwrap_or_default()
+    }
+
+    /// ジョイントの内省情報を改行区切りで返す(**群1で追加**)。1行1件で
+    /// `種別\t接続\t軸/長さ/目標角\t無効か` のタブ区切り。
+    /// `body_index`が非負ならその剛体に接続されたものだけに絞る。
+    ///
+    /// **これが無かった間の縮約**: フロントエンドは`constraint_anchor_points_at`で
+    /// アンカー2点しか取れず、**種別も接続先も軸もモータ設定も見えなかった**。
+    pub fn joint_info_text(&self, body_index: i32) -> String {
+        let joints = if body_index < 0 {
+            self.inner.joints()
+        } else {
+            match self.try_body_id_at(body_index as usize) {
+                Ok(id) => self.inner.joints_for_body(id),
+                Err(_) => Vec::new(),
+            }
+        };
+        joints
+            .iter()
+            .map(|j| {
+                let connection = match j.body_b {
+                    Some(b) => format!("body#{} ↔ body#{}", j.body_a, b),
+                    None => format!("body#{} ↔ ワールド固定点", j.body_a),
+                };
+                let mut detail = Vec::new();
+                if let Some(l) = j.length {
+                    detail.push(format!("length={l}"));
+                }
+                if let Some(a) = j.axis {
+                    detail.push(format!("axis=({:.3}, {:.3}, {:.3})", a.x, a.y, a.z));
+                }
+                if let Some(t) = j.motor_target {
+                    detail.push(format!("target={:.3}rad", t));
+                }
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    j.kind.name(),
+                    connection,
+                    detail.join(" "),
+                    if j.disabled { "無効" } else { "有効" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// 有効な近似・縮約の一覧を改行区切りで返す(**増分Kで追加**、
     /// Inspectorの「近似バッジ」用。`World::active_approximations`のdoc参照)。
+    /// 1行1件、`名前\t理由\t出典\tオフ可否` のタブ区切り(**群1で拡張**)。
+    /// 設計 §1.3 の `ApproximationBadge` が要求する「名前・出典・オフ可否」を
+    /// すべて渡す(以前は名前だけの文字列だった)。
     pub fn active_approximations_text(&self) -> String {
-        self.inner.active_approximations().join("\n")
+        self.inner
+            .active_approximations()
+            .iter()
+            .map(|a| {
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    a.name,
+                    a.reason,
+                    a.doc,
+                    if a.can_disable { "1" } else { "0" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// 現在の回路に実際に配線されている素子の本数(**増分G2で追加**)。

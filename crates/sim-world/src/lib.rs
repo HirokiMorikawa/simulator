@@ -256,6 +256,76 @@ pub enum ProbeTarget {
     StateHashDigest,
 }
 
+/// ジョイントの種別(**群1で追加**、`JointInfo`のdoc参照)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JointKind {
+    Distance,
+    Ball,
+    Slider,
+    HingeMotor,
+}
+
+impl JointKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            JointKind::Distance => "DistanceJoint",
+            JointKind::Ball => "BallJoint",
+            JointKind::Slider => "SliderJoint",
+            JointKind::HingeMotor => "HingeMotorPd",
+        }
+    }
+}
+
+/// ジョイント1件の内省情報(**群1で追加**)。
+///
+/// **これが無かった間の縮約**: フロントエンドはジョイントを
+/// `constraint_anchor_points_at`(スポーン時に覚えた`constraint_joint_index`から
+/// アンカー2点を返すだけ)でしか見られず、**種別も接続先も制限もモータ設定も
+/// 取り出せなかった**。設計 docs/23-frontend/01-editor.md §1.3 の Joint
+/// コンポーネントは「種別(Ball/Hinge/Slider/…)・接続 Body ID・軸・制限・モータ」を
+/// 要求している。`MechanicsSolver`は4種のジョイントを別々の`Vec`で保持しているので、
+/// ここで種別タグを付けて1本の列挙へまとめる。
+#[derive(Clone, Debug)]
+pub struct JointInfo {
+    /// 種別ごとの`Vec`内のindex(`kind`と組で一意)。
+    pub index: usize,
+    pub kind: JointKind,
+    pub body_a: usize,
+    /// `None`ならワールド固定点への拘束。
+    pub body_b: Option<usize>,
+    pub anchor_a: Vec3,
+    pub anchor_b: Vec3,
+    /// 軸を持つ種別(Slider/HingeMotor)のみ`Some`。
+    pub axis: Option<Vec3>,
+    /// `DistanceJoint`の拘束長。
+    pub length: Option<f64>,
+    /// モータの目標角(`HingeMotorPd`のみ)。
+    pub motor_target: Option<f64>,
+    /// 無効化されているか(`BallJoint::disabled`)。
+    pub disabled: bool,
+}
+
+/// 結合1件の内省情報(**群1で追加**、`World::couplings`のdoc参照)。
+///
+/// 設計 docs/23-frontend/01-editor.md §1.3 の Coupling コンポーネントが要求する
+/// 「種別・関連する Body/Fluid/Circuit 参照」をそのまま表現する。
+#[derive(Clone, Debug)]
+pub struct CouplingInfo {
+    /// 登録順のindex(`World::couplings`の並びと一致)。
+    pub index: usize,
+    pub kind: sim_coupling::CouplingKind,
+    /// パラメータ込みの人間可読表現。
+    pub description: String,
+    /// この結合が跨るドメイン。
+    pub domains: &'static [sim_core::DomainId],
+    /// 読み書きする剛体index。
+    pub bodies: Vec<usize>,
+    /// 読み書きする熱ノードindex。
+    pub thermal_nodes: Vec<usize>,
+    /// 読み書きする電圧源index。
+    pub voltage_sources: Vec<usize>,
+}
+
 /// 任意の観測量を毎stepサンプルして`history`(`RingBuffer`)に積む軽量プローブ
 /// (設計docs/20-integration/04-world-api.md §2.1「測って遊ぶの中心機能」)。
 #[derive(Clone)]
@@ -1173,57 +1243,173 @@ impl World {
         self.ledger.as_ref().map_or(0.0, |l| l.latest_residual())
     }
 
-    /// 登録済み`Coupling`の件数(**増分Kで追加**、InspectorのComponentビューが
-    /// 「このワールドにいくつ結合が載っているか」を出すのに使う。個々の結合の
-    /// 種別名を出す手段は`Coupling`トレイトが名前を持たないため無い——
-    /// `domains()`のペアで種別を推測することはできるが、名前を捏造するより
-    /// 件数だけを正直に出す)。
+    /// 登録済み`Coupling`の件数。
     pub fn coupling_count(&self) -> usize {
         self.couplings.len()
     }
 
-    /// 現在のワールドで有効になっている**縮約・近似の一覧**(**増分Kで追加**)。
+    /// 登録済み結合を内省用に列挙する(**群1で追加**)。
+    ///
+    /// **これが無かった間の縮約**: `Coupling`トレイトが種別を名乗る手段を持たず、
+    /// Inspectorは「種別: —(トレイトが名前を持たないため非表示)」という表示に
+    /// 留まっていた。設計 docs/23-frontend/01-editor.md §1.3 が Coupling
+    /// コンポーネントに要求する「**種別**・関連する Body/Fluid/Circuit 参照」を
+    /// 満たすため、`CouplingKind`+`describe()`+`referenced_*()`を
+    /// トレイトへ追加し、ここで集約する。
+    pub fn couplings(&self) -> Vec<CouplingInfo> {
+        self.couplings
+            .iter()
+            .enumerate()
+            .map(|(index, c)| CouplingInfo {
+                index,
+                kind: c.kind(),
+                description: c.describe(),
+                domains: c.domain_ids(),
+                bodies: c.referenced_bodies(),
+                thermal_nodes: c.referenced_thermal_nodes(),
+                voltage_sources: c.referenced_voltage_sources(),
+            })
+            .collect()
+    }
+
+    /// 全ジョイントを種別タグ付きで列挙する(**群1で追加**、`JointInfo`のdoc参照)。
+    pub fn joints(&self) -> Vec<JointInfo> {
+        let m = &self.mechanics;
+        let mut out = Vec::new();
+        for (index, j) in m.joints.iter().enumerate() {
+            out.push(JointInfo {
+                index,
+                kind: JointKind::Distance,
+                body_a: j.body_a,
+                body_b: j.body_b,
+                anchor_a: j.anchor_a,
+                anchor_b: j.anchor_b,
+                axis: None,
+                length: Some(j.length),
+                motor_target: None,
+                disabled: false,
+            });
+        }
+        for (index, j) in m.ball_joints.iter().enumerate() {
+            out.push(JointInfo {
+                index,
+                kind: JointKind::Ball,
+                body_a: j.body_a,
+                body_b: j.body_b,
+                anchor_a: j.anchor_a,
+                anchor_b: j.anchor_b,
+                axis: None,
+                length: None,
+                motor_target: None,
+                disabled: j.disabled,
+            });
+        }
+        for (index, j) in m.slider_joints.iter().enumerate() {
+            out.push(JointInfo {
+                index,
+                kind: JointKind::Slider,
+                body_a: j.body_a,
+                body_b: j.body_b,
+                anchor_a: j.anchor_a,
+                anchor_b: j.anchor_b,
+                axis: Some(j.axis_a),
+                length: None,
+                motor_target: None,
+                disabled: false,
+            });
+        }
+        for (index, j) in m.hinge_motors.iter().enumerate() {
+            out.push(JointInfo {
+                index,
+                kind: JointKind::HingeMotor,
+                body_a: j.body,
+                body_b: None,
+                anchor_a: Vec3::ZERO,
+                anchor_b: Vec3::ZERO,
+                axis: Some(j.axis),
+                length: None,
+                motor_target: Some(j.theta_target),
+                disabled: false,
+            });
+        }
+        out
+    }
+
+    /// 特定の剛体に接続されたジョイントだけを返す(Inspectorが選択中ボディで絞る)。
+    pub fn joints_for_body(&self, body: BodyId) -> Vec<JointInfo> {
+        let index = body.index as usize;
+        self.joints()
+            .into_iter()
+            .filter(|j| j.body_a == index || j.body_b == Some(index))
+            .collect()
+    }
+
+    /// 特定の剛体に作用する結合だけを返す(Inspectorが選択中ボディで絞るため)。
+    pub fn couplings_for_body(&self, body: BodyId) -> Vec<CouplingInfo> {
+        let index = body.index as usize;
+        self.couplings()
+            .into_iter()
+            .filter(|c| c.bodies.contains(&index))
+            .collect()
+    }
+
+    /// 現在のワールドで有効になっている**縮約・近似の一覧**。
     /// Inspectorの「近似バッジ」に出す。
     ///
-    /// **なぜワールドの構成から導くのか**: 各ソルバが「自分がどんな近似を
-    /// 使っているか」を申告するAPIは無い。ここでは**どのドメイン・どの設定が
-    /// 有効か**という観測可能な事実から、設計文書に記録済みの既知の縮約を
-    /// 引き当てる。事実に基づくので嘘にならず、かつユーザーが「今見えている
-    /// 挙動がどの近似の上に乗っているか」を知る手段になる。
-    pub fn active_approximations(&self) -> Vec<&'static str> {
+    /// **群1で「Worldからの推測」を「各ソルバの自己申告の集約」へ置き換えた**。
+    /// 以前はここで「どのドメインが有効か」を見て固定文字列を並べていたため、
+    /// ①ソルバ側で近似を変えてもここを直さないと表示が古いまま
+    /// ②同じドメインでも設定によって効いている近似が違う(格子流体の粘性0など)
+    /// ことを表現できない、という問題があった。`Solver::approximations()`
+    /// (既定は空)を各ソルバが実装し、ここは集めるだけにする。
+    ///
+    /// **`MechanicsSolver`のように申告がまだ空のソルバもある**——その場合は
+    /// 何も出さない(嘘を並べるより出さない方を選ぶ、既存の方針どおり)。
+    pub fn active_approximations(&self) -> Vec<sim_core::Approximation> {
         let mut out = Vec::new();
-        if self.mechanics.water.is_some() {
-            out.push("浮力: 静的水域(集中定数、自由表面を追跡しない)");
+        out.extend(self.mechanics.approximations());
+        if let Some(t) = &self.thermal {
+            out.extend(t.approximations());
         }
-        if self.mechanics.atmosphere.is_some() {
-            out.push("空気抗力: 集中定数モデル(格子流体との連成ではない)");
+        if let Some(e) = &self.em_electrostatics {
+            out.extend(e.approximations());
         }
-        if self.thermal.is_some() {
-            out.push("熱: 集中定数ノード網(陰的Euler、無条件安定)");
+        if let Some(a) = &self.astro {
+            out.extend(a.approximations());
         }
-        if self.conduction_rod.is_some() {
-            out.push("熱伝導棒: 1D格子(両端Dirichlet境界、エネルギー台帳に参加しない)");
+        if let Some(c) = &self.circuit {
+            out.extend(c.approximations());
         }
-        if self.circuit.is_some() {
-            out.push("回路: MNA + 後退Euler(スイッチは2値抵抗近似)");
+        if let Some(sph) = &self.sph {
+            out.extend(sph.approximations());
         }
-        if self.sph.is_some() {
-            out.push("SPH: 弱圧縮(WCSPH、自由表面で密度が欠損する)");
+        if let Some(g) = &self.grid_fluid {
+            out.extend(g.approximations());
         }
-        if self.grid_fluid.is_some() {
-            out.push("格子流体: 2D・周期境界(流入/流出境界を持たない)");
+        if let Some(b) = &self.soft_body {
+            out.extend(b.approximations());
         }
-        if self.soft_body.is_some() {
-            out.push("ソフトボディ: XPBD距離拘束のみ(曲げ/体積拘束・自己衝突は無し)");
+        if let Some(r) = &self.conduction_rod {
+            out.extend(r.approximations());
         }
-        if self.gas.is_some() {
-            out.push("気体: 準静的な理想気体(固有の時間発展を持たない)");
-        }
-        if self.astro.is_some() {
-            out.push("天体: 質点N体(形状・自転・潮汐は別扱い)");
-        }
-        if !self.couplings.is_empty() {
-            out.push("結合: 一部は1step遅れの縮約(誘導・モーター)");
+        // 結合の1step遅れはソルバではなく`World`の適用順序に起因するので、
+        // ここでしか申告できない(どのソルバの近似でもない)。
+        if self.couplings.iter().any(|c| {
+            matches!(
+                c.kind(),
+                sim_coupling::CouplingKind::InductionCoupling
+                    | sim_coupling::CouplingKind::MotorCoupling
+                    | sim_coupling::CouplingKind::SphRigid
+                    | sim_coupling::CouplingKind::GridFluidRigid
+            )
+        }) {
+            out.push(sim_core::Approximation {
+                name: "結合の1step遅れ",
+                reason: "誘導・モーター・SPH剛体・格子流体剛体は、前stepで確定した量を\
+                         読む縮約になっている(pre/post 2相への移行は未了)。",
+                doc: "docs/20-integration/01-coupling-matrix.md",
+                can_disable: false,
+            });
         }
         out
     }
@@ -1795,6 +1981,202 @@ mod tests {
         );
     }
 
+    /// **群1: 近似バッジがソルバの自己申告であり、設定に追従すること**。
+    ///
+    /// 以前は`World`が「どのドメインが有効か」から固定文字列を組み立てていたため、
+    /// **同じドメインなら設定が違っても同じバッジ**しか出せなかった。
+    /// `Solver::approximations()`へ移したので、格子流体の粘性を0にすると
+    /// 「粘性拡散をスキップ」が増える——**設定依存の近似を表現できる**ことを固定する。
+    #[test]
+    fn approximations_are_self_reported_and_follow_solver_settings() {
+        let build = |viscosity: f64| -> Vec<sim_core::Approximation> {
+            let mut world = World::new(WorldOptions::default());
+            let mut grid = sim_fluid::GridFluid2D::new(8, 8, 0.1);
+            grid.kinematic_viscosity = viscosity;
+            world.enable_grid_fluid(grid);
+            world.active_approximations()
+        };
+
+        let viscous = build(1.0e-4);
+        let inviscid = build(0.0);
+        let names = |v: &[sim_core::Approximation]| -> Vec<&'static str> {
+            v.iter().map(|a| a.name).collect()
+        };
+        assert!(
+            names(&viscous).contains(&"2D・周期境界"),
+            "格子流体の常時の近似は申告されるべき: {:?}",
+            names(&viscous)
+        );
+        assert!(
+            !names(&viscous).contains(&"粘性拡散をスキップ"),
+            "粘性があるならスキップの申告は出ないはず: {:?}",
+            names(&viscous)
+        );
+        assert!(
+            names(&inviscid).contains(&"粘性拡散をスキップ"),
+            "粘性0なら設定依存の近似が増えるべき(自己申告にした目的そのもの): {:?}",
+            names(&inviscid)
+        );
+
+        // 設計§1.3 が要求する「出典」と「オフ可否」が全件に入っていること。
+        for a in &inviscid {
+            assert!(a.doc.starts_with("docs/"), "出典を持つべき: {a:?}");
+            assert!(!a.reason.is_empty(), "理由を持つべき: {a:?}");
+        }
+        // 現状オフにできる機構が無いものは`can_disable=false`で申告される
+        // (UIが「オフにできます」という嘘のトグルを出さないため)。
+        assert!(inviscid
+            .iter()
+            .any(|a| a.name == "2D・周期境界" && !a.can_disable));
+    }
+
+    /// **群1: 結合の内省が「捏造でない」こと**——`referenced_bodies()`が申告する
+    /// 剛体が、**実際にその結合から力を受ける剛体と一致する**ことを確認する。
+    ///
+    /// これが内省層の要である。種別名や説明文は実装者が好きに書けてしまうが、
+    /// 参照ボディは**実測と突き合わせられる**: 結合を適用する前後で速度が変わった
+    /// 剛体を集め、申告値と一致するかを見る。申告だけ増やして実際には触っていない
+    /// (あるいは逆に、申告に無い剛体を勝手に動かす)結合をこれで弾ける。
+    #[test]
+    fn coupling_referenced_bodies_match_the_bodies_actually_affected() {
+        let mut world = World::new(WorldOptions {
+            gravity: 0.0,
+            ..WorldOptions::default()
+        });
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        // 3体用意し、真ん中(index 1)だけに結合を張る。
+        for _ in 0..3 {
+            let desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.1 }, steel);
+            world.create_body(desc);
+        }
+        // 一様電場を与えれば、結合を張ったボディだけが力を受ける。
+        let electrostatics = sim_em::PointChargeSystem::new(sim_em::UniformField {
+            e: Vec3::new(0.0, 1.0e6, 0.0),
+            b: Vec3::ZERO,
+        });
+        world.enable_em_electrostatics(electrostatics);
+        world.add_coupling(Box::new(sim_coupling::LorentzForce {
+            body_index: 1,
+            charge: 1.0e-6,
+        }));
+
+        let before: Vec<Vec3> = (0..3)
+            .map(|i| world.mechanics().bodies.linear_velocity[i])
+            .collect();
+        world.step();
+        let moved: Vec<usize> = (0..3)
+            .filter(|&i| {
+                let v = world.mechanics().bodies.linear_velocity[i];
+                (v - before[i]).length() > 1.0e-15
+            })
+            .collect();
+
+        let infos = world.couplings();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].kind, sim_coupling::CouplingKind::LorentzForce);
+        assert_eq!(
+            infos[0].bodies, moved,
+            "referenced_bodies()は実際に力を受けた剛体と一致すべき: \
+             申告={:?} 実測={:?}",
+            infos[0].bodies, moved
+        );
+        // 説明文にパラメータが入っていること(件数だけの縮約からの脱却)。
+        assert!(
+            infos[0].description.contains("body#1"),
+            "describe()はパラメータを含むべき: {}",
+            infos[0].description
+        );
+        // 選択ボディでの絞り込みが効くこと。
+        let ids: Vec<BodyId> = (0..3)
+            .map(|i| BodyId {
+                index: i,
+                generation: 0,
+            })
+            .collect();
+        assert_eq!(world.couplings_for_body(ids[1]).len(), 1);
+        assert!(world.couplings_for_body(ids[0]).is_empty());
+    }
+
+    /// **群1: 種別が一意で、跨るドメインが空でないこと**。`CouplingKind`を
+    /// enum にした目的(UIが種別で分岐・フィルタできる)が成立する前提を固定する。
+    #[test]
+    fn every_coupling_kind_is_distinct_and_declares_its_domains() {
+        use sim_coupling::{Coupling, CouplingKind};
+        let couplings: Vec<Box<dyn Coupling>> = vec![
+            Box::new(sim_coupling::DissipationToHeat { thermal_node: 0 }),
+            Box::new(sim_coupling::JouleHeat { thermal_node: 0 }),
+            Box::new(sim_coupling::LorentzForce {
+                body_index: 0,
+                charge: 1.0,
+            }),
+            Box::new(sim_coupling::MotorCoupling {
+                body_index: 0,
+                axis: Vec3::new(0.0, 1.0, 0.0),
+                voltage_source_index: 0,
+                torque_constant: 0.05,
+            }),
+            Box::new(sim_coupling::BoussinesqBuoyancy {
+                thermal_node: 0,
+                ambient_temperature: 293.15,
+                thermal_expansion_coefficient: 3.4e-3,
+            }),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for c in &couplings {
+            let kind = c.kind();
+            assert!(seen.insert(kind), "種別は一意であるべき: {kind:?}");
+            assert!(
+                !c.domain_ids().is_empty(),
+                "跨るドメインを宣言すべき: {kind:?}"
+            );
+            assert!(
+                c.describe().starts_with(kind.name()),
+                "describe()は種別名で始めるべき: {}",
+                c.describe()
+            );
+            assert!(!kind.summary().is_empty());
+        }
+        assert_ne!(CouplingKind::JouleHeat, CouplingKind::DissipationToHeat);
+    }
+
+    /// **群1: ジョイントの列挙**。4種のジョイントが種別タグ付きで1本の列挙に
+    /// 並び、選択ボディで絞れること。Inspectorの Joint コンポーネントが
+    /// アンカー2点だけの縮約表示だったのを、種別・接続先・軸まで出せるようにした。
+    #[test]
+    fn joints_are_enumerated_with_kind_and_filtered_by_body() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let a = world.create_body(RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.1 }, steel));
+        let b = world.create_body(RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.1 }, steel));
+
+        world.add_distance_joint_to_world_point(a, Vec3::ZERO, Vec3::new(0.0, 2.0, 0.0), 1.0);
+        world
+            .mechanics_mut()
+            .add_ball_joint(sim_mechanics::BallJoint {
+                body_a: a.index as usize,
+                anchor_a: Vec3::ZERO,
+                body_b: Some(b.index as usize),
+                anchor_b: Vec3::ZERO,
+                disabled: false,
+            });
+
+        let joints = world.joints();
+        assert_eq!(joints.len(), 2);
+        let kinds: Vec<JointKind> = joints.iter().map(|j| j.kind).collect();
+        assert!(kinds.contains(&JointKind::Distance) && kinds.contains(&JointKind::Ball));
+        // DistanceJoint はワールド固定点なので body_b が None。
+        let distance = joints
+            .iter()
+            .find(|j| j.kind == JointKind::Distance)
+            .unwrap();
+        assert_eq!(distance.body_b, None);
+        assert_eq!(distance.length, Some(1.0));
+
+        // bはBallJointだけに繋がる。
+        assert_eq!(world.joints_for_body(b).len(), 1);
+        assert_eq!(world.joints_for_body(a).len(), 2);
+    }
+
     /// **増分J: 結合の pre/post 2相分離が実際に働くこと**。
     ///
     /// 設計 docs/20-integration/01-coupling-matrix.md §1.3 が求める2相のうち、
@@ -1810,8 +2192,14 @@ mod tests {
             speed: f64,
         }
         impl sim_coupling::Coupling for PinVelocity {
-            fn domains(&self) -> (sim_core::DomainId, sim_core::DomainId) {
-                (sim_core::DomainId::Mechanics, sim_core::DomainId::Mechanics)
+            fn kind(&self) -> sim_coupling::CouplingKind {
+                sim_coupling::CouplingKind::Noop
+            }
+            fn domain_ids(&self) -> &'static [sim_core::DomainId] {
+                &[sim_core::DomainId::Mechanics]
+            }
+            fn describe(&self) -> String {
+                "PinVelocity(検査用)".to_string()
             }
             fn apply(&mut self, _world: &mut sim_coupling::DomainStates, _dt: f64) {}
             fn apply_pre(&mut self, world: &mut sim_coupling::DomainStates, _dt: f64) {

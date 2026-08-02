@@ -17,7 +17,7 @@
 //! `sim_mechanics::MechanicsSolver::gravity`のdoc参照)をそのまま使う —
 //! 独自の重力パラメータを持たせると`World`の重力設定と食い違うリスクがあるため。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 
 /// 単一の`ThermalNode`(`thermal_node`インデックス)の温度と周囲温度
@@ -34,8 +34,23 @@ pub struct BoussinesqBuoyancy {
 }
 
 impl Coupling for BoussinesqBuoyancy {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Thermal, DomainId::Fluid)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::BoussinesqBuoyancy
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Thermal, DomainId::Fluid]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "BoussinesqBuoyancy thermal_node[{}] T_amb={}K beta={}",
+            self.thermal_node, self.ambient_temperature, self.thermal_expansion_coefficient
+        )
+    }
+
+    fn referenced_thermal_nodes(&self) -> Vec<usize> {
+        vec![self.thermal_node]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

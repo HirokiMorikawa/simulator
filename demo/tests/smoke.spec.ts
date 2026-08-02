@@ -321,14 +321,23 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   // Probe セクション(シーン定義プローブ)と現在値。
   await expect(inspector.getByText("Probe", { exact: true })).toBeVisible();
   await expect(inspector.getByText("BodyPosX(bob)", { exact: true })).toBeVisible();
-  // 近似バッジと Coupling セクションは**有効なドメインがあるシーンにだけ**出る
-  // (D11は純粋な力学シーンなので該当する縮約が無く、何も表示しないのが正しい)。
-  // 熱ドメイン + dissipation_to_heat 結合を持つ D10 で確認する。
-  await expect(inspector.locator(".approximation-badge")).toHaveCount(0);
+  // 近似バッジ(**群1で各ソルバの自己申告へ移行**)。
+  // 移行前はWorld側が「どのドメインが有効か」から推測しており、力学ソルバ自身の
+  // 近似(PGS+Baumgarte・マニフォールド4点)は**1件も挙がっていなかった**ため
+  // D11(純粋な力学シーン)ではバッジが0件だった。自己申告にしたことで、
+  // 力学だけのシーンでも実際に効いている近似が出る。
+  await expect(
+    inspector.getByText("接触: PGS + Baumgarte", { exact: true }),
+  ).toBeVisible();
   await page.selectOption("#select-scene", "d10-brake-heat.json");
   await hierarchy.getByText("brake_pad", { exact: true }).click();
   await expect(inspector.locator(".approximation-badge").first()).toBeVisible();
-  await expect(inspector.getByText("Coupling", { exact: true })).toBeVisible();
+  // **群1: Coupling が種別とパラメータで出る**(以前は「種別: —(トレイトが
+  // 名前を持たないため非表示)」という件数だけの表示だった)。D10 は
+  // dissipation_to_heat 結合を持つ。これは特定ボディを参照しない(全体の散逸を
+  // 読む)結合なので「Coupling (シーン全体)」枠に出る。
+  await expect(inspector.getByText("DissipationToHeat", { exact: true })).toBeVisible();
+  await expect(inspector).not.toContainText("トレイトが名前を持たないため非表示");
 
   // Joint セクションは `constraint_anchor_points_at` がアンカーを返すボディに
   // 出る。スポーンした振り子(ワールド固定点への DistanceJoint)で確認する。
@@ -397,6 +406,42 @@ test("増分L: 流体場オーバーレイ・カプセル・材料派生", async
   await toggle.uncheck();
   await page.waitForTimeout(200);
   await toggle.check();
+
+  expect(errors).toEqual([]);
+});
+
+test("群1: Inspector が結合の種別・ジョイントの接続を実データで出し、下端まで到達できる", async ({
+  page,
+}) => {
+  // **ユーザーが指摘した縮約の解消**: 以前 Coupling は件数だけを出し
+  // 「種別: —(トレイトが名前を持たないため非表示)」と表示していた。
+  // Joint も `constraint_anchor_points_at` のアンカー2点のみで、
+  // シーンから読み込んだジョイントは**1件も出なかった**。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+  const hierarchy = page.locator("#hierarchy-tree");
+  const inspector = page.locator("#inspector-body");
+
+  // D12 ラグドールは BallJoint 3本。種別と接続先が出る。
+  await page.selectOption("#select-scene", "d12-ragdoll.json");
+  await hierarchy.getByText("torso", { exact: true }).click();
+  await expect(inspector.getByText("BallJoint", { exact: true }).first()).toBeVisible();
+  await expect(inspector.getByText("body#1 ↔ body#2", { exact: true })).toBeVisible();
+
+  // **Component が増えてパネル高を超えるので、スクロールで下端へ到達できること**を
+  // 座標で確認する(増分E3のドロワー同様、到達不能なUIを作らないための回帰)。
+  const panel = page.locator("#inspector");
+  const overflowing = await panel.evaluate((e) => e.scrollHeight > e.clientHeight);
+  expect(overflowing).toBe(true);
+  await panel.evaluate((e) => {
+    e.scrollTop = e.scrollHeight;
+  });
+  await expect(page.locator(".approximation-badge").first()).toBeVisible();
+
+  // 近似バッジは出典と理由を title に持つ(設計§1.3「名前・出典・オフ可否」)。
+  const badgeTitle = await page.locator(".approximation-badge").first().getAttribute("title");
+  expect(badgeTitle).toContain("出典: docs/");
 
   expect(errors).toEqual([]);
 });

@@ -190,6 +190,10 @@ body {
 
 #inspector-body {
   padding: 0 10px 10px;
+  /* スクロールは親の `.panel { overflow: auto }` が担う(ここで二重に
+     スクロールコンテナを作らない)。群1で Component が増えて内容が
+     パネル高を超えるようになったため、実際にスクロールで下端の
+     Component へ到達できることを Playwright で固定してある。 */
 }
 
 .inspector-component {
@@ -206,7 +210,32 @@ body {
 .inspector-field {
   display: flex;
   justify-content: space-between;
+  gap: 8px;
   padding: 1px 0;
+  color: #ccc;
+}
+
+/* 値側は折り返す(結合の説明文のように長い値が切れないように、群1で追加)。 */
+.inspector-field > span:last-child {
+  text-align: right;
+  word-break: break-word;
+  min-width: 0;
+}
+
+/* ラベル側は縮めない。 */
+.inspector-field > span:first-child {
+  flex: 0 0 auto;
+  color: #9aa;
+}
+
+/* 結合・ジョイントは値が長いので縦積みにする(群1)。 */
+.inspector-component[data-stacked] .inspector-field {
+  display: block;
+}
+.inspector-component[data-stacked] .inspector-field > span:last-child {
+  display: block;
+  text-align: left;
+  padding-left: 8px;
   color: #ccc;
 }
 

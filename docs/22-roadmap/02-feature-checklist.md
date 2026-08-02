@@ -2220,20 +2220,50 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       **Circuit**は`circuit_element_count`/`circuit_element_label_at`(増分G2)、
       **Probe**は`imported_probe_count`/`imported_probe_label_at`+現在値、
       **Coupling**は本増分で追加した`coupling_count`。
-      **Couplingは件数だけを出す**——`Coupling`トレイトが名前を持たないため、
-      `domains()`のペアから種別を推測することはできるが**名前を捏造するより
-      件数だけを正直に出す**判断にした(その旨をUIにも「—(トレイトが名前を
-      持たないため非表示)」と明示する)。
-      **近似バッジ**は本増分で追加した`World::active_approximations`。
-      各ソルバが「自分がどんな近似を使っているか」を自己申告するAPIは無いので、
-      **どのドメイン・どの設定が有効かという観測可能な事実**から設計文書に
-      記録済みの既知の縮約(静的水域の集中定数浮力、WCSPHの自由表面欠損、
-      格子流体の周期境界、1step遅れの結合など)を引き当てる。事実に基づくので
-      嘘にならず、ユーザーが「今見えている挙動がどの近似の上に乗っているか」を
-      知る手段になる。
-      Playwrightで、D11(純粋な力学シーン)では**近似バッジが1つも出ない**こと
-      (該当する縮約が無いので正しい)、D10(熱+結合)では実際に出ること、
-      スポーンした振り子でJointセクションが出ることを確認した。
+      **(当初の縮約と、群1での解消)**: 当初 Coupling は件数だけを出し
+      「種別: —(トレイトが名前を持たないため非表示)」と表示していた
+      ——`Coupling`トレイトが名前を持たず、名前を捏造するより件数だけを
+      正直に出す判断だったため。近似バッジも各ソルバの自己申告APIが無く、
+      `World`が「どのドメインが有効か」から推測していた。
+
+      **群1(2026-08-02)で内省層を新設し、両方とも解消した**:
+      - `Coupling`トレイトに `kind() -> CouplingKind`(15種のenum)・
+        `describe() -> String`(パラメータ込み)・`referenced_bodies()`/
+        `referenced_thermal_nodes()`/`referenced_voltage_sources()` を追加。
+        `domains()` は `(DomainId, DomainId)` から `&'static [DomainId]` へ
+        一般化した(**3ドメイン以上を宣言できない**制約の解消)。なお変更時点で
+        このメソッドの呼び出し元は**1つも無く**、「実行順序の決定に使う」と
+        宣言しながら誰も使っていない死んだAPIだった。
+      - `World::couplings()`/`couplings_for_body()`/`joints()`/
+        `joints_for_body()` を新設。**Joint は種別(Distance/Ball/Slider/
+        HingeMotor)・接続先・軸・長さ・モータ目標角・無効フラグ**を返す
+        ——設計§1.3 の Joint コンポーネントが要求する全項目。以前は
+        `constraint_anchor_points_at`(スポーン時に覚えたindex経由)だったため
+        **シーンJSONから読み込んだジョイントは1件も出なかった**。
+      - `Solver`トレイトに `approximations() -> Vec<Approximation>` を追加し、
+        `Approximation { name, reason, doc, can_disable }` として設計§1.3 が
+        要求する「名前・**出典**・**オフ可否**」を揃えた。
+        `World::active_approximations()` は推測をやめ**集約するだけ**にした。
+        **自己申告にしたことで設定依存の近似を表現できる**ようになった——
+        格子流体の `kinematic_viscosity=0` なら「粘性拡散をスキップ」が増える
+        (推測方式はドメインの有無しか見ないため表現できなかった)。
+        `can_disable=false` を申告することで、UIが「オフにできます」という
+        嘘のトグルを出さずに済む。
+      - Inspector は Coupling を**ボディ単位**と**シーン全体**に分けて出す
+        ——`DissipationToHeat`のように特定の剛体を参照しない結合は選択ボディで
+        絞ると消えてしまうため(実際D10で踏んだ)。
+      - **検証**:
+        `coupling_referenced_bodies_match_the_bodies_actually_affected` は、
+        結合適用の前後で速度が変わった剛体を実測して`referenced_bodies()`の
+        申告と一致することを確認する——**種別名や説明文は実装者が好きに書けるが、
+        参照ボディは実測と突き合わせられる**。申告だけ増やして実際には触らない
+        結合をこれで弾く。
+      - あわせて**Inspectorパネルのスクロールを直した**。Componentが増えて
+        パネル高を超え、下端の近似バッジが到達不能になっていた(増分E3の
+        Projectドロワーと同じ種類のバグ)。Playwrightで座標で固定した。
+      - **D11(純粋な力学シーン)でもバッジが出るようになった**。移行前は
+        力学ソルバ自身の近似(PGS+Baumgarte・マニフォールド4点)が1件も
+        挙がっておらず0件だった。
       **FluidRegionは対象外**: SPH粒子が`RigidBodySet`のような個別ID体系を
       持たないため(Hierarchyの概要行と同じ既知の限界)。
 - [x] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク

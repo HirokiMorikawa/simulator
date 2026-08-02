@@ -11,7 +11,8 @@ use crate::joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint};
 use crate::shape::Shape;
 use crate::{ccd, collision, contact, joint, sleep, RigidBodyDesc};
 use sim_core::{
-    EnergyBreakdown, Event, EventKind, MaterialDb, Solver, SolverContext, SourceId, StateHasher,
+    Approximation, EnergyBreakdown, Event, EventKind, MaterialDb, Solver, SolverContext, SourceId,
+    StateHasher,
 };
 use sim_fluid::{Atmosphere, StaticWaterRegion};
 use std::collections::HashSet;
@@ -332,6 +333,44 @@ impl Solver for MechanicsSolver {
             potential,
             ..Default::default()
         }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        let mut out = vec![
+            Approximation {
+                name: "接触: PGS + Baumgarte",
+                reason: "厳密なLCPではなく逐次射影で解くため、深い積み重ねでは\
+                         わずかな貫入が残る。位置補正はBaumgarteで、これが\
+                         エネルギー台帳に小さな人工的増加を生む。",
+                doc: "docs/10-mechanics/03-contact-solver.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "マニフォールドは最大4点",
+                reason: "接触点を深い順に4点へ縮約する(設計§4.4の簡略版)。",
+                doc: "docs/10-mechanics/02-collision-detection.md",
+                can_disable: false,
+            },
+        ];
+        if self.water.is_some() {
+            out.push(Approximation {
+                name: "浮力: 静的水域(集中定数)",
+                reason: "自由表面を追跡せず、水面の高さと密度だけで浮力を出す。\
+                         物体が入っても水位は変わらない。",
+                doc: "docs/11-fluid/04-free-surface-buoyancy.md",
+                can_disable: false,
+            });
+        }
+        if self.atmosphere.is_some() {
+            out.push(Approximation {
+                name: "空気抗力: 集中定数",
+                reason: "格子流体との連成ではなく、抗力係数と相対速度から直接力を出す。\
+                         揚力の式は sim-fluid に無いため計上しない。",
+                doc: "docs/11-fluid/05-aero-hydrodynamics.md",
+                can_disable: false,
+            });
+        }
+        out
     }
 }
 

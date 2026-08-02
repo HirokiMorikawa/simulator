@@ -31,7 +31,7 @@
 //! 文書化する制約、`SphRigid`・`GridFluidRigid`と同様に既存の`World`公開APIを拡張
 //! せずに実装できる範囲に留めた)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_math::Vec3;
 use sim_mechanics::BodyType;
@@ -83,8 +83,30 @@ impl PhaseChangeMorph {
 }
 
 impl Coupling for PhaseChangeMorph {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Thermal, DomainId::Mechanics)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::PhaseChangeMorph
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Thermal, DomainId::Mechanics]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "PhaseChangeMorph body#{} thermal_node[{}] Tm={}K m0={}kg",
+            self.body_index,
+            self.thermal_node,
+            self.material.melting_temperature,
+            self.initial_mass
+        )
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
+    }
+
+    fn referenced_thermal_nodes(&self) -> Vec<usize> {
+        vec![self.thermal_node]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

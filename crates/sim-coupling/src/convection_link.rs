@@ -27,7 +27,7 @@
 //! の制約は`BoussinesqBuoyancy`と同じ)。取り出した熱量をそのまま反対側へ注入するため、
 //! 2ノード間で厳密に対記帳される(丸め誤差を除き完全にゼロ和)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 
 /// 流体ノード`fluid_node`と受熱面ノード`surface_node`を、強制対流(平板、Blasius解)の
@@ -84,8 +84,23 @@ impl ConvectionLink {
 }
 
 impl Coupling for ConvectionLink {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Fluid, DomainId::Thermal)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::ConvectionLink
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Fluid, DomainId::Thermal]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "ConvectionLink fluid_node[{}] -> surface_node[{}] A={}m2",
+            self.fluid_node, self.surface_node, self.area
+        )
+    }
+
+    fn referenced_thermal_nodes(&self) -> Vec<usize> {
+        vec![self.fluid_node, self.surface_node]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

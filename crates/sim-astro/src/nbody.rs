@@ -4,7 +4,7 @@
 //! 設計 §4.1 が明記する既定モード)+ leapfrog(kick-drift-kick、シンプレクティック)。
 //! Barnes-Hut($N\gtrsim256$)・WHFast・浮動原点・レジーム切替(§4.2 の残り)は Phase 3+ で拡張する。
 
-use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::Vec3;
 
 /// 万有引力定数 [N m^2/kg^2]。設計 §2、CODATA 値。
@@ -373,6 +373,24 @@ impl Solver for NBodySystem {
             potential,
             ..Default::default()
         }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        let mut out = vec![Approximation {
+            name: "天体: 質点N体",
+            reason: "形状・自転・剛体潮汐は扱わない(潮汐力は独立した純粋関数として提供)。",
+            doc: "docs/16-astro/01-gravitation-nbody.md",
+            can_disable: false,
+        }];
+        if self.atmospheric_drag.is_some() {
+            out.push(Approximation {
+                name: "大気: 指数関数モデル",
+                reason: "スケールハイト一定の等温大気。大気は中心天体と共回転しない。",
+                doc: "docs/16-astro/02-orbital-mechanics.md",
+                can_disable: false,
+            });
+        }
+        out
     }
 }
 

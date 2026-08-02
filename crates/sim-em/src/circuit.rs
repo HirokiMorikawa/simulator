@@ -15,7 +15,7 @@
 //! `Solver`トレイト実装(`sim-coupling::JouleHeat`が`World`経由で駆動するための窓口、
 //! 設計docs/00-foundation/04-architecture.md §1.2)はファイル末尾。
 
-use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 
 /// ノード0は常にグラウンド(電位0、未知数に含めない)。設計 §3。
 pub const GROUND: usize = 0;
@@ -404,6 +404,24 @@ impl Solver for Circuit {
         for &v in &self.diode_voltage {
             hasher.write_f64(v);
         }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        vec![
+            Approximation {
+                name: "スイッチ = 2値抵抗近似",
+                reason: "理想スイッチ専用の未知数を追加せず、閉1e-6Ω/開1e9Ωの抵抗として\
+                         通常のコンダクタンス経路でスタンプする。",
+                doc: "docs/13-electromagnetism/02-circuits.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "動的素子は後退Euler",
+                reason: "C・Lをコンパニオンモデルへ変換して代数化する(設計§4の既定)。",
+                doc: "docs/13-electromagnetism/02-circuits.md",
+                can_disable: false,
+            },
+        ]
     }
 }
 

@@ -32,12 +32,117 @@ pub struct DomainStates<'a> {
     pub sph: Option<&'a mut SphFluid>,
 }
 
+/// 結合の種別(**内省層、群1で追加**)。
+///
+/// **なぜ必要だったか**: `Coupling`トレイトは長らく`domains()`と`apply()`しか持たず、
+/// **実装が自分の種別を名乗る手段が無かった**。そのため`World::coupling_count()`は
+/// 件数しか返せず、InspectorのCouplingコンポーネントは
+/// 「種別: —(トレイトが名前を持たないため非表示)」という縮退表示だった。
+/// 設計 docs/23-frontend/01-editor.md §1.3 は Coupling コンポーネントに
+/// 「**種別**・関連する Body/Fluid/Circuit 参照」を出すことを要求しており、
+/// これはその要求を満たすための型である。
+///
+/// **なぜ`&'static str`ではなく enum なのか**: 文字列だと実装側が任意の名前を
+/// 書けてしまい、UI側が種別で分岐・フィルタできない。enumならコンパイラが
+/// 網羅性を保証し、新しい結合を足したときにUI側の対応漏れが検出できる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CouplingKind {
+    BoussinesqBuoyancy,
+    BrownianForce,
+    BuoyancyDrag,
+    ConvectionLink,
+    DissipationToHeat,
+    GridFluidRigid,
+    ImageChargeForce,
+    InductionCoupling,
+    JouleHeat,
+    LorentzForce,
+    MotorCoupling,
+    PhaseChangeMorph,
+    PistonGas,
+    SphRigid,
+    /// `World`が pre 相で結合を一時的に取り出すときのプレースホルダ。
+    Noop,
+}
+
+impl CouplingKind {
+    /// 型名そのもの(UIの見出し・シーンJSONのタグと一致させる)。
+    pub fn name(self) -> &'static str {
+        match self {
+            CouplingKind::BoussinesqBuoyancy => "BoussinesqBuoyancy",
+            CouplingKind::BrownianForce => "BrownianForce",
+            CouplingKind::BuoyancyDrag => "BuoyancyDrag",
+            CouplingKind::ConvectionLink => "ConvectionLink",
+            CouplingKind::DissipationToHeat => "DissipationToHeat",
+            CouplingKind::GridFluidRigid => "GridFluidRigid",
+            CouplingKind::ImageChargeForce => "ImageChargeForce",
+            CouplingKind::InductionCoupling => "InductionCoupling",
+            CouplingKind::JouleHeat => "JouleHeat",
+            CouplingKind::LorentzForce => "LorentzForce",
+            CouplingKind::MotorCoupling => "MotorCoupling",
+            CouplingKind::PhaseChangeMorph => "PhaseChangeMorph",
+            CouplingKind::PistonGas => "PistonGas",
+            CouplingKind::SphRigid => "SphRigid",
+            CouplingKind::Noop => "Noop",
+        }
+    }
+
+    /// 何をする結合かの1行説明(Inspectorのツールチップ用)。
+    pub fn summary(self) -> &'static str {
+        match self {
+            CouplingKind::BoussinesqBuoyancy => "熱ノードの温度差から格子流体へ浮力を与える",
+            CouplingKind::BrownianForce => "温度と粘性から微小剛体へランダム力を与える",
+            CouplingKind::BuoyancyDrag => "静的水域の浮力と大気の抗力を剛体へ与える",
+            CouplingKind::ConvectionLink => "流体ノードと表面ノードを対流相関式で繋ぐ",
+            CouplingKind::DissipationToHeat => "力学の散逸(接触・摩擦)を熱ノードへ移す",
+            CouplingKind::GridFluidRigid => "格子流体と剛体を双方向に結合する",
+            CouplingKind::ImageChargeForce => "接地平面に対する鏡像電荷の引力を与える",
+            CouplingKind::InductionCoupling => "導体棒の渦電流ブレーキ(レンツ則)",
+            CouplingKind::JouleHeat => "回路の抵抗損失 I^2R を熱ノードへ移す",
+            CouplingKind::LorentzForce => "静電場から帯電剛体へローレンツ力を与える",
+            CouplingKind::MotorCoupling => "回路とヒンジ回転を双方向に結合する(モーター/発電機)",
+            CouplingKind::PhaseChangeMorph => "融解に応じて剛体の質量を減らす(相変化)",
+            CouplingKind::PistonGas => "気体区画とピストン剛体を結合する",
+            CouplingKind::SphRigid => "SPH流体と剛体を境界粒子経由で双方向に結合する",
+            CouplingKind::Noop => "何もしない(内部用プレースホルダ)",
+        }
+    }
+}
+
 /// ドメイン間結合(設計 docs/00-foundation/04-architecture.md §1.3「保存量の橋」)。
 /// 2つ(以上)のソルバの状態を読み、互いに作用を書き込む。取り出した量と注入した量が
 /// 一致することを実装側がデバッグビルドで検算する(設計の要求、§1.1.2(2))。
 pub trait Coupling: CouplingClone {
-    /// 依存するソルバ(実行順序の決定に使う、設計§1.3)。
-    fn domains(&self) -> (DomainId, DomainId);
+    /// この結合の種別(**内省層、群1で追加**。`CouplingKind`のdoc参照)。
+    fn kind(&self) -> CouplingKind;
+
+    /// 依存するソルバ(設計§1.3)。
+    ///
+    /// **群1で `(DomainId, DomainId)` の2-tuple から slice へ一般化した**。
+    /// 2-tuple固定では**3ドメイン以上に跨る結合を宣言できない**。
+    /// なお変更時点でこのメソッドの呼び出し元は**1つも無かった**——
+    /// 「実行順序の決定に使う」と宣言しながら誰も使っていない死んだAPIだったので、
+    /// シグネチャ変更による実挙動の変化は無い。内省層で実際に使い始める。
+    fn domain_ids(&self) -> &'static [DomainId];
+
+    /// パラメータ込みの人間可読表現(InspectorのComponent行に出す)。
+    fn describe(&self) -> String;
+
+    /// この結合が読み書きする剛体のindex(**Inspectorが選択中ボディで絞るため**)。
+    /// 剛体に触れない結合(`JouleHeat`・`ConvectionLink`など)は空を返す。
+    fn referenced_bodies(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
+    /// この結合が読み書きする熱ノードのindex(同上)。既定は空。
+    fn referenced_thermal_nodes(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
+    /// この結合が読み書きする回路の電圧源index(同上)。既定は空。
+    fn referenced_voltage_sources(&self) -> Vec<usize> {
+        Vec::new()
+    }
 
     /// 結合の適用。**pre/post を区別しない実装のための既定の入口**であり、
     /// `apply_pre`/`apply_post`のどちらもオーバーライドしなければ post 相で呼ばれる。
@@ -100,8 +205,14 @@ impl Clone for Box<dyn Coupling> {
 pub struct NoopCoupling;
 
 impl Coupling for NoopCoupling {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Mechanics)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::Noop
+    }
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[]
+    }
+    fn describe(&self) -> String {
+        "Noop".to_string()
     }
     fn apply(&mut self, _world: &mut DomainStates, _dt: f64) {}
 }

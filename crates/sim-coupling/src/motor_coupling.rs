@@ -18,7 +18,7 @@
 //! (`Kinematic`剛体は`torque_accum`を無視して外部指定の角速度をそのまま維持する設計
 //! ——「手回し発電」シナリオで手が任意の負荷に対して一定回転数を保つ理想化に対応)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_math::Vec3;
 
@@ -35,8 +35,27 @@ pub struct MotorCoupling {
 }
 
 impl Coupling for MotorCoupling {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Electromagnetism)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::MotorCoupling
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Electromagnetism]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "MotorCoupling body#{} k={}N.m/A -> V[{}]",
+            self.body_index, self.torque_constant, self.voltage_source_index
+        )
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
+    }
+
+    fn referenced_voltage_sources(&self) -> Vec<usize> {
+        vec![self.voltage_source_index]
     }
 
     fn apply(&mut self, world: &mut DomainStates, _dt: f64) {

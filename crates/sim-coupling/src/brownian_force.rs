@@ -25,7 +25,7 @@
 //! 中央ストリーム管理への正式な組み込みは、他のCoupling同様まだ`World::step()`
 //! パイプラインに接続されていないため後続増分)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_math::SimRng;
 
@@ -75,8 +75,27 @@ impl BrownianForce {
 }
 
 impl Coupling for BrownianForce {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Thermal)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::BrownianForce
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Thermal]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "BrownianForce body#{} r={}m eta={}Pa.s thermal_node[{}]",
+            self.body_index, self.radius, self.viscosity, self.thermal_node
+        )
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
+    }
+
+    fn referenced_thermal_nodes(&self) -> Vec<usize> {
+        vec![self.thermal_node]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

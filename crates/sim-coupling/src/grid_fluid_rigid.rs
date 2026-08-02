@@ -21,7 +21,7 @@
 //! 決定論的に検証する(密な剛体をバルク流体に沈める動的シナリオが`SphRigid`実装検証中に
 //! 招いたSPH特有の縁効果の再発を避ける判断)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_fluid::GridSolidBox;
 use sim_math::Vec3;
@@ -46,8 +46,23 @@ impl GridFluidRigid {
 }
 
 impl Coupling for GridFluidRigid {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Fluid)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::GridFluidRigid
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Fluid]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "GridFluidRigid body#{} half={}x{}",
+            self.body_index, self.half_width, self.half_height
+        )
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

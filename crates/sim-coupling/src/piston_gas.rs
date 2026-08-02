@@ -12,7 +12,7 @@
 //! 気体は常にピストンの`axis`が指す向きに体積が増える側にあるものとして符号を取る
 //! (生成時の位置・体積を基準に、軸方向の変位 × 断面積を加減算)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_math::Vec3;
 use sim_mechanics::RigidBodySet;
@@ -49,8 +49,20 @@ impl PistonGas {
 }
 
 impl Coupling for PistonGas {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Thermal)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::PistonGas
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Thermal]
+    }
+
+    fn describe(&self) -> String {
+        format!("PistonGas body#{} A={}m2", self.body_index, self.area)
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
     }
 
     fn apply(&mut self, world: &mut DomainStates, _dt: f64) {

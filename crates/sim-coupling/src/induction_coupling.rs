@@ -22,7 +22,7 @@
 //! この1step遅れによる数値誤差は、`dt`が時定数$\tau$に対して十分小さければ無視できる
 //! 程度に収まることをテストで確認する(実測rel_err、テストdoc参照)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_math::Vec3;
 
@@ -41,8 +41,27 @@ pub struct InductionCoupling {
 }
 
 impl Coupling for InductionCoupling {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Electromagnetism)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::InductionCoupling
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Electromagnetism]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "InductionCoupling body#{} B={}T l={}m -> V[{}]",
+            self.body_index, self.magnetic_field, self.length, self.voltage_source_index
+        )
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
+    }
+
+    fn referenced_voltage_sources(&self) -> Vec<usize> {
+        vec![self.voltage_source_index]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

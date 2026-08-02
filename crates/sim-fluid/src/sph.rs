@@ -37,7 +37,7 @@
 //! `hydrostatic_pressure_matches_rho_g_h_within_wcsph_boundary_approximation`
 //! (静水圧平衡)で代替的に満たされるものとする。
 
-use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{SpatialHash, Vec3};
 
 /// cubic splineカーネル(Monaghan 1992、3D正規化)。設計§2.1。
@@ -342,6 +342,25 @@ impl Solver for SphFluid {
             hasher.write_f64(self.density[i]);
             hasher.write_f64(self.pressure[i]);
         }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        vec![
+            Approximation {
+                name: "弱圧縮(WCSPH)",
+                reason: "非圧縮の射影ではなく状態方程式で圧力を出すため、密度は静止密度の\
+                         まわりで数%揺らぐ。",
+                doc: "docs/11-fluid/03-sph.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "自由表面で密度が欠損する",
+                reason: "表面付近は近傍粒子が足りず密度が過小評価される(SPH固有の性質で\
+                         バグではない)。",
+                doc: "docs/11-fluid/03-sph.md",
+                can_disable: false,
+            },
+        ]
     }
 }
 

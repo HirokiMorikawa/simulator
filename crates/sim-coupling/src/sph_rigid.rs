@@ -29,7 +29,7 @@
 //! `boundary_force_sums_to_resting_fluid_columns_weight_on_the_container`が
 //! 既に検証済み。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_math::Vec3;
 
@@ -89,8 +89,20 @@ impl SphRigid {
 }
 
 impl Coupling for SphRigid {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Fluid)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::SphRigid
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Fluid]
+    }
+
+    fn describe(&self) -> String {
+        format!("SphRigid body#{} r={}m", self.body_index, self.radius)
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

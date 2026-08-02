@@ -13,7 +13,7 @@
 //! 同じく反作用対象を持たない「外部」由来の力として扱う(平板自身の電荷分布の変化は
 //! モデル化しない)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_em::COULOMB_CONSTANT;
 use sim_math::Vec3;
@@ -30,8 +30,23 @@ pub struct ImageChargeForce {
 }
 
 impl Coupling for ImageChargeForce {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Electromagnetism)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::ImageChargeForce
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Electromagnetism]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "ImageChargeForce body#{} q={}C plane_d={}",
+            self.body_index, self.charge, self.plane_d
+        )
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

@@ -223,6 +223,24 @@ impl sim_core::Solver for SoftBody {
             ..Default::default()
         }
     }
+
+    fn approximations(&self) -> Vec<sim_core::Approximation> {
+        vec![
+            sim_core::Approximation {
+                name: "距離拘束のみ(XPBD)",
+                reason: "曲げ拘束・体積拘束(布・ゼリー)・自己衝突・剛体/流体との結合は未実装。",
+                doc: "docs/10-mechanics/06-soft-body-particles.md",
+                can_disable: false,
+            },
+            sim_core::Approximation {
+                name: "弾性エネルギーを計上しない",
+                reason: "コンプライアンスが実質0で拘束が剛体的に効く運用のため、\
+                         elasticは0のまま。",
+                doc: "docs/10-mechanics/06-soft-body-particles.md",
+                can_disable: false,
+            },
+        ]
+    }
 }
 
 #[cfg(test)]

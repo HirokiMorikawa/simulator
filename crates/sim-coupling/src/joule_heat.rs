@@ -10,7 +10,7 @@
 //! (瞬時電力なので蓄積量ではなく、`DissipationToHeat`の`last_contact_dissipation`とは
 //! 異なり毎回`Circuit`側から改めて読み出すだけで良い — リセットは不要)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 
 /// 回路の全抵抗の瞬時消費電力(ΣV²/R)を`dt`で積分し、単一の`ThermalNode`
@@ -21,8 +21,20 @@ pub struct JouleHeat {
 }
 
 impl Coupling for JouleHeat {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Electromagnetism, DomainId::Thermal)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::JouleHeat
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Electromagnetism, DomainId::Thermal]
+    }
+
+    fn describe(&self) -> String {
+        format!("JouleHeat -> thermal_node[{}]", self.thermal_node)
+    }
+
+    fn referenced_thermal_nodes(&self) -> Vec<usize> {
+        vec![self.thermal_node]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

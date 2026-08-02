@@ -10,7 +10,7 @@
 //! `u` は x面 $(ih,(j+\tfrac12)h)$、`v` は y面 $((i+\tfrac12)h,jh)$ に置く。周期境界のため
 //! 各成分の格子点数はセル数と同じ($n_x\times n_y$、境界の重複層を持たない)。
 
-use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::Vec3;
 
 /// 単一の矩形剛体をマスキング方式(cut-cell法ではない、`sim_fluid::GridFluidRigidBox2D`
@@ -443,6 +443,35 @@ impl Solver for GridFluid2D {
             }
             None => hasher.write_u64(0),
         }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        let mut out = vec![
+            Approximation {
+                name: "2D・周期境界",
+                reason: "流入/流出境界も固体境界も持たないため、下流の後流が上流へ回り込む。",
+                doc: "docs/11-fluid/02-eulerian-grid.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "semi-Lagrangian移流",
+                reason: "無条件安定だが数値拡散が大きい(低粘性域では真の粘性より拡散的)。",
+                doc: "docs/11-fluid/02-eulerian-grid.md",
+                can_disable: false,
+            },
+        ];
+        if self.kinematic_viscosity == 0.0 {
+            // **設定によって効いている近似が変わる例**。粘性0なら陽的粘性拡散を
+            // 丸ごとスキップするので、その事実を申告する(Worldの側からドメインの
+            // 有無だけで推測していたときには表現できなかった情報)。
+            out.push(Approximation {
+                name: "粘性拡散をスキップ",
+                reason: "kinematic_viscosity=0 のため陽的粘性拡散の段を実行していない。",
+                doc: "docs/11-fluid/02-eulerian-grid.md",
+                can_disable: true,
+            });
+        }
+        out
     }
 }
 

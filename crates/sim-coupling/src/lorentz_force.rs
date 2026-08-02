@@ -14,7 +14,7 @@
 //! (`UniformField`)は「外部」由来のため反作用対象を持たない
 //! (`PointChargeSystem::step()`自身が一様外場をそう扱っているのと同じ規約)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_em::COULOMB_CONSTANT;
 use sim_math::Vec3;
@@ -28,8 +28,20 @@ pub struct LorentzForce {
 }
 
 impl Coupling for LorentzForce {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Electromagnetism)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::LorentzForce
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Electromagnetism]
+    }
+
+    fn describe(&self) -> String {
+        format!("LorentzForce body#{} q={}C", self.body_index, self.charge)
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

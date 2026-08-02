@@ -24,7 +24,7 @@
 //! 「揚力」は`sim_fluid`側にも式自体が未実装のため対象外(設計から乖離している範囲を
 //! 正直に文書化する、他の縮約実装と同じ方針)。
 
-use crate::domain_states::{Coupling, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
 use sim_fluid::{Atmosphere, StaticWaterRegion};
 use sim_math::Vec3;
@@ -39,8 +39,25 @@ pub struct BuoyancyDrag {
 }
 
 impl Coupling for BuoyancyDrag {
-    fn domains(&self) -> (DomainId, DomainId) {
-        (DomainId::Mechanics, DomainId::Fluid)
+    fn kind(&self) -> CouplingKind {
+        CouplingKind::BuoyancyDrag
+    }
+
+    fn domain_ids(&self) -> &'static [DomainId] {
+        &[DomainId::Mechanics, DomainId::Fluid]
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "BuoyancyDrag body#{} water={} atmosphere={}",
+            self.body_index,
+            self.water.is_some(),
+            self.atmosphere.is_some()
+        )
+    }
+
+    fn referenced_bodies(&self) -> Vec<usize> {
+        vec![self.body_index]
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {
