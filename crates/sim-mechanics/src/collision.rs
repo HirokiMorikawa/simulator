@@ -1126,6 +1126,16 @@ pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactM
         if bodies.body_type[a] != BodyType::Dynamic && bodies.body_type[b] != BodyType::Dynamic {
             continue;
         }
+        // 衝突フィルタ(設計 §4.1)。broadphase 側で落とすので narrowphase は
+        // 一切走らず、マニフォールドも生成されない = 完全にすり抜ける。
+        if !crate::body::collision_filter_allows(
+            bodies.collision_group[a],
+            bodies.collision_mask[a],
+            bodies.collision_group[b],
+            bodies.collision_mask[b],
+        ) {
+            continue;
+        }
         let xf_a = transform_of(bodies, a);
         let xf_b = transform_of(bodies, b);
         let shape_a = bodies.shape_of(a);
@@ -1180,6 +1190,47 @@ mod tests {
             position: p,
             rotation: sim_math::Quat::IDENTITY,
         }
+    }
+
+    /// 衝突フィルタ(設計 §4.1)が `detect` に効いていること。重なった2球は
+    /// 既定フィルタでは必ずマニフォールドを作るが、互いに見えないグループへ
+    /// 分けると **narrowphase まで到達せず** 0 件になる。
+    #[test]
+    fn collision_filter_suppresses_manifold_for_disjoint_groups() {
+        use crate::body::{RigidBodyDesc, RigidBodySet};
+        use sim_core::MaterialDb;
+
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let build = || {
+            let mut bodies = RigidBodySet::new();
+            for x in [0.0, 1.5] {
+                let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 1.0 }, steel);
+                desc.transform.position = Vec3::new(x, 0.0, 0.0);
+                bodies.create_body(desc, &materials);
+            }
+            bodies
+        };
+
+        let mut cache = AxisCache::default();
+        let bodies = build();
+        assert_eq!(
+            detect(&bodies, &mut cache).len(),
+            1,
+            "既定フィルタでは接触する"
+        );
+
+        let mut filtered = build();
+        // 0b01 は 0b01 だけを見る / 0b10 は 0b10 だけを見る → 互いに不可視。
+        filtered.set_collision_filter(0, 0b01, 0b01);
+        filtered.set_collision_filter(1, 0b10, 0b10);
+        assert_eq!(detect(&filtered, &mut cache).len(), 0, "フィルタで落ちる");
+
+        // 片側だけがマスクを緩めても通らない(双方向 AND)。
+        let mut half = build();
+        half.set_collision_filter(0, 0b01, 0b11);
+        half.set_collision_filter(1, 0b10, 0b10);
+        assert_eq!(detect(&half, &mut cache).len(), 0, "片側だけでは通らない");
     }
 
     #[test]

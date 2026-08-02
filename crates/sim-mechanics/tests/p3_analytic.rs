@@ -47,6 +47,7 @@ fn measure_pendulum_period(theta0: f64, length: f64, gravity: f64, dt: f64, step
         body_b: None,
         anchor_b: pivot,
         length,
+        disabled: false,
     });
 
     let mut rng = SimRng::new(1, 1);

@@ -560,6 +560,7 @@ mod tests {
             kp: 20.0,
             kd: 2.0,
             torque_max: 50.0,
+            disabled: false,
         });
 
         let dt = 1.0 / 120.0;

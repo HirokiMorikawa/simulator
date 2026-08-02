@@ -50,6 +50,10 @@ pub struct DistanceJoint {
     pub anchor_b: Vec3,
     /// 維持する距離 L。
     pub length: f64,
+    /// `true`なら解決対象から除外する(`BallJoint::disabled`と同じ理由——
+    /// 密な`Vec`から取り除くと他ジョイントのindexがずれる。`World::remove_body`
+    /// の連鎖削除が使う)。
+    pub disabled: bool,
 }
 
 struct PreparedDistanceJoint {
@@ -167,8 +171,11 @@ pub fn resolve_distance(joints: &[DistanceJoint], bodies: &mut RigidBodySet, dt:
     if joints.is_empty() {
         return;
     }
-    let prepared: Vec<PreparedDistanceJoint> =
-        joints.iter().map(|j| j.prepare(bodies, dt)).collect();
+    let prepared: Vec<PreparedDistanceJoint> = joints
+        .iter()
+        .filter(|j| !j.disabled)
+        .map(|j| j.prepare(bodies, dt))
+        .collect();
     for _ in 0..JOINT_VELOCITY_ITERATIONS {
         for p in &prepared {
             solve_velocity(p, bodies);
@@ -284,6 +291,8 @@ pub struct HingeMotorPd {
     pub kp: f64,
     pub kd: f64,
     pub torque_max: f64,
+    /// `true`ならトルクを一切加えない(`BallJoint::disabled`と同じ理由)。
+    pub disabled: bool,
 }
 
 impl HingeMotorPd {
@@ -320,7 +329,7 @@ impl HingeMotorPd {
 
 /// `HingeMotorPd`一覧を全て`apply`する。
 pub fn apply_hinge_motors(motors: &[HingeMotorPd], bodies: &mut RigidBodySet, dt: f64) {
-    for motor in motors {
+    for motor in motors.iter().filter(|m| !m.disabled) {
         motor.apply(bodies, dt);
     }
 }
@@ -406,6 +415,8 @@ pub struct SliderJoint {
     pub anchor_b: Vec3,
     /// 生成時点の相対回転(角度0の基準)。`SliderJoint::new`で自動算出する。
     reference_relative_rotation: Quat,
+    /// `true`なら解決対象から除外する(`BallJoint::disabled`と同じ理由)。
+    pub disabled: bool,
 }
 
 impl SliderJoint {
@@ -429,6 +440,7 @@ impl SliderJoint {
             body_b,
             anchor_b,
             reference_relative_rotation: rot_b.mul(rot_a.conjugate()),
+            disabled: false,
         }
     }
 }
@@ -527,7 +539,11 @@ pub fn resolve_slider(joints: &[SliderJoint], bodies: &mut RigidBodySet, dt: f64
     if joints.is_empty() {
         return;
     }
-    let prepared: Vec<PreparedSliderJoint> = joints.iter().map(|j| j.prepare(bodies, dt)).collect();
+    let prepared: Vec<PreparedSliderJoint> = joints
+        .iter()
+        .filter(|j| !j.disabled)
+        .map(|j| j.prepare(bodies, dt))
+        .collect();
     for _ in 0..JOINT_VELOCITY_ITERATIONS {
         for p in &prepared {
             solve_velocity_slider(p, bodies);

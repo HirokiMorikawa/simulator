@@ -718,6 +718,7 @@ mod tests {
                 body_b: None,
                 anchor_b: pivot,
                 length,
+                disabled: false,
             });
 
         let analytic_period = 2.0 * std::f64::consts::PI * (length / 9.80665_f64).sqrt();
@@ -770,6 +771,7 @@ mod tests {
                     body_b: None,
                     anchor_b: Vec3::ZERO,
                     length: l1,
+                    disabled: false,
                 });
 
             let pos1 = world.body_position(bob1).unwrap();
@@ -785,6 +787,7 @@ mod tests {
                     body_b: Some(bob1.index as usize),
                     anchor_b: Vec3::ZERO,
                     length: l2,
+                    disabled: false,
                 });
 
             for _ in 0..2000 {

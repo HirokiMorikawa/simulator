@@ -66,6 +66,10 @@ struct SpawnedBodyMeta {
     /// `hinge_motor_index`引数、`set_motor_target_at`参照)。振り子/球/箱
     /// スポーンでは`None`。
     hinge_motor_index: Option<usize>,
+    /// `remove_body_at`で削除済みか(群2)。`Vec`から要素を取り除くとフロントの
+    /// ボディindexが総ずれするため、削除は**このフラグで表す**
+    /// (`World::remove_body`が下層スロットを詰めないのと同じ方針)。
+    removed: bool,
 }
 
 #[wasm_bindgen]
@@ -185,6 +189,7 @@ impl WasmWorld {
                 base_shape: ground_shape,
                 constraint_joint_index: None,
                 hinge_motor_index: None,
+                removed: false,
             },
             SpawnedBodyMeta {
                 id: box_body,
@@ -193,6 +198,7 @@ impl WasmWorld {
                 base_shape: box_shape,
                 constraint_joint_index: None,
                 hinge_motor_index: None,
+                removed: false,
             },
         ];
         WasmWorld {
@@ -294,6 +300,7 @@ impl WasmWorld {
                     base_shape: shape,
                     constraint_joint_index: None,
                     hinge_motor_index: None,
+                    removed: false,
                 }
             })
             .collect();
@@ -487,8 +494,72 @@ impl WasmWorld {
             base_shape: Shape::Sphere { radius },
             constraint_joint_index: None,
             hinge_motor_index: None,
+            removed: false,
         });
         Ok(index)
+    }
+
+    /// **Hierarchy 右クリックメニューの「削除」(群2)**。設計
+    /// docs/23-frontend/01-editor.md §1.1 が求める「右クリックでコンテキストメニュー
+    /// (複製・削除・親付け・プレハブ化・アイソレート表示)」の削除。
+    ///
+    /// **`self.bodies` から要素を取り除かない**——フロントエンドのボディ index は
+    /// この `Vec` の位置そのもので、詰めると Scene View のメッシュ対応表・
+    /// 選択状態・Console のイベント行が一斉にずれる。`World::remove_body` が
+    /// 下層スロットを詰めないのと同じ「無効化に留める」方針で揃える。
+    /// 以後 `body_is_removed_at` が `true` を返し、フロント側が Hierarchy の行と
+    /// Scene View のメッシュを隠す。
+    pub fn remove_body_at(&mut self, index: usize) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(index)?;
+        if index == 0 {
+            return Err(JsValue::from_str("床は削除できません(シーンの基準面)"));
+        }
+        self.inner.remove_body(id);
+        self.bodies[index].removed = true;
+        Ok(())
+    }
+
+    /// `index`番目のボディが `remove_body_at` で削除済みか。
+    pub fn body_is_removed_at(&self, index: usize) -> Result<bool, JsValue> {
+        Ok(self.try_body_meta_at(index)?.removed)
+    }
+
+    /// **Hierarchy 右クリックメニューの「複製」(群2)**。元のボディの形状・材質を
+    /// そのまま使い、`offset` だけずらした位置に新しいボディを作る。
+    ///
+    /// **形状は現在の実形状ではなく `base_shape`(スポーン時の寸法)を複製する**
+    /// ——Scale Gizmo の倍率は `base_shape × scale` として保持されており、複製後の
+    /// ボディも同じ規約(`set_body_scale_at`)に乗せる必要があるため。倍率まで
+    /// 引き継ぎたい場合は複製後に改めてスケールを掛ける(既知の限界)。
+    pub fn duplicate_body_at(&mut self, index: usize, offset: f64) -> Result<usize, JsValue> {
+        let meta = self.try_body_meta_at(index)?;
+        let base_shape = meta.base_shape.clone();
+        let material_label = meta.material_label.clone();
+        let source_id = meta.id;
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(&material_label)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_label}")))?;
+        let position = self
+            .inner
+            .body_position(source_id)
+            .ok_or_else(|| JsValue::from_str("cannot duplicate a removed body"))?;
+        let mut desc = RigidBodyDesc::dynamic(base_shape.clone(), material);
+        desc.transform.position = position + sim_math::Vec3::new(offset, 0.0, 0.0);
+        let id = self.inner.create_body(desc);
+        let new_index = self.body_count();
+        let label = format!("{}_copy_{new_index}", self.bodies[index].label);
+        self.bodies.push(SpawnedBodyMeta {
+            id,
+            label,
+            material_label,
+            base_shape,
+            constraint_joint_index: None,
+            hinge_motor_index: None,
+            removed: false,
+        });
+        Ok(new_index)
     }
 
     /// スポーンパレット——カプセル(**増分Lで追加**、ローカル+y軸が長軸)。
@@ -526,6 +597,7 @@ impl WasmWorld {
             base_shape: shape,
             constraint_joint_index: None,
             hinge_motor_index: None,
+            removed: false,
         });
         Ok(index)
     }
@@ -604,6 +676,7 @@ impl WasmWorld {
             },
             constraint_joint_index: None,
             hinge_motor_index: None,
+            removed: false,
         });
         Ok(index)
     }
@@ -658,6 +731,7 @@ impl WasmWorld {
                 base_shape: shape,
                 constraint_joint_index: None,
                 hinge_motor_index: None,
+                removed: false,
             });
         }
 
@@ -761,6 +835,39 @@ impl WasmWorld {
             }
         }
         out
+    }
+
+    /// 重力加速度の大きさ [m/s^2] を実行時に変更する(**群2で追加**)。
+    ///
+    /// **「Unityのように物理法則を試せる」ことの中心**——重力を変えて挙動が
+    /// どう変わるかを見るのは、このツールの最も基本的な使い方である。
+    /// `MechanicsSolver.gravity`は元々公開フィールドで実行時に変更可能だったが、
+    /// **wasm側にsetterが無かったためフロントエンドから触れなかった**
+    /// (`WorldOptions`はコンストラクタでしか受け取らない、と誤解していた)。
+    pub fn set_gravity(&mut self, gravity: f64) {
+        self.inner.mechanics_mut().gravity = gravity;
+    }
+
+    /// 現在の重力加速度の大きさ [m/s^2]。
+    pub fn gravity(&self) -> f64 {
+        self.inner.mechanics().gravity
+    }
+
+    /// タイムステップ [s] を実行時に変更する(**群2で追加**)。
+    ///
+    /// **決定論を壊しうる操作**なので、フロントエンドはEditモードでのみ
+    /// 呼び、変更を`commandLog`へ記録する(`SimClock::set_dt`のdoc参照)。
+    pub fn set_dt(&mut self, dt: f64) -> Result<(), JsValue> {
+        if !(dt.is_finite() && dt > 0.0) {
+            return Err(JsValue::from_str("dt must be a positive finite number"));
+        }
+        self.inner.clock_mut().set_dt(dt);
+        Ok(())
+    }
+
+    /// 現在のタイムステップ [s]。
+    pub fn dt(&self) -> f64 {
+        self.inner.dt()
     }
 
     /// エネルギー台帳の残差(**増分Kで追加**)。Consoleの発散警告バッジが使う
@@ -1091,6 +1198,7 @@ impl WasmWorld {
             base_shape: Shape::Sphere { radius: BOB_RADIUS },
             constraint_joint_index: Some(joint_index),
             hinge_motor_index: None,
+            removed: false,
         });
         Ok(index)
     }
@@ -1144,6 +1252,7 @@ impl WasmWorld {
             kp: 20.0,
             kd: 2.0,
             torque_max: 50.0,
+            disabled: false,
         });
         let index = self.body_count();
         let label = format!("MotorArm_{index}");
@@ -1156,6 +1265,7 @@ impl WasmWorld {
             },
             constraint_joint_index: None,
             hinge_motor_index: Some(hinge_motor_index),
+            removed: false,
         });
         Ok(index)
     }
@@ -1616,6 +1726,50 @@ impl WasmWorld {
         Ok(())
     }
 
+    /// **軸別スケール(群2)**。設計 docs/23-frontend/01-editor.md §1.2 の Gizmo は
+    /// Transform を直接編集するもので、スケールも当然軸別に効く。これまでは
+    /// 単一倍率(`set_body_scale_at`)しか無く、**細長い箱を作れなかった**
+    /// (斜面・板・棒はどれも非等方な箱で表すのが自然なので、実際に困る)。
+    ///
+    /// **球には軸別スケールが効かない**——`Shape::Sphere` は半径1つで表され、
+    /// 楕円体は `Shape` に存在しないため。設計の形状一覧(Sphere/Box/Plane/
+    /// Capsule/Convex)に楕円体が無い以上、ここで勝手に作るより「効かない」
+    /// ことを返り値で正直に伝える(`false` を返す)。球は `set_body_scale_at`
+    /// の等方スケールを使う。
+    pub fn set_body_scale_xyz_at(
+        &mut self,
+        index: usize,
+        sx: f64,
+        sy: f64,
+        sz: f64,
+    ) -> Result<bool, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        if index == 0 {
+            return Err(JsValue::from_str(
+                "Ground is static and has no scale handle",
+            ));
+        }
+        for s in [sx, sy, sz] {
+            if !s.is_finite() || s <= 0.0 {
+                return Err(JsValue::from_str("scale components must be positive"));
+            }
+        }
+        let base_shape = self.try_body_meta_at(index)?.base_shape.clone();
+        let scaled_shape = match base_shape {
+            Shape::Box { half_extents } => Shape::Box {
+                half_extents: sim_math::Vec3::new(
+                    half_extents.x * sx,
+                    half_extents.y * sy,
+                    half_extents.z * sz,
+                ),
+            },
+            // 球・カプセル・平面は軸別に変形できない(モジュールdoc参照)。
+            _ => return Ok(false),
+        };
+        self.inner.set_body_shape(id, scaled_shape);
+        Ok(true)
+    }
+
     /// 1 world step。1s相当のstep数ごとにTimelineスナップショットを
     /// リングバッファへ記録する(モジュールdoc「スナップショットリングバッファ」
     /// 参照、既存の`World::snapshot`をそのまま使う)。
@@ -1725,6 +1879,24 @@ impl WasmWorld {
     /// 返す)はスキップする。
     pub fn bookmark_export_scene_json(&self, index: usize) -> Result<String, JsValue> {
         let (label, snapshot) = self.try_bookmark_at(index)?;
+        self.export_scene_json_from(&format!("bookmark-{label}"), snapshot)
+    }
+
+    /// **現在の状態をシーンJSONとして書き出す(群2)**。単一ファイルExport
+    /// (設計 §6「シーンJSON+Replay+ブックマークを単一ファイルとして
+    /// エクスポート」)が使う。
+    ///
+    /// **これが無かったせいでフロント側は「一時ブックマークを1件打って
+    /// それを書き出す」という回り道をしており、ブックマーク一覧に
+    /// `__export__` というゴミが残っていた**(実装検証中に発見)。
+    /// `bookmark_export_scene_json` と本体を共有する。
+    pub fn export_scene_json(&self) -> Result<String, JsValue> {
+        // `World: Clone` なので現在状態のスナップショットをその場で取る。
+        let snapshot = self.inner.snapshot();
+        self.export_scene_json_from("current", &snapshot)
+    }
+
+    fn export_scene_json_from(&self, name: &str, snapshot: &World) -> Result<String, JsValue> {
         let mut bodies_json = Vec::new();
         for i in 0..self.body_count() {
             // `i`は`0..body_count()`の範囲内なので必ず解決できる
@@ -1779,7 +1951,7 @@ impl WasmWorld {
             ));
         }
         Ok(format!(
-            r#"{{"name":"bookmark-{label}","world":{{"gravity":{gravity},"dt":{dt}}},"bodies":[{bodies}]}}"#,
+            r#"{{"name":"{name}","world":{{"gravity":{gravity},"dt":{dt}}},"bodies":[{bodies}]}}"#,
             gravity = self.gravity,
             dt = self.dt,
             bodies = bodies_json.join(",")
@@ -1871,6 +2043,96 @@ impl WasmWorld {
             force: sim_math::Vec3::new(fx, fy, fz),
             point: None,
         });
+        Ok(())
+    }
+
+    /// **Inspector の RigidBody Component を編集可能にする(群2)**。設計
+    /// docs/23-frontend/01-editor.md §1.3 は「各 Component は World API の `Desc` 型と
+    /// 1:1 対応。編集は次ステップ先頭で Command として適用される」と定めているが、
+    /// これまで Inspector は**全フィールドが読み取り専用**で、質量も Body type も
+    /// 衝突フィルタも触れなかった(そもそも衝突フィルタは `RigidBodySet` に
+    /// 概念自体が無かった——群2で追加)。
+    ///
+    /// いずれも`Command`経由なので、**Playモード中でも決定論とリプレイ再現性を
+    /// 保ったまま**編集できる(Gizmoドラッグのような直接書き換えとは違う)。
+    pub fn body_mass_at(&self, index: usize) -> Result<f64, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        Ok(self.inner.mechanics().bodies.mass(id.index as usize))
+    }
+
+    /// Body type を表す文字列(`"Dynamic"`/`"Static"`/`"Kinematic"`)。
+    pub fn body_type_at(&self, index: usize) -> Result<String, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        Ok(
+            match self.inner.mechanics().bodies.body_type[id.index as usize] {
+                BodyType::Dynamic => "Dynamic",
+                BodyType::Static => "Static",
+                BodyType::Kinematic => "Kinematic",
+            }
+            .to_string(),
+        )
+    }
+
+    pub fn body_collision_group_at(&self, index: usize) -> Result<u32, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        Ok(self.inner.mechanics().bodies.collision_group[id.index as usize])
+    }
+
+    pub fn body_collision_mask_at(&self, index: usize) -> Result<u32, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        Ok(self.inner.mechanics().bodies.collision_mask[id.index as usize])
+    }
+
+    pub fn push_set_body_mass(&mut self, body_index: usize, mass: f64) -> Result<(), JsValue> {
+        if mass <= 0.0 || !mass.is_finite() {
+            return Err(JsValue::from_str("mass must be a positive finite number"));
+        }
+        let body = self.try_body_id_at(body_index)?;
+        self.inner.push_command(Command::SetBodyMass { body, mass });
+        Ok(())
+    }
+
+    /// Body type を切り替える。**Dynamic へ戻すときの質量をこちら側で確保する**
+    /// のが要点——`Static` 化すると `inv_mass = 0`(無限質量)になり元の質量は
+    /// 復元できないため、切替前の値を読んで `Command` に載せる。
+    /// 既に非 Dynamic で質量が 0 になっているボディを Dynamic へ戻す場合は、
+    /// 形状と材質密度から `create_body` と同じ式で計算し直す。
+    pub fn push_set_body_type(&mut self, body_index: usize, kind: String) -> Result<(), JsValue> {
+        let body = self.try_body_id_at(body_index)?;
+        let body_type = match kind.as_str() {
+            "Dynamic" => BodyType::Dynamic,
+            "Static" => BodyType::Static,
+            "Kinematic" => BodyType::Kinematic,
+            other => {
+                return Err(JsValue::from_str(&format!(
+                    "unknown body type {other:?} (expected Dynamic/Static/Kinematic)"
+                )))
+            }
+        };
+        let idx = body.index as usize;
+        let bodies = &self.inner.mechanics().bodies;
+        let mut mass = bodies.mass(idx);
+        if mass <= 0.0 {
+            let material = self.inner.materials().get(bodies.material[idx]);
+            mass = bodies.shape_of(idx).volume().unwrap_or(0.0) * material.density;
+        }
+        self.inner.push_command(Command::SetBodyType {
+            body,
+            body_type,
+            mass,
+        });
+        Ok(())
+    }
+
+    pub fn push_set_collision_filter(
+        &mut self,
+        body_index: usize,
+        group: u32,
+        mask: u32,
+    ) -> Result<(), JsValue> {
+        let body = self.try_body_id_at(body_index)?;
+        self.inner
+            .push_command(Command::SetCollisionFilter { body, group, mask });
         Ok(())
     }
 

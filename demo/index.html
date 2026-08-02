@@ -18,9 +18,29 @@
         </div>
         <div class="toolbar-group">
           <button id="btn-play" title="再生/一時停止">▶</button>
-          <button id="btn-step" title="1 step 進める">⏭</button>
+          <button id="btn-step" title="指定 step 数だけ進める(既定 1)">⏭</button>
+          <input
+            id="input-step-count"
+            type="number"
+            min="1"
+            max="10000"
+            step="1"
+            value="1"
+            title="⏭ で一度に進める step 数"
+          />
         </div>
         <div class="toolbar-group">
+          <button id="btn-tool-translate" title="移動ツール (W)">W 移動</button>
+          <button id="btn-tool-rotate" title="回転ツール (E)">E 回転</button>
+          <button id="btn-tool-scale" title="スケールツール (R)">R 拡縮</button>
+          <button id="btn-tool-select" title="選択のみ (Q)">Q 選択</button>
+          <button
+            id="btn-gizmo-space"
+            title="Gizmo の座標系を World / Local で切り替える (X)"
+            data-space="world"
+          >
+            🌐 World
+          </button>
           <button id="btn-nudge" title="選択中の剛体に上向きの力を加える(Command経由)">
             ↑ Nudge
           </button>
@@ -38,42 +58,66 @@
         </div>
         <div class="toolbar-group">
           <select id="select-spawn-material" title="スポーンする材質"></select>
-          <button id="btn-spawn-sphere" title="球を配置(Command経由ではなくcreate_body)">+ 球</button>
-          <button id="btn-spawn-box" title="箱を配置(Command経由ではなくcreate_body)">+ 箱</button>
-          <button id="btn-spawn-capsule" title="カプセルを配置(増分L。カプセル×箱の接触は未実装)">+ カプセル</button>
-          <button id="btn-derive-material" title="選択中の材質から密度違いの派生材料を作る">材料派生</button>
-          <button id="btn-spawn-pendulum" title="振り子を配置(DistanceJointでワールド固定点へ拘束)">+ 振り子</button>
-          <button id="btn-spawn-motor" title="モーターアームを配置(BallJoint+HingeMotorPdでワールド固定点へピン留め)">+ モーター</button>
-          <button id="btn-spawn-fluid" title="SPH流体塊を配置(水塊+床の境界粒子)">+ 流体</button>
-          <button
-            id="btn-add-frame"
-            title="新規フレームをHierarchyで選択中のフレーム(未選択ならROOT)の子として追加(フレーム階層ドリルインUI)"
+          <!-- **群2でスポーン系を1つのメニューへ畳んだ**。8個のボタンを並べると
+               ツールバーが3行ぶんの高さに膨れ、ラベルが縦書きに折り返して
+               読めなくなっていた(実際にスクリーンショットで確認)。Scene View の
+               右クリックでも同じスポーンパレットが開く。 -->
+          <button id="btn-add" title="ボディ・ジョイント・流体・フレームを追加する">＋ 追加</button>
+          <button id="btn-spawn-sphere" hidden>+ 球</button>
+          <button id="btn-spawn-box" hidden>+ 箱</button>
+          <button id="btn-spawn-capsule" hidden>+ カプセル</button>
+          <button id="btn-derive-material" hidden>材料派生</button>
+          <button id="btn-spawn-pendulum" hidden>+ 振り子</button>
+          <button id="btn-spawn-motor" hidden>+ モーター</button>
+          <button id="btn-spawn-fluid" hidden>+ 流体</button>
+          <button id="btn-add-frame" hidden>+ フレーム</button>
+        </div>
+        <div class="toolbar-group">
+          <label for="select-timescale">時間倍率</label>
+          <select id="select-timescale">
+            <option value="0.125">×1/8</option>
+            <option value="0.25">×1/4</option>
+            <option value="0.5">×1/2</option>
+            <option value="1" selected>×1</option>
+            <option value="2">×2</option>
+            <option value="4">×4</option>
+            <option value="8">×8</option>
+            <option value="16">×16</option>
+            <option value="32">×32</option>
+            <option value="64">×64</option>
+            <option value="128">×128</option>
+          </select>
+          <span
+            id="timescale-effective"
+            title="実際に達成できている時間倍率。指定値に届かないときは赤で表示する(1フレームあたりのstep数上限に当たっている)"
+            >×1.00</span
           >
-            + フレーム
-          </button>
         </div>
         <div class="toolbar-group">
-          <label><input type="checkbox" id="toggle-circuit-switch" /> 回路スイッチ(閉)</label>
-          <label><input type="checkbox" id="toggle-heater" /> ヒーター</label>
-        </div>
-        <div class="toolbar-group">
+          <button id="btn-settings" title="Settings(オーバーレイ・物理パラメータ・グリッド)">⚙</button>
+          <div id="settings-popover" hidden>
+            <h4>オーバーレイ</h4>
+
           <label><input type="checkbox" id="toggle-velocity-overlay" checked /> 速度オーバーレイ</label>
           <label><input type="checkbox" id="toggle-contact-overlay" checked /> 接触点オーバーレイ</label>
           <label><input type="checkbox" id="toggle-force-overlay" checked /> 力オーバーレイ</label>
           <label><input type="checkbox" id="toggle-constraint-overlay" checked /> 拘束オーバーレイ</label>
           <label><input type="checkbox" id="toggle-frame-overlay" checked /> フレーム軸オーバーレイ</label>
           <label><input type="checkbox" id="toggle-grid-fluid-overlay" checked /> 流体場オーバーレイ</label>
-        </div>
-        <div class="toolbar-group">
-          <label for="select-timescale">時間倍率</label>
-          <select id="select-timescale">
-            <option value="0.5">×0.5</option>
-            <option value="1" selected>×1</option>
-            <option value="2">×2</option>
-            <option value="5">×5</option>
-          </select>
-        </div>
-        <div class="toolbar-group">
+            <h4>デモ操作</h4>
+
+          <label><input type="checkbox" id="toggle-circuit-switch" /> 回路スイッチ(閉)</label>
+          <label><input type="checkbox" id="toggle-heater" /> ヒーター</label>
+            <h4>物理パラメータ</h4>
+            <label>重力 [m/s²] <input type="number" id="input-gravity" step="0.1" min="0" /></label>
+            <label>dt [s] <input type="number" id="input-dt" step="0.001" min="0.0001" /></label>
+            <p class="settings-note">dt の変更はリプレイの再現性に影響するため Edit モードのみ。</p>
+            <h4>グリッド</h4>
+            <label>スナップ [m] <input type="number" id="input-grid-snap" step="0.01" min="0" value="0.1" /></label>
+            <h4>決定論</h4>
+            <label>PRNG シード <input type="number" id="input-seed" step="1" min="0" value="0" disabled /></label>
+            <p class="settings-note">シードは World 構築時に決まるため、変更にはシーン再読み込みが要る。</p>
+          </div>
           <label for="select-scene">Scene</label>
           <select id="select-scene"><option value="">(既定シーン)</option></select>
           <label for="select-layout">Layout</label>

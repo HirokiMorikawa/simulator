@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import init, { WasmWorld } from "../pkg/sim_wasm.js";
 import "./style.css";
 
@@ -70,8 +71,16 @@ const BODY_INDEX_BOX = 1;
 // スポーンパレット(設計docs/23-frontend/01-editor.md §6)で選べる材質。
 // `sim_core::MaterialDb::standard`が持つ名前の一部(密度・反発特性が異なる
 // ものを選び、着地の見た目が分かりやすいように)。
-const SPAWN_MATERIALS = ["鋼(炭素鋼)", "アルミニウム", "木材(松)", "ゴム(天然)"];
+const SPAWN_MATERIALS = [
+  "鋼(炭素鋼)",
+  "アルミニウム",
+  "木材(松)",
+  "ゴム(天然)",
+];
 const SPAWN_HEIGHT = 12.0;
+/// Hierarchy 右クリック「複製」で複製体をずらす距離 [m](群2)。
+/// 同一位置に重ねると初期貫入から弾き飛ばされるため、必ず離す。
+const DUPLICATE_OFFSET_M = 0.6;
 const SPAWN_SPHERE_RADIUS = 0.4;
 const SPAWN_BOX_HALF_EXTENT = 0.4;
 const PENDULUM_PIVOT_HEIGHT = 6.0;
@@ -113,6 +122,102 @@ type ConsoleDiagnosticsRef = {
 };
 
 type SelectBodyRef = { current: ((index: number) => void) | null };
+
+/// **Inspector の編集ハンドラ(群2)**。設計 docs/23-frontend/01-editor.md §1.3 は
+/// 「各 Component は World API の `Desc` 型と 1:1 対応。**編集は次ステップ先頭で
+/// Command として適用される**(実行中は編集ロック — §4)」と定めているが、
+/// これまで Inspector は全フィールドが読み取り専用の `<span>` だった。
+///
+/// `renderInspectorFor` はモジュールスコープの自由関数で `world` を引数に取る
+/// (Command キューを持つクロージャの外側)ため、`SelectBodyRef` と同じ理由で
+/// 可変の参照オブジェクト越しにハンドラを配線する。
+type InspectorEditHandlers = {
+  setMass(bodyIndex: number, mass: number): void;
+  setBodyType(bodyIndex: number, kind: string): void;
+  setCollisionFilter(bodyIndex: number, group: number, mask: number): void;
+  /// 軸別スケール(群2、設計 §1.2 の Gizmo は Transform を編集する)。
+  /// Box 以外では効かないので、適用できたかを返す。
+  setScaleXyz(bodyIndex: number, sx: number, sy: number, sz: number): boolean;
+};
+type InspectorEditRef = { current: InspectorEditHandlers | null };
+const inspectorEditRef: InspectorEditRef = { current: null };
+
+/// **右クリックコンテキストメニュー(群2)**。設計 docs/23-frontend/01-editor.md は
+/// Hierarchy(§1.1「右クリックでコンテキストメニュー(複製・削除・親付け・
+/// プレハブ化・アイソレート表示)」)と Scene View(§1.2 のスポーンパレット)の
+/// 両方で要求しているが、リポジトリ全体で `contextmenu` リスナは **0件**だった。
+///
+/// 1枚の `<div>` を使い回す(開くたびに中身を作り直す)。**メニューは常に
+/// viewport 内に収める**——右端・下端で右クリックすると素朴な `left/top` 指定では
+/// 画面外へはみ出して項目に到達できなくなる(増分E3のドロワーで踏んだのと
+/// 同じクラスのバグ)。
+type ContextMenuItem =
+  | { label: string; onSelect: () => void; disabled?: boolean; title?: string }
+  | { separator: true };
+
+let contextMenuElement: HTMLDivElement | null = null;
+
+function closeContextMenu(): void {
+  contextMenuElement?.remove();
+  contextMenuElement = null;
+}
+
+function showContextMenu(
+  clientX: number,
+  clientY: number,
+  items: ContextMenuItem[],
+): void {
+  closeContextMenu();
+  const menu = document.createElement("div");
+  menu.id = "context-menu";
+  menu.setAttribute("role", "menu");
+  for (const item of items) {
+    if ("separator" in item) {
+      menu.appendChild(document.createElement("hr"));
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = item.label;
+    button.disabled = item.disabled ?? false;
+    if (item.title) button.title = item.title;
+    button.addEventListener("click", () => {
+      closeContextMenu();
+      item.onSelect();
+    });
+    menu.appendChild(button);
+  }
+  // 一度 viewport 外の位置で貼って実寸を測り、はみ出す分だけ引き戻す。
+  menu.style.left = "0px";
+  menu.style.top = "0px";
+  document.body.appendChild(menu);
+  const rect = menu.getBoundingClientRect();
+  const left = Math.max(0, Math.min(clientX, window.innerWidth - rect.width));
+  const top = Math.max(0, Math.min(clientY, window.innerHeight - rect.height));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  contextMenuElement = menu;
+}
+
+// メニュー外クリック・Escape・スクロールで閉じる(Unity と同じ挙動)。
+// `pointerdown` は capture 段で拾う——Scene View 側のピック処理が先に走って
+// 選択が変わってしまうのを避けるため。
+document.addEventListener(
+  "pointerdown",
+  (event) => {
+    if (
+      contextMenuElement &&
+      !contextMenuElement.contains(event.target as Node)
+    ) {
+      closeContextMenu();
+    }
+  },
+  true,
+);
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeContextMenu();
+});
+window.addEventListener("blur", closeContextMenu);
 
 // Projectドロワー Materials タブ(設計§1.6「Materials: MaterialDbプリセット一覧」)向け。
 // Console/jumpToStepRefと同じ理由(worldより先にパネルが構築される)で、
@@ -162,6 +267,42 @@ type SceneBodyExport = {
 };
 type SceneExportRef = { current: (() => SceneBodyExport[]) | null };
 type SceneImportRef = { current: ((json: string) => number) | null };
+
+/// **単一ファイル Export(群2)**。設計 docs/23-frontend/01-editor.md §1.6 は
+/// Scenes / Replays / Bookmarks をそれぞれ別々に扱うが、**実際に他人へ渡したり
+/// 後で自分が再現したりするときに要るのは3点セット**(どのシーンで・どんな操作を・
+/// どの時点に注目したか)。これまでは Scenes タブで scene.json、Replays タブで
+/// command_log.json をそれぞれ落とし、ブックマークは**そもそも書き出せなかった**。
+///
+/// `scene` は `WasmWorld::bookmark_export_scene_json` と同じ `sim_world::Scenario`
+/// スキーマ(=ヘッドレスランナーと D1–D43 のテストが読む正典形式)なので、
+/// このファイルの `scene` 部分だけを取り出せばそのままギャラリーへ読み込める。
+type ProjectBundle = {
+  formatVersion: 1;
+  exportedAt: string;
+  /// `sim_world::Scenario` スキーマのシーン JSON(文字列ではなくパース済み)。
+  scene: unknown;
+  /// 表示用のボディ一覧(Scenes タブが出しているのと同じ内容)。
+  bodies: SceneBodyExport[];
+  commandLog: CommandLogEntry[];
+  bookmarks: { label: string; time: number }[];
+  stateHash: string;
+};
+type ProjectBundleRef = { current: (() => ProjectBundle) | null };
+/// 一括Export完了の通知(群2)。Project ドロワーからシーンビュー側の
+/// 「未保存」フラグを下ろすための逆方向の配線。
+type ProjectExportedRef = { current: (() => void) | null };
+
+/// Replay のライブ再生(群2)。Project ドロワーの Replays タブから
+/// Scene View 側の再生ドライバを操作する。
+type ReplayPlaybackRef = {
+  current: {
+    start: () => { started: boolean; reason?: string; totalSteps?: number };
+    stop: () => void;
+    isPlaying: () => boolean;
+    progress: () => number;
+  } | null;
+};
 
 // シーンギャラリー(設計docs/23-frontend/01-editor.md §1.6「Scenes」、ワーク
 // ストリームD項目13「D1–D43の全シーンをエディタから読み込み可能にし、視覚的な
@@ -224,13 +365,26 @@ type CircuitFreeWiringState = { active: boolean };
 // Joint/Circuit組・ドラッグ&ドロップ・複数シーンをまたいだ永続化は対象外、
 // ブラウザセッション内のみ保持)。`setUpProjectDrawer`から`world`への
 // 直接アクセスを持たないため、他のRef同様コールバック経由で配線する。
-type PrefabDefinition = { name: string; kind: string; params: number[]; material: string };
+type PrefabDefinition = {
+  name: string;
+  kind: string;
+  params: number[];
+  material: string;
+};
 type PrefabRef = {
   current: {
     captureSelectedBody: () => Omit<PrefabDefinition, "name"> | null;
+    /// 任意のボディをキャプチャする(群2: Hierarchy 右クリック→「プレハブ化」)。
+    /// 選択中に限定しないのが `captureSelectedBody` との違い。
+    captureBody: (index: number) => Omit<PrefabDefinition, "name"> | null;
     spawn: (prefab: PrefabDefinition) => void;
   } | null;
 };
+
+/// Prefab 登録(群2)。Prefabs タブが保持する配列へ、Hierarchy の右クリック
+/// メニューから直接追加するための逆方向の配線(`PrefabRef` が Scene View →
+/// ドロワーなのに対し、こちらはドロワー → 呼び出し元)。
+type PrefabSaveRef = { current: ((prefab: PrefabDefinition) => void) | null };
 
 // Import側のシーンJSONパース(`sim_world::scenario::ShapeJson`のJSON表現と同じ
 // タグ付きオブジェクト形)。`world.import_scene_json`はボディの追加自体は行うが
@@ -249,8 +403,15 @@ type ImportedBodyJson = { shape: ImportedShapeJson };
 // `sim_world::scenario::PredictionPromptJson`のJSON表現と同じ形(物理には
 // 影響しないメタデータのため、Rust側で検証済みの値としてではなく、Importに
 // 渡した生のJSONをJSが独立に読む——他のImportedShapeJson等と同じ設計)。
-type ImportedPredictionPromptJson = { question: string; probe_index: number; expected_value: number };
-type ImportedScenarioJson = { bodies?: ImportedBodyJson[]; prediction_prompts?: ImportedPredictionPromptJson[] };
+type ImportedPredictionPromptJson = {
+  question: string;
+  probe_index: number;
+  expected_value: number;
+};
+type ImportedScenarioJson = {
+  bodies?: ImportedBodyJson[];
+  prediction_prompts?: ImportedPredictionPromptJson[];
+};
 
 // シーンギャラリー(`SceneGalleryRef`のdoc参照)向けのアセット読み込み。
 // リポジトリ直下`scenes/`(ヘッドレスランナーのテストが読むのと同じファイル、
@@ -272,14 +433,17 @@ const sceneGalleryFiles = import.meta.glob("../../scenes/*.json", {
 }) as Record<string, string>;
 
 function sceneGalleryFileContent(file: string): string | null {
-  const entry = Object.entries(sceneGalleryFiles).find(([path]) => path.endsWith(`/${file}`));
+  const entry = Object.entries(sceneGalleryFiles).find(([path]) =>
+    path.endsWith(`/${file}`),
+  );
   return entry ? entry[1] : null;
 }
 
 function sceneGalleryManifest(): SceneGalleryManifestEntry[] {
   const indexJson = sceneGalleryFileContent("index.json");
   if (!indexJson) return [];
-  return (JSON.parse(indexJson) as { scenes: SceneGalleryManifestEntry[] }).scenes;
+  return (JSON.parse(indexJson) as { scenes: SceneGalleryManifestEntry[] })
+    .scenes;
 }
 
 function setUpConsole(
@@ -335,7 +499,8 @@ function setUpConsole(
   const initial = document.createElement("li");
   initial.dataset.level = "info";
   initial.dataset.category = "info";
-  initial.textContent = "[INFO] World起動 — SolverDiagnostics接続済み(ContactStarted/ContactEndedを表示)";
+  initial.textContent =
+    "[INFO] World起動 — SolverDiagnostics接続済み(ContactStarted/ContactEndedを表示)";
   log.appendChild(initial);
 
   // **診断バッジ(増分K)**。設計§1.5「発散・CFL警告バッジ」。
@@ -400,7 +565,11 @@ function setUpConsole(
       // 任意なので、決定的になるよう常に先頭(a)にする(縮約、正直な記録)。
       const bodiesMatch = message.match(/bodies=(\d+),(\d+)/);
       // 種別タグ(増分K、Contacts/Events タブが使う)。
-      li.dataset.category = bodiesMatch ? "contacts" : stepMatch ? "events" : "info";
+      li.dataset.category = bodiesMatch
+        ? "contacts"
+        : stepMatch
+          ? "events"
+          : "info";
       if (bodiesMatch) {
         li.dataset.bodyIndex = bodiesMatch[1];
         li.classList.add("console-entry-clickable");
@@ -433,11 +602,39 @@ function setUpConsole(
 // 並べるには`sim-wasm`側へ列挙APIを新設する必要がある。一方でCircuitタブの
 // 自由配線エディタが既に素子一覧と各ノード電圧の表を出しており、ツリーへ
 // 重複表示する実利が薄いと判断した(必要になった時点で列挙APIごと追加する)。
+/// **Hierarchy の右クリック操作(群2)**。設計 §1.1「右クリックでコンテキスト
+/// メニュー(複製・削除・親付け・プレハブ化・アイソレート表示)」。
+///
+/// **「親付け」だけは対象外にする**——`RigidBodySet` に剛体同士の親子関係が無く
+/// (`FrameId` は座標系の階層であってボディの階層ではない)、UI だけ作っても
+/// 何も起きない。フレーム階層のドリルイン UI が既に別途あるので、そちらが
+/// この役割を担う(できないことをメニューに並べない、という判断)。
+type HierarchyActions = {
+  duplicate(index: number): void;
+  remove(index: number): void;
+  /// 選択中のボディだけを Scene View に表示する(`null` で解除)。
+  isolate(index: number | null): void;
+  isolatedIndex(): number | null;
+  capturePrefab(index: number): void;
+};
+
+/// 折りたたみ状態(設計 §1.1「ツリーは折り畳み可」)。`setUpHierarchy` は
+/// world 差し替えのたびにツリーを作り直すので、**状態はツリーの外に持つ**
+/// ——さもないとシーンを読み込むたびに全部開いた状態へ戻る。
+const collapsedHierarchyGroups = new Set<string>();
+
+/// 複数選択(設計 §1.1「複数選択可」)。Inspector は単一選択前提のままなので、
+/// **複数選択は Hierarchy 上の操作対象の集合**として機能する(右クリックの
+/// 複製/削除がまとめて効く)。Inspector には最後にクリックしたものを出す。
+const hierarchyMultiSelection = new Set<number>();
+
 function setUpHierarchy(
   world: WasmWorld,
   onSelect: (index: number) => void,
   selectedFrameIndex: number,
   onSelectFrame: (frameIndex: number) => void,
+  actions: HierarchyActions | null,
+  materialNames: readonly string[],
 ): (index: number) => void {
   const tree = document.getElementById("hierarchy-tree")!;
   tree.innerHTML = "";
@@ -445,33 +642,132 @@ function setUpHierarchy(
   root.textContent = "World Root";
   const bodies = document.createElement("ul");
   bodies.className = "tree-nested";
-  const bodyItem = document.createElement("li");
-  bodyItem.textContent = "Bodies";
+
+  /// グループ見出しを「折り畳み可」にする。見出しのクリックで開閉し、
+  /// 状態は `collapsedHierarchyGroups` に残す。
+  function makeGroup(
+    key: string,
+    label: string,
+    contents: HTMLUListElement,
+  ): HTMLLIElement {
+    const item = document.createElement("li");
+    item.className = "tree-group";
+    const toggle = document.createElement("span");
+    toggle.className = "tree-toggle";
+    const apply = () => {
+      const collapsed = collapsedHierarchyGroups.has(key);
+      toggle.textContent = collapsed ? "▶" : "▼";
+      contents.style.display = collapsed ? "none" : "";
+    };
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (collapsedHierarchyGroups.has(key))
+        collapsedHierarchyGroups.delete(key);
+      else collapsedHierarchyGroups.add(key);
+      apply();
+    });
+    item.appendChild(toggle);
+    item.appendChild(document.createTextNode(label));
+    item.appendChild(contents);
+    apply();
+    return item;
+  }
+
   const list = document.createElement("ul");
   list.className = "tree-nested";
 
   const count = world.body_count();
-  const items: HTMLLIElement[] = [];
+  const items: (HTMLLIElement | null)[] = [];
 
+  function refreshSelectionClasses(primary: number) {
+    items.forEach((it, i) => {
+      if (!it) return;
+      it.classList.toggle("selected", i === primary);
+      it.classList.toggle(
+        "multi-selected",
+        hierarchyMultiSelection.has(i) && i !== primary,
+      );
+    });
+  }
   function highlight(index: number) {
-    items.forEach((it, i) => it.classList.toggle("selected", i === index));
+    refreshSelectionClasses(index);
   }
 
   for (let i = 0; i < count; i++) {
+    // **削除済みは並べない(群2)**。`remove_body_at` は index のずれを避けるため
+    // スロットを残すので、UI 側で隠す必要がある。
+    if (world.body_is_removed_at(i)) {
+      items.push(null);
+      continue;
+    }
     const item = document.createElement("li");
     item.textContent = world.body_label_at(i);
-    item.classList.add("tree-selectable");
-    item.addEventListener("click", () => {
+    // `tree-body` は **Bodies サブツリーの実体行**だけに付く(群2)。
+    // Materials(参照)や Joints の行も `tree-selectable` なので、
+    // 「ボディが何体あるか」を数えるにはこちらを使う。
+    item.classList.add("tree-selectable", "tree-body");
+    item.addEventListener("click", (event) => {
+      // Ctrl/Cmd クリックで追加選択・解除(設計 §1.1「複数選択可」)。
+      if (event.ctrlKey || event.metaKey) {
+        if (hierarchyMultiSelection.has(i)) hierarchyMultiSelection.delete(i);
+        else hierarchyMultiSelection.add(i);
+      } else {
+        hierarchyMultiSelection.clear();
+        hierarchyMultiSelection.add(i);
+      }
       highlight(i);
       onSelect(i);
     });
+    if (actions) {
+      item.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        // 右クリックした行が選択に入っていなければ、そこだけを選択し直す
+        // (Unity と同じ——選択外を右クリックしたら選択が移る)。
+        if (!hierarchyMultiSelection.has(i)) {
+          hierarchyMultiSelection.clear();
+          hierarchyMultiSelection.add(i);
+          highlight(i);
+          onSelect(i);
+        }
+        const targets = [...hierarchyMultiSelection].sort((a, b) => a - b);
+        const suffix = targets.length > 1 ? ` (${targets.length}件)` : "";
+        const isolated = actions.isolatedIndex();
+        showContextMenu(event.clientX, event.clientY, [
+          {
+            label: `複製${suffix}`,
+            onSelect: () => targets.forEach((t) => actions.duplicate(t)),
+          },
+          {
+            label: `削除${suffix}`,
+            // index 0 は床。削除するとシーンの基準面が無くなるので禁止
+            // (`remove_body_at` も Err を返す)。
+            disabled: targets.includes(0),
+            title: targets.includes(0) ? "床は削除できません" : undefined,
+            // 降順に消す(index は詰めない実装だが、意図を明示しておく)。
+            onSelect: () =>
+              [...targets].reverse().forEach((t) => actions.remove(t)),
+          },
+          { separator: true },
+          {
+            label: isolated === i ? "アイソレート解除" : "アイソレート表示",
+            title: "選択中のボディ以外を Scene View から隠す(物理は止めない)",
+            onSelect: () => actions.isolate(isolated === i ? null : i),
+          },
+          {
+            label: "プレハブ化",
+            title: "現在の形状・材質を Project ドロワーの Prefabs へ登録する",
+            onSelect: () => actions.capturePrefab(i),
+          },
+        ]);
+      });
+    }
     items.push(item);
     list.appendChild(item);
   }
   highlight(BODY_INDEX_BOX);
 
-  bodyItem.appendChild(list);
-  bodies.appendChild(bodyItem);
+  bodies.appendChild(makeGroup("bodies", "Bodies", list));
 
   // Joints(設計§1.1「シーングラフツリー(Bodies/Joints/Circuits/Fluids/
   // Probes/Frames)」)。振り子スポーン(`spawn_pendulum`)が追加した
@@ -494,10 +790,7 @@ function setUpHierarchy(
     jointList.appendChild(item);
   }
   if (jointCount > 0) {
-    const jointItem = document.createElement("li");
-    jointItem.textContent = "Joints";
-    jointItem.appendChild(jointList);
-    bodies.appendChild(jointItem);
+    bodies.appendChild(makeGroup("joints", "Joints", jointList));
   }
 
   // Frames(設計§1.1「シーングラフツリー(...Frames)」、フレーム階層ドリルイン
@@ -526,10 +819,7 @@ function setUpHierarchy(
       }
       return ul;
     }
-    const frameItem = document.createElement("li");
-    frameItem.textContent = "Frames";
-    frameItem.appendChild(buildFrameSubtree(0));
-    bodies.appendChild(frameItem);
+    bodies.appendChild(makeGroup("frames", "Frames", buildFrameSubtree(0)));
   }
 
   // Fluids(設計§1.1「シーングラフツリー(...Fluids)」)。個々の粒子や塊単位の
@@ -552,8 +842,6 @@ function setUpHierarchy(
   // (Inspectorに回路素子用のComponent表示が無い)。
   const circuitElementCount = world.circuit_element_count();
   if (circuitElementCount > 0) {
-    const circuitItem = document.createElement("li");
-    circuitItem.textContent = "Circuits";
     const circuitList = document.createElement("ul");
     circuitList.className = "tree-nested";
     for (let i = 0; i < circuitElementCount; i++) {
@@ -561,8 +849,7 @@ function setUpHierarchy(
       item.textContent = world.circuit_element_label_at(i);
       circuitList.appendChild(item);
     }
-    circuitItem.appendChild(circuitList);
-    bodies.appendChild(circuitItem);
+    bodies.appendChild(makeGroup("circuits", "Circuits", circuitList));
   }
 
   // Probes(設計§1.1「シーングラフツリー(...Probes)」、増分E2で追加)。
@@ -578,8 +865,6 @@ function setUpHierarchy(
   // 凡例が既に出している。
   const probeCount = world.imported_probe_count();
   if (probeCount > 0) {
-    const probeItem = document.createElement("li");
-    probeItem.textContent = "Probes";
     const probeList = document.createElement("ul");
     probeList.className = "tree-nested";
     for (let i = 0; i < probeCount; i++) {
@@ -587,8 +872,58 @@ function setUpHierarchy(
       item.textContent = world.imported_probe_label_at(i);
       probeList.appendChild(item);
     }
-    probeItem.appendChild(probeList);
-    bodies.appendChild(probeItem);
+    bodies.appendChild(makeGroup("probes", "Probes", probeList));
+  }
+
+  // **Materials(群2)**。設計 §1.1 は「Bodies / Joints / Circuits / Fluids /
+  // Probes / Frames(フレーム階層)/ **Materials(参照)**」と列挙しているが、
+  // Materials だけツリーに無かった(Project ドロワーの Materials タブには
+  // 物性表があるが、それは「参照」ではなく一覧)。
+  // ここでは**このシーンで実際に使われている材質**だけを出し、各材質の下に
+  // それを使っているボディを並べる——これが設計の言う「参照」。
+  const materialUsers = new Map<string, number[]>();
+  for (let i = 0; i < count; i++) {
+    if (world.body_is_removed_at(i)) continue;
+    const name = world.body_material_label_at(i);
+    const users = materialUsers.get(name);
+    if (users) users.push(i);
+    else materialUsers.set(name, [i]);
+  }
+  if (materialUsers.size > 0) {
+    const materialList = document.createElement("ul");
+    materialList.className = "tree-nested";
+    // 表示順は `SPAWN_MATERIALS` の順(決定的)、その後に未知の材質。
+    const ordered = [
+      ...materialNames.filter((n) => materialUsers.has(n)),
+      ...[...materialUsers.keys()].filter((n) => !materialNames.includes(n)),
+    ];
+    for (const name of ordered) {
+      const users = materialUsers.get(name)!;
+      const item = document.createElement("li");
+      item.textContent = `${name} (${users.length})`;
+      const userList = document.createElement("ul");
+      userList.className = "tree-nested";
+      for (const bodyIndex of users) {
+        const userItem = document.createElement("li");
+        // **「↳」を付けて Bodies の行と区別する**。同じラベルの行がツリー内に
+        // 2つ現れると、見た目にどちらが実体でどちらが参照か分からないうえ、
+        // ラベルでの選択(テスト・自動化)も曖昧になる(実際に Playwright の
+        // strict モードが 8 本まとめて落ちて気付いた)。
+        userItem.textContent = `↳ ${world.body_label_at(bodyIndex)}`;
+        userItem.classList.add("tree-selectable");
+        userItem.addEventListener("click", (event) => {
+          event.stopPropagation();
+          highlight(bodyIndex);
+          onSelect(bodyIndex);
+        });
+        userList.appendChild(userItem);
+      }
+      item.appendChild(userList);
+      materialList.appendChild(item);
+    }
+    bodies.appendChild(
+      makeGroup("materials", "Materials (参照)", materialList),
+    );
   }
 
   root.appendChild(bodies);
@@ -621,7 +956,9 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     return;
   }
   const label = world.body_label_at(index);
-  const staticBadge = world.body_is_static_at(index) ? ' <span class="badge">Static</span>' : "";
+  const staticBadge = world.body_is_static_at(index)
+    ? ' <span class="badge">Static</span>'
+    : "";
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
@@ -632,13 +969,126 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
       <div class="inspector-field"><span>Position</span><span id="inspector-position">—</span></div>
       <div class="inspector-field"><span>Rotation</span><span id="inspector-rotation">—</span></div>
       <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
+      <div class="inspector-field">
+        <span>Scale (x,y,z)</span>
+        <span class="inspector-scale-fields">
+          <input type="number" id="inspector-scale-x" min="0.01" step="0.1" value="1" />
+          <input type="number" id="inspector-scale-y" min="0.01" step="0.1" value="1" />
+          <input type="number" id="inspector-scale-z" min="0.01" step="0.1" value="1" />
+        </span>
+      </div>
+      <p class="inspector-note">軸別スケールは Box のみ(球・カプセルは形状表現に非等方の自由度が無い)。</p>
     </div>
+    ${renderRigidBodyComponent(world, index)}
+    ${renderInspectorExtraComponents(world, index)}
+  `;
+  wireInspectorEditFields(index);
+}
+
+/// **編集可能な RigidBody Component(群2)**。設計 §1.3 の表は RigidBody に
+/// 「Shape、Mass、Material、Body type(Dynamic/Static/Kinematic)、Collision
+/// group/mask」を求めている。Shape/Material は既に出ていたが、残り3つは
+/// **表示すらされていなかった**(Collision group/mask に至っては
+/// `RigidBodySet` に概念自体が無く、群2で `sim-mechanics` から作った)。
+///
+/// 編集は全て `Command` としてキューへ積み、**次 step の先頭で適用される**
+/// (`World::apply_pending_commands`)。Gizmo ドラッグのような直接書き換えと
+/// 違い、Play モード中でもリプレイ再現性と決定論が壊れない。
+function renderRigidBodyComponent(world: WasmWorld, index: number): string {
+  const mass = world.body_mass_at(index);
+  const bodyType = world.body_type_at(index);
+  const group = world.body_collision_group_at(index);
+  const mask = world.body_collision_mask_at(index);
+  const option = (value: string) =>
+    `<option value="${value}"${value === bodyType ? " selected" : ""}>${value}</option>`;
+  // 質量 0 は「無限質量」(Static/Kinematic)を意味するので、数値入力には
+  // 出さずプレースホルダで示す——0 と表示すると「0 kg の物体」に見えてしまう。
+  const massValue = mass > 0 ? mass.toPrecision(6) : "";
+  return `
     <div class="inspector-component">
       <h3>RigidBody</h3>
       <div class="inspector-field"><span>Material</span><span>${world.body_material_label_at(index)}</span></div>
+      <div class="inspector-field">
+        <span>Mass [kg]</span>
+        <input type="number" id="inspector-mass" min="0" step="0.1"
+               value="${massValue}" placeholder="∞ (無限質量)"
+               ${mass > 0 ? "" : "disabled"} />
+      </div>
+      <div class="inspector-field">
+        <span>Body type</span>
+        <select id="inspector-body-type">${["Dynamic", "Static", "Kinematic"].map(option).join("")}</select>
+      </div>
+      <div class="inspector-field">
+        <span>Collision group</span>
+        <input type="number" id="inspector-collision-group" min="0" step="1" value="${group}" />
+      </div>
+      <div class="inspector-field">
+        <span>Collision mask</span>
+        <input type="number" id="inspector-collision-mask" min="0" step="1" value="${mask}" />
+      </div>
+      <p class="inspector-note">編集は Command としてキューに積まれ、次 step の先頭で適用されます。</p>
     </div>
-    ${renderInspectorExtraComponents(world, index)}
   `;
+}
+
+/// `renderInspectorFor` が `innerHTML` を張り替えた直後にイベントを配線する
+/// (innerHTML 代入で前のリスナは要素ごと捨てられるので毎回張り直す)。
+function wireInspectorEditFields(index: number): void {
+  const handlers = inspectorEditRef.current;
+  if (!handlers) return;
+  const massInput = document.getElementById(
+    "inspector-mass",
+  ) as HTMLInputElement | null;
+  massInput?.addEventListener("change", () => {
+    const value = Number(massInput.value);
+    if (!Number.isFinite(value) || value <= 0) return;
+    handlers.setMass(index, value);
+  });
+  const typeSelect = document.getElementById(
+    "inspector-body-type",
+  ) as HTMLSelectElement | null;
+  typeSelect?.addEventListener("change", () =>
+    handlers.setBodyType(index, typeSelect.value),
+  );
+  const groupInput = document.getElementById(
+    "inspector-collision-group",
+  ) as HTMLInputElement | null;
+  const maskInput = document.getElementById(
+    "inspector-collision-mask",
+  ) as HTMLInputElement | null;
+  const pushFilter = () => {
+    const group = Number(groupInput?.value);
+    const mask = Number(maskInput?.value);
+    if (
+      !Number.isInteger(group) ||
+      !Number.isInteger(mask) ||
+      group < 0 ||
+      mask < 0
+    )
+      return;
+    handlers.setCollisionFilter(index, group, mask);
+  };
+  groupInput?.addEventListener("change", pushFilter);
+  maskInput?.addEventListener("change", pushFilter);
+
+  // 軸別スケール(群2)。Gizmo ドラッグと違い**Edit モードでの直接編集**なので
+  // Command を経由しない(既存の Scale Gizmo と同じ扱い)。
+  const scaleInputs = (["x", "y", "z"] as const).map(
+    (axis) =>
+      document.getElementById(
+        `inspector-scale-${axis}`,
+      ) as HTMLInputElement | null,
+  );
+  const pushScale = () => {
+    const [sx, sy, sz] = scaleInputs.map((input) => Number(input?.value));
+    if (![sx, sy, sz].every((s) => Number.isFinite(s) && s > 0)) return;
+    if (!handlers.setScaleXyz(index, sx, sy, sz)) {
+      // 効かない形状(球・カプセル)では入力を 1 に戻す——「入れたのに何も
+      // 起きない」より「この形状には効かない」と見えるほうが正直。
+      scaleInputs.forEach((input) => input && (input.value = "1"));
+    }
+  };
+  scaleInputs.forEach((input) => input?.addEventListener("change", pushScale));
 }
 
 /// **増分K: Componentビューの残り(Joint/Circuit/Coupling/Probe/近似バッジ)**。
@@ -649,17 +1099,23 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
 ///
 /// - **Joint**: `constraint_anchor_points_at`(選択中ボディが持つ拘束のアンカー)
 /// - **Circuit**: `circuit_element_count`/`circuit_element_label_at`(増分G2)
-/// - **Coupling**: `coupling_count`(本増分)——**個々の結合の種別名は出せない**。
-///   `Coupling`トレイトが名前を持たないためで、`domains()`のペアから推測する
-///   ことはできるが名前を捏造するより件数だけを正直に出す
+/// - **Coupling**: `coupling_info_text`(**群1で内省層へ移行**)——増分Kの時点では
+///   `coupling_count`(件数のみ)で、「`Coupling`トレイトが名前を持たないので
+///   名前を捏造するより件数だけを正直に出す」と書いていた。**群1でトレイト側に
+///   `kind()`/`describe()`/`referenced_bodies()` を足して前提ごと解消した**ので、
+///   種別・パラメータ・跨るドメイン・作用先ボディまで出せる
 /// - **Probe**: `imported_probe_count`/`imported_probe_label_at`(増分B1)
-/// - **近似バッジ**: `active_approximations_text`(本増分)——各ソルバが自己申告
-///   するAPIは無いので、**どのドメインが有効かという観測可能な事実**から
-///   設計文書に記録済みの既知の縮約を引き当てる
+/// - **近似バッジ**: `active_approximations_text`(**群1で自己申告へ移行**)——
+///   増分Kでは「どのドメインが有効か」からWorld側が推測していた。群1で
+///   `Solver::approximations()` を足し、各ソルバが名前・出典・オフ可否を
+///   自己申告する形にした(設定依存の近似も表現できるようになった)
 ///
 /// FluidRegion は SPH 粒子が個別ID体系を持たないため対象外(Hierarchy の
 /// 概要行と同じ既知の限界)。
-function renderInspectorExtraComponents(world: WasmWorld, index: number): string {
+function renderInspectorExtraComponents(
+  world: WasmWorld,
+  index: number,
+): string {
   const escape = (text: string) =>
     text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const sections: string[] = [];
@@ -668,7 +1124,10 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
   // アンカー2点だけを出しており、**種別も接続先も軸もモータ設定も見えなかった**。
   // 設計 §1.3 は「種別(Ball/Hinge/Slider/…)・接続 Body ID・軸・制限・モータ」を
   // 要求している。`joint_info_text`(タブ区切り)から全項目を出す。
-  const jointLines = world.joint_info_text(index).split("\n").filter((l) => l.length > 0);
+  const jointLines = world
+    .joint_info_text(index)
+    .split("\n")
+    .filter((l) => l.length > 0);
   if (jointLines.length > 0) {
     const rows = jointLines
       .map((line) => {
@@ -680,7 +1139,9 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
         );
       })
       .join("");
-    sections.push(`<div class="inspector-component" data-stacked><h3>Joint</h3>${rows}</div>`);
+    sections.push(
+      `<div class="inspector-component" data-stacked><h3>Joint</h3>${rows}</div>`,
+    );
   }
 
   // Circuit: ワールドに載っている回路素子(ボディ単位ではなくシーン単位)。
@@ -693,7 +1154,9 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
           `${escape(world.circuit_element_label_at(k))}</span></div>`,
       );
     }
-    sections.push(`<div class="inspector-component"><h3>Circuit</h3>${rows.join("")}</div>`);
+    sections.push(
+      `<div class="inspector-component"><h3>Circuit</h3>${rows.join("")}</div>`,
+    );
   }
 
   // Coupling(**群1で内省層へ移行**): 以前は件数だけを出し「種別: —(トレイトが
@@ -716,10 +1179,17 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
     .filter((l) => l.length > 0)
     .map(parseCoupling);
   const forThisBody = allCouplings.filter((c) =>
-    c.bodies.split(",").filter((b) => b.length > 0).includes(String(index)),
+    c.bodies
+      .split(",")
+      .filter((b) => b.length > 0)
+      .includes(String(index)),
   );
   const sceneWide = allCouplings.filter((c) => c.bodies.length === 0);
-  const couplingRow = (c: { kind: string; description: string; domains: string }) =>
+  const couplingRow = (c: {
+    kind: string;
+    description: string;
+    domains: string;
+  }) =>
     `<div class="inspector-field" title="${escape(world.coupling_kind_summary(c.kind))}">` +
     `<span>${escape(c.kind)}</span>` +
     `<span>${escape(c.description)} <em>[${escape(c.domains)}]</em></span></div>`;
@@ -748,7 +1218,9 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
           `<span>${world.imported_probe_value_at(k).toFixed(4)}</span></div>`,
       );
     }
-    sections.push(`<div class="inspector-component"><h3>Probe</h3>${rows.join("")}</div>`);
+    sections.push(
+      `<div class="inspector-component"><h3>Probe</h3>${rows.join("")}</div>`,
+    );
   }
 
   // 近似バッジ(**群1で自己申告へ移行**): 以前はWorld側が「どのドメインが
@@ -778,6 +1250,44 @@ function renderInspectorExtraComponents(world: WasmWorld, index: number): string
   }
 
   return sections.join("");
+}
+
+/// RigidBody Component の編集可能フィールドを、**実際にエンジンへ適用された値**で
+/// 毎フレーム描き直す(群2)。編集は次stepの先頭で適用されるため、押した瞬間には
+/// まだ反映されていない——ここで実データを読み直すことで「いつ適用されたか」が
+/// UI 上で正直に見える。
+///
+/// Settings の重力入力と同じく **`document.activeElement` の欄は書き換えない**。
+/// 打っている最中に値が戻ると数値を入力できなくなるため。
+function updateInspectorRigidBodyFields(world: WasmWorld, index: number): void {
+  const setIfIdle = (id: string, value: string) => {
+    const element = document.getElementById(id) as
+      | HTMLInputElement
+      | HTMLSelectElement
+      | null;
+    if (!element || document.activeElement === element) return;
+    if (element.value !== value) element.value = value;
+  };
+  const massInput = document.getElementById(
+    "inspector-mass",
+  ) as HTMLInputElement | null;
+  if (massInput) {
+    const mass = world.body_mass_at(index);
+    // Static/Kinematic は inv_mass=0(無限質量)なので欄を空にして無効化する。
+    massInput.disabled = !(mass > 0);
+    if (document.activeElement !== massInput) {
+      massInput.value = mass > 0 ? mass.toPrecision(6) : "";
+    }
+  }
+  setIfIdle("inspector-body-type", world.body_type_at(index));
+  setIfIdle(
+    "inspector-collision-group",
+    String(world.body_collision_group_at(index)),
+  );
+  setIfIdle(
+    "inspector-collision-mask",
+    String(world.body_collision_mask_at(index)),
+  );
 }
 
 function updateInspectorTransformFields(
@@ -818,7 +1328,15 @@ type CommandLogEntry =
       targetZ: number;
     }
   | { t: number; step: number; kind: "Release"; bodyIndex: number }
-  | { t: number; step: number; kind: "ApplyForce"; bodyIndex: number; fx: number; fy: number; fz: number }
+  | {
+      t: number;
+      step: number;
+      kind: "ApplyForce";
+      bodyIndex: number;
+      fx: number;
+      fy: number;
+      fz: number;
+    }
   | {
       t: number;
       step: number;
@@ -828,17 +1346,62 @@ type CommandLogEntry =
       targetAngle: number;
     }
   | { t: number; step: number; kind: "SetSwitch"; closed: boolean }
-  | { t: number; step: number; kind: "SetHeatSource"; on: boolean; watts: number };
+  | {
+      t: number;
+      step: number;
+      kind: "SetHeatSource";
+      on: boolean;
+      watts: number;
+    }
+  // **物理パラメータの変更(群2)**。決定論の観点では重力・dtの変更も
+  // 「入力」なので、Grab や SetSwitch と同じく記録しないとリプレイが
+  // 再現しない(とくに dt はステップ幅そのものを変える)。
+  | { t: number; step: number; kind: "SetGravity"; gravity: number }
+  | { t: number; step: number; kind: "SetDt"; dt: number }
+  // **Inspector の編集(群2)**。これらは `World` 側でも `Command` として
+  // `command_log` に載るが、フロント側の記録は「ユーザーの操作」単位で
+  // Replay タブに出すためのもの(既存の Grab/SetSwitch と同じ扱い)。
+  | {
+      t: number;
+      step: number;
+      kind: "SetBodyMass";
+      bodyIndex: number;
+      mass: number;
+    }
+  | {
+      t: number;
+      step: number;
+      kind: "SetBodyType";
+      bodyIndex: number;
+      bodyType: string;
+    }
+  | {
+      t: number;
+      step: number;
+      kind: "SetCollisionFilter";
+      bodyIndex: number;
+      group: number;
+      mask: number;
+    };
 const commandLog: CommandLogEntry[] = [];
 
 // `Omit<Union, K>`はTypeScriptでは判別共用体を分配せず、各variant固有の
 // フィールド(targetX/fx/closed等)が消えてしまう既知の挙動のため、分配版の
 // Omitを自前で定義する(`T extends any ? ... : never`は条件型がunion型の各
 // メンバーへ分配して適用される性質を利用する標準的なパターン)。
-type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
+type DistributiveOmit<T, K extends keyof T> = T extends unknown
+  ? Omit<T, K>
+  : never;
 
-function pushCommandLog(world: WasmWorld, entry: DistributiveOmit<CommandLogEntry, "t" | "step">) {
-  commandLog.push({ ...entry, t: world.time(), step: Number(world.step_count()) } as CommandLogEntry);
+function pushCommandLog(
+  world: WasmWorld,
+  entry: DistributiveOmit<CommandLogEntry, "t" | "step">,
+) {
+  commandLog.push({
+    ...entry,
+    t: world.time(),
+    step: Number(world.step_count()),
+  } as CommandLogEntry);
 }
 
 function formatCommandLogDetail(entry: CommandLogEntry): string {
@@ -855,6 +1418,16 @@ function formatCommandLogDetail(entry: CommandLogEntry): string {
       return `closed=${entry.closed}`;
     case "SetHeatSource":
       return `toggled ${entry.on ? "on" : "off"} (${entry.watts}W)`;
+    case "SetGravity":
+      return `gravity = ${entry.gravity} m/s²`;
+    case "SetDt":
+      return `dt = ${entry.dt} s`;
+    case "SetBodyMass":
+      return `body=#${entry.bodyIndex} mass = ${entry.mass} kg`;
+    case "SetBodyType":
+      return `body=#${entry.bodyIndex} type = ${entry.bodyType}`;
+    case "SetCollisionFilter":
+      return `body=#${entry.bodyIndex} group=0x${entry.group.toString(16)} mask=0x${entry.mask.toString(16)}`;
   }
 }
 
@@ -862,11 +1435,15 @@ function setUpProjectDrawer(
   materialsRef: MaterialsRef,
   circuitRef: CircuitRef,
   sceneExportRef: SceneExportRef,
+  projectBundleRef: ProjectBundleRef,
+  projectExportedRef: ProjectExportedRef,
   sceneImportRef: SceneImportRef,
   replayVerifyRef: ReplayVerifyRef,
+  replayPlaybackRef: ReplayPlaybackRef,
   circuitEditorRef: CircuitEditorRef,
   circuitFreeWiringState: CircuitFreeWiringState,
   prefabRef: PrefabRef,
+  prefabSaveRef: PrefabSaveRef,
   sceneGalleryRef: SceneGalleryRef,
   circuitElementsRef: CircuitElementsRef,
 ) {
@@ -875,6 +1452,12 @@ function setUpProjectDrawer(
   const staticContentByTab: Record<string, string> = {};
   let circuitTabRefreshIntervalId: number | null = null;
   const prefabs: PrefabDefinition[] = [];
+  // Hierarchy の右クリック「プレハブ化」からの登録口(群2、`PrefabSaveRef`のdoc参照)。
+  prefabSaveRef.current = (prefab) => {
+    prefabs.push(prefab);
+    if (document.querySelector('.project-tab[data-tab="prefabs"].active'))
+      renderPrefabsTab();
+  };
 
   // 自由配線回路エディタの状態(タブ切替でDOMは再構築されるが、実際に構築した
   // 回路自体はwasm側に残るため、この一覧はタブ再訪時の表示復元用)。
@@ -897,7 +1480,8 @@ function setUpProjectDrawer(
     // 読み込みは既存シーンへの追加(下のImport)ではなく、ワールド自体の
     // 差し替え(`from_scene_json`)である点が異なる。
     const galleryHeading = document.createElement("h4");
-    galleryHeading.textContent = "シーンギャラリー(ワールドを差し替えて読み込み)";
+    galleryHeading.textContent =
+      "シーンギャラリー(ワールドを差し替えて読み込み)";
     body.appendChild(galleryHeading);
     const galleryList = document.createElement("ul");
     galleryList.className = "scene-gallery-list";
@@ -920,15 +1504,20 @@ function setUpProjectDrawer(
     body.appendChild(galleryList);
 
     const note = document.createElement("p");
-    note.textContent = "現在のシーン(ボディ一覧)をJSONへエクスポートする(人間可読な表示専用の形式)。";
+    note.textContent =
+      "現在のシーン(ボディ一覧)をJSONへエクスポートする(人間可読な表示専用の形式)。";
     body.appendChild(note);
 
     const bodies = sceneExportRef.current();
     const exportButton = document.createElement("button");
     exportButton.textContent = `Export current scene (${bodies.length}件, JSON)`;
     exportButton.addEventListener("click", () => {
-      const latestBodies = sceneExportRef.current ? sceneExportRef.current() : bodies;
-      const blob = new Blob([JSON.stringify(latestBodies, null, 2)], { type: "application/json" });
+      const latestBodies = sceneExportRef.current
+        ? sceneExportRef.current()
+        : bodies;
+      const blob = new Blob([JSON.stringify(latestBodies, null, 2)], {
+        type: "application/json",
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -937,6 +1526,28 @@ function setUpProjectDrawer(
       URL.revokeObjectURL(url);
     });
     body.appendChild(exportButton);
+
+    // **単一ファイル Export(群2、設計 §6)**。`ProjectBundle`のdoc参照。
+    const bundleButton = document.createElement("button");
+    bundleButton.id = "btn-export-bundle";
+    bundleButton.textContent = "⬇ 一括Export (シーン+Replay+Bookmark)";
+    bundleButton.title =
+      "シーンJSON・記録済みコマンド列・ブックマーク一覧を1つのJSONファイルにまとめて書き出す";
+    bundleButton.addEventListener("click", () => {
+      if (!projectBundleRef.current) return;
+      const bundle = projectBundleRef.current();
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "project_bundle.json";
+      a.click();
+      URL.revokeObjectURL(url);
+      projectExportedRef.current?.();
+    });
+    body.appendChild(bundleButton);
 
     const list = document.createElement("ul");
     for (const b of bodies) {
@@ -989,7 +1600,9 @@ function setUpProjectDrawer(
     // ダイオードなのに、10V / 100Ω / 200Ω と表示され続ける)。sim-wasm へ
     // `circuit_element_count`/`circuit_element_label_at` を足し、
     // **実際に載っている素子を列挙して描く**ようにした。
-    const elements = circuitElementsRef.current ? circuitElementsRef.current() : [];
+    const elements = circuitElementsRef.current
+      ? circuitElementsRef.current()
+      : [];
     if (elements.length > 0) {
       const lines: string[] = [
         `回路の素子(実際に配線されているもの、${elements.length}件):`,
@@ -1013,7 +1626,9 @@ function setUpProjectDrawer(
     voltageLine.className = "inspector-field";
     body.appendChild(voltageLine);
 
-    const switchCheckbox = document.getElementById("toggle-circuit-switch") as HTMLInputElement | null;
+    const switchCheckbox = document.getElementById(
+      "toggle-circuit-switch",
+    ) as HTMLInputElement | null;
 
     // 自由配線回路エディタ(設計docs/23-frontend/01-editor.md §6「回路エディタ
     // サブモード」(D19)の縮約実装、`CircuitEditorRef`のdoc参照)。専用の
@@ -1035,7 +1650,10 @@ function setUpProjectDrawer(
     resetButton.textContent = "リセット(新規回路)";
     resetButton.addEventListener("click", () => {
       if (!circuitEditorRef.current) return;
-      const numNodes = Math.max(2, Math.trunc(Number(nodeCountInput.value) || 2));
+      const numNodes = Math.max(
+        2,
+        Math.trunc(Number(nodeCountInput.value) || 2),
+      );
       circuitEditorRef.current.reset(numNodes);
       circuitFreeWiringState.active = true;
       if (switchCheckbox) {
@@ -1088,17 +1706,43 @@ function setUpProjectDrawer(
         const value = Number(valueInput.value) || 0;
         if (kindSelect.value === "resistor") {
           circuitEditorRef.current.addResistor(a, b, value);
-          freeWiringComponents.push({ kind: "resistor", a, b, resistance: value });
+          freeWiringComponents.push({
+            kind: "resistor",
+            a,
+            b,
+            resistance: value,
+          });
         } else if (kindSelect.value === "voltage_source") {
           circuitEditorRef.current.addVoltageSource(a, b, value);
-          freeWiringComponents.push({ kind: "voltage_source", a, b, voltage: value });
+          freeWiringComponents.push({
+            kind: "voltage_source",
+            a,
+            b,
+            voltage: value,
+          });
         } else {
           const index = circuitEditorRef.current.addSwitch(a, b, false);
-          freeWiringComponents.push({ kind: "switch", a, b, index, closed: false });
+          freeWiringComponents.push({
+            kind: "switch",
+            a,
+            b,
+            index,
+            closed: false,
+          });
         }
         renderCircuitTab();
       });
-      addForm.append("A: ", aInput, " B: ", bInput, " ", kindSelect, " 値: ", valueInput, addButton);
+      addForm.append(
+        "A: ",
+        aInput,
+        " B: ",
+        bInput,
+        " ",
+        kindSelect,
+        " 値: ",
+        valueInput,
+        addButton,
+      );
       body.appendChild(addForm);
 
       const componentList = document.createElement("ul");
@@ -1131,7 +1775,9 @@ function setUpProjectDrawer(
         if (!circuitEditorRef.current) return;
         const lines: string[] = [];
         for (let node = 0; node < freeWiringNumNodes; node++) {
-          lines.push(`Node${node}: ${circuitEditorRef.current.nodeVoltage(node).toFixed(3)}V`);
+          lines.push(
+            `Node${node}: ${circuitEditorRef.current.nodeVoltage(node).toFixed(3)}V`,
+          );
         }
         voltageTable.textContent = lines.join(" / ");
       }
@@ -1164,7 +1810,8 @@ function setUpProjectDrawer(
   function renderPrefabsTab() {
     body.innerHTML = "";
     const note = document.createElement("p");
-    note.textContent = "選択中のボディの形状+材質をPrefabとして保存し、後で同じ形状+材質のボディを再スポーンできる。";
+    note.textContent =
+      "選択中のボディの形状+材質をPrefabとして保存し、後で同じ形状+材質のボディを再スポーンできる。";
     body.appendChild(note);
 
     const saveForm = document.createElement("div");
@@ -1210,7 +1857,14 @@ function setUpProjectDrawer(
     const table = document.createElement("table");
     table.className = "materials-table";
     const header = table.insertRow();
-    for (const label of ["Material", "density [kg/m^3]", "friction", "restitution", "specific heat [J/(kg・K)]", "conductivity [W/(m・K)]"]) {
+    for (const label of [
+      "Material",
+      "density [kg/m^3]",
+      "friction",
+      "restitution",
+      "specific heat [J/(kg・K)]",
+      "conductivity [W/(m・K)]",
+    ]) {
       const th = document.createElement("th");
       th.textContent = label;
       header.appendChild(th);
@@ -1237,7 +1891,9 @@ function setUpProjectDrawer(
     const exportButton = document.createElement("button");
     exportButton.textContent = `Export (${commandLog.length}件, JSON)`;
     exportButton.addEventListener("click", () => {
-      const blob = new Blob([JSON.stringify(commandLog, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(commandLog, null, 2)], {
+        type: "application/json",
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -1255,7 +1911,8 @@ function setUpProjectDrawer(
     replayButton.addEventListener("click", () => {
       if (!replayVerifyRef.current) return;
       const result = replayVerifyRef.current();
-      const boxText = (p: [number, number, number]) => `(${p[0].toFixed(3)}, ${p[1].toFixed(3)}, ${p[2].toFixed(3)})`;
+      const boxText = (p: [number, number, number]) =>
+        `(${p[0].toFixed(3)}, ${p[1].toFixed(3)}, ${p[2].toFixed(3)})`;
       replayStatus.textContent =
         `${result.commandCount}件のコマンドを${result.totalSteps}stepにわたって再生。` +
         `再生後Box_1位置=${boxText(result.finalBoxPosition)} (現在のシーン: ${boxText(result.liveBoxPosition)})。` +
@@ -1266,6 +1923,33 @@ function setUpProjectDrawer(
             : "state_hashが一致しませんでした。");
     });
     body.appendChild(replayButton);
+
+    // **ライブ再生(群2、`ReplayPlaybackRef`のdoc参照)**。上の「検証」は
+    // ヘッドレスで一気に流して state_hash を比べるだけで、**記録した操作を
+    // 目で見る手段が無かった**。こちらは Scene View に流し込んで再生する。
+    const livePlayButton = document.createElement("button");
+    livePlayButton.id = "btn-replay-live";
+    livePlayButton.textContent = "▶ ライブ再生(Scene Viewで見る)";
+    livePlayButton.title =
+      "記録済みコマンドを別のWorldで再生し、その様子をScene Viewに映す(現在のシーンは変更しない)";
+    livePlayButton.addEventListener("click", () => {
+      const playback = replayPlaybackRef.current;
+      if (!playback) return;
+      if (playback.isPlaying()) {
+        playback.stop();
+        replayStatus.textContent = "ライブ再生を中断しました。";
+        livePlayButton.textContent = "▶ ライブ再生(Scene Viewで見る)";
+        return;
+      }
+      const result = playback.start();
+      if (!result.started) {
+        replayStatus.textContent = result.reason ?? "ライブ再生を開始できませんでした。";
+        return;
+      }
+      replayStatus.textContent = `${commandLog.length}件のコマンドを${result.totalSteps}step分ライブ再生します(時間倍率が効きます)。`;
+      livePlayButton.textContent = "⏹ ライブ再生を止める";
+    });
+    body.appendChild(livePlayButton);
     body.appendChild(replayStatus);
 
     const list = document.createElement("ul");
@@ -1360,8 +2044,11 @@ function signedLog(v: number): number {
 /// 系列ごとに履歴長が違い得るので最長に合わせ、短い系列は空欄で埋める。
 function probeSeriesToCsv(series: ProbeSeries[]): string {
   const rows = series.reduce((m, s) => Math.max(m, s.history.length), 0);
-  const escape = (s: string) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-  const lines = [["sample", ...series.map((s) => s.label)].map(escape).join(",")];
+  const escape = (s: string) =>
+    /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  const lines = [
+    ["sample", ...series.map((s) => s.label)].map(escape).join(","),
+  ];
   for (let i = 0; i < rows; i++) {
     const cells = [String(i)];
     for (const s of series) {
@@ -1382,8 +2069,12 @@ const PROBE_GRAPH_COLORS = ["#9cf", "#fc6", "#f9c", "#9fc", "#c9f", "#ffcc99"];
 function setUpProbeGraph(): (series: ProbeSeries[]) => void {
   const canvas = document.getElementById("probe-canvas") as HTMLCanvasElement;
   const ctx = canvas.getContext("2d")!;
-  const logToggle = document.getElementById("toggle-probe-log") as HTMLInputElement;
-  const csvButton = document.getElementById("btn-probe-csv") as HTMLButtonElement;
+  const logToggle = document.getElementById(
+    "toggle-probe-log",
+  ) as HTMLInputElement;
+  const csvButton = document.getElementById(
+    "btn-probe-csv",
+  ) as HTMLButtonElement;
 
   // CSVボタンは「今まさに描かれている系列」を書き出す。`render()`が毎フレーム
   // 渡してくる最新の配列をここで覚えておく(描画とエクスポートで同じデータを
@@ -1391,7 +2082,9 @@ function setUpProbeGraph(): (series: ProbeSeries[]) => void {
   let latest: ProbeSeries[] = [];
   csvButton.addEventListener("click", () => {
     if (latest.length === 0) return;
-    const blob = new Blob([probeSeriesToCsv(latest)], { type: "text/csv;charset=utf-8" });
+    const blob = new Blob([probeSeriesToCsv(latest)], {
+      type: "text/csv;charset=utf-8",
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -1460,11 +2153,15 @@ async function setUpSceneView(
   materialsRef: MaterialsRef,
   circuitRef: CircuitRef,
   sceneExportRef: SceneExportRef,
+  projectBundleRef: ProjectBundleRef,
+  projectExportedRef: ProjectExportedRef,
   sceneImportRef: SceneImportRef,
   replayVerifyRef: ReplayVerifyRef,
+  replayPlaybackRef: ReplayPlaybackRef,
   circuitEditorRef: CircuitEditorRef,
   circuitFreeWiringState: CircuitFreeWiringState,
   prefabRef: PrefabRef,
+  prefabSaveRef: PrefabSaveRef,
   sceneGalleryRef: SceneGalleryRef,
   selectBodyRef: SelectBodyRef,
   circuitElementsRef: CircuitElementsRef,
@@ -1481,16 +2178,27 @@ async function setUpSceneView(
   let isGalleryScene = false;
   circuitEditorRef.current = {
     reset: (numNodes: number) => world.circuit_editor_reset(numNodes),
-    addResistor: (a, b, resistance) => world.circuit_editor_add_resistor(a, b, resistance),
-    addVoltageSource: (a, b, voltage) => world.circuit_editor_add_voltage_source(a, b, voltage),
+    addResistor: (a, b, resistance) =>
+      world.circuit_editor_add_resistor(a, b, resistance),
+    addVoltageSource: (a, b, voltage) =>
+      world.circuit_editor_add_voltage_source(a, b, voltage),
     addSwitch: (a, b, closed) => world.circuit_editor_add_switch(a, b, closed),
-    setSwitchClosed: (index, closed) => world.circuit_editor_set_switch_closed(index, closed),
+    setSwitchClosed: (index, closed) =>
+      world.circuit_editor_set_switch_closed(index, closed),
     nodeVoltage: (node) => world.circuit_node_voltage(node),
   };
   materialsRef.current = () =>
     SPAWN_MATERIALS.map((name) => {
-      const [density, friction, restitution, specificHeat, conductivity] = world.material_properties_f64(name);
-      return { name, density, friction, restitution, specificHeat, conductivity };
+      const [density, friction, restitution, specificHeat, conductivity] =
+        world.material_properties_f64(name);
+      return {
+        name,
+        density,
+        friction,
+        restitution,
+        specificHeat,
+        conductivity,
+      };
     });
   circuitRef.current = () => world.circuit_divider_voltage();
   // Circuitタブ・Hierarchyの「Circuits」が実際の素子を読むための配線
@@ -1499,7 +2207,8 @@ async function setUpSceneView(
   circuitElementsRef.current = () => {
     const count = world.circuit_element_count();
     const labels: string[] = [];
-    for (let i = 0; i < count; i += 1) labels.push(world.circuit_element_label_at(i));
+    for (let i = 0; i < count; i += 1)
+      labels.push(world.circuit_element_label_at(i));
     return labels;
   };
   sceneExportRef.current = () => {
@@ -1531,6 +2240,193 @@ async function setUpSceneView(
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   host.appendChild(renderer.domElement);
 
+  // **カメラ操作(群2で追加)**。設計 docs/23-frontend/01-editor.md §1.2
+  // 「中クリック回転・右クリックパン・ホイールでズーム」。
+  //
+  // **これが無かったあいだ、カメラは`position.set(6,4,10)`の完全固定だった**
+  // ——Unityのようなツールを名乗る上で最も基本的な欠落で、視点を変えられないため
+  // 物体の裏側も、大きなシーン(D8の球50個・天体シーン)の全体も見られなかった。
+  //
+  // **左ボタンは割り当てない**: 左は選択・ギズモ操作・Grabに既に使われている
+  // (`pointerdown`ハンドラ参照)。OrbitControlsの既定は左=回転なので、
+  // そのまま入れると選択が一切できなくなる。設計が中/右を指定しているのは
+  // まさにこの住み分けのためである。
+  const orbit = new OrbitControls(camera, renderer.domElement);
+  orbit.mouseButtons = {
+    LEFT: null,
+    MIDDLE: THREE.MOUSE.ROTATE,
+    RIGHT: THREE.MOUSE.PAN,
+  };
+  orbit.enableDamping = true;
+  orbit.dampingFactor = 0.12;
+  orbit.target.set(0, 1.5, 0);
+  orbit.update();
+  // Playwright からカメラ位置を観測するための露出(テスト専用、実行時の
+  // 挙動には影響しない)。カメラが実際に動いたことを座標で検証するため。
+  (window as unknown as { __camera: THREE.PerspectiveCamera }).__camera =
+    camera;
+
+  // **ツール状態(群2)**。設計 §1.2 の W/E/R/Q に対応する。
+  type GizmoTool = "translate" | "rotate" | "scale" | "none";
+  let gizmoTool: GizmoTool = "translate";
+  const toolButtons = new Map<GizmoTool, HTMLButtonElement>();
+  function setGizmoTool(tool: GizmoTool) {
+    gizmoTool = tool;
+    for (const [t, button] of toolButtons)
+      button.classList.toggle("active", t === tool);
+  }
+  for (const [id, tool] of [
+    ["btn-tool-translate", "translate"],
+    ["btn-tool-rotate", "rotate"],
+    ["btn-tool-scale", "scale"],
+    ["btn-tool-select", "none"],
+  ] as [string, GizmoTool][]) {
+    const button = document.getElementById(id) as HTMLButtonElement | null;
+    if (!button) continue;
+    toolButtons.set(tool, button);
+    button.addEventListener("click", () => setGizmoTool(tool));
+  }
+  setGizmoTool("translate");
+
+  // **Gizmo 座標系 World/Local(群2)**。設計 §1.2「座標系は World / Local 切替可」。
+  // これまで Gizmo の軸は常に世界軸固定で、傾いた物体を「その物体の軸方向へ」
+  // 動かす手段が無かった。
+  type GizmoSpace = "world" | "local";
+  let gizmoSpace: GizmoSpace = "world";
+  const gizmoSpaceButton = document.getElementById(
+    "btn-gizmo-space",
+  ) as HTMLButtonElement | null;
+  function setGizmoSpace(space: GizmoSpace) {
+    gizmoSpace = space;
+    if (gizmoSpaceButton) {
+      gizmoSpaceButton.dataset.space = space;
+      gizmoSpaceButton.textContent =
+        space === "world" ? "🌐 World" : "📦 Local";
+    }
+  }
+  gizmoSpaceButton?.addEventListener("click", () =>
+    setGizmoSpace(gizmoSpace === "world" ? "local" : "world"),
+  );
+
+  // **Settings(⚙)ポップオーバー(群2で追加)**。設計 §2「Settings(⚙):
+  // レンダリング品質・グリッド・ショートカット・PRNGシードの一括変更」。
+  //
+  // **オーバーレイのチェックボックス群をここへ移した**——ツールバーに
+  // 直に並べていたため6個のラベルが縦積みに折り返し、ボタンが読めない
+  // ほど混雑していた(実際にスクリーンショットで確認した)。
+  // 常時操作するものではないので、まとめて畳む。
+  const settingsButton = document.getElementById(
+    "btn-settings",
+  ) as HTMLButtonElement | null;
+  const settingsPopover = document.getElementById(
+    "settings-popover",
+  ) as HTMLElement | null;
+  if (settingsButton && settingsPopover) {
+    settingsButton.addEventListener("click", () => {
+      settingsPopover.hidden = !settingsPopover.hidden;
+    });
+    // ポップオーバーの外side をクリックしたら閉じる。
+    document.addEventListener("pointerdown", (event) => {
+      if (settingsPopover.hidden) return;
+      const target = event.target as Node;
+      if (!settingsPopover.contains(target) && target !== settingsButton) {
+        settingsPopover.hidden = true;
+      }
+    });
+  }
+
+  // **物理パラメータの実行時変更(群2)**。重力を変えて挙動を見るのは
+  // 「物理法則を試せるツール」の最も基本的な使い方だが、これまで
+  // フロントエンドから触る手段が一切無かった(wasmにsetterが無かった)。
+  const gravityInput = document.getElementById(
+    "input-gravity",
+  ) as HTMLInputElement | null;
+  const dtInput = document.getElementById(
+    "input-dt",
+  ) as HTMLInputElement | null;
+  const gridSnapInput = document.getElementById(
+    "input-grid-snap",
+  ) as HTMLInputElement | null;
+  function syncSettingsInputs() {
+    if (gravityInput && document.activeElement !== gravityInput) {
+      gravityInput.value = world.gravity().toFixed(3);
+    }
+    if (dtInput && document.activeElement !== dtInput) {
+      dtInput.value = world.dt().toFixed(6);
+    }
+    if (dtInput) dtInput.disabled = mode !== "edit";
+  }
+  gravityInput?.addEventListener("change", () => {
+    const value = Number(gravityInput.value);
+    if (!Number.isFinite(value)) return;
+    world.set_gravity(value);
+    pushCommandLog(world, { kind: "SetGravity", gravity: value });
+  });
+  dtInput?.addEventListener("change", () => {
+    const value = Number(dtInput.value);
+    if (!Number.isFinite(value) || value <= 0) return;
+    try {
+      world.set_dt(value);
+      pushCommandLog(world, { kind: "SetDt", dt: value });
+    } catch (err) {
+      window.alert(`dt の変更に失敗しました: ${String(err)}`);
+    }
+  });
+
+  /// グリッドスナップ幅 [m](設計 §1.2「グリッド・スナップ(既定 10 cm、変更可)」)。
+  /// 0 ならスナップしない。Gizmo ドラッグの位置決めに使う。
+  function gridSnapStep(): number {
+    const value = Number(gridSnapInput?.value ?? "0.1");
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+  function snapToGrid(value: number): number {
+    const step = gridSnapStep();
+    return step > 0 ? Math.round(value / step) * step : value;
+  }
+
+  // **キーボードショートカット(群2で追加)**。これまで`keydown`リスナは
+  // **リポジトリ全体で0件**で、ショートカットが一切無かった。
+  // テキスト入力中(input/textarea)は横取りしない——ブックマーク名や
+  // 数値入力を打てなくなるため。
+  window.addEventListener("keydown", (event) => {
+    const target = event.target as HTMLElement | null;
+    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    switch (event.key.toLowerCase()) {
+      case "w":
+        setGizmoTool("translate");
+        break;
+      case "e":
+        setGizmoTool("rotate");
+        break;
+      case "r":
+        setGizmoTool("scale");
+        break;
+      case "q":
+        setGizmoTool("none");
+        break;
+      case "f":
+        // 選択中のボディへカメラを寄せる(Unityの F と同じ)。
+        focusCameraOnSelection();
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  });
+
+  /// 選択中ボディを画面中央に収める(`F`キー)。OrbitControlsの注視点を
+  /// 動かし、現在の視線方向を保ったまま一定距離まで寄る。
+  function focusCameraOnSelection() {
+    if (!hasSelectedBody()) return;
+    const p = world.body_position_at_f32(selectedBodyIndex);
+    const target = new THREE.Vector3(p[0], p[1], p[2]);
+    const direction = camera.position.clone().sub(orbit.target).normalize();
+    orbit.target.copy(target);
+    camera.position.copy(target).addScaledVector(direction, 6);
+    orbit.update();
+  }
+
   function resize() {
     const w = host.clientWidth;
     const h = host.clientHeight;
@@ -1547,7 +2443,11 @@ async function setUpSceneView(
   scene.add(sun);
 
   const box = new THREE.Mesh(
-    new THREE.BoxGeometry(BOX_HALF_EXTENT * 2, BOX_HALF_EXTENT * 2, BOX_HALF_EXTENT * 2),
+    new THREE.BoxGeometry(
+      BOX_HALF_EXTENT * 2,
+      BOX_HALF_EXTENT * 2,
+      BOX_HALF_EXTENT * 2,
+    ),
     new THREE.MeshStandardMaterial({ color: 0xffa500 }),
   );
   scene.add(box);
@@ -1586,7 +2486,9 @@ async function setUpSceneView(
   );
   velocityArrow.visible = false;
   scene.add(velocityArrow);
-  const velocityOverlayToggle = document.getElementById("toggle-velocity-overlay") as HTMLInputElement;
+  const velocityOverlayToggle = document.getElementById(
+    "toggle-velocity-overlay",
+  ) as HTMLInputElement;
   const velocityDirection = new THREE.Vector3();
 
   // 接触点オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「接触点」、切替可)。
@@ -1596,9 +2498,17 @@ async function setUpSceneView(
   // だけで、法線・貫入量の可視化(矢印やインパルス強度の色分け等)は対象外。
   const CONTACT_MARKER_POOL_SIZE = 8;
   const CONTACT_MARKER_RADIUS = 0.06;
-  const contactOverlayToggle = document.getElementById("toggle-contact-overlay") as HTMLInputElement;
-  const contactMarkerGeometry = new THREE.SphereGeometry(CONTACT_MARKER_RADIUS, 10, 8);
-  const contactMarkerMaterial = new THREE.MeshBasicMaterial({ color: 0xff2222 });
+  const contactOverlayToggle = document.getElementById(
+    "toggle-contact-overlay",
+  ) as HTMLInputElement;
+  const contactMarkerGeometry = new THREE.SphereGeometry(
+    CONTACT_MARKER_RADIUS,
+    10,
+    8,
+  );
+  const contactMarkerMaterial = new THREE.MeshBasicMaterial({
+    color: 0xff2222,
+  });
   const contactMarkers: THREE.Mesh[] = [];
   for (let i = 0; i < CONTACT_MARKER_POOL_SIZE; i++) {
     const marker = new THREE.Mesh(contactMarkerGeometry, contactMarkerMaterial);
@@ -1616,8 +2526,15 @@ async function setUpSceneView(
   // 物理入力が一致する。
   const FORCE_OVERLAY_DURATION_MS = 500;
   const FORCE_OVERLAY_SCALE = 1.0 / 300_000.0; // 矢印長 = 力[N] * この係数[m]。
-  const forceOverlayToggle = document.getElementById("toggle-force-overlay") as HTMLInputElement;
-  const forceArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), new THREE.Vector3(), 1, 0xff8800);
+  const forceOverlayToggle = document.getElementById(
+    "toggle-force-overlay",
+  ) as HTMLInputElement;
+  const forceArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(0, 1, 0),
+    new THREE.Vector3(),
+    1,
+    0xff8800,
+  );
   forceArrow.visible = false;
   scene.add(forceArrow);
   let forceOverlayHideAtMs = 0;
@@ -1627,7 +2544,9 @@ async function setUpSceneView(
   // (固定ピボット・可動体側)を結ぶ線を毎フレーム描画する(`render()`内、
   // `constraintLines`ループ参照)。拘束を持たないボディ(球/箱スポーン・
   // 床・箱)は対象外。
-  const constraintOverlayToggle = document.getElementById("toggle-constraint-overlay") as HTMLInputElement;
+  const constraintOverlayToggle = document.getElementById(
+    "toggle-constraint-overlay",
+  ) as HTMLInputElement;
 
   // フレーム軸オーバーレイ + 階層ドリルインUI(設計docs/23-frontend/01-editor.md
   // §1.3「フレームサブモード」)。ROOTの子としてz軸まわりに自転するフレームを
@@ -1638,7 +2557,9 @@ async function setUpSceneView(
   // 親をROOT固定ではなく任意に選べる)。各フレームは`frame_world_position_f32`/
   // `frame_world_rotation_f32`(`FrameTree::transform_to_root`、階層を遡って
   // 合成したワールド姿勢)で毎フレーム更新する専用の`THREE.AxesHelper`を持つ。
-  const frameOverlayToggle = document.getElementById("toggle-frame-overlay") as HTMLInputElement;
+  const frameOverlayToggle = document.getElementById(
+    "toggle-frame-overlay",
+  ) as HTMLInputElement;
   const FRAME_AXIS_ANGULAR_VELOCITY = 1.0; // rad/s(任意値、回転が目視できる速さ)
   const FRAME_CHILD_OFFSET = 1.5; // 新規子フレームの親からのローカルオフセット(x軸方向)
   const frameAxesHelpers = new Map<number, THREE.AxesHelper>();
@@ -1650,7 +2571,13 @@ async function setUpSceneView(
     frameAxesHelpers.set(frameIndex, helper);
   }
 
-  const initialFrameIndex = world.add_child_frame(0, 0, 3, 0, FRAME_AXIS_ANGULAR_VELOCITY);
+  const initialFrameIndex = world.add_child_frame(
+    0,
+    0,
+    3,
+    0,
+    FRAME_AXIS_ANGULAR_VELOCITY,
+  );
   createFrameAxesHelper(initialFrameIndex);
   selectedFrameIndex = initialFrameIndex;
 
@@ -1659,7 +2586,10 @@ async function setUpSceneView(
   // 粒子位置をTHREE.Pointsで毎フレーム反映する(粒子数は固定なので、スポーン時に
   // 一度だけBufferAttributeを確保しrender()内で内容だけ更新する)。
   const fluidGeometry = new THREE.BufferGeometry();
-  const fluidMaterial = new THREE.PointsMaterial({ color: 0x3399ff, size: 0.08 });
+  const fluidMaterial = new THREE.PointsMaterial({
+    color: 0x3399ff,
+    size: 0.08,
+  });
   const fluidPoints = new THREE.Points(fluidGeometry, fluidMaterial);
   fluidPoints.visible = false;
   scene.add(fluidPoints);
@@ -1674,7 +2604,10 @@ async function setUpSceneView(
   const GRID_FLUID_MAX_CELLS = 4096;
   const gridFluidGeometry = new THREE.BufferGeometry();
   const gridFluidVertices = new Float32Array(GRID_FLUID_MAX_CELLS * 2 * 3);
-  const gridFluidPositionAttribute = new THREE.BufferAttribute(gridFluidVertices, 3);
+  const gridFluidPositionAttribute = new THREE.BufferAttribute(
+    gridFluidVertices,
+    3,
+  );
   gridFluidGeometry.setAttribute("position", gridFluidPositionAttribute);
   const gridFluidLines = new THREE.LineSegments(
     gridFluidGeometry,
@@ -1684,16 +2617,26 @@ async function setUpSceneView(
   scene.add(gridFluidLines);
 
   function updateGridFluidOverlay(currentWorld: WasmWorld) {
-    const enabled = (document.getElementById("toggle-grid-fluid-overlay") as HTMLInputElement | null)
-      ?.checked;
-    const field = enabled ? currentWorld.grid_fluid_velocity_field_f32(GRID_FLUID_OVERLAY_STRIDE) : new Float32Array(0);
+    const enabled = (
+      document.getElementById(
+        "toggle-grid-fluid-overlay",
+      ) as HTMLInputElement | null
+    )?.checked;
+    const field = enabled
+      ? currentWorld.grid_fluid_velocity_field_f32(GRID_FLUID_OVERLAY_STRIDE)
+      : new Float32Array(0);
     const cells = Math.min(field.length / 4, GRID_FLUID_MAX_CELLS);
     if (cells === 0) {
       gridFluidLines.visible = false;
       return;
     }
     for (let c = 0; c < cells; c += 1) {
-      const [x, y, u, v] = [field[c * 4], field[c * 4 + 1], field[c * 4 + 2], field[c * 4 + 3]];
+      const [x, y, u, v] = [
+        field[c * 4],
+        field[c * 4 + 1],
+        field[c * 4 + 2],
+        field[c * 4 + 3],
+      ];
       const base = c * 6;
       // 始点(セル中心)。格子流体は2Dなのでz=0平面に描く。
       gridFluidVertices[base] = x;
@@ -1715,7 +2658,11 @@ async function setUpSceneView(
     forceArrow.position.copy(origin);
     forceArrow.setDirection(force.clone().divideScalar(magnitude));
     const length = magnitude * FORCE_OVERLAY_SCALE;
-    forceArrow.setLength(Math.max(length, 0.3), Math.min(0.3, length * 0.3), Math.min(0.2, length * 0.2));
+    forceArrow.setLength(
+      Math.max(length, 0.3),
+      Math.min(0.3, length * 0.3),
+      Math.min(0.2, length * 0.2),
+    );
     forceOverlayHideAtMs = performance.now() + FORCE_OVERLAY_DURATION_MS;
   }
 
@@ -1731,28 +2678,44 @@ async function setUpSceneView(
   const GIZMO_HEAD_LENGTH = 0.28;
   const GIZMO_SHAFT_RADIUS = 0.03;
   const GIZMO_HEAD_RADIUS = 0.09;
-  const GIZMO_AXES: { axis: THREE.Vector3; color: number; name: "x" | "y" | "z" }[] = [
+  const GIZMO_AXES: {
+    axis: THREE.Vector3;
+    color: number;
+    name: "x" | "y" | "z";
+  }[] = [
     { axis: new THREE.Vector3(1, 0, 0), color: 0xff4444, name: "x" },
     { axis: new THREE.Vector3(0, 1, 0), color: 0x44ff44, name: "y" },
     { axis: new THREE.Vector3(0, 0, 1), color: 0x4488ff, name: "z" },
   ];
   const gizmoGroup = new THREE.Group();
-  const gizmoHandleMeshes: { mesh: THREE.Mesh; axisName: "x" | "y" | "z" }[] = [];
+  const gizmoHandleMeshes: { mesh: THREE.Mesh; axisName: "x" | "y" | "z" }[] =
+    [];
   for (const { axis, color, name } of GIZMO_AXES) {
     const shaftLength = GIZMO_AXIS_LENGTH - GIZMO_HEAD_LENGTH;
     const material = new THREE.MeshBasicMaterial({ color });
     const shaft = new THREE.Mesh(
-      new THREE.CylinderGeometry(GIZMO_SHAFT_RADIUS, GIZMO_SHAFT_RADIUS, shaftLength, 8),
+      new THREE.CylinderGeometry(
+        GIZMO_SHAFT_RADIUS,
+        GIZMO_SHAFT_RADIUS,
+        shaftLength,
+        8,
+      ),
       material,
     );
     shaft.position.y = shaftLength / 2;
-    const head = new THREE.Mesh(new THREE.ConeGeometry(GIZMO_HEAD_RADIUS, GIZMO_HEAD_LENGTH, 8), material);
+    const head = new THREE.Mesh(
+      new THREE.ConeGeometry(GIZMO_HEAD_RADIUS, GIZMO_HEAD_LENGTH, 8),
+      material,
+    );
     head.position.y = shaftLength + GIZMO_HEAD_LENGTH / 2;
     const axisGroup = new THREE.Group();
     axisGroup.add(shaft, head);
     axisGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
     gizmoGroup.add(axisGroup);
-    gizmoHandleMeshes.push({ mesh: shaft, axisName: name }, { mesh: head, axisName: name });
+    gizmoHandleMeshes.push(
+      { mesh: shaft, axisName: name },
+      { mesh: head, axisName: name },
+    );
   }
   gizmoGroup.visible = false;
   scene.add(gizmoGroup);
@@ -1766,10 +2729,18 @@ async function setUpSceneView(
   const ROTATION_RING_RADIUS = 1.0;
   const ROTATION_RING_TUBE_RADIUS = 0.03;
   const rotationGizmoGroup = new THREE.Group();
-  const rotationHandleMeshes: { mesh: THREE.Mesh; axisName: "x" | "y" | "z" }[] = [];
+  const rotationHandleMeshes: {
+    mesh: THREE.Mesh;
+    axisName: "x" | "y" | "z";
+  }[] = [];
   for (const { axis, color, name } of GIZMO_AXES) {
     const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(ROTATION_RING_RADIUS, ROTATION_RING_TUBE_RADIUS, 8, 48),
+      new THREE.TorusGeometry(
+        ROTATION_RING_RADIUS,
+        ROTATION_RING_TUBE_RADIUS,
+        8,
+        48,
+      ),
       new THREE.MeshBasicMaterial({ color }),
     );
     // TorusGeometryは既定でXY平面上(穴の軸はZ)にあるため、穴の軸を`axis`へ合わせる。
@@ -1796,14 +2767,26 @@ async function setUpSceneView(
   const SCALE_MAX = 4.0;
   const scaleGizmoGroup = new THREE.Group();
   const scaleHandleMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(SCALE_HANDLE_SIZE, SCALE_HANDLE_SIZE, SCALE_HANDLE_SIZE),
+    new THREE.BoxGeometry(
+      SCALE_HANDLE_SIZE,
+      SCALE_HANDLE_SIZE,
+      SCALE_HANDLE_SIZE,
+    ),
     new THREE.MeshBasicMaterial({ color: 0xffff00 }),
   );
-  scaleHandleMesh.position.set(SCALE_HANDLE_OFFSET, SCALE_HANDLE_OFFSET, SCALE_HANDLE_OFFSET);
+  scaleHandleMesh.position.set(
+    SCALE_HANDLE_OFFSET,
+    SCALE_HANDLE_OFFSET,
+    SCALE_HANDLE_OFFSET,
+  );
   scaleGizmoGroup.add(scaleHandleMesh);
   scaleGizmoGroup.visible = false;
   scene.add(scaleGizmoGroup);
   const currentScale = new Map<number, number>();
+  /// 軸別スケール(群2)。`currentScale`(等方)と別に持つ——`render()`が毎フレーム
+  /// メッシュのスケールを書き戻すため、ここに残さないと1フレームで消える
+  /// (実装検証中に発見: 入力した瞬間だけ変形して即座に戻っていた)。
+  const currentScaleXyz = new Map<number, [number, number, number]>();
 
   // モーターアーム(`Command::SetMotorTarget`の実証用、設計docs/20-integration/
   // 04-world-api.md §2「Commandキュー」)。`motorArmBodies`はスポーン時に登録
@@ -1838,9 +2821,33 @@ async function setUpSceneView(
   // このスコープの外側で宣言済み)。
   function selectFrame(frameIndex: number) {
     selectedFrameIndex = frameIndex;
-    highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
+    highlightHierarchy = rebuildHierarchy();
   }
-  let highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
+  // **Hierarchy の右クリック操作(群2)**。実体(`hierarchyActionsImpl`)は
+  // メッシュ管理・プレハブ機構が揃う後段で組み立てるので、ここでは**遅延解決の
+  // プロキシ**を渡す——`setUpHierarchy` は呼び出し時点の `actions` を各行の
+  // リスナへ焼き込むため、後から差し替えても既に作られた行には届かない。
+  const hierarchyActionsRef: { current: HierarchyActions | null } = {
+    current: null,
+  };
+  const hierarchyActions: HierarchyActions = {
+    duplicate: (i) => hierarchyActionsRef.current?.duplicate(i),
+    remove: (i) => hierarchyActionsRef.current?.remove(i),
+    isolate: (i) => hierarchyActionsRef.current?.isolate(i),
+    isolatedIndex: () => hierarchyActionsRef.current?.isolatedIndex() ?? null,
+    capturePrefab: (i) => hierarchyActionsRef.current?.capturePrefab(i),
+  };
+  function rebuildHierarchy(): (index: number) => void {
+    return setUpHierarchy(
+      world,
+      selectBody,
+      selectedFrameIndex,
+      selectFrame,
+      hierarchyActions,
+      SPAWN_MATERIALS,
+    );
+  }
+  let highlightHierarchy = rebuildHierarchy();
   // Consoleのオブジェクト連動(増分E4、`SelectBodyRef`のdoc参照)。イベント行が
   // 持つ発生源ボディを選択できるようにする。**範囲外は無視する**——イベントは
   // 過去のstepで発生したものが表示され続けるため、その後シーンギャラリーで
@@ -1849,6 +2856,44 @@ async function setUpSceneView(
   selectBodyRef.current = (index: number) => {
     if (index < 0 || index >= world.body_count()) return;
     selectBody(index);
+  };
+  // **Inspector の編集を Command キューへ配線する(群2、`InspectorEditRef`のdoc参照)**。
+  // 適用は次stepの先頭なので、押した直後に Inspector を描き直しても値は
+  // まだ変わっていない。**そこで嘘の即時反映をしない**——`render()`ループが
+  // 毎フレーム値を読み直して表示を更新するため、実際に適用された step で
+  // 表示が変わる(Playモードが止まっていれば `step` ボタンを押すまで変わらない、
+  // これは「次step先頭で適用」という設計そのものが目に見えている状態)。
+  inspectorEditRef.current = {
+    setMass(bodyIndex, mass) {
+      if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
+      world.push_set_body_mass(bodyIndex, mass);
+      pushCommandLog(world, { kind: "SetBodyMass", bodyIndex, mass });
+    },
+    setBodyType(bodyIndex, kind) {
+      if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
+      world.push_set_body_type(bodyIndex, kind);
+      pushCommandLog(world, { kind: "SetBodyType", bodyIndex, bodyType: kind });
+    },
+    setCollisionFilter(bodyIndex, group, mask) {
+      if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
+      world.push_set_collision_filter(bodyIndex, group, mask);
+      pushCommandLog(world, {
+        kind: "SetCollisionFilter",
+        bodyIndex,
+        group,
+        mask,
+      });
+    },
+    setScaleXyz(bodyIndex, sx, sy, sz) {
+      if (bodyIndex <= 0 || bodyIndex >= world.body_count()) return false;
+      const applied = world.set_body_scale_xyz_at(bodyIndex, sx, sy, sz);
+      if (applied) {
+        // Three.js 側のメッシュは基準ジオメトリ×スケールで表示しているので、
+        // 同じ倍率を掛ける(`currentScale` は等方スケール用なので触らない)。
+        currentScaleXyz.set(bodyIndex, [sx, sy, sz]);
+      }
+      return applied;
+    },
   };
   renderInspectorFor(world, selectedBodyIndex);
 
@@ -1896,7 +2941,9 @@ async function setUpSceneView(
     if (!gizmoGroup.visible) return null;
     updatePointerNdc(event);
     raycaster.setFromCamera(pointerNdc, camera);
-    const hits = raycaster.intersectObjects(gizmoHandleMeshes.map((h) => h.mesh));
+    const hits = raycaster.intersectObjects(
+      gizmoHandleMeshes.map((h) => h.mesh),
+    );
     if (!hits.length) return null;
     const handle = gizmoHandleMeshes.find((h) => h.mesh === hits[0].object);
     return handle ? handle.axisName : null;
@@ -1906,7 +2953,9 @@ async function setUpSceneView(
     if (!rotationGizmoGroup.visible) return null;
     updatePointerNdc(event);
     raycaster.setFromCamera(pointerNdc, camera);
-    const hits = raycaster.intersectObjects(rotationHandleMeshes.map((h) => h.mesh));
+    const hits = raycaster.intersectObjects(
+      rotationHandleMeshes.map((h) => h.mesh),
+    );
     if (!hits.length) return null;
     const handle = rotationHandleMeshes.find((h) => h.mesh === hits[0].object);
     return handle ? handle.axisName : null;
@@ -1961,16 +3010,31 @@ async function setUpSceneView(
   const editUndoStack: EditUndoEntry[] = [];
   const editRedoStack: EditUndoEntry[] = [];
 
-  function captureCurrentEntry(bodyIndex: number, kind: "position" | "rotation" | "scale"): EditUndoEntry {
+  function captureCurrentEntry(
+    bodyIndex: number,
+    kind: "position" | "rotation" | "scale",
+  ): EditUndoEntry {
     if (kind === "position") {
       const p = world.body_position_at_f32(bodyIndex);
-      return { bodyIndex, kind: "position", position: new THREE.Vector3(p[0], p[1], p[2]) };
+      return {
+        bodyIndex,
+        kind: "position",
+        position: new THREE.Vector3(p[0], p[1], p[2]),
+      };
     }
     if (kind === "rotation") {
       const r = world.body_rotation_at_f32(bodyIndex);
-      return { bodyIndex, kind: "rotation", rotation: new THREE.Quaternion(r[0], r[1], r[2], r[3]) };
+      return {
+        bodyIndex,
+        kind: "rotation",
+        rotation: new THREE.Quaternion(r[0], r[1], r[2], r[3]),
+      };
     }
-    return { bodyIndex, kind: "scale", scale: currentScale.get(bodyIndex) ?? 1.0 };
+    return {
+      bodyIndex,
+      kind: "scale",
+      scale: currentScale.get(bodyIndex) ?? 1.0,
+    };
   }
 
   function projectToScreen(worldPos: THREE.Vector3): { x: number; y: number } {
@@ -1988,9 +3052,13 @@ async function setUpSceneView(
     dragMode = null;
     if (mode === "edit") {
       pointerDownGizmoAxis = hitGizmo(event);
-      pointerDownRotationAxis = pointerDownGizmoAxis ? null : hitRotationGizmo(event);
+      pointerDownRotationAxis = pointerDownGizmoAxis
+        ? null
+        : hitRotationGizmo(event);
       pointerDownScaleHit =
-        !pointerDownGizmoAxis && !pointerDownRotationAxis && hitScaleGizmo(event);
+        !pointerDownGizmoAxis &&
+        !pointerDownRotationAxis &&
+        hitScaleGizmo(event);
       pointerDownHit =
         pointerDownGizmoAxis || pointerDownRotationAxis || pointerDownScaleHit
           ? null
@@ -2025,7 +3093,8 @@ async function setUpSceneView(
           kind: "rotation",
           rotation: rotateStartQuat.clone(),
         });
-        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY)
+          editUndoStack.shift();
         editRedoStack.length = 0;
         undoButton.disabled = mode !== "edit";
         redoButton.disabled = true;
@@ -2033,6 +3102,9 @@ async function setUpSceneView(
         isDragging = true;
         dragMode = "gizmo";
         gizmoAxisDir.copy(AXIS_VECTORS[pointerDownGizmoAxis]);
+        // Local 座標系ならボディの姿勢で軸を回す(群2、設計 §1.2)。
+        if (gizmoSpace === "local")
+          gizmoAxisDir.applyQuaternion(inspectorRotationQuat).normalize();
         gizmoDragStartPosition.copy(gizmoGroup.position);
         gizmoDragStartScalar = gizmoAxisDir.dot(gizmoDragStartPosition);
         editUndoStack.push({
@@ -2040,28 +3112,42 @@ async function setUpSceneView(
           kind: "position",
           position: gizmoDragStartPosition.clone(),
         });
-        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY)
+          editUndoStack.shift();
         editRedoStack.length = 0;
         undoButton.disabled = mode !== "edit";
         redoButton.disabled = true;
         camera.getWorldDirection(cameraDirection);
         let planeNormal = cameraDirection
           .clone()
-          .sub(gizmoAxisDir.clone().multiplyScalar(cameraDirection.dot(gizmoAxisDir)));
+          .sub(
+            gizmoAxisDir
+              .clone()
+              .multiplyScalar(cameraDirection.dot(gizmoAxisDir)),
+          );
         if (planeNormal.lengthSq() < 1e-9) {
-          planeNormal = new THREE.Vector3().crossVectors(gizmoAxisDir, new THREE.Vector3(0, 1, 0));
+          planeNormal = new THREE.Vector3().crossVectors(
+            gizmoAxisDir,
+            new THREE.Vector3(0, 1, 0),
+          );
           if (planeNormal.lengthSq() < 1e-9) {
             planeNormal.crossVectors(gizmoAxisDir, new THREE.Vector3(1, 0, 0));
           }
         }
         planeNormal.normalize();
-        dragPlane.setFromNormalAndCoplanarPoint(planeNormal, gizmoDragStartPosition);
+        dragPlane.setFromNormalAndCoplanarPoint(
+          planeNormal,
+          gizmoDragStartPosition,
+        );
       } else if (pointerDownScaleHit) {
         isDragging = true;
         dragMode = "scale";
         scaleCenterScreen = projectToScreen(scaleGizmoGroup.position);
         scaleDragStartDistance = Math.max(
-          Math.hypot(event.clientX - scaleCenterScreen.x, event.clientY - scaleCenterScreen.y),
+          Math.hypot(
+            event.clientX - scaleCenterScreen.x,
+            event.clientY - scaleCenterScreen.y,
+          ),
           10,
         );
         scaleDragStartValue = currentScale.get(selectedBodyIndex) ?? 1.0;
@@ -2070,7 +3156,8 @@ async function setUpSceneView(
           kind: "scale",
           scale: scaleDragStartValue,
         });
-        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY)
+          editUndoStack.shift();
         editRedoStack.length = 0;
         undoButton.disabled = mode !== "edit";
         redoButton.disabled = true;
@@ -2081,10 +3168,19 @@ async function setUpSceneView(
         grabbedBodyIndex = pointerDownHit.picked.bodyIndex;
         selectBody(grabbedBodyIndex);
         camera.getWorldDirection(cameraDirection);
-        dragPlane.setFromNormalAndCoplanarPoint(cameraDirection, pointerDownHit.worldPoint);
+        dragPlane.setFromNormalAndCoplanarPoint(
+          cameraDirection,
+          pointerDownHit.worldPoint,
+        );
         const p = world.body_position_at_f32(grabbedBodyIndex);
         world.push_grab(grabbedBodyIndex, p[0], p[1], p[2]);
-        pushCommandLog(world, { kind: "Grab", bodyIndex: grabbedBodyIndex, targetX: p[0], targetY: p[1], targetZ: p[2] });
+        pushCommandLog(world, {
+          kind: "Grab",
+          bodyIndex: grabbedBodyIndex,
+          targetX: p[0],
+          targetY: p[1],
+          targetZ: p[2],
+        });
       }
     }
     if (dragMode === "rotate") {
@@ -2095,9 +3191,18 @@ async function setUpSceneView(
         event.clientX - rotateCenterScreen.x,
       );
       const deltaAngle = currentAngle - rotateStartAngle;
-      const deltaQuat = new THREE.Quaternion().setFromAxisAngle(rotateAxisDir, deltaAngle);
+      const deltaQuat = new THREE.Quaternion().setFromAxisAngle(
+        rotateAxisDir,
+        deltaAngle,
+      );
       const newQuat = deltaQuat.multiply(rotateStartQuat);
-      world.set_body_rotation_at(selectedBodyIndex, newQuat.x, newQuat.y, newQuat.z, newQuat.w);
+      world.set_body_rotation_at(
+        selectedBodyIndex,
+        newQuat.x,
+        newQuat.y,
+        newQuat.z,
+        newQuat.w,
+      );
       return;
     }
     if (dragMode === "scale") {
@@ -2108,11 +3213,17 @@ async function setUpSceneView(
         event.clientY - scaleCenterScreen.y,
       );
       const factor = Math.min(
-        Math.max(scaleDragStartValue * (currentDistance / scaleDragStartDistance), SCALE_MIN),
+        Math.max(
+          scaleDragStartValue * (currentDistance / scaleDragStartDistance),
+          SCALE_MIN,
+        ),
         SCALE_MAX,
       );
       world.set_body_scale_at(selectedBodyIndex, factor);
       currentScale.set(selectedBodyIndex, factor);
+      // 等方スケール Gizmo を使ったら軸別スケールは破棄する(両方を同時に
+      // 効かせると `set_body_scale_at`(基準形状×倍率)と食い違う)。
+      currentScaleXyz.delete(selectedBodyIndex);
       renderInspectorFor(world, selectedBodyIndex);
       return;
     }
@@ -2122,10 +3233,39 @@ async function setUpSceneView(
     if (dragMode === "gizmo") {
       const t = gizmoAxisDir.dot(dragPlaneHit);
       const delta = t - gizmoDragStartScalar;
-      const newPos = gizmoDragStartPosition.clone().addScaledVector(gizmoAxisDir, delta);
-      world.set_body_position_at(selectedBodyIndex, newPos.x, newPos.y, newPos.z);
+      const newPos = gizmoDragStartPosition
+        .clone()
+        .addScaledVector(gizmoAxisDir, delta);
+      // **グリッドスナップ(群2)**。設計 §1.2「グリッド・スナップ(既定10cm、
+      // 変更可)」。Settings で 0 にすると連続移動になる。
+      // ドラッグしている軸の成分だけを丸める——3成分すべてを丸めると、
+      // 軸に沿った移動なのに他の軸まで動いてしまう。
+      //
+      // **Local 座標系ではスナップしない**——グリッドは世界座標に固定された
+      // 格子なので、傾いた軸に沿って動かしながら世界格子へ丸めると、動かして
+      // いない軸まで格子へ引っ張られて軸拘束が壊れる(実際に試して確認した)。
+      const snapped =
+        gizmoSpace === "local"
+          ? newPos.clone()
+          : new THREE.Vector3(
+              Math.abs(gizmoAxisDir.x) > 0.5 ? snapToGrid(newPos.x) : newPos.x,
+              Math.abs(gizmoAxisDir.y) > 0.5 ? snapToGrid(newPos.y) : newPos.y,
+              Math.abs(gizmoAxisDir.z) > 0.5 ? snapToGrid(newPos.z) : newPos.z,
+            );
+      world.set_body_position_at(
+        selectedBodyIndex,
+        snapped.x,
+        snapped.y,
+        snapped.z,
+      );
+      markUnsaved();
     } else if (dragMode === "grab") {
-      world.push_move_grab(grabbedBodyIndex, dragPlaneHit.x, dragPlaneHit.y, dragPlaneHit.z);
+      world.push_move_grab(
+        grabbedBodyIndex,
+        dragPlaneHit.x,
+        dragPlaneHit.y,
+        dragPlaneHit.z,
+      );
     }
   });
 
@@ -2154,33 +3294,72 @@ async function setUpSceneView(
   const playButton = document.getElementById("btn-play") as HTMLButtonElement;
   const stepButton = document.getElementById("btn-step") as HTMLButtonElement;
   const nudgeButton = document.getElementById("btn-nudge") as HTMLButtonElement;
-  const motorToggleButton = document.getElementById("btn-motor-toggle") as HTMLButtonElement;
+  const motorToggleButton = document.getElementById(
+    "btn-motor-toggle",
+  ) as HTMLButtonElement;
   // 分圧回路のスイッチ(`Command::SetSwitch`実証用、設計docs/20-integration/
   // 04-world-api.md §2「Commandキュー」)。`WasmWorld::new`が既に分圧回路
   // (電源10V→100Ω→分圧点、分圧点→200Ω→GND、分圧点↔GNDにスイッチ)を構築
   // 済みなので、フロントエンドは切替のみを担う。HUDの`circuit V`行が
   // 実際の分圧点電圧(開: 約6.67V、閉: 約0V)を毎フレーム表示する。
-  const circuitSwitchToggle = document.getElementById("toggle-circuit-switch") as HTMLInputElement;
+  const circuitSwitchToggle = document.getElementById(
+    "toggle-circuit-switch",
+  ) as HTMLInputElement;
   // ヒーター(`Command::SetHeatSource`実証用)。モジュールdoc「1step分だけ効く」
   // 縮約セマンティクスのとおり、継続加熱するには毎stepの直前に再度
   // `push_heat_source`を呼ぶ必要がある(`frame()`ループ内、`world.step()`の
   // 直前で呼ぶ)。HUDの`heater T`行が熱ノードの現在温度(ニュートン冷却あり、
   // 時定数τ=10s)を毎フレーム表示する。
   const HEATER_WATTS = 2000.0;
-  const heaterToggle = document.getElementById("toggle-heater") as HTMLInputElement;
+  const heaterToggle = document.getElementById(
+    "toggle-heater",
+  ) as HTMLInputElement;
   const undoButton = document.getElementById("btn-undo") as HTMLButtonElement;
   const redoButton = document.getElementById("btn-redo") as HTMLButtonElement;
 
   // 時間倍率(設計docs/23-frontend/01-editor.md §1.1「Toolbar: 時間倍率スライダー」)。
-  // dt自体は固定(`DT`、物理の決定論性はステップ幅に依存するため)のまま、
-  // 1描画フレームあたりに進める実時間(`frameSeconds`)をこの倍率でスケールする
-  // ことで、シミュレーションの見かけの再生速度のみを変える(縮約実装:
-  // スライダーではなくセレクトボックス、離散値×0.5/×1/×2/×5のみ)。
-  const timescaleSelect = document.getElementById("select-timescale") as HTMLSelectElement;
+  // dt自体は変えず(物理の決定論性はステップ幅に依存する。dtはSettingsから
+  // Editモード限定で変更できる)、1描画フレームあたりに進める実時間
+  // (`frameSeconds`)をこの倍率でスケールして、見かけの再生速度のみを変える。
+  //
+  // **群2で範囲を ×1/8〜×128 へ広げた**(以前は ×0.5/×1/×2/×5 の4段のみ)。
+  // 微速は接触の瞬間を観察するのに、高倍率は熱伝導・天体のように時定数が
+  // 秒〜分の現象を待つのに要る。ただし1フレームあたりのstep数には上限
+  // (`MAX_STEPS_PER_FRAME`)があるので、**高倍率では指定どおりの速度が出ない**。
+  // それを黙って隠すと「×128にしたのに速くならない」という説明のつかない
+  // 挙動になるため、実際に達成できている倍率を隣に出し、指定値に届かない
+  // ときは赤くする。
+  const timescaleSelect = document.getElementById(
+    "select-timescale",
+  ) as HTMLSelectElement;
+  const timescaleEffective = document.getElementById("timescale-effective")!;
   let timeScale = Number.parseFloat(timescaleSelect.value);
   timescaleSelect.addEventListener("change", () => {
     timeScale = Number.parseFloat(timescaleSelect.value);
   });
+  // フレームごとの実測値はばらつくので指数移動平均で均す(生値だと数字が
+  // 目まぐるしく変わって読めない)。
+  let effectiveTimeScale = timeScale;
+  // **赤字の判定は「1フレームあたりの step 数上限に当たったか」という事実で行う**。
+  // 当初は「実効倍率が指定値の9割未満なら赤」という比率で判定していたが、
+  // これは機械の速さ次第で結果が変わる——実測: 60fps・dt=1/120 で ×128 は
+  // 1フレーム 256 step を要求し上限 240 で頭打ちになるのに、240/256 = 93.75% は
+  // 9割の閾値を超えるので**赤くならなかった**(遅い機械では赤くなる)。
+  // 上限に当たったことは真偽で分かる事実なので、比率で推測せず直接見る。
+  // 単発のフレーム落ちで表示がちらつかないよう、一定フレーム保持する。
+  const CAPPED_INDICATOR_HOLD_FRAMES = 30;
+  let cappedIndicatorFrames = 0;
+  function updateEffectiveTimeScale(measured: number, capped: boolean) {
+    effectiveTimeScale += (measured - effectiveTimeScale) * 0.1;
+    timescaleEffective.textContent = `×${effectiveTimeScale.toFixed(2)}`;
+    if (capped) cappedIndicatorFrames = CAPPED_INDICATOR_HOLD_FRAMES;
+    else if (cappedIndicatorFrames > 0) cappedIndicatorFrames -= 1;
+    const degraded = cappedIndicatorFrames > 0;
+    timescaleEffective.classList.toggle("degraded", degraded);
+    timescaleEffective.title = degraded
+      ? `1フレームあたりの step 数上限(${MAX_STEPS_PER_FRAME})に当たっているため、指定した ×${timeScale} は出せていません。`
+      : "実際に達成できている時間倍率。";
+  }
 
   // Edit/Play モードの分離(設計§4「Edit モード: シーンの直接編集が可能…Play を
   // 押した瞬間の状態が実行の初期条件になる」「Play モード: 直接編集は不可。
@@ -2189,8 +3368,12 @@ async function setUpSceneView(
   type Mode = "edit" | "play";
   let mode: Mode = "edit";
   let playing = false;
-  const modeEditButton = document.getElementById("btn-mode-edit") as HTMLButtonElement;
-  const modePlayButton = document.getElementById("btn-mode-play") as HTMLButtonElement;
+  const modeEditButton = document.getElementById(
+    "btn-mode-edit",
+  ) as HTMLButtonElement;
+  const modePlayButton = document.getElementById(
+    "btn-mode-play",
+  ) as HTMLButtonElement;
 
   function setMode(next: Mode) {
     mode = next;
@@ -2199,11 +3382,13 @@ async function setUpSceneView(
     playButton.disabled = mode === "edit";
     stepButton.disabled = mode === "edit";
     nudgeButton.disabled = mode === "edit";
-    motorToggleButton.disabled = mode === "edit" || !motorArmBodies.has(selectedBodyIndex);
+    motorToggleButton.disabled =
+      mode === "edit" || !motorArmBodies.has(selectedBodyIndex);
     // 自由配線回路エディタでリセット済みなら、モード切替に関わらず無効のまま
     // (`circuitFreeWiringState`のdoc参照——`circuit_switch_index`が新回路の
     // スイッチ数を超えて無効になり得るため、再有効化してはならない)。
-    circuitSwitchToggle.disabled = mode === "edit" || circuitFreeWiringState.active;
+    circuitSwitchToggle.disabled =
+      mode === "edit" || circuitFreeWiringState.active;
     heaterToggle.disabled = mode === "edit";
     undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
     redoButton.disabled = mode !== "edit" || editRedoStack.length === 0;
@@ -2216,7 +3401,12 @@ async function setUpSceneView(
 
   function applyEditEntry(entry: EditUndoEntry) {
     if (entry.kind === "position") {
-      world.set_body_position_at(entry.bodyIndex, entry.position.x, entry.position.y, entry.position.z);
+      world.set_body_position_at(
+        entry.bodyIndex,
+        entry.position.x,
+        entry.position.y,
+        entry.position.z,
+      );
     } else if (entry.kind === "rotation") {
       world.set_body_rotation_at(
         entry.bodyIndex,
@@ -2260,7 +3450,9 @@ async function setUpSceneView(
   // クリック配置(`create_body`)」)。Toolbarの「+ 球」/「+ 箱」ボタンで、床の
   // 中心付近・上空(`SPAWN_HEIGHT`)へ新規ボディを配置する。落下位置が重ならない
   // よう、配置のたびにx/zを少しずつずらす(スポーン回数から決定的に算出)。
-  const spawnMaterialSelect = document.getElementById("select-spawn-material") as HTMLSelectElement;
+  const spawnMaterialSelect = document.getElementById(
+    "select-spawn-material",
+  ) as HTMLSelectElement;
   for (const material of SPAWN_MATERIALS) {
     const option = document.createElement("option");
     option.value = material;
@@ -2273,6 +3465,11 @@ async function setUpSceneView(
   // ボディ数)。以後のスポーンパレット操作による「これまでのスポーン数」の
   // 基準点として使う。
   let sceneBaseBodyCount = 2;
+  /// 未保存の変更があるか(群2、`beforeunload` のdoc参照)。
+  let hasUnsavedChanges = false;
+  function markUnsaved() {
+    hasUnsavedChanges = true;
+  }
   function nextSpawnPosition(): { x: number; z: number } {
     const n = world.body_count() - sceneBaseBodyCount; // これまでのスポーン数
     const angle = n * 2.4; // 黄金角に近い値、重ならないようばらけさせる
@@ -2281,10 +3478,11 @@ async function setUpSceneView(
   }
 
   function addSpawnedMesh(bodyIndex: number, mesh: THREE.Mesh) {
+    markUnsaved();
     scene.add(mesh);
     pickables.push({ mesh, bodyIndex });
     bodyMeshes.set(bodyIndex, mesh);
-    highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
+    highlightHierarchy = rebuildHierarchy();
     selectBody(bodyIndex);
   }
 
@@ -2341,9 +3539,13 @@ async function setUpSceneView(
     currentPredictionPrompts.forEach((prompt, i) => {
       const resultLine = document.getElementById(`prediction-result-${i}`);
       if (!resultLine) return;
-      const guessInput = document.getElementById(`prediction-guess-${i}`) as HTMLInputElement | null;
+      const guessInput = document.getElementById(
+        `prediction-guess-${i}`,
+      ) as HTMLInputElement | null;
       const actual = world.imported_probe_value_at(prompt.probe_index);
-      const guessText = guessInput?.value ? Number(guessInput.value).toFixed(3) : "(未入力)";
+      const guessText = guessInput?.value
+        ? Number(guessInput.value).toFixed(3)
+        : "(未入力)";
       resultLine.textContent = `実測=${actual.toFixed(3)} / 予測=${guessText} / 解析解=${prompt.expected_value.toFixed(3)}`;
     });
   }
@@ -2365,7 +3567,10 @@ async function setUpSceneView(
         const normal = new THREE.Vector3(nx, ny, nz).normalize();
         const mesh = new THREE.Mesh(
           new THREE.PlaneGeometry(20, 20),
-          new THREE.MeshStandardMaterial({ color: 0x777755, side: THREE.DoubleSide }),
+          new THREE.MeshStandardMaterial({
+            color: 0x777755,
+            side: THREE.DoubleSide,
+          }),
         );
         mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
         mesh.position.copy(normal.multiplyScalar(shape.plane.d));
@@ -2447,6 +3652,7 @@ async function setUpSceneView(
     motorArmBodies.clear();
     currentMotorTarget.clear();
     currentScale.clear();
+    currentScaleXyz.clear();
     editUndoStack.length = 0;
     commandLog.length = 0;
     fluidPositionAttribute = null;
@@ -2468,7 +3674,10 @@ async function setUpSceneView(
         const normal = new THREE.Vector3(nx, ny, nz).normalize();
         const mesh = new THREE.Mesh(
           new THREE.PlaneGeometry(20, 20),
-          new THREE.MeshStandardMaterial({ color: 0x777755, side: THREE.DoubleSide }),
+          new THREE.MeshStandardMaterial({
+            color: 0x777755,
+            side: THREE.DoubleSide,
+          }),
         );
         mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
         mesh.position.copy(normal.multiplyScalar(shape.plane.d));
@@ -2505,7 +3714,10 @@ async function setUpSceneView(
           new THREE.Vector3(),
           new THREE.Vector3(),
         ]);
-        const line = new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({ color: 0xffaa00 }));
+        const line = new THREE.Line(
+          lineGeometry,
+          new THREE.LineBasicMaterial({ color: 0xffaa00 }),
+        );
         scene.add(line);
         constraintLines.set(bodyIndex, line);
       }
@@ -2522,7 +3734,7 @@ async function setUpSceneView(
       selectBody(0);
     } else {
       selectedBodyIndex = -1; // 有効なボディ無し(`hasSelectedBody`参照)。
-      highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
+      highlightHierarchy = rebuildHierarchy();
       renderInspectorFor(world, selectedBodyIndex);
     }
   };
@@ -2535,53 +3747,108 @@ async function setUpSceneView(
   // ボディが存在しないため`bodyIndex`が範囲外なら無視する(縮約実装、既知の
   // 限定——`sceneChanged`で呼び出し側に伝える)。MoveGrab(ドラッグ中の連続更新)
   // は元々記録していないため、再生されるのはGrabの初期アンカー位置のみ。
-  replayVerifyRef.current = () => {
-    const replayWorld = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
-    const totalSteps = Number(world.step_count());
-    const sceneChanged = world.body_count() !== 2;
-
+  /// 記録済みコマンドを step 番号で引けるようにまとめ直す(検証実行と
+  /// **ライブ再生**の両方が使う、群2で共通化)。
+  function groupCommandsByStep(): Map<number, CommandLogEntry[]> {
     const commandsByStep = new Map<number, CommandLogEntry[]>();
     for (const entry of commandLog) {
       const list = commandsByStep.get(entry.step) ?? [];
       list.push(entry);
       commandsByStep.set(entry.step, list);
     }
+    return commandsByStep;
+  }
 
-    let heaterOn = false;
-    let heaterWatts = 0;
-    for (let s = 0; s < totalSteps; s++) {
-      for (const entry of commandsByStep.get(s) ?? []) {
-        switch (entry.kind) {
-          case "Grab":
-            if (entry.bodyIndex < replayWorld.body_count()) {
-              replayWorld.push_grab(entry.bodyIndex, entry.targetX, entry.targetY, entry.targetZ);
-            }
-            break;
-          case "Release":
-            if (entry.bodyIndex < replayWorld.body_count()) {
-              replayWorld.push_release(entry.bodyIndex);
-            }
-            break;
-          case "ApplyForce":
-            if (entry.bodyIndex < replayWorld.body_count()) {
-              replayWorld.push_apply_force(entry.bodyIndex, entry.fx, entry.fy, entry.fz);
-            }
-            break;
-          case "SetMotorTarget":
-            if (entry.bodyIndex < replayWorld.body_count()) {
-              replayWorld.set_motor_target_at(entry.bodyIndex, entry.targetAngle);
-            }
-            break;
-          case "SetSwitch":
-            replayWorld.set_circuit_switch_closed(entry.closed);
-            break;
-          case "SetHeatSource":
-            heaterOn = entry.on;
-            heaterWatts = entry.watts;
-            break;
-        }
+  /// ヒーターは「1step分だけ効く」縮約セマンティクスなので、再生側でも
+  /// 状態として持ち回って毎step再送する必要がある(`HEATER_WATTS`のdoc参照)。
+  type ReplayHeaterState = { on: boolean; watts: number };
+
+  /// 1 step 分のコマンドを再生用ワールドへ適用する(検証実行とライブ再生で共有)。
+  function applyReplayCommands(
+    replayWorld: WasmWorld,
+    entries: CommandLogEntry[],
+    heater: ReplayHeaterState,
+  ): void {
+    for (const entry of entries) {
+      switch (entry.kind) {
+        case "Grab":
+          if (entry.bodyIndex < replayWorld.body_count()) {
+            replayWorld.push_grab(
+              entry.bodyIndex,
+              entry.targetX,
+              entry.targetY,
+              entry.targetZ,
+            );
+          }
+          break;
+        case "Release":
+          if (entry.bodyIndex < replayWorld.body_count()) {
+            replayWorld.push_release(entry.bodyIndex);
+          }
+          break;
+        case "ApplyForce":
+          if (entry.bodyIndex < replayWorld.body_count()) {
+            replayWorld.push_apply_force(
+              entry.bodyIndex,
+              entry.fx,
+              entry.fy,
+              entry.fz,
+            );
+          }
+          break;
+        case "SetMotorTarget":
+          if (entry.bodyIndex < replayWorld.body_count()) {
+            replayWorld.set_motor_target_at(entry.bodyIndex, entry.targetAngle);
+          }
+          break;
+        case "SetSwitch":
+          replayWorld.set_circuit_switch_closed(entry.closed);
+          break;
+        case "SetHeatSource":
+          heater.on = entry.on;
+          heater.watts = entry.watts;
+          break;
+        // **群2で追加した入力も再現する**。これらを再生しないと、重力を
+        // 変えた実行のリプレイが「重力9.807のまま」進んで state_hash が
+        // 一致しなくなる(記録しているのに再生しないのが一番たちが悪い)。
+        case "SetGravity":
+          replayWorld.set_gravity(entry.gravity);
+          break;
+        case "SetDt":
+          replayWorld.set_dt(entry.dt);
+          break;
+        case "SetBodyMass":
+          if (entry.bodyIndex < replayWorld.body_count()) {
+            replayWorld.push_set_body_mass(entry.bodyIndex, entry.mass);
+          }
+          break;
+        case "SetBodyType":
+          if (entry.bodyIndex < replayWorld.body_count()) {
+            replayWorld.push_set_body_type(entry.bodyIndex, entry.bodyType);
+          }
+          break;
+        case "SetCollisionFilter":
+          if (entry.bodyIndex < replayWorld.body_count()) {
+            replayWorld.push_set_collision_filter(
+              entry.bodyIndex,
+              entry.group,
+              entry.mask,
+            );
+          }
+          break;
       }
-      if (heaterOn) replayWorld.push_heat_source(heaterWatts);
+    }
+  }
+
+  replayVerifyRef.current = () => {
+    const replayWorld = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
+    const totalSteps = Number(world.step_count());
+    const sceneChanged = world.body_count() !== 2;
+    const commandsByStep = groupCommandsByStep();
+    const heater: ReplayHeaterState = { on: false, watts: 0 };
+    for (let s = 0; s < totalSteps; s++) {
+      applyReplayCommands(replayWorld, commandsByStep.get(s) ?? [], heater);
+      if (heater.on) replayWorld.push_heat_source(heater.watts);
       replayWorld.step();
     }
 
@@ -2591,7 +3858,9 @@ async function setUpSceneView(
     // が真の時点で`matches`は`false`確定なので、位置の意味自体が無いプレース
     // ホルダで安全に済ませる(**残タスク完遂のシーンギャラリー増分**で追加した
     // ガード、以前は既定シーン以外あり得なかったため無条件アクセスで安全だった)。
-    const liveBoxPos = sceneChanged ? new Float32Array(3) : world.body_position_at_f32(BODY_INDEX_BOX);
+    const liveBoxPos = sceneChanged
+      ? new Float32Array(3)
+      : world.body_position_at_f32(BODY_INDEX_BOX);
     const finalStateHash = replayWorld.state_hash();
     const liveStateHash = world.state_hash();
     return {
@@ -2606,6 +3875,93 @@ async function setUpSceneView(
     };
   };
 
+  // **Replay のライブ再生(群2)**。設計 docs/23-frontend/01-editor.md §1.6
+  // 「Replays: 記録した入力列の再生」。これまでの Replay は**ヘッドレスで
+  // 一気に流して最終 state_hash を比べるだけ**で、記録した操作を「見る」
+  // 手段が無かった(検証としては正しいが、再生とは呼べない)。
+  //
+  // ライブ再生は**現在の world を壊さない**——別の `WasmWorld` を作って
+  // そこを step し、その位置を Scene View のメッシュへ流し込む。再生が
+  // 終われば(または中断すれば)メッシュは次フレームから現在の world の
+  // 位置へ戻る(`render()` が毎フレーム同期するため、後片付けが要らない)。
+  //
+  // **既定シーン(床+箱)以外では再生できない**——記録済み command は
+  // 既定シーンの body index を前提にしており、別シーンへ流し込むと
+  // 無関係なボディが動く。`sceneChanged` と同じ判定で弾く。
+  type LivePlayback = {
+    replayWorld: WasmWorld;
+    commandsByStep: Map<number, CommandLogEntry[]>;
+    heater: ReplayHeaterState;
+    step: number;
+    totalSteps: number;
+    accumulator: number;
+  };
+  let livePlayback: LivePlayback | null = null;
+
+  replayPlaybackRef.current = {
+    start: () => {
+      if (world.body_count() !== 2) {
+        return { started: false, reason: "既定シーン(床+箱)でのみライブ再生できます。" };
+      }
+      const totalSteps = Number(world.step_count());
+      if (totalSteps === 0) {
+        return { started: false, reason: "再生する step がありません(まず Play で進めてください)。" };
+      }
+      livePlayback = {
+        replayWorld: new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT),
+        commandsByStep: groupCommandsByStep(),
+        heater: { on: false, watts: 0 },
+        step: 0,
+        totalSteps,
+        accumulator: 0,
+      };
+      return { started: true, totalSteps };
+    },
+    stop: () => {
+      livePlayback = null;
+    },
+    isPlaying: () => livePlayback !== null,
+    progress: () => (livePlayback ? livePlayback.step / livePlayback.totalSteps : 1),
+  };
+
+  /// ライブ再生を実時間ぶんだけ進め、再生用ワールドの位置を Scene View の
+  /// メッシュへ反映する。`frame()` から毎フレーム呼ぶ。
+  function advanceLivePlayback(frameSeconds: number): boolean {
+    const playback = livePlayback;
+    if (!playback) return false;
+    const dt = playback.replayWorld.dt();
+    playback.accumulator += frameSeconds * timeScale;
+    let steps = 0;
+    while (
+      playback.accumulator >= dt &&
+      steps < MAX_STEPS_PER_FRAME &&
+      playback.step < playback.totalSteps
+    ) {
+      applyReplayCommands(
+        playback.replayWorld,
+        playback.commandsByStep.get(playback.step) ?? [],
+        playback.heater,
+      );
+      if (playback.heater.on) playback.replayWorld.push_heat_source(playback.heater.watts);
+      playback.replayWorld.step();
+      playback.accumulator -= dt;
+      playback.step += 1;
+      steps += 1;
+    }
+    // 再生用ワールドのボディ位置をメッシュへ流し込む(床は Plane なので除く、
+    // `render()` の同期と同じ理由)。
+    for (const [bodyIndex, mesh] of bodyMeshes) {
+      if (bodyIndex >= playback.replayWorld.body_count()) continue;
+      if (playback.replayWorld.body_shape_kind_at(bodyIndex) === "plane") continue;
+      const p = playback.replayWorld.body_position_at_f32(bodyIndex);
+      mesh.position.set(p[0], p[1], p[2]);
+      const r = playback.replayWorld.body_rotation_at_f32(bodyIndex);
+      mesh.quaternion.set(r[0], r[1], r[2], r[3]);
+    }
+    if (playback.step >= playback.totalSteps) livePlayback = null;
+    return true;
+  }
+
   // Prefabs(`PrefabRef`のdoc参照)。球/箱のみ対応(スポーンパレットの
   // `spawn_sphere`/`spawn_box`自体がこの2形状しか受け付けないのと同じ制約)。
   // `spawn_box`は立方体のみ(単一`half_extent`引数)のため、非立方体の箱を
@@ -2616,17 +3972,27 @@ async function setUpSceneView(
       // ボディが無いシーン(D9/D34/D35のようなギャラリーシーン)で選択が
       // 無効なら何もキャプチャできない(`hasSelectedBody`のdoc参照)。
       if (!hasSelectedBody()) return null;
-      const kind = world.body_shape_kind_at(selectedBodyIndex);
+      return prefabRef.current!.captureBody(selectedBodyIndex);
+    },
+    captureBody: (index) => {
+      if (index < 0 || index >= world.body_count()) return null;
+      const kind = world.body_shape_kind_at(index);
       if (kind !== "sphere" && kind !== "box") return null;
-      const params = Array.from(world.body_shape_params_f64_at(selectedBodyIndex));
-      const material = world.body_material_label_at(selectedBodyIndex);
+      const params = Array.from(world.body_shape_params_f64_at(index));
+      const material = world.body_material_label_at(index);
       return { kind, params, material };
     },
     spawn: (prefab) => {
       const { x, z } = nextSpawnPosition();
       if (prefab.kind === "sphere") {
         const radius = prefab.params[0] ?? SPAWN_SPHERE_RADIUS;
-        const bodyIndex = world.spawn_sphere(x, SPAWN_HEIGHT, z, radius, prefab.material);
+        const bodyIndex = world.spawn_sphere(
+          x,
+          SPAWN_HEIGHT,
+          z,
+          radius,
+          prefab.material,
+        );
         const mesh = new THREE.Mesh(
           new THREE.SphereGeometry(radius, 16, 12),
           new THREE.MeshStandardMaterial({ color: 0x6699ff }),
@@ -2634,7 +4000,13 @@ async function setUpSceneView(
         addSpawnedMesh(bodyIndex, mesh);
       } else if (prefab.kind === "box") {
         const halfExtent = prefab.params[0] ?? SPAWN_BOX_HALF_EXTENT;
-        const bodyIndex = world.spawn_box(x, SPAWN_HEIGHT, z, halfExtent, prefab.material);
+        const bodyIndex = world.spawn_box(
+          x,
+          SPAWN_HEIGHT,
+          z,
+          halfExtent,
+          prefab.material,
+        );
         const mesh = new THREE.Mesh(
           new THREE.BoxGeometry(halfExtent * 2, halfExtent * 2, halfExtent * 2),
           new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
@@ -2644,98 +4016,327 @@ async function setUpSceneView(
     },
   };
 
-  document.getElementById("btn-spawn-sphere")!.addEventListener("click", () => {
-    const { x, z } = nextSpawnPosition();
-    const material = spawnMaterialSelect.value;
-    const bodyIndex = world.spawn_sphere(x, SPAWN_HEIGHT, z, SPAWN_SPHERE_RADIUS, material);
-    const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(SPAWN_SPHERE_RADIUS, 16, 12),
-      new THREE.MeshStandardMaterial({ color: 0x6699ff }),
-    );
-    addSpawnedMesh(bodyIndex, mesh);
-  });
-
-  document.getElementById("btn-spawn-box")!.addEventListener("click", () => {
-    const { x, z } = nextSpawnPosition();
-    const material = spawnMaterialSelect.value;
-    const bodyIndex = world.spawn_box(x, SPAWN_HEIGHT, z, SPAWN_BOX_HALF_EXTENT, material);
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(SPAWN_BOX_HALF_EXTENT * 2, SPAWN_BOX_HALF_EXTENT * 2, SPAWN_BOX_HALF_EXTENT * 2),
-      new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
-    );
-    addSpawnedMesh(bodyIndex, mesh);
-  });
-
   // **カプセルのスポーン(増分L)**。`sim-mechanics`側で体積・慣性・接触
   // (平面/球/カプセル)を実装したので、床へ落として寝かせるところまで動く。
   // **カプセル×箱の接触は未実装**なので箱と並べてもすり抜ける(パニックは
   // しない)——ボタンのtitleにもその制約を書いてある。
   const SPAWN_CAPSULE_RADIUS = 0.2;
   const SPAWN_CAPSULE_HALF_HEIGHT = 0.35;
-  document.getElementById("btn-spawn-capsule")!.addEventListener("click", () => {
-    const { x, z } = nextSpawnPosition();
+
+  /// スポーンパレットが扱う形状(設計 §1.2「右クリックでコンテキストメニュー…
+  /// スポーンパレット(形状×材質を選んで**クリック位置に配置**)」)。
+  /// ツールバーのボタンも右クリックメニューも**この1関数を共有する**ので、
+  /// 「ボタンからだと動くがメニューからだと動かない」という乖離が起きない。
+  type SpawnShapeKind = "sphere" | "box" | "capsule";
+  function spawnShapeAt(
+    kind: SpawnShapeKind,
+    x: number,
+    y: number,
+    z: number,
+  ): number {
     const material = spawnMaterialSelect.value;
-    const bodyIndex = world.spawn_capsule(
-      x,
-      SPAWN_HEIGHT,
-      z,
-      SPAWN_CAPSULE_RADIUS,
-      SPAWN_CAPSULE_HALF_HEIGHT,
-      material,
-    );
-    // THREE.CapsuleGeometry の length は「円柱部の長さ」= 2*half_height。
-    const mesh = new THREE.Mesh(
-      new THREE.CapsuleGeometry(SPAWN_CAPSULE_RADIUS, SPAWN_CAPSULE_HALF_HEIGHT * 2, 8, 16),
-      new THREE.MeshStandardMaterial({ color: 0xcc88ff }),
-    );
+    let bodyIndex: number;
+    let mesh: THREE.Mesh;
+    switch (kind) {
+      case "sphere":
+        bodyIndex = world.spawn_sphere(x, y, z, SPAWN_SPHERE_RADIUS, material);
+        mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(SPAWN_SPHERE_RADIUS, 16, 12),
+          new THREE.MeshStandardMaterial({ color: 0x6699ff }),
+        );
+        break;
+      case "box":
+        bodyIndex = world.spawn_box(x, y, z, SPAWN_BOX_HALF_EXTENT, material);
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(
+            SPAWN_BOX_HALF_EXTENT * 2,
+            SPAWN_BOX_HALF_EXTENT * 2,
+            SPAWN_BOX_HALF_EXTENT * 2,
+          ),
+          new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
+        );
+        break;
+      case "capsule":
+        bodyIndex = world.spawn_capsule(
+          x,
+          y,
+          z,
+          SPAWN_CAPSULE_RADIUS,
+          SPAWN_CAPSULE_HALF_HEIGHT,
+          material,
+        );
+        // THREE.CapsuleGeometry の length は「円柱部の長さ」= 2*half_height。
+        mesh = new THREE.Mesh(
+          new THREE.CapsuleGeometry(
+            SPAWN_CAPSULE_RADIUS,
+            SPAWN_CAPSULE_HALF_HEIGHT * 2,
+            8,
+            16,
+          ),
+          new THREE.MeshStandardMaterial({ color: 0xcc88ff }),
+        );
+        break;
+    }
     addSpawnedMesh(bodyIndex, mesh);
+    return bodyIndex;
+  }
+
+  for (const [id, kind] of [
+    ["btn-spawn-sphere", "sphere"],
+    ["btn-spawn-box", "box"],
+    ["btn-spawn-capsule", "capsule"],
+  ] as [string, SpawnShapeKind][]) {
+    document.getElementById(id)!.addEventListener("click", () => {
+      const { x, z } = nextSpawnPosition();
+      spawnShapeAt(kind, x, SPAWN_HEIGHT, z);
+    });
+  }
+
+  // **Hierarchy 右クリックメニューの実体(群2、`HierarchyActions`のdoc参照)**。
+  // ここまで来て初めて `spawnShapeAt`・`bodyMeshes`・`prefabRef` が揃う。
+  let isolatedBodyIndex: number | null = null;
+  hierarchyActionsRef.current = {
+    duplicate(index) {
+      if (index < 0 || index >= world.body_count()) return;
+      // 無限平面(床)は複製しない——2枚重ねても物理的に意味が無く、
+      // 対応するメッシュも作れない(Plane の見た目は `normal`/`d` から
+      // 別経路で作っている)。
+      if (world.body_shape_kind_at(index) === "plane") return;
+      // Rust 側が形状・材質・位置を複製する(`duplicate_body_at`)。
+      // フロント側は対応するメッシュを作るだけ——**形状の種類は Rust から
+      // 読み直す**(元メッシュを `clone()` すると、Scale Gizmo で寸法を
+      // 変えたボディで見た目と物理がずれる)。
+      const newIndex = world.duplicate_body_at(index, DUPLICATE_OFFSET_M);
+      const kind = world.body_shape_kind_at(newIndex);
+      const params = Array.from(world.body_shape_params_f64_at(newIndex));
+      let mesh: THREE.Mesh | null = null;
+      if (kind === "sphere") {
+        mesh = new THREE.Mesh(
+          new THREE.SphereGeometry(params[0], 16, 12),
+          new THREE.MeshStandardMaterial({ color: 0x6699ff }),
+        );
+      } else if (kind === "box") {
+        mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(params[0] * 2, params[1] * 2, params[2] * 2),
+          new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
+        );
+      } else if (kind === "capsule") {
+        mesh = new THREE.Mesh(
+          new THREE.CapsuleGeometry(params[0], params[1] * 2, 8, 16),
+          new THREE.MeshStandardMaterial({ color: 0xcc88ff }),
+        );
+      }
+      // Plane(床)は複製対象外——`duplicate_body_at` は作ってしまうが、
+      // 無限平面を2枚重ねても意味が無いのでメッシュは作らない。
+      if (mesh) addSpawnedMesh(newIndex, mesh);
+    },
+    remove(index) {
+      world.remove_body_at(index);
+      // メッシュ・ピック対象・オーバーレイから外す(残すと y=-1e9 の
+      // 退避先へ飛んだメッシュが毎フレーム同期され続ける)。
+      const mesh = bodyMeshes.get(index);
+      if (mesh) {
+        scene.remove(mesh);
+        bodyMeshes.delete(index);
+      }
+      const pickIndex = pickables.findIndex((p) => p.bodyIndex === index);
+      if (pickIndex >= 0) pickables.splice(pickIndex, 1);
+      hierarchyMultiSelection.delete(index);
+      if (selectedBodyIndex === index) selectBody(BODY_INDEX_BOX);
+      highlightHierarchy = rebuildHierarchy();
+    },
+    isolate(index) {
+      isolatedBodyIndex = index;
+      // **物理は止めない**——見えないだけで計算は続く(Unity の Isolate と同じ)。
+      for (const [bodyIndex, mesh] of bodyMeshes) {
+        mesh.visible = index === null || bodyIndex === index;
+      }
+      highlightHierarchy = rebuildHierarchy();
+    },
+    isolatedIndex: () => isolatedBodyIndex,
+    capturePrefab(index) {
+      const captured = prefabRef.current?.captureBody(index);
+      if (!captured) {
+        window.alert("この形状はPrefab化できません(球/箱のみ対応)");
+        return;
+      }
+      prefabSaveRef.current?.({
+        name: `${world.body_label_at(index)}_prefab`,
+        ...captured,
+      });
+    },
+  };
+
+  // **「＋ 追加」メニュー(群2)**。8個のスポーンボタンを直接並べていたため
+  // ツールバーが3行ぶんの高さに膨れ、ラベルが1文字ずつ縦に折り返して
+  // 読めなくなっていた(実際にスクリーンショットで確認)。1つのメニューへ畳む。
+  // **既存のボタンは `hidden` で DOM に残してある**——それぞれのクリック
+  // ハンドラ(振り子・モーター・流体・フレーム・材料派生はここより後で
+  // 配線される)をそのまま再利用でき、既存のテストも壊れないため。
+  document.getElementById("btn-add")?.addEventListener("click", (event) => {
+    const clickHidden = (id: string) => () => document.getElementById(id)?.click();
+    const target = event.currentTarget as HTMLElement;
+    const rect = target.getBoundingClientRect();
+    showContextMenu(rect.left, rect.bottom, [
+      { label: "＋ 球", onSelect: clickHidden("btn-spawn-sphere") },
+      { label: "＋ 箱", onSelect: clickHidden("btn-spawn-box") },
+      {
+        label: "＋ カプセル",
+        onSelect: clickHidden("btn-spawn-capsule"),
+        title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
+      },
+      { separator: true },
+      { label: "＋ 振り子 (DistanceJoint)", onSelect: clickHidden("btn-spawn-pendulum") },
+      { label: "＋ モーター (BallJoint + HingeMotorPd)", onSelect: clickHidden("btn-spawn-motor") },
+      { label: "＋ 流体 (SPH 水塊)", onSelect: clickHidden("btn-spawn-fluid") },
+      { separator: true },
+      {
+        label: "＋ フレーム",
+        onSelect: clickHidden("btn-add-frame"),
+        title: "Hierarchy で選択中のフレーム(未選択なら ROOT)の子として追加",
+      },
+      {
+        label: "材料派生",
+        onSelect: clickHidden("btn-derive-material"),
+        title: "選択中の材質から密度違いの派生材料を作る",
+      },
+    ]);
+  });
+
+  // **Scene View のスポーンパレット(群2)**。設計 §1.2 が求める
+  // 「右クリックでコンテキストメニュー…**クリック位置に配置**」。
+  //
+  // 右ドラッグは OrbitControls のパンに割り当ててあるので、**パンした直後は
+  // メニューを出さない**(パンのたびにメニューが開くと操作にならない)。
+  // `pointerdown` から `contextmenu` までの移動量で判別する——`click` と
+  // ドラッグを `DRAG_THRESHOLD_PX` で判別している既存のピック処理と同じ手法。
+  const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const groundHit = new THREE.Vector3();
+  let rightDownScreen: { x: number; y: number } | null = null;
+  renderer.domElement.addEventListener("pointerdown", (event) => {
+    if (event.button === 2)
+      rightDownScreen = { x: event.clientX, y: event.clientY };
+  });
+  renderer.domElement.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    if (rightDownScreen) {
+      const moved = Math.hypot(
+        event.clientX - rightDownScreen.x,
+        event.clientY - rightDownScreen.y,
+      );
+      rightDownScreen = null;
+      if (moved > DRAG_THRESHOLD_PX) return; // パンだったのでメニューは出さない。
+    }
+    // クリック位置を地面(y=0)へ投影する。カメラが地面と平行に近いと交点が
+    // 得られないので、その場合は既存の `nextSpawnPosition()` へ落とす。
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hasHit =
+      raycaster.ray.intersectPlane(groundPlane, groundHit) !== null;
+    const fallback = nextSpawnPosition();
+    // グリッドスナップを効かせる(Settings で 0 にすれば連続)。
+    const x = hasHit ? snapToGrid(groundHit.x) : fallback.x;
+    const z = hasHit ? snapToGrid(groundHit.z) : fallback.z;
+    const place = (kind: SpawnShapeKind, restHeight: number) => () => {
+      // 地面にちょうど乗る高さで置く(めり込ませない/落とさない)。
+      const bodyIndex = spawnShapeAt(kind, x, restHeight, z);
+      selectBody(bodyIndex);
+    };
+    showContextMenu(event.clientX, event.clientY, [
+      {
+        label: `ここに球を配置 (${x.toFixed(2)}, ${z.toFixed(2)})`,
+        onSelect: place("sphere", SPAWN_SPHERE_RADIUS),
+      },
+      {
+        label: "ここに箱を配置",
+        onSelect: place("box", SPAWN_BOX_HALF_EXTENT),
+      },
+      {
+        label: "ここにカプセルを配置",
+        onSelect: place(
+          "capsule",
+          SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
+        ),
+        title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
+      },
+      { separator: true },
+      {
+        label: `材質: ${spawnMaterialSelect.value}`,
+        disabled: true,
+        onSelect: () => {},
+        title: "材質はツールバーの材質セレクタで切り替えます",
+      },
+    ]);
   });
 
   // **材料派生(増分L)**。シーンJSONの`materials[].extends`と同じ仕組みを
   // 実行時に開く。**派生できるのは密度のみ**——`MaterialOverride`(シーンJSON側)
   // も密度だけを持つので、そちらと表現力を揃えた(食い違うとエディタで作った
   // 材料をシーンJSONへ書き出せなくなる)。
-  document.getElementById("btn-derive-material")!.addEventListener("click", () => {
-    const base = spawnMaterialSelect.value;
-    const name = window.prompt(`「${base}」から派生する新しい材料名`, `${base}-軽量`);
-    if (!name) return;
-    const densityText = window.prompt("新しい密度 [kg/m³]", "500");
-    if (!densityText) return;
-    const density = Number(densityText);
-    try {
-      world.derive_material(base, name, density);
-      const option = document.createElement("option");
-      option.value = name;
-      option.textContent = name;
-      spawnMaterialSelect.appendChild(option);
-      spawnMaterialSelect.value = name;
-    } catch (err) {
-      window.alert(`材料派生に失敗しました: ${String(err)}`);
-    }
-  });
+  document
+    .getElementById("btn-derive-material")!
+    .addEventListener("click", () => {
+      const base = spawnMaterialSelect.value;
+      const name = window.prompt(
+        `「${base}」から派生する新しい材料名`,
+        `${base}-軽量`,
+      );
+      if (!name) return;
+      const densityText = window.prompt("新しい密度 [kg/m³]", "500");
+      if (!densityText) return;
+      const density = Number(densityText);
+      try {
+        world.derive_material(base, name, density);
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        spawnMaterialSelect.appendChild(option);
+        spawnMaterialSelect.value = name;
+      } catch (err) {
+        window.alert(`材料派生に失敗しました: ${String(err)}`);
+      }
+    });
 
-  document.getElementById("btn-spawn-pendulum")!.addEventListener("click", () => {
-    const { x, z } = nextSpawnPosition();
-    const material = spawnMaterialSelect.value;
-    const bodyIndex = world.spawn_pendulum(x, PENDULUM_PIVOT_HEIGHT, z, PENDULUM_ARM_LENGTH, material);
-    const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.3, 16, 12),
-      new THREE.MeshStandardMaterial({ color: 0xff66cc }),
-    );
-    addSpawnedMesh(bodyIndex, mesh);
-    const lineGeometry = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(),
-      new THREE.Vector3(),
-    ]);
-    const line = new THREE.Line(lineGeometry, new THREE.LineBasicMaterial({ color: 0xffaa00 }));
-    scene.add(line);
-    constraintLines.set(bodyIndex, line);
-  });
+  document
+    .getElementById("btn-spawn-pendulum")!
+    .addEventListener("click", () => {
+      const { x, z } = nextSpawnPosition();
+      const material = spawnMaterialSelect.value;
+      const bodyIndex = world.spawn_pendulum(
+        x,
+        PENDULUM_PIVOT_HEIGHT,
+        z,
+        PENDULUM_ARM_LENGTH,
+        material,
+      );
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.3, 16, 12),
+        new THREE.MeshStandardMaterial({ color: 0xff66cc }),
+      );
+      addSpawnedMesh(bodyIndex, mesh);
+      const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(),
+        new THREE.Vector3(),
+      ]);
+      const line = new THREE.Line(
+        lineGeometry,
+        new THREE.LineBasicMaterial({ color: 0xffaa00 }),
+      );
+      scene.add(line);
+      constraintLines.set(bodyIndex, line);
+    });
 
   document.getElementById("btn-spawn-motor")!.addEventListener("click", () => {
     const { x, z } = nextSpawnPosition();
     const material = spawnMaterialSelect.value;
-    const bodyIndex = world.spawn_motor_arm(x, PENDULUM_PIVOT_HEIGHT, z, material);
+    const bodyIndex = world.spawn_motor_arm(
+      x,
+      PENDULUM_PIVOT_HEIGHT,
+      z,
+      material,
+    );
     motorArmBodies.add(bodyIndex);
     currentMotorTarget.set(bodyIndex, MOTOR_TARGET_LOW);
     const mesh = new THREE.Mesh(
@@ -2748,10 +4349,13 @@ async function setUpSceneView(
   document.getElementById("btn-spawn-fluid")!.addEventListener("click", () => {
     world.spawn_fluid_block();
     const count = world.fluid_particle_count();
-    fluidPositionAttribute = new THREE.BufferAttribute(new Float32Array(count * 3), 3);
+    fluidPositionAttribute = new THREE.BufferAttribute(
+      new Float32Array(count * 3),
+      3,
+    );
     fluidGeometry.setAttribute("position", fluidPositionAttribute);
     fluidPoints.visible = true;
-    highlightHierarchy = setUpHierarchy(world, selectBody, selectedFrameIndex, selectFrame);
+    highlightHierarchy = rebuildHierarchy();
   });
 
   // フレーム階層ドリルインUI: Hierarchyで選択中のフレーム(既定はROOTでは
@@ -2777,13 +4381,34 @@ async function setUpSceneView(
     playing = !playing;
     playButton.textContent = playing ? "⏸" : "▶";
   });
+  // **N step 送り(群2)**。設計 §1.1 の「[▶ ⏸ ⏭]」は1step送りだが、
+  // 実際に物理を観察していると「10 step だけ進めて接触の瞬間を見る」
+  // 「600 step 進めて定常状態まで飛ばす」といった操作が頻繁に要る
+  // (これまでは⏭を数百回押すか、Playで流して勘で止めるしかなかった)。
+  // 隣の数値入力で step 数を指定する。
+  const stepCountInput = document.getElementById(
+    "input-step-count",
+  ) as HTMLInputElement;
   stepButton.addEventListener("click", () => {
     if (mode === "play" && !playing) {
-      world.step();
+      const requested = Math.floor(Number(stepCountInput.value));
+      const count = Number.isFinite(requested)
+        ? Math.min(Math.max(requested, 1), 10000)
+        : 1;
+      for (let i = 0; i < count; i += 1) {
+        // Play ループと同じくヒーターは毎 step 再送する(「1step分だけ効く」
+        // 縮約セマンティクス、`HEATER_WATTS` のdoc参照)。
+        if (heaterToggle.checked) world.push_heat_source(HEATER_WATTS);
+        world.step();
+      }
       appendConsoleEntries(world.drain_events_text());
       // 診断バッジ(増分K)。毎フレーム最新の残差・最大速度で更新する。
       if (consoleDiagnosticsRef.current) {
-        consoleDiagnosticsRef.current(world.energy_residual(), world.max_body_speed(), DT);
+        consoleDiagnosticsRef.current(
+          world.energy_residual(),
+          world.max_body_speed(),
+          world.dt(),
+        );
       }
       render();
     }
@@ -2793,7 +4418,9 @@ async function setUpSceneView(
   // スナップショット予算」既定1s間隔・リングバッファN=8面)。ドラッグ中
   // (`scrubbing`)は`render()`側からスクラバのmax/valueを触らない——そうしないと
   // 毎フレームの「最新に追従」更新がユーザーのドラッグ位置を上書きしてしまう。
-  const scrubber = document.getElementById("timeline-scrubber") as HTMLInputElement;
+  const scrubber = document.getElementById(
+    "timeline-scrubber",
+  ) as HTMLInputElement;
   const playModeBadge = document.getElementById("play-mode-badge")!;
   let scrubbing = false;
   scrubber.addEventListener("pointerdown", () => {
@@ -2813,8 +4440,12 @@ async function setUpSceneView(
   // 任意時点にラベル付けし、後で戻れる」)。リングバッファの退避を受けない別領域
   // (`add_bookmark`/`restore_bookmark`)に保存する。縮約実装の理由: シーンJSONと
   // 一緒に出す「共有」用途(設計の記述)は未実装、ブラウザ内での往復のみ。
-  const bookmarkLabelInput = document.getElementById("bookmark-label") as HTMLInputElement;
-  const addBookmarkButton = document.getElementById("btn-add-bookmark") as HTMLButtonElement;
+  const bookmarkLabelInput = document.getElementById(
+    "bookmark-label",
+  ) as HTMLInputElement;
+  const addBookmarkButton = document.getElementById(
+    "btn-add-bookmark",
+  ) as HTMLButtonElement;
   const bookmarkList = document.getElementById("bookmark-list")!;
 
   function renderBookmarkList() {
@@ -2841,7 +4472,8 @@ async function setUpSceneView(
       // `bookmark_export_scene_json`のdoc参照)。
       const exportButton = document.createElement("button");
       exportButton.textContent = "⬇";
-      exportButton.title = "このブックマークをシーンJSONとしてエクスポート(Importで読み込み可能)";
+      exportButton.title =
+        "このブックマークをシーンJSONとしてエクスポート(Importで読み込み可能)";
       exportButton.addEventListener("click", () => {
         const json = world.bookmark_export_scene_json(i);
         const blob = new Blob([json], { type: "application/json" });
@@ -2858,8 +4490,62 @@ async function setUpSceneView(
     }
   }
 
+  // **未保存の変更の確認(群2)**。設計 docs/23-frontend/01-editor.md §6
+  // 「保存・共有」。エディタで小一時間かけて組んだシーンが、タブを閉じたり
+  // リロードしたりした瞬間に**警告なく消える**状態だった(すべてブラウザの
+  // メモリ上にしか無い)。
+  //
+  // **「変更あり」の判定はシーンJSONの内容比較ではなく操作の有無で行う**——
+  // 内容比較には現在状態のシリアライズが要り、それ自体が重い
+  // (`bookmark_export_scene_json` はブックマークを1件消費する)。
+  // スポーン・Import・ギャラリー読み込み・Gizmo編集・Prefab登録のいずれかが
+  // 起きたら「未保存」とみなし、一括Exportしたら解除する。
+  // `beforeunload` の確認ダイアログはブラウザ側の仕様で文言を指定できないため、
+  // `preventDefault()` のみを行う(表示される文言はブラウザ既定)。
+  window.addEventListener("beforeunload", (event) => {
+    if (!hasUnsavedChanges) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+
+  // **単一ファイル Export(群2、`ProjectBundle`のdoc参照)**。設計 §6
+  // 「保存・共有: シーンJSON+Replay+ブックマークを単一ファイルとして
+  // エクスポート」。これまで3つが**別々のボタンで別々のファイル**に落ちており、
+  // ブックマーク一覧に至っては書き出す手段が無かった(個々のブックマークを
+  // シーンJSONとして落とせるだけ)。
+  //
+  // 現在の状態は `world.export_scene_json()` が `sim_world::Scenario` 形式で返す
+  // (**群2で追加**——それまで「現在状態をシーンJSONにする」経路は
+  // `bookmark_export_scene_json` しかなく、書き出すたびに一時ブックマークが
+  // 一覧に残る実装になっていた。実装検証中に気付いて Rust 側へ
+  // `export_scene_json` を切り出した)。
+  projectBundleRef.current = () => {
+    const sceneJson = world.export_scene_json();
+    const bookmarks: { label: string; time: number }[] = [];
+    for (let i = 0; i < world.bookmark_count(); i += 1) {
+      bookmarks.push({
+        label: world.bookmark_label_at(i),
+        time: world.bookmark_time_at(i),
+      });
+    }
+    return {
+      formatVersion: 1,
+      exportedAt: new Date().toISOString(),
+      scene: JSON.parse(sceneJson),
+      bodies: sceneExportRef.current ? sceneExportRef.current() : [],
+      commandLog: [...commandLog],
+      bookmarks,
+      stateHash: world.state_hash(),
+    };
+  };
+  // 一括Exportしたら「保存済み」とみなす(ファイルが手元に残るため)。
+  projectExportedRef.current = () => {
+    hasUnsavedChanges = false;
+  };
+
   addBookmarkButton.addEventListener("click", () => {
-    const label = bookmarkLabelInput.value.trim() || `t=${world.time().toFixed(1)}s`;
+    const label =
+      bookmarkLabelInput.value.trim() || `t=${world.time().toFixed(1)}s`;
     world.add_bookmark(label);
     bookmarkLabelInput.value = "";
     renderBookmarkList();
@@ -2902,17 +4588,28 @@ async function setUpSceneView(
     // 加える対象が無い(`hasSelectedBody`のdoc参照)。
     if (!hasSelectedBody()) return;
     world.push_apply_force(selectedBodyIndex, 0.0, NUDGE_FORCE_NEWTONS, 0.0);
-    pushCommandLog(world, { kind: "ApplyForce", bodyIndex: selectedBodyIndex, fx: 0.0, fy: NUDGE_FORCE_NEWTONS, fz: 0.0 });
+    pushCommandLog(world, {
+      kind: "ApplyForce",
+      bodyIndex: selectedBodyIndex,
+      fx: 0.0,
+      fy: NUDGE_FORCE_NEWTONS,
+      fz: 0.0,
+    });
     if (forceOverlayToggle.checked) {
       const p = world.body_position_at_f32(selectedBodyIndex);
-      showForceOverlay(new THREE.Vector3(p[0], p[1], p[2]), new THREE.Vector3(0.0, NUDGE_FORCE_NEWTONS, 0.0));
+      showForceOverlay(
+        new THREE.Vector3(p[0], p[1], p[2]),
+        new THREE.Vector3(0.0, NUDGE_FORCE_NEWTONS, 0.0),
+      );
     }
   });
 
   motorToggleButton.addEventListener("click", () => {
     if (mode !== "play" || !motorArmBodies.has(selectedBodyIndex)) return;
-    const current = currentMotorTarget.get(selectedBodyIndex) ?? MOTOR_TARGET_LOW;
-    const next = current === MOTOR_TARGET_LOW ? MOTOR_TARGET_HIGH : MOTOR_TARGET_LOW;
+    const current =
+      currentMotorTarget.get(selectedBodyIndex) ?? MOTOR_TARGET_LOW;
+    const next =
+      current === MOTOR_TARGET_LOW ? MOTOR_TARGET_HIGH : MOTOR_TARGET_LOW;
     world.set_motor_target_at(selectedBodyIndex, next);
     currentMotorTarget.set(selectedBodyIndex, next);
     pushCommandLog(world, {
@@ -2930,7 +4627,10 @@ async function setUpSceneView(
     // リセット時に`disabled`にする)。
     if (circuitFreeWiringState.active) return;
     world.set_circuit_switch_closed(circuitSwitchToggle.checked);
-    pushCommandLog(world, { kind: "SetSwitch", closed: circuitSwitchToggle.checked });
+    pushCommandLog(world, {
+      kind: "SetSwitch",
+      closed: circuitSwitchToggle.checked,
+    });
   });
 
   heaterToggle.addEventListener("change", () => {
@@ -2938,7 +4638,11 @@ async function setUpSceneView(
     // 再送する(モジュールdoc「1step分だけ効く」縮約セマンティクス参照)ため
     // ここでは記録しない——ユーザーが行った「切替」という離散操作のみ記録する
     // (Replay再生実行はこの`on`/`watts`から再送区間を再構成する)。
-    pushCommandLog(world, { kind: "SetHeatSource", on: heaterToggle.checked, watts: HEATER_WATTS });
+    pushCommandLog(world, {
+      kind: "SetHeatSource",
+      on: heaterToggle.checked,
+      watts: HEATER_WATTS,
+    });
   });
 
   const inspectorPosition = new THREE.Vector3();
@@ -2964,7 +4668,9 @@ async function setUpSceneView(
       mesh.position.set(sp[0], sp[1], sp[2]);
       const sr = world.body_rotation_at_f32(bodyIndex);
       mesh.quaternion.set(sr[0], sr[1], sr[2], sr[3]);
-      mesh.scale.setScalar(currentScale.get(bodyIndex) ?? 1.0);
+      const xyz = currentScaleXyz.get(bodyIndex);
+      if (xyz) mesh.scale.set(xyz[0], xyz[1], xyz[2]);
+      else mesh.scale.setScalar(currentScale.get(bodyIndex) ?? 1.0);
     }
 
     for (const [bodyIndex, line] of constraintLines) {
@@ -2977,7 +4683,8 @@ async function setUpSceneView(
         line.visible = false;
         continue;
       }
-      const positions = line.geometry.attributes.position as THREE.BufferAttribute;
+      const positions = line.geometry.attributes
+        .position as THREE.BufferAttribute;
       positions.setXYZ(0, anchors[0], anchors[1], anchors[2]);
       positions.setXYZ(1, anchors[3], anchors[4], anchors[5]);
       positions.needsUpdate = true;
@@ -3029,12 +4736,30 @@ async function setUpSceneView(
     const selectedVelocity = selectedBodyValid
       ? world.body_velocity_at_f32(selectedBodyIndex)
       : new Float32Array(3);
-    inspectorPosition.set(selectedPosition[0], selectedPosition[1], selectedPosition[2]);
-    inspectorRotationQuat.set(selectedRotation[0], selectedRotation[1], selectedRotation[2], selectedRotation[3]);
+    inspectorPosition.set(
+      selectedPosition[0],
+      selectedPosition[1],
+      selectedPosition[2],
+    );
+    inspectorRotationQuat.set(
+      selectedRotation[0],
+      selectedRotation[1],
+      selectedRotation[2],
+      selectedRotation[3],
+    );
     inspectorRotation.setFromQuaternion(inspectorRotationQuat);
-    inspectorVelocity.set(selectedVelocity[0], selectedVelocity[1], selectedVelocity[2]);
+    inspectorVelocity.set(
+      selectedVelocity[0],
+      selectedVelocity[1],
+      selectedVelocity[2],
+    );
     if (selectedBodyValid) {
-      updateInspectorTransformFields(inspectorPosition, inspectorRotation, inspectorVelocity);
+      updateInspectorTransformFields(
+        inspectorPosition,
+        inspectorRotation,
+        inspectorVelocity,
+      );
+      updateInspectorRigidBodyFields(world, selectedBodyIndex);
     }
     if (isGalleryScene) {
       // シーンギャラリー読み込み中(D6/D11のような、Scene Viewに描く物が
@@ -3053,8 +4778,16 @@ async function setUpSceneView(
       updateProbeGraph(series);
     } else {
       updateProbeGraph([
-        { label: "BodyPosY", color: "#9cf", history: world.y_probe_history_f64() },
-        { label: "BodySpeed", color: "#fc6", history: world.speed_probe_history_f64() },
+        {
+          label: "BodyPosY",
+          color: "#9cf",
+          history: world.y_probe_history_f64(),
+        },
+        {
+          label: "BodySpeed",
+          color: "#fc6",
+          history: world.speed_probe_history_f64(),
+        },
       ]);
     }
 
@@ -3075,10 +4808,17 @@ async function setUpSceneView(
 
     if (contactOverlayToggle.checked) {
       const contactPoints = world.contact_points_f32();
-      const count = Math.min(contactPoints.length / 3, CONTACT_MARKER_POOL_SIZE);
+      const count = Math.min(
+        contactPoints.length / 3,
+        CONTACT_MARKER_POOL_SIZE,
+      );
       for (let i = 0; i < CONTACT_MARKER_POOL_SIZE; i++) {
         if (i < count) {
-          contactMarkers[i].position.set(contactPoints[i * 3], contactPoints[i * 3 + 1], contactPoints[i * 3 + 2]);
+          contactMarkers[i].position.set(
+            contactPoints[i * 3],
+            contactPoints[i * 3 + 1],
+            contactPoints[i * 3 + 2],
+          );
           contactMarkers[i].visible = true;
         } else {
           contactMarkers[i].visible = false;
@@ -3088,16 +4828,35 @@ async function setUpSceneView(
       for (const marker of contactMarkers) marker.visible = false;
     }
 
-    forceArrow.visible = forceOverlayToggle.checked && performance.now() < forceOverlayHideAtMs;
+    forceArrow.visible =
+      forceOverlayToggle.checked && performance.now() < forceOverlayHideAtMs;
 
-    const showGizmo = selectedBodyValid && mode === "edit" && !world.body_is_static_at(selectedBodyIndex);
-    gizmoGroup.visible = showGizmo;
-    rotationGizmoGroup.visible = showGizmo;
-    scaleGizmoGroup.visible = showGizmo;
+    // **ツール切替(群2で追加)**: 設計 §1.2「W(移動)/E(回転)/R(スケール)/
+    // Q(選択のみ)」。以前は3つのギズモを**同時に**表示していたため、
+    // 移動したいのに回転リングを掴んでしまうなど誤操作が起きやすく、
+    // 何より画面が見えづらかった。1つずつ出す。
+    const showGizmo =
+      selectedBodyValid &&
+      mode === "edit" &&
+      !world.body_is_static_at(selectedBodyIndex);
+    gizmoGroup.visible = showGizmo && gizmoTool === "translate";
+    rotationGizmoGroup.visible = showGizmo && gizmoTool === "rotate";
+    scaleGizmoGroup.visible = showGizmo && gizmoTool === "scale";
     if (showGizmo) {
       gizmoGroup.position.copy(inspectorPosition);
       rotationGizmoGroup.position.copy(inspectorPosition);
       scaleGizmoGroup.position.copy(inspectorPosition);
+      // **World / Local 座標系(群2)**。設計 §1.2「座標系は World / Local 切替可」。
+      // Local では Gizmo をボディの姿勢に合わせて回す——回転した箱を「その箱の
+      // 長辺方向へ」動かせるようになる(World 固定では常に世界軸方向にしか
+      // 動かせず、傾いた物体の扱いが著しく面倒だった)。
+      if (gizmoSpace === "local") {
+        gizmoGroup.quaternion.copy(inspectorRotationQuat);
+        scaleGizmoGroup.quaternion.copy(inspectorRotationQuat);
+      } else {
+        gizmoGroup.quaternion.identity();
+        scaleGizmoGroup.quaternion.identity();
+      }
     }
 
     const hashFull = world.state_hash();
@@ -3112,7 +4871,8 @@ async function setUpSceneView(
     timelineStep.textContent = `step = ${world.step_count().toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
     hashDisplay.title = hashFull;
-    playModeBadge.textContent = mode === "edit" ? "Edit" : playing ? "Playing" : "Paused";
+    playModeBadge.textContent =
+      mode === "edit" ? "Edit" : playing ? "Playing" : "Paused";
 
     if (!scrubbing) {
       const latestIndex = Math.max(world.snapshot_count() - 1, 0);
@@ -3120,6 +4880,9 @@ async function setUpSceneView(
       scrubber.value = String(latestIndex);
     }
 
+    syncSettingsInputs();
+    // enableDamping を使うので毎フレーム update が要る。
+    orbit.update();
     renderer.render(scene, camera);
   }
   hashDisplay.addEventListener("click", () => {
@@ -3133,19 +4896,42 @@ async function setUpSceneView(
     const frameSeconds = Math.min((nowMs - lastTimeMs) / 1000, 0.25);
     lastTimeMs = nowMs;
 
-    if (mode === "play" && playing) {
+    // ライブ再生中はそちらが Scene View を駆動する(現在の world は進めない)。
+    const playingBack = advanceLivePlayback(frameSeconds);
+
+    if (!playingBack && mode === "play" && playing) {
       accumulator += frameSeconds * timeScale;
       let steps = 0;
-      while (accumulator >= DT && steps < MAX_STEPS_PER_FRAME) {
+      // **`DT` 定数ではなく `world.dt()` を読む(群2)**。Settings で dt を
+      // 変更できるようにした結果、固定の `DT` で積算すると「dt を半分にすると
+      // 時間が倍速で進む」という嘘の挙動になっていた(実装検証中に発見)。
+      const dt = world.dt();
+      while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
         if (heaterToggle.checked) world.push_heat_source(HEATER_WATTS);
         world.step();
-        accumulator -= DT;
+        accumulator -= dt;
         steps += 1;
       }
+      // **実効時間倍率(群2)**。高倍率では `MAX_STEPS_PER_FRAME` に当たって
+      // 指定どおりの速度が出ない。**出ていないことを黙って隠さない**——
+      // 達成できた倍率を出し、指定値に届かないときは赤で示す。
+      // (届かないまま `accumulator` を溜め続けると、負荷が下がった瞬間に
+      //  一気に進む「時間の借金」になるので、上限に当たったフレームでは
+      //  余りを捨てる。)
+      const capped = steps >= MAX_STEPS_PER_FRAME;
+      if (capped) accumulator = 0;
+      updateEffectiveTimeScale(
+        frameSeconds > 0 ? (steps * dt) / frameSeconds : timeScale,
+        capped,
+      );
       appendConsoleEntries(world.drain_events_text());
       // 診断バッジ(増分K)。毎フレーム最新の残差・最大速度で更新する。
       if (consoleDiagnosticsRef.current) {
-        consoleDiagnosticsRef.current(world.energy_residual(), world.max_body_speed(), DT);
+        consoleDiagnosticsRef.current(
+          world.energy_residual(),
+          world.max_body_speed(),
+          DT,
+        );
       }
     }
 
@@ -3166,7 +4952,9 @@ function main() {
   // する——ギャラリーのマニフェスト(`scenes/index.json`)をそのまま再利用し、
   // 二重管理を作らない。読み込み自体は`sceneGalleryRef`(ドロワーのギャラリーと
   // 同じ経路)へ委譲する。
-  const sceneSelect = document.getElementById("select-scene") as HTMLSelectElement | null;
+  const sceneSelect = document.getElementById(
+    "select-scene",
+  ) as HTMLSelectElement | null;
   if (sceneSelect) {
     for (const entry of sceneGalleryManifest()) {
       const option = document.createElement("option");
@@ -3183,26 +4971,38 @@ function main() {
   }
 
   const consoleDiagnosticsRef: ConsoleDiagnosticsRef = { current: null };
-  const appendConsoleEntries = setUpConsole(jumpToStepRef, selectBodyRef, consoleDiagnosticsRef);
+  const appendConsoleEntries = setUpConsole(
+    jumpToStepRef,
+    selectBodyRef,
+    consoleDiagnosticsRef,
+  );
   const materialsRef: MaterialsRef = { current: null };
   const circuitRef: CircuitRef = { current: null };
   const sceneExportRef: SceneExportRef = { current: null };
+  const projectBundleRef: ProjectBundleRef = { current: null };
+  const projectExportedRef: ProjectExportedRef = { current: null };
   const sceneImportRef: SceneImportRef = { current: null };
   const replayVerifyRef: ReplayVerifyRef = { current: null };
+  const replayPlaybackRef: ReplayPlaybackRef = { current: null };
   const circuitEditorRef: CircuitEditorRef = { current: null };
   const circuitFreeWiringState: CircuitFreeWiringState = { active: false };
   const prefabRef: PrefabRef = { current: null };
+  const prefabSaveRef: PrefabSaveRef = { current: null };
   const sceneGalleryRef: SceneGalleryRef = { current: null };
   const circuitElementsRef: CircuitElementsRef = { current: null };
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
     sceneExportRef,
+    projectBundleRef,
+    projectExportedRef,
     sceneImportRef,
     replayVerifyRef,
+    replayPlaybackRef,
     circuitEditorRef,
     circuitFreeWiringState,
     prefabRef,
+    prefabSaveRef,
     sceneGalleryRef,
     circuitElementsRef,
   );
@@ -3213,11 +5013,15 @@ function main() {
     materialsRef,
     circuitRef,
     sceneExportRef,
+    projectBundleRef,
+    projectExportedRef,
     sceneImportRef,
     replayVerifyRef,
+    replayPlaybackRef,
     circuitEditorRef,
     circuitFreeWiringState,
     prefabRef,
+    prefabSaveRef,
     sceneGalleryRef,
     selectBodyRef,
     circuitElementsRef,

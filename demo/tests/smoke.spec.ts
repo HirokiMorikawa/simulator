@@ -24,6 +24,19 @@ async function waitForWorld(page: Page) {
   });
 }
 
+
+/**
+ * ツールバーの「＋ 追加」メニューから項目を選ぶ(群2)。
+ * スポーン系8個のボタンはツールバーを3行ぶんの高さに膨らませていたため
+ * 1つのメニューへ畳んだ。個々のボタンは `hidden` で DOM に残してあるが、
+ * **`hidden` な要素は Playwright からクリックできない**ので、テストも
+ * 実ユーザーと同じくメニュー経由で操作する。
+ */
+async function addViaMenu(page: Page, label: string) {
+  await page.click("#btn-add");
+  await page.locator("#context-menu button", { hasText: label }).first().click();
+}
+
 test("起動して wasm が初期化され、既定シーンが Hierarchy と HUD に現れる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await page.goto("/");
@@ -68,7 +81,9 @@ test("シーンギャラリーから D4(積み木)を読み込むと Hierarchy �
   await loadButton.click();
 
   // D4 は床 + 3段の箱 = 4体。既定シーン(2体)から差し替わったことの確認。
-  await expect(page.locator("#hierarchy-tree .tree-selectable")).toHaveCount(4);
+  // **`.tree-body` は Bodies サブツリーの実体行だけ**(群2で Materials(参照)
+  // サブツリーを足したため、`.tree-selectable` だけだと参照行まで数えてしまう)。
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(4);
   expect(errors).toEqual([]);
 });
 
@@ -83,7 +98,7 @@ test("剛体を持たないシーン(D9 熱のみ)を読み込んでも描画ル
   await page.click('.scene-gallery-list button[data-scene-file="d9-cooling-coffee.json"]');
 
   // 剛体が無いので Hierarchy のボディ一覧は空になる。
-  await expect(page.locator("#hierarchy-tree .tree-selectable")).toHaveCount(0);
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(0);
   // それでも HUD は描かれ続ける(y はプレースホルダ表示)。
   await expect(page.locator("#hud")).toContainText("t =");
 
@@ -193,12 +208,12 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
 
   // D8 散乱: 床 + 球50個 = 51体。ギャラリー中で最大のシーン。
   await page.click('.scene-gallery-list button[data-scene-file="d8-scatter.json"]');
-  await expect(page.locator("#hierarchy-tree .tree-selectable")).toHaveCount(51);
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(51);
 
   // D36 スイングバイ: 剛体0体、天体2体。Hierarchy のボディ一覧は空になるが、
   // シーン定義プローブ8本が Probes サブツリーに並ぶ。
   await page.click('.scene-gallery-list button[data-scene-file="d36-swingby.json"]');
-  await expect(page.locator("#hierarchy-tree .tree-selectable")).toHaveCount(0);
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(0);
   await expect(hierarchy.getByText("AstroPosX[1]", { exact: true })).toBeVisible();
   await expect(hierarchy.getByText("AstroVelY[0]", { exact: true })).toBeVisible();
 
@@ -343,7 +358,7 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   // 出る。スポーンした振り子(ワールド固定点への DistanceJoint)で確認する。
   await page.reload();
   await waitForWorld(page);
-  await page.click("#btn-spawn-pendulum");
+  await addViaMenu(page, "＋ 振り子");
   await hierarchy.getByText("Pendulum", { exact: false }).first().click();
   await expect(inspector.getByText("Joint", { exact: true })).toBeVisible();
 
@@ -374,7 +389,7 @@ test("増分L: 流体場オーバーレイ・カプセル・材料派生", async
   const hierarchy = page.locator("#hierarchy-tree");
 
   // ① カプセルのスポーン(sim-mechanics 側で体積・慣性・接触を実装した)。
-  await page.click("#btn-spawn-capsule");
+  await addViaMenu(page, "＋ カプセル");
   await expect(hierarchy.getByText("Capsule_", { exact: false }).first()).toBeVisible();
   // 落として床に載る(接触が起きる = カプセル-平面の接触が働いている)。
   await page.click("#btn-mode-play");
@@ -390,7 +405,7 @@ test("増分L: 流体場オーバーレイ・カプセル・材料派生", async
   // 順番にキューから answers を取り出すハンドラのほうが確実。
   const answers = ["テスト軽量材", "321"];
   page.on("dialog", (d) => d.accept(answers.shift() ?? ""));
-  await page.click("#btn-derive-material");
+  await addViaMenu(page, "材料派生");
   await expect(page.locator("#select-spawn-material option")).toHaveCount(before + 1);
   await expect(page.locator("#select-spawn-material")).toHaveValue("テスト軽量材");
 
@@ -401,6 +416,9 @@ test("増分L: 流体場オーバーレイ・カプセル・材料派生", async
   await page.waitForTimeout(600);
   await page.click("#btn-play");
   // トグルが存在し、既定でONであること(描画自体はcanvas内なので直接は見えない)。
+  // **群2でオーバーレイ切替は Settings(⚙)ポップオーバーへ移した**
+  // ——ツールバーに6個並べていたら折り返して読めなくなっていたため。
+  await page.click("#btn-settings");
   const toggle = page.locator("#toggle-grid-fluid-overlay");
   await expect(toggle).toBeChecked();
   await toggle.uncheck();
@@ -442,6 +460,228 @@ test("群1: Inspector が結合の種別・ジョイントの接続を実デー�
   // 近似バッジは出典と理由を title に持つ(設計§1.3「名前・出典・オフ可否」)。
   const badgeTitle = await page.locator(".approximation-badge").first().getAttribute("title");
   expect(badgeTitle).toContain("出典: docs/");
+
+  expect(errors).toEqual([]);
+});
+
+test("群2: カメラ操作・ツール切替ショートカット・Settings の物理パラメータ", async ({ page }) => {
+  // **これらは全て存在しなかった**: カメラは position.set(6,4,10) の完全固定、
+  // keydown リスナ0件、重力/dt を触る手段なし。Unityのようなツールとしては
+  // 最も基本的な欠落だった。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // ① カメラ: 中ドラッグで回転する(左は選択・ギズモに使うので割り当てない)。
+  const canvas = page.locator("canvas").first();
+  const box = (await canvas.boundingBox())!;
+  const before = await page.evaluate(() => {
+    const c = (window as unknown as { __camera?: { position: { x: number; y: number; z: number } } })
+      .__camera;
+    return c ? { ...c.position } : null;
+  });
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(box.x + box.width / 2 + 200, box.y + box.height / 2, { steps: 10 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForTimeout(300);
+  const after = await page.evaluate(() => {
+    const c = (window as unknown as { __camera?: { position: { x: number; y: number; z: number } } })
+      .__camera;
+    return c ? { ...c.position } : null;
+  });
+  expect(before).not.toBeNull();
+  expect(after).not.toEqual(before);
+
+  // ② ツール切替: W/E/R/Q。以前は3つのギズモが同時表示で切替が無かった。
+  await page.keyboard.press("e");
+  await expect(page.locator("#btn-tool-rotate")).toHaveClass(/active/);
+  await page.keyboard.press("w");
+  await expect(page.locator("#btn-tool-translate")).toHaveClass(/active/);
+
+  // ③ Settings: 重力を実行時に変更できる(「物理法則を試す」の中心)。
+  await page.click("#btn-settings");
+  await expect(page.locator("#input-gravity")).toHaveValue(/9\.80/);
+  await page.fill("#input-gravity", "1.0");
+  await page.locator("#input-gravity").dispatchEvent("change");
+  // **フォーカスを外してから確認するのが要点**。`syncSettingsInputs()` は
+  // 編集中(activeElement)の入力欄を上書きしない——さもないと数値を打っている
+  // 最中に毎フレーム値が書き換わって入力できなくなる。したがってフォーカスが
+  // 乗ったままだと表示は打った文字列("1.0")のままで、**エンジンが受理した値**を
+  // 見たことにならない。blur 後の `toFixed(3)` 表示は world.gravity() の往復。
+  await page.locator("#input-gravity").blur();
+  await page.waitForTimeout(200);
+  await expect(page.locator("#input-gravity")).toHaveValue("1.000");
+  // dt は Edit モードでのみ変更できる(決定論を守るため)。
+  await expect(page.locator("#input-dt")).toBeEnabled();
+
+  expect(errors).toEqual([]);
+});
+
+test("群2: Inspector の RigidBody を Command 経由で編集できる", async ({ page }) => {
+  // **設計 §1.3 は「各 Component は World API の `Desc` 型と 1:1 対応。編集は
+  // 次ステップ先頭で Command として適用される」と定めているが、Inspector は
+  // 全フィールドが読み取り専用の `<span>` だった**。Collision group/mask に
+  // 至っては `RigidBodySet` に概念自体が無く、群2で `sim-mechanics` から作った。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // 既定の箱は鋼。Mass は密度×体積(7850 kg/m³ × 1 m³)。
+  const massInput = page.locator("#inspector-mass");
+  await expect(massInput).toHaveValue(/^7850/);
+  await expect(page.locator("#inspector-body-type")).toHaveValue("Dynamic");
+  // 衝突フィルタの既定は「1番グループに属し全グループと当たる」。
+  await expect(page.locator("#inspector-collision-group")).toHaveValue("1");
+  await expect(page.locator("#inspector-collision-mask")).toHaveValue(String(0xffffffff));
+
+  // Play モードで質量を変更 → Command が次 step 先頭で適用され、
+  // 表示が**エンジンから読み直した値**に変わる。
+  await page.click("#btn-mode-play");
+  await massInput.fill("3.5");
+  await massInput.dispatchEvent("change");
+  await massInput.blur();
+  await page.waitForTimeout(300);
+  await expect(massInput).toHaveValue("3.50000");
+
+  // Static へ切り替えると inv_mass = 0(無限質量)になり、質量欄は無効化される。
+  await page.selectOption("#inspector-body-type", "Static");
+  await page.waitForTimeout(300);
+  await expect(page.locator("#inspector-body-type")).toHaveValue("Static");
+  await expect(massInput).toBeDisabled();
+
+  expect(errors).toEqual([]);
+});
+
+test("群2: 右クリックメニュー(Scene View スポーンパレット / Hierarchy 複製)", async ({
+  page,
+}) => {
+  // **設計 §1.1/§1.2 が両方で要求しているのに、`contextmenu` リスナは
+  // リポジトリ全体で0件だった**。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const rowCount = () => page.locator("#hierarchy-tree .tree-body").count();
+
+  // ① Hierarchy: 行を右クリック → 複製。
+  const before = await rowCount();
+  await page.locator("#hierarchy-tree .tree-body").nth(1).click({ button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  await page.locator("#context-menu button", { hasText: "複製" }).first().click();
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBeGreaterThan(before);
+
+  // ② Scene View: 地面を右クリック → クリック位置に配置。
+  const canvas = page.locator("canvas").first();
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + box.width * 0.4, box.y + box.height * 0.75, { button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  // メニューのラベルにクリック位置のワールド座標が入る(地面へ投影した点)。
+  await expect(page.locator("#context-menu button").first()).toContainText("ここに球を配置");
+  const beforeSpawn = await rowCount();
+  await page.locator("#context-menu button", { hasText: "ここに箱を配置" }).click();
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBeGreaterThan(beforeSpawn);
+
+  // ③ Escape で閉じる。
+  await page.mouse.click(box.x + box.width * 0.4, box.y + box.height * 0.75, { button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#context-menu")).toHaveCount(0);
+
+  expect(errors).toEqual([]);
+});
+
+test("群2: Hierarchy の折り畳み・Materials サブツリー・N step 送り・実効時間倍率", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // ① Materials(参照)サブツリー。設計 §1.1 の列挙にあるのにツリーに無かった。
+  await expect(page.locator("#hierarchy-tree")).toContainText("Materials (参照)");
+
+  // ② 折り畳み(設計 §1.1「ツリーは折り畳み可」)。Bodies を畳むと
+  //    ボディ行が消える(Materials 配下の参照行は残る)。
+  const visibleBodies = () =>
+    page.locator("#hierarchy-tree .tree-group", { hasText: "Bodies" }).locator("li:visible").count();
+  expect(await visibleBodies()).toBeGreaterThan(0);
+  await page.locator("#hierarchy-tree .tree-toggle").first().click();
+  expect(await visibleBodies()).toBe(0);
+  await page.locator("#hierarchy-tree .tree-toggle").first().click();
+  expect(await visibleBodies()).toBeGreaterThan(0);
+
+  // ③ N step 送り。⏭ を1回押して指定 step 数ちょうど進むこと。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play"); // 一時停止
+  await page.fill("#input-step-count", "50");
+  const readStep = async () =>
+    Number((await page.locator("#timeline-step").textContent())!.replace(/\D/g, ""));
+  const s0 = await readStep();
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
+  expect(await readStep()).toBe(s0 + 50);
+
+  // ④ 実効時間倍率。×128 は 1 フレームあたりの step 上限(240)に当たる
+  //    ——60fps・dt=1/120 なら 1 フレーム 256 step を要求するため。
+  //    **出せていないことを赤で正直に示す**(黙って遅いままにしない)。
+  //    判定は「上限に当たったか」という事実で行う(比率だと機械の速さで
+  //    結果が変わる。実測: 240/256 = 93.75% は素朴な9割閾値を超えてしまう)。
+  await page.selectOption("#select-timescale", "128");
+  await page.click("#btn-play"); // 再生再開
+  await page.waitForTimeout(1500);
+  await expect(page.locator("#timescale-effective")).toHaveClass(/degraded/);
+  await expect(page.locator("#timescale-effective")).toHaveAttribute(
+    "title",
+    /step 数上限/,
+  );
+  const effective = Number(
+    (await page.locator("#timescale-effective").textContent())!.replace("×", ""),
+  );
+  expect(effective).toBeGreaterThan(1); // 速くはなっている
+  expect(effective).toBeLessThan(128); // が指定値には届かない
+
+  // ×1 に戻せば上限に当たらなくなり、赤も消える(保持フレーム分だけ遅れて)。
+  await page.selectOption("#select-timescale", "1");
+  await page.waitForTimeout(1500);
+  await expect(page.locator("#timescale-effective")).not.toHaveClass(/degraded/);
+
+  expect(errors).toEqual([]);
+});
+
+test("群2: 単一ファイル Export(シーン+Replay+Bookmark)", async ({ page }) => {
+  // 設計 §6「保存・共有: シーンJSON+Replay+ブックマークを単一ファイルとして
+  // エクスポート」。これまで3つは別々のファイルで、ブックマーク一覧は
+  // そもそも書き出せなかった。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  await page.click("#btn-mode-play");
+  await page.waitForTimeout(400);
+  await page.click("#btn-nudge"); // Replay に載る Command を1件作る
+  await page.fill("#bookmark-label", "テスト地点");
+  await page.click("#btn-add-bookmark");
+
+  await page.click('.project-tab[data-tab="scenes"]');
+  const download = page.waitForEvent("download");
+  await page.click("#btn-export-bundle");
+  const stream = await (await download).createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(chunk as Buffer);
+  const bundle = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+
+  expect(bundle.formatVersion).toBe(1);
+  // `scene` は sim_world::Scenario スキーマなので、そのままギャラリーへ読める。
+  expect(bundle.scene.bodies.length).toBeGreaterThan(0);
+  expect(bundle.scene.world).toHaveProperty("gravity");
+  expect(bundle.commandLog.length).toBeGreaterThan(0);
+  expect(bundle.bookmarks.map((b: { label: string }) => b.label)).toContain("テスト地点");
+  // **書き出しのために一時ブックマークを作らない**(群2で `export_scene_json`
+  // を Rust 側へ切り出した理由——以前の実装は一覧にゴミを残した)。
+  expect(bundle.bookmarks).toHaveLength(1);
 
   expect(errors).toEqual([]);
 });

@@ -72,7 +72,26 @@
 | E | フロントエンド残り(Probe対数軸/CSV、Consoleオブジェクト連動、Inspector Component、Hierarchy未接続ドメイン等) | §6 |
 | F | 残りの設計項目(シーンJSON couplings自動解決+排他結合検査接続、World APIのfilter引数、並列リダクション決定性C-1) | §3・§4 |
 
-**次の一手**: **増分H(スキーマ一括拡張)完了** —— `soft_body`/`grid_fluid`/
+### 縮約解消フェーズ(群1〜群8、2026-08-02〜)
+
+チェックリスト262項目は100%に達したが、**「実装したが縮約した」「設計にあるが
+作らなかった」箇所が本文の随所に正直に記録されている**。それらを洗い出し、
+「あるべき形」で作り直すのがこのフェーズ。ユーザーの指示は
+「unity見たいなツールで物理法則を試せることが目標」「品質向上のために全項目を
+出来るだけ実装」「実装を諦めた事例があればあるべき形で設計して欲しい」。
+
+| 群 | 内容 | 状態 |
+|---|---|---|
+| 1 | 内省層(Coupling種別・Joint詳細・近似の自己申告) | **完了** |
+| 2 | エディタ操作性(カメラ・ツール切替・右クリック・Inspector編集・衝突フィルタ・連鎖削除) | **完了** |
+| 3 | 未統合ドメインをWorldへ(量子・統計・FDTD)/ ソフトボディ・天体・熱場の描画 | 未着手 |
+| 4 | 力学の縮約解消(capsule×box接触・WheelJoint(D24)・関節角度制限・マニフォールド永続化・CCD拡張・ソフトボディ曲げ/体積拘束) | 未着手 |
+| 5 | 結合の縮約解消(apply_pre移行で1step遅れ解消・DomainStates汎用化・剛体↔熱ノード対応・PhaseChangeMorphの実体変換・自然対流・揚力) | 未着手 |
+| 6 | レンダラの縮約解消(コースティクス合成・分光コースティクス・NEE+MIS・ロシアンルーレット・金属の複素IOR・PNG deflate・三角形メッシュ) | 未着手 |
+| 7 | 場のソルバの縮約解消(GridFluid流入出/固体境界/3D・ConductionRod ρc_p/3D・FDTD PML・回路Newtonフォールバック連鎖+モータ素子) | 未着手 |
+| 8 | 縮約解消に伴って陳腐化したモジュールdocの訂正 | 群ごとに随時 |
+
+以前の記録: **増分H(スキーマ一括拡張)完了** —— `soft_body`/`grid_fluid`/
 `conduction_rod`/`sph`の4ドメイン、熱ドメインの`links`/`emissivity`、結合8種
 (`boussinesq_buoyancy`/`dissipation_to_heat`/`phase_change_morph`/`motor_coupling`/
 `sph_rigid`/`grid_fluid_rigid`/`lorentz_force`/`convection_link`)、プローブ7種を
@@ -908,7 +927,18 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       (`collision::tests::bvh_matches_brute_force_pair_enumeration_on_scattered_scene`)。
       実装中に、無限平面(`aabb_of`がmin=-∞/max=+∞を返す)の重心を素朴に$(min+max)/2$で
       計算するとNaNになりBVH構築のソートがpanicする(既存のM8/M9等、地面平面を使うテストで
-      発覚)ことを発見・修正 — 有限側だけで代表点を決めるヘルパー`centroid`を追加した
+      発覚)ことを発見・修正 — 有限側だけで代表点を決めるヘルパー`centroid`を追加した。
+      **群2で衝突フィルタ(設計 §4.1「`collision_group: u32` / `collision_mask: u32`
+      のビット AND」)を追加した**——それまで`RigidBodySet`にこの概念自体が無く、
+      設計に書かれているのに実装が存在しなかった項目。`detect`が候補ペアを
+      narrowphase へ回す前に落とすので、フィルタで外れたペアはマニフォールドを
+      一切生成しない(=完全にすり抜ける)。**双方向 AND** にした——片側だけが
+      相手を無視すると「A は B を押すが B は A を押さない」非対称な接触になり
+      運動量が保存しないため。既定値(group=1 / mask=!0)同士は必ず衝突するので
+      **既存シーンの数値挙動は導入前と完全に一致する**。
+      検証: `collision_filter_is_symmetric_and_defaults_to_allow`(述語の対称性)と
+      `collision_filter_suppresses_manifold_for_disjoint_groups`(重なった2球が
+      既定では1マニフォールド、別グループでは0件、片側だけ緩めても0件)
 - [x] スリープ — `crates/sim-mechanics/src/sleep.rs::update_sleep_state`。dynamic-dynamic
       接触の連結成分(接触島、union-find)単位で、島内の全 dynamic body の速度が閾値
       (0.01 m/s / 0.02 rad/s)未満の状態が0.5秒続いたら asleep にし、力適用・速度積分・
@@ -1423,7 +1453,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       絞る ②特定のボディを除外する。`default()`は何も除外しない)。除外は
       **世代も一致した場合のみ**効く(削除後にindexが再利用された別のボディを
       巻き添えにしないため、`BodyId`が世代付きである理由そのもの)。
-      レイヤーマスク/衝突グループは`RigidBodySet`にその概念自体が無いため対象外。
+      **群2で③衝突グループのマスク(`collision_mask: Option<u32>`)を追加した**
+      ——それまで「レイヤーマスク/衝突グループは`RigidBodySet`にその概念自体が
+      無いため対象外」と書いていたが、群2で `collision_group`/`collision_mask` を
+      `sim-mechanics` に実装したためこの前提は解消した。クエリ側は**単方向 AND**
+      (「このマスクで見えるものを拾う」問い合わせ)で、broadphase の接触ペア
+      (双方向 AND、運動量保存のため)とは意味論が違う。既定 `None` は絞らない。
       **縮約(正直な記録)**: `raycast`のフィルタは受理判定をヒット**後**に
       適用するため、最近傍が除外対象だと背後のボディではなく`None`になる
       ——「全ヒットを距離順に返す」APIが`raycast`側に無いため。この挙動自体を
@@ -2036,8 +2071,74 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       (姿勢クォータニオンの直接書き換え、新設の`World::body_rotation`+
       `sim-wasm`の`body_rotation_at_f32`/`set_body_rotation_at`)で適用する
       (Blenderのようなビュー平面トラックボールではなく単純な単一軸回転)。
+      **群2(2026-08-02)でエディタ操作性を Unity 相当まで引き上げた**——
+      それまで「物理法則を試すツール」として最も基本的な操作が欠けていた:
+      - **カメラ操作**(設計§1.2「中クリック回転・右クリックパン・ホイールで
+        ズーム」): `OrbitControls` を導入。それまで `camera.position.set(6,4,10)`
+        の**完全固定**で、視点を1度も動かせなかった。左ボタンは選択・Gizmo に
+        使うので `mouseButtons` を中=回転/右=パンへ差し替えている。
+      - **W/E/R/Q ショートカット**(設計§1.2): `keydown` リスナは
+        **リポジトリ全体で0件**だった。あわせて3つの Gizmo が同時表示だったのを
+        ツールごとに1つだけ出すよう変更(移動したいのに回転リングを掴む
+        誤操作が実際に起きていた)。F で選択物へ寄る。
+      - **World / Local 座標系トグル**(設計§1.2「座標系は World / Local 切替可」):
+        `#btn-gizmo-space`。Local ではボディの姿勢で軸を回すので、傾いた箱を
+        その長辺方向へ動かせる。**Local ではグリッドスナップを切る**——世界固定の
+        格子へ丸めると動かしていない軸まで引っ張られて軸拘束が壊れるため。
+      - **グリッド・スナップ**(設計§1.2「既定 10 cm、変更可」): Settings に
+        入力欄。**ドラッグしている軸の成分だけ**丸める。
+      - **右クリックコンテキストメニュー**(設計§1.1/§1.2): `contextmenu`
+        リスナも**リポジトリ全体で0件**だった。Scene View はクリック位置を
+        地面へ投影してそこにスポーン(**ツールバーのボタンと同じ関数を共有**
+        するので挙動が乖離しない)、Hierarchy は複製・削除・アイソレート表示・
+        プレハブ化。**「親付け」は意図的に出さない**——`RigidBodySet` に剛体
+        同士の親子関係が無く(`FrameId` は座標系の階層であってボディの階層では
+        ない)、UI だけ作っても何も起きないため。メニューは常に viewport 内へ
+        収める(増分E3で踏んだのと同じクラスのバグを避ける)。
+      - **Hierarchy の折り畳み・複数選択・Materials サブツリー**(設計§1.1):
+        折り畳み状態はツリーの外(モジュールスコープ)に持つ——シーンを
+        読み込むたびに全部開いた状態へ戻らないように。Materials は
+        **このシーンで実際に使われている材質**の下に使用ボディを並べる
+        (設計の言う「Materials(参照)」)。参照行は `↳` を付けて Bodies の
+        実体行と区別する(同名の行が2つあると人にもテストにも曖昧になる
+        ——実際に Playwright の strict モードが8本まとめて落ちて気付いた)。
+      - **N step 送り**: ⏭ の隣に step 数入力。「10 step だけ進めて接触の瞬間を
+        見る」「600 step 飛ばして定常状態まで進める」が、それまで⏭連打か
+        Play で流して勘で止めるしかなかった。
+      - **時間倍率 ×1/8〜×128**(それまで ×0.5/×1/×2/×5 の4段のみ)+
+        **実効倍率の赤字表示**: 高倍率は1フレームあたりの step 数上限
+        (`MAX_STEPS_PER_FRAME`)に当たって指定どおり出ない。**出ていないことを
+        黙って隠さず**、達成できている倍率を隣に出して届かなければ赤くする
+        (実測: ×128 指定で ×58〜74)。上限に当たったフレームでは余りを捨てる
+        ——溜め続けると負荷が下がった瞬間に一気に進む「時間の借金」になる。
+      - **未保存の変更の確認**(設計§6): 組んだシーンがリロードで**警告なく
+        消える**状態だった。`beforeunload` で確認する(判定はシーン内容の比較では
+        なく操作の有無——内容比較には現在状態のシリアライズが要る)。
+      - **単一ファイル Export**(設計§6「シーンJSON+Replay+ブックマークを
+        単一ファイルとして」): それまで scene.json と command_log.json が
+        別々に落ち、ブックマーク一覧は書き出す手段が無かった。実装中に
+        「現在状態をシーンJSONにする」経路が `bookmark_export_scene_json` しか
+        無く**書き出すたび一時ブックマークが一覧に残る**ことに気付き、
+        `WasmWorld::export_scene_json` を Rust 側へ切り出して解消した。
+      - **Replay のライブ再生**(設計§1.6): それまでの Replay は
+        **ヘッドレスで一気に流して最終 state_hash を比べるだけ**で、記録した
+        操作を「見る」手段が無かった(検証としては正しいが再生ではない)。
+        別の `WasmWorld` を作ってそこを step し、位置を Scene View のメッシュへ
+        流し込む(現在の world は一切壊さない)。既定シーン以外では
+        body index の前提が崩れるので理由を出して断る。
+      - あわせて**ツールバーの高さを 140px → 82px に戻した**。スポーン系8個の
+        ボタンを直接並べていたためラベルが1文字ずつ縦に折り返して読めなく
+        なっていた(スクリーンショットで確認)。「＋ 追加」1つのメニューへ畳み、
+        既存のボタンは `hidden` で DOM に残してハンドラを再利用している。
+      - **`frame()` が `DT` 定数で積算していたバグを修正**した。Settings で dt を
+        変更できるようにした結果、「dt を半分にすると時間が倍速で進む」という
+        嘘の挙動になっていた(`world.dt()` を読むよう修正)。
       Scale Gizmo(単一の立方体ハンドル、対角オフセット位置)も実装した——
-      Blenderのような軸別スケールではなく単一の一様スケールのみで、ドラッグ
+      Gizmo ドラッグは一様スケールのみだが、**軸別スケールは群2で Inspector の
+      Transform に数値入力として追加した**(`set_body_scale_xyz_at`。細長い箱
+      ——斜面・板・棒——が作れなかったのは実際に困る欠落だった。球・カプセルは
+      `Shape` に楕円体が無いため効かず、効かないことを返り値で伝えて入力を
+      1へ戻す)。以下は Gizmo ドラッグの説明: ドラッグ
       開始点からハンドルまでの画面上の距離比をスポーン時の寸法からの絶対
       倍率として`sim_mechanics::RigidBodySet::set_shape`(新設、`World::
       set_body_shape`経由)へ適用する。`set_shape`は`create_body`と同じ規約で
@@ -2204,7 +2305,23 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       「回路の素子(実際に配線されているもの、7件)」を出し**`100Ω`と
       `10V 電源`をもう含まないこと**を確認した。
       **縮約**: Probesと同じ理由で個々の素子は選択対象にしない
-      (Inspectorに回路素子用のComponent表示が無い))
+      (Inspectorに回路素子用のComponent表示が無い)。
+      **群2で設計§1.1の残り3項目(折り畳み・複数選択・右クリックメニュー)と
+      Materialsサブツリーを実装した**(詳細は上の Scene View 行を参照)。
+      あわせて**`World::remove_body`の連鎖削除**(設計 docs/00-foundation/
+      04-architecture.md §2 の完全仕様)を実装した——Hierarchy の「削除」を
+      作った時点でこれが無いと実害が出るため。それまでモジュールdocは
+      「`World`がまだジョイント・Couplingを保持していないため対象外」と
+      書いていたが、その前提は既に崩れていた(`mechanics.joints`/`ball_joints`/
+      `slider_joints`/`hinge_motors`と`couplings`を保持している)。
+      削除した剛体を参照するジョイントは`disabled`にし(index のずれを避ける
+      ため`Vec`からは取り除かない。`DistanceJoint`/`SliderJoint`/`HingeMotorPd`
+      にも`BallJoint`と同じ`disabled`フラグを新設した)、参照する`Coupling`は
+      **群1で足した`referenced_bodies()`**で特定して除去する。
+      検証: `remove_body_detaches_joints_so_the_partner_is_not_dragged_away`
+      ——連鎖削除が無いと、削除で遠方(y=-1e9)へ退避させられた剛体に
+      ジョイントで繋がった相手が**一緒に引きずられて飛んでいく**(拘束は
+      「無効化」を知らない)。連鎖削除後は自由落下するだけで y > -100 に留まる)
 - [x] Inspector: Component ビュー(Transform/RigidBody/Joint/Circuit/FluidRegion/Coupling/Probe/近似バッジ)
       (選択中ボディのTransform(Position/Rotation/Velocity)は`sim-wasm`に新設した
       `body_position_at_f32`/`body_rotation_at_f32`/`body_velocity_at_f32`
@@ -2266,6 +2383,36 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
         挙がっておらず0件だった。
       **FluidRegionは対象外**: SPH粒子が`RigidBodySet`のような個別ID体系を
       持たないため(Hierarchyの概要行と同じ既知の限界)。
+
+      **群2(2026-08-02)で Inspector を編集可能にした**。設計§1.3 は
+      「各 Component は World API の `Desc` 型と 1:1 対応。**編集は次ステップ
+      先頭で Command として適用される**」と定めているのに、全フィールドが
+      読み取り専用の`<span>`だった(表示するだけで、Unity で言う Inspector の
+      本質——値を変えて挙動を見る——が一切できなかった):
+      - **Mass**: `Command::SetBodyMass` → `RigidBodySet::set_mass`
+        (質量と慣性テンソルを整合させて張り直す)。
+      - **Body type**: `Command::SetBodyType`。Dynamic 以外へ移すと
+        `inv_mass = 0`(無限質量)になり**元の質量が復元できない**ため、
+        戻すときに使う質量をコマンドに載せる設計にした。速度もゼロ化する
+        ——力を受けないのに等速で飛び続ける物理的に無意味な状態を防ぐため。
+      - **Collision group / mask**: **`RigidBodySet`にその概念自体が無かった**
+        (`QueryFilter`のdocが「必要になった時点でボディ表現ごと拡張する」と
+        書いていた状態)。設計 docs/10-mechanics/02-collision-detection.md §4.1
+        「`collision_group: u32` / `collision_mask: u32` のビット AND」を
+        `sim-mechanics` に実装し、broadphase の候補ペア列挙で判定する。
+        **双方向 AND**にした——片側だけが相手を無視すると「A は B を押すが
+        B は A を押さない」非対称な接触になり運動量が保存しないため。
+        既定値(group=1 / mask=!0)同士は必ず衝突するので、既存シーンの
+        挙動は導入前と完全に一致する。`QueryFilter`にも
+        `collision_mask: Option<u32>` を足した(こちらはクエリなので単方向)。
+      - **Scale (x,y,z)**: `set_body_scale_xyz_at`。**球・カプセルには効かない**
+        ——`Shape`に楕円体が無いため。効かない形状では入力を1へ戻して
+        「この形状には効かない」と見せる(黙って無視しない)。
+      検証(`sim-world`): `inspector_edit_commands_change_mass_body_type_and_collision_filter`
+      が3つとも**観測可能な物理の変化**で確認する——質量4倍で同じ力に対する
+      加速度が厳密に1/4($a=F/m$)、Static 化で重力下でも変位が 1e-12 未満、
+      床と別グループへ移すと**床をすり抜けて落ち続ける**(y < -1 m、
+      フィルタ無しなら y > 0 で静止)。
 - [x] Timeline: 再生スクラバ + Play モードバッジ + ブックマーク
       (再生スクラバは設計docs/00-foundation/04-architecture.md「巻き戻しの
       スナップショット予算」(既定1s間隔・リングバッファN=8面)どおりに実装済み
@@ -2415,7 +2562,30 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       できる(縮約実装: Body形状+材質のみ、対応形状はsphere/box(boxは
       立方体のみ)、Joint/Circuitのプレファブ化・永続化は対象外)。
       Playwrightで保存→一覧表示→再スポーンによるHierarchyへの新規ボディ
-      追加を確認した)
+      追加を確認した。
+      **群2で「Replay再生実行(replay)自体は未実装、エクスポートのみ」という
+      注記のうち、残っていた"見る"側を実装した**——増分でヘッドレス検証
+      (`▶ Replay実行(検証)`)は入ったが、それは一気に流して最終 state_hash を
+      比べるだけで、記録した操作を Scene View で見る手段は無かった。
+      `▶ ライブ再生` は別の `WasmWorld` を作ってそこを step し、位置を
+      Scene View のメッシュへ流し込む(**現在の world は一切壊さない**ので、
+      再生を止めれば次フレームから元の表示に戻る——`render()` が毎フレーム
+      同期するため後片付けが要らない)。既定シーン以外では記録済み command の
+      body index の前提が崩れるので理由を出して断る。
+      あわせて**単一ファイル Export**(設計§6)を Scenes タブに追加した——
+      それまで scene.json と command_log.json が別々に落ち、ブックマーク一覧は
+      書き出す手段が無かった。`{formatVersion, exportedAt, scene, bodies,
+      commandLog, bookmarks, stateHash}` の1ファイルにまとめる(`scene` は
+      `sim_world::Scenario` スキーマなのでそのままギャラリーへ読める)。
+      実装中に**「現在状態をシーンJSONにする」経路が
+      `bookmark_export_scene_json` しか無く、書き出すたび一時ブックマークが
+      一覧に残る**ことに気付き、`WasmWorld::export_scene_json` を Rust 側へ
+      切り出して解消した(Playwright で「書き出し後もブックマークは自分で
+      付けた1件だけ」を固定してある)。
+      **記録した入力の再生漏れも直した**: 群2で足した `SetGravity`/`SetDt`/
+      `SetBodyMass`/`SetBodyType`/`SetCollisionFilter` は Replay の
+      `switch` に無かった——**記録しているのに再生しない**状態で、重力を変えた
+      実行のリプレイが state_hash 不一致になる。5種とも再生するようにした)
 - [x] Edit / Play モードの切替と編集ロック
       (Toolbarのセグメントトグル(`#btn-mode-edit`/`#btn-mode-play`)で切替。
       既定はEditモード(Unityと同じ起動時挙動、設計§4「Play を押した瞬間の

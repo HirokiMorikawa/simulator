@@ -1257,6 +1257,7 @@ impl World {
                             body_b: b_index,
                             anchor_b: array_to_vec3(*anchor_b),
                             length: *length,
+                            disabled: false,
                         });
                 }
                 JointJson::Ball {

@@ -23,7 +23,10 @@ mod soft_body;
 mod solver;
 mod vehicle;
 
-pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};
+pub use body::{
+    collision_filter_allows, BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle,
+    ShapeStore, DEFAULT_COLLISION_GROUP, DEFAULT_COLLISION_MASK,
+};
 pub use collision::{ContactManifold, ContactPoint};
 pub use gjk::{
     conservative_advancement_toi, epa_penetration, gjk_distance, ConvexShape, EpaResult, GjkResult,

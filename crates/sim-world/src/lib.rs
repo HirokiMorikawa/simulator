@@ -12,9 +12,13 @@
 //! スロットの削除・再利用に対応していないため(密な `Vec` ベースで、削除は配列の
 //! 詰め直しか tombstone 化を要する大きめの改修になる)、`remove_body` は下層スロットを
 //! 「無効化」(`BodyType::Static` 化 + 遠方(y=-1e9)へ退避 + 速度ゼロ化)するに留め、世代
-//! カウンタだけを正式にインクリメントして以後のアクセスを `None` にする。ジョイント・
-//! 結合の連鎖削除(設計 §2 の `remove_body` 完全仕様)は、`World` がまだジョイント・
-//! Coupling を保持していないため対象外(それらの導入時に合わせて拡張する)。
+//! カウンタだけを正式にインクリメントして以後のアクセスを `None` にする。
+//! **ジョイント・結合の連鎖削除(設計 §2 の `remove_body` 完全仕様)は群2で実装した**
+//! ——以前は「`World` がまだジョイント・Coupling を保持していないため対象外」と
+//! 書いてあったが、その前提は既に成り立っていない(`mechanics.joints`/`ball_joints`/
+//! `slider_joints`/`hinge_motors` と `couplings` を保持している)。削除された剛体を
+//! 参照するジョイントは `disabled` にし、参照する `Coupling` は
+//! `Coupling::referenced_bodies()`(群1の内省層)で特定して取り除く。
 //! `EnergyLedger`(docs/00-foundation/04-architecture.md §1.1.2(2))は P1 で導入済み:
 //! シーン構築(`create_body` 呼び出し列)が終わり最初の `step()` が呼ばれた時点の
 //! 合計エネルギーを基準点として、以後毎 step 後に記帳する(構築途中の`create_body`
@@ -152,6 +156,22 @@ pub enum Command {
     MoveGrab { body: BodyId, target: Vec3 },
     /// `body`の既存grabを解除する(grab中でなければ無視)。
     Release { body: BodyId },
+    /// 剛体`body`の質量を`mass`[kg]へ変更する(Inspector の RigidBody Component、
+    /// 設計 docs/23-frontend/01-editor.md §1.3「編集は次ステップ先頭で Command として
+    /// 適用される」)。形状は変えないので密度が暗黙に動く(`RigidBodySet::set_mass`)。
+    SetBodyMass { body: BodyId, mass: f64 },
+    /// 剛体`body`の種別を切り替える(Dynamic/Static/Kinematic)。Dynamic へ戻すときに
+    /// 使う質量を`mass`で明示する——**Static 化で inv_mass=0 になると元の質量が
+    /// 失われる**ため、復元値はコマンド側が持つ必要がある。
+    SetBodyType {
+        body: BodyId,
+        body_type: sim_mechanics::BodyType,
+        mass: f64,
+    },
+    /// 剛体`body`の衝突フィルタ(設計 docs/10-mechanics/02-collision-detection.md §4.1)
+    /// を設定する。broadphase で双方向 AND を取るため、片側の変更だけで
+    /// ペアを落とせる。
+    SetCollisionFilter { body: BodyId, group: u32, mask: u32 },
 }
 
 /// `raycast`/`overlap_sphere`のフィルタ(設計docs/20-integration/04-world-api.md §2
@@ -159,9 +179,10 @@ pub enum Command {
 ///
 /// **設計は`Filter`の中身を定義していない**ため、クエリの用途から必要最小限を
 /// 決めた: ①静的/動的の別で絞る(例: 「地面以外に当たったか」)②特定のボディを
-/// 除外する(例: 自分自身を無視してレイを飛ばす)。レイヤーマスクや衝突グループは
-/// `RigidBodySet`側にその概念自体が無いため対象外(必要になった時点で
-/// `sim-mechanics`のボディ表現ごと拡張する)。
+/// 除外する(例: 自分自身を無視してレイを飛ばす)③**衝突グループのマスク**
+/// (群2で追加。`RigidBodySet`に`collision_group`/`collision_mask`が入り、設計
+/// docs/10-mechanics/02-collision-detection.md §4.1 のビットANDが実体を持ったため、
+/// 「その概念自体が無いので対象外」という以前の記述は解消した)。
 ///
 /// `default()`は**何も除外しない**ので、フィルタ不要な呼び出しはそれを渡せばよい。
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -174,6 +195,9 @@ pub struct QueryFilter {
     /// index が再利用された別のボディを巻き添えにしないため(`BodyId`が
     /// 世代付きである理由そのもの)。
     pub exclude: Vec<BodyId>,
+    /// 衝突グループのマスク。`Some(m)`なら`m & body.collision_group != 0`の
+    /// ボディだけを拾う。`None`(既定)は絞らない。
+    pub collision_mask: Option<u32>,
 }
 
 /// `raycast`の結果(`raycast`モジュールdoc参照)。生の`RigidBodySet`indexではなく
@@ -811,6 +835,34 @@ impl World {
                         }
                     }
                 }
+                Command::SetBodyMass { body, mass } => {
+                    if self.is_valid(body) {
+                        self.mechanics.bodies.set_mass(body.index as usize, mass);
+                    }
+                }
+                Command::SetBodyType {
+                    body,
+                    body_type,
+                    mass,
+                } => {
+                    if self.is_valid(body) {
+                        self.mechanics
+                            .bodies
+                            .set_body_type(body.index as usize, body_type, mass);
+                    }
+                }
+                Command::SetCollisionFilter { body, group, mask } => {
+                    if self.is_valid(body) {
+                        self.mechanics.bodies.set_collision_filter(
+                            body.index as usize,
+                            group,
+                            mask,
+                        );
+                        // フィルタ変更で新たに触れるようになった相手を拾うため、
+                        // 静止仮定を解除する(`set_shape` と同じ理由)。
+                        self.mechanics.bodies.asleep[body.index as usize] = false;
+                    }
+                }
             }
             self.command_log.push((step, cmd));
         }
@@ -988,6 +1040,17 @@ impl World {
         })
     }
 
+    /// 現在のタイムステップ [s](**群2で追加**、エディタのSettingsが表示する)。
+    pub fn dt(&self) -> f64 {
+        self.clock.dt()
+    }
+
+    /// クロックへの可変アクセス(**群2で追加**)。`dt`を実行時に変えるための窓口
+    /// ——決定論への影響は`SimClock::set_dt`のdoc参照。
+    pub fn clock_mut(&mut self) -> &mut sim_core::SimClock {
+        &mut self.clock
+    }
+
     /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す
     /// `MaterialId` の解決に使う。
     pub fn materials(&self) -> &MaterialDb {
@@ -1044,6 +1107,16 @@ impl World {
     /// 再利用)へのアクセスは `None` になる(設計の不変条件)。下層の `RigidBodySet`
     /// スロット自体はまだ真に解放されない(モジュールdoc参照) — 無効化として
     /// `BodyType::Static` 化・遠方への退避・速度ゼロ化を行い、実質的な影響を無くす。
+    ///
+    /// **連鎖削除(群2)**: 削除した剛体を参照するジョイントと結合を切り離す。
+    /// これをやらないと、遠方(y=-1e9)へ飛ばした剛体にジョイントで繋がった相手が
+    /// **一緒に引きずられて飛んでいく**(拘束は「無効化」を知らないため)。
+    /// ジョイントは index のずれを避けるため `disabled` フラグで無効化し、
+    /// `Coupling` は `referenced_bodies()`(群1の内省層)で参照を判定して除去する。
+    ///
+    /// **`Coupling` は index ベースの参照しか持たない**ため、削除で index が
+    /// 再利用されることはない(スロットを真に解放しない設計のおかげで、
+    /// 「別のボディを指し始める」危険はそもそも生じない)。
     pub fn remove_body(&mut self, id: BodyId) {
         if !self.is_valid(id) {
             return;
@@ -1054,6 +1127,36 @@ impl World {
         self.mechanics.bodies.position[idx] = Vec3::new(0.0, -1.0e9, 0.0);
         self.mechanics.bodies.linear_velocity[idx] = Vec3::ZERO;
         self.mechanics.bodies.angular_velocity[idx] = Vec3::ZERO;
+
+        // ジョイントの連鎖削除。`body_b: Option<usize>` の `None` はワールド固定点。
+        let touches = |a: usize, b: Option<usize>| a == idx || b == Some(idx);
+        for joint in &mut self.mechanics.joints {
+            if touches(joint.body_a, joint.body_b) {
+                joint.disabled = true;
+            }
+        }
+        for joint in &mut self.mechanics.ball_joints {
+            if touches(joint.body_a, joint.body_b) {
+                joint.disabled = true;
+            }
+        }
+        for joint in &mut self.mechanics.slider_joints {
+            if touches(joint.body_a, joint.body_b) {
+                joint.disabled = true;
+            }
+        }
+        for motor in &mut self.mechanics.hinge_motors {
+            if motor.body == idx {
+                motor.disabled = true;
+            }
+        }
+        // grab 中だったなら追跡表からも落とす(残すと `MoveGrab` が
+        // 無効化済みジョイントを触り続ける)。
+        self.grab_joints.remove(&id.index);
+
+        // 結合の連鎖削除(群1の `Coupling::referenced_bodies()` を使う)。
+        self.couplings
+            .retain(|c| !c.referenced_bodies().contains(&idx));
     }
 
     /// 直接可変アクセス(抗力・浮力の周囲媒質設定など)。設計が定める
@@ -1487,6 +1590,7 @@ impl World {
                 body_b: None,
                 anchor_b: anchor_world,
                 length,
+                disabled: false,
             });
         index
     }
@@ -1534,6 +1638,15 @@ impl World {
         }
         if filter.exclude_dynamic && !is_static {
             return false;
+        }
+        // 衝突フィルタ(設計 docs/10-mechanics/02-collision-detection.md §4.1)。
+        // **クエリ側は単方向 AND** ——「このマスクで見えるものを拾う」という
+        // 問い合わせであり、broadphase の接触ペア(双方向 AND、運動量保存のため)
+        // とは意味論が違う。既定の `mask: None` は何も絞らない。
+        if let Some(mask) = filter.collision_mask {
+            if (mask & self.mechanics.bodies.collision_group[index]) == 0 {
+                return false;
+            }
         }
         !filter
             .exclude
@@ -1744,6 +1857,21 @@ mod tests {
             rotation: sim_math::Quat::IDENTITY,
         };
         world.create_body(desc)
+    }
+
+    /// y=0 の静的な無限平面を敷く(衝突フィルタのテストで「床をすり抜けるか」を
+    /// 見るのに使う)。
+    fn add_ground_plane(world: &mut World) -> BodyId {
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let mut floor = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            steel,
+        );
+        floor.body_type = BodyType::Static;
+        world.create_body(floor)
     }
 
     #[test]
@@ -2808,6 +2936,7 @@ mod tests {
                 kp: 20.0,
                 kd: 2.0,
                 torque_max: 50.0,
+                disabled: false,
             });
 
         for _ in 0..60 {
@@ -2970,6 +3099,139 @@ mod tests {
         assert!(
             (t2 - t1).abs() < 1e-9,
             "temperature must not keep rising without re-pushing the command: t1={t1} t2={t2}"
+        );
+    }
+
+    /// **`remove_body` の連鎖削除(群2)**。削除した剛体にジョイントで繋がった
+    /// 相手が、遠方(y=-1e9)へ退避させられた側に**引きずられて飛んでいかない**
+    /// ことを確認する。連鎖削除が無いと拘束はそのまま解かれ続けるため、
+    /// 相手は 1e9 m のオーダーで落ちる——「無効化しただけ」では足りないことが
+    /// 数値としてはっきり出る。
+    #[test]
+    fn remove_body_detaches_joints_so_the_partner_is_not_dragged_away() {
+        let mut world = World::new(WorldOptions::default());
+        let anchor = create_falling_box(&mut world);
+        let hanging = create_falling_box(&mut world);
+        // 2体を長さ1のDistanceJointで繋ぐ。
+        world
+            .mechanics_mut()
+            .add_distance_joint(sim_mechanics::DistanceJoint {
+                body_a: anchor.index as usize,
+                anchor_a: Vec3::ZERO,
+                body_b: Some(hanging.index as usize),
+                anchor_b: Vec3::ZERO,
+                length: 1.0,
+                disabled: false,
+            });
+        for _ in 0..10 {
+            world.step();
+        }
+        let before = world.body_position(hanging).unwrap();
+
+        world.remove_body(anchor);
+        for _ in 0..60 {
+            world.step();
+        }
+        let after = world.body_position(hanging).unwrap();
+        // 自由落下しているので下がってはいるが、退避先(-1e9)へは連れていかれない。
+        assert!(
+            after.y > -100.0,
+            "partner must not be dragged toward the removed body's parking spot: \
+             before={before:?} after={after:?}"
+        );
+        // 削除済み ID へのアクセスは None(設計の不変条件)。
+        assert!(world.body_position(anchor).is_none());
+    }
+
+    /// **Inspector の編集を Command として適用する(群2)**。設計
+    /// docs/23-frontend/01-editor.md §1.3「編集は次ステップ先頭で Command として
+    /// 適用される」の実体。3つとも「観測可能な物理の変化」で確認する:
+    ///
+    /// - `SetBodyMass`: 質量を変えても**自由落下の加速度は変わらない**
+    ///   (ガリレオ)——質量が実際に効いていることは、代わりに同じ力を加えたときの
+    ///   加速度が $a = F/m$ で反比例することで示す。
+    /// - `SetBodyType`: Static 化すると重力下でも一切動かない。
+    /// - `SetCollisionFilter`: 床と別グループへ移すと**床をすり抜けて落ち続ける**。
+    #[test]
+    fn inspector_edit_commands_change_mass_body_type_and_collision_filter() {
+        // ① SetBodyMass: 同じ力に対する加速度が a = F/m に従う。
+        let force = 100.0;
+        let mut accelerations = Vec::new();
+        for mass in [1.0, 4.0] {
+            let mut world = World::new(WorldOptions::default());
+            let body = create_falling_box(&mut world);
+            world.push_command(Command::SetBodyMass { body, mass });
+            world.step(); // 質量変更をこのstepの先頭で適用。
+            let v0 = world.body_velocity(body).unwrap().x;
+            let steps = 10;
+            for _ in 0..steps {
+                world.push_command(Command::ApplyForce {
+                    body,
+                    force: Vec3::new(force, 0.0, 0.0),
+                    point: None,
+                });
+                world.step();
+            }
+            let v1 = world.body_velocity(body).unwrap().x;
+            let dt = WorldOptions::default().dt;
+            accelerations.push((v1 - v0) / (steps as f64 * dt));
+        }
+        // 質量4倍 → 加速度1/4(重力はx方向に効かないので純粋に F/m)。
+        let ratio = accelerations[0] / accelerations[1];
+        assert!(
+            (ratio - 4.0).abs() < 1e-6,
+            "a ∝ 1/m should hold: a(m=1)={} a(m=4)={} ratio={ratio}",
+            accelerations[0],
+            accelerations[1]
+        );
+
+        // ② SetBodyType: Static 化すると重力下でも動かない。
+        let mut world = World::new(WorldOptions::default());
+        let body = create_falling_box(&mut world);
+        let start = world.body_position(body).unwrap();
+        world.push_command(Command::SetBodyType {
+            body,
+            body_type: BodyType::Static,
+            mass: 1.0,
+        });
+        for _ in 0..120 {
+            world.step();
+        }
+        let held = world.body_position(body).unwrap();
+        assert!(
+            (held - start).length() < 1e-12,
+            "static body must not move at all: start={start:?} held={held:?}"
+        );
+
+        // ③ SetCollisionFilter: 床(既定グループ 1)と互いに不可視にすると
+        //    床で止まらず自由落下し続ける。
+        let mut baseline = World::new(WorldOptions::default());
+        add_ground_plane(&mut baseline);
+        let falling = create_falling_box(&mut baseline);
+        for _ in 0..400 {
+            baseline.step();
+        }
+        let rested_y = baseline.body_position(falling).unwrap().y;
+        assert!(
+            rested_y > 0.0,
+            "sanity: the box must rest on the ground without a filter (y={rested_y})"
+        );
+
+        let mut filtered = World::new(WorldOptions::default());
+        add_ground_plane(&mut filtered);
+        let ghost = create_falling_box(&mut filtered);
+        filtered.push_command(Command::SetCollisionFilter {
+            body: ghost,
+            group: 0b10,
+            mask: 0b10,
+        });
+        for _ in 0..400 {
+            filtered.step();
+        }
+        let fallen_y = filtered.body_position(ghost).unwrap().y;
+        assert!(
+            fallen_y < -1.0,
+            "filtered body must pass through the ground (y={fallen_y}, baseline={rested_y})"
         );
     }
 
