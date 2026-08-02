@@ -37,7 +37,7 @@ pub use brownian_force::BrownianForce;
 pub use buoyancy_drag::BuoyancyDrag;
 pub use convection_link::ConvectionLink;
 pub use dissipation_to_heat::DissipationToHeat;
-pub use domain_states::{Coupling, DomainStates};
+pub use domain_states::{Coupling, DomainStates, NoopCoupling};
 pub use grid_fluid_rigid::GridFluidRigid;
 pub use image_charge_force::ImageChargeForce;
 pub use induction_coupling::InductionCoupling;

@@ -41,7 +41,13 @@ use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{SpatialHash, Vec3};
 
 /// cubic splineカーネル(Monaghan 1992、3D正規化)。設計§2.1。
-fn kernel(r: f64, h: f64) -> f64 {
+///
+/// **`pub`にした理由(増分J)**: `sim_world::World::sample_fluid`が
+/// 「最近傍粒子の値をそのまま返す」縮約から**真のカーネル補間**
+/// $A(x)=\sum_j \frac{m_j}{\rho_j}A_j W(|x-x_j|,h)$ へ移行するのに、
+/// 同じカーネルを使う必要があるため(別々のカーネルで補間すると、
+/// 密度の計算と場のサンプリングが整合しなくなる)。
+pub fn kernel(r: f64, h: f64) -> f64 {
     let q = r / h;
     let sigma = 8.0 / (std::f64::consts::PI * h.powi(3));
     if q <= 0.5 {

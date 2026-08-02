@@ -874,15 +874,47 @@ impl World {
     /// 後続増分)。SPHドメインが未有効化、または粒子が1つも無い場合は`None`。
     pub fn sample_fluid(&self, p: Vec3) -> Option<FluidSample> {
         let sph = self.sph.as_ref()?;
-        let (nearest_idx, _) = sph
-            .position
-            .iter()
-            .enumerate()
-            .map(|(i, &pos)| (i, (pos - p).length_sq()))
-            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        if sph.position.is_empty() {
+            return None;
+        }
+
+        // **増分Jで真のカーネル補間へ移行した**。それまでは最近傍粒子の値を
+        // そのまま返す縮約で、粒子間では値が階段状に不連続に飛んでいた
+        // (同じ水塊の中でもサンプル点が少し動くだけで別粒子の値に切り替わる)。
+        // SPHの場の補間は $A(x)=\sum_j \frac{m_j}{\rho_j} A_j W(|x-x_j|,h)$ であり、
+        // **密度計算に使っているのと同じカーネル**(`sim_fluid::sph_kernel`)で
+        // 重み付けしないと、密度と場のサンプリングが整合しない。
+        let h = sph.h;
+        let mut velocity = Vec3::ZERO;
+        let mut pressure = 0.0;
+        // シェパード補正の分母。自由表面付近では $\sum_j \frac{m_j}{\rho_j}W$ が
+        // 1を大きく下回る(近傍が足りない=D23で実測した自由表面欠損と同じ現象)ため、
+        // これで割って規格化しないと**表面付近の値が系統的に小さく出る**。
+        let mut weight_sum = 0.0;
+        for j in 0..sph.position.len() {
+            let r = (sph.position[j] - p).length();
+            if r > h {
+                continue; // cubic splineの台はr<=h。
+            }
+            let density = sph.density[j];
+            if density <= 0.0 {
+                continue;
+            }
+            let w = sim_fluid::sph_kernel(r, h) * sph.mass / density;
+            velocity = velocity + sph.velocity[j].scale(w);
+            pressure += sph.pressure[j] * w;
+            weight_sum += w;
+        }
+
+        if weight_sum <= 1.0e-12 {
+            // 近傍粒子が1つも無い点(流体の外)。**最近傍へフォールバックしない**
+            // ——遠く離れた点にもっともらしい値を返すより、「そこに流体は無い」と
+            // 答えるほうが正直である。
+            return None;
+        }
         Some(FluidSample {
-            velocity: sph.velocity[nearest_idx],
-            pressure: sph.pressure[nearest_idx],
+            velocity: velocity.scale(1.0 / weight_sum),
+            pressure: pressure / weight_sum,
         })
     }
 
@@ -993,6 +1025,32 @@ impl World {
         }
         self.apply_pending_commands();
         let dt = self.clock.dt();
+
+        // **pre 相(増分Jで追加)**。設計 docs/20-integration/01-coupling-matrix.md
+        // §1.3 が求める pre/post の2相分離のうち、ドメインソルバを進める**前**に
+        // 呼ぶ側。今stepの積分へ効かせたい注入型の結合をここへ移せるようにする。
+        // **既定実装は何もしない**ので、既存の全結合の挙動は変わらない
+        // (`Coupling::apply_pre`のdoc参照)。
+        for index in 0..self.couplings.len() {
+            let mut coupling = std::mem::replace(
+                &mut self.couplings[index],
+                Box::new(sim_coupling::NoopCoupling),
+            );
+            {
+                let mut states = sim_coupling::DomainStates {
+                    mechanics: &mut self.mechanics,
+                    thermal: self.thermal.as_mut(),
+                    em_circuit: self.circuit.as_mut(),
+                    em_electrostatics: self.em_electrostatics.as_mut(),
+                    gas: self.gas.as_mut(),
+                    grid_fluid: self.grid_fluid.as_mut(),
+                    sph: self.sph.as_mut(),
+                };
+                coupling.apply_pre(&mut states, dt);
+            }
+            self.couplings[index] = coupling;
+        }
+
         match self.time_regime {
             sim_astro::TimeRegime::Local { .. } => {
                 run_domain_substeps(
@@ -1075,7 +1133,7 @@ impl World {
                 grid_fluid: self.grid_fluid.as_mut(),
                 sph: self.sph.as_mut(),
             };
-            coupling.apply(&mut states, dt);
+            coupling.apply_post(&mut states, dt);
         }
         // このstepで発行された全イベントを排出し、Event::step(発行元ドメインは
         // ワールド全体のstep_countを知らないため0で埋めている、`sim-mechanics::
@@ -1606,6 +1664,131 @@ mod tests {
     /// SPH流体ドメイン(`sim_fluid::SphFluid`の`Solver`実装、モジュールdoc「全ドメイン
     /// 合成」参照): 他ドメインと同様に`step()`が自動的にsub-stepし、孤立した1粒子が
     /// 重力で落下することを確認する。`sample_fluid`が最近傍粒子の速度・圧力を返す
+    /// **増分J: `sample_fluid`が真のカーネル補間になったこと**。
+    ///
+    /// それまでは最近傍粒子の値をそのまま返す縮約で、**粒子間で値が階段状に
+    /// 不連続に飛んでいた**(サンプル点が中点を跨いだ瞬間に別粒子の値へ切り替わる)。
+    /// SPHの場の補間 $A(x)=\sum_j \frac{m_j}{\rho_j}A_j W(|x-x_j|,h)$ へ移した。
+    ///
+    /// 判定は**2粒子の中点での連続性**で行う。速度の違う2粒子を距離hより近く
+    /// 置き、その間をサンプル点で走査する:
+    /// - 最近傍方式なら中点で値が飛ぶ(片方の速度→もう片方の速度へ不連続)
+    /// - カーネル補間なら中点は両者の中間値になり、走査は滑らかに変化する
+    #[test]
+    fn sample_fluid_interpolates_smoothly_between_particles() {
+        let mut world = World::new(WorldOptions::default());
+        let h = 0.4;
+        let mut sph = sim_fluid::SphFluid::new(h, 1000.0, 20.0);
+        sph.mass = 1.0;
+        // 距離0.2(< h)に2粒子。速度は +x と -x で正反対。
+        sph.add_particle(Vec3::new(-0.1, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
+        sph.add_particle(Vec3::new(0.1, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0));
+        world.enable_sph(sph);
+        world.step(); // 密度を確定させる(補間の分母に要る)
+
+        // 中点は対称なので速度がちょうど打ち消し合ってほぼ0になる。
+        let mid = world
+            .sample_fluid(Vec3::ZERO)
+            .expect("2粒子の中点は台の内側");
+        assert!(
+            mid.velocity.x.abs() < 1.0e-9,
+            "対称な2粒子の中点では速度が打ち消し合うべき(最近傍方式ならどちらかの\
+             ±1付近の値が出る): {}",
+            mid.velocity.x
+        );
+
+        // 走査して不連続な飛びが無いこと(最近傍方式なら中点で2.0の跳躍が出る)。
+        let n = 200;
+        let mut previous: Option<f64> = None;
+        let mut max_jump: f64 = 0.0;
+        for k in 0..=n {
+            let x = -0.1 + 0.2 * k as f64 / n as f64;
+            let sample = world
+                .sample_fluid(Vec3::new(x, 0.0, 0.0))
+                .expect("粒子間は台の内側");
+            if let Some(p) = previous {
+                max_jump = max_jump.max((sample.velocity.x - p).abs());
+            }
+            previous = Some(sample.velocity.x);
+        }
+        assert!(
+            max_jump < 0.05,
+            "カーネル補間なら隣接サンプル間の変化は滑らかなはず(最近傍方式では\
+             中点で約2.0の跳躍が出る): max_jump={max_jump}"
+        );
+    }
+
+    /// **増分J: 流体の外をサンプルすると`None`を返す**。カーネルの台(r<=h)に
+    /// 粒子が1つも無い点には「そこに流体は無い」と答える——最近傍へ
+    /// フォールバックして遠く離れた点にもっともらしい値を返すより正直である。
+    #[test]
+    fn sample_fluid_returns_none_outside_the_kernel_support() {
+        let mut world = World::new(WorldOptions::default());
+        let mut sph = sim_fluid::SphFluid::new(0.1, 1000.0, 20.0);
+        sph.mass = 1.0;
+        sph.add_particle(Vec3::ZERO, Vec3::ZERO);
+        world.enable_sph(sph);
+        world.step();
+
+        assert!(
+            world.sample_fluid(Vec3::ZERO).is_some(),
+            "粒子の位置は台の内側"
+        );
+        assert!(
+            world.sample_fluid(Vec3::new(10.0, 0.0, 0.0)).is_none(),
+            "台の外は None を返すべき"
+        );
+    }
+
+    /// **増分J: 結合の pre/post 2相分離が実際に働くこと**。
+    ///
+    /// 設計 docs/20-integration/01-coupling-matrix.md §1.3 が求める2相のうち、
+    /// pre 相は**ドメインソルバを進める前**に呼ばれなければ意味が無い
+    /// (注入した力が今stepの積分に効かないなら1step遅れのままで、分離した意味が
+    /// 消える)。そこで pre 相で速度を書き換える結合を仕込み、**同じstepの
+    /// 積分がその値を使って位置を進めた**ことを位置の変化から確認する。
+    #[test]
+    fn coupling_pre_phase_runs_before_the_domain_solvers() {
+        /// pre 相で剛体0の速度を +x 方向 `speed` に固定する検査用の結合。
+        #[derive(Clone)]
+        struct PinVelocity {
+            speed: f64,
+        }
+        impl sim_coupling::Coupling for PinVelocity {
+            fn domains(&self) -> (sim_core::DomainId, sim_core::DomainId) {
+                (sim_core::DomainId::Mechanics, sim_core::DomainId::Mechanics)
+            }
+            fn apply(&mut self, _world: &mut sim_coupling::DomainStates, _dt: f64) {}
+            fn apply_pre(&mut self, world: &mut sim_coupling::DomainStates, _dt: f64) {
+                world.mechanics.bodies.linear_velocity[0] = Vec3::new(self.speed, 0.0, 0.0);
+            }
+        }
+
+        let mut world = World::new(WorldOptions {
+            gravity: 0.0,
+            ..WorldOptions::default()
+        });
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.1 }, steel);
+        world.create_body(desc);
+
+        let speed = 3.0;
+        world.add_coupling(Box::new(PinVelocity { speed }));
+        let dt = WorldOptions::default().dt;
+        world.step();
+
+        // pre 相で書いた速度が**同じstep**の積分に使われていれば、位置は speed*dt
+        // だけ進む。post 相(従来の`apply`)だけなら、このstepの積分は初速0で
+        // 行われるので位置は動かない。
+        let x = world.mechanics().bodies.position[0].x;
+        assert!(
+            (x - speed * dt).abs() < 1.0e-9,
+            "pre 相はソルバより前に走り、その速度が今stepの積分に効くべき: \
+             x={x} expected={}",
+            speed * dt
+        );
+    }
+
     /// ことも合わせて確認する。
     #[test]
     fn sph_domain_steps_automatically_and_sample_fluid_reads_nearest_particle() {

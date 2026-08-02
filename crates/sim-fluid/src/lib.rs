@@ -28,4 +28,4 @@ pub use grid_fluid::{GridFluid2D, GridSolidBox};
 pub use grid_fluid_rigid::GridFluidRigidBox2D;
 pub use karman::KarmanChannel2D;
 pub use poiseuille::PoiseuilleChannel1D;
-pub use sph::SphFluid;
+pub use sph::{kernel as sph_kernel, SphFluid};
