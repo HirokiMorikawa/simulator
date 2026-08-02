@@ -686,6 +686,126 @@ test("群2: 単一ファイル Export(シーン+Replay+Bookmark)", async ({ page
   expect(errors).toEqual([]);
 });
 
+test("群3: 量子・統計・FDTD がギャラリーに載り、場のパネルに描かれる", async ({ page }) => {
+  // **これらは長らく「原理的に載せられない」として閉じられていた**——
+  // `sim-world` が `sim-quantum`/`sim-statistical` を依存にすら持たず、
+  // `Solver` 未実装で `World::step()` の走査対象にもならなかった。
+  // 群3で `Solver` 実装 → `World` 統合 → シーンJSON → 可視化まで通した。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+  await page.click('.project-tab[data-tab="scenes"]');
+
+  const fieldPanel = page.locator("#field-panel");
+  const fieldTitle = page.locator("#field-title");
+
+  // 量子1D(D28 トンネル効果): |ψ|² と V(x) の折れ線。
+  await page.click('.scene-gallery-list button[data-scene-file="d28-tunneling.json"]');
+  await expect(fieldPanel).toBeVisible();
+  await expect(fieldTitle).toContainText("量子 1D");
+
+  // 量子2D(D27 二重スリット): |ψ|² の 2D 分布。
+  await page.click('.scene-gallery-list button[data-scene-file="d27-double-slit.json"]');
+  await expect(fieldTitle).toContainText("量子 2D");
+
+  // FDTD(D29 電波の水槽): Ez 場。
+  await page.click('.scene-gallery-list button[data-scene-file="d29-radio-tank.json"]');
+  await expect(fieldTitle).toContainText("FDTD Ez");
+
+  // イジング(D32 相転移): スピン格子。
+  await page.click('.scene-gallery-list button[data-scene-file="d32-magnet-transition.json"]');
+  await expect(fieldTitle).toContainText("イジング スピン格子");
+
+  // 気体(D30): 速さのヒストグラム + 粒子群が Scene View に出る。
+  await page.click('.scene-gallery-list button[data-scene-file="d30-gas-box.json"]');
+  await expect(fieldTitle).toContainText("気体分子の速さ分布");
+  await page.click("#btn-mode-play");
+  await page.waitForTimeout(1200);
+  const gasDrawn = await page.evaluate(() => {
+    let n = 0;
+    (window as unknown as { __scene: { traverse: (f: (o: never) => void) => void } }).__scene.traverse(
+      (o: never) => {
+        const object = o as unknown as {
+          type: string;
+          visible: boolean;
+          geometry?: { drawRange?: { count: number | null } };
+        };
+        if (object.type === "Points" && object.visible && object.geometry?.drawRange?.count) {
+          n += object.geometry.drawRange.count;
+        }
+      },
+    );
+    return n;
+  });
+  expect(gasDrawn).toBe(400);
+  await page.click("#btn-mode-edit");
+
+  // 場のパネルは対象ドメインが無いシーンでは畳まれる(常に居座らない)。
+  await page.click('.scene-gallery-list button[data-scene-file="d4-box-stack.json"]');
+  await expect(fieldPanel).toBeHidden();
+
+  expect(errors).toEqual([]);
+});
+
+test("群3: ソフトボディと天体が Scene View に描かれる", async ({ page }) => {
+  // **D13(ロープ)・D34–D36(天体)は Scene View に何も描かれていなかった**
+  // ——どちらも `RigidBodySet` の剛体ではないのでメッシュ同期の対象外だった。
+  // あわせて**カメラをシーンの中身に合わせる**(描けていても画角外なら
+  // 「何も出ていない」のと変わらない——実際に調査で踏んだ)。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+  await page.click('.project-tab[data-tab="scenes"]');
+
+  const drawnCounts = async () =>
+    page.evaluate(() => {
+      const result: string[] = [];
+      (
+        window as unknown as { __scene: { traverse: (f: (o: never) => void) => void } }
+      ).__scene.traverse((o: never) => {
+        const object = o as unknown as {
+          type: string;
+          visible: boolean;
+          geometry?: { drawRange?: { count: number | null } };
+        };
+        if (
+          (object.type === "Points" || object.type === "LineSegments") &&
+          object.visible &&
+          object.geometry?.drawRange?.count
+        ) {
+          result.push(`${object.type}:${object.geometry.drawRange.count}`);
+        }
+      });
+      return result;
+    });
+
+  // D13: 21粒子のロープ + 20本の距離拘束(線分は 2 頂点 × 20 = 40)。
+  await page.click('.scene-gallery-list button[data-scene-file="d13-rope.json"]');
+  await page.click("#btn-mode-play");
+  await page.waitForTimeout(800);
+  const rope = await drawnCounts();
+  expect(rope).toContain("Points:21");
+  expect(rope).toContain("LineSegments:40");
+  await page.click("#btn-mode-edit");
+
+  // D34: 天体2体がメッシュとして出る(Points ではなく Mesh なので別途数える)。
+  await page.click(
+    '.scene-gallery-list button[data-scene-file="d34-solar-system-single-planet.json"]',
+  );
+  await page.waitForTimeout(400);
+  const astroVisible = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __scene: { children: { type: string; visible: boolean; children: unknown[] }[] };
+      }
+    ).__scene.children.filter((c) => c.type === "Group" && c.visible && c.children.length > 0)
+      .length,
+  );
+  expect(astroVisible).toBeGreaterThan(0);
+
+  expect(errors).toEqual([]);
+});
+
 test("Project ドロワーがタブクリックで開き、中身が画面内に入る(増分E3)", async ({ page }) => {
   // **増分E3で修正した重大なUIバグの回帰テスト**: 既定のグリッド行はタブバーの
   // 高さしか無く、ドロワー本体(Scenes/Materials/... の中身)は画面外へ押し出されて

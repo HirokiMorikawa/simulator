@@ -1,0 +1,13 @@
+{
+  "name": "d32-magnet-transition",
+  "seed": 13,
+  "world": { "gravity": 0.0, "dt": 1.0 },
+  "ising": {
+    "l": 48,
+    "j_coupling": 1.0,
+    "temperature": 2.0,
+    "updates_per_step": 4,
+    "use_wolff": true
+  },
+  "probes": ["ising_magnetization", "ising_energy_per_spin"]
+}

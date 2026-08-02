@@ -1,0 +1,19 @@
+{
+  "name": "d27-double-slit",
+  "world": { "gravity": 0.0, "dt": 0.002 },
+  "quantum_2d": {
+    "nx": 256,
+    "ny": 128,
+    "dx": 0.1,
+    "dy": 0.1,
+    "packet": { "x0": 4.0, "y0": 6.4, "sigma_x": 1.5, "sigma_y": 3.0, "k0": 4.0 },
+    "double_slit": {
+      "wall_x": 10.0,
+      "thickness": 0.4,
+      "height": 60.0,
+      "slit_centers": [5.4, 7.4],
+      "slit_width": 0.6
+    }
+  },
+  "probes": []
+}

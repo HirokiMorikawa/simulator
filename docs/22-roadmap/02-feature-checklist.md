@@ -84,12 +84,30 @@
 |---|---|---|
 | 1 | 内省層(Coupling種別・Joint詳細・近似の自己申告) | **完了** |
 | 2 | エディタ操作性(カメラ・ツール切替・右クリック・Inspector編集・衝突フィルタ・連鎖削除) | **完了** |
-| 3 | 未統合ドメインをWorldへ(量子・統計・FDTD)/ ソフトボディ・天体・熱場の描画 | 未着手 |
+| 3 | 未統合ドメインをWorldへ(量子・統計・FDTD)/ ソフトボディ・天体・熱場の描画 | **完了** |
 | 4 | 力学の縮約解消(capsule×box接触・WheelJoint(D24)・関節角度制限・マニフォールド永続化・CCD拡張・ソフトボディ曲げ/体積拘束) | 未着手 |
 | 5 | 結合の縮約解消(apply_pre移行で1step遅れ解消・DomainStates汎用化・剛体↔熱ノード対応・PhaseChangeMorphの実体変換・自然対流・揚力) | 未着手 |
 | 6 | レンダラの縮約解消(コースティクス合成・分光コースティクス・NEE+MIS・ロシアンルーレット・金属の複素IOR・PNG deflate・三角形メッシュ) | 未着手 |
 | 7 | 場のソルバの縮約解消(GridFluid流入出/固体境界/3D・ConductionRod ρc_p/3D・FDTD PML・回路Newtonフォールバック連鎖+モータ素子) | 未着手 |
 | 8 | 縮約解消に伴って陳腐化したモジュールdocの訂正 | 群ごとに随時 |
+
+**群3で見つけて直した設計上の穴(2件)**:
+
+1. **`total_energy()` に全ドメインを足してはいけない**。`EnergyLedger` は保存則を
+   CIゲートとして検算する仕組みだが、量子(原子単位)・FDTD(正規化単位)・
+   イジング(無次元)は**単位系が違い**、イジング(正準集団)・ブラウン
+   (ランジュバン熱浴)は**保存しないのが正しい**。混ぜると残差が「バグの兆候」
+   ではなく「仕様」になり保存則ゲートが死ぬ。`World::energy_report()` を新設して
+   **ドメインごとに単位と保存性を明示**し、合計にはSI・保存系のみを入れる。
+   あわせて `soft_body`/`conduction_rod`/`kinetic_gas`(いずれもSI・保存系)を
+   合計へ追加した——増分Hで `Solver` を実装した時点で入れるべきだったのが漏れ、
+   **ロープや熱伝導棒のエネルギーが台帳から丸ごと抜けていた**。
+2. **sub-step 数に上限が無く `World::step()` が返ってこなくなる**。分子気体の
+   `max_stable_dt` は ~10⁻¹³ s で、フレーム dt(1/120 s)と素直に割ると
+   **2×10¹⁰ sub-step**(`u32` で飽和して約43億回ループ)。これは実装バグでは
+   なく物理的に正しい要求なので、**上限(1000)で打ち切ったうえで打ち切ったことを
+   近似バッジで申告する**形にした(壁時計ではなく状態から決まる固定上限なので
+   設計§1.3「壁時計ベースの打ち切り禁止」に反さず、決定論も保たれる)。
 
 以前の記録: **増分H(スキーマ一括拡張)完了** —— `soft_body`/`grid_fluid`/
 `conduction_rod`/`sph`の4ドメイン、熱ドメインの`links`/`emissivity`、結合8種
@@ -2071,6 +2089,22 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       (姿勢クォータニオンの直接書き換え、新設の`World::body_rotation`+
       `sim-wasm`の`body_rotation_at_f32`/`set_body_rotation_at`)で適用する
       (Blenderのようなビュー平面トラックボールではなく単純な単一軸回転)。
+      **群3(2026-08-02)で「Scene View に何も描かれない」ドメインを描いた**。
+      ソフトボディ(D13)・天体(D34–D36)は**`RigidBodySet`の剛体ではないため
+      メッシュ同期の対象外**で、載せても Scene View には一切現れなかった
+      (Probe Graphs が唯一の観測手段だった)。粒子を`Points`・距離拘束を
+      `LineSegments`で描き、天体は**正規化して描く**(太陽系のスケールは
+      10¹¹ m オーダーでカメラの世界と桁が違うため、最遠天体を半径6に収める。
+      絶対距離は Probe Graphs が出す)。統計ドメインの粒子群(気体・ブラウン)も
+      同じ理由で正規化して描く。
+      あわせて**シーン読み込み時にカメラを中身へ合わせる**
+      (`frameCameraOnContent`)——**描画は正しく動いているのに画角外で
+      「何も出ていない」ように見える**という状態を実際に踏んだため
+      (D13 のロープは 1 m、天体は正規化後 半径6 と、既定シーンの箱とは
+      画角が合わない)。
+      **場のパネル**(Scene View 内の 2D canvas)も新設した——|ψ|²・スピン格子・
+      Ez 場・速さヒストグラム・熱伝導棒の温度分布はいずれも「格子上のスカラー場」
+      であって剛体描画では表現できない。対象ドメインが無いシーンでは畳む。
       **群2(2026-08-02)でエディタ操作性を Unity 相当まで引き上げた**——
       それまで「物理法則を試すツール」として最も基本的な操作が欠けていた:
       - **カメラ操作**(設計§1.2「中クリック回転・右クリックパン・ホイールで
@@ -3653,6 +3687,18 @@ Phase 5:
       $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
       表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
       未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+      **群3(2026-08-02)でこの「原理的に存在しない」を解消し、実際に
+      ギャラリーへ出した**。増分H2が挙げた3つの障壁を順に潰した:
+      ①`sim-quantum`(`WaveFunction1D`/`WaveFunction2D`)・`sim-statistical`
+      (`BrownianParticleSet`/`GasSim`/`IsingSim`)・`sim_em::FdtdSim2D` の
+      **6型すべてに `Solver` を実装**(`max_stable_dt`/`step`/`state_hash`/
+      `total_energy`/`approximations`)②`sim-world` の依存に `sim-quantum`/
+      `sim-statistical` を追加し、`enable_quantum_1d`/`enable_quantum_2d`/
+      `enable_brownian`/`enable_kinetic_gas`/`enable_ising`/`enable_fdtd` と
+      `World::step()`の固定順走査・`state_hash`・`active_approximations` へ配線
+      ③シーンJSONに `quantum_1d`/`quantum_2d`/`brownian`/`kinetic_gas`/`ising`/
+      `fdtd` セクションと 11 種のプローブを追加 ④**場のパネル**(Scene View 内の
+      2D canvas)で |ψ|²・スピン格子・Ez 場・速さヒストグラム・温度分布を描く。
 - [x] D28 トンネル効果(合格基準「Q5」——`crates/sim-quantum/src/schrodinger.rs`の
       `q5_tunneling_transmission_matches_energy_weighted_analytic_formula`が
       既にGreen。「障壁高さ・厚みスライダー」はフロントエンド側の対話的パラメータ
@@ -3672,6 +3718,18 @@ Phase 5:
       $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
       表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
       未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+      **群3(2026-08-02)でこの「原理的に存在しない」を解消し、実際に
+      ギャラリーへ出した**。増分H2が挙げた3つの障壁を順に潰した:
+      ①`sim-quantum`(`WaveFunction1D`/`WaveFunction2D`)・`sim-statistical`
+      (`BrownianParticleSet`/`GasSim`/`IsingSim`)・`sim_em::FdtdSim2D` の
+      **6型すべてに `Solver` を実装**(`max_stable_dt`/`step`/`state_hash`/
+      `total_energy`/`approximations`)②`sim-world` の依存に `sim-quantum`/
+      `sim-statistical` を追加し、`enable_quantum_1d`/`enable_quantum_2d`/
+      `enable_brownian`/`enable_kinetic_gas`/`enable_ising`/`enable_fdtd` と
+      `World::step()`の固定順走査・`state_hash`・`active_approximations` へ配線
+      ③シーンJSONに `quantum_1d`/`quantum_2d`/`brownian`/`kinetic_gas`/`ising`/
+      `fdtd` セクションと 11 種のプローブを追加 ④**場のパネル**(Scene View 内の
+      2D canvas)で |ψ|²・スピン格子・Ez 場・速さヒストグラム・温度分布を描く。
 - [x] D29 電波の水槽(合格基準「E8/E13」——`crates/sim-em/src/fdtd.rs`の
       `plane_wave_propagates_at_the_normalized_speed_of_light`(E8)・
       `rectangular_cavity_resonance_matches_analytic_formula`(E13)が既にGreen。
@@ -3692,6 +3750,18 @@ Phase 5:
       $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
       表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
       未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+      **群3(2026-08-02)でこの「原理的に存在しない」を解消し、実際に
+      ギャラリーへ出した**。増分H2が挙げた3つの障壁を順に潰した:
+      ①`sim-quantum`(`WaveFunction1D`/`WaveFunction2D`)・`sim-statistical`
+      (`BrownianParticleSet`/`GasSim`/`IsingSim`)・`sim_em::FdtdSim2D` の
+      **6型すべてに `Solver` を実装**(`max_stable_dt`/`step`/`state_hash`/
+      `total_energy`/`approximations`)②`sim-world` の依存に `sim-quantum`/
+      `sim-statistical` を追加し、`enable_quantum_1d`/`enable_quantum_2d`/
+      `enable_brownian`/`enable_kinetic_gas`/`enable_ising`/`enable_fdtd` と
+      `World::step()`の固定順走査・`state_hash`・`active_approximations` へ配線
+      ③シーンJSONに `quantum_1d`/`quantum_2d`/`brownian`/`kinetic_gas`/`ising`/
+      `fdtd` セクションと 11 種のプローブを追加 ④**場のパネル**(Scene View 内の
+      2D canvas)で |ψ|²・スピン格子・Ez 場・速さヒストグラム・温度分布を描く。
 - [x] D30 気体の箱(合格基準「S1/S2/S3」——`crates/sim-statistical/src/
       kinetic_gas.rs`の`s1_speed_distribution_converges_to_maxwell_boltzmann`・
       `s2_equation_of_state_matches_pv_equals_nkt`・
@@ -3716,6 +3786,18 @@ Phase 5:
       $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
       表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
       未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+      **群3(2026-08-02)でこの「原理的に存在しない」を解消し、実際に
+      ギャラリーへ出した**。増分H2が挙げた3つの障壁を順に潰した:
+      ①`sim-quantum`(`WaveFunction1D`/`WaveFunction2D`)・`sim-statistical`
+      (`BrownianParticleSet`/`GasSim`/`IsingSim`)・`sim_em::FdtdSim2D` の
+      **6型すべてに `Solver` を実装**(`max_stable_dt`/`step`/`state_hash`/
+      `total_energy`/`approximations`)②`sim-world` の依存に `sim-quantum`/
+      `sim-statistical` を追加し、`enable_quantum_1d`/`enable_quantum_2d`/
+      `enable_brownian`/`enable_kinetic_gas`/`enable_ising`/`enable_fdtd` と
+      `World::step()`の固定順走査・`state_hash`・`active_approximations` へ配線
+      ③シーンJSONに `quantum_1d`/`quantum_2d`/`brownian`/`kinetic_gas`/`ising`/
+      `fdtd` セクションと 11 種のプローブを追加 ④**場のパネル**(Scene View 内の
+      2D canvas)で |ψ|²・スピン格子・Ez 場・速さヒストグラム・温度分布を描く。
 - [x] D31 拡散とインク(合格基準「S4、場と粒子の一致」——`crates/sim-statistical/
       src/brownian.rs`の`s4_mean_squared_displacement_matches_6dt`が粒子側を既に
       Green。「場」(濃度場の陰的Euler拡散)は`brownian.rs`モジュールdocが「Phase 5+
@@ -3736,6 +3818,18 @@ Phase 5:
       $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
       表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
       未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+      **群3(2026-08-02)でこの「原理的に存在しない」を解消し、実際に
+      ギャラリーへ出した**。増分H2が挙げた3つの障壁を順に潰した:
+      ①`sim-quantum`(`WaveFunction1D`/`WaveFunction2D`)・`sim-statistical`
+      (`BrownianParticleSet`/`GasSim`/`IsingSim`)・`sim_em::FdtdSim2D` の
+      **6型すべてに `Solver` を実装**(`max_stable_dt`/`step`/`state_hash`/
+      `total_energy`/`approximations`)②`sim-world` の依存に `sim-quantum`/
+      `sim-statistical` を追加し、`enable_quantum_1d`/`enable_quantum_2d`/
+      `enable_brownian`/`enable_kinetic_gas`/`enable_ising`/`enable_fdtd` と
+      `World::step()`の固定順走査・`state_hash`・`active_approximations` へ配線
+      ③シーンJSONに `quantum_1d`/`quantum_2d`/`brownian`/`kinetic_gas`/`ising`/
+      `fdtd` セクションと 11 種のプローブを追加 ④**場のパネル**(Scene View 内の
+      2D canvas)で |ψ|²・スピン格子・Ez 場・速さヒストグラム・温度分布を描く。
 - [x] D32 磁石の相転移(合格基準「S7/S8」——`crates/sim-statistical/src/ising.rs`の
       `s7_susceptibility_peak_estimates_critical_temperature`・
       `s8_spontaneous_magnetization_matches_onsager_formula`が既にGreen。
@@ -3756,6 +3850,18 @@ Phase 5:
       $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
       表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
       未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+      **群3(2026-08-02)でこの「原理的に存在しない」を解消し、実際に
+      ギャラリーへ出した**。増分H2が挙げた3つの障壁を順に潰した:
+      ①`sim-quantum`(`WaveFunction1D`/`WaveFunction2D`)・`sim-statistical`
+      (`BrownianParticleSet`/`GasSim`/`IsingSim`)・`sim_em::FdtdSim2D` の
+      **6型すべてに `Solver` を実装**(`max_stable_dt`/`step`/`state_hash`/
+      `total_energy`/`approximations`)②`sim-world` の依存に `sim-quantum`/
+      `sim-statistical` を追加し、`enable_quantum_1d`/`enable_quantum_2d`/
+      `enable_brownian`/`enable_kinetic_gas`/`enable_ising`/`enable_fdtd` と
+      `World::step()`の固定順走査・`state_hash`・`active_approximations` へ配線
+      ③シーンJSONに `quantum_1d`/`quantum_2d`/`brownian`/`kinetic_gas`/`ising`/
+      `fdtd` セクションと 11 種のプローブを追加 ④**場のパネル**(Scene View 内の
+      2D canvas)で |ψ|²・スピン格子・Ez 場・速さヒストグラム・温度分布を描く。
 - [x] D33 井戸の中の電子(合格基準「Q3/Q4」——`crates/sim-quantum/src/
       schrodinger.rs`の`q3_infinite_well_eigenvalues_match_particle_in_a_box_
       formula`(固有状態ギャラリーに相当、5状態の固有値がrel<0.1%で解析解と一致)・
@@ -3787,6 +3893,18 @@ Pα:
       $|\psi|^2$分布・スピン格子・速度ヒストグラム等はScene Viewの剛体描画では
       表現できない)が要る。**新規実装が要るものとしてスコープ外に置き、
       未チェックのまま黙って残さず到達点を明記して閉じる**(F10・R4・D24と同じ体裁)。
+      **群3(2026-08-02)でこの「原理的に存在しない」を解消し、実際に
+      ギャラリーへ出した**。増分H2が挙げた3つの障壁を順に潰した:
+      ①`sim-quantum`(`WaveFunction1D`/`WaveFunction2D`)・`sim-statistical`
+      (`BrownianParticleSet`/`GasSim`/`IsingSim`)・`sim_em::FdtdSim2D` の
+      **6型すべてに `Solver` を実装**(`max_stable_dt`/`step`/`state_hash`/
+      `total_energy`/`approximations`)②`sim-world` の依存に `sim-quantum`/
+      `sim-statistical` を追加し、`enable_quantum_1d`/`enable_quantum_2d`/
+      `enable_brownian`/`enable_kinetic_gas`/`enable_ising`/`enable_fdtd` と
+      `World::step()`の固定順走査・`state_hash`・`active_approximations` へ配線
+      ③シーンJSONに `quantum_1d`/`quantum_2d`/`brownian`/`kinetic_gas`/`ising`/
+      `fdtd` セクションと 11 種のプローブを追加 ④**場のパネル**(Scene View 内の
+      2D canvas)で |ψ|²・スピン格子・Ez 場・速さヒストグラム・温度分布を描く。
 - [x] D34 太陽系儀(ヘッドレステストGreen、`crates/sim-world/src/demos.rs`。
       8惑星ではなく1惑星(円軌道)への縮約でA1(ケプラー第3法則)・A2
       (エネルギー・角運動量保存)を確認。時間加速の切替を跨ぐリプレイ一致は

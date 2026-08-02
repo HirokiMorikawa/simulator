@@ -174,6 +174,20 @@ pub enum Command {
     SetCollisionFilter { body: BodyId, group: u32, mask: u32 },
 }
 
+/// `World::energy_report`の1ドメイン分(**群3で追加**、`energy_report`のdoc参照)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DomainEnergy {
+    /// ドメイン名(表示用の安定した識別子)。
+    pub domain: &'static str,
+    pub energy: sim_core::EnergyBreakdown,
+    /// エネルギーの単位。SI以外のドメインがあるため明示する。
+    pub unit: &'static str,
+    /// 閉じた保存系か(`false`なら保存しないのが正しい挙動)。
+    pub conservative: bool,
+    /// `World::total_energy()`の合計に含まれているか。
+    pub in_total: bool,
+}
+
 /// `raycast`/`overlap_sphere`のフィルタ(設計docs/20-integration/04-world-api.md §2
 /// が引数に取る`Filter`、増分F1で追加)。
 ///
@@ -274,6 +288,24 @@ pub enum ProbeTarget {
     /// スイッチ開閉という**3つとも節点電圧で観測する現象**であり、電流だけを見る
     /// `CircuitCurrent`では合格基準(E5/E3)のどれも再構成できなかった。
     CircuitNodeVoltage(usize),
+    /// **群3で追加した6ドメインの観測量**。量子(波動関数)・統計(スピン格子・
+    /// 分子集合)・FDTD(場)はいずれも Scene View に直接の3D表現を持たないため、
+    /// **Probe Graphs が主要な観測手段**になる。
+    ///
+    /// 量子1D: 全確率(ユニタリなら 1 で一定 = Q1 の検証量そのもの)。
+    QuantumNorm,
+    QuantumMeanX,
+    QuantumEnergy,
+    /// 格子インデックス `i` 以降に存在する確率(トンネル効果の透過率、D27)。
+    QuantumTransmission(usize),
+    GasTemperature,
+    GasPressure,
+    IsingMagnetization,
+    IsingEnergyPerSpin,
+    /// ブラウン粒子の平均二乗変位(原点からの、S4 の検証量)。
+    BrownianMsd,
+    FdtdEz(usize, usize),
+    FdtdEnergy,
     LedgerKinetic,
     /// `state_hash()`をグラフ表示用に`f64`へ変換した値(厳密な数値変換ではなく、
     /// UI上でハッシュの変化を視覚化するためのダイジェスト、設計§2.1「UIのグラフ」)。
@@ -389,12 +421,16 @@ pub struct World {
     /// 回路ドメイン(モジュールdoc参照、シーンが使う場合のみ`Some`)。
     circuit: Option<sim_em::Circuit>,
     /// 気体区画ドメイン(`sim_coupling::PistonGas`が読み書きする、シーンが使う場合のみ
-    /// `Some`)。`Solver`トレイトを実装しないため`step()`のドメイン走査対象ではなく、
-    /// `apply_coupling`経由でのみ状態が変化する。
+    /// `Some`)。**これは今も`Solver`未実装で正しい**——`GasCompartment`は
+    /// 状態変数(モル数・体積・温度)を持つだけで自律的な時間発展を持たず、
+    /// ピストンの動きに追従して`apply_coupling`が更新する従属量だからである
+    /// (`conduction_rod`/`soft_body`とは事情が違う。あちらは自律的に発展する
+    /// のに`Solver`が無かっただけで、増分Hで実装した)。
     gas: Option<sim_thermal::GasCompartment>,
     /// 1D格子熱伝導ドメイン(D16「熱伝導レース」が使う、シーンが使う場合のみ`Some`)。
-    /// `gas`と同じ理由(`Solver`トレイト未実装)で`step()`の自動走査対象ではなく、
-    /// `conduction_rod_mut().step(dt)`を呼び出し側が明示的に呼ぶ必要がある。
+    /// **増分Hで`Solver`を実装したので`step()`が自動的にsub-stepする**
+    /// (それまでは`conduction_rod_mut().step(dt)`を呼び出し側が明示的に
+    /// 呼ぶ必要があり、シーンに載せても再生では一切動かなかった)。
     conduction_rod: Option<sim_thermal::ConductionRod1D>,
     /// SPH流体ドメイン(シーンが使う場合のみ`Some`)。`sim_fluid::SphFluid`に
     /// `Solver`トレイトを実装済み(モジュールdoc「全ドメイン合成」参照)のため、
@@ -406,11 +442,36 @@ pub struct World {
     /// 同じ固定順で`step()`が自動的にsub-stepする。
     grid_fluid: Option<sim_fluid::GridFluid2D>,
     /// ソフトボディ(XPBDロープ、D13「ロープと旗」が使う、シーンが使う場合のみ`Some`)。
-    /// `gas`・`conduction_rod`と同じ理由(`Solver`トレイト未実装、`step`が複数引数
-    /// (`dt, gravity, n_sub, n_iter, damping`)を取るため`Solver::step(dt, ctx)`の
-    /// シグネチャに素直に適合しない)で`step()`の自動走査対象ではなく、
-    /// `soft_body_mut().step(...)`を呼び出し側が明示的に呼ぶ必要がある。
+    /// **増分Hで`Solver`を実装したので`step()`が自動的にsub-stepする**——
+    /// `step`が複数引数(`dt, gravity, n_sub, n_iter, damping`)を取り
+    /// `Solver::step(dt, ctx)`のシグネチャに素直に適合しなかったのを、
+    /// 積分設定を`SoftBody`のフィールドへ移すことで解消した。
+    /// **群3で描画も繋いだ**——それまで`RigidBodySet`の剛体ではないため
+    /// Scene Viewに一切現れず、Probe Graphsが唯一の観測手段だった。
     soft_body: Option<sim_mechanics::SoftBody>,
+    /// **量子ドメイン(群3で追加)**。設計 docs/00-foundation/04-architecture.md §1.2 は
+    /// 量子を7ドメインの1つとして数えているのに、`sim-quantum`は`Solver`を実装しておらず
+    /// **`World`に載る経路が原理的に存在しなかった**——D27–D29(トンネル効果・二重
+    /// スリット・調和振動子)がシーンギャラリーに出せなかった直接の原因。
+    /// 群3で`WaveFunction1D`/`WaveFunction2D`に`Solver`を実装して接続した。
+    ///
+    /// 1Dと2Dを**別フィールドで持つ**のは、両者が別の型で相互変換できないため
+    /// (enumで1つにまとめると、1D用のプローブから2Dの状態を読む経路が塞がる)。
+    quantum_1d: Option<sim_quantum::WaveFunction1D>,
+    quantum_2d: Option<sim_quantum::WaveFunction2D>,
+    /// **統計ドメイン(群3で追加)**。`quantum_*`と同じ理由。D25/D30/D31が対象。
+    brownian: Option<sim_statistical::BrownianParticleSet>,
+    kinetic_gas: Option<sim_statistical::GasSim>,
+    ising: Option<sim_statistical::IsingSim>,
+    /// **FDTD(電磁波)ドメイン(群3で追加)**。`PointChargeSystem`(静電)と
+    /// `Circuit`(回路)は既に`Solver`を実装済みだったが、**波動だけ未実装**で
+    /// `World`に載らなかった(D32「電磁波の伝播」が出せなかった原因)。
+    fdtd: Option<sim_em::FdtdSim2D>,
+    /// 直近の`step()`で、いずれかのドメインが sub-step 数の上限
+    /// (`orchestrator::MAX_SUB_STEPS_PER_FRAME`)に当たったか(**群3で追加**)。
+    /// 当たったフレームはそのドメインが**要求された時間ぶん正しくは進んでいない**
+    /// ので、`active_approximations()`が申告する。
+    sub_step_cap_reached: bool,
     materials: MaterialDb,
     rng: SimRng,
     events: EventQueue,
@@ -502,14 +563,20 @@ const ENERGY_SCALE_FLOOR: f64 = 1.0;
 /// `&mut self.<domain>` と `&mut self.rng`/`&mut self.events` の disjoint borrow が
 /// 同時に成立する(構造体メソッド越しだと借用チェッカに見えなくなるため、あえて自由関数
 /// にしている)。
+/// 1ドメインを`frame_dt`ぶん進める(必要なら`max_stable_dt`以下へ均等分割)。
+///
+/// **戻り値は「sub-step数の上限で打ち切ったか」**(群3で追加、
+/// `orchestrator::MAX_SUB_STEPS_PER_FRAME`のdoc参照)。打ち切った場合は
+/// そのドメインは要求された時間ぶん**正しくは進んでいない**ので、
+/// `World`が近似バッジとして申告する。
 fn run_domain_substeps<S: Solver>(
     solver: &mut S,
     frame_dt: f64,
     materials: &MaterialDb,
     rng: &mut SimRng,
     events: &mut EventQueue,
-) {
-    let n = orchestrator::sub_step_count(frame_dt, solver.max_stable_dt());
+) -> bool {
+    let (n, capped) = orchestrator::sub_step_count_capped(frame_dt, solver.max_stable_dt());
     let sub_dt = orchestrator::sub_step_dt(frame_dt, n);
     for _ in 0..n {
         let mut ctx = SolverContext {
@@ -519,6 +586,7 @@ fn run_domain_substeps<S: Solver>(
         };
         solver.step(sub_dt, &mut ctx);
     }
+    capped
 }
 
 impl World {
@@ -535,6 +603,13 @@ impl World {
             sph: None,
             grid_fluid: None,
             soft_body: None,
+            quantum_1d: None,
+            quantum_2d: None,
+            brownian: None,
+            kinetic_gas: None,
+            ising: None,
+            fdtd: None,
+            sub_step_cap_reached: false,
             materials: MaterialDb::standard(),
             rng: SimRng::new(options.seed, STREAM_DIAG),
             events: EventQueue::new(),
@@ -725,6 +800,50 @@ impl World {
                 .and_then(|s| s.density.get(idx))
                 .copied()
                 .unwrap_or(0.0),
+            // **群3で追加**。ドメインが無効なら 0 を返す(既存の全プローブと同じ規約
+            // ——「無効なドメインを観測したらエラー」ではなく静かに 0)。
+            ProbeTarget::QuantumNorm => self.quantum_1d.as_ref().map_or(0.0, |q| q.norm()),
+            ProbeTarget::QuantumMeanX => self.quantum_1d.as_ref().map_or(0.0, |q| q.mean_x()),
+            ProbeTarget::QuantumEnergy => self.quantum_1d.as_ref().map_or(0.0, |q| q.energy()),
+            ProbeTarget::QuantumTransmission(from) => self.quantum_1d.as_ref().map_or(0.0, |q| {
+                let total = q.norm();
+                if total == 0.0 {
+                    return 0.0;
+                }
+                let tail: f64 = q.psi.iter().skip(from).map(|p| p.norm_sq()).sum::<f64>() * q.dx;
+                tail / total
+            }),
+            ProbeTarget::GasTemperature => self
+                .kinetic_gas
+                .as_ref()
+                .filter(|g| g.particle_count() > 0)
+                .map_or(0.0, |g| g.temperature()),
+            ProbeTarget::GasPressure => self
+                .kinetic_gas
+                .as_ref()
+                .filter(|g| g.particle_count() > 0)
+                .map_or(0.0, |g| g.pressure()),
+            ProbeTarget::IsingMagnetization => {
+                self.ising.as_ref().map_or(0.0, |i| i.magnetization())
+            }
+            ProbeTarget::IsingEnergyPerSpin => {
+                self.ising.as_ref().map_or(0.0, |i| i.energy_per_spin())
+            }
+            ProbeTarget::BrownianMsd => self.brownian.as_ref().map_or(0.0, |b| {
+                if b.position.is_empty() {
+                    0.0
+                } else {
+                    b.position.iter().map(|p| p.length_sq()).sum::<f64>() / b.position.len() as f64
+                }
+            }),
+            ProbeTarget::FdtdEz(i, j) => self.fdtd.as_ref().map_or(0.0, |f| {
+                if i < f.nx() && j < f.ny() {
+                    f.ez(i, j)
+                } else {
+                    0.0
+                }
+            }),
+            ProbeTarget::FdtdEnergy => self.fdtd.as_ref().map_or(0.0, |f| f.total_energy()),
             ProbeTarget::LedgerKinetic => self.mechanics.total_energy().kinetic,
             ProbeTarget::StateHashDigest => self.state_hash() as f64,
         }
@@ -987,6 +1106,93 @@ impl World {
         self.soft_body.as_mut()
     }
 
+    /// **量子ドメイン(1D TDSE)を有効化する(群3、フィールドのdoc参照)**。
+    /// `Solver`を実装したので`step()`が他ドメインと同じ固定順で自動sub-stepする。
+    ///
+    /// **単位系が違う点に注意**: 量子は原子単位($\hbar=m_e=1$)、他ドメインはSI。
+    /// `total_energy()`の合計は物理的に意味を持たない(`WaveFunction1D::total_energy`
+    /// のdoc参照)。混在シーンを禁止はしない——D27–D29 のように量子だけのシーンでは
+    /// 何の問題も無く、禁止するとそれらが載せられなくなるため。
+    pub fn enable_quantum_1d(&mut self, wave: sim_quantum::WaveFunction1D) {
+        self.quantum_1d = Some(wave);
+    }
+
+    pub fn quantum_1d(&self) -> Option<&sim_quantum::WaveFunction1D> {
+        self.quantum_1d.as_ref()
+    }
+
+    pub fn quantum_1d_mut(&mut self) -> Option<&mut sim_quantum::WaveFunction1D> {
+        self.quantum_1d.as_mut()
+    }
+
+    /// 量子ドメイン(2D TDSE、二重スリット用)を有効化する。
+    pub fn enable_quantum_2d(&mut self, wave: sim_quantum::WaveFunction2D) {
+        self.quantum_2d = Some(wave);
+    }
+
+    pub fn quantum_2d(&self) -> Option<&sim_quantum::WaveFunction2D> {
+        self.quantum_2d.as_ref()
+    }
+
+    pub fn quantum_2d_mut(&mut self) -> Option<&mut sim_quantum::WaveFunction2D> {
+        self.quantum_2d.as_mut()
+    }
+
+    /// ブラウン運動ドメインを有効化する(群3)。外力は
+    /// `BrownianParticleSet::external_force`(一様場)で与える。
+    pub fn enable_brownian(&mut self, brownian: sim_statistical::BrownianParticleSet) {
+        self.brownian = Some(brownian);
+    }
+
+    pub fn brownian(&self) -> Option<&sim_statistical::BrownianParticleSet> {
+        self.brownian.as_ref()
+    }
+
+    pub fn brownian_mut(&mut self) -> Option<&mut sim_statistical::BrownianParticleSet> {
+        self.brownian.as_mut()
+    }
+
+    /// 気体分子運動論(剛体球MD)ドメインを有効化する(群3)。
+    pub fn enable_kinetic_gas(&mut self, gas: sim_statistical::GasSim) {
+        self.kinetic_gas = Some(gas);
+    }
+
+    pub fn kinetic_gas(&self) -> Option<&sim_statistical::GasSim> {
+        self.kinetic_gas.as_ref()
+    }
+
+    pub fn kinetic_gas_mut(&mut self) -> Option<&mut sim_statistical::GasSim> {
+        self.kinetic_gas.as_mut()
+    }
+
+    /// イジング模型ドメインを有効化する(群3)。**モンテカルロには物理時間が無い**
+    /// ため、`step()`の`dt`は無視され`updates_per_step`回の更新が行われる
+    /// (`IsingSim`の`Solver`実装のdoc参照)。
+    pub fn enable_ising(&mut self, ising: sim_statistical::IsingSim) {
+        self.ising = Some(ising);
+    }
+
+    pub fn ising(&self) -> Option<&sim_statistical::IsingSim> {
+        self.ising.as_ref()
+    }
+
+    pub fn ising_mut(&mut self) -> Option<&mut sim_statistical::IsingSim> {
+        self.ising.as_mut()
+    }
+
+    /// FDTD(電磁波)ドメインを有効化する(群3)。
+    pub fn enable_fdtd(&mut self, fdtd: sim_em::FdtdSim2D) {
+        self.fdtd = Some(fdtd);
+    }
+
+    pub fn fdtd(&self) -> Option<&sim_em::FdtdSim2D> {
+        self.fdtd.as_ref()
+    }
+
+    pub fn fdtd_mut(&mut self) -> Option<&mut sim_em::FdtdSim2D> {
+        self.fdtd.as_mut()
+    }
+
     /// 流体場の点`p`での観測(設計docs/20-integration/04-world-api.md §2
     /// `sample_fluid(p) -> FluidSample`)。
     ///
@@ -1187,7 +1393,113 @@ impl World {
         if let Some(g) = &self.grid_fluid {
             total = total + g.total_energy();
         }
+        // **群3で追加**: `soft_body`(弾性)・`conduction_rod`(熱)・`kinetic_gas`
+        // (運動)。いずれもSI単位で閉じた保存系なので合計に入れてよい。
+        // 増分Hで`Solver`を実装して`step()`へ繋いだ時点で入れるべきだったが
+        // 漏れており、**ロープや熱伝導棒のエネルギーが台帳から丸ごと抜けていた**。
+        if let Some(b) = &self.soft_body {
+            total = total + b.total_energy();
+        }
+        if let Some(r) = &self.conduction_rod {
+            total = total + r.total_energy();
+        }
+        if let Some(g) = &self.kinetic_gas {
+            total = total + g.total_energy();
+        }
         total
+    }
+
+    /// ドメインごとのエネルギー内訳(**群3で追加**)。
+    ///
+    /// **なぜ `total_energy()` に全ドメインを足さないのか**——`EnergyLedger` は
+    /// 「合計エネルギーが保存しているか」をCIゲートとして検算する仕組みだが、
+    /// 群3で載せたドメインには**そもそも足してはいけないものがある**:
+    ///
+    /// - **量子(原子単位 $\hbar=m_e=1$)・FDTD(正規化単位 $c=\varepsilon_0=\mu_0=1$)**:
+    ///   SI単位の力学・熱と**単位系が違う**。数値を足しても物理量にならない。
+    /// - **イジング模型**: $J$ は無次元スケール。加えて正準集団のサンプリングなので
+    ///   エネルギーは**揺らぐのが正しい**。
+    /// - **ブラウン運動**: ランジュバン熱浴と絶えずエネルギーをやり取りする開放系。
+    ///   保存しないのが正しい挙動。
+    ///
+    /// これらを合計に混ぜると、**台帳の残差が「バグの兆候」ではなく「仕様」に
+    /// なってしまい、保存則ゲートが死ぬ**。そこで合計からは外し、代わりに
+    /// このメソッドで**ドメインごとに単位と保存性を明示して**返す。
+    /// エディタの Inspector / HUD はこちらを使う。
+    pub fn energy_report(&self) -> Vec<DomainEnergy> {
+        let mut report = vec![DomainEnergy {
+            domain: "Mechanics",
+            energy: self.mechanics.total_energy(),
+            unit: "J",
+            conservative: true,
+            in_total: true,
+        }];
+        let mut push = |domain, energy, unit, conservative, in_total| {
+            report.push(DomainEnergy {
+                domain,
+                energy,
+                unit,
+                conservative,
+                in_total,
+            });
+        };
+        if let Some(t) = &self.thermal {
+            push("Thermal", t.total_energy(), "J", true, true);
+        }
+        if let Some(e) = &self.em_electrostatics {
+            push("Electrostatics", e.total_energy(), "J", true, true);
+        }
+        if let Some(a) = &self.astro {
+            push("Astro", a.total_energy(), "J", true, true);
+        }
+        if let Some(c) = &self.circuit {
+            push("Circuit", c.total_energy(), "J", true, true);
+        }
+        if let Some(x) = &self.sph {
+            push("SPH", x.total_energy(), "J", true, true);
+        }
+        if let Some(g) = &self.grid_fluid {
+            push("GridFluid", g.total_energy(), "J", true, true);
+        }
+        if let Some(b) = &self.soft_body {
+            push("SoftBody", b.total_energy(), "J", true, true);
+        }
+        if let Some(r) = &self.conduction_rod {
+            push("ConductionRod", r.total_energy(), "J", true, true);
+        }
+        if let Some(g) = &self.kinetic_gas {
+            push("KineticGas", g.total_energy(), "J", true, true);
+        }
+        if let Some(q) = &self.quantum_1d {
+            push("Quantum1D", q.total_energy(), "Ha (原子単位)", true, false);
+        }
+        if let Some(q) = &self.quantum_2d {
+            push("Quantum2D", q.total_energy(), "Ha (原子単位)", true, false);
+        }
+        if let Some(b) = &self.brownian {
+            push("Brownian", b.total_energy(), "J", false, false);
+        }
+        if let Some(i) = &self.ising {
+            push(
+                "Ising",
+                i.total_energy(),
+                "J (無次元スケール)",
+                false,
+                false,
+            );
+        }
+        if let Some(f) = &self.fdtd {
+            // `FdtdSim2D`はスカラーを返す inherent `total_energy()` を持ち、
+            // そちらがトレイトメソッドより優先されるため明示的に呼び分ける。
+            push(
+                "FDTD",
+                sim_core::Solver::total_energy(f),
+                "正規化単位 (c=1)",
+                true,
+                false,
+            );
+        }
+        report
     }
 
     /// 1 world step(固定 dt)。docs/20-integration/04-world-api.md §2 の `step()`。
@@ -1226,7 +1538,7 @@ impl World {
 
         match self.time_regime {
             sim_astro::TimeRegime::Local { .. } => {
-                run_domain_substeps(
+                let mut capped = run_domain_substeps(
                     &mut self.mechanics,
                     dt,
                     &self.materials,
@@ -1234,22 +1546,58 @@ impl World {
                     &mut self.events,
                 );
                 if let Some(t) = &mut self.thermal {
-                    run_domain_substeps(t, dt, &self.materials, &mut self.rng, &mut self.events);
+                    capped |= run_domain_substeps(
+                        t,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
                 }
                 if let Some(e) = &mut self.em_electrostatics {
-                    run_domain_substeps(e, dt, &self.materials, &mut self.rng, &mut self.events);
+                    capped |= run_domain_substeps(
+                        e,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
                 }
                 if let Some(a) = &mut self.astro {
-                    run_domain_substeps(a, dt, &self.materials, &mut self.rng, &mut self.events);
+                    capped |= run_domain_substeps(
+                        a,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
                 }
                 if let Some(c) = &mut self.circuit {
-                    run_domain_substeps(c, dt, &self.materials, &mut self.rng, &mut self.events);
+                    capped |= run_domain_substeps(
+                        c,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
                 }
                 if let Some(s) = &mut self.sph {
-                    run_domain_substeps(s, dt, &self.materials, &mut self.rng, &mut self.events);
+                    capped |= run_domain_substeps(
+                        s,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
                 }
                 if let Some(g) = &mut self.grid_fluid {
-                    run_domain_substeps(g, dt, &self.materials, &mut self.rng, &mut self.events);
+                    capped |= run_domain_substeps(
+                        g,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
                 }
                 // **増分Hで追加**。`soft_body`と`conduction_rod`はここに無かったため、
                 // `enable_soft_body`/`enable_conduction_rod`で載せても`World::step()`
@@ -1257,11 +1605,82 @@ impl World {
                 // 手で`step`を呼んでいたのはこのため)。シーンギャラリーへ出すには
                 // 自動ステップが要るので、両者に`Solver`を実装した上でここへ繋ぐ。
                 if let Some(b) = &mut self.soft_body {
-                    run_domain_substeps(b, dt, &self.materials, &mut self.rng, &mut self.events);
+                    capped |= run_domain_substeps(
+                        b,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
                 }
                 if let Some(r) = &mut self.conduction_rod {
-                    run_domain_substeps(r, dt, &self.materials, &mut self.rng, &mut self.events);
+                    capped |= run_domain_substeps(
+                        r,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
                 }
+                // **群3で追加**。量子・統計・FDTDは`Solver`未実装だったため
+                // `World`に載る経路が原理的に無かった(D25/D27–D32が全て
+                // 「ドメイン自体が存在しない」として滞留していた)。
+                // 順序は他ドメインと同じく**固定**(決定論のため)。
+                if let Some(q) = &mut self.quantum_1d {
+                    capped |= run_domain_substeps(
+                        q,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
+                }
+                if let Some(q) = &mut self.quantum_2d {
+                    capped |= run_domain_substeps(
+                        q,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
+                }
+                if let Some(b) = &mut self.brownian {
+                    capped |= run_domain_substeps(
+                        b,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
+                }
+                if let Some(g) = &mut self.kinetic_gas {
+                    capped |= run_domain_substeps(
+                        g,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
+                }
+                if let Some(i) = &mut self.ising {
+                    capped |= run_domain_substeps(
+                        i,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
+                }
+                if let Some(f) = &mut self.fdtd {
+                    capped |= run_domain_substeps(
+                        f,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
+                }
+                self.sub_step_cap_reached = capped;
             }
             // 天体レンジ(設計docs/20-integration/06-regime-switching.md §1「天体専用
             // レジームに切り替え、天体状態のみを独立時間軸で進める…ローカル物理ソルバは
@@ -1494,6 +1913,63 @@ impl World {
         }
         if let Some(r) = &self.conduction_rod {
             out.extend(r.approximations());
+        }
+        // **群3で追加**した6ドメイン。
+        if let Some(q) = &self.quantum_1d {
+            out.extend(q.approximations());
+        }
+        if let Some(q) = &self.quantum_2d {
+            out.extend(q.approximations());
+        }
+        if let Some(b) = &self.brownian {
+            out.extend(b.approximations());
+        }
+        if let Some(g) = &self.kinetic_gas {
+            out.extend(g.approximations());
+        }
+        if let Some(i) = &self.ising {
+            out.extend(i.approximations());
+        }
+        if let Some(f) = &self.fdtd {
+            out.extend(f.approximations());
+        }
+        // **単位系の混在を World の側で申告する(群3)**。個々のソルバは自分の
+        // 単位しか知らないので、「SI と原子単位/正規化単位が同じシーンに同居して
+        // いる」という事実はここでしか言えない——`total_energy()` の合計から
+        // 除外しているとはいえ、混ぜて使っていること自体が近似である。
+        let has_si = self.thermal.is_some()
+            || self.em_electrostatics.is_some()
+            || self.astro.is_some()
+            || self.circuit.is_some()
+            || self.sph.is_some()
+            || self.grid_fluid.is_some()
+            || !self.mechanics.bodies.is_empty();
+        let has_non_si = self.quantum_1d.is_some()
+            || self.quantum_2d.is_some()
+            || self.ising.is_some()
+            || self.fdtd.is_some();
+        if has_si && has_non_si {
+            out.push(sim_core::Approximation {
+                name: "単位系の混在",
+                reason: "SI単位のドメインと、原子単位(量子)/正規化単位(FDTD)/無次元\
+                         (イジング)のドメインが同じシーンに載っている。エネルギーの\
+                         合計は取らない(World::energy_report がドメインごとに分けて出す)。",
+                doc: "docs/00-foundation/04-architecture.md",
+                can_disable: false,
+            });
+        }
+        // sub-step 上限に当たったフレームは、そのドメインが要求された時間ぶん
+        // 正しく進んでいない(群3、`orchestrator::MAX_SUB_STEPS_PER_FRAME`のdoc参照)。
+        if self.sub_step_cap_reached {
+            out.push(sim_core::Approximation {
+                name: "sub-step 上限に到達",
+                reason: "あるドメインの安定 dt がフレーム dt より桁違いに小さく、\
+                         1フレームあたりの sub-step 数が上限(1000)で打ち切られた。\
+                         そのドメインは要求された時間ぶん正しくは進んでいない\
+                         ——フレーム dt を下げる必要がある。",
+                doc: "docs/00-foundation/04-architecture.md",
+                can_disable: false,
+            });
         }
         // 結合の1step遅れはソルバではなく`World`の適用順序に起因するので、
         // ここでしか申告できない(どのソルバの近似でもない)。
@@ -1812,6 +2288,32 @@ impl World {
         hasher.write_u64(self.conduction_rod.is_some() as u64);
         if let Some(r) = &self.conduction_rod {
             r.state_hash(&mut hasher);
+        }
+        // **群3で追加**。同じ理由——`step()`が回す以上、ハッシュにも含めないと
+        // 決定論の検証がこの6ドメインの差分を見逃す。
+        hasher.write_u64(self.quantum_1d.is_some() as u64);
+        if let Some(q) = &self.quantum_1d {
+            q.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.quantum_2d.is_some() as u64);
+        if let Some(q) = &self.quantum_2d {
+            q.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.brownian.is_some() as u64);
+        if let Some(b) = &self.brownian {
+            b.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.kinetic_gas.is_some() as u64);
+        if let Some(g) = &self.kinetic_gas {
+            g.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.ising.is_some() as u64);
+        if let Some(i) = &self.ising {
+            i.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.fdtd.is_some() as u64);
+        if let Some(f) = &self.fdtd {
+            f.state_hash(&mut hasher);
         }
         match self.time_regime {
             sim_astro::TimeRegime::Local { steps_per_frame } => {
@@ -3099,6 +3601,180 @@ mod tests {
         assert!(
             (t2 - t1).abs() < 1e-9,
             "temperature must not keep rising without re-pushing the command: t1={t1} t2={t2}"
+        );
+    }
+
+    /// **群3: 量子・統計・FDTD が `World::step()` で実際に動くこと**。
+    ///
+    /// これらは長らく `Solver` 未実装で **`World` に載る経路が原理的に存在しなかった**
+    /// (`enable_*` が無いのでシーンJSONからもエディタからも到達できず、D25/D27–D32 が
+    /// 「ドメイン自体が無い」として滞留していた)。載っただけで満足しないよう、
+    /// **各ドメインが持つ保存量・特徴量で「実際に正しく進んだこと」**を確認する。
+    #[test]
+    fn group3_domains_actually_advance_inside_world_step() {
+        // ① 量子1D: split-step Fourier はユニタリなのでノルムが厳密に保存する
+        //    (Q1 と同じ検証量)。かつ波束は実際に動く(⟨x⟩ が変化する)。
+        let mut world = World::new(WorldOptions::default());
+        let mut wave = sim_quantum::WaveFunction1D::new(128, 0.1);
+        wave.set_gaussian_wave_packet(4.0, 0.5, 5.0);
+        let norm0 = wave.norm();
+        let mean_x0 = wave.mean_x();
+        world.enable_quantum_1d(wave);
+        for _ in 0..50 {
+            world.step();
+        }
+        let q = world.quantum_1d().unwrap();
+        assert!(
+            (q.norm() - norm0).abs() < 1e-9,
+            "TDSE must be unitary: norm0={norm0} norm={}",
+            q.norm()
+        );
+        assert!(
+            (q.mean_x() - mean_x0).abs() > 1e-3,
+            "the wave packet must actually move: <x>0={mean_x0} <x>={}",
+            q.mean_x()
+        );
+
+        // ② 気体分子運動論: 壁は鏡面反射(断熱)・衝突は弾性なのでエネルギー保存。
+        //
+        // **フレームdtを分子気体の時間スケールに合わせる**。既定の 1/120 s だと
+        // `max_stable_dt`(最速粒子が半径ぶん動く時間 ~1e-13 s)との比が 10¹⁰ になり、
+        // sub-step 上限(1000)で毎フレーム打ち切られて意味のある積分にならない
+        // ——**実際に `World::step()` が返ってこなくなり、上限機構を入れる契機になった**。
+        let mut world = World::new(WorldOptions {
+            dt: 1.0e-12,
+            ..Default::default()
+        });
+        let mut gas = sim_statistical::GasSim::new(4.65e-26, 1.5e-10, Vec3::new(1e-7, 1e-7, 1e-7));
+        let mut rng = SimRng::new(11, 0);
+        for _ in 0..200 {
+            let p = Vec3::new(
+                rng.next_f64() * 1e-7,
+                rng.next_f64() * 1e-7,
+                rng.next_f64() * 1e-7,
+            );
+            gas.add_particle(p, rng.maxwell_boltzmann_velocity(300.0));
+        }
+        let e0 = gas.kinetic_energy();
+        world.enable_kinetic_gas(gas);
+        for _ in 0..100 {
+            world.step();
+        }
+        let e1 = world.kinetic_gas().unwrap().kinetic_energy();
+        assert!(
+            (e1 - e0).abs() / e0 < 1e-9,
+            "hard-sphere gas with specular walls must conserve energy: e0={e0} e1={e1}"
+        );
+
+        // ③ FDTD: PEC空洞は無損失なので電磁エネルギーが保存する(既存のクレート内
+        //    テストと同じ検証量を、`World::step()` 経由で成り立つことで確認する)。
+        //    **`step_dt` の一般化が効いているかもここで見る**——`World` の dt
+        //    (1/120 s)は FDTD の Courant dt とは無関係なので、`max_stable_dt` に
+        //    従った sub-step が正しく効かないとここで発散する。
+        let mut world = World::new(WorldOptions::default());
+        let (nx, ny) = (33, 33);
+        let mut fdtd = sim_em::FdtdSim2D::new(nx, ny, 0.02, 0.5);
+        for j in 1..ny - 1 {
+            for i in 1..nx - 1 {
+                let sx = (std::f64::consts::PI * i as f64 / (nx - 1) as f64).sin();
+                let sy = (std::f64::consts::PI * j as f64 / (ny - 1) as f64).sin();
+                fdtd.set_ez(i, j, sx * sy);
+            }
+        }
+        let e0 = fdtd.total_energy();
+        world.enable_fdtd(fdtd);
+        for _ in 0..20 {
+            world.step();
+        }
+        let e1 = world.fdtd().unwrap().total_energy();
+        assert!(
+            (e1 - e0).abs() / e0 < 0.05,
+            "lossless PEC cavity must conserve field energy: e0={e0} e1={e1}"
+        );
+
+        // ④ イジング模型: 高温では磁化が 0 付近に留まる(無秩序相)。
+        //    `dt` に依存しないこと(モンテカルロには物理時間が無い)も同時に見る。
+        let mut world = World::new(WorldOptions::default());
+        let mut ising = sim_statistical::IsingSim::new(16, 1.0, 50.0, &mut SimRng::new(3, 0));
+        ising.updates_per_step = 2;
+        world.enable_ising(ising);
+        for _ in 0..40 {
+            world.step();
+        }
+        let m = world.ising().unwrap().magnetization().abs();
+        assert!(m < 0.3, "high-T Ising must stay disordered: |m|={m}");
+
+        // ⑤ ブラウン運動: 外力ゼロの自由拡散で、粒子は実際に広がる。
+        let mut world = World::new(WorldOptions {
+            dt: 1.0e-8,
+            ..Default::default()
+        });
+        let mut brownian =
+            sim_statistical::BrownianParticleSet::new(5.5e-16, 9.4e-9, 1.380649e-23 * 293.15);
+        for _ in 0..500 {
+            brownian.add_particle(Vec3::ZERO, Vec3::ZERO);
+        }
+        world.enable_brownian(brownian);
+        for _ in 0..200 {
+            world.step();
+        }
+        let b = world.brownian().unwrap();
+        let msd: f64 =
+            b.position.iter().map(|p| p.length_sq()).sum::<f64>() / b.position.len() as f64;
+        // ⟨Δx²⟩ = 6Dt。統計誤差があるので桁で確認する(厳密値は S4 テストが担保)。
+        let expected = 6.0 * b.diffusion_coefficient() * (200.0 * 1.0e-8);
+        assert!(
+            msd > 0.2 * expected && msd < 5.0 * expected,
+            "free diffusion MSD should be within an order of 6Dt: msd={msd} expected={expected}"
+        );
+    }
+
+    /// **群3: `energy_report` が単位系と保存性を正直に分けて出すこと**。
+    /// **`total_energy()` の合計に非SI・非保存ドメインを混ぜてはいけない**
+    /// ——混ぜると `EnergyLedger` の残差が「バグの兆候」ではなく「仕様」になり、
+    /// CIの保存則ゲートが機能しなくなる。
+    #[test]
+    fn energy_report_separates_non_si_and_non_conservative_domains() {
+        let mut world = World::new(WorldOptions::default());
+        create_falling_box(&mut world);
+        let mut wave = sim_quantum::WaveFunction1D::new(64, 0.1);
+        wave.set_gaussian_wave_packet(2.0, 0.4, 3.0);
+        world.enable_quantum_1d(wave);
+        world.enable_ising(sim_statistical::IsingSim::new(
+            8,
+            1.0,
+            2.0,
+            &mut SimRng::new(1, 0),
+        ));
+        world.step();
+
+        let report = world.energy_report();
+        let quantum = report.iter().find(|d| d.domain == "Quantum1D").unwrap();
+        assert!(!quantum.in_total, "原子単位の量子はSI合計に入れない");
+        assert_eq!(quantum.unit, "Ha (原子単位)");
+        let ising = report.iter().find(|d| d.domain == "Ising").unwrap();
+        assert!(!ising.in_total);
+        assert!(!ising.conservative, "正準集団のサンプリングは保存しない");
+        let mechanics = report.iter().find(|d| d.domain == "Mechanics").unwrap();
+        assert!(mechanics.in_total && mechanics.conservative);
+
+        // 合計は `in_total` のドメインだけの和に一致する。
+        let expected: f64 = report
+            .iter()
+            .filter(|d| d.in_total)
+            .map(|d| d.energy.total())
+            .sum();
+        assert!(
+            (world.total_energy().total() - expected).abs() < 1e-9,
+            "total_energy must equal the sum of in_total domains"
+        );
+
+        // 単位系が混在していることを近似バッジで申告する。
+        let approximations = world.active_approximations();
+        assert!(
+            approximations.iter().any(|a| a.name == "単位系の混在"),
+            "mixing SI and atomic units must be reported: {:?}",
+            approximations.iter().map(|a| a.name).collect::<Vec<_>>()
         );
     }
 

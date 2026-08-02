@@ -561,6 +561,8 @@ dependencies = [
  "sim-fluid",
  "sim-math",
  "sim-mechanics",
+ "sim-quantum",
+ "sim-statistical",
  "sim-thermal",
 ]
 

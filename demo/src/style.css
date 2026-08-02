@@ -280,6 +280,46 @@ body {
   line-height: 1.4;
 }
 
+/* **場のパネル(群3)**。量子の |ψ|²・イジングのスピン格子・FDTD の Ez・
+   気体の速さ分布・熱伝導棒の温度分布を 2D canvas に描く。
+   **Probe Graphs の上に重ねる**——専用のグリッド行を割くと、対象ドメインが
+   無いシーン(大多数)で常に空欄が居座ることになる。hidden で畳めば
+   Probe Graphs が元の大きさに戻る。 */
+#field-panel {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: min(46%, 560px);
+  max-height: 62%;
+  display: flex;
+  flex-direction: column;
+  background: #1a1a1acc;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 4px 6px 6px;
+  z-index: 2;
+}
+#field-panel h2 {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #9ab;
+  margin: 0 0 4px;
+}
+#field-panel[hidden] {
+  display: none;
+}
+#field-canvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  /* 格子1セル=1ピクセルで描いた ImageData を引き伸ばすので、
+     補間せず**セルの粒を残す**(スピン格子は特にそう描くのが読みやすい)。 */
+  image-rendering: pixelated;
+  object-fit: contain;
+  background: #111;
+}
+
 /* 実効時間倍率(群2)。指定値に届かないとき赤くする。 */
 #timescale-effective {
   font-variant-numeric: tabular-nums;

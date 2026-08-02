@@ -2265,6 +2265,11 @@ async function setUpSceneView(
   // 挙動には影響しない)。カメラが実際に動いたことを座標で検証するため。
   (window as unknown as { __camera: THREE.PerspectiveCamera }).__camera =
     camera;
+  // 同じ理由で `world` と `scene` も露出する(群3)。**getter にする**のが要点
+  // ——`world` はギャラリー読み込みで再束縛されるため、値をそのまま代入すると
+  // 差し替え前の古いインスタンスを掴んだままになる。
+  Object.defineProperty(window, "__world", { get: () => world, configurable: true });
+  Object.defineProperty(window, "__scene", { get: () => scene, configurable: true });
 
   // **ツール状態(群2)**。設計 §1.2 の W/E/R/Q に対応する。
   type GizmoTool = "translate" | "rotate" | "scale" | "none";
@@ -2615,6 +2620,393 @@ async function setUpSceneView(
   );
   gridFluidLines.visible = false;
   scene.add(gridFluidLines);
+
+  // **ソフトボディの描画(群3)**。**D13(ロープと旗)は Scene View に何も
+  // 描かれていなかった**——ソフトボディは`RigidBodySet`の剛体ではないので
+  // `bodyMeshes`の同期対象外で、Probe Graphs でしか観測できなかった。
+  // 粒子を`Points`、距離拘束を`LineSegments`で描く。
+  const SOFT_BODY_MAX_PARTICLES = 4096;
+  const softBodyGeometry = new THREE.BufferGeometry();
+  const softBodyVertices = new Float32Array(SOFT_BODY_MAX_PARTICLES * 3);
+  const softBodyPositionAttribute = new THREE.BufferAttribute(softBodyVertices, 3);
+  softBodyGeometry.setAttribute("position", softBodyPositionAttribute);
+  const softBodyPoints = new THREE.Points(
+    softBodyGeometry,
+    new THREE.PointsMaterial({ color: 0xffcc66, size: 0.06 }),
+  );
+  softBodyPoints.visible = false;
+  scene.add(softBodyPoints);
+
+  const softBodyLinkGeometry = new THREE.BufferGeometry();
+  const softBodyLinkVertices = new Float32Array(SOFT_BODY_MAX_PARTICLES * 2 * 3);
+  const softBodyLinkAttribute = new THREE.BufferAttribute(softBodyLinkVertices, 3);
+  softBodyLinkGeometry.setAttribute("position", softBodyLinkAttribute);
+  const softBodyLines = new THREE.LineSegments(
+    softBodyLinkGeometry,
+    new THREE.LineBasicMaterial({ color: 0xcc9944 }),
+  );
+  softBodyLines.visible = false;
+  scene.add(softBodyLines);
+  /// 拘束ペアはシーン読み込み時にしか変わらないのでキャッシュする(毎フレーム
+  /// wasm から取り直すと数千要素のコピーが走る)。
+  let softBodyConstraintPairs: Uint32Array = new Uint32Array(0);
+
+  function updateSoftBodyOverlay(currentWorld: WasmWorld) {
+    const positions = currentWorld.soft_body_positions_f32();
+    const count = Math.min(positions.length / 3, SOFT_BODY_MAX_PARTICLES);
+    if (count === 0) {
+      softBodyPoints.visible = false;
+      softBodyLines.visible = false;
+      return;
+    }
+    softBodyVertices.set(positions.subarray(0, count * 3));
+    softBodyGeometry.setDrawRange(0, count);
+    softBodyPositionAttribute.needsUpdate = true;
+    softBodyPoints.visible = true;
+
+    const pairs = softBodyConstraintPairs;
+    const links = Math.min(pairs.length / 2, SOFT_BODY_MAX_PARTICLES);
+    for (let k = 0; k < links; k += 1) {
+      const i = pairs[k * 2];
+      const j = pairs[k * 2 + 1];
+      softBodyLinkVertices[k * 6] = positions[i * 3];
+      softBodyLinkVertices[k * 6 + 1] = positions[i * 3 + 1];
+      softBodyLinkVertices[k * 6 + 2] = positions[i * 3 + 2];
+      softBodyLinkVertices[k * 6 + 3] = positions[j * 3];
+      softBodyLinkVertices[k * 6 + 4] = positions[j * 3 + 1];
+      softBodyLinkVertices[k * 6 + 5] = positions[j * 3 + 2];
+    }
+    softBodyLinkGeometry.setDrawRange(0, links * 2);
+    softBodyLinkAttribute.needsUpdate = true;
+    softBodyLines.visible = links > 0;
+  }
+
+  // **天体の描画(群3)**。**D34/D35/D36 も Scene View には何も描かれて
+  // いなかった**——天体は`RigidBodySet`とは別の質点集合で、剛体メッシュの
+  // 同期対象外だった。
+  //
+  // **座標を「そのまま」描くと何も見えない**——太陽系のスケールは 10¹¹ m
+  // オーダーで、カメラは数メートルの世界にいる。最も遠い天体が画面に収まるよう
+  // **毎フレーム正規化して描く**(絶対距離はProbe Graphsが出す)。
+  const ASTRO_VIEW_RADIUS = 6.0; // 最遠天体をこの半径に収める。
+  const astroMeshes: THREE.Mesh[] = [];
+  const astroGroup = new THREE.Group();
+  astroGroup.visible = false;
+  scene.add(astroGroup);
+
+  function updateAstroOverlay(currentWorld: WasmWorld) {
+    const positions = currentWorld.astro_positions_f32();
+    const count = positions.length / 3;
+    if (count === 0) {
+      astroGroup.visible = false;
+      return;
+    }
+    const masses = currentWorld.astro_masses_f64();
+    // 最遠天体までの距離でスケールを決める(0 なら 1 とみなす)。
+    let maxR = 0;
+    for (let i = 0; i < count; i += 1) {
+      const r = Math.hypot(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+      if (r > maxR) maxR = r;
+    }
+    const scale = maxR > 0 ? ASTRO_VIEW_RADIUS / maxR : 1;
+    const maxMass = masses.length ? Math.max(...masses) : 1;
+    while (astroMeshes.length < count) {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(1, 12, 8),
+        new THREE.MeshStandardMaterial({ color: 0xffdd88, emissive: 0x332200 }),
+      );
+      astroMeshes.push(mesh);
+      astroGroup.add(mesh);
+    }
+    for (let i = 0; i < astroMeshes.length; i += 1) {
+      const mesh = astroMeshes[i];
+      if (i >= count) {
+        mesh.visible = false;
+        continue;
+      }
+      mesh.visible = true;
+      mesh.position.set(
+        positions[i * 3] * scale,
+        positions[i * 3 + 1] * scale,
+        positions[i * 3 + 2] * scale,
+      );
+      // 半径は質量の立方根に比例させる(密度一定の球と同じ関係)。
+      // 質量が桁違いなので、太陽が画面を埋めないよう上限を掛ける。
+      const ratio = maxMass > 0 ? (masses[i] ?? 0) / maxMass : 0;
+      mesh.scale.setScalar(0.12 + 0.5 * Math.cbrt(Math.max(ratio, 0)));
+    }
+    astroGroup.visible = true;
+  }
+
+  // **気体分子・ブラウン粒子の描画(群3)**。どちらも点群として描く。
+  // 分子気体は 10⁻⁷ m の箱、ブラウン粒子は 10⁻⁶ m オーダーの変位なので、
+  // 天体と同じ理由で**正規化して描く**。
+  const PARTICLE_VIEW_RADIUS = 4.0;
+  const STAT_MAX_PARTICLES = 4096;
+  function makeParticleCloud(color: number, size: number) {
+    const geometry = new THREE.BufferGeometry();
+    const vertices = new Float32Array(STAT_MAX_PARTICLES * 3);
+    const attribute = new THREE.BufferAttribute(vertices, 3);
+    geometry.setAttribute("position", attribute);
+    const points = new THREE.Points(geometry, new THREE.PointsMaterial({ color, size }));
+    points.visible = false;
+    scene.add(points);
+    return { geometry, vertices, attribute, points };
+  }
+  const gasCloud = makeParticleCloud(0x88ddff, 0.05);
+  const brownianCloud = makeParticleCloud(0xff88cc, 0.06);
+
+  function updateParticleCloud(
+    cloud: ReturnType<typeof makeParticleCloud>,
+    positions: Float32Array,
+    center: [number, number, number],
+  ) {
+    const count = Math.min(positions.length / 3, STAT_MAX_PARTICLES);
+    if (count === 0) {
+      cloud.points.visible = false;
+      return;
+    }
+    // 最遠粒子を PARTICLE_VIEW_RADIUS に収める(絶対スケールは Probe Graphs が出す)。
+    let maxR = 0;
+    for (let i = 0; i < count; i += 1) {
+      const r = Math.hypot(
+        positions[i * 3] - center[0],
+        positions[i * 3 + 1] - center[1],
+        positions[i * 3 + 2] - center[2],
+      );
+      if (r > maxR) maxR = r;
+    }
+    const scale = maxR > 0 ? PARTICLE_VIEW_RADIUS / maxR : 1;
+    for (let i = 0; i < count; i += 1) {
+      cloud.vertices[i * 3] = (positions[i * 3] - center[0]) * scale;
+      cloud.vertices[i * 3 + 1] = (positions[i * 3 + 1] - center[1]) * scale + 2.0;
+      cloud.vertices[i * 3 + 2] = (positions[i * 3 + 2] - center[2]) * scale;
+    }
+    cloud.geometry.setDrawRange(0, count);
+    cloud.attribute.needsUpdate = true;
+    cloud.points.visible = true;
+  }
+
+  // **場のパネル(群3)**。チェックリストが D27–D33 を閉じる際に挙げた
+  // 「解禁には**専用の可視化パネル**が要る——波動関数の |ψ|² 分布・スピン格子・
+  // 速度ヒストグラム等は Scene View の剛体描画では表現できない」という条件の実体。
+  //
+  // **3D の Scene View ではなく 2D canvas に描く**のが要点。|ψ|²・スピン格子・
+  // Ez 場はいずれも「格子上のスカラー場」であり、3D 空間に浮かべるより
+  // 平面に色で塗るほうが読める(実際、物理の教科書もそう描く)。
+  // Probe Graphs の隣に置き、対象ドメインが無効なときは畳んで場所を取らない。
+  const fieldPanel = document.getElementById("field-panel")!;
+  const fieldCanvas = document.getElementById("field-canvas") as HTMLCanvasElement;
+  const fieldTitle = document.getElementById("field-title")!;
+  const fieldContext = fieldCanvas.getContext("2d");
+  /// 気体の箱の中心(粒子描画の原点合わせに使う)。シーン読み込み時に更新する。
+  let gasBoxCenter: [number, number, number] = [0, 0, 0];
+
+  /// 発散カラーマップ(青←0→赤)。Ez のように符号を持つ場に使う。
+  function divergingColor(t: number): [number, number, number] {
+    const x = Math.max(-1, Math.min(1, t));
+    if (x >= 0) return [255, Math.round(255 * (1 - x)), Math.round(255 * (1 - x))];
+    return [Math.round(255 * (1 + x)), Math.round(255 * (1 + x)), 255];
+  }
+
+  /// 単調カラーマップ(黒→黄→白)。|ψ|² のように非負の場に使う。
+  function sequentialColor(t: number): [number, number, number] {
+    const x = Math.max(0, Math.min(1, t));
+    return [Math.round(255 * Math.min(1, x * 2)), Math.round(255 * x), Math.round(255 * x * x)];
+  }
+
+  /// `nx × ny` のスカラー場を canvas いっぱいに描く。
+  function drawScalarField(
+    values: Float32Array,
+    nx: number,
+    ny: number,
+    color: (t: number) => [number, number, number],
+    normalize: "signed" | "positive",
+  ) {
+    if (!fieldContext || nx === 0 || ny === 0) return;
+    fieldCanvas.width = nx;
+    fieldCanvas.height = ny;
+    const image = fieldContext.createImageData(nx, ny);
+    let scale = 0;
+    for (let i = 0; i < values.length; i += 1) scale = Math.max(scale, Math.abs(values[i]));
+    if (scale === 0) scale = 1;
+    for (let j = 0; j < ny; j += 1) {
+      for (let i = 0; i < nx; i += 1) {
+        const v = values[j * nx + i];
+        const t = normalize === "signed" ? v / scale : Math.abs(v) / scale;
+        const [r, g, b] = color(t);
+        // canvas の y は下向き。物理の格子は上向きなので反転して描く。
+        const px = ((ny - 1 - j) * nx + i) * 4;
+        image.data[px] = r;
+        image.data[px + 1] = g;
+        image.data[px + 2] = b;
+        image.data[px + 3] = 255;
+      }
+    }
+    fieldContext.putImageData(image, 0, 0);
+  }
+
+  /// 1D の分布(|ψ|² とポテンシャル)を折れ線で描く。
+  function drawQuantum1d(density: Float32Array, potential: Float32Array) {
+    if (!fieldContext) return;
+    const w = 512;
+    const h = 160;
+    fieldCanvas.width = w;
+    fieldCanvas.height = h;
+    fieldContext.fillStyle = "#111";
+    fieldContext.fillRect(0, 0, w, h);
+    const n = density.length;
+    if (n === 0) return;
+    const plot = (
+      values: Float32Array,
+      color: string,
+      scaleOverride?: number,
+    ) => {
+      let max = scaleOverride ?? 0;
+      if (scaleOverride === undefined) {
+        for (let i = 0; i < values.length; i += 1) max = Math.max(max, values[i]);
+      }
+      if (max <= 0) return;
+      fieldContext.strokeStyle = color;
+      fieldContext.lineWidth = 1.5;
+      fieldContext.beginPath();
+      for (let i = 0; i < values.length; i += 1) {
+        const x = (i / (values.length - 1)) * w;
+        const y = h - (values[i] / max) * (h - 8) - 4;
+        if (i === 0) fieldContext.moveTo(x, y);
+        else fieldContext.lineTo(x, y);
+      }
+      fieldContext.stroke();
+    };
+    // ポテンシャルを先に(背景として)、確率密度を手前に。
+    plot(potential, "#666");
+    plot(density, "#6cf");
+  }
+
+  /// 速さのヒストグラムを棒グラフで描く(D30「ヒストグラム」)。
+  function drawHistogram(counts: Float32Array) {
+    if (!fieldContext) return;
+    const w = 512;
+    const h = 160;
+    fieldCanvas.width = w;
+    fieldCanvas.height = h;
+    fieldContext.fillStyle = "#111";
+    fieldContext.fillRect(0, 0, w, h);
+    let max = 0;
+    for (let i = 0; i < counts.length; i += 1) max = Math.max(max, counts[i]);
+    if (max <= 0) return;
+    const barWidth = w / counts.length;
+    fieldContext.fillStyle = "#8df";
+    for (let i = 0; i < counts.length; i += 1) {
+      const barHeight = (counts[i] / max) * (h - 8);
+      fieldContext.fillRect(i * barWidth, h - barHeight, Math.max(barWidth - 1, 1), barHeight);
+    }
+  }
+
+  function updateFieldPanel(currentWorld: WasmWorld) {
+    if (!fieldContext) return;
+    // **優先順位を固定する**(決定論的な表示)。同時に複数ドメインが載っている
+    // シーンでは最初に見つかったものを描く。
+    const quantum2dSize = currentWorld.quantum_2d_size();
+    if (quantum2dSize.length === 2) {
+      fieldTitle.textContent = `量子 2D |ψ|² (${quantum2dSize[0]}×${quantum2dSize[1]})`;
+      // ポテンシャル壁を暗く重ねたいが、まずは密度をそのまま出す
+      // (壁は密度が 0 のまま残るので位置は読み取れる)。
+      drawScalarField(
+        currentWorld.quantum_2d_density_f32(),
+        quantum2dSize[0],
+        quantum2dSize[1],
+        sequentialColor,
+        "positive",
+      );
+      fieldPanel.hidden = false;
+      return;
+    }
+    const density = currentWorld.quantum_1d_density_f32();
+    if (density.length > 0) {
+      fieldTitle.textContent = `量子 1D |ψ|² と V(x)(格子 ${density.length} 点)`;
+      drawQuantum1d(density, currentWorld.quantum_1d_potential_f32());
+      fieldPanel.hidden = false;
+      return;
+    }
+    const fdtdSize = currentWorld.fdtd_size();
+    if (fdtdSize.length === 2) {
+      fieldTitle.textContent = `FDTD Ez (${fdtdSize[0]}×${fdtdSize[1]}、青=負 赤=正)`;
+      drawScalarField(
+        currentWorld.fdtd_ez_f32(),
+        fdtdSize[0],
+        fdtdSize[1],
+        divergingColor,
+        "signed",
+      );
+      fieldPanel.hidden = false;
+      return;
+    }
+    const isingSize = currentWorld.ising_size();
+    if (isingSize > 0) {
+      const spins = currentWorld.ising_spins_u8();
+      // ±1 を ±1 の f32 に直して発散カラーマップへ渡す(上向き=赤・下向き=青)。
+      const values = new Float32Array(spins.length);
+      for (let i = 0; i < spins.length; i += 1) values[i] = spins[i] ? 1 : -1;
+      fieldTitle.textContent = `イジング スピン格子 (${isingSize}×${isingSize})`;
+      drawScalarField(values, isingSize, isingSize, divergingColor, "signed");
+      fieldPanel.hidden = false;
+      return;
+    }
+    const maxSpeed = currentWorld.kinetic_gas_max_speed();
+    if (maxSpeed > 0) {
+      fieldTitle.textContent = `気体分子の速さ分布(最大 ${maxSpeed.toFixed(0)} m/s)`;
+      drawHistogram(currentWorld.kinetic_gas_speed_histogram_f32(32, maxSpeed));
+      fieldPanel.hidden = false;
+      return;
+    }
+    const rod = currentWorld.conduction_rod_temperatures_f32();
+    if (rod.length > 0) {
+      fieldTitle.textContent = `熱伝導棒の温度分布(${rod.length} 格子点)`;
+      drawScalarField(rod, rod.length, 1, sequentialColor, "positive");
+      fieldPanel.hidden = false;
+      return;
+    }
+    fieldPanel.hidden = true;
+  }
+
+  /// **シーンの中身にカメラを合わせる(群3)**。
+  ///
+  /// **なぜ必要だったか**: ギャラリーシーンを読み込んでもカメラは起動時の
+  /// 固定位置(既定シーンの箱に合わせた画角)のままだった。剛体のシーンは
+  /// たまたま同じスケールなので問題にならなかったが、群3で描けるようにした
+  /// ソフトボディ(D13: 1 m のロープが原点付近)や天体(正規化して半径6に描く)
+  /// は画角から外れる/小さすぎて、**描画は正しく動いているのに「何も出ていない」
+  /// ように見えた**(実際にこれで調査に時間を使った)。
+  ///
+  /// 描画対象すべてのバウンディングボックスを取り、その中心を注視点に、
+  /// 対角長からカメラ距離を決める(Unity の F キーと同じ考え方)。
+  function frameCameraOnContent() {
+    const box = new THREE.Box3();
+    let hasContent = false;
+    const expand = (object: THREE.Object3D) => {
+      if (!object.visible) return;
+      const objectBox = new THREE.Box3().setFromObject(object);
+      if (objectBox.isEmpty()) return;
+      box.union(objectBox);
+      hasContent = true;
+    };
+    for (const mesh of bodyMeshes.values()) expand(mesh);
+    expand(softBodyPoints);
+    expand(astroGroup);
+    expand(gasCloud.points);
+    expand(brownianCloud.points);
+    expand(fluidPoints);
+    if (!hasContent) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.5);
+    orbit.target.copy(center);
+    // 現在の視線方向を保ったまま距離だけ合わせる(向きの好みを壊さない)。
+    const direction = camera.position.clone().sub(center);
+    if (direction.lengthSq() < 1e-9) direction.set(1, 0.7, 1.2);
+    camera.position.copy(center).add(direction.normalize().multiplyScalar(radius * 2.6));
+    orbit.update();
+  }
 
   function updateGridFluidOverlay(currentWorld: WasmWorld) {
     const enabled = (
@@ -3662,6 +4054,32 @@ async function setUpSceneView(
 
     world = WasmWorld.from_scene_json(json);
     isGalleryScene = true;
+    // **群3で追加したドメインの描画用キャッシュを張り直す**。
+    // 拘束ペアはシーン読み込み時にしか変わらないので毎フレーム取り直さない。
+    softBodyConstraintPairs = world.soft_body_constraint_pairs_u32();
+    // 気体の箱は原点を中心に描きたいので、箱の中心を粒子座標から推定する
+    // (箱サイズは `Scenario` にしかないため、初期粒子分布の重心で代用する)。
+    const gasPositions = world.kinetic_gas_positions_f32(1);
+    if (gasPositions.length >= 3) {
+      let sx = 0;
+      let sy = 0;
+      let sz = 0;
+      const n = gasPositions.length / 3;
+      for (let i = 0; i < n; i += 1) {
+        sx += gasPositions[i * 3];
+        sy += gasPositions[i * 3 + 1];
+        sz += gasPositions[i * 3 + 2];
+      }
+      gasBoxCenter = [sx / n, sy / n, sz / n];
+    } else {
+      gasBoxCenter = [0, 0, 0];
+    }
+    // オーバーレイを一度描いてからカメラを合わせる(そうしないと
+    // ソフトボディ/天体/粒子群のバウンディングボックスがまだ空)。
+    updateSoftBodyOverlay(world);
+    updateAstroOverlay(world);
+    updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter);
+    updateParticleCloud(brownianCloud, world.brownian_positions_f32(1), [0, 0, 0]);
     sceneBaseBodyCount = bodies.length;
 
     currentPredictionPrompts = parsed.prediction_prompts ?? [];
@@ -3737,6 +4155,9 @@ async function setUpSceneView(
       highlightHierarchy = rebuildHierarchy();
       renderInspectorFor(world, selectedBodyIndex);
     }
+    // **シーンの中身にカメラを合わせる(群3、`frameCameraOnContent`のdoc参照)**。
+    // 剛体・ソフトボディ・天体・粒子群がすべて配置し終わった後に呼ぶ。
+    frameCameraOnContent();
   };
 
   // Replay再生実行(`ReplayVerifyRef`のdoc参照)。記録済み`commandLog`を、
@@ -4719,6 +5140,15 @@ async function setUpSceneView(
     // LineSegmentsの頂点バッファへ直接書き込む(セルごとに`ArrowHelper`を
     // 作ると数百オブジェクトになるため、1本のジオメトリで描く)。
     updateGridFluidOverlay(world);
+
+    // **群3で追加したドメインの描画**。それまで Scene View に一切現れず
+    // Probe Graphs でしか観測できなかった(ソフトボディ・天体)、あるいは
+    // ドメイン自体が World に無かった(統計)ものを描く。
+    updateSoftBodyOverlay(world);
+    updateAstroOverlay(world);
+    updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter);
+    updateParticleCloud(brownianCloud, world.brownian_positions_f32(1), [0, 0, 0]);
+    updateFieldPanel(world);
 
     // **2026-07-28のD9/D34/D35増分で追加したガード**: `hasSelectedBody()`が
     // falseのとき(D9/D34/D35のように力学ボディを1つも持たないギャラリー

@@ -5,10 +5,12 @@
 //! Phase 5+ で拡張する。`Solver` トレイトは外力を汎用の関数引数として渡す必要があるため
 //! (熱・力学等の固定シグネチャに馴染まない)、`step_baoab` は独立メソッドとして提供する。
 
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{SimRng, Vec3};
 
 /// ブラウン粒子集合。設計 §3「通常の剛体(微小)+ BrownianForce、または軽量 ParticleSet」の
 /// 後者。粒子は同一の質量・抵抗係数・温度を共有する(異種粒子径混合は Phase 5 拡張)。
+#[derive(Clone)]
 pub struct BrownianParticleSet {
     pub position: Vec<Vec3>,
     pub velocity: Vec<Vec3>,
@@ -18,6 +20,20 @@ pub struct BrownianParticleSet {
     pub gamma: f64,
     /// k_B・T [J]。設計 §2.1 の揺動散逸定理(ノイズ強度 √(2γk_BT) を一意に決める)。
     pub kb_t: f64,
+    /// **一様外力場 [N](群3で追加)**。`Solver::step` はこれを全粒子に加える。
+    ///
+    /// **なぜフィールドとして持つのか**: モジュール冒頭のdocは長らく
+    /// 「`Solver` トレイトは外力を汎用の関数引数として渡す必要があるため
+    /// `step_baoab` は独立メソッドとして提供する」と書いていた。しかしその結果
+    /// **`BrownianParticleSet` は `World` に載る経路が原理的に無く**、D25
+    /// (ブラウン運動)はシーンJSONからもエディタからも到達できなかった。
+    ///
+    /// 位置依存の任意の外力(光ピンセットの調和トラップ等)を `Solver::step` の
+    /// 固定シグネチャで渡す手段は無いが、**実際にシーンで要る外力の大半は
+    /// 重力・浮力のような一様場**である。一様場だけをフィールドとして持ち、
+    /// 位置依存の力が要る用途では従来どおり `step_baoab` を直接呼ぶ——
+    /// 両方を残すことで、`World` 統合と汎用性のどちらも捨てずに済む。
+    pub external_force: Vec3,
 }
 
 impl BrownianParticleSet {
@@ -28,6 +44,7 @@ impl BrownianParticleSet {
             mass,
             gamma,
             kb_t,
+            external_force: Vec3::ZERO,
         }
     }
 
@@ -66,6 +83,90 @@ impl BrownianParticleSet {
             let f2 = force(self.position[i]);
             self.velocity[i] = self.velocity[i].addcarry_scaled(f2, 0.5 * dt / self.mass);
         }
+    }
+
+    /// 系の運動エネルギー $\sum \frac12 m v^2$。
+    pub fn kinetic_energy(&self) -> f64 {
+        0.5 * self.mass * self.velocity.iter().map(|v| v.dot(*v)).sum::<f64>()
+    }
+}
+
+/// **`Solver` 実装(群3)**。`external_force`(一様場)を外力として `step_baoab` を回す。
+impl Solver for BrownianParticleSet {
+    /// **BAOAB の O 段(速度の OU 更新)は厳密解なので `γΔt/m` が大きくても発散しない**
+    /// ——が、A 段(位置更新)の離散化誤差は別物で、`γΔt/m` が大きいと平均二乗変位が
+    /// 理論値 $\langle\Delta x^2\rangle = 6Dt$ から系統的にずれる
+    /// (実測: `γΔt/m≈17` で rel_err≈760%、`≈0.17` まで下げると <0.1%。
+    /// S4 テストのdocに記録済み)。**発散しないが答えが合わない**という性質なので、
+    /// 「安定限界」ではなく**精度が保てる上限**として `0.2 m/γ` を返す
+    /// (上の実測で rel_err<0.1% だった `γΔt/m≈0.17` に対応する)。
+    fn max_stable_dt(&self) -> f64 {
+        if self.gamma > 0.0 {
+            0.2 * self.mass / self.gamma
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    fn step(&mut self, dt: f64, ctx: &mut SolverContext) {
+        let f = self.external_force;
+        self.step_baoab(dt, ctx.rng, |_| f);
+    }
+
+    /// **運動エネルギーのみ**。ランジュバン系は熱浴と絶えずエネルギーを
+    /// やり取りする開放系なので、**そもそも全エネルギーは保存しない**
+    /// (揺動散逸定理により平衡では $\langle E_k\rangle = \frac32 Nk_BT$ に留まる)。
+    /// `EnergyLedger` の残差はここでは保存則の破れを意味しない——熱浴への/からの
+    /// 流入出が意図的に存在する。
+    fn total_energy(&self) -> EnergyBreakdown {
+        EnergyBreakdown {
+            kinetic: self.kinetic_energy(),
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.position.len() as u64);
+        for (p, v) in self.position.iter().zip(self.velocity.iter()) {
+            hasher.write_f64(p.x);
+            hasher.write_f64(p.y);
+            hasher.write_f64(p.z);
+            hasher.write_f64(v.x);
+            hasher.write_f64(v.y);
+            hasher.write_f64(v.z);
+        }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        let mut list = vec![
+            Approximation {
+                name: "ランジュバン: BAOAB積分",
+                reason: "O段(速度のOrnstein-Uhlenbeck更新)は厳密解。位置更新の離散化誤差のみが残るため、過減衰域でも平衡分布を正しくサンプルする。",
+                doc: "docs/15-statistical/03-diffusion-brownian.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "外力: 一様場のみ",
+                reason: "Solver::step の固定シグネチャでは位置依存の外力を渡せない。光ピンセットのような調和トラップが要る場合は step_baoab を直接呼ぶ。",
+                doc: "docs/15-statistical/03-diffusion-brownian.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "粒子間相互作用なし",
+                reason: "希薄極限。粒子は互いに衝突も遮蔽もせず、独立にランジュバン方程式に従う。",
+                doc: "docs/15-statistical/03-diffusion-brownian.md",
+                can_disable: false,
+            },
+        ];
+        if self.external_force == Vec3::ZERO {
+            list.push(Approximation {
+                name: "自由拡散(外力ゼロ)",
+                reason: "external_force が 0 なので B 段は恒等変換になり、純粋な自由拡散(⟨Δx²⟩=6Dt)になる。",
+                doc: "docs/15-statistical/03-diffusion-brownian.md",
+                can_disable: false,
+            });
+        }
+        list
     }
 }
 

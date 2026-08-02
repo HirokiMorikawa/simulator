@@ -299,6 +299,69 @@
         "mechanics",
         "thermal"
       ]
+    },
+    {
+      "file": "d27-double-slit.json",
+      "demo": "D27",
+      "title": "二重スリット(電子)",
+      "description": "2D TDSE(split-step Fourier)でガウス波束を二重スリット壁に当てる。Scene View には剛体が無く、|ψ|² オーバーレイが唯一の可視化手段(群3で追加)。",
+      "domains": [
+        "quantum"
+      ]
+    },
+    {
+      "file": "d28-tunneling.json",
+      "demo": "D28",
+      "title": "トンネル効果",
+      "description": "矩形障壁に波束を当て、透過率を Probe Graphs で見る。ノルムは厳密に1で一定(ユニタリ)。",
+      "domains": [
+        "quantum"
+      ]
+    },
+    {
+      "file": "d29-radio-tank.json",
+      "demo": "D29",
+      "title": "電波の水槽(FDTD)",
+      "description": "PEC 壁の2D空洞に点源パルスを置き、波の広がりと壁での反射を Ez オーバーレイで見る。無損失なので全エネルギーは保存する。",
+      "domains": [
+        "electromagnetism"
+      ]
+    },
+    {
+      "file": "d30-gas-box.json",
+      "demo": "D30",
+      "title": "気体の箱",
+      "description": "剛体球400個の分子動力学。温度・圧力を Probe Graphs で観測する。壁は鏡面反射(断熱)なのでエネルギーは保存する。",
+      "domains": [
+        "statistical"
+      ]
+    },
+    {
+      "file": "d31-diffusion-ink.json",
+      "demo": "D31",
+      "title": "拡散とインク",
+      "description": "原点に置いた600個のブラウン粒子が自由拡散する。平均二乗変位が 6Dt に沿って伸びることを Probe Graphs で見る。",
+      "domains": [
+        "statistical"
+      ]
+    },
+    {
+      "file": "d32-magnet-transition.json",
+      "demo": "D32",
+      "title": "磁石の相転移(イジング)",
+      "description": "48×48 の2Dイジング模型を Wolff クラスタ法で更新する。T=2.0 < Tc≈2.269 なので自発磁化が立ち上がる。スピン格子オーバーレイで見る。",
+      "domains": [
+        "statistical"
+      ]
+    },
+    {
+      "file": "d33-electron-in-well.json",
+      "demo": "D33",
+      "title": "井戸の中の電子",
+      "description": "無限井戸に閉じ込めた波束の時間発展。井戸幅で決まる固有状態の重ね合わせとして呼吸運動する。",
+      "domains": [
+        "quantum"
+      ]
     }
   ]
 }

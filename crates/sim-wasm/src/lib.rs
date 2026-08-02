@@ -1148,9 +1148,272 @@ impl WasmWorld {
             ProbeTarget::GridFluidRmsV => "GridFluidRmsV".to_string(),
             ProbeTarget::SphParticlePosY(idx) => format!("SphPosY[{idx}]"),
             ProbeTarget::SphParticleDensity(idx) => format!("SphDensity[{idx}]"),
+            // **群3で追加**した量子・統計・FDTDの観測量。
+            ProbeTarget::QuantumNorm => "QuantumNorm".to_string(),
+            ProbeTarget::QuantumMeanX => "Quantum⟨x⟩".to_string(),
+            ProbeTarget::QuantumEnergy => "Quantum⟨H⟩".to_string(),
+            ProbeTarget::QuantumTransmission(from) => format!("Quantum透過率[i≥{from}]"),
+            ProbeTarget::GasTemperature => "GasT [K]".to_string(),
+            ProbeTarget::GasPressure => "GasP [Pa]".to_string(),
+            ProbeTarget::IsingMagnetization => "Ising磁化".to_string(),
+            ProbeTarget::IsingEnergyPerSpin => "IsingE/N".to_string(),
+            ProbeTarget::BrownianMsd => "Brownian⟨Δx²⟩".to_string(),
+            ProbeTarget::FdtdEz(i, j) => format!("FdtdEz[{i},{j}]"),
+            ProbeTarget::FdtdEnergy => "Fdtdエネルギー".to_string(),
             ProbeTarget::LedgerKinetic => "LedgerKinetic".to_string(),
             ProbeTarget::StateHashDigest => "StateHashDigest".to_string(),
         }
+    }
+
+    /// **群3で追加したドメインの可視化用アクセサ**。
+    ///
+    /// チェックリストは D27–D33 を閉じる際、解禁には「`World`への新ドメイン追加」と
+    /// 「**専用の可視化パネル**(波動関数の$|\psi|^2$分布・スピン格子・速度
+    /// ヒストグラム等は Scene View の剛体描画では表現できない)」の両方が要ると
+    /// 書いていた。前者は群3の`Solver`実装で済み、ここが後者。
+    ///
+    /// いずれも**表示に必要な最小限の配列を`Float32Array`で返す**——`f64`のまま
+    /// 渡すと転送量が倍になるうえ、描画側(Three.js/Canvas)は`f32`しか使わない。
+    ///
+    /// 量子1D: 確率密度 $|\psi(x)|^2$(格子点数ぶん)。
+    pub fn quantum_1d_density_f32(&self) -> Float32Array {
+        let values: Vec<f32> = self
+            .inner
+            .quantum_1d()
+            .map(|q| q.psi.iter().map(|p| p.norm_sq() as f32).collect())
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// 量子1Dのポテンシャル $V(x)$(密度と同じ格子点数)。障壁・井戸の位置を
+    /// 密度と重ねて描くために要る。
+    pub fn quantum_1d_potential_f32(&self) -> Float32Array {
+        let values: Vec<f32> = self
+            .inner
+            .quantum_1d()
+            .map(|q| q.v.iter().map(|&v| v as f32).collect())
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    pub fn quantum_1d_dx(&self) -> f64 {
+        self.inner.quantum_1d().map_or(0.0, |q| q.dx)
+    }
+
+    /// 量子2D: 確率密度 $|\psi(x,y)|^2$ を行優先で返す(`nx*ny`要素)。
+    pub fn quantum_2d_density_f32(&self) -> Float32Array {
+        let values: Vec<f32> = self
+            .inner
+            .quantum_2d()
+            .map(|q| q.psi.iter().map(|p| p.norm_sq() as f32).collect())
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// 量子2Dのポテンシャル(スリット壁の位置を density と重ねて描くため)。
+    pub fn quantum_2d_potential_f32(&self) -> Float32Array {
+        let values: Vec<f32> = self
+            .inner
+            .quantum_2d()
+            .map(|q| q.v.iter().map(|&v| v as f32).collect())
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// 量子2Dの格子サイズ `[nx, ny]`(0要素なら未有効化)。
+    pub fn quantum_2d_size(&self) -> Vec<u32> {
+        self.inner
+            .quantum_2d()
+            .map(|q| vec![q.nx as u32, q.ny as u32])
+            .unwrap_or_default()
+    }
+
+    /// イジング模型のスピン格子(+1 → 1、-1 → 0 の`u8`、`l*l`要素)。
+    pub fn ising_spins_u8(&self) -> Vec<u8> {
+        self.inner
+            .ising()
+            .map(|i| i.spins.iter().map(|&s| u8::from(s > 0)).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn ising_size(&self) -> usize {
+        self.inner.ising().map_or(0, |i| i.l)
+    }
+
+    /// 気体分子の位置(`[x,y,z]`の並び)。粒子数が多いので`stride`で間引ける
+    /// (格子流体オーバーレイと同じ方針)。
+    pub fn kinetic_gas_positions_f32(&self, stride: usize) -> Float32Array {
+        let stride = stride.max(1);
+        let values: Vec<f32> = self
+            .inner
+            .kinetic_gas()
+            .map(|g| {
+                g.position
+                    .iter()
+                    .step_by(stride)
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                    .collect()
+            })
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// 気体分子の速さのヒストグラム(設計 docs/21-verification/03-demo-scenarios.md
+    /// D30「圧力計・温度計・**ヒストグラム**」)。`bins`本の等幅ビンに数え上げ、
+    /// **各ビンの粒子数**を返す。マクスウェル分布との比較はフロント側で行う。
+    pub fn kinetic_gas_speed_histogram_f32(&self, bins: usize, max_speed: f64) -> Float32Array {
+        let bins = bins.max(1);
+        let mut counts = vec![0.0f32; bins];
+        if let Some(g) = self.inner.kinetic_gas() {
+            if max_speed > 0.0 {
+                for v in &g.velocity {
+                    let speed = v.length();
+                    let bin = ((speed / max_speed) * bins as f64).floor() as usize;
+                    if bin < bins {
+                        counts[bin] += 1.0;
+                    }
+                }
+            }
+        }
+        Float32Array::from(counts.as_slice())
+    }
+
+    /// 気体分子の最大速さ(ヒストグラムのレンジ決定に使う)。
+    pub fn kinetic_gas_max_speed(&self) -> f64 {
+        self.inner.kinetic_gas().map_or(0.0, |g| g.max_speed())
+    }
+
+    /// ブラウン粒子の位置(`[x,y,z]`の並び)。
+    pub fn brownian_positions_f32(&self, stride: usize) -> Float32Array {
+        let stride = stride.max(1);
+        let values: Vec<f32> = self
+            .inner
+            .brownian()
+            .map(|b| {
+                b.position
+                    .iter()
+                    .step_by(stride)
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                    .collect()
+            })
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// FDTD の Ez 場(行優先、`nx*ny`要素)。
+    pub fn fdtd_ez_f32(&self) -> Float32Array {
+        let values: Vec<f32> = self
+            .inner
+            .fdtd()
+            .map(|f| {
+                let mut out = Vec::with_capacity(f.nx() * f.ny());
+                for j in 0..f.ny() {
+                    for i in 0..f.nx() {
+                        out.push(f.ez(i, j) as f32);
+                    }
+                }
+                out
+            })
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// FDTD の格子サイズ `[nx, ny]`(0要素なら未有効化)。
+    pub fn fdtd_size(&self) -> Vec<u32> {
+        self.inner
+            .fdtd()
+            .map(|f| vec![f.nx() as u32, f.ny() as u32])
+            .unwrap_or_default()
+    }
+
+    /// ソフトボディ粒子の位置(`[x,y,z]`の並び、**群3で追加**)。
+    /// **D13(ロープと旗)は Scene View に何も描かれていなかった**——ソフトボディは
+    /// 剛体ではないので `bodyMeshes` の同期対象外で、Probe Graphs でしか
+    /// 観測できない状態だった。
+    pub fn soft_body_positions_f32(&self) -> Float32Array {
+        let values: Vec<f32> = self
+            .inner
+            .soft_body()
+            .map(|b| {
+                b.position
+                    .iter()
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                    .collect()
+            })
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// ソフトボディの距離拘束のペア(`[i, j]`の並び)。線分として描くために要る。
+    pub fn soft_body_constraint_pairs_u32(&self) -> Vec<u32> {
+        self.inner
+            .soft_body()
+            .map(|b| {
+                b.constraints
+                    .iter()
+                    .flat_map(|c| [c.i as u32, c.j as u32])
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 天体の位置(`[x,y,z]`の並び、**群3で追加**)。
+    /// **D34/D35/D36 も Scene View には何も描かれていなかった**——天体は
+    /// `RigidBodySet` とは別の質点集合で、剛体メッシュの同期対象外だった。
+    pub fn astro_positions_f32(&self) -> Float32Array {
+        let values: Vec<f32> = self
+            .inner
+            .astro()
+            .map(|a| {
+                a.position
+                    .iter()
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                    .collect()
+            })
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// 天体の質量(相対的な描画サイズを決めるために使う)。
+    pub fn astro_masses_f64(&self) -> Float64Array {
+        let values: Vec<f64> = self
+            .inner
+            .astro()
+            .map(|a| a.mass.clone())
+            .unwrap_or_default();
+        Float64Array::from(values.as_slice())
+    }
+
+    /// 1D熱伝導棒の温度分布(**群3で追加**)。D16 も Scene View には何も
+    /// 描かれず Probe Graphs のみだった。
+    pub fn conduction_rod_temperatures_f32(&self) -> Float32Array {
+        let values: Vec<f32> = self
+            .inner
+            .conduction_rod()
+            .map(|r| r.temperature.iter().map(|&t| t as f32).collect())
+            .unwrap_or_default();
+        Float32Array::from(values.as_slice())
+    }
+
+    /// ドメイン別のエネルギー内訳(`World::energy_report`、**群3で追加**)。
+    /// タブ区切り4列 `名前\t合計\t単位\t保存性(1/0)` を改行区切りで返す。
+    /// **単位と保存性を必ず添える**——SI と原子単位/正規化単位が混在しうるため、
+    /// 数値だけ出すと合計してよいように見えてしまう(`energy_report`のdoc参照)。
+    pub fn energy_report_text(&self) -> String {
+        self.inner
+            .energy_report()
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    d.domain,
+                    d.energy.total(),
+                    d.unit,
+                    u8::from(d.conservative)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// スポーンパレット——振り子(拘束オーバーレイの実証用)。ワールド固定点

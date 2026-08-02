@@ -142,6 +142,17 @@
       <main id="scene-view" class="panel">
         <div id="scene-view-canvas-host"></div>
         <div id="hud"></div>
+        <!-- **場のパネル(群3)**。量子の |ψ|²・イジングのスピン格子・FDTD の Ez・
+             気体の速さ分布・熱伝導棒の温度分布は、いずれも「格子上のスカラー場」で
+             あって Scene View の剛体描画では表現できない(チェックリストが D27–D33 を
+             閉じる際に「専用の可視化パネルが要る」と書いていたものの実体)。
+             **Scene View の中に置く**のが要点——これらのドメインだけのシーンでは
+             3D ビューポートに描くものが無く空いており、かつ Probe Graphs を
+             奪わずに済む(最初は probes 行に置いたが、グラフが見えなくなった)。 -->
+        <section id="field-panel" hidden>
+          <h2 id="field-title">場</h2>
+          <canvas id="field-canvas"></canvas>
+        </section>
       </main>
 
       <aside id="inspector" class="panel">

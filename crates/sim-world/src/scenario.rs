@@ -126,6 +126,25 @@ pub struct Scenario {
     /// 気体区画(`sim_thermal::GasCompartment`、**増分H3で追加**)。D17(ピストン)。
     #[serde(default)]
     pub gas: Option<GasScenarioJson>,
+    /// 量子ドメイン1D(`sim_quantum::WaveFunction1D`、**群3で追加**)。
+    /// D27(トンネル効果)・D29(調和振動子)。
+    #[serde(default)]
+    pub quantum_1d: Option<Quantum1dScenarioJson>,
+    /// 量子ドメイン2D(`sim_quantum::WaveFunction2D`、**群3で追加**)。D28(二重スリット)。
+    #[serde(default)]
+    pub quantum_2d: Option<Quantum2dScenarioJson>,
+    /// ブラウン運動(`sim_statistical::BrownianParticleSet`、**群3で追加**)。D25。
+    #[serde(default)]
+    pub brownian: Option<BrownianScenarioJson>,
+    /// 気体分子運動論(`sim_statistical::GasSim`、**群3で追加**)。D30(気体分子の箱)。
+    #[serde(default)]
+    pub kinetic_gas: Option<KineticGasScenarioJson>,
+    /// イジング模型(`sim_statistical::IsingSim`、**群3で追加**)。D31(相転移)。
+    #[serde(default)]
+    pub ising: Option<IsingScenarioJson>,
+    /// FDTD(`sim_em::FdtdSim2D`、**群3で追加**)。D32(電磁波の伝播)。
+    #[serde(default)]
+    pub fdtd: Option<FdtdScenarioJson>,
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
@@ -344,6 +363,27 @@ pub enum ProbeJson {
     CircuitNodeVoltage(usize),
     /// 回路の電圧源index(`circuit.voltage_sources`配列のインデックス)を流れる電流。
     CircuitCurrent(usize),
+    /// **群3で追加**。量子・統計・FDTDの観測量。これらのドメインは Scene View に
+    /// 直接の3D表現を持たない(波動関数・スピン格子・場)ため、**Probe Graphs と
+    /// 専用オーバーレイが唯一の観測手段**になる。
+    ///
+    /// 量子1D: 全確率(ノルム、ユニタリなら1で一定)・位置期待値・エネルギー期待値・
+    /// 指定範囲の透過確率。
+    QuantumNorm,
+    QuantumMeanX,
+    QuantumEnergy,
+    /// 格子インデックス `i` 以降の確率(トンネル効果の透過率、D27)。
+    QuantumTransmission(usize),
+    /// 統計: 気体の温度・圧力、イジングの磁化・1スピンあたりエネルギー、
+    /// ブラウン粒子の平均二乗変位。
+    GasTemperature,
+    GasPressure,
+    IsingMagnetization,
+    IsingEnergyPerSpin,
+    BrownianMsd,
+    /// FDTD: 格子点 `(i, j)` の Ez、および全電磁エネルギー。
+    FdtdEz(usize, usize),
+    FdtdEnergy,
 }
 
 /// `Scenario::joints`の1件。設計の例示JSONには無い項目(モジュールdoc
@@ -806,6 +846,155 @@ pub struct GasScenarioJson {
     pub molar_mass: Option<f64>,
 }
 
+/// `Scenario::quantum_1d`(**群3で追加**)。1D TDSE(原子単位 $\hbar=m_e=1$)。
+///
+/// **ポテンシャルは「よく使う3形」を列挙する**——任意関数を JSON で表現する仕組み
+/// (数式パーサ)を作るのは大がかりで、D27(矩形障壁のトンネル)・D29(調和振動子)が
+/// 要るのはこの3形で足りる。足りなくなったら形を足す。
+#[derive(Deserialize)]
+pub struct Quantum1dScenarioJson {
+    /// 格子点数(2の冪、`sim_math::fft`の制約)。
+    pub n: usize,
+    pub dx: f64,
+    /// 初期ガウス波束 $\exp[-(x-x_0)^2/(4\sigma^2)+ik_0x]$。
+    pub packet: GaussianPacketJson,
+    #[serde(default)]
+    pub potential: Option<Potential1dJson>,
+}
+
+#[derive(Deserialize)]
+pub struct GaussianPacketJson {
+    pub x0: f64,
+    pub sigma: f64,
+    pub k0: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Potential1dJson {
+    /// 矩形障壁(D27 トンネル効果)。`[x_min, x_max]` の区間で高さ `height`。
+    Barrier { x_min: f64, x_max: f64, height: f64 },
+    /// 調和振動子 $V=\frac12 m\omega^2(x-x_c)^2$(原子単位 $m=1$、D29)。
+    Harmonic { center: f64, omega: f64 },
+    /// 無限井戸(区間外を`height`で塞ぐ)。
+    Well { x_min: f64, x_max: f64, height: f64 },
+}
+
+/// `Scenario::quantum_2d`(**群3で追加**)。D28(二重スリット)。
+#[derive(Deserialize)]
+pub struct Quantum2dScenarioJson {
+    pub nx: usize,
+    pub ny: usize,
+    pub dx: f64,
+    pub dy: f64,
+    pub packet: GaussianPacket2dJson,
+    /// 二重スリットの壁(未指定なら自由空間)。
+    #[serde(default)]
+    pub double_slit: Option<DoubleSlitJson>,
+}
+
+#[derive(Deserialize)]
+pub struct GaussianPacket2dJson {
+    pub x0: f64,
+    pub y0: f64,
+    pub sigma_x: f64,
+    pub sigma_y: f64,
+    pub k0: f64,
+}
+
+/// 二重スリット壁(x=`wall_x` に厚み `thickness` の高いポテンシャル壁を立て、
+/// `slit_centers` の各位置に幅 `slit_width` の開口を空ける)。
+#[derive(Deserialize)]
+pub struct DoubleSlitJson {
+    pub wall_x: f64,
+    pub thickness: f64,
+    pub height: f64,
+    pub slit_centers: Vec<f64>,
+    pub slit_width: f64,
+}
+
+/// `Scenario::brownian`(**群3で追加**)。D25(ブラウン運動)。
+///
+/// **これまで D25 は `format!` で300粒子ぶんの剛体を動的生成する
+/// インラインシーンだった**(静的ファイル化に不向きとして `scenes/` へ
+/// 切り出さずインラインのまま残していた)。粒子集合を「個数+分布」として
+/// 宣言できるようにすれば静的ファイルで書けるので、その形にする。
+#[derive(Deserialize)]
+pub struct BrownianScenarioJson {
+    pub particle_count: usize,
+    /// 粒子質量 [kg]。
+    pub mass: f64,
+    /// ストークス抵抗係数 γ [kg/s]。
+    pub gamma: f64,
+    /// $k_BT$ [J]。
+    pub kb_t: f64,
+    /// 一様外力 [N](重力・浮力の正味など)。未指定なら 0(自由拡散)。
+    #[serde(default)]
+    pub external_force: Option<[f64; 3]>,
+    /// 初期位置。未指定なら全粒子を原点に置く(自由拡散の MSD 測定の標準設定)。
+    #[serde(default)]
+    pub initial_position: Option<[f64; 3]>,
+}
+
+/// `Scenario::kinetic_gas`(**群3で追加**)。D30(気体分子の箱)。
+#[derive(Deserialize)]
+pub struct KineticGasScenarioJson {
+    pub particle_count: usize,
+    /// 分子質量 [kg]。
+    pub mass: f64,
+    /// 剛体球半径 [m]。
+    pub radius: f64,
+    pub box_size: [f64; 3],
+    /// 初期速度をサンプルする温度 [K](マクスウェル分布)。
+    pub temperature: f64,
+}
+
+/// `Scenario::ising`(**群3で追加**)。D31(イジング模型の相転移)。
+#[derive(Deserialize)]
+pub struct IsingScenarioJson {
+    /// 格子の一辺 L(全 L×L スピン)。
+    pub l: usize,
+    /// 交換相互作用 J。
+    pub j_coupling: f64,
+    /// 温度 $k_BT/J$ の単位。臨界点は $T_c = 2/\ln(1+\sqrt2) \approx 2.269$。
+    pub temperature: f64,
+    /// 1 step あたりの更新回数(未指定なら1)。
+    #[serde(default)]
+    pub updates_per_step: Option<u32>,
+    /// Wolff クラスタ法を使うか(未指定なら false = メトロポリス法)。
+    #[serde(default)]
+    pub use_wolff: Option<bool>,
+}
+
+/// `Scenario::fdtd`(**群3で追加**)。D32(電磁波の伝播)。
+#[derive(Deserialize)]
+pub struct FdtdScenarioJson {
+    pub nx: usize,
+    pub ny: usize,
+    /// 格子間隔 h(正規化単位、$c=1$)。
+    pub h: f64,
+    /// Courant 数 $c\Delta t/h$(2D の上限は $1/\sqrt2$、既定 0.5)。
+    #[serde(default)]
+    pub courant: Option<f64>,
+    /// 初期条件。未指定なら全ゼロ(何も起きない)。
+    #[serde(default)]
+    pub initial: Option<FdtdInitialJson>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FdtdInitialJson {
+    /// 矩形空洞の固有モード $E_z = \sin(m\pi x/a)\sin(n\pi y/b)$(設計§7の検証設定)。
+    CavityMode { m: u32, n: u32, amplitude: f64 },
+    /// 単一格子点のガウス的な盛り上がり(点源からの波の広がりを見る)。
+    Pulse {
+        i: usize,
+        j: usize,
+        amplitude: f64,
+        width: f64,
+    },
+}
+
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
@@ -1200,6 +1389,172 @@ impl World {
             });
         }
 
+        // **群3で追加した6ドメイン**。ここまで`World`は量子・統計・FDTDを
+        // そもそも保持しておらず(`Solver`未実装で載る経路が原理的に無かった)、
+        // D25/D27–D32 が「ドメイン自体が存在しない」として滞留していた。
+        if let Some(q) = &scenario.quantum_1d {
+            if !q.n.is_power_of_two() {
+                return Err(SceneError::InvalidValue(format!(
+                    "quantum_1d.n must be a power of two (FFT constraint), got {}",
+                    q.n
+                )));
+            }
+            let mut wave = sim_quantum::WaveFunction1D::new(q.n, q.dx);
+            wave.set_gaussian_wave_packet(q.packet.x0, q.packet.sigma, q.packet.k0);
+            if let Some(potential) = &q.potential {
+                for i in 0..q.n {
+                    let x = i as f64 * q.dx;
+                    wave.v[i] = match potential {
+                        Potential1dJson::Barrier {
+                            x_min,
+                            x_max,
+                            height,
+                        } => {
+                            if x >= *x_min && x <= *x_max {
+                                *height
+                            } else {
+                                0.0
+                            }
+                        }
+                        Potential1dJson::Harmonic { center, omega } => {
+                            0.5 * omega * omega * (x - center) * (x - center)
+                        }
+                        Potential1dJson::Well {
+                            x_min,
+                            x_max,
+                            height,
+                        } => {
+                            if x < *x_min || x > *x_max {
+                                *height
+                            } else {
+                                0.0
+                            }
+                        }
+                    };
+                }
+            }
+            world.enable_quantum_1d(wave);
+        }
+
+        if let Some(q) = &scenario.quantum_2d {
+            if !q.nx.is_power_of_two() || !q.ny.is_power_of_two() {
+                return Err(SceneError::InvalidValue(
+                    "quantum_2d.nx/ny must be powers of two (FFT constraint)".to_string(),
+                ));
+            }
+            let mut wave = sim_quantum::WaveFunction2D::new(q.nx, q.ny, q.dx, q.dy);
+            wave.set_gaussian_wave_packet(
+                q.packet.x0,
+                q.packet.y0,
+                q.packet.sigma_x,
+                q.packet.sigma_y,
+                q.packet.k0,
+            );
+            if let Some(slit) = &q.double_slit {
+                for iy in 0..q.ny {
+                    let y = iy as f64 * q.dy;
+                    // スリットの開口内なら壁を立てない。
+                    let in_slit = slit
+                        .slit_centers
+                        .iter()
+                        .any(|c| (y - c).abs() <= slit.slit_width * 0.5);
+                    if in_slit {
+                        continue;
+                    }
+                    for ix in 0..q.nx {
+                        let x = ix as f64 * q.dx;
+                        if (x - slit.wall_x).abs() <= slit.thickness * 0.5 {
+                            wave.v[iy * q.nx + ix] = slit.height;
+                        }
+                    }
+                }
+            }
+            world.enable_quantum_2d(wave);
+        }
+
+        if let Some(b) = &scenario.brownian {
+            let mut set = sim_statistical::BrownianParticleSet::new(b.mass, b.gamma, b.kb_t);
+            if let Some(f) = b.external_force {
+                set.external_force = array_to_vec3(f);
+            }
+            let start = b.initial_position.map_or(Vec3::ZERO, array_to_vec3);
+            for _ in 0..b.particle_count {
+                set.add_particle(start, Vec3::ZERO);
+            }
+            world.enable_brownian(set);
+        }
+
+        if let Some(g) = &scenario.kinetic_gas {
+            let mut gas = sim_statistical::GasSim::new(g.mass, g.radius, array_to_vec3(g.box_size));
+            // **位置と速度は World の seed 付き PRNG から引く**——シーンJSONに
+            // 数百粒子ぶんの座標を書き下すのは現実的でなく、かつ決定論も保てる
+            // (同じ seed なら同じ配置になる)。D25 が `format!` で粒子を動的生成
+            // していたのと同じ問題を、シーン側ではなくローダ側で解く。
+            let mut rng = sim_math::SimRng::new(scenario.seed, 0x67617300);
+            let b = array_to_vec3(g.box_size);
+            for _ in 0..g.particle_count {
+                // 壁にめり込まないよう半径ぶん内側に収める。
+                let inset = |extent: f64, u: f64| g.radius + u * (extent - 2.0 * g.radius).max(0.0);
+                let position = Vec3::new(
+                    inset(b.x, rng.next_f64()),
+                    inset(b.y, rng.next_f64()),
+                    inset(b.z, rng.next_f64()),
+                );
+                let sigma = (sim_statistical::BOLTZMANN_CONSTANT * g.temperature / g.mass).sqrt();
+                gas.add_particle(position, rng.maxwell_boltzmann_velocity(sigma));
+            }
+            world.enable_kinetic_gas(gas);
+        }
+
+        if let Some(i) = &scenario.ising {
+            let mut rng = sim_math::SimRng::new(scenario.seed, 0x6973696e);
+            let mut sim =
+                sim_statistical::IsingSim::new(i.l, i.j_coupling, i.temperature, &mut rng);
+            if let Some(n) = i.updates_per_step {
+                sim.updates_per_step = n;
+            }
+            if let Some(w) = i.use_wolff {
+                sim.use_wolff = w;
+            }
+            world.enable_ising(sim);
+        }
+
+        if let Some(f) = &scenario.fdtd {
+            let mut sim = sim_em::FdtdSim2D::new(f.nx, f.ny, f.h, f.courant.unwrap_or(0.5));
+            match &f.initial {
+                Some(FdtdInitialJson::CavityMode { m, n, amplitude }) => {
+                    for j in 1..f.ny - 1 {
+                        for i in 1..f.nx - 1 {
+                            let sx = (*m as f64 * std::f64::consts::PI * i as f64
+                                / (f.nx - 1) as f64)
+                                .sin();
+                            let sy = (*n as f64 * std::f64::consts::PI * j as f64
+                                / (f.ny - 1) as f64)
+                                .sin();
+                            sim.set_ez(i, j, amplitude * sx * sy);
+                        }
+                    }
+                }
+                Some(FdtdInitialJson::Pulse {
+                    i: ci,
+                    j: cj,
+                    amplitude,
+                    width,
+                }) => {
+                    for j in 1..f.ny - 1 {
+                        for i in 1..f.nx - 1 {
+                            let dx = (i as f64 - *ci as f64) * f.h;
+                            let dy = (j as f64 - *cj as f64) * f.h;
+                            let r2 = dx * dx + dy * dy;
+                            sim.set_ez(i, j, amplitude * (-r2 / (width * width)).exp());
+                        }
+                    }
+                }
+                None => {}
+            }
+            world.enable_fdtd(sim);
+        }
+
         for joint in &scenario.joints {
             match joint {
                 JointJson::Slider {
@@ -1569,6 +1924,18 @@ impl World {
                 ProbeJson::SphParticlePosY(index) => ProbeTarget::SphParticlePosY(*index),
                 ProbeJson::SphParticleDensity(index) => ProbeTarget::SphParticleDensity(*index),
                 ProbeJson::CircuitCurrent(index) => ProbeTarget::CircuitCurrent(*index),
+                // **群3で追加**。
+                ProbeJson::QuantumNorm => ProbeTarget::QuantumNorm,
+                ProbeJson::QuantumMeanX => ProbeTarget::QuantumMeanX,
+                ProbeJson::QuantumEnergy => ProbeTarget::QuantumEnergy,
+                ProbeJson::QuantumTransmission(from) => ProbeTarget::QuantumTransmission(*from),
+                ProbeJson::GasTemperature => ProbeTarget::GasTemperature,
+                ProbeJson::GasPressure => ProbeTarget::GasPressure,
+                ProbeJson::IsingMagnetization => ProbeTarget::IsingMagnetization,
+                ProbeJson::IsingEnergyPerSpin => ProbeTarget::IsingEnergyPerSpin,
+                ProbeJson::BrownianMsd => ProbeTarget::BrownianMsd,
+                ProbeJson::FdtdEz(i, j) => ProbeTarget::FdtdEz(*i, *j),
+                ProbeJson::FdtdEnergy => ProbeTarget::FdtdEnergy,
             };
             handles.push(self.add_probe(target, DEFAULT_PROBE_CAPACITY));
         }
@@ -3650,6 +4017,140 @@ mod tests {
     /// ファイルを見ているため、シーン自体の正しさは`run_headless_scenario_*`の各
     /// テストが個別に検証済みだが、本テストは「マニフェストに載っている全ファイルが
     /// 実在し壊れていないこと」をマニフェスト側から検証する)。
+    /// **群3で追加した7シーン(D27–D33)の物理的な検証**。
+    ///
+    /// マニフェストのテストは「壊れたアセットを出荷しない」ための安全網で、
+    /// 60step 走ることしか見ない。ここでは**各デモの合格基準に対応する量**を
+    /// シーンJSON経由(=エディタが実際に読む経路)で確認する。
+    #[test]
+    fn group3_gallery_scenes_reproduce_their_acceptance_criteria() {
+        // D28 トンネル効果: ①ノルムは厳密に 1 のまま(split-step Fourier は
+        // ユニタリ、Q1 の検証量)②障壁の向こう側へ確率が漏れる(透過率 > 0)。
+        let result =
+            run_headless_scenario(include_str!("../../../scenes/d28-tunneling.json"), 1500)
+                .unwrap();
+        let norm = &result.probe_histories[0];
+        for &n in norm {
+            assert!(
+                (n - 1.0).abs() < 1e-9,
+                "TDSE must stay unitary through the scene: norm={n}"
+            );
+        }
+        let transmission = result.probe_histories[3].last().copied().unwrap();
+        assert!(
+            transmission > 1e-4,
+            "some probability must tunnel through the barrier: T={transmission}"
+        );
+        // ⟨x⟩ は実際に前進する(波束が動いている)。
+        let mean_x = &result.probe_histories[1];
+        assert!(
+            mean_x.last().unwrap() > mean_x.first().unwrap(),
+            "the packet must move forward: <x>0={} <x>1={}",
+            mean_x.first().unwrap(),
+            mean_x.last().unwrap()
+        );
+
+        // D29 電波の水槽: PEC 空洞は無損失なので電磁エネルギーが保存する。
+        let result =
+            run_headless_scenario(include_str!("../../../scenes/d29-radio-tank.json"), 120)
+                .unwrap();
+        let energy = &result.probe_histories[0];
+        let e0 = energy[0];
+        let e1 = *energy.last().unwrap();
+        assert!(e0 > 0.0, "the pulse must carry energy: e0={e0}");
+        assert!(
+            (e1 - e0).abs() / e0 < 0.05,
+            "lossless PEC cavity must conserve field energy: e0={e0} e1={e1}"
+        );
+        // 中心から離れた観測点にも波が到達する(点源から実際に広がっている)。
+        let off_center = &result.probe_histories[2];
+        assert!(
+            off_center.iter().any(|v| v.abs() > 1e-3),
+            "the wave must reach the off-centre probe"
+        );
+
+        // D30 気体の箱: 断熱・弾性なので温度が一定、かつ圧力が理想気体則の桁に乗る。
+        let result =
+            run_headless_scenario(include_str!("../../../scenes/d30-gas-box.json"), 300).unwrap();
+        let temperature = &result.probe_histories[0];
+        let t0 = temperature[0];
+        let t1 = *temperature.last().unwrap();
+        assert!(
+            (t1 - t0).abs() / t0 < 0.02,
+            "specular walls + elastic collisions keep T constant: t0={t0} t1={t1}"
+        );
+        // p = N k_B T / V(理想気体則、S2 の検証量)。壁への運動量流束から
+        // 測った圧力がこの桁に乗ることを確認する(統計誤差があるので係数2倍以内)。
+        let pressure = *result.probe_histories[1].last().unwrap();
+        let volume = 1e-7_f64.powi(3);
+        let expected = 400.0 * 1.380649e-23 * t1 / volume;
+        assert!(
+            pressure > 0.5 * expected && pressure < 2.0 * expected,
+            "measured pressure should match pV=NkT within a factor of 2: p={pressure} expected={expected}"
+        );
+
+        // D31 拡散とインク: 平均二乗変位が単調に増え、6Dt の桁に乗る。
+        let steps = 400;
+        let result = run_headless_scenario(
+            include_str!("../../../scenes/d31-diffusion-ink.json"),
+            steps,
+        )
+        .unwrap();
+        let msd = &result.probe_histories[0];
+        // **プローブは step の末尾でサンプルされる**ので、履歴の先頭は既に
+        // 1step ぶん拡散した後の値(0 ではない)。ここで見るのは「単調に広がる」
+        // ことと最終値の桁。
+        let final_msd = *msd.last().unwrap();
+        assert!(
+            final_msd > msd[0] * 10.0,
+            "MSD must keep growing: first={} last={final_msd}",
+            msd[0]
+        );
+        // D = k_BT/γ、dt = 1e-8 s。
+        let d = 4.0471e-21 / 9.4e-9;
+        let expected = 6.0 * d * (steps as f64 * 1e-8);
+        assert!(
+            final_msd > 0.2 * expected && final_msd < 5.0 * expected,
+            "free-diffusion MSD should be within an order of 6Dt: msd={final_msd} expected={expected}"
+        );
+
+        // D32 磁石の相転移: T=2.0 < Tc≈2.269 なので自発磁化が立ち上がる。
+        let result = run_headless_scenario(
+            include_str!("../../../scenes/d32-magnet-transition.json"),
+            200,
+        )
+        .unwrap();
+        let magnetization = result.probe_histories[0].last().copied().unwrap().abs();
+        assert!(
+            magnetization > 0.7,
+            "below Tc the Ising lattice must order: |m|={magnetization}"
+        );
+
+        // D27 二重スリット・D33 井戸: どちらもノルム保存(ユニタリ)を見る。
+        // D27 はプローブを持たない(可視化は |ψ|² オーバーレイ)ので、World から直接読む。
+        let scenario =
+            Scenario::from_json(include_str!("../../../scenes/d27-double-slit.json")).unwrap();
+        let mut world = World::from_scenario(&scenario).unwrap();
+        let norm0 = world.quantum_2d().unwrap().norm();
+        for _ in 0..200 {
+            world.step();
+        }
+        let norm1 = world.quantum_2d().unwrap().norm();
+        assert!(
+            (norm1 - norm0).abs() < 1e-9,
+            "2D TDSE must stay unitary: norm0={norm0} norm1={norm1}"
+        );
+
+        let result = run_headless_scenario(
+            include_str!("../../../scenes/d33-electron-in-well.json"),
+            300,
+        )
+        .unwrap();
+        for &n in &result.probe_histories[0] {
+            assert!((n - 1.0).abs() < 1e-9, "well scene must stay unitary: {n}");
+        }
+    }
+
     #[test]
     fn all_scenes_in_the_gallery_manifest_parse_and_run_for_sixty_steps() {
         let manifest_json = include_str!("../../../scenes/index.json");

@@ -8,7 +8,10 @@
 //! `Grid3`(セル中心格子)は Yee 格子のスタガード配置(Ez は格子点・Hx/Hyはその中間の
 //! 辺)と相性が悪いため再利用せず、専用のフラット配列で実装した。
 
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
+
 /// 2D TMzモードのFDTDシミュレータ(真空、ε=μ=1、σ=0)。
+#[derive(Clone)]
 pub struct FdtdSim2D {
     nx: usize,
     ny: usize,
@@ -57,8 +60,21 @@ impl FdtdSim2D {
     }
 
     /// 1ステップ進める(leapfrog、設計§3.2)。境界のEzは更新しない(PEC、接線E=0固定)。
+    /// 構築時に決めた Courant 数由来の `self.dt` で進める。
     pub fn step(&mut self) {
-        let ch = self.dt / self.h;
+        self.step_dt(self.dt);
+    }
+
+    /// **任意の `dt` で1ステップ進める(群3で切り出した)**。`Solver::step` が使う。
+    ///
+    /// `Orchestrator` は `max_stable_dt` 以下の任意の `dt` を渡してくるので、
+    /// 構築時の `self.dt` を無条件に使うと**要求された時間より長く/短く進んで
+    /// しまい、他ドメインと時刻が合わなくなる**。leapfrog の更新式は
+    /// $c\Delta t/h$ を通してのみ `dt` に依存するので、その比を差し替えれば
+    /// そのまま任意の `dt` で回せる(Courant 条件 $c\Delta t/h \le 1/\sqrt2$ を
+    /// 満たす範囲であれば安定性も保たれる)。
+    pub fn step_dt(&mut self, dt: f64) {
+        let ch = dt / self.h;
 
         // Hx[i,j] は Ez[i,j] と Ez[i,j+1] の間の辺(j in 0..ny-1)。
         for j in 0..self.ny - 1 {
@@ -99,6 +115,76 @@ impl FdtdSim2D {
         let hx_energy: f64 = self.hx.iter().map(|&hval| 0.5 * hval * hval).sum();
         let hy_energy: f64 = self.hy.iter().map(|&hval| 0.5 * hval * hval).sum();
         (ez_energy + hx_energy + hy_energy) * self.h * self.h
+    }
+}
+
+/// **`Solver` 実装(群3)**。設計 docs/00-foundation/04-architecture.md §1.2 は
+/// 電磁気を7ドメインの1つとして数えており `PointChargeSystem`(静電)と
+/// `Circuit`(回路)は既に `Solver` を実装していたが、**FDTD(波動)だけ未実装**で
+/// `World` に載る経路が無かった(D32「電磁波の伝播」がギャラリーに出せなかった原因)。
+impl Solver for FdtdSim2D {
+    /// **Courant-Friedrichs-Lewy 条件**(設計§9)。2D TMz の安定限界は
+    /// $c\Delta t/h \le 1/\sqrt2$ で、$c=1$(正規化単位)なので
+    /// $\Delta t \le h/\sqrt2$。これは**真の安定限界**であり、超えると
+    /// 数値的に指数発散する(精度の目安ではない)。
+    fn max_stable_dt(&self) -> f64 {
+        self.h / std::f64::consts::SQRT_2
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        self.step_dt(dt);
+    }
+
+    /// 電磁場のエネルギー(`total_energy` の inherent メソッドをそのまま使う)。
+    fn total_energy(&self) -> EnergyBreakdown {
+        EnergyBreakdown {
+            electromagnetic: self.total_energy(),
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.nx as u64);
+        hasher.write_u64(self.ny as u64);
+        hasher.write_f64(self.h);
+        for &e in &self.ez {
+            hasher.write_f64(e);
+        }
+        for &hval in &self.hx {
+            hasher.write_f64(hval);
+        }
+        for &hval in &self.hy {
+            hasher.write_f64(hval);
+        }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        vec![
+            Approximation {
+                name: "FDTD: 2D TMz(Ez, Hx, Hy)のみ",
+                reason: "3D の全6成分ではなく、面内に一様な TMz モードに限定している。3D 構造の散乱・偏波変換は表現できない。",
+                doc: "docs/13-electromagnetism/03-maxwell-fdtd.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "境界: PEC(完全導体壁)",
+                reason: "境界の接線 E を 0 に固定するため、外向きに出た波は全反射して戻る。開放空間を模す PML 吸収境界は未実装。",
+                doc: "docs/13-electromagnetism/03-maxwell-fdtd.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "媒質: 真空のみ (ε=μ=1, σ=0)",
+                reason: "誘電体界面・導電損失・分散・非線形は未実装。屈折・吸収は起きない。",
+                doc: "docs/13-electromagnetism/03-maxwell-fdtd.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "単位: 正規化 (c=1)",
+                reason: "エネルギーは正規化単位のまま返すため、SI 単位の他ドメインと合算した total_energy は物理的に意味を持たない。",
+                doc: "docs/13-electromagnetism/03-maxwell-fdtd.md",
+                can_disable: false,
+            },
+        ]
     }
 }
 

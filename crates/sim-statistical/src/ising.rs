@@ -3,21 +3,40 @@
 //! P5 スコープの最小実装: 2D正方格子・周期境界・$h=0$(外場ゼロ、Onsager厳密解が
 //! 存在する設定)。3D・非ゼロ外場でのWolff($h\ne0$は再重み付けが必要で未対応)は未実装。
 
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::SimRng;
 
 /// $L\times L$ 2Dイジング模型。設計 §3 `IsingSim` の縮約版(観測量の移動平均フィールドは
 /// 持たず、呼び出し側が`magnetization`/`energy`等を都度計算する)。
+#[derive(Clone)]
 pub struct IsingSim {
     pub spins: Vec<i8>,
     pub l: usize,
     pub j_coupling: f64,
     pub temperature: f64,
-    rng: SimRng,
+    /// `Solver::step` 1回あたりに回す更新回数(**群3で追加**)。
+    ///
+    /// **モンテカルロには物理時間が無い**——`Solver::step(dt, ..)` の `dt` は
+    /// 何も意味しない。設計 docs/15-statistical/04-monte-carlo.md はイジング模型を
+    /// 「平衡状態のサンプリング」と位置づけており、時間発展方程式を解いているの
+    /// ではないため、`dt` に対応する物理量が存在しない。そこで **1 step = この
+    /// 回数ぶんの更新** と定義し、`dt` は無視する(無視していることを
+    /// `approximations()` で申告する)。
+    pub updates_per_step: u32,
+    /// `true` なら Wolff クラスタ法、`false` ならメトロポリス法で更新する。
+    /// 臨界点近傍(T≈2.269 J/k_B)ではメトロポリスが臨界減速を起こすため Wolff を使う。
+    pub use_wolff: bool,
 }
 
 impl IsingSim {
     /// 全スピンをPRNGでランダムに$\pm1$初期化する(高温初期状態)。
-    pub fn new(l: usize, j_coupling: f64, temperature: f64, mut rng: SimRng) -> IsingSim {
+    /// **群3で `rng` を所有しなくなった**。以前は `SimRng` をフィールドとして
+    /// 抱え込んでいたが、設計 docs/00-foundation/04-architecture.md は
+    /// 「決定論は World が持つ単一の seed 付き PRNG から導く」と定めており、
+    /// ドメインが独自の乱数源を持つとその系譜から外れる(`SolverContext::rng`
+    /// を渡されても使えない)。初期化にだけ `rng` を借り、以後の更新は
+    /// 呼び出し側が渡す `&mut SimRng` を使う。
+    pub fn new(l: usize, j_coupling: f64, temperature: f64, rng: &mut SimRng) -> IsingSim {
         let spins = (0..l * l)
             .map(|_| if rng.next_f64() < 0.5 { 1 } else { -1 })
             .collect();
@@ -26,7 +45,8 @@ impl IsingSim {
             l,
             j_coupling,
             temperature,
-            rng,
+            updates_per_step: 1,
+            use_wolff: false,
         }
     }
 
@@ -49,14 +69,14 @@ impl IsingSim {
     /// メトロポリス法(設計 §2.2/§4)を1スイープ($L^2$回の反転試行、格子を順次走査)進める。
     /// $h=0$ のため $\Delta E\in\{-8J,-4J,0,4J,8J\}$ の5値のみ(設計§4のテーブル化の対象、
     /// ここでは都度`exp`を呼ぶ単純実装)。
-    pub fn metropolis_sweep(&mut self) {
+    pub fn metropolis_sweep(&mut self, rng: &mut SimRng) {
         for y in 0..self.l {
             for x in 0..self.l {
                 let idx = self.index(x, y);
                 let s = self.spins[idx] as f64;
                 let nb = self.neighbor_sum(x, y) as f64;
                 let delta_e = 2.0 * self.j_coupling * s * nb;
-                if delta_e <= 0.0 || self.rng.next_f64() < (-delta_e / self.temperature).exp() {
+                if delta_e <= 0.0 || rng.next_f64() < (-delta_e / self.temperature).exp() {
                     self.spins[idx] = -self.spins[idx];
                 }
             }
@@ -66,11 +86,11 @@ impl IsingSim {
     /// Wolffクラスタ法(設計 §4、S7/S8の必須実装 — 臨界域での臨界減速を回避する)。
     /// シードスピンから同符号の隣接スピンを確率 $p=1-e^{-2J/k_BT}$ で再帰的にクラスタへ
     /// 加え(棄却なしの一括反転)、1回の呼び出しで1クラスタ分だけ更新する。
-    pub fn wolff_step(&mut self) {
+    pub fn wolff_step(&mut self, rng: &mut SimRng) {
         let l = self.l;
         let p_add = 1.0 - (-2.0 * self.j_coupling / self.temperature).exp();
 
-        let start = self.rng.range_u32((l * l) as u32) as usize;
+        let start = rng.range_u32((l * l) as u32) as usize;
         let (sx, sy) = (start % l, start / l);
         let seed_spin = self.spins[self.index(sx, sy)];
 
@@ -87,8 +107,7 @@ impl IsingSim {
             ];
             for (nx, ny) in neighbors {
                 let nidx = self.index(nx, ny);
-                if !in_cluster[nidx] && self.spins[nidx] == seed_spin && self.rng.next_f64() < p_add
-                {
+                if !in_cluster[nidx] && self.spins[nidx] == seed_spin && rng.next_f64() < p_add {
                     in_cluster[nidx] = true;
                     stack.push((nx, ny));
                 }
@@ -121,6 +140,93 @@ impl IsingSim {
         }
         e / (self.l * self.l) as f64
     }
+
+    /// 格子全体の交換エネルギー $E=-J\sum_{\langle ij\rangle}s_is_j$(1スピンあたりでない総和)。
+    pub fn total_exchange_energy(&self) -> f64 {
+        self.energy_per_spin() * (self.l * self.l) as f64
+    }
+}
+
+/// **`Solver` 実装(群3)**。設計 docs/00-foundation/04-architecture.md §1.2 は
+/// 統計を7ドメインの1つとして数えているのに `Solver` 未実装で、`World` に載る
+/// 経路が原理的に無かった(D31「イジング模型の相転移」がギャラリーに出せなかった原因)。
+///
+/// **モンテカルロを時間発展ソルバの器に入れることの正直な説明**: イジング模型の
+/// 更新は平衡分布からのサンプリングであって時間発展ではない。したがって
+/// `Solver::step(dt, ..)` の `dt` は**物理的な意味を持たず、無視される**。
+/// 代わりに `updates_per_step` 回の更新を行う。この不一致を隠さないため、
+/// `approximations()` の先頭でそれを申告する。
+impl Solver for IsingSim {
+    /// `dt` に一切依存しないので上限は無い。
+    fn max_stable_dt(&self) -> f64 {
+        f64::INFINITY
+    }
+
+    fn step(&mut self, _dt: f64, ctx: &mut SolverContext) {
+        for _ in 0..self.updates_per_step {
+            if self.use_wolff {
+                self.wolff_step(ctx.rng);
+            } else {
+                self.metropolis_sweep(ctx.rng);
+            }
+        }
+    }
+
+    /// **交換エネルギーを `electromagnetic` に入れる**。`EnergyBreakdown` が持つ
+    /// 6形態(運動・ポテンシャル・弾性・熱・電磁場・化学)のうち、スピン間交換
+    /// 相互作用は磁性——すなわち電磁的な起源——なのでこの枠に入れる。
+    /// なお $J$ の単位はここでは無次元(温度も $k_BT/J$ 相当のスケール)なので、
+    /// SI 単位の他ドメインと合算した値に物理的な意味は無い(近似として申告する)。
+    ///
+    /// **モンテカルロはエネルギーを保存しない**——熱浴と平衡にある正準集団を
+    /// サンプルしているので、エネルギーは揺らぐのが正しい挙動である。
+    /// `EnergyLedger` の残差はここでは保存則の破れを意味しない。
+    fn total_energy(&self) -> EnergyBreakdown {
+        EnergyBreakdown {
+            electromagnetic: self.total_exchange_energy(),
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.l as u64);
+        // スピンは ±1 なので 1 バイトに詰めて書く(f64 化すると格子が大きいとき
+        // ハッシュ計算だけで無視できない時間を食う)。
+        for &s in &self.spins {
+            hasher.write_u64(if s > 0 { 1 } else { 0 });
+        }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        vec![
+            Approximation {
+                name: "モンテカルロ: dt は無視される",
+                reason: "イジング模型の更新は平衡分布のサンプリングであって時間発展ではない。1 step = updates_per_step 回の更新と定義しており、Solver::step の dt には対応する物理量が無い。",
+                doc: "docs/15-statistical/04-monte-carlo.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: if self.use_wolff {
+                    "更新: Wolff クラスタ法"
+                } else {
+                    "更新: メトロポリス法(臨界減速あり)"
+                },
+                reason: if self.use_wolff {
+                    "同符号の隣接スピンをクラスタとして一括反転する。臨界点近傍でも相関時間が発散しない。"
+                } else {
+                    "1スピンずつ反転を試行する。臨界点近傍(T≈2.269 J/k_B)では相関時間が発散し、平衡化に必要なスイープ数が爆発する(use_wolff = true で回避できる)。"
+                },
+                doc: "docs/15-statistical/04-monte-carlo.md",
+                can_disable: true,
+            },
+            Approximation {
+                name: "外場ゼロ (h=0)・2D正方格子・周期境界",
+                reason: "Onsager の厳密解が存在する設定に限定している。3D と h≠0(Wolff では再重み付けが要る)は未実装。",
+                doc: "docs/15-statistical/04-monte-carlo.md",
+                can_disable: false,
+            },
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -144,14 +250,15 @@ mod tests {
         equilibration: usize,
         samples: usize,
     ) -> (f64, f64) {
-        let mut sim = IsingSim::new(l, j, t, SimRng::new(seed, 0));
+        let mut rng = SimRng::new(seed, 0);
+        let mut sim = IsingSim::new(l, j, t, &mut rng);
         for _ in 0..equilibration {
-            sim.wolff_step();
+            sim.wolff_step(&mut rng);
         }
         let mut sum_m2 = 0.0;
         let mut sum_abs_m = 0.0;
         for _ in 0..samples {
-            sim.wolff_step();
+            sim.wolff_step(&mut rng);
             let m = sim.magnetization();
             sum_m2 += m * m;
             sum_abs_m += m.abs();
@@ -242,14 +349,15 @@ mod tests {
         let exact_mean_abs_m = weighted_abs_m / z;
 
         // メトロポリスで長時間サンプル。
-        let mut sim = IsingSim::new(l, j, t, SimRng::new(7, 3));
+        let mut rng = SimRng::new(7, 3);
+        let mut sim = IsingSim::new(l, j, t, &mut rng);
         for _ in 0..2000 {
-            sim.metropolis_sweep();
+            sim.metropolis_sweep(&mut rng);
         }
         let sweeps = 40000;
         let mut sum_abs_m = 0.0;
         for _ in 0..sweeps {
-            sim.metropolis_sweep();
+            sim.metropolis_sweep(&mut rng);
             sum_abs_m += sim.magnetization().abs();
         }
         let sampled_mean_abs_m = sum_abs_m / sweeps as f64;
@@ -280,9 +388,10 @@ mod limit_tests {
         let j = 1.0;
 
         // 高温極限(T >> Tc≈2.269): スピンは乱雑になり、磁化・エネルギーとも0付近。
-        let mut hot = IsingSim::new(l, j, 50.0, SimRng::new(7, 1));
+        let mut hot_rng = SimRng::new(7, 1);
+        let mut hot = IsingSim::new(l, j, 50.0, &mut hot_rng);
         for _ in 0..2000 {
-            hot.metropolis_sweep();
+            hot.metropolis_sweep(&mut hot_rng);
         }
         let hot_m = hot.magnetization().abs();
         let hot_e = hot.energy_per_spin().abs();
@@ -293,9 +402,10 @@ mod limit_tests {
         );
 
         // 低温極限(T << Tc): 整列して |M| → 1。
-        let mut cold = IsingSim::new(l, j, 0.4, SimRng::new(7, 2));
+        let mut cold_rng = SimRng::new(7, 2);
+        let mut cold = IsingSim::new(l, j, 0.4, &mut cold_rng);
         for _ in 0..2000 {
-            cold.wolff_step();
+            cold.wolff_step(&mut cold_rng);
         }
         let cold_m = cold.magnetization().abs();
         assert!(
