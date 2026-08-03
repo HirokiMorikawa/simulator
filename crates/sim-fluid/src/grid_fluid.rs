@@ -1,10 +1,23 @@
-//! 格子(Eulerian)流体ソルバ、2D周期境界のみ。設計: docs/11-fluid/02-eulerian-grid.md。
+//! 格子(Eulerian)流体ソルバ、2D。設計: docs/11-fluid/02-eulerian-grid.md。
 //!
-//! 完全な `GridFluid`(3D、MAC格子、Solid/Empty境界、渦度強化)ではなく、Taylor-Green渦
-//! (F8)・投影後発散(F9)の検証に必要な範囲 — 周期境界の2D非圧縮流(移流+粘性拡散+
-//! 圧力投影)— に絞った縮約実装。ポアズイユ流(F7、固体境界+4解像度の収束次数)・
-//! カルマン渦列(F11、円柱障害物+渦度強化の要否判断)は固体境界の扱いが別途必要な
-//! ため後続増分に残す。
+//! 完全な `GridFluid`(3D、MAC格子、Solid/Empty境界、渦度強化)ではなく、2D非圧縮流
+//! (移流+粘性拡散+圧力投影)に絞った縮約実装。
+//!
+//! **群7で開境界(流入出)を追加した**(`GridBoundary`)。移行前は**周期境界のみ**で、
+//! 「一方から流れ込んで反対側へ抜ける」という最も基本的な流路の構成すら作れなかった
+//! (Taylor-Green渦(F8)・投影後発散(F9)の検証に周期境界で足りたため)。群7では
+//! `GridBoundary::Channel` を追加し、
+//!
+//! - **x−側 = 流入**(速度Dirichlet、`inflow_speed`を固定)
+//! - **x+側 = 流出**(勾配ゼロ、$\partial u/\partial x=0$ + 圧力Dirichlet $p=0$)
+//! - **y側 = 自由すべり壁**($v=0$、$\partial u/\partial y=0$)
+//!
+//! とした。流出側に圧力Dirichletが入るのでポアソン方程式が**非特異になり**、
+//! 周期境界で必要だった「右辺の平均引き」(可解性条件)が不要になる。
+//!
+//! **残る縮約**: 3D化・渦度強化・任意形状の固体境界(現状は`GridSolidBox`の単一矩形を
+//! マスキングする方式)は引き続き未実装。壁は自由すべりで、粘着(no-slip)境界層は
+//! 作れない——ポアズイユ流(F7)は専用の`PoiseuilleChannel1D`が別途担っている。
 //!
 //! 格子は staggered(MAC)配置: 圧力・スカラーはセル中心 $((i+\tfrac12)h,(j+\tfrac12)h)$、
 //! `u` は x面 $(ih,(j+\tfrac12)h)$、`v` は y面 $((i+\tfrac12)h,jh)$ に置く。周期境界のため
@@ -25,7 +38,19 @@ pub struct GridSolidBox {
     pub velocity: Vec3,
 }
 
-/// 周期境界の2D格子流体。`u`・`v` は共に長さ `nx*ny`(staggered配置、モジュールdoc参照)。
+/// 境界条件(**群7で追加**、モジュールdoc参照)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GridBoundary {
+    /// 全方向周期(既定、移行前の唯一の挙動)。F8/F9はこれ。
+    Periodic,
+    /// 流路: x−から流入・x+へ流出、y方向は自由すべり壁。
+    Channel {
+        /// 流入面($x=0$)で固定する $u$ [m/s]。
+        inflow_speed: f64,
+    },
+}
+
+/// 2D格子流体。`u`・`v` は共に長さ `nx*ny`(staggered配置、モジュールdoc参照)。
 #[derive(Clone)]
 pub struct GridFluid2D {
     pub nx: usize,
@@ -39,6 +64,8 @@ pub struct GridFluid2D {
     /// `Solver::step`が使う既定動粘性係数。0.0なら陽的粘性拡散をスキップする
     /// (設計§4.3: 粘性が無視できるほど小さい場合の既定分岐)。
     pub kinematic_viscosity: f64,
+    /// 境界条件(**群7で追加**、モジュールdoc参照)。
+    boundary: GridBoundary,
     /// `GridFluidRigid`結合用の単一剛体マスク。`None`なら従来どおり完全周期境界
     /// (既存の挙動に一切変更なし)。
     pub solid: Option<GridSolidBox>,
@@ -65,6 +92,62 @@ impl GridFluid2D {
             kinematic_viscosity: 0.0,
             solid: None,
             last_pressure: vec![0.0; nx * ny],
+            boundary: GridBoundary::Periodic,
+        }
+    }
+
+    /// 境界条件を差し替える(**群7で追加**、モジュールdoc参照)。`Channel`にすると
+    /// 流入面の $u$ を`inflow_speed`で初期化する(そうしないと最初の数stepだけ
+    /// 静止流体が流入してくる形になり、定常へ落ち着くまで余計な過渡が乗る)。
+    pub fn with_boundary(mut self, boundary: GridBoundary) -> GridFluid2D {
+        self.boundary = boundary;
+        if let GridBoundary::Channel { inflow_speed } = boundary {
+            for value in self.u.iter_mut() {
+                *value = inflow_speed;
+            }
+            for value in self.v.iter_mut() {
+                *value = 0.0;
+            }
+        }
+        self
+    }
+
+    /// 現在の境界条件。
+    pub fn boundary(&self) -> GridBoundary {
+        self.boundary
+    }
+
+    /// x面の $u$(境界条件を考慮、**群7**)。`i`は面index(`0..=nx`)。
+    /// `Channel`では `i=0` が流入面(固定値)、`i>=nx` は流出(勾配ゼロ = 最終列の複製)。
+    fn u_face(&self, i: i64, j: i64) -> f64 {
+        match self.boundary {
+            GridBoundary::Periodic => self.u_at(i, j),
+            GridBoundary::Channel { inflow_speed } => {
+                let jj = j.clamp(0, self.ny as i64 - 1); // y壁は勾配ゼロ(自由すべり)
+                if i <= 0 {
+                    inflow_speed
+                } else if i >= self.nx as i64 {
+                    self.u[(self.nx - 1) + self.nx * jj as usize]
+                } else {
+                    self.u[i as usize + self.nx * jj as usize]
+                }
+            }
+        }
+    }
+
+    /// y面の $v$(境界条件を考慮、**群7**)。`j`は面index(`0..=ny`)。
+    /// `Channel`では `j=0` と `j=ny` が壁なので $v=0$(自由すべり)。
+    fn v_face(&self, i: i64, j: i64) -> f64 {
+        match self.boundary {
+            GridBoundary::Periodic => self.v_at(i, j),
+            GridBoundary::Channel { .. } => {
+                if j <= 0 || j >= self.ny as i64 {
+                    0.0
+                } else {
+                    let ii = i.clamp(0, self.nx as i64 - 1);
+                    self.v[ii as usize + self.nx * j as usize]
+                }
+            }
         }
     }
 
@@ -82,8 +165,8 @@ impl GridFluid2D {
 
     /// セル(i,j)の発散(中心差分、MAC格子の標準式、設計§4.4)。
     pub fn divergence(&self, i: i64, j: i64) -> f64 {
-        (self.u_at(i + 1, j) - self.u_at(i, j)) / self.h
-            + (self.v_at(i, j + 1) - self.v_at(i, j)) / self.h
+        (self.u_face(i + 1, j) - self.u_face(i, j)) / self.h
+            + (self.v_face(i, j + 1) - self.v_face(i, j)) / self.h
     }
 
     /// 双線形補間(周期境界、モジュールdocのstaggered配置に対応する`offset`を使う)。
@@ -107,16 +190,55 @@ impl GridFluid2D {
             + v11 * fx * fy
     }
 
+    /// 双線形補間(開境界版、**群7**)。周期のラップアラウンドの代わりに
+    /// `u_face`/`v_face`(境界条件を知っている面アクセサ)から値を引く。
+    /// これが無いと、流出面を跨いでバックトレースしたレイが**反対側の流入面から
+    /// 値を拾ってくる**(周期の折り返し)ことになり、開境界が成立しない。
+    fn sample_bounded(&self, is_u: bool, offset: Vec3, pos: Vec3) -> f64 {
+        let local_x = (pos.x - offset.x) / self.h;
+        let local_y = (pos.y - offset.y) / self.h;
+        let i0f = local_x.floor();
+        let j0f = local_y.floor();
+        let fx = local_x - i0f;
+        let fy = local_y - j0f;
+        let (i0, j0) = (i0f as i64, j0f as i64);
+        let get = |ii: i64, jj: i64| -> f64 {
+            if is_u {
+                self.u_face(ii, jj)
+            } else {
+                self.v_face(ii, jj)
+            }
+        };
+        let v00 = get(i0, j0);
+        let v10 = get(i0 + 1, j0);
+        let v01 = get(i0, j0 + 1);
+        let v11 = get(i0 + 1, j0 + 1);
+        v00 * (1.0 - fx) * (1.0 - fy)
+            + v10 * fx * (1.0 - fy)
+            + v01 * (1.0 - fx) * fy
+            + v11 * fx * fy
+    }
+
     fn sample_u(&self, pos: Vec3) -> f64 {
         // u[i][j] は (i*h, (j+0.5)*h) に位置する。
         let offset = Vec3::new(0.0, 0.5 * self.h, 0.0);
-        Self::sample_periodic(&self.u, self.nx, self.ny, self.h, offset, pos)
+        match self.boundary {
+            GridBoundary::Periodic => {
+                Self::sample_periodic(&self.u, self.nx, self.ny, self.h, offset, pos)
+            }
+            GridBoundary::Channel { .. } => self.sample_bounded(true, offset, pos),
+        }
     }
 
     fn sample_v(&self, pos: Vec3) -> f64 {
         // v[i][j] は ((i+0.5)*h, j*h) に位置する。
         let offset = Vec3::new(0.5 * self.h, 0.0, 0.0);
-        Self::sample_periodic(&self.v, self.nx, self.ny, self.h, offset, pos)
+        match self.boundary {
+            GridBoundary::Periodic => {
+                Self::sample_periodic(&self.v, self.nx, self.ny, self.h, offset, pos)
+            }
+            GridBoundary::Channel { .. } => self.sample_bounded(false, offset, pos),
+        }
     }
 
     fn velocity_at(&self, pos: Vec3) -> Vec3 {
@@ -137,6 +259,7 @@ impl GridFluid2D {
             kinematic_viscosity: self.kinematic_viscosity,
             solid: self.solid,
             last_pressure: self.last_pressure.clone(),
+            boundary: self.boundary,
         };
 
         for j in 0..self.ny as i64 {
@@ -292,23 +415,64 @@ impl GridFluid2D {
                 rhs[self.idx(i, j)] = density / dt * self.divergence(i, j);
             }
         }
-        let mean: f64 = rhs.iter().sum::<f64>() / n as f64;
-        for r in rhs.iter_mut() {
-            *r -= mean;
+        // 流出列は圧力Dirichlet p=0(上の`apply_a`の恒等行と対にする)。
+        if let GridBoundary::Channel { .. } = self.boundary {
+            for j in 0..self.ny {
+                rhs[(self.nx - 1) + self.nx * j] = 0.0;
+            }
+        }
+        // 周期境界ではラプラシアンが特異(定数関数が零空間)なので右辺の平均を引く。
+        // **開境界(Channel)では流出面に圧力Dirichlet $p=0$ が入るため非特異**で、
+        // 平均引きは不要どころか**やってはいけない**(可解な系の右辺を歪める)。
+        if self.boundary == GridBoundary::Periodic {
+            let mean: f64 = rhs.iter().sum::<f64>() / n as f64;
+            for r in rhs.iter_mut() {
+                *r -= mean;
+            }
         }
 
         let nx = self.nx;
         let ny = self.ny;
         let h2 = self.h * self.h;
+        let boundary = self.boundary;
         let apply_a = |x: &[f64], out: &mut [f64]| {
             for j in 0..ny as i64 {
                 for i in 0..nx as i64 {
                     let idx = wrap(i, nx) + nx * wrap(j, ny);
-                    let ip = wrap(i + 1, nx) + nx * wrap(j, ny);
-                    let im = wrap(i - 1, nx) + nx * wrap(j, ny);
-                    let jp = wrap(i, nx) + nx * wrap(j + 1, ny);
-                    let jm = wrap(i, nx) + nx * wrap(j - 1, ny);
-                    out[idx] = (x[ip] + x[im] + x[jp] + x[jm] - 4.0 * x[idx]) / h2;
+                    match boundary {
+                        GridBoundary::Periodic => {
+                            let ip = wrap(i + 1, nx) + nx * wrap(j, ny);
+                            let im = wrap(i - 1, nx) + nx * wrap(j, ny);
+                            let jp = wrap(i, nx) + nx * wrap(j + 1, ny);
+                            let jm = wrap(i, nx) + nx * wrap(j - 1, ny);
+                            out[idx] = (x[ip] + x[im] + x[jp] + x[jm] - 4.0 * x[idx]) / h2;
+                        }
+                        GridBoundary::Channel { .. } => {
+                            // 流出列(i = nx-1)は圧力Dirichlet p=0。恒等行にして
+                            // 未知数から実質的に外す(rhsも0にしてある)。
+                            if i == nx as i64 - 1 {
+                                out[idx] = x[idx];
+                                continue;
+                            }
+                            // 流入面(i=0の左)と y壁 はNeumann(∂p/∂n=0)なので、
+                            // 隣接セルが領域外なら**自分自身を鏡像として使う**
+                            // ——その結果、対角の係数がその方向ぶん減る。
+                            let mut sum = 0.0;
+                            let mut diag = 0.0;
+                            let mut neighbour = |ii: i64, jj: i64| {
+                                if ii < 0 || ii >= nx as i64 || jj < 0 || jj >= ny as i64 {
+                                    return; // Neumann: 鏡像なので寄与が相殺する。
+                                }
+                                sum += x[ii as usize + nx * jj as usize];
+                                diag += 1.0;
+                            };
+                            neighbour(i + 1, j);
+                            neighbour(i - 1, j);
+                            neighbour(i, j + 1);
+                            neighbour(i, j - 1);
+                            out[idx] = (sum - diag * x[idx]) / h2;
+                        }
+                    }
                 }
             }
         };
@@ -328,22 +492,49 @@ impl GridFluid2D {
         );
 
         let scale = dt / density;
-        for j in 0..self.ny as i64 {
-            for i in 0..=self.nx as i64 {
-                let ip = wrap(i, nx) + nx * wrap(j, ny);
-                let im = wrap(i - 1, nx) + nx * wrap(j, ny);
-                let dpdx = (pressure[ip] - pressure[im]) / self.h;
-                let idx = wrap(i, self.nx) + self.nx * wrap(j, self.ny);
-                self.u[idx] -= scale * dpdx;
+        match self.boundary {
+            GridBoundary::Periodic => {
+                for j in 0..self.ny as i64 {
+                    for i in 0..=self.nx as i64 {
+                        let ip = wrap(i, nx) + nx * wrap(j, ny);
+                        let im = wrap(i - 1, nx) + nx * wrap(j, ny);
+                        let dpdx = (pressure[ip] - pressure[im]) / self.h;
+                        let idx = wrap(i, self.nx) + self.nx * wrap(j, self.ny);
+                        self.u[idx] -= scale * dpdx;
+                    }
+                }
+                for j in 0..=self.ny as i64 {
+                    for i in 0..self.nx as i64 {
+                        let jp = wrap(i, nx) + nx * wrap(j, ny);
+                        let jm = wrap(i, nx) + nx * wrap(j - 1, ny);
+                        let dpdy = (pressure[jp] - pressure[jm]) / self.h;
+                        let idx = wrap(i, self.nx) + self.nx * wrap(j, self.ny);
+                        self.v[idx] -= scale * dpdy;
+                    }
+                }
             }
-        }
-        for j in 0..=self.ny as i64 {
-            for i in 0..self.nx as i64 {
-                let jp = wrap(i, nx) + nx * wrap(j, ny);
-                let jm = wrap(i, nx) + nx * wrap(j - 1, ny);
-                let dpdy = (pressure[jp] - pressure[jm]) / self.h;
-                let idx = wrap(i, self.nx) + self.nx * wrap(j, self.ny);
-                self.v[idx] -= scale * dpdy;
+            GridBoundary::Channel { .. } => {
+                // 内部の面だけを補正する。流入面(i=0)は速度Dirichletなので触らない、
+                // y壁(j=0)は v=0 のまま。
+                for j in 0..self.ny {
+                    for i in 1..self.nx {
+                        let dpdx = (pressure[i + nx * j] - pressure[(i - 1) + nx * j]) / self.h;
+                        self.u[i + nx * j] -= scale * dpdx;
+                    }
+                }
+                for j in 1..self.ny {
+                    for i in 0..self.nx {
+                        let dpdy = (pressure[i + nx * j] - pressure[i + nx * (j - 1)]) / self.h;
+                        self.v[i + nx * j] -= scale * dpdy;
+                    }
+                }
+                // 流入面と壁を境界値へ戻す(投影が触っていないので実質的な再確認)。
+                if let GridBoundary::Channel { inflow_speed } = self.boundary {
+                    for j in 0..self.ny {
+                        self.u[nx * j] = inflow_speed;
+                        self.v[nx * j] = 0.0;
+                    }
+                }
             }
         }
 
@@ -720,5 +911,146 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **群7: 開境界(流路)の最も基本的な整合性**——空の流路を一様流が
+    /// 「素通りする」こと。移流も粘性拡散も圧力投影も、一様流に対しては
+    /// 何もしないのが正しい。周期境界の折り返しやNeumann/Dirichletの取り違えが
+    /// あれば、どこかの面に必ず誤差が出る。
+    #[test]
+    fn a_uniform_flow_passes_through_an_open_channel_unchanged() {
+        let inflow = 2.5;
+        let mut fluid = GridFluid2D::new(24, 12, 0.1).with_boundary(GridBoundary::Channel {
+            inflow_speed: inflow,
+        });
+        fluid.kinematic_viscosity = 1e-3;
+
+        for _ in 0..200 {
+            fluid.step(0.002);
+        }
+        let mut worst_u: f64 = 0.0;
+        let mut worst_v: f64 = 0.0;
+        for value in &fluid.u {
+            worst_u = worst_u.max((value - inflow).abs());
+        }
+        for value in &fluid.v {
+            worst_v = worst_v.max(value.abs());
+        }
+        assert!(
+            worst_u < 1e-9 && worst_v < 1e-9,
+            "一様流は開流路を変化せず通り抜けるはず: |u-U|max={worst_u:.3e} |v|max={worst_v:.3e}"
+        );
+    }
+
+    /// **群7: 質量保存**——定常状態では流入した体積流量がそのまま流出する。
+    /// 障害物を入れても(流れが曲がるだけで)総量は変わらない。
+    #[test]
+    fn inflow_and_outflow_volume_fluxes_balance_even_around_an_obstacle() {
+        let inflow = 1.5;
+        let h = 0.1;
+        let (nx, ny) = (32usize, 16usize);
+        let mut fluid = GridFluid2D::new(nx, ny, h).with_boundary(GridBoundary::Channel {
+            inflow_speed: inflow,
+        });
+        // 流路の中ほどに矩形障害物を置く。
+        fluid.solid = Some(GridSolidBox {
+            center: (nx as f64 * h * 0.35, ny as f64 * h * 0.5),
+            half_width: 2.0 * h,
+            half_height: 3.0 * h,
+            velocity: Vec3::ZERO,
+        });
+
+        for _ in 0..400 {
+            fluid.step(0.002);
+        }
+
+        // 流入(i=0面)と流出(i=nx-1面)の体積流量。
+        let flux_at =
+            |column: usize| -> f64 { (0..ny).map(|j| fluid.u[column + nx * j] * h).sum::<f64>() };
+        let inflow_flux = inflow * ny as f64 * h;
+        let outflow_flux = flux_at(nx - 1);
+        let rel = (outflow_flux - inflow_flux).abs() / inflow_flux;
+        assert!(
+            rel < 0.02,
+            "定常では流入流量=流出流量のはず: in={inflow_flux:.5} out={outflow_flux:.5} rel={rel:.5}"
+        );
+
+        // 障害物の脇では流れが加速する(流路が狭まるので当然)。障害物が
+        // 実際に流れを曲げていることの確認。
+        let obstacle_column = (nx as f64 * 0.35) as usize;
+        let centre_row = ny / 2;
+        let centre_speed = fluid.u[obstacle_column + nx * centre_row].abs();
+        let bypass_speed = fluid.u[obstacle_column + nx].abs();
+        assert!(
+            bypass_speed > 1.2 * inflow,
+            "障害物の脇は加速するはず: bypass={bypass_speed:.4} inflow={inflow}"
+        );
+        assert!(
+            centre_speed < 0.5 * inflow,
+            "障害物の中は流れが止まっているはず: centre={centre_speed:.4}"
+        );
+    }
+
+    /// **群7: 開境界の投影が発散を落とすこと**(F9の開境界版)。
+    /// 適当な発散を持つ初期速度場から1回投影して、内部セルの発散が消えることを確認する
+    /// (流出列は圧力Dirichletで発散を吸うので判定から外す)。
+    #[test]
+    fn projection_removes_divergence_in_an_open_channel() {
+        let (nx, ny) = (24usize, 16usize);
+        let h = 0.05;
+        let mut fluid =
+            GridFluid2D::new(nx, ny, h).with_boundary(GridBoundary::Channel { inflow_speed: 1.0 });
+        // 非発散フリーな摂動を乗せる。
+        for j in 0..ny {
+            for i in 0..nx {
+                let x = i as f64 * h;
+                let y = j as f64 * h;
+                fluid.u[i + nx * j] += 0.3 * (3.0 * x).sin() * (2.0 * y).cos();
+                fluid.v[i + nx * j] += 0.2 * (2.0 * x).cos() * (3.0 * y).sin();
+            }
+        }
+        let before = (1..nx - 1)
+            .flat_map(|i| (0..ny).map(move |j| (i, j)))
+            .fold(0.0_f64, |acc, (i, j)| {
+                acc.max(fluid.divergence(i as i64, j as i64).abs())
+            });
+        assert!(before > 0.1, "初期場は発散を持つはず: {before}");
+
+        fluid.project(0.01, 1.0);
+
+        let after = (1..nx - 1)
+            .flat_map(|i| (0..ny).map(move |j| (i, j)))
+            .fold(0.0_f64, |acc, (i, j)| {
+                acc.max(fluid.divergence(i as i64, j as i64).abs())
+            });
+        assert!(
+            after < 1e-6,
+            "投影後は内部セルの発散が消えるはず: before={before:.4} after={after:.3e}"
+        );
+    }
+
+    /// `Periodic`(既定)は移行前とまったく同じ挙動——F8/F9 が影響を受けないことの保証。
+    #[test]
+    fn the_default_boundary_is_periodic_and_unchanged() {
+        let build = || {
+            let mut f = GridFluid2D::new(16, 16, 0.1);
+            for j in 0..16 {
+                for i in 0..16 {
+                    let x = i as f64 * 0.1;
+                    let y = j as f64 * 0.1;
+                    f.u[i + 16 * j] = (x).sin() * (y).cos();
+                    f.v[i + 16 * j] = -(x).cos() * (y).sin();
+                }
+            }
+            f
+        };
+        let (mut a, mut b) = (build(), build());
+        assert_eq!(a.boundary(), GridBoundary::Periodic);
+        for _ in 0..20 {
+            a.step(0.001);
+            b.step(0.001);
+        }
+        assert_eq!(a.u, b.u);
+        assert_eq!(a.v, b.v);
     }
 }

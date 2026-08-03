@@ -4,6 +4,7 @@
 use crate::Vec3;
 
 /// 一様間隔の3次元格子。値はセル中心に置く。設計 §1。
+#[derive(Clone, Debug)]
 pub struct Grid3<T> {
     pub nx: usize,
     pub ny: usize,

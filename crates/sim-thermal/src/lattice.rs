@@ -20,12 +20,14 @@
 //! どちらも**省略可能**で、指定しなければ移行前とまったく同じ一様$\alpha$の
 //! 経路を通る(既存のT3テストはビット単位で不変)。
 //!
-//! **残る縮約**: 3D `Grid3<f64>` への一般化(7点ステンシル)は引き続き未実装。
-//! 1Dで足りる検証(T3・D16)しか現時点で無く、3D化は格子の保持方法(`Grid3`との
-//! 統合)から設計し直す必要があるため。
+//! **群7で3D(7点ステンシル)も実装した**(`ConductionGrid3D`)。設計 §4.3
+//! 「温度場(格子)は同じ陰的拡散を7点ステンシルで(流束形式・調和平均)」。
+//! `sim_math::Grid3<f64>`を温度場の保持に使い、1D版と同じく陰的Euler + matrix-free PCG、
+//! 面の伝導率は調和平均で作る。境界は面ごとにDirichlet(固定温度)/Neumann(断熱)を
+//! 選べる。**1D版と同じ問題を解かせると同じ答えになる**ことを突き合わせて検証した。
 
 use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
-use sim_math::{pcg, Preconditioner};
+use sim_math::{pcg, Grid3, Preconditioner, Vec3};
 
 /// 1D棒の格子熱伝導ソルバ。両端(`temperature[0]`・`temperature[n-1]`)はDirichlet境界。
 #[derive(Clone)]
@@ -229,6 +231,203 @@ impl ConductionRod1D {
     }
 }
 
+/// 面ごとの境界条件(**群7で追加**、`ConductionGrid3D`が使う)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ThermalBoundary {
+    /// 固定温度(Dirichlet)。
+    Fixed(f64),
+    /// 断熱(Neumann、$\partial T/\partial n=0$)。
+    Insulated,
+}
+
+/// 3D格子熱伝導ソルバ(7点ステンシル、**群7で追加**、モジュールdoc参照)。
+///
+/// 陰的Euler $\rho c_p\frac{T^{n+1}-T^n}{\Delta t}=\nabla\cdot(k\nabla T^{n+1})$ を
+/// 有限体積で離散化し、面の伝導率は**調和平均**で作る(1D版と同じ、設計§4.3
+/// 「流束形式・調和平均」)。係数行列は対称正定値なのでmatrix-free PCGで解ける。
+///
+/// **境界**は6面それぞれに`ThermalBoundary`を指定する。`Fixed`はゴーストセルの
+/// 温度を固定値に、`Insulated`はゴーストセルを内側の鏡像にする(標準的な扱い)。
+///
+/// **残る縮約**: 熱伝導率は等方・セルごとのスカラー(異方性テンソルは非対応)。
+/// 前処理器は`Preconditioner::None`(1D版と同じ。格子が大きくなったら
+/// 対角スケーリングを入れる余地がある)。
+#[derive(Clone)]
+pub struct ConductionGrid3D {
+    /// セル中心の温度場。
+    pub temperature: Grid3<f64>,
+    /// セルごとの熱伝導率 $k$ [W/(m·K)]。
+    pub conductivity: Grid3<f64>,
+    /// 体積熱容量 $\rho c_p$ [J/(m³·K)](一様)。
+    pub volumetric_heat_capacity: f64,
+    /// 6面の境界条件(-x, +x, -y, +y, -z, +z の順)。
+    pub boundaries: [ThermalBoundary; 6],
+}
+
+impl ConductionGrid3D {
+    /// 一様な材質・一様な初期温度で作る。境界は全面断熱(閉じた箱)。
+    pub fn uniform(
+        nx: usize,
+        ny: usize,
+        nz: usize,
+        h: f64,
+        initial_temperature: f64,
+        conductivity: f64,
+        volumetric_heat_capacity: f64,
+    ) -> ConductionGrid3D {
+        assert!(nx >= 1 && ny >= 1 && nz >= 1);
+        assert!(volumetric_heat_capacity > 0.0, "ρc_p は正");
+        ConductionGrid3D {
+            temperature: Grid3::new(nx, ny, nz, h, Vec3::ZERO, initial_temperature),
+            conductivity: Grid3::new(nx, ny, nz, h, Vec3::ZERO, conductivity),
+            volumetric_heat_capacity,
+            boundaries: [ThermalBoundary::Insulated; 6],
+        }
+    }
+
+    fn dims(&self) -> (usize, usize, usize) {
+        (
+            self.temperature.nx,
+            self.temperature.ny,
+            self.temperature.nz,
+        )
+    }
+
+    fn flat(&self, i: usize, j: usize, k: usize) -> usize {
+        let (nx, ny, _) = self.dims();
+        i + nx * (j + ny * k)
+    }
+
+    /// 面の伝導率(調和平均、1D版と同じ理由)。
+    fn face_conductivity(a: f64, b: f64) -> f64 {
+        if a <= 0.0 || b <= 0.0 {
+            0.0
+        } else {
+            2.0 * a * b / (a + b)
+        }
+    }
+
+    /// 蓄えている熱エネルギー $\sum \rho c_p T\,\Delta V$ [J]。
+    pub fn thermal_energy(&self) -> f64 {
+        let (nx, ny, nz) = self.dims();
+        let dv = self.temperature.h.powi(3);
+        let mut sum = 0.0;
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    sum += self.temperature.at(i, j, k);
+                }
+            }
+        }
+        self.volumetric_heat_capacity * dv * sum
+    }
+
+    /// 1ステップ(陰的Euler + PCG)。
+    pub fn step(&mut self, dt: f64) {
+        let (nx, ny, nz) = self.dims();
+        let n = nx * ny * nz;
+        let h = self.temperature.h;
+        let factor = dt / (self.volumetric_heat_capacity * h * h);
+
+        // 6方向の面係数を先に作る(`(方向, セル)`ごと)。方向は
+        // 0:-x 1:+x 2:-y 3:+y 4:-z 5:+z で`boundaries`と同じ並び。
+        let mut face = vec![[0.0_f64; 6]; n];
+        // Dirichlet境界からの寄与(右辺へ移す定数項)。
+        let mut boundary_source = vec![0.0_f64; n];
+        let neighbour =
+            |i: usize, j: usize, k: usize, dir: usize| -> Option<(usize, usize, usize)> {
+                match dir {
+                    0 => i.checked_sub(1).map(|ii| (ii, j, k)),
+                    1 => (i + 1 < nx).then_some((i + 1, j, k)),
+                    2 => j.checked_sub(1).map(|jj| (i, jj, k)),
+                    3 => (j + 1 < ny).then_some((i, j + 1, k)),
+                    4 => k.checked_sub(1).map(|kk| (i, j, kk)),
+                    _ => (k + 1 < nz).then_some((i, j, k + 1)),
+                }
+            };
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = self.flat(i, j, k);
+                    let k_self = self.conductivity.at(i, j, k);
+                    for (dir, coefficient_slot) in face[idx].iter_mut().enumerate() {
+                        match neighbour(i, j, k, dir) {
+                            Some((a, b, c)) => {
+                                let k_face =
+                                    Self::face_conductivity(k_self, self.conductivity.at(a, b, c));
+                                *coefficient_slot = k_face * factor;
+                            }
+                            None => match self.boundaries[dir] {
+                                // 断熱: ゴーストが鏡像なので流束ゼロ = 係数ゼロ。
+                                ThermalBoundary::Insulated => *coefficient_slot = 0.0,
+                                // 固定温度: 境界温度は**セル中心から半セル外の面**に
+                                // あるので、熱抵抗は $(h/2)/k$、したがって係数は
+                                // 内部面($h/k$)の**2倍**になる。
+                                // 実装検証中にこれを1倍で書いて、二層平板の定常分布が
+                                // 解析解から4.5%ずれた(境界の熱抵抗を2倍に見積もった
+                                // ことになり、その分だけ内部の温度差が小さくなる)。
+                                ThermalBoundary::Fixed(t_boundary) => {
+                                    let coefficient = 2.0 * k_self * factor;
+                                    *coefficient_slot = coefficient;
+                                    boundary_source[idx] += coefficient * t_boundary;
+                                }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut b = vec![0.0; n];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = self.flat(i, j, k);
+                    b[idx] = self.temperature.at(i, j, k) + boundary_source[idx];
+                }
+            }
+        }
+
+        let apply_a = |x: &[f64], out: &mut [f64]| {
+            for k in 0..nz {
+                for j in 0..ny {
+                    for i in 0..nx {
+                        let idx = i + nx * (j + ny * k);
+                        let coefficients = face[idx];
+                        let mut diag = 1.0;
+                        let mut sum = 0.0;
+                        for (dir, &coefficient) in coefficients.iter().enumerate() {
+                            if coefficient == 0.0 {
+                                continue;
+                            }
+                            diag += coefficient;
+                            if let Some((a, bb, c)) = neighbour(i, j, k, dir) {
+                                sum += coefficient * x[a + nx * (bb + ny * c)];
+                            }
+                            // Dirichlet面の隣接項は`b`側(boundary_source)へ移してある。
+                        }
+                        out[idx] = diag * x[idx] - sum;
+                    }
+                }
+            }
+        };
+
+        let mut x = b.clone();
+        let result = pcg(apply_a, &b, &mut x, &Preconditioner::None, 1e-12, 2000);
+        debug_assert!(
+            result.converged,
+            "3D conduction PCG did not converge: {result:?}"
+        );
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    self.temperature.set(i, j, k, x[i + nx * (j + ny * k)]);
+                }
+            }
+        }
+    }
+}
+
 /// **増分Hで追加**。これが無いあいだ`ConductionRod1D`は`World::step()`が回す
 /// ドメイン一覧から漏れており、`enable_conduction_rod`で載せても**再生しても
 /// 一切温度が動かなかった**(D16のテストが
@@ -277,7 +476,8 @@ impl Solver for ConductionRod1D {
     fn approximations(&self) -> Vec<Approximation> {
         let mut out = vec![Approximation {
             name: "1D棒(3点ステンシル)",
-            reason: "3D格子への一般化は未実装。T3のフーリエ級数解の検証に1Dで足りたため。",
+            reason: "この型は1D。3D(7点ステンシル)が要るなら`ConductionGrid3D`を使う\
+                         (群7で追加、1D版と同じ答えを出すことを突き合わせ済み)。",
             doc: "docs/12-thermal/02-heat-transfer.md",
             can_disable: false,
         }];
@@ -502,5 +702,170 @@ mod tests {
             b.step(0.5);
         }
         assert_eq!(a.temperature, b.temperature);
+    }
+
+    /// **群7: 3D(7点ステンシル)が1D版と同じ答えを出すこと**。$x$方向の両端だけを
+    /// 固定温度にし、残り4面を断熱にすれば、3Dの問題は**1Dと物理的に同一**になる。
+    /// 同じ$\alpha$・同じ長さ・同じdtで両方を進め、温度分布が一致することを確認する。
+    ///
+    /// 単体で「それらしく動く」ことを見るより、**既に解析解(T3フーリエ級数)で
+    /// 検証済みの1D版と突き合わせる**ほうが、7点ステンシル・境界処理・PCGの配線を
+    /// まとめて検証できる。
+    ///
+    /// **格子の位置合わせに注意**: 1D版は**節点**中心(境界は節点そのもの)、3D版は
+    /// **セル**中心(境界はセル中心から半セル外の面)。同じ物理領域を覆わせた上で、
+    /// 1D解を3Dのセル中心位置へ線形補間して比べる。
+    #[test]
+    fn the_3d_solver_reproduces_the_1d_solver_on_a_one_dimensional_problem() {
+        let k = 50.0;
+        let rho_cp = 2.0e6;
+        let alpha = k / rho_cp;
+        let (t_left, t_right) = (100.0, 0.0);
+        let length = 1.0;
+
+        // 1D: 節点41個、両端がDirichlet。
+        let nodes = 41;
+        let mut rod = ConductionRod1D::new(nodes, length, 0.0, alpha);
+        rod.set_boundary_temperatures(t_left, t_right);
+
+        // 3D: 同じ長さをセル20個で覆う(境界は外側の面)。
+        let cells = 20usize;
+        let h = length / cells as f64;
+        let mut grid = ConductionGrid3D::uniform(cells, 3, 2, h, 0.0, k, rho_cp);
+        grid.boundaries[0] = ThermalBoundary::Fixed(t_left);
+        grid.boundaries[1] = ThermalBoundary::Fixed(t_right);
+        // y・z は断熱(既定)なので、この問題は x のみの1D問題になる。
+
+        // **十分に発達した過渡で比べる**。実装検証中、t=30秒(拡散長 √(αt)≈0.027 m、
+        // 3Dのセル幅0.05 mより小さい)で比べて11%ずれた——これは解の誤りではなく、
+        // **境界近傍の鋭い温度フロントを解像度の違う2つの格子で見比べていた**だけ。
+        // 拡散長が数セル分に育つ時刻(√(αt)≈0.32 m)まで進めれば、両者は
+        // 離散化誤差の範囲で一致する。
+        let dt = 20.0;
+        for _ in 0..200 {
+            rod.step(dt);
+            grid.step(dt);
+        }
+
+        // 1D解をセル中心 (i+0.5)h へ線形補間して比較する。
+        let sample_1d = |x: f64| -> f64 {
+            let t = x / rod.dx;
+            let i = t.floor() as usize;
+            let f = t - i as f64;
+            rod.temperature[i] * (1.0 - f) + rod.temperature[(i + 1).min(nodes - 1)] * f
+        };
+        let mut worst: f64 = 0.0;
+        for i in 0..cells {
+            let x = (i as f64 + 0.5) * h;
+            worst = worst.max((grid.temperature.at(i, 1, 0) - sample_1d(x)).abs());
+        }
+        assert!(
+            worst / (t_left - t_right) < 0.01,
+            "3Dは1Dと同じ答えを出すはず: 最大偏差={worst:.4}K"
+        );
+
+        // y・z 方向には勾配が立たない(断熱なので1D問題のまま)。
+        for i in 0..cells {
+            for j in 0..3 {
+                for kk in 0..2 {
+                    let d = (grid.temperature.at(i, j, kk) - grid.temperature.at(i, 1, 0)).abs();
+                    assert!(d < 1e-9, "y/z方向は一様のはず: セル({i},{j},{kk}) 偏差={d}");
+                }
+            }
+        }
+    }
+
+    /// **群7: 断熱箱ではエネルギーが厳密に保存する**(全面`Insulated`)。
+    /// 内部の温度分布は均されていくが、$\sum\rho c_p T\Delta V$ は変わらない
+    /// ——境界処理・係数行列の対称性が正しくないと必ず漏れる。
+    #[test]
+    fn an_insulated_3d_box_conserves_thermal_energy_while_equalising() {
+        let mut grid = ConductionGrid3D::uniform(8, 6, 5, 0.02, 300.0, 80.0, 3.0e6);
+        // 角だけ熱くする(非一様な初期条件)。
+        grid.temperature.set(0, 0, 0, 500.0);
+        grid.temperature.set(7, 5, 4, 100.0);
+
+        let initial = grid.thermal_energy();
+        let spread_of = |g: &ConductionGrid3D| -> f64 {
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            for k in 0..5 {
+                for j in 0..6 {
+                    for i in 0..8 {
+                        min = min.min(g.temperature.at(i, j, k));
+                        max = max.max(g.temperature.at(i, j, k));
+                    }
+                }
+            }
+            max - min
+        };
+        let initial_spread = spread_of(&grid);
+
+        // α = k/ρc_p ≈ 2.7e-5 m²/s、箱の代表長さ 0.16 m なので均されるのに
+        // L²/α ≈ 1e3 s かかる。dt=20 の200step(4e3 s)で十分。
+        for _ in 0..200 {
+            grid.step(20.0);
+            let now = grid.thermal_energy();
+            let rel = (now - initial).abs() / initial;
+            assert!(
+                rel < 1e-9,
+                "断熱箱はエネルギーを保存するはず: rel={rel:.3e}"
+            );
+        }
+        assert!(
+            spread_of(&grid) < 0.01 * initial_spread,
+            "十分に均されているはず: {} -> {}",
+            initial_spread,
+            spread_of(&grid)
+        );
+    }
+
+    /// **群7: 3Dでも材質界面の直列熱抵抗が成り立つ**(調和平均の3D版)。
+    /// $x$方向に $k_1$/$k_2$ の2層を積み、両端をDirichletにした定常分布が
+    /// 解析解(1D版と同じ直列熱抵抗)に一致することを確認する。
+    #[test]
+    fn a_two_layer_3d_slab_matches_the_series_resistance_steady_profile() {
+        let cells = 20usize;
+        let h = 0.05;
+        let (k1, k2) = (200.0, 2.0);
+        let rho_cp = 3.0e6;
+        let (t_left, t_right) = (80.0, 0.0);
+
+        let mut grid = ConductionGrid3D::uniform(cells, 2, 2, h, 0.0, k1, rho_cp);
+        for k in 0..2 {
+            for j in 0..2 {
+                for i in cells / 2..cells {
+                    grid.conductivity.set(i, j, k, k2);
+                }
+            }
+        }
+        grid.boundaries[0] = ThermalBoundary::Fixed(t_left);
+        grid.boundaries[1] = ThermalBoundary::Fixed(t_right);
+
+        for _ in 0..2000 {
+            grid.step(1.0e4);
+        }
+
+        // 解析解。境界はセル中心から半セル外にあるので、層の厚さは
+        // 左: (cells/2) * h、右: (cells/2) * h、全長 cells*h。
+        let length = cells as f64 * h;
+        let x_f = (cells / 2) as f64 * h;
+        let flux = (t_left - t_right) / (x_f / k1 + (length - x_f) / k2);
+        let analytic = |x: f64| {
+            if x <= x_f {
+                t_left - flux * x / k1
+            } else {
+                t_right + flux * (length - x) / k2
+            }
+        };
+        let mut worst: f64 = 0.0;
+        for i in 0..cells {
+            let x = (i as f64 + 0.5) * h;
+            worst = worst.max((grid.temperature.at(i, 0, 0) - analytic(x)).abs());
+        }
+        assert!(
+            worst / (t_left - t_right) < 0.02,
+            "3Dの二層平板も直列熱抵抗の解析解に一致するはず: 最大偏差={worst:.4}K"
+        );
     }
 }

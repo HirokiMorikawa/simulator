@@ -12,7 +12,7 @@ mod lattice;
 mod phase;
 
 pub use gas::{carnot_efficiency_bound, GasCompartment, GasSpecies, GAS_CONSTANT};
-pub use lattice::ConductionRod1D;
+pub use lattice::{ConductionGrid3D, ConductionRod1D, ThermalBoundary};
 pub use phase::{Phase, PhaseMaterial, PhaseState};
 
 use sim_core::{
