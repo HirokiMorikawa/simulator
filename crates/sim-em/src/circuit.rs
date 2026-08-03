@@ -42,7 +42,7 @@ const DIODE_MAX_NEWTON_ITERATIONS: usize = 10;
 /// 収束判定: 電圧ステップがこれ未満なら収束とみなす(設計§4「Δv<10⁻⁹V」)。
 const DIODE_CONVERGENCE_TOLERANCE: f64 = 1e-9;
 
-/// 理想スイッチの近似(モジュールdoc「モーター・スイッチは未実装」の解消、
+/// 理想スイッチの近似(モーターは群7で`add_dc_motor`として実装済み、
 /// `sim-world::Command::SetSwitch`が使う)。専用の未知数(電圧源のような)を追加せず、
 /// 閉:低抵抗(ほぼ短絡)・開:高抵抗(ほぼ開放)の2値抵抗として`resistors`と同じ
 /// `stamp_conductance`経路でスタンプする(最小の実装)。抵抗比(1e-6Ω/1e9Ω、15桁)は
@@ -1021,7 +1021,7 @@ mod tests {
         );
     }
 
-    /// スイッチ(モジュールdoc「モーター・スイッチは未実装」の解消): 開いている間は
+    /// スイッチ(理想スイッチの2値抵抗近似、`SWITCH_ON_RESISTANCE`のdoc参照): 開いている間は
     /// 出力電圧がほぼ0(開放)、閉じている間は分圧回路の解析値と一致することを確認する
     /// (`sim-world::Command::SetSwitch`が使う`set_switch_closed`経由)。
     #[test]

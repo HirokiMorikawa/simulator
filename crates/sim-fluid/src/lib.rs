@@ -3,7 +3,8 @@
 //! P1: `aero`(集中定数の抗力モデル、docs/11-fluid/05-aero-hydrodynamics.md)・
 //! `buoyancy`(集中定数の浮力モデル、docs/11-fluid/04-free-surface-buoyancy.md)を実装。
 //! P4: `sph`(弱圧縮SPH、docs/11-fluid/03-sph.md)を実装。P3: `grid_fluid`
-//! (格子流体、docs/11-fluid/02-eulerian-grid.md、2D周期境界のみ・F8/F9)・
+//! (格子流体、docs/11-fluid/02-eulerian-grid.md、2D。周期境界(F8/F9)に加え群7で
+//! 開境界(流入出)`GridBoundary::Channel`を追加)・
 //! `poiseuille`(ポアズイユ流、完全発達した平行平板間流れが厳密に1D陰的粘性拡散に
 //! 帰着することを使った専用縮約実装、F7)・`karman`(カルマン渦列、流入/流出境界+円柱の
 //! マスキング方式固体セル、渦度強化を設計§4.5の代替経路として使用、F11)・

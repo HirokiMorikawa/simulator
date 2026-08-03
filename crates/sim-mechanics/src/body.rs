@@ -186,7 +186,8 @@ impl RigidBodySet {
 
     /// 剛体を追加する。密度→質量は `mass_override` が無ければ `shape.volume() * material.density`
     /// (設計 §3 の `RigidBodyDesc` 規約)。返り値のインデックスは push 順(世代管理は
-    /// `remove_body` を持つ World 層の責務、Phase A では未実装)。
+    /// World 層の責務で、`sim_world::World::remove_body`として**実装済み**——
+    /// この注記は「Phase A では未実装」と書いたまま古くなっていた)。
     pub fn create_body(&mut self, desc: RigidBodyDesc, materials: &MaterialDb) -> usize {
         let index = self.position.len();
         let material = materials.get(desc.material);

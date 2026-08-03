@@ -386,11 +386,24 @@ impl Solver for FdtdSim2D {
                 doc: "docs/13-electromagnetism/03-maxwell-fdtd.md",
                 can_disable: false,
             },
-            Approximation {
-                name: "境界: PEC(完全導体壁)",
-                reason: "境界の接線 E を 0 に固定するため、外向きに出た波は全反射して戻る。開放空間を模す PML 吸収境界は未実装。",
-                doc: "docs/13-electromagnetism/03-maxwell-fdtd.md",
-                can_disable: false,
+            // 境界の申告は PML の有無で変わる(**群7**)。
+            if self.pml_layers() == 0 {
+                Approximation {
+                    name: "境界: PEC(完全導体壁)",
+                    reason: "境界の接線 E を 0 に固定するため、外向きに出た波は全反射して戻る。\
+                             開放空間を模すなら`with_pml`でPML吸収境界を有効にする(群7で実装)。",
+                    doc: "docs/13-electromagnetism/03-maxwell-fdtd.md",
+                    can_disable: true,
+                }
+            } else {
+                Approximation {
+                    name: "境界: PML(有限層の吸収境界)",
+                    reason: "外向きの波を多項式グレーディングした導電率で吸収する(反射率は設計目標の\
+                             -40 dB 未満を実測で確認済み)。層で減衰しきれずに届いた分は最外周の\
+                             PEC壁で反射して戻るため、反射はゼロではない。",
+                    doc: "docs/13-electromagnetism/03-maxwell-fdtd.md",
+                    can_disable: true,
+                }
             },
             Approximation {
                 name: "媒質: 真空のみ (ε=μ=1, σ=0)",
