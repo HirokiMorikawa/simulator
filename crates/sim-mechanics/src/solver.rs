@@ -38,6 +38,9 @@ pub struct MechanicsSolver {
     contact_cache: contact::ManifoldCache,
     /// Box-Box 軸選択ヒステリシス用キャッシュ(設計 docs/10-mechanics/02-collision-detection.md §4.4)。
     axis_cache: collision::AxisCache,
+    /// フルCCD(設計 §4.6「フルCCD(Phase 5)」)を走らせるか。既定は有効。
+    /// `set_full_ccd` から切り替える(対照実験専用)。
+    full_ccd_enabled: bool,
     /// Distance ジョイント一覧(設計 docs/10-mechanics/05-joints-constraints.md §3)。
     pub joints: Vec<DistanceJoint>,
     /// Ball ジョイント一覧(設計 docs/10-mechanics/05-joints-constraints.md §3)。
@@ -103,6 +106,7 @@ impl MechanicsSolver {
             water: None,
             contact_cache: contact::ManifoldCache::new(),
             axis_cache: collision::AxisCache::new(),
+            full_ccd_enabled: true,
             joints: Vec::new(),
             ball_joints: Vec::new(),
             slider_joints: Vec::new(),
@@ -129,6 +133,13 @@ impl MechanicsSolver {
     /// マニフォールド持続化キャッシュが保持している接触点数(GC の検証用)。
     pub fn cached_contact_point_count(&self) -> usize {
         self.contact_cache.len()
+    }
+
+    /// フルCCD(conservative advancement、設計 §4.6「フルCCD(Phase 5)」)の有効/無効。
+    /// 既定は有効。`false` にすると最小CCD(speculative contact)だけが残る——
+    /// 対照実験専用のスイッチ。
+    pub fn set_full_ccd(&mut self, enabled: bool) {
+        self.full_ccd_enabled = enabled;
     }
 
     /// 剛体ごとの運動エネルギー [J](並進+回転、`Solver::total_energy`の`kinetic`と
@@ -360,6 +371,11 @@ impl Solver for MechanicsSolver {
         // 最小CCD(speculative contact、設計§4.6)。既存の実接触解決のあとに、まだ検出
         // されていない今ステップ中のすり抜けだけを速度クランプで防ぐ(P1標準機能)。
         ccd::apply_speculative_contacts(&mut self.bodies, dt);
+        // フルCCD(conservative advancement、設計§4.6「フルCCD(Phase 5)」、**群9で配線**)。
+        // speculative pass が原理的に扱えない「球以外の弾丸」「動的な相手」を受け持つ。
+        if self.full_ccd_enabled {
+            ccd::apply_conservative_advancement(&mut self.bodies, dt);
+        }
         self.integrate_positions(dt);
         self.update_inertia_and_clear_accum();
     }

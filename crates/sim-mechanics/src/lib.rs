@@ -29,7 +29,8 @@ pub use body::{
 };
 pub use collision::{ContactManifold, ContactPoint};
 pub use gjk::{
-    conservative_advancement_toi, epa_penetration, gjk_distance, ConvexShape, EpaResult, GjkResult,
+    conservative_advancement_hit, conservative_advancement_toi, epa_penetration, gjk_distance,
+    ConvexShape, EpaResult, GjkResult, ToiHit,
 };
 pub use joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint, SoftParams, WheelJoint};
 pub use shape::{Aabb, Shape};

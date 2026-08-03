@@ -399,14 +399,47 @@ pub fn conservative_advancement_toi(
     rel_vel: Vec3,
     max_time: f64,
 ) -> Option<f64> {
+    conservative_advancement_hit(a, b, rel_vel, max_time).map(|hit| hit.time)
+}
+
+/// `conservative_advancement_toi` の結果に**衝突時の分離法線**を添えたもの
+/// (**群9で追加**)。速度クランプで CCD を実際に効かせるには「どちら向きに
+/// 近づいているか」が要るが、TOI だけでは分からないため。
+#[derive(Clone, Copy, Debug)]
+pub struct ToiHit {
+    /// 接触へ到達する時刻。
+    pub time: f64,
+    /// 直近の反復で GJK が返した分離法線(BからAへ向かう単位法線)。
+    /// 開始時点で既に重なっていて一度も分離法線が得られなかった場合のみ `None`
+    /// (この場合は通常の離散接触解決が扱う範囲であり、CCD は何もしない)。
+    pub normal: Option<Vec3>,
+}
+
+/// TOI とその時刻での分離法線を返す(`conservative_advancement_toi` の本体、同 doc 参照)。
+pub fn conservative_advancement_hit(
+    a: &ConvexShape,
+    b: &ConvexShape,
+    rel_vel: Vec3,
+    max_time: f64,
+) -> Option<ToiHit> {
     let mut t = 0.0;
+    let mut last_normal = None;
     for _ in 0..CCD_MAX_ITERATIONS {
         let offset = rel_vel.scale(t);
         match gjk_distance_offset(a, b, offset) {
-            GjkResult::Overlapping { .. } => return Some(t),
+            GjkResult::Overlapping { .. } => {
+                return Some(ToiHit {
+                    time: t,
+                    normal: last_normal,
+                })
+            }
             GjkResult::Separated { distance, normal } => {
+                last_normal = Some(normal);
                 if distance < 1e-9 {
-                    return Some(t);
+                    return Some(ToiHit {
+                        time: t,
+                        normal: last_normal,
+                    });
                 }
                 let closing_speed = rel_vel.dot(normal);
                 if closing_speed <= 1e-12 {
@@ -421,7 +454,10 @@ pub fn conservative_advancement_toi(
     }
     // 反復上限に達した場合、この時点のtは接触に十分近いとみなして返す
     // (分離距離が反復ごとに単調減少しているため、上限到達時も概ね接触寸前)。
-    Some(t.min(max_time))
+    Some(ToiHit {
+        time: t.min(max_time),
+        normal: last_normal,
+    })
 }
 
 #[cfg(test)]
