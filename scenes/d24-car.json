@@ -1,0 +1,188 @@
+{
+  "name": "d24-car",
+  "world": {
+    "gravity": 9.80665,
+    "dt": 0.004166666666666667
+  },
+  "bodies": [
+    {
+      "name": "ground",
+      "shape": {
+        "plane": {
+          "normal": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "d": 0.0
+        }
+      },
+      "material": "コンクリート",
+      "type": "static",
+      "collision_group": 1,
+      "collision_mask": 4294967295
+    },
+    {
+      "name": "chassis",
+      "shape": {
+        "box": {
+          "half": [
+            1.2,
+            0.25,
+            0.6
+          ]
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.0,
+        0.75,
+        0.0
+      ],
+      "mass_override": 600.0,
+      "collision_group": 2,
+      "collision_mask": 4294967289
+    },
+    {
+      "name": "wheel_fl",
+      "shape": {
+        "sphere": {
+          "radius": 0.32
+        }
+      },
+      "material": "ゴム(天然)",
+      "position": [
+        0.9,
+        0.32,
+        0.65
+      ],
+      "mass_override": 60.0,
+      "collision_group": 4,
+      "collision_mask": 4294967289
+    },
+    {
+      "name": "wheel_fr",
+      "shape": {
+        "sphere": {
+          "radius": 0.32
+        }
+      },
+      "material": "ゴム(天然)",
+      "position": [
+        0.9,
+        0.32,
+        -0.65
+      ],
+      "mass_override": 60.0,
+      "collision_group": 4,
+      "collision_mask": 4294967289
+    },
+    {
+      "name": "wheel_rl",
+      "shape": {
+        "sphere": {
+          "radius": 0.32
+        }
+      },
+      "material": "ゴム(天然)",
+      "position": [
+        -0.9,
+        0.32,
+        0.65
+      ],
+      "mass_override": 60.0,
+      "collision_group": 4,
+      "collision_mask": 4294967289
+    },
+    {
+      "name": "wheel_rr",
+      "shape": {
+        "sphere": {
+          "radius": 0.32
+        }
+      },
+      "material": "ゴム(天然)",
+      "position": [
+        -0.9,
+        0.32,
+        -0.65
+      ],
+      "mass_override": 60.0,
+      "collision_group": 4,
+      "collision_mask": 4294967289
+    }
+  ],
+  "joints": [
+    {
+      "wheel": {
+        "chassis": "chassis",
+        "wheel": "wheel_fl",
+        "anchor_chassis": [
+          0.9,
+          0.0,
+          0.65
+        ],
+        "rest_length": 0.43,
+        "frequency": 2.5,
+        "damping_ratio": 0.7
+      }
+    },
+    {
+      "wheel": {
+        "chassis": "chassis",
+        "wheel": "wheel_fr",
+        "anchor_chassis": [
+          0.9,
+          0.0,
+          -0.65
+        ],
+        "rest_length": 0.43,
+        "frequency": 2.5,
+        "damping_ratio": 0.7
+      }
+    },
+    {
+      "wheel": {
+        "chassis": "chassis",
+        "wheel": "wheel_rl",
+        "anchor_chassis": [
+          -0.9,
+          0.0,
+          0.65
+        ],
+        "rest_length": 0.43,
+        "frequency": 2.5,
+        "damping_ratio": 0.7,
+        "motor_speed": 12.0,
+        "motor_max_torque": 200.0
+      }
+    },
+    {
+      "wheel": {
+        "chassis": "chassis",
+        "wheel": "wheel_rr",
+        "anchor_chassis": [
+          -0.9,
+          0.0,
+          -0.65
+        ],
+        "rest_length": 0.43,
+        "frequency": 2.5,
+        "damping_ratio": 0.7,
+        "motor_speed": 12.0,
+        "motor_max_torque": 200.0
+      }
+    }
+  ],
+  "probes": [
+    {
+      "body_pos_x": "chassis"
+    },
+    {
+      "body_pos_y": "chassis"
+    },
+    {
+      "body_speed": "chassis"
+    }
+  ]
+}

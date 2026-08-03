@@ -1,0 +1,21 @@
+{
+  "name": "d17-piston",
+  "world": { "gravity": 0.0, "dt": 0.008333333 },
+  "bodies": [
+    { "shape": { "sphere": { "radius": 0.05 } }, "material": "鋼(炭素鋼)",
+      "position": [0, 0, 0], "linear_velocity": [-0.5, 0, 0],
+      "mass_override": 1.0, "name": "piston" }
+  ],
+  "joints": [
+    { "slider": { "body_a": "piston", "axis": [1, 0, 0] } }
+  ],
+  "gas": { "n_moles": 1.0e-4, "volume": 1.0e-3, "temperature": 300.0 },
+  "couplings": [
+    { "piston_gas": { "body": "piston", "axis": [1, 0, 0],
+                      "area": 0.01, "initial_volume": 1.0e-3 } }
+  ],
+  "probes": [
+    { "body_pos_x": "piston" },
+    { "body_speed": "piston" }
+  ]
+}

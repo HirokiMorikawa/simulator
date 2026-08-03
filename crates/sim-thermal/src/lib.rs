@@ -12,10 +12,12 @@ mod lattice;
 mod phase;
 
 pub use gas::{carnot_efficiency_bound, GasCompartment, GasSpecies, GAS_CONSTANT};
-pub use lattice::ConductionRod1D;
+pub use lattice::{ConductionGrid3D, ConductionRod1D, ThermalBoundary};
 pub use phase::{Phase, PhaseMaterial, PhaseState};
 
-use sim_core::{EnergyBreakdown, Solver, SolverContext, StateHasher};
+use sim_core::{
+    Approximation, EnergyBreakdown, Event, EventKind, Solver, SolverContext, SourceId, StateHasher,
+};
 use sim_math::{pcg, Preconditioner};
 
 /// 基準温度(台帳の thermal 基準)。設計 09-パラメータ表(01-thermodynamics-laws.md §9)。
@@ -58,6 +60,7 @@ pub struct ThermalLink {
 }
 
 /// 熱ノード網ソルバ。設計 02-heat-transfer.md §4.3(陰的Euler + PCG、グラフラプラシアン)。
+#[derive(Clone)]
 pub struct ThermalSolver {
     pub nodes: Vec<ThermalNode>,
     pub links: Vec<ThermalLink>,
@@ -109,7 +112,7 @@ impl Solver for ThermalSolver {
 
     /// (C/dt + L) T^{n+1} = (C/dt) T^n + b をノード数 n の matrix-free PCG で解く。
     /// L はグラフラプラシアン(伝導)+ 対流・放射の対角項(SPD)。
-    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+    fn step(&mut self, dt: f64, ctx: &mut SolverContext) {
         let n = self.nodes.len();
         if n == 0 {
             return;
@@ -157,7 +160,22 @@ impl Solver for ThermalSolver {
 
         let mut x: Vec<f64> = self.nodes.iter().map(|n| n.temperature).collect();
         let result = pcg(apply_a, &b, &mut x, &Preconditioner::None, 1e-10, 200);
-        debug_assert!(result.converged, "thermal PCG did not converge: {result:?}");
+        // **2026-07-27の監査で修正(品質是正Q8)**: 以前はここが`debug_assert!`
+        // だった——devビルドでは即パニックする一方、releaseビルドでは未収束の
+        // 解を無言で温度場へ書き戻しており、両ビルドで挙動が異なっていた。
+        // `SolverContext::events`(既存の`EventKind::SolverDiverged`)へ両ビルド
+        // 一律で通知する形に統一した——`step: 0`は他ドメイン(`sim_mechanics::
+        // solver`の接触イベント等)と同じ既存の慣行(実際のstep番号は`World`側で
+        // 埋める想定の暫定値)。イベントを出した上で解自体は書き戻す(PCGは
+        // 200回で打ち切っても部分的に改善された近似解を返すため、状態を全く
+        // 進めないより実用上ましという既存の設計判断はそのまま維持する)。
+        if !result.converged {
+            ctx.events.push(Event {
+                step: 0,
+                source: SourceId(0),
+                kind: EventKind::SolverDiverged,
+            });
+        }
 
         for (i, node) in self.nodes.iter_mut().enumerate() {
             node.temperature = x[i];
@@ -183,6 +201,25 @@ impl Solver for ThermalSolver {
             thermal,
             ..Default::default()
         }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        let mut out = vec![Approximation {
+            name: "熱: 集中定数ノード網",
+            reason: "空間分解した温度場ではなく、熱容量を持つノードとリンクのネットワークで\
+                     近似する(陰的Eulerなので無条件安定)。",
+            doc: "docs/12-thermal/02-heat-transfer.md",
+            can_disable: false,
+        }];
+        if self.nodes.iter().all(|n| n.emissivity == 0.0) {
+            out.push(Approximation {
+                name: "放射を無視",
+                reason: "全ノードのemissivityが0のため、放射項は解いていない(対流と伝導のみ)。",
+                doc: "docs/12-thermal/02-heat-transfer.md",
+                can_disable: true,
+            });
+        }
+        out
     }
 }
 
@@ -346,6 +383,44 @@ mod tests {
         assert!(
             (boiling_point_1atm - 100.0).abs() < 1.0,
             "boiling_point_1atm={boiling_point_1atm}"
+        );
+    }
+
+    /// **品質是正Q8の回帰テスト**: PCGが200回の反復上限内に収束しないほど
+    /// 悪条件な熱網(コンダクタンスが12桁にわたって振動する4000ノードの鎖 +
+    /// 巨大なdt)を`step`すると、`EventKind::SolverDiverged`が
+    /// `SolverContext::events`へ積まれること(以前は`debug_assert!`のみで、
+    /// releaseビルドでは無検知だった)。
+    #[test]
+    fn step_emits_solver_diverged_event_when_pcg_fails_to_converge_within_the_iteration_cap() {
+        let mut solver = ThermalSolver::new(293.15);
+        let node_count = 4000;
+        let mut previous = solver.add_node(ThermalNode::new(400.0, 1.0));
+        for i in 1..node_count {
+            let node = solver.add_node(ThermalNode::new(293.15 + i as f64, 1.0));
+            // コンダクタンスを12桁にわたって振動させ、前処理なしPCGにとって
+            // 悪条件な系にする(200回の反復上限内では収束しない)。
+            let conductance = 1e-6 * 10f64.powi(i % 12);
+            solver.add_link(previous, node, conductance);
+            previous = node;
+        }
+
+        let materials = sim_core::MaterialDb::standard();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        solver.step(1.0e6, &mut ctx);
+
+        let drained = events.drain_sorted();
+        assert!(
+            drained
+                .iter()
+                .any(|e| e.kind == sim_core::EventKind::SolverDiverged),
+            "expected a SolverDiverged event when PCG fails to converge, got {drained:?}"
         );
     }
 }

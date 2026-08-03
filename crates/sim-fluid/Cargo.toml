@@ -7,3 +7,14 @@ publish.workspace = true
 [dependencies]
 sim-core = { path = "../sim-core" }
 sim-math = { path = "../sim-math" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "grid_fluid_pcg"
+harness = false
+
+[[bench]]
+name = "sph_neighbor_search"
+harness = false

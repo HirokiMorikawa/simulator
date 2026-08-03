@@ -8,7 +8,7 @@ use sim_math::{Mat3, Quat, Transform, Vec3};
 pub struct ShapeHandle(pub u32);
 
 /// 形状プール。`RigidBodySet` から間接参照する(設計 §3 の `Vec<ShapeHandle>`)。
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ShapeStore {
     shapes: Vec<Shape>,
 }
@@ -62,6 +62,24 @@ pub struct RigidBodyDesc {
     pub mass_override: Option<f64>,
     pub initial_temperature: f64,
     pub drag: DragModel,
+    /// 衝突フィルタのビットフラグ(設計 docs/10-mechanics/02-collision-detection.md §4.1
+    /// 「`collision_group: u32` / `collision_mask: u32` のビット AND」)。
+    /// 既定は「全員が同じ 1 番グループに属し、全グループと当たる」。
+    pub collision_group: u32,
+    pub collision_mask: u32,
+}
+
+/// 衝突フィルタの既定値。**既定同士は必ず衝突する**(`1 & !0 != 0`)ので、
+/// フィルタを設定しないシーンの挙動は導入前と完全に一致する。
+pub const DEFAULT_COLLISION_GROUP: u32 = 1;
+pub const DEFAULT_COLLISION_MASK: u32 = u32::MAX;
+
+/// broadphase のペアフィルタ(設計 §4.1)。**双方向 AND** を取る——片側だけが
+/// 相手を無視するのは物理的に意味を成さない(A は B を押すが B は A を押さない
+/// という非対称な接触になり運動量が保存しない)ため、どちらか一方でも相手を
+/// マスクしていればペアを捨てる。
+pub fn collision_filter_allows(group_a: u32, mask_a: u32, group_b: u32, mask_b: u32) -> bool {
+    (mask_a & group_b) != 0 && (mask_b & group_a) != 0
 }
 
 impl RigidBodyDesc {
@@ -80,11 +98,14 @@ impl RigidBodyDesc {
             mass_override: None,
             initial_temperature: 293.15,
             drag: DragModel::None,
+            collision_group: DEFAULT_COLLISION_GROUP,
+            collision_mask: DEFAULT_COLLISION_MASK,
         }
     }
 }
 
 /// 剛体状態の SoA コンテナ。設計 §3。
+#[derive(Clone)]
 pub struct RigidBodySet {
     // 状態(毎ステップ更新)
     pub position: Vec<Vec3>,
@@ -103,6 +124,9 @@ pub struct RigidBodySet {
     pub shape: Vec<ShapeHandle>,
     pub material: Vec<MaterialId>,
     pub drag: Vec<DragModel>,
+    /// 衝突フィルタ(設計 §4.1)。broadphase の候補ペア列挙で AND を取る。
+    pub collision_group: Vec<u32>,
+    pub collision_mask: Vec<u32>,
     // 熱結合用
     pub temperature: Vec<f64>,
     // スリープ用(設計 docs/10-mechanics/01-rigid-body.md §4)。
@@ -130,6 +154,8 @@ impl RigidBodySet {
             shape: Vec::new(),
             material: Vec::new(),
             drag: Vec::new(),
+            collision_group: Vec::new(),
+            collision_mask: Vec::new(),
             temperature: Vec::new(),
             still_time: Vec::new(),
             asleep: Vec::new(),
@@ -160,7 +186,8 @@ impl RigidBodySet {
 
     /// 剛体を追加する。密度→質量は `mass_override` が無ければ `shape.volume() * material.density`
     /// (設計 §3 の `RigidBodyDesc` 規約)。返り値のインデックスは push 順(世代管理は
-    /// `remove_body` を持つ World 層の責務、Phase A では未実装)。
+    /// World 層の責務で、`sim_world::World::remove_body`として**実装済み**——
+    /// この注記は「Phase A では未実装」と書いたまま古くなっていた)。
     pub fn create_body(&mut self, desc: RigidBodyDesc, materials: &MaterialDb) -> usize {
         let index = self.position.len();
         let material = materials.get(desc.material);
@@ -202,11 +229,110 @@ impl RigidBodySet {
         self.shape.push(shape_handle);
         self.material.push(desc.material);
         self.drag.push(desc.drag);
+        self.collision_group.push(desc.collision_group);
+        self.collision_mask.push(desc.collision_mask);
         self.temperature.push(desc.initial_temperature);
         self.still_time.push(0.0);
         self.asleep.push(false);
 
         index
+    }
+
+    /// エディタのScale Gizmo(縮約実装、`sim-wasm::set_body_scale_at`参照)向けに、
+    /// 既存ボディの形状を置き換え、質量・慣性を`create_body`と同じ式
+    /// (質量 = `shape.volume() * material.density`、`inv_inertia_local`も同様)で
+    /// 再計算する。`ShapeStore`は追加専用(既存の`create_body`と同じ設計)のため、
+    /// 古い形状のエントリはプールに残り続ける(Undo/Redoが古いハンドルへ戻せる
+    /// 実装ではないため実害は無いが、スケールドラッグを繰り返すたびにプールが
+    /// 単調に増える点は正直に記録しておく)。
+    ///
+    /// 静止中(`sleep`モジュール参照)のボディの形状を変えると、寸法変更後の
+    /// 形状が新たに接触相手と干渉していても、asleepなボディ同士の接触は
+    /// 再解決されない(`MechanicsSolver::manifold_is_active`)ため、そのまま
+    /// 干渉状態で固まってしまう。形状変更は静止仮定を無効化する明らかな
+    /// イベントなので、`still_time`/`asleep`をリセットして次stepで確実に
+    /// 再評価させる。
+    pub fn set_shape(&mut self, index: usize, shape: Shape, materials: &MaterialDb) {
+        let material = materials.get(self.material[index]);
+        let mass = shape.volume().unwrap_or(0.0) * material.density;
+        let is_dynamic = matches!(self.body_type[index], BodyType::Dynamic);
+        self.inv_mass[index] = if is_dynamic && mass > 0.0 {
+            1.0 / mass
+        } else {
+            0.0
+        };
+        self.inv_inertia_local[index] = if is_dynamic && mass > 0.0 {
+            let diag = shape.unit_mass_inertia_diagonal().scale(mass);
+            Mat3::from_diagonal(diag)
+                .inverse()
+                .unwrap_or(Mat3::from_diagonal(Vec3::ZERO))
+        } else {
+            Mat3::from_diagonal(Vec3::ZERO)
+        };
+        self.inv_inertia_world[index] =
+            self.inv_inertia_local[index].similarity(self.rotation[index].to_mat3());
+        self.shape[index] = self.shapes.insert(shape);
+        self.still_time[index] = 0.0;
+        self.asleep[index] = false;
+    }
+
+    /// 慣性テンソルを現在の質量・形状・姿勢から張り直す。`set_mass`/`set_body_type`
+    /// の共通後段。`mass <= 0` または非 Dynamic なら inv 系はすべて 0
+    /// (= 無限質量)——`create_body`/`set_shape` と同じ規約。
+    fn rebuild_inertia(&mut self, index: usize, mass: f64) {
+        let is_dynamic = matches!(self.body_type[index], BodyType::Dynamic);
+        if is_dynamic && mass > 0.0 {
+            self.inv_mass[index] = 1.0 / mass;
+            let diag = self
+                .shape_of(index)
+                .unit_mass_inertia_diagonal()
+                .scale(mass);
+            self.inv_inertia_local[index] = Mat3::from_diagonal(diag)
+                .inverse()
+                .unwrap_or(Mat3::from_diagonal(Vec3::ZERO));
+        } else {
+            self.inv_mass[index] = 0.0;
+            self.inv_inertia_local[index] = Mat3::from_diagonal(Vec3::ZERO);
+        }
+        self.inv_inertia_world[index] =
+            self.inv_inertia_local[index].similarity(self.rotation[index].to_mat3());
+        // 質量や種別が変わったら静止仮定は無効(`set_shape` と同じ理由)。
+        self.still_time[index] = 0.0;
+        self.asleep[index] = false;
+    }
+
+    /// 質量を直接指定する(Inspector の Mass フィールド、設計
+    /// docs/23-frontend/01-editor.md §1.3 の RigidBody Component)。
+    ///
+    /// **形状は変えずに質量だけ変える**ので、密度は暗黙に `mass / volume` へ動く。
+    /// これは `RigidBodyDesc::mass_override` と同じ意味論であり、材質の密度は
+    /// `MaterialDb` 側の値のまま残る(材質を共有する他のボディを巻き込まない)。
+    pub fn set_mass(&mut self, index: usize, mass: f64) {
+        self.rebuild_inertia(index, mass);
+    }
+
+    /// Body type を切り替える(Dynamic ⇄ Static ⇄ Kinematic)。
+    ///
+    /// **Dynamic 以外へ移すと質量情報が失われる**(inv_mass = 0 は無限質量を
+    /// 表すため元の値を復元できない)。呼び出し側が戻したい場合に備え、
+    /// 切替直前の質量を返す。Static/Kinematic へ移す際は速度も 0 にする——
+    /// inv_mass = 0 のまま速度が残ると、力を受けないのに等速で飛び続ける
+    /// 物理的に意味のない状態になるため。
+    pub fn set_body_type(&mut self, index: usize, body_type: BodyType, mass: f64) -> f64 {
+        let previous_mass = self.mass(index);
+        self.body_type[index] = body_type;
+        if !matches!(body_type, BodyType::Dynamic) {
+            self.linear_velocity[index] = Vec3::ZERO;
+            self.angular_velocity[index] = Vec3::ZERO;
+        }
+        self.rebuild_inertia(index, mass);
+        previous_mass
+    }
+
+    /// 衝突フィルタを設定する(設計 §4.1)。
+    pub fn set_collision_filter(&mut self, index: usize, group: u32, mask: u32) {
+        self.collision_group[index] = group;
+        self.collision_mask[index] = mask;
     }
 }
 
@@ -263,5 +389,70 @@ mod tests {
         desc.mass_override = Some(42.0);
         let idx = set.create_body(desc, &materials);
         assert_eq!(set.mass(idx), 42.0);
+    }
+
+    /// `set_mass` は質量と慣性を整合させる。球の慣性は $I = \frac{2}{5} m r^2$
+    /// なので、質量を2倍にすれば inv_inertia は厳密に半分になる(解析値と比較)。
+    #[test]
+    fn set_mass_rebuilds_inertia_analytically() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut set = RigidBodySet::new();
+        let idx = set.create_body(
+            RigidBodyDesc::dynamic(Shape::Sphere { radius: 2.0 }, steel),
+            &materials,
+        );
+        set.set_mass(idx, 10.0);
+        assert_eq!(set.mass(idx), 10.0);
+        // I = 2/5 · 10 · 2² = 16 → inv = 1/16
+        assert!((set.inv_inertia_local[idx].m[0][0] - 1.0 / 16.0).abs() < 1e-12);
+
+        set.set_mass(idx, 20.0);
+        assert!((set.inv_inertia_local[idx].m[0][0] - 1.0 / 32.0).abs() < 1e-12);
+    }
+
+    /// Body type の切替は inv_mass を 0 にし、残留速度も消す。Dynamic へ戻せば
+    /// 指定した質量で復帰する(**元の質量は復元できない**ので呼び出し側が
+    /// 保持する必要がある——`set_body_type` が旧質量を返す理由)。
+    #[test]
+    fn set_body_type_zeroes_inverse_mass_and_velocity() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut set = RigidBodySet::new();
+        let idx = set.create_body(
+            RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.5 }, steel),
+            &materials,
+        );
+        set.linear_velocity[idx] = Vec3::new(1.0, 2.0, 3.0);
+        let original = set.mass(idx);
+        assert!(original > 0.0);
+
+        let returned = set.set_body_type(idx, BodyType::Static, original);
+        assert_eq!(returned, original);
+        assert_eq!(set.inv_mass[idx], 0.0);
+        assert_eq!(set.linear_velocity[idx], Vec3::ZERO);
+        assert_eq!(set.inv_inertia_world[idx], Mat3::from_diagonal(Vec3::ZERO));
+
+        set.set_body_type(idx, BodyType::Dynamic, original);
+        assert!((set.mass(idx) - original).abs() < 1e-9);
+    }
+
+    /// 衝突フィルタは双方向 AND(設計 §4.1)。片側だけがマスクしても
+    /// ペアは成立しない——非対称な接触は運動量を保存しないため。
+    #[test]
+    fn collision_filter_is_symmetric_and_defaults_to_allow() {
+        // 既定同士は必ず通る(導入前の挙動と一致)。
+        assert!(collision_filter_allows(
+            DEFAULT_COLLISION_GROUP,
+            DEFAULT_COLLISION_MASK,
+            DEFAULT_COLLISION_GROUP,
+            DEFAULT_COLLISION_MASK
+        ));
+        // グループ 0b01 と 0b10。A は B を見るが B は A を見ない → 落ちる。
+        assert!(!collision_filter_allows(0b01, 0b11, 0b10, 0b10));
+        // 逆向きも同じ結果(対称性)。
+        assert!(!collision_filter_allows(0b10, 0b10, 0b01, 0b11));
+        // 双方向に見えていれば通る。
+        assert!(collision_filter_allows(0b01, 0b10, 0b10, 0b01));
     }
 }

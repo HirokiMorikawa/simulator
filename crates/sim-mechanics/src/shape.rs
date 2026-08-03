@@ -43,8 +43,16 @@ impl Shape {
                 Some(8.0 * half_extents.x * half_extents.y * half_extents.z)
             }
             Shape::Plane { .. } => None,
-            Shape::Capsule { .. } | Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
-                todo!("Phase 2/5 で実装")
+            // **増分Lで実装**。円柱(半径r・高さ2h)+ 両端の半球(合わせて球1個)。
+            Shape::Capsule {
+                radius,
+                half_height,
+            } => Some(
+                std::f64::consts::PI * radius * radius * 2.0 * half_height
+                    + 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3),
+            ),
+            Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
+                todo!("Phase 5 で実装")
             }
         }
     }
@@ -66,8 +74,41 @@ impl Shape {
                 )
             }
             Shape::Plane { .. } => Vec3::ZERO,
-            Shape::Capsule { .. } | Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
-                todo!("Phase 2/5 で実装")
+            // **増分Lで実装**。ローカル+y軸を長軸とするカプセル。円柱部と
+            // 半球部を別々に積分し、質量比で重み付けして合成する(標準的な
+            // 複合剛体の慣性計算——半球は自身の重心まわりの慣性に平行軸定理で
+            // 中心軸からの距離ぶんを足す)。
+            Shape::Capsule {
+                radius,
+                half_height,
+            } => {
+                let (r, h) = (*radius, *half_height);
+                let cylinder_volume = std::f64::consts::PI * r * r * 2.0 * h;
+                let sphere_volume = 4.0 / 3.0 * std::f64::consts::PI * r.powi(3);
+                let total = cylinder_volume + sphere_volume;
+                if total <= 0.0 {
+                    return Vec3::ZERO;
+                }
+                // 単位質量あたりなので、体積比がそのまま質量比になる(密度一様)。
+                let (mc, ms) = (cylinder_volume / total, sphere_volume / total);
+
+                // 円柱: 長軸(y)まわり r²/2、横軸まわり (3r²+(2h)²)/12。
+                let cyl_axial = 0.5 * r * r;
+                let cyl_lateral = (3.0 * r * r + 4.0 * h * h) / 12.0;
+
+                // 両端の半球を合わせた球: 長軸まわり 2r²/5。
+                // 横軸まわりは半球自身の重心まわり(83/320)r² に、
+                // 平行軸定理で中心からの距離 (h + 3r/8) を加える。
+                let sph_axial = 2.0 / 5.0 * r * r;
+                let hemisphere_offset = h + 3.0 * r / 8.0;
+                let sph_lateral = 83.0 / 320.0 * r * r + hemisphere_offset * hemisphere_offset;
+
+                let axial = mc * cyl_axial + ms * sph_axial;
+                let lateral = mc * cyl_lateral + ms * sph_lateral;
+                Vec3::new(lateral, axial, lateral)
+            }
+            Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
+                todo!("Phase 5 で実装")
             }
         }
     }

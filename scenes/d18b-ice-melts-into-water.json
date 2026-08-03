@@ -1,0 +1,52 @@
+{
+  "name": "d18b-ice-melts-into-water",
+  "world": {
+    "gravity": 9.80665,
+    "dt": 0.002
+  },
+  "materials": [
+    { "extends": "木材(松)", "name": "ice", "density": 900.0 }
+  ],
+  "bodies": [
+    {
+      "shape": { "box": { "half": [0.05, 0.05, 0.05] } },
+      "material": "ice",
+      "position": [0, 0.3, 0],
+      "mass_override": 0.9,
+      "name": "ice_cube"
+    }
+  ],
+  "thermal": {
+    "ambient_temperature": 350.0,
+    "nodes": [{ "temperature": 350.0, "heat_capacity": 200000.0 }]
+  },
+  "sph": {
+    "h": 0.05,
+    "rest_density": 1000.0,
+    "sound_speed": 20.0,
+    "particle_mass": 0.05,
+    "boundary_blocks": [
+      { "min": [-0.15, -0.05, -0.15], "counts": [7, 1, 7], "spacing": 0.05 }
+    ]
+  },
+  "couplings": [
+    {
+      "phase_change_morph": {
+        "body": "ice_cube",
+        "thermal_node": 0,
+        "melting_temperature": 273.15,
+        "latent_heat_fusion": 334000.0,
+        "specific_heat_solid": 2100.0,
+        "specific_heat_liquid": 4186.0,
+        "initial_mass": 0.9,
+        "conductance": 200.0,
+        "initial_enthalpy": -10000.0,
+        "melt_spawn": { "spawn_radius": 0.05, "seed": 20260803 }
+      }
+    }
+  ],
+  "probes": [
+    { "body_pos_y": "ice_cube" },
+    { "node_temp": 0 }
+  ]
+}

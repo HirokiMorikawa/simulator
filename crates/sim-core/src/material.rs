@@ -58,6 +58,7 @@ fn pair_key(a: MaterialId, b: MaterialId) -> (MaterialId, MaterialId) {
     }
 }
 
+#[derive(Clone)]
 pub struct MaterialDb {
     materials: Vec<Material>,
     friction_pairs: BTreeMap<(MaterialId, MaterialId), PairOverride>,

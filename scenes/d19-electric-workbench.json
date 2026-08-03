@@ -1,0 +1,40 @@
+{
+  "name": "d19-electric-workbench",
+  "world": { "gravity": 9.80665, "dt": 0.008333333 },
+  "circuit": {
+    "num_nodes": 5,
+    "voltage_sources": [
+      { "a": 1, "b": 0, "voltage": 9.0 }
+    ],
+    "resistors": [
+      { "a": 1, "b": 2, "resistance": 1000.0 },
+      { "a": 2, "b": 0, "resistance": 2000.0 },
+      { "a": 3, "b": 0, "resistance": 500.0 }
+    ],
+    "capacitors": [
+      { "a": 3, "b": 0, "capacitance": 0.001, "initial_voltage": 9.0 }
+    ],
+    "switches": [
+      { "a": 1, "b": 4, "closed": true }
+    ],
+    "diodes": [
+      { "anode": 4, "cathode": 0, "saturation_current": 1.0e-12, "n_vt": 0.02585 }
+    ]
+  },
+  "thermal": {
+    "ambient_temperature": 293.15,
+    "nodes": [
+      { "temperature": 293.15, "heat_capacity": 1000.0 }
+    ]
+  },
+  "couplings": [
+    { "joule_heat": { "thermal_node": 0 } }
+  ],
+  "probes": [
+    { "circuit_node_voltage": 2 },
+    { "circuit_node_voltage": 3 },
+    { "circuit_node_voltage": 4 },
+    { "circuit_current": 0 },
+    { "node_temp": 0 }
+  ]
+}

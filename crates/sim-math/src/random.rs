@@ -111,6 +111,18 @@ impl SimRng {
         }
     }
 
+    /// 単位円板上の一様分布(棄却法)。物理カメラの薄レンズ開口サンプリング
+    /// (docs/17-rendering/03-materials-camera.md §4.1)等が使う汎用プリミティブ。
+    pub fn unit_disk(&mut self) -> (f64, f64) {
+        loop {
+            let x = self.range_f64(-1.0, 1.0);
+            let y = self.range_f64(-1.0, 1.0);
+            if x * x + y * y < 1.0 {
+                return (x, y);
+            }
+        }
+    }
+
     /// 指数分布(逆関数法): -ln(1-u)/lambda。
     pub fn exponential(&mut self, rate: f64) -> f64 {
         -(1.0 - self.next_f64()).ln() / rate
@@ -237,6 +249,23 @@ mod tests {
             let v = rng.unit_sphere();
             assert!((v.length() - 1.0).abs() < 1e-9);
         }
+    }
+
+    /// 単位円板サンプルは常に半径1以内に収まり、十分な数を集めれば円板の隅々まで
+    /// (半径0.9超の点も)含む(棄却法が正しく機能していることの確認)。
+    #[test]
+    fn unit_disk_samples_stay_within_the_unit_circle_and_cover_it() {
+        let mut rng = SimRng::new(8, 8);
+        let mut saw_far_point = false;
+        for _ in 0..10_000 {
+            let (x, y) = rng.unit_disk();
+            let r2 = x * x + y * y;
+            assert!(r2 < 1.0, "sample ({x}, {y}) outside the unit disk");
+            if r2 > 0.81 {
+                saw_far_point = true;
+            }
+        }
+        assert!(saw_far_point, "should sample points near the disk's edge");
     }
 
     #[test]

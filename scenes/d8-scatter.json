@@ -1,0 +1,736 @@
+{
+  "name": "d8-scatter",
+  "world": {
+    "gravity": 9.80665,
+    "dt": 0.008333333
+  },
+  "seed": 42,
+  "bodies": [
+    {
+      "shape": {
+        "plane": {
+          "normal": [
+            0,
+            1,
+            0
+          ],
+          "d": 0
+        }
+      },
+      "type": "static",
+      "material": "鋼(炭素鋼)",
+      "name": "floor"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.35,
+        3.0,
+        0.0
+      ],
+      "name": "s0"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.364979,
+        3.18,
+        0.334351
+      ],
+      "name": "s1"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.052999,
+        3.36,
+        -0.603897
+      ],
+      "name": "s2"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.425907,
+        3.54,
+        0.555521
+      ],
+      "name": "s3"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.77066,
+        3.72,
+        -0.136319
+      ],
+      "name": "s4"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.723369,
+        3.9,
+        -0.460148
+      ],
+      "name": "s5"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.240397,
+        4.08,
+        0.894265
+      ],
+      "name": "s6"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.456275,
+        4.26,
+        -0.878529
+      ],
+      "name": "s7"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.986287,
+        4.44,
+        0.360191
+      ],
+      "name": "s8"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.023063,
+        4.62,
+        0.422306
+      ],
+      "name": "s9"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.492008,
+        4.8,
+        -1.051393
+      ],
+      "name": "s10"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.362862,
+        4.98,
+        1.156863
+      ],
+      "name": "s11"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.091847,
+        5.16,
+        -0.632748
+      ],
+      "name": "s12"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.279035,
+        5.34,
+        -0.281192
+      ],
+      "name": "s13"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.779613,
+        5.52,
+        1.10892
+      ],
+      "name": "s14"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.179915,
+        5.7,
+        -1.388391
+      ],
+      "name": "s15"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.103455,
+        5.88,
+        0.929993
+      ],
+      "name": "s16"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.483656,
+        6.06,
+        0.061354
+      ],
+      "name": "s17"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.081401,
+        6.24,
+        -1.076138
+      ],
+      "name": "s18"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.072301,
+        6.42,
+        1.563577
+      ],
+      "name": "s19"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.027634,
+        6.6,
+        -1.231449
+      ],
+      "name": "s20"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.626985,
+        6.78,
+        0.218908
+      ],
+      "name": "s21"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.377844,
+        6.96,
+        0.958668
+      ],
+      "name": "s22"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.376332,
+        7.14,
+        -1.672834
+      ],
+      "name": "s23"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.870067,
+        7.32,
+        1.518382
+      ],
+      "name": "s24"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.70023,
+        7.5,
+        -0.54242
+      ],
+      "name": "s25"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.650957,
+        7.68,
+        -0.762784
+      ],
+      "name": "s26"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.714995,
+        7.86,
+        1.708444
+      ],
+      "name": "s27"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.637917,
+        8.04,
+        -1.773573
+      ],
+      "name": "s28"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.696934,
+        8.22,
+        0.891861
+      ],
+      "name": "s29"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.884351,
+        8.4,
+        0.496709
+      ],
+      "name": "s30"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.070804,
+        8.58,
+        -1.665346
+      ],
+      "name": "s31"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.340547,
+        8.76,
+        1.981547
+      ],
+      "name": "s32"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.61353,
+        8.94,
+        -1.249608
+      ],
+      "name": "s33"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        2.063558,
+        9.12,
+        -0.170962
+      ],
+      "name": "s34"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.426067,
+        9.3,
+        1.541536
+      ],
+      "name": "s35"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.010386,
+        9.48,
+        -2.128942
+      ],
+      "name": "s36"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.449622,
+        9.66,
+        1.597997
+      ],
+      "name": "s37"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -2.176422,
+        9.84,
+        -0.20171
+      ],
+      "name": "s38"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        1.763259,
+        10.02,
+        -1.338251
+      ],
+      "name": "s39"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.401119,
+        10.2,
+        2.204904
+      ],
+      "name": "s40"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.208088,
+        10.38,
+        -1.919772
+      ],
+      "name": "s41"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        2.213483,
+        10.56,
+        0.606624
+      ],
+      "name": "s42"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -2.065529,
+        10.74,
+        1.059995
+      ],
+      "name": "s43"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.81616,
+        10.92,
+        -2.20145
+      ],
+      "name": "s44"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        0.89503,
+        11.1,
+        2.198618
+      ],
+      "name": "s45"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -2.168303,
+        11.28,
+        -1.027599
+      ],
+      "name": "s46"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        2.317238,
+        11.46,
+        -0.714429
+      ],
+      "name": "s47"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -1.238775,
+        11.64,
+        2.11375
+      ],
+      "name": "s48"
+    },
+    {
+      "shape": {
+        "sphere": {
+          "radius": 0.2
+        }
+      },
+      "material": "鋼(炭素鋼)",
+      "position": [
+        -0.519606,
+        11.82,
+        -2.419713
+      ],
+      "name": "s49"
+    }
+  ],
+  "probes": [
+    {
+      "body_speed": "s0"
+    },
+    {
+      "body_pos_y": "s0"
+    },
+    {
+      "body_pos_y": "s49"
+    }
+  ]
+}

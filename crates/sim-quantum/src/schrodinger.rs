@@ -3,6 +3,7 @@
 //! P5 スコープの最小実装: 1D、周期境界(吸収マスクなし)、実時間発展のみ(虚時間発展・
 //! 2D・検出スクリーンサンプリングは未実装)。内部は原子単位($\hbar=m_e=1$、設計 §2)。
 
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{fft, ifft, Complex64};
 
 /// 1D波動関数。設計 §3 `QuantumSim1D` の縮約版(吸収マスク・FftPlanキャッシュ構造体は
@@ -118,8 +119,23 @@ impl WaveFunction1D {
     /// $\sum_i\psi_i^*[\mathcal F^{-1}(k^2\hat\psi)]_i=(1/N)\sum_k k^2|\hat\psi_k|^2$)。
     /// ノルムが1でなくても期待値として正しくなるよう`norm()`で割る。
     pub fn energy(&self) -> f64 {
+        let (kinetic, potential) = self.energy_split();
+        kinetic + potential
+    }
+
+    /// `energy()` の内訳版 `(⟨T⟩, ⟨V⟩)`(**群3で切り出した**)。
+    /// `Solver::total_energy` が `EnergyBreakdown` の `kinetic`/`potential` へ
+    /// 分けて詰めるために要る——合計だけでは内訳が復元できないため。
+    /// 空格子(`psi` が空)では両方 0 を返す(`norm()` が 0 になり 0 除算するのを避ける)。
+    pub fn energy_split(&self) -> (f64, f64) {
         let n = self.len();
+        if n == 0 {
+            return (0.0, 0.0);
+        }
         let norm = self.norm();
+        if norm == 0.0 {
+            return (0.0, 0.0);
+        }
 
         let potential: f64 = self
             .psi
@@ -148,7 +164,7 @@ impl WaveFunction1D {
             * self.dx
             / n as f64;
 
-        (potential + kinetic) / norm
+        (kinetic / norm, potential / norm)
     }
 
     /// 内積 $\langle\text{self}|\text{other}\rangle=\sum_i\psi_i^*\,\phi_i\,dx$。
@@ -256,6 +272,105 @@ pub fn find_eigenstates(
     }
 
     result
+}
+
+/// **`Solver` 実装(群3)**。設計 docs/00-foundation/04-architecture.md §1.2 は
+/// 量子を7ドメインの1つとして数えているのに、`WaveFunction1D` は `Solver` を
+/// 実装しておらず **`World` に載る経路が原理的に無かった**——`enable_quantum_*`
+/// が無いのでシーンJSONからもエディタからも到達できず、クレート内テストからしか
+/// 動かせない状態だった(D27–D33 のデモが「ドメイン自体が存在しない」として
+/// 滞留していた直接の原因)。
+impl Solver for WaveFunction1D {
+    /// **split-step Fourier は無条件安定**(各因子が位相回転=ユニタリなのでノルムは
+    /// 厳密に保たれる)。したがって「発散しない上限」は存在しない。ここで返すのは
+    /// **Strang 分割の分割誤差を許容範囲に収める目安**である:
+    /// 1ステップの位相回転が $\pi$ を超えると波数空間でエイリアスし、
+    /// 物理的に無意味な結果になる。最も速く回る位相はナイキスト波数
+    /// $k_{max}=\pi/dx$ の運動項 $k_{max}^2/2$ とポテンシャルの最大値なので、
+    /// $\Delta t \le \pi / (k_{max}^2/2 + \max|V|)$ を返す。
+    ///
+    /// **これは安定限界ではなく精度の目安**である点を明記しておく——`Orchestrator`
+    /// は `max_stable_dt` を sub-step 決定に使うので、無限大を返すと分割誤差が
+    /// 野放しになる。
+    fn max_stable_dt(&self) -> f64 {
+        if self.psi.is_empty() {
+            return f64::INFINITY;
+        }
+        let k_max = std::f64::consts::PI / self.dx;
+        let max_v = self.v.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+        let max_rate = 0.5 * k_max * k_max + max_v;
+        if max_rate > 0.0 {
+            std::f64::consts::PI / max_rate
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        // inherent メソッド(1引数版)が同名のトレイトメソッドより優先されるため
+        // 無限再帰しない(`GridFluid2D`/`SphFluid`/`Circuit` と同じパターン)。
+        self.step(dt);
+    }
+
+    /// **原子単位($\hbar=m_e=1$)のまま返す**(モジュールdoc冒頭参照)。
+    /// `World` の `EnergyLedger` は全ドメインの合計を取るので、他ドメインが SI 単位の
+    /// シーンに量子を混ぜると**単位系の異なる量を足すことになる**。これは縮約であり、
+    /// 単位変換(ハートリー → J は $\times 4.3597\times10^{-18}$)を入れなかったのは、
+    /// 変換すると今度は「原子単位で書いた設計文書の式と数値が合わない」形の混乱が
+    /// 起きるため——設計 docs/14-quantum/02-schrodinger-solver.md §2 が原子単位を
+    /// 正典としているので、そちらに揃えて**単位が違うことを明記する**方を選んだ。
+    ///
+    /// 内訳は運動項を `kinetic`、ポテンシャル項を `potential` に分けて返す。
+    fn total_energy(&self) -> EnergyBreakdown {
+        let (kinetic, potential) = self.energy_split();
+        EnergyBreakdown {
+            kinetic,
+            potential,
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.psi.len() as u64);
+        hasher.write_f64(self.dx);
+        for p in &self.psi {
+            hasher.write_f64(p.re);
+            hasher.write_f64(p.im);
+        }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        let mut list = vec![
+            Approximation {
+                name: "TDSE: Strang分割 (split-step Fourier)",
+                reason: "運動項とポテンシャル項を交互に厳密適用する2次精度分割。ユニタリなのでノルムは厳密保存するが、[T,V]≠0 由来の O(dt³) 分割誤差が残る。",
+                doc: "docs/14-quantum/02-schrodinger-solver.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "境界: 周期境界(吸収なし)",
+                reason: "FFT が周期境界を前提とするため。波束が端に達すると反対側から回り込む(吸収マスク未実装)。",
+                doc: "docs/14-quantum/02-schrodinger-solver.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "単位: 原子単位 (ℏ=mₑ=1)",
+                reason: "エネルギーはハートリー単位のまま返すため、SI 単位の他ドメインと合算した total_energy は物理的に意味を持たない。",
+                doc: "docs/14-quantum/02-schrodinger-solver.md",
+                can_disable: false,
+            },
+        ];
+        if self.v.iter().all(|&v| v == 0.0) {
+            list.push(Approximation {
+                name: "自由粒子(V≡0)",
+                reason:
+                    "ポテンシャルが全格子点で 0 なので、ポテンシャル半ステップは恒等変換になる。",
+                doc: "docs/14-quantum/02-schrodinger-solver.md",
+                can_disable: false,
+            });
+        }
+        list
+    }
 }
 
 #[cfg(test)]

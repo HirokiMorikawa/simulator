@@ -1,0 +1,12 @@
+{
+  "name": "d34-solar-system-single-planet",
+  "world": { "gravity": 9.80665, "dt": 31554.896928761962 },
+  "astro": {
+    "softening": 0.0,
+    "bodies": [
+      { "position": [0, 0, 0], "velocity": [0, 0, 0], "mass": 1.989e30 },
+      { "position": [1.496e11, 0, 0], "velocity": [0, 29788.22982930735, 0], "mass": 1.0 }
+    ]
+  },
+  "probes": [ { "astro_pos_x": 1 }, { "astro_pos_y": 1 } ]
+}

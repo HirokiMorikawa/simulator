@@ -1,0 +1,13 @@
+{
+  "name": "d30-gas-box",
+  "seed": 7,
+  "world": { "gravity": 0.0, "dt": 1e-12 },
+  "kinetic_gas": {
+    "particle_count": 400,
+    "mass": 4.65e-26,
+    "radius": 1.5e-10,
+    "box_size": [1e-7, 1e-7, 1e-7],
+    "temperature": 300.0
+  },
+  "probes": ["gas_temperature", "gas_pressure"]
+}

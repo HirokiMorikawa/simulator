@@ -1,0 +1,17 @@
+{
+  "name": "d36-swingby",
+  "world": { "gravity": 0.0, "dt": 5.0 },
+  "astro": {
+    "softening": 0.0,
+    "bodies": [
+      { "position": [0, 0, 0], "velocity": [0, 20000.0, 0], "mass": 1.0e24 },
+      { "position": [5000000.0, 0, 0], "velocity": [0, 27189.993045893716, 0], "mass": 1.0 }
+    ]
+  },
+  "probes": [
+    { "astro_pos_x": 1 }, { "astro_pos_y": 1 },
+    { "astro_vel_x": 1 }, { "astro_vel_y": 1 },
+    { "astro_pos_x": 0 }, { "astro_pos_y": 0 },
+    { "astro_vel_x": 0 }, { "astro_vel_y": 0 }
+  ]
+}

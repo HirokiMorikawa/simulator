@@ -1,0 +1,23 @@
+{
+  "name": "d23-pouring-water",
+  "world": { "gravity": 9.80665, "dt": 0.0005 },
+  "sph": {
+    "h": 0.04,
+    "rest_density": 1000.0,
+    "sound_speed": 20.0,
+    "particle_mass": 0.008,
+    "blocks": [
+      { "min": [0.0, 0.30, 0.0], "counts": [6, 6, 6], "spacing": 0.02,
+        "velocity": [0.0, -0.5, 0.0] }
+    ],
+    "boundary_blocks": [
+      { "min": [-0.06, 0.0, -0.06], "counts": [12, 1, 12], "spacing": 0.02 }
+    ]
+  },
+  "probes": [
+    { "sph_particle_pos_y": 0 },
+    { "sph_particle_density": 86 },
+    { "sph_particle_pos_y": 215 },
+    { "sph_particle_density": 0 }
+  ]
+}

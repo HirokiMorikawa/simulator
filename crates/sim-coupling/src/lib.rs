@@ -1,10 +1,57 @@
 //! ドメイン間結合行列・排他結合の静的検査。設計: docs/20-integration/01-coupling-matrix.md。
 //!
-//! Phase Cスコープの縮約実装: シーン設定における排他結合(同じ物理を2経路で計算しない、
-//! 設計§2規則2)の静的検査のみを実装する。結合行列本体の各Coupling実装(`BuoyancyDrag`・
-//! `GridFluidRigid`等、設計§3)・sub-iteration剛性閾値表(設計§2規則3)は、`World`/各
-//! ドメインSolverの統合を待つため未実装(Phase A型スケルトンも導入していない — 本crateは
-//! これまで空だったため、実装可能な範囲から先に実体を持たせた)。
+//! シーン設定における排他結合(同じ物理を2経路で計算しない、設計§2規則2)の静的検査
+//! (`validate_exclusive_couplings`)に加え、`Coupling`トレイト + `DomainStates`
+//! (設計docs/00-foundation/04-architecture.md §1.3「保存量の橋」、`domain_states`
+//! モジュールdoc参照)と、具体的な実装13種(`DissipationToHeat`・`BuoyancyDrag`・
+//! `JouleHeat`・`BrownianForce`・`LorentzForce`・`InductionCoupling`・`MotorCoupling`・
+//! `PistonGas`・`BoussinesqBuoyancy`・`ConvectionLink`・`SphRigid`・`GridFluidRigid`・
+//! `ImageChargeForce`、各モジュールdoc参照)を実装する。これで設計§3が挙げる元の12種の
+//! Couplingが全て出揃った(`BuoyancyDrag`は既存の`MechanicsSolver`埋め込み実装を
+//! 置き換えるものではなく、同じ物理式を剛体単位でCoupling登録経由から選択的に適用する
+//! 独立した追加経路として実装した、`buoyancy_drag`モジュールdoc参照)+ D26「帯電風船」
+//! 向けに設計docs/13-electromagnetism/01-electrostatics-magnetostatics.md §2が別途
+//! 要求する「鏡像力」である追加実装の`ImageChargeForce`。sub-iteration剛性閾値表
+//! (設計§2規則3、`GridFluidRigid`自身は現状固定的な単一適用で、`sim_fluid::
+//! GridFluidRigidBox2D`(X2)が持つ閾値ベースのsub-iteration機構までは踏襲していない)・
+//! シーンJSON`couplings`セクションからの自動解決は後続増分で追加する。
+//!
+//! **pre/post 2相分離は群5で完了した**(`Coupling::apply_pre`のdoc参照)。同時に
+//! `MotorCoupling`・`InductionCoupling`の1step遅れを解消し、`SphRigid`・
+//! `GridFluidRigid`のモジュールdocが誤って主張していた「反作用力の1step遅れ」
+//! (実際には`World`経由なら遅れていない)を訂正し、`ConvectionLink`に設計 §4.2 の
+//! 相関式4件を揃えた(自然対流を含む)。
+
+mod boussinesq_buoyancy;
+mod brownian_force;
+mod buoyancy_drag;
+mod convection_link;
+mod dissipation_to_heat;
+mod domain_states;
+mod grid_fluid_rigid;
+mod image_charge_force;
+mod induction_coupling;
+mod joule_heat;
+mod lorentz_force;
+mod motor_coupling;
+mod phase_change_morph;
+mod piston_gas;
+mod sph_rigid;
+pub use boussinesq_buoyancy::BoussinesqBuoyancy;
+pub use brownian_force::BrownianForce;
+pub use buoyancy_drag::{BuoyancyDrag, LiftModel};
+pub use convection_link::{ConvectionLink, ConvectionMode};
+pub use dissipation_to_heat::{effusivity, BodyThermalLink, DissipationToHeat};
+pub use domain_states::{Coupling, CouplingKind, DomainStates, NoopCoupling};
+pub use grid_fluid_rigid::GridFluidRigid;
+pub use image_charge_force::ImageChargeForce;
+pub use induction_coupling::InductionCoupling;
+pub use joule_heat::JouleHeat;
+pub use lorentz_force::LorentzForce;
+pub use motor_coupling::MotorCoupling;
+pub use phase_change_morph::{MeltSpawn, PhaseChangeMorph};
+pub use piston_gas::PistonGas;
+pub use sph_rigid::SphRigid;
 
 /// シーンの結合設定(設計§2規則2が列挙する3組の排他結合、設定は各ドメインシーンJSON相当)。
 #[derive(Clone, Copy, Debug, Default)]

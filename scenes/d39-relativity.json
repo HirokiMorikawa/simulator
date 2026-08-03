@@ -1,0 +1,16 @@
+{
+  "name": "d39-relativity",
+  "world": { "gravity": 0.0, "dt": 0.0007853981633974483 },
+  "astro": {
+    "softening": 0.0,
+    "bodies": [
+      { "position": [0, 0, 0], "velocity": [0, 0, 0], "mass": 14983518130.056938 },
+      { "position": [0.5, 0, 0], "velocity": [0, 1.7320508075688772, 0], "mass": 0.0 }
+    ],
+    "relativistic_correction": { "central_body": 0, "speed_of_light": 100.0 }
+  },
+  "probes": [
+    { "astro_pos_x": 1 }, { "astro_pos_y": 1 },
+    { "astro_vel_x": 1 }, { "astro_vel_y": 1 }
+  ]
+}

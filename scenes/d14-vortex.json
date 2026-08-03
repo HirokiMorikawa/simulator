@@ -1,0 +1,18 @@
+{
+  "name": "d14-vortex",
+  "world": { "gravity": 0.0, "dt": 0.008333333 },
+  "bodies": [
+    { "shape": { "box": { "half": [0.05, 0.05, 0.05] } },
+      "material": "鋼(炭素鋼)", "position": [0.4, 0.4, 0], "name": "obstacle" }
+  ],
+  "grid_fluid": { "nx": 32, "ny": 32, "h": 0.025, "kinematic_viscosity": 1.0e-4,
+                  "initial_velocity": [1.0, 0.0] },
+  "couplings": [
+    { "grid_fluid_rigid": { "body": "obstacle", "half_width": 0.05, "half_height": 0.05 } }
+  ],
+  "probes": [
+    "grid_fluid_rms_v",
+    "grid_fluid_mean_v",
+    { "body_pos_x": "obstacle" }
+  ]
+}

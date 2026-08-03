@@ -6,25 +6,111 @@
 //! 収束にはこれが鍵、docs/22-roadmap/01-phases.md 横断ルール5に基づき実装漏れを訂正。
 //! velocity_bias の Baumgarte 項は split impulse(§4.5)の位置チャンネルに置き換えたため
 //! 廃止(設計 §4.5 の指摘どおり「エネルギーを汚さないため反発テストが厳密になる」)。
-//! マニフォールド持続化の feature_id マッチング(移動量2mm以内チェック、設計 §4.7)は未実装。
+//!
+//! **群9でマニフォールド持続化(設計 02-collision-detection.md §4.7)を実装した**。
+//! 移行前は feature_id が一致しさえすれば無条件に前ステップのインパルスを引き継いでおり、
+//! 接触点が実際には別の場所へ移った場合でも古いインパルスがそのまま適用されていた
+//! (加えて接触が消えたキーの GC が無かった)。`ManifoldCache` を参照。
 
 use crate::body::RigidBodySet;
 use crate::collision::ContactManifold;
 use crate::shape::Shape;
 use sim_core::MaterialDb;
-use sim_math::{Mat3, Vec3};
-use std::collections::BTreeMap;
+use sim_math::{Mat3, Transform, Vec3};
+use std::collections::{BTreeMap, BTreeSet};
 
-/// Warm starting 用の永続キャッシュ。キーは (body_a, body_b, feature_id)。
-/// 設計 §4.4「前ステップの累積インパルス(feature_idで対応づけ)をソルバ開始時に適用」。
-/// 簡易実装: 毎ステップ現在の接触点で上書きするのみで、接触が消えた古いキーの明示的な
-/// 削除(GC)は行わない(body 削除・再利用が未実装のため実害はない、Phase 2 の精緻化課題)。
-pub type WarmStartCache = BTreeMap<(usize, usize, u32), WarmStartImpulse>;
+/// 接触点を再利用してよい「移動量」の上限 [m]。設計 02-collision-detection.md §4.7
+/// 「点の再利用判定: 同一 feature_id かつ移動 < 2mm」。
+///
+/// **「移動」を何に対して測るか**: ワールド座標での移動量ではなく、**2体のアンカーが
+/// 互いにどれだけずれたか**(相対すべり量)で測る。ワールド基準にすると、転がる球・
+/// 動く床の上の箱など「接触自体は継続しているが接触点がワールド内を動く」ケースで
+/// warm starting が毎ステップ無効化されてしまい、設計 §4.4 が warm starting に期待する
+/// 収束改善が丸ごと失われる(実装検討時にこの読み違いに気づいた)。キャッシュ時に
+/// 一致していた2つのローカルアンカーを現在の姿勢でワールドへ戻し、その距離を見る
+/// ——これが「同一の物理接触点であり続けているか」の判定になる。
+pub const PERSISTENCE_TOLERANCE: f64 = 0.002;
 
 #[derive(Clone, Copy, Default)]
 pub struct WarmStartImpulse {
     normal: f64,
     tangent: (f64, f64),
+}
+
+/// キャッシュされた接触点。インパルスに加えて**両ボディのローカル座標での接触点位置**を
+/// 持つ(`PERSISTENCE_TOLERANCE` のdoc参照)。
+#[derive(Clone, Copy)]
+struct CachedPoint {
+    local_a: Vec3,
+    local_b: Vec3,
+    impulse: WarmStartImpulse,
+}
+
+/// マニフォールド持続化キャッシュ(設計 §4.7)。キーは (body_a, body_b, feature_id)。
+/// 設計 §4.4「前ステップの累積インパルス(feature_idで対応づけ)をソルバ開始時に適用」の
+/// 土台でもある。
+#[derive(Clone)]
+pub struct ManifoldCache {
+    points: BTreeMap<(usize, usize, u32), CachedPoint>,
+    /// 持続化の再利用判定を行うか。`false` にすると移行前の挙動(feature_id 一致だけで
+    /// 無条件に引き継ぎ・GCなし)に戻る——対照実験専用のスイッチで、既定は `true`。
+    pub persistence_enabled: bool,
+}
+
+impl Default for ManifoldCache {
+    fn default() -> ManifoldCache {
+        ManifoldCache::new()
+    }
+}
+
+impl ManifoldCache {
+    pub fn new() -> ManifoldCache {
+        ManifoldCache {
+            points: BTreeMap::new(),
+            persistence_enabled: true,
+        }
+    }
+
+    /// キャッシュしている接触点の総数(GCが効いていることの検証に使う。
+    /// 空判定の用途が無いため `is_empty` は置かない)。
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.points.len()
+    }
+
+    /// 指定の接触点に引き継ぐ warm start インパルス。持続化が有効なとき、
+    /// アンカーのずれが `PERSISTENCE_TOLERANCE` 以上なら**引き継がない**(同 doc 参照)。
+    fn warm_start_for(
+        &self,
+        key: (usize, usize, u32),
+        xf_a: Transform,
+        xf_b: Transform,
+    ) -> WarmStartImpulse {
+        let Some(cached) = self.points.get(&key) else {
+            return WarmStartImpulse::default();
+        };
+        if !self.persistence_enabled {
+            return cached.impulse; // 移行前の挙動(対照実験用)
+        }
+        let drift = xf_a.apply_point(cached.local_a) - xf_b.apply_point(cached.local_b);
+        if drift.length() < PERSISTENCE_TOLERANCE {
+            cached.impulse
+        } else {
+            WarmStartImpulse::default()
+        }
+    }
+
+    /// 接触が完全に消えたボディ対のエントリを捨てる(GC)。`live_pairs` には
+    /// **スリープ中でソルバをスキップしたペアも含めた**全マニフォールドのペアを渡す
+    /// (スリープ中のペアを捨ててしまうと、起床時に warm start が0から立ち上がって
+    /// 再収束の跳ねが出るため)。持続化が無効なときは移行前どおり何もしない。
+    pub fn retain_pairs(&mut self, live_pairs: &BTreeSet<(usize, usize)>) {
+        if !self.persistence_enabled {
+            return;
+        }
+        self.points
+            .retain(|&(a, b, _), _| live_pairs.contains(&(a, b)));
+    }
 }
 
 /// 反発を無視する接近速度の閾値(静止接触のジッタ防止)。設計 §4.3・§9 の既定値。
@@ -48,6 +134,12 @@ const DEFAULT_ROLLING_FRICTION: f64 = 0.005;
 struct PointConstraint {
     r_a: Vec3,
     r_b: Vec3,
+    /// 接触点の body_a / body_b ローカル座標(マニフォールド持続化、設計 §4.7)。
+    /// `prepare` の時点(=位置補正より前)の姿勢で求めて保持し、そのままキャッシュへ
+    /// 書き戻す(位置補正後の姿勢で取り直すと、split impulse が動かした分だけ
+    /// アンカーがずれて次ステップの再利用判定が誤る)。
+    local_a: Vec3,
+    local_b: Vec3,
     feature_id: u32,
     normal_mass: f64,
     tangent_mass: (f64, f64),
@@ -122,13 +214,23 @@ fn prepare(
     bodies: &RigidBodySet,
     materials: &MaterialDb,
     restitution_velocity_threshold: f64,
-    warm_start_cache: &WarmStartCache,
+    warm_start_cache: &ManifoldCache,
 ) -> Vec<Constraint> {
     manifolds
         .iter()
         .map(|m| {
             let a = m.body_a;
             let b = m.body_b;
+            let xf_a = Transform {
+                position: bodies.position[a],
+                rotation: bodies.rotation[a],
+            };
+            let xf_b = Transform {
+                position: bodies.position[b],
+                rotation: bodies.rotation[b],
+            };
+            let inv_xf_a = xf_a.inverse();
+            let inv_xf_b = xf_b.inverse();
             let (t1, t2) = m.normal.orthonormal_basis();
             let friction = materials.friction_pair(bodies.material[a], bodies.material[b]);
             let restitution = materials.restitution_pair(bodies.material[a], bodies.material[b]);
@@ -194,14 +296,13 @@ fn prepare(
                     let restitution_bias =
                         restitution * (-v_n_pre - restitution_velocity_threshold).max(0.0);
 
-                    let warm = warm_start_cache
-                        .get(&(a, b, p.feature_id))
-                        .copied()
-                        .unwrap_or_default();
+                    let warm = warm_start_cache.warm_start_for((a, b, p.feature_id), xf_a, xf_b);
 
                     PointConstraint {
                         r_a,
                         r_b,
+                        local_a: inv_xf_a.apply_point(p.world_point),
+                        local_b: inv_xf_b.apply_point(p.world_point),
                         feature_id: p.feature_id,
                         normal_mass,
                         tangent_mass,
@@ -429,14 +530,19 @@ fn position_correction(constraints: &[Constraint], bodies: &mut RigidBodySet) {
 }
 
 /// 接触解決の1ステップ分: prepare → warm start 適用 → velocity iterations(法線→摩擦、固定順)
-/// → position iterations(split impulse、§4.5)→ 次ステップ用に累積インパルスをキャッシュへ
-/// 書き戻す。設計 §4.1/§4.4/§4.5。
+/// → position iterations(split impulse、§4.5)→ 次ステップ用に累積インパルスとローカル
+/// アンカーをキャッシュへ書き戻す。設計 §4.1/§4.4/§4.5/§4.7。
+///
+/// 書き戻しの際、**このステップで扱ったボディ対のうち今回現れなかった feature_id を
+/// 削除する**(接触点が消えた分の GC、設計 §4.7 のマニフォールド持続化)。
+/// ボディ対そのものが接触を終えた分の GC は `ManifoldCache::retain_pairs` が担う
+/// (`resolve` にはスリープでスキップされたペアが渡ってこないため、ここでは判断できない)。
 pub fn resolve(
     manifolds: &[ContactManifold],
     bodies: &mut RigidBodySet,
     materials: &MaterialDb,
     restitution_velocity_threshold: f64,
-    warm_start_cache: &mut WarmStartCache,
+    warm_start_cache: &mut ManifoldCache,
 ) {
     let mut constraints = prepare(
         manifolds,
@@ -454,15 +560,160 @@ pub fn resolve(
         }
     }
     position_correction(&constraints, bodies);
+
+    let mut touched: BTreeSet<(usize, usize, u32)> = BTreeSet::new();
+    let mut solved_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
     for c in &constraints {
+        solved_pairs.insert((c.body_a, c.body_b));
         for p in &c.points {
-            warm_start_cache.insert(
-                (c.body_a, c.body_b, p.feature_id),
-                WarmStartImpulse {
-                    normal: p.normal_impulse,
-                    tangent: p.tangent_impulse,
+            let key = (c.body_a, c.body_b, p.feature_id);
+            touched.insert(key);
+            warm_start_cache.points.insert(
+                key,
+                CachedPoint {
+                    local_a: p.local_a,
+                    local_b: p.local_b,
+                    impulse: WarmStartImpulse {
+                        normal: p.normal_impulse,
+                        tangent: p.tangent_impulse,
+                    },
                 },
             );
         }
+    }
+    if warm_start_cache.persistence_enabled {
+        warm_start_cache
+            .points
+            .retain(|key, _| touched.contains(key) || !solved_pairs.contains(&(key.0, key.1)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::{BodyType, RigidBodyDesc};
+    use crate::collision::ContactPoint;
+    use sim_math::Quat;
+
+    fn identity_at(position: Vec3) -> Transform {
+        Transform {
+            position,
+            rotation: Quat::IDENTITY,
+        }
+    }
+
+    /// 地面(Static な箱)の上に箱を1つ置いた最小構成を作り、`resolve` を1回呼んで
+    /// キャッシュに接触点を1つ載せる。戻り値はキャッシュ・その唯一のキー・
+    /// キャッシュ時点の両ボディの姿勢(再利用判定はこの姿勢からのずれで決まる)。
+    fn cache_with_one_contact() -> (ManifoldCache, (usize, usize, u32), (Transform, Transform)) {
+        let materials = MaterialDb::standard();
+        let wood = materials.find_by_name("木材(松)").unwrap();
+        let mut bodies = RigidBodySet::new();
+
+        let ground = RigidBodyDesc {
+            body_type: BodyType::Static,
+            ..RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(5.0, 0.5, 5.0),
+                },
+                wood,
+            )
+        };
+        let a = bodies.create_body(ground, &materials);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            wood,
+        );
+        desc.transform.position = Vec3::new(0.0, 1.0, 0.0);
+        let b = bodies.create_body(desc, &materials);
+        // 法線方向に押し合っている状態にする(warm start インパルスが非ゼロになるよう、
+        // 接近速度を与える)。
+        bodies.linear_velocity[b] = Vec3::new(0.0, -1.0, 0.0);
+
+        let manifold = ContactManifold {
+            body_a: a,
+            body_b: b,
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            points: vec![ContactPoint {
+                world_point: Vec3::new(0.0, 0.5, 0.0),
+                penetration: 0.001,
+                feature_id: 7,
+            }],
+        };
+
+        let xf_a = identity_at(bodies.position[a]);
+        let xf_b = identity_at(bodies.position[b]);
+
+        let mut cache = ManifoldCache::new();
+        resolve(&[manifold], &mut bodies, &materials, 0.5, &mut cache);
+        assert_eq!(cache.len(), 1);
+        assert!(
+            cache.points[&(a, b, 7)].impulse.normal > 0.0,
+            "the cached entry must carry a non-zero normal impulse for the test to mean anything"
+        );
+        (cache, (a, b, 7), (xf_a, xf_b))
+    }
+
+    /// 設計 §4.7「点の再利用判定: 同一 feature_id かつ移動 < 2mm」。
+    /// アンカーのずれが許容値未満なら引き継ぎ、超えたら引き継がない。
+    #[test]
+    fn warm_start_is_inherited_only_while_the_anchors_stay_within_two_millimetres() {
+        let (cache, key, (xf_a, xf_b)) = cache_with_one_contact();
+        let cached = cache.points[&key].impulse.normal;
+        let slid = |offset: Vec3| identity_at(xf_b.position + offset);
+
+        // ずれ 0(両ボディとも動いていない)→ 引き継ぐ。
+        let kept = cache.warm_start_for(key, xf_a, xf_b);
+        assert_eq!(kept.normal, cached);
+
+        // ずれ 1mm(許容内)→ 引き継ぐ。
+        let kept = cache.warm_start_for(key, xf_a, slid(Vec3::new(0.001, 0.0, 0.0)));
+        assert_eq!(kept.normal, cached);
+
+        // ずれ 5mm(許容超)→ 引き継がない。
+        let dropped = cache.warm_start_for(key, xf_a, slid(Vec3::new(0.005, 0.0, 0.0)));
+        assert_eq!(
+            dropped.normal, 0.0,
+            "an anchor that slid {PERSISTENCE_TOLERANCE} m or more is a different physical \
+             contact point and must not inherit the accumulated impulse"
+        );
+    }
+
+    /// 持続化を切ると移行前の挙動(ずれに関係なく無条件に引き継ぐ)に戻ること
+    /// ——対照実験のスイッチが本当に「移行前」を再現していることの確認。
+    #[test]
+    fn disabling_persistence_restores_the_unconditional_pre_migration_inheritance() {
+        let (mut cache, key, (xf_a, xf_b)) = cache_with_one_contact();
+        cache.persistence_enabled = false;
+        let cached = cache.points[&key].impulse.normal;
+
+        let kept = cache.warm_start_for(
+            key,
+            xf_a,
+            identity_at(xf_b.position + Vec3::new(1.0, 0.0, 0.0)), // 1m ずれても引き継いでしまう
+        );
+        assert_eq!(kept.normal, cached);
+
+        // GC も行われない。
+        cache.retain_pairs(&BTreeSet::new());
+        assert_eq!(cache.len(), 1);
+    }
+
+    /// 接触が消えたボディ対のエントリが `retain_pairs` で捨てられること(GC)。
+    #[test]
+    fn retain_pairs_drops_entries_for_pairs_that_are_no_longer_touching() {
+        let (mut cache, key, _) = cache_with_one_contact();
+        let live: BTreeSet<(usize, usize)> = [(key.0, key.1)].into_iter().collect();
+        cache.retain_pairs(&live);
+        assert_eq!(cache.len(), 1, "a live pair must be kept");
+
+        cache.retain_pairs(&BTreeSet::new());
+        assert_eq!(
+            cache.len(),
+            0,
+            "a pair that stopped touching must be dropped"
+        );
     }
 }

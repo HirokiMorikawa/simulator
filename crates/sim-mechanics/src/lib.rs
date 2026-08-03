@@ -6,7 +6,10 @@
 //! 最小CCD・warm starting・split impulse・Box-Box(SAT)は後続の増分で追加する。
 //! Phase 0 の `FallingBody` 最小実装はこの正式な `RigidBodySet`/`MechanicsSolver` に置き換えた。
 //! P4: `vehicle`(簡易Pacejkaタイヤモデル、フルの`WheelJoint`剛体シミュレーションではなく
-//! 制動距離・定常円旋回の受け入れ基準を単独のスカラーODEで直接検証する縮約実装)。
+//! 制動距離・定常円旋回の受け入れ基準を単独のスカラーODEで直接検証する縮約実装)・
+//! `joint::HingeMotorPd`(PD位置サーボ付きヒンジモーター、正式なHingeジョイントの軸直交
+//! 拘束行を持たない縮約実装、`joint`モジュールdoc参照。エンティティ層の関節PD静的姿勢
+//! 維持の受け入れ基準、docs/20-integration/03-entity-layer.md §7)。
 
 mod body;
 mod ccd;
@@ -20,15 +23,20 @@ mod soft_body;
 mod solver;
 mod vehicle;
 
-pub use body::{BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle, ShapeStore};
+pub use body::{
+    collision_filter_allows, BodyType, DragModel, RigidBodyDesc, RigidBodySet, ShapeHandle,
+    ShapeStore, DEFAULT_COLLISION_GROUP, DEFAULT_COLLISION_MASK,
+};
 pub use collision::{ContactManifold, ContactPoint};
 pub use gjk::{
-    conservative_advancement_toi, epa_penetration, gjk_distance, ConvexShape, EpaResult, GjkResult,
+    conservative_advancement_hit, conservative_advancement_toi, epa_penetration, gjk_distance,
+    ConvexShape, EpaResult, GjkResult, ToiHit,
 };
-pub use joint::{BallJoint, DistanceJoint};
+pub use joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint, SoftParams, WheelJoint};
 pub use shape::{Aabb, Shape};
 pub use soft_body::{
-    rope, DistanceConstraint, SoftBody, DEFAULT_DAMPING, DEFAULT_ITERATIONS, DEFAULT_SUBSTEPS,
+    rope, tetrahedron_volume, BendingConstraint, DistanceConstraint, SoftBody, VolumeConstraint,
+    DEFAULT_DAMPING, DEFAULT_ITERATIONS, DEFAULT_SUBSTEPS,
 };
 pub use solver::MechanicsSolver;
 pub use vehicle::{pacejka_force, pacejka_peak_slip, PacejkaParams};

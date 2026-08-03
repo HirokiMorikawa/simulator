@@ -98,7 +98,7 @@ fn event_order_key(e: &Event) -> (u64, u64, u8) {
 
 /// イベントの一時保管。ステップ末尾でまとめて全順序化して配送する
 /// (docs/00-foundation/04-architecture.md §3「イベントは push 型」)。
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct EventQueue {
     pending: Vec<Event>,
 }
@@ -129,6 +129,31 @@ pub struct SolverContext<'a> {
     pub events: &'a mut EventQueue,
 }
 
+/// ソルバが自己申告する近似・縮約(**群1で追加**)。
+///
+/// **なぜ必要だったか**: `World::active_approximations()`は
+/// 「どのドメインが有効か」から**Worldの側で推測して**バッジ文字列を組み立てていた。
+/// これは①ソルバ側で近似を変えてもWorldを直さないと表示が古いまま
+/// ②同じドメインでも設定によって効いている近似が違う(例: 格子流体の粘性が0なら
+/// 陽的粘性拡散をスキップする)ことを表現できない、という2つの問題がある。
+/// 設計 docs/23-frontend/01-editor.md §1.3 の `ApproximationBadge` は
+/// 「近似の名前・**出典**・**オフ可否**」を要求しており、出典もオフ可否も
+/// ソルバ自身しか知らない。**各ソルバが自分の近似を申告する**形へ移す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Approximation {
+    /// 近似の短い名前(バッジに出す)。
+    pub name: &'static str,
+    /// なぜその近似を採ったか(ツールチップに出す)。
+    pub reason: &'static str,
+    /// 根拠となる設計文書のパス(設計§1.3「出典」)。
+    pub doc: &'static str,
+    /// 実行時にオフにできるか(設計§1.3「オフ可否」)。
+    /// **現状は全て`false`**——オフにする機構(近似を切り替えて再計算する経路)は
+    /// まだ無い。ここで`false`と申告しておけば、UIは「オフにできます」という
+    /// 嘘のトグルを出さずに済む。
+    pub can_disable: bool,
+}
+
 /// すべてのドメインソルバが実装する共通トレイト。設計 §1.2。
 pub trait Solver {
     /// このソルバが安定に積分できる最大タイムステップ(状態依存でよい)。
@@ -142,6 +167,13 @@ pub trait Solver {
 
     /// このソルバが保持する全エネルギー(保存則の全体検算に使う)。
     fn total_energy(&self) -> EnergyBreakdown;
+
+    /// このソルバが今の設定で使っている近似・縮約(**群1で追加**、
+    /// `Approximation`のdoc参照)。既定は空——近似を持たない(あるいはまだ
+    /// 申告していない)ソルバは何も出さない。
+    fn approximations(&self) -> Vec<Approximation> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

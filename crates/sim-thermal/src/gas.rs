@@ -59,6 +59,19 @@ impl GasCompartment {
     pub fn isothermal_heat_for_volume_change(&self, target_volume: f64) -> f64 {
         self.n_moles * GAS_CONSTANT * self.temperature * (target_volume / self.volume).ln()
     }
+
+    /// `sim-coupling::PistonGas`用: 1シミュレーションstep分の断熱体積変化を直接適用する
+    /// (`adiabatic_quasi_static_volume_change`の1反復版)。ピストンの機械的time scaleは
+    /// 気体分子の熱化time scaleよりずっと長い(準静的近似が成り立つ、設計§4.3)という
+    /// 前提の下、1回の`Coupling::apply`呼び出し内で$dT/T=-(\gamma-1)dV/V$を1次近似で
+    /// 適用する(`adiabatic_quasi_static_volume_change`が`steps`回の細分で検証している
+    /// のと同じ式を、実際のシミュレーションstep一回分だけ適用する形)。
+    pub fn apply_step_volume_change(&mut self, new_volume: f64) {
+        let gamma = self.heat_capacity_ratio();
+        let dv = new_volume - self.volume;
+        self.temperature *= 1.0 - (gamma - 1.0) * dv / self.volume;
+        self.volume = new_volume;
+    }
 }
 
 /// カルノー効率の上限(設計§7): $\eta \le 1-T_c/T_h$。

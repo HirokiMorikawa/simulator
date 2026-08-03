@@ -1,0 +1,13 @@
+{
+  "name": "d31-diffusion-ink",
+  "seed": 5,
+  "world": { "gravity": 0.0, "dt": 1e-8 },
+  "brownian": {
+    "particle_count": 600,
+    "mass": 5.5e-16,
+    "gamma": 9.4e-9,
+    "kb_t": 4.0471e-21,
+    "initial_position": [0.0, 0.0, 0.0]
+  },
+  "probes": ["brownian_msd"]
+}

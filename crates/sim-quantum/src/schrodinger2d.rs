@@ -7,9 +7,11 @@
 //! 実装を新たに追加する必要はない)。虚時間発展・吸収境界・検出スクリーンの
 //! 決定論的サンプリングは1D版と同様未実装。
 
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::{fft, ifft, Complex64};
 
 /// 2D波動関数。行優先(`index = iy*nx+ix`)。
+#[derive(Clone)]
 pub struct WaveFunction2D {
     pub psi: Vec<Complex64>,
     pub v: Vec<f64>,
@@ -151,6 +153,129 @@ impl WaveFunction2D {
     pub fn psi_column_near_x(&self, x: f64) -> Vec<Complex64> {
         let ix = ((x / self.dx).round() as usize).min(self.nx - 1);
         (0..self.ny).map(|iy| self.psi[self.idx(ix, iy)]).collect()
+    }
+
+    /// エネルギー期待値の内訳 `(⟨T⟩, ⟨V⟩)`(**群3で追加**、1D版 `energy_split` の2D版)。
+    /// 運動項は Parseval の等式で運動量空間から評価する(`step` の波数分割と同じ
+    /// $k$ 規約)。2D FFT は行→列の分離可能実装なので、正規化は $1/(n_xn_y)$。
+    pub fn energy_split(&self) -> (f64, f64) {
+        let cell = self.dx * self.dy;
+        let n = self.nx * self.ny;
+        if n == 0 {
+            return (0.0, 0.0);
+        }
+        let norm = self.norm();
+        if norm == 0.0 {
+            return (0.0, 0.0);
+        }
+
+        let potential: f64 = self
+            .psi
+            .iter()
+            .zip(self.v.iter())
+            .map(|(p, &v)| v * p.norm_sq())
+            .sum::<f64>()
+            * cell;
+
+        let mut psi_hat = self.psi.clone();
+        fft_2d(&mut psi_hat, self.nx, self.ny, false);
+        let dkx = 2.0 * std::f64::consts::PI / (self.nx as f64 * self.dx);
+        let dky = 2.0 * std::f64::consts::PI / (self.ny as f64 * self.dy);
+        let mut kinetic = 0.0;
+        for iy in 0..self.ny {
+            let ky_index = if iy <= self.ny / 2 {
+                iy as isize
+            } else {
+                iy as isize - self.ny as isize
+            };
+            let ky = ky_index as f64 * dky;
+            for ix in 0..self.nx {
+                let kx_index = if ix <= self.nx / 2 {
+                    ix as isize
+                } else {
+                    ix as isize - self.nx as isize
+                };
+                let kx = kx_index as f64 * dkx;
+                kinetic += 0.5 * (kx * kx + ky * ky) * psi_hat[index(self.nx, ix, iy)].norm_sq();
+            }
+        }
+        kinetic *= cell / n as f64;
+
+        (kinetic / norm, potential / norm)
+    }
+
+    /// エネルギー期待値 $\langle H\rangle$。
+    pub fn energy(&self) -> f64 {
+        let (kinetic, potential) = self.energy_split();
+        kinetic + potential
+    }
+}
+
+/// **`Solver` 実装(群3)**。1D版(`schrodinger.rs`)と同じ理由・同じ規約。
+impl Solver for WaveFunction2D {
+    /// 1D版と同じ「分割誤差の目安」。2Dのナイキスト波数は
+    /// $k_{max}^2 = (\pi/dx)^2 + (\pi/dy)^2$。
+    fn max_stable_dt(&self) -> f64 {
+        if self.psi.is_empty() {
+            return f64::INFINITY;
+        }
+        let kx_max = std::f64::consts::PI / self.dx;
+        let ky_max = std::f64::consts::PI / self.dy;
+        let max_v = self.v.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+        let max_rate = 0.5 * (kx_max * kx_max + ky_max * ky_max) + max_v;
+        if max_rate > 0.0 {
+            std::f64::consts::PI / max_rate
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        self.step(dt);
+    }
+
+    /// 1D版と同じく**原子単位のまま**返す(`WaveFunction1D::total_energy` のdoc参照)。
+    fn total_energy(&self) -> EnergyBreakdown {
+        let (kinetic, potential) = self.energy_split();
+        EnergyBreakdown {
+            kinetic,
+            potential,
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.nx as u64);
+        hasher.write_u64(self.ny as u64);
+        hasher.write_f64(self.dx);
+        hasher.write_f64(self.dy);
+        for p in &self.psi {
+            hasher.write_f64(p.re);
+            hasher.write_f64(p.im);
+        }
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        vec![
+            Approximation {
+                name: "TDSE 2D: Strang分割 + 分離可能FFT",
+                reason: "2D FFT は行→列に1D FFTを適用する分離可能実装。分割誤差は1D版と同じ O(dt³)。",
+                doc: "docs/14-quantum/02-schrodinger-solver.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "境界: 周期境界(吸収なし)",
+                reason: "FFT が周期境界を前提とするため。波束が端に達すると反対側から回り込む。",
+                doc: "docs/14-quantum/02-schrodinger-solver.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "単位: 原子単位 (ℏ=mₑ=1)",
+                reason: "エネルギーはハートリー単位のまま。SI 単位の他ドメインとの合算は物理的に意味を持たない。",
+                doc: "docs/14-quantum/02-schrodinger-solver.md",
+                can_disable: false,
+            },
+        ]
     }
 }
 

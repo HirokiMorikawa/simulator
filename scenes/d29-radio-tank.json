@@ -1,0 +1,17 @@
+{
+  "name": "d29-radio-tank",
+  "world": { "gravity": 0.0, "dt": 0.005 },
+  "fdtd": {
+    "nx": 81,
+    "ny": 81,
+    "h": 0.02,
+    "courant": 0.5,
+    "initial": { "pulse": { "i": 40, "j": 40, "amplitude": 1.0, "width": 0.06 } }
+  },
+  "probes": [
+    "fdtd_energy",
+    { "fdtd_ez": [40, 40] },
+    { "fdtd_ez": [60, 40] },
+    { "fdtd_ez": [40, 60] }
+  ]
+}

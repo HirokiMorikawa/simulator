@@ -6,13 +6,16 @@
 //! `Solver`/`Coupling` トレイト・`EventQueue`・`CommandQueue` 等は Phase A で
 //! 各ドメインスケルトンと合わせて追加する(docs/00-foundation/04-architecture.md §1.2–1.3)。
 
+mod frame;
 mod ledger;
 mod material;
 mod solver;
+pub use frame::{fictitious_forces, FictitiousForces, Frame, FrameTree};
 pub use ledger::EnergyLedger;
 pub use material::{Material, MaterialDb, MaterialId, PairOverride, PhaseChangeProps};
 pub use solver::{
-    DomainId, EnergyBreakdown, Event, EventKind, EventQueue, Solver, SolverContext, SourceId,
+    Approximation, DomainId, EnergyBreakdown, Event, EventKind, EventQueue, Solver, SolverContext,
+    SourceId,
 };
 
 /// 世代付きインデックス。削除済み ID へのアクセスは `None`(パニックしない)。
@@ -25,7 +28,9 @@ pub struct BodyId {
 
 /// 所属フレーム。単一フレームのシーンでは全て `ROOT`。
 /// 設計: docs/00-foundation/02-scale-ladder.md §2.2、docs/00-foundation/04-architecture.md §3。
-/// フル フレーム階層(floating origin)は Pα(docs/20-integration/05-frame-hierarchy.md)で拡張する。
+/// フレーム階層(木構造・フレーム間変換・非慣性項)は`frame`モジュール(`FrameTree`)が実装する。
+/// 跨ぎ判定(re-parenting)は`World`のブロードフェーズに依存するため未実装(Phase C、`frame`
+/// モジュールdoc参照)。
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct FrameId(pub u32);
 
@@ -45,6 +50,18 @@ pub struct SimClock {
 impl SimClock {
     pub fn new(dt: f64) -> SimClock {
         SimClock { dt, step_count: 0 }
+    }
+
+    /// タイムステップを変更する(**群2で追加**、エディタのSettingsが使う)。
+    ///
+    /// **決定論への影響を明記する**: `dt`はリプレイの再現性の土台なので、
+    /// 実行中に変えると**それ以降のリプレイは以前の入力列と一致しない**。
+    /// 呼び出し側(エディタ)はEditモードでのみ変更を許し、変更を
+    /// `CommandLog`へ記録することで「いつ変わったか」を残す責務を負う。
+    /// ここでガードしないのは、ヘッドレスランナーやテストが意図的に
+    /// 途中で変えたい場合(適応ステップの実験など)を塞がないため。
+    pub fn set_dt(&mut self, dt: f64) {
+        self.dt = dt;
     }
 
     pub fn dt(&self) -> f64 {

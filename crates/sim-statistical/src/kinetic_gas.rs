@@ -4,6 +4,7 @@
 //! broadphase(設計 §10「空間ハッシュ + Morton順でO(N)」の縮約、Morton順序ソートは未実装)。
 //! Lennard-Jones・熱壁・ピストン・輸送係数測定は未実装。
 
+use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::Vec3;
 use std::collections::HashMap;
 
@@ -12,6 +13,7 @@ pub const BOLTZMANN_CONSTANT: f64 = 1.380649e-23;
 
 /// 剛体球気体シミュレーション。設計 §3 `GasSim` の縮約版(`Interaction`/`Container`の
 /// enum抽象・ピストン・熱壁は未実装、剛体球+反射壁の箱のみ)。
+#[derive(Clone)]
 pub struct GasSim {
     pub position: Vec<Vec3>,
     pub velocity: Vec<Vec3>,
@@ -183,6 +185,89 @@ impl GasSim {
             self.velocity[j] = self.velocity[j] - impulse;
             self.collision_count += 1;
         }
+    }
+
+    /// 全粒子の運動エネルギー $\sum\frac12 m v^2$(剛体球気体は相互作用ポテンシャルを
+    /// 持たない——衝突は瞬間的な速度交換なので、全エネルギー = 運動エネルギー)。
+    pub fn kinetic_energy(&self) -> f64 {
+        0.5 * self.mass * self.velocity.iter().map(|v| v.length_sq()).sum::<f64>()
+    }
+
+    /// 最大速さ [m/s](`max_stable_dt` が使う)。
+    pub fn max_speed(&self) -> f64 {
+        self.velocity
+            .iter()
+            .fold(0.0_f64, |acc, v| acc.max(v.length()))
+    }
+}
+
+/// **`Solver` 実装(群3)**。設計 docs/00-foundation/04-architecture.md §1.2 は
+/// 統計を7ドメインの1つとして数えているのに `Solver` 未実装で、`World` に載る
+/// 経路が原理的に無かった(D30「気体分子の箱」がギャラリーに出せなかった直接の原因)。
+impl Solver for GasSim {
+    /// **剛体球の重なり検出は「ステップ後に重なっていること」に依存する**
+    /// (連続衝突検出ではなく離散判定、`resolve_particle_collisions`)。1ステップで
+    /// 粒子が自分の直径より大きく動くと、相手をすり抜けて衝突を取りこぼす
+    /// ——高速な粒子ほど衝突頻度が過小になり、圧力・輸送係数が系統的にずれる。
+    /// そこで**最速粒子が半径ぶんだけ動く時間**を上限として返す。
+    fn max_stable_dt(&self) -> f64 {
+        let speed = self.max_speed();
+        if speed > 0.0 && self.radius > 0.0 {
+            self.radius / speed
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    fn step(&mut self, dt: f64, _ctx: &mut SolverContext) {
+        // inherent メソッド(1引数版)が優先されるため無限再帰しない。
+        self.step(dt);
+    }
+
+    /// **運動エネルギーのみ**(剛体球は相互作用ポテンシャルを持たない)。
+    /// 壁は鏡面反射(断熱壁)なので、粒子間衝突も壁反射も**弾性=エネルギー保存**
+    /// ——`EnergyLedger` の残差が増えるならそれは実装バグの兆候になる。
+    fn total_energy(&self) -> EnergyBreakdown {
+        EnergyBreakdown {
+            kinetic: self.kinetic_energy(),
+            ..Default::default()
+        }
+    }
+
+    fn state_hash(&self, hasher: &mut StateHasher) {
+        hasher.write_u64(self.position.len() as u64);
+        for (p, v) in self.position.iter().zip(self.velocity.iter()) {
+            hasher.write_f64(p.x);
+            hasher.write_f64(p.y);
+            hasher.write_f64(p.z);
+            hasher.write_f64(v.x);
+            hasher.write_f64(v.y);
+            hasher.write_f64(v.z);
+        }
+        hasher.write_u64(self.collision_count);
+    }
+
+    fn approximations(&self) -> Vec<Approximation> {
+        vec![
+            Approximation {
+                name: "気体: 剛体球(相互作用ポテンシャルなし)",
+                reason: "衝突は接触した瞬間の法線方向速度交換のみ。Lennard-Jones のような連続ポテンシャルは未実装なので、実在気体の引力(ファンデルワールス補正)は再現しない。",
+                doc: "docs/15-statistical/02-kinetic-gas.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "境界: 鏡面反射の断熱壁",
+                reason: "壁との熱交換は無い(熱壁・ピストンは未実装)。したがって系は断熱・エネルギー保存であり、温度は初期条件で決まったまま。",
+                doc: "docs/15-statistical/02-kinetic-gas.md",
+                can_disable: false,
+            },
+            Approximation {
+                name: "衝突検出: 離散(すり抜けあり)",
+                reason: "ステップ後の重なりで判定するため、1ステップで直径以上動く粒子は衝突を取りこぼす。max_stable_dt がこれを踏まえた上限を返す。",
+                doc: "docs/15-statistical/02-kinetic-gas.md",
+                can_disable: false,
+            },
+        ]
     }
 }
 

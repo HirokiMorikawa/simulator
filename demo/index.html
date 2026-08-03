@@ -3,29 +3,213 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>物理エンジン Phase 0 デモ — 落下する箱</title>
-    <style>
-      html,
-      body {
-        margin: 0;
-        height: 100%;
-        background: #111;
-        color: #eee;
-        font-family: monospace;
-      }
-      #hud {
-        position: absolute;
-        top: 8px;
-        left: 8px;
-        font-size: 14px;
-        line-height: 1.5;
-        white-space: pre;
-        pointer-events: none;
-      }
-    </style>
+    <title>物理エンジン統合エディタ</title>
   </head>
   <body>
-    <div id="hud">読み込み中...</div>
+    <div id="app" data-layout="default">
+      <header id="toolbar" class="panel">
+        <div class="toolbar-group" id="mode-toggle">
+          <button id="btn-mode-edit" class="mode-btn" title="Editモード: シーンを直接編集(シミュレーション停止)">
+            Edit
+          </button>
+          <button id="btn-mode-play" class="mode-btn" title="Playモード: Command経由の操作のみ・シミュレーション実行">
+            ▶ Play
+          </button>
+        </div>
+        <div class="toolbar-group">
+          <button id="btn-play" title="再生/一時停止">▶</button>
+          <button id="btn-step" title="指定 step 数だけ進める(既定 1)">⏭</button>
+          <input
+            id="input-step-count"
+            type="number"
+            min="1"
+            max="10000"
+            step="1"
+            value="1"
+            title="⏭ で一度に進める step 数"
+          />
+        </div>
+        <div class="toolbar-group">
+          <button id="btn-tool-translate" title="移動ツール (W)">W 移動</button>
+          <button id="btn-tool-rotate" title="回転ツール (E)">E 回転</button>
+          <button id="btn-tool-scale" title="スケールツール (R)">R 拡縮</button>
+          <button id="btn-tool-select" title="選択のみ (Q)">Q 選択</button>
+          <button
+            id="btn-gizmo-space"
+            title="Gizmo の座標系を World / Local で切り替える (X)"
+            data-space="world"
+          >
+            🌐 World
+          </button>
+          <button id="btn-nudge" title="選択中の剛体に上向きの力を加える(Command経由)">
+            ↑ Nudge
+          </button>
+          <button id="btn-motor-toggle" title="選択中のモーターアームの目標角度を0°/90°で切替(Command::SetMotorTarget経由)">
+            ⟳ モーター切替
+          </button>
+        </div>
+        <div class="toolbar-group">
+          <button id="btn-undo" title="Editモードでの直前の位置編集を取り消す(Gizmoドラッグのみ)">
+            ↶ Undo
+          </button>
+          <button id="btn-redo" title="Undoを取り消してやり直す(Gizmoドラッグのみ)">
+            ↷ Redo
+          </button>
+        </div>
+        <div class="toolbar-group">
+          <select id="select-spawn-material" title="スポーンする材質"></select>
+          <!-- **群2でスポーン系を1つのメニューへ畳んだ**。8個のボタンを並べると
+               ツールバーが3行ぶんの高さに膨れ、ラベルが縦書きに折り返して
+               読めなくなっていた(実際にスクリーンショットで確認)。Scene View の
+               右クリックでも同じスポーンパレットが開く。 -->
+          <button id="btn-add" title="ボディ・ジョイント・流体・フレームを追加する">＋ 追加</button>
+          <button id="btn-spawn-sphere" hidden>+ 球</button>
+          <button id="btn-spawn-box" hidden>+ 箱</button>
+          <button id="btn-spawn-capsule" hidden>+ カプセル</button>
+          <button id="btn-derive-material" hidden>材料派生</button>
+          <button id="btn-spawn-pendulum" hidden>+ 振り子</button>
+          <button id="btn-spawn-motor" hidden>+ モーター</button>
+          <button id="btn-spawn-fluid" hidden>+ 流体</button>
+          <button id="btn-add-frame" hidden>+ フレーム</button>
+        </div>
+        <div class="toolbar-group">
+          <label for="select-timescale">時間倍率</label>
+          <select id="select-timescale">
+            <option value="0.125">×1/8</option>
+            <option value="0.25">×1/4</option>
+            <option value="0.5">×1/2</option>
+            <option value="1" selected>×1</option>
+            <option value="2">×2</option>
+            <option value="4">×4</option>
+            <option value="8">×8</option>
+            <option value="16">×16</option>
+            <option value="32">×32</option>
+            <option value="64">×64</option>
+            <option value="128">×128</option>
+          </select>
+          <span
+            id="timescale-effective"
+            title="実際に達成できている時間倍率。指定値に届かないときは赤で表示する(1フレームあたりのstep数上限に当たっている)"
+            >×1.00</span
+          >
+        </div>
+        <div class="toolbar-group">
+          <button id="btn-settings" title="Settings(オーバーレイ・物理パラメータ・グリッド)">⚙</button>
+          <div id="settings-popover" hidden>
+            <h4>オーバーレイ</h4>
+
+          <label><input type="checkbox" id="toggle-velocity-overlay" checked /> 速度オーバーレイ</label>
+          <label><input type="checkbox" id="toggle-contact-overlay" checked /> 接触点オーバーレイ</label>
+          <label><input type="checkbox" id="toggle-force-overlay" checked /> 力オーバーレイ</label>
+          <label><input type="checkbox" id="toggle-constraint-overlay" checked /> 拘束オーバーレイ</label>
+          <label><input type="checkbox" id="toggle-frame-overlay" checked /> フレーム軸オーバーレイ</label>
+          <label><input type="checkbox" id="toggle-grid-fluid-overlay" checked /> 流体場オーバーレイ</label>
+            <h4>デモ操作</h4>
+
+          <label><input type="checkbox" id="toggle-circuit-switch" /> 回路スイッチ(閉)</label>
+          <label><input type="checkbox" id="toggle-heater" /> ヒーター</label>
+            <h4>物理パラメータ</h4>
+            <label>重力 [m/s²] <input type="number" id="input-gravity" step="0.1" min="0" /></label>
+            <label>dt [s] <input type="number" id="input-dt" step="0.001" min="0.0001" /></label>
+            <p class="settings-note">dt の変更はリプレイの再現性に影響するため Edit モードのみ。</p>
+            <h4>グリッド</h4>
+            <label>スナップ [m] <input type="number" id="input-grid-snap" step="0.01" min="0" value="0.1" /></label>
+            <h4>決定論</h4>
+            <label>PRNG シード <input type="number" id="input-seed" step="1" min="0" value="0" disabled /></label>
+            <p class="settings-note">シードは World 構築時に決まるため、変更にはシーン再読み込みが要る。</p>
+          </div>
+          <label for="select-scene">Scene</label>
+          <select id="select-scene"><option value="">(既定シーン)</option></select>
+          <label for="select-layout">Layout</label>
+          <select id="select-layout">
+            <option value="default">Default</option>
+            <option value="physics-focus">Physics-focus</option>
+            <option value="circuit-focus">Circuit-focus</option>
+            <option value="astro">Astro</option>
+          </select>
+        </div>
+        <div class="toolbar-group toolbar-spacer"></div>
+        <div class="toolbar-group">
+          <span id="hash-display" title="状態ハッシュ(クリックでコピー)">hash: --------</span>
+        </div>
+      </header>
+
+      <aside id="hierarchy" class="panel">
+        <h2>Hierarchy</h2>
+        <ul id="hierarchy-tree" class="tree"></ul>
+      </aside>
+
+      <main id="scene-view" class="panel">
+        <div id="scene-view-canvas-host"></div>
+        <div id="hud"></div>
+        <!-- **場のパネル(群3)**。量子の |ψ|²・イジングのスピン格子・FDTD の Ez・
+             気体の速さ分布・熱伝導棒の温度分布は、いずれも「格子上のスカラー場」で
+             あって Scene View の剛体描画では表現できない(チェックリストが D27–D33 を
+             閉じる際に「専用の可視化パネルが要る」と書いていたものの実体)。
+             **Scene View の中に置く**のが要点——これらのドメインだけのシーンでは
+             3D ビューポートに描くものが無く空いており、かつ Probe Graphs を
+             奪わずに済む(最初は probes 行に置いたが、グラフが見えなくなった)。 -->
+        <section id="field-panel" hidden>
+          <h2 id="field-title">場</h2>
+          <canvas id="field-canvas"></canvas>
+        </section>
+      </main>
+
+      <aside id="inspector" class="panel">
+        <h2>Inspector</h2>
+        <div id="inspector-body"></div>
+        <div id="prediction-panel" style="display: none"></div>
+      </aside>
+
+      <section id="timeline" class="panel">
+        <div class="timeline-header">
+          <span id="timeline-time">t = 0.000 s</span>
+          <span id="timeline-step">step = 0</span>
+          <span id="play-mode-badge" class="badge">Play</span>
+        </div>
+        <input id="timeline-scrubber" type="range" min="0" max="0" value="0" />
+        <div class="timeline-bookmarks">
+          <input id="bookmark-label" type="text" placeholder="ブックマーク名" />
+          <button id="btn-add-bookmark" title="現在時点にラベルを付けて記録する">📌 Bookmark</button>
+          <div id="bookmark-list"></div>
+        </div>
+      </section>
+
+      <section id="console-panel" class="panel">
+        <div class="console-tabs">
+          <button class="console-tab active" data-tab="all">All</button>
+          <button class="console-tab" data-tab="errors">Errors</button>
+          <button class="console-tab" data-tab="warnings">Warnings</button>
+          <button class="console-tab" data-tab="info">Info</button>
+          <button class="console-tab" data-tab="contacts">Contacts</button>
+          <button class="console-tab" data-tab="events">Events</button>
+          <span id="console-badges" class="console-badges"></span>
+        </div>
+        <ul id="console-log"></ul>
+      </section>
+
+      <section id="probe-graphs" class="panel">
+        <h2>Probe Graphs</h2>
+        <div class="probe-controls">
+          <label title="各系列を対数軸(|値|のlog10)で正規化する。桁の異なる量の比較に使う">
+            <input type="checkbox" id="toggle-probe-log" /> 対数軸
+          </label>
+          <button id="btn-probe-csv" title="表示中の全系列の履歴をCSVでダウンロードする">CSV</button>
+        </div>
+        <canvas id="probe-canvas"></canvas>
+      </section>
+
+      <footer id="project-drawer" class="panel">
+        <div class="project-tabs">
+          <button class="project-tab active" data-tab="scenes">Scenes</button>
+          <button class="project-tab" data-tab="materials">Materials</button>
+          <button class="project-tab" data-tab="circuit">Circuit</button>
+          <button class="project-tab" data-tab="prefabs">Prefabs</button>
+          <button class="project-tab" data-tab="replays">Replays</button>
+        </div>
+        <div id="project-body"></div>
+      </footer>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

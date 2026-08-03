@@ -1,0 +1,21 @@
+{
+  "name": "d14c-smoke-3d",
+  "world": { "gravity": 0.0, "dt": 0.004 },
+  "bodies": [],
+  "grid_fluid_3d": {
+    "nx": 24,
+    "ny": 12,
+    "nz": 12,
+    "h": 0.0833333333,
+    "kinematic_viscosity": 1.0e-4,
+    "boundary": { "channel": { "inflow_speed": 1.0 } },
+    "vorticity_confinement_epsilon": 1.0,
+    "solids": [
+      { "sphere": { "center": [0.6, 0.5, 0.5], "radius": 0.18 } }
+    ],
+    "smoke_blocks": [
+      { "min": [2, 4, 4], "counts": [2, 4, 4], "density": 1.0 }
+    ]
+  },
+  "probes": []
+}

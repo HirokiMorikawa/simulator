@@ -14,6 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 性能ベンチ回帰ゲートが merge-base を `git worktree` で取り出すため、
+          # 既定の shallow clone (fetch-depth: 1) では足りない。
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -24,6 +28,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo test (全ドメインの解析解テスト・決定論テスト)
         run: cargo test --workspace
+      - name: 性能ベンチ回帰ゲート(横断DoD④)
+        # 同一ジョブ・同一ランナー上で merge-base をワークツリーへ取り出して
+        # ベースラインを採り、作業ツリー側と criterion の `--baseline` で比較する。
+        # criterion 自体は回帰を表示するだけで exit 0 のままなので、
+        # `change/estimates.json` を読んで閾値超過で落とすのがスクリプトの役目。
+        # 設計判断と閾値の実測的な根拠は scripts/check_bench_regression.py の
+        # モジュールdocを参照。
+        run: python3 scripts/check_bench_regression.py --threshold 0.25
 
   wasm:
     name: wasm-pack build (sim-wasm)
@@ -44,7 +56,7 @@ jobs:
           path: demo/pkg
 
   demo:
-    name: demo build (Vite)
+    name: demo build + Playwright smoke (Vite)
     runs-on: ubuntu-latest
     needs: wasm
     steps:
@@ -64,3 +76,19 @@ jobs:
       - name: npm run build
         working-directory: demo
         run: npm run build
+      - name: install Playwright chromium
+        working-directory: demo
+        run: npx playwright install --with-deps chromium
+      - name: Playwright スモークテスト(フロントエンドの配線検証)
+        # これまでフロントエンドのテストがCIに1本も無かった(`npm run build` =
+        # `tsc --noEmit` + `vite build` のみ)。各増分で手動実行していた確認を
+        # `demo/tests/smoke.spec.ts` として資産化したもの。物理の正しさはRust側の
+        # 解析解テストが担保しており、ここが守るのは「起動し、wasmが初期化され、
+        # 主要な操作でクラッシュしない」という配線の健全性だけである。
+        working-directory: demo
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: demo/playwright-report
