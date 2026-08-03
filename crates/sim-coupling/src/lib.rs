@@ -49,7 +49,7 @@ pub use induction_coupling::InductionCoupling;
 pub use joule_heat::JouleHeat;
 pub use lorentz_force::LorentzForce;
 pub use motor_coupling::MotorCoupling;
-pub use phase_change_morph::PhaseChangeMorph;
+pub use phase_change_morph::{MeltSpawn, PhaseChangeMorph};
 pub use piston_gas::PistonGas;
 pub use sph_rigid::SphRigid;
 

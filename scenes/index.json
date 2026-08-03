@@ -289,6 +289,17 @@
       ]
     },
     {
+      "file": "d18b-ice-melts-into-water.json",
+      "demo": "D18",
+      "title": "氷が水になる(融解→流体生成)",
+      "description": "融ける氷の失った質量が、実際にSPH粒子として生成される。設計の「融解 → 剛体消滅/流体生成」の流体生成側。剛体が軽くなるのと同時に流体粒子が湧くのを Hierarchy の Fluids 行で観測できる。",
+      "domains": [
+        "mechanics",
+        "thermal",
+        "sph"
+      ]
+    },
+    {
       "file": "d20-hand-crank-generator.json",
       "demo": "D20",
       "title": "モーターと発電",

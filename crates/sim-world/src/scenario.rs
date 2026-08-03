@@ -549,6 +549,12 @@ pub enum CouplingJson {
         conductance: f64,
         #[serde(default)]
         initial_enthalpy: f64,
+        /// 融けた質量をSPH粒子として生成する(**群9で公開**、
+        /// `sim_coupling::MeltSpawn`)。省略すると生成しない(既定、移行前の挙動)。
+        /// SPHドメイン(`sph`セクション)が無いシーンで指定しても粒子は湧かない
+        /// ——質量は繰り越しに積まれたまま保持される(質量保存の等式は成り立つ)。
+        #[serde(default)]
+        melt_spawn: Option<MeltSpawnJson>,
     },
     /// D20(モーターと発電)向け(`sim_coupling::MotorCoupling`)。
     MotorCoupling {
@@ -889,6 +895,17 @@ pub struct SoftConstraintJson {
     pub rest: f64,
     #[serde(default)]
     pub compliance: f64,
+}
+
+/// `CouplingJson::PhaseChangeMorph::melt_spawn`(**群9で追加**、
+/// `sim_coupling::MeltSpawn`)。
+#[derive(Deserialize)]
+pub struct MeltSpawnJson {
+    /// 生成位置のばらつき半径 [m](剛体中心まわりの球内に一様分布)。
+    pub spawn_radius: f64,
+    /// 決定論のための乱数シード。
+    #[serde(default)]
+    pub seed: u64,
 }
 
 /// `Scenario::grid_fluid`(`sim_fluid::GridFluid2D`、**増分Hで追加**)。
@@ -2020,11 +2037,12 @@ impl World {
                     initial_mass,
                     conductance,
                     initial_enthalpy,
+                    melt_spawn,
                 } => {
                     let id = *body_ids_by_name
                         .get(body)
                         .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
-                    world.add_coupling(Box::new(sim_coupling::PhaseChangeMorph::new(
+                    let mut coupling = sim_coupling::PhaseChangeMorph::new(
                         id.index as usize,
                         *thermal_node,
                         sim_thermal::PhaseMaterial {
@@ -2036,7 +2054,14 @@ impl World {
                         *initial_mass,
                         *conductance,
                         *initial_enthalpy,
-                    )));
+                    );
+                    if let Some(spawn) = melt_spawn {
+                        coupling.spawn = Some(sim_coupling::MeltSpawn {
+                            spawn_radius: spawn.spawn_radius,
+                            seed: spawn.seed,
+                        });
+                    }
+                    world.add_coupling(Box::new(coupling));
                 }
                 CouplingJson::MotorCoupling {
                     body,
@@ -3886,6 +3911,49 @@ mod tests {
         assert!(
             returned_speed > 0.9 * v0 && returned_speed < 1.05 * v0,
             "気体ばねは圧縮エネルギーをほぼ返すべき: v0={v0} returned={returned_speed}"
+        );
+    }
+
+    /// **群9** D18b(氷が水になる): `phase_change_morph.melt_spawn` によって、
+    /// 融けた質量ぶんが**実際にSPH粒子として生成される**ことをシーンJSON経由で確認する。
+    ///
+    /// 設計 docs/20-integration/01-coupling-matrix.md §3「P3: 融解 → 剛体消滅/
+    /// 流体生成イベント」の**後半(流体生成)**。群5までは「`DomainStates`の設計変更が
+    /// 要る」として残置していたが、`DomainStates`は最初から`sph`を公開しており
+    /// 実際には不要だった(`phase_change_morph`モジュールdocに訂正を記録)。
+    #[test]
+    fn run_headless_scenario_melting_ice_spawns_sph_particles() {
+        let json = include_str!("../../../scenes/d18b-ice-melts-into-water.json");
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let mut world = World::from_scenario(&scenario).expect("valid world");
+
+        let particles_before = world.sph().expect("SPHドメイン").position.len();
+        assert_eq!(particles_before, 0, "最初は流体粒子が1つも無い");
+        let mass_before = world.mechanics().bodies.mass(0);
+
+        for _ in 0..2000 {
+            world.step();
+        }
+
+        let particles_after = world.sph().expect("SPHドメイン").position.len();
+        let mass_after = world.mechanics().bodies.mass(0);
+        assert!(
+            particles_after > 0,
+            "融けた質量ぶんの流体粒子が生成されるべき: {particles_after}"
+        );
+        assert!(
+            mass_after < mass_before,
+            "剛体側は融けた分だけ軽くなるべき: {mass_before} -> {mass_after}"
+        );
+        // 質量の対記帳: 生成された粒子の総質量は、剛体が失った質量を超えない
+        // (超えたら質量を生成してしまっている)。
+        let particle_mass = world.sph().expect("SPHドメイン").mass;
+        let spawned_mass = particles_after as f64 * particle_mass;
+        let lost_mass = mass_before - mass_after;
+        assert!(
+            spawned_mass <= lost_mass + 1e-9,
+            "生成した流体質量が剛体の失った質量を超えてはならない: \
+             spawned={spawned_mass} lost={lost_mass}"
         );
     }
 
