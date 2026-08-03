@@ -3,9 +3,11 @@
 //!
 //! Phase 1: 総当たり broadphase + Sphere-Sphere/Sphere-Plane/Box-Plane/Sphere-Box
 //! narrowphase(§4.2 の表の Phase 1 行)。
-//! Phase 2: Box-Box(SAT、§4.4)。軸選択のヒステリシス・マニフォールド持続化(§4.7、warm
-//! starting の前提)は未実装 — 多段スタック(M12)で貫入が slop を超える既知の制限として
-//! 残る(docs/22-roadmap/02-feature-checklist.md に記録)。Capsule 系は Phase 2、GJK/EPA は Phase 5。
+//! Phase 2: Box-Box(SAT、§4.4)。Capsule 系は Phase 2、GJK/EPA は Phase 5。
+//! 軸選択のヒステリシス(`AxisCache`)は実装済み。**マニフォールド持続化(§4.7)は
+//! 群9で実装した**(`contact::ManifoldCache`)——移行前は M12(4段スタック)の
+//! 貫入が slop の 93.5% まで達していた既知の限界(Q4)があり、実装後は最悪 33.8% に下がった
+//! (`tests/manifold_persistence.rs` の対照実験)。
 //! **群4で Capsule×Box を実装した**(増分Lでは線分-OBB の場合分けを避けて `None` を
 //! 返しており、エディタでカプセルと箱を並べるとすり抜けていた)。`capsule_box` 参照。
 
@@ -1004,7 +1006,9 @@ fn box_box_edge_contact(
 /// `preferred_axis` は軸選択ヒステリシス用(前ステップで選ばれた軸、`detect` が管理する
 /// `AxisCache` から渡す。テスト等で履歴が無い場合は `None` で純粋な最小重なり軸を使う)。
 /// 戻り値の第3要素は今回選ばれた軸インデックス(呼び出し側がキャッシュ更新に使う)。
-/// マニフォールド持続化(§4.7、feature_id の移動量チェックによる再利用判定)は未実装。
+/// マニフォールド持続化(§4.7、feature_id の移動量チェックによる再利用判定)は
+/// 接触ソルバ側(`contact::ManifoldCache`)が担う——ここは毎ステップ新しい接触点を
+/// 生成し、安定した feature_id を振るところまでを担当する。
 fn box_box(
     xf_a: Transform,
     half_a: Vec3,

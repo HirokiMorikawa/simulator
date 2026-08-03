@@ -32,8 +32,10 @@ pub struct MechanicsSolver {
     /// 浮力の評価に使う静的水域(設計 docs/11-fluid/04-free-surface-buoyancy.md §3)。
     /// `None`(既定)は水域なし。P1 は直立姿勢の直方体のみ対応(`sim_fluid::buoyancy` 冒頭注記)。
     pub water: Option<StaticWaterRegion>,
-    /// Warm starting 用の永続キャッシュ(設計 docs/10-mechanics/03-contact-solver.md §4.4)。
-    contact_cache: contact::WarmStartCache,
+    /// マニフォールド持続化 + warm starting 用の永続キャッシュ(設計
+    /// docs/10-mechanics/02-collision-detection.md §4.7・03-contact-solver.md §4.4)。
+    /// `persistence_enabled` の切り替えは `set_manifold_persistence` から行う。
+    contact_cache: contact::ManifoldCache,
     /// Box-Box 軸選択ヒステリシス用キャッシュ(設計 docs/10-mechanics/02-collision-detection.md §4.4)。
     axis_cache: collision::AxisCache,
     /// Distance ジョイント一覧(設計 docs/10-mechanics/05-joints-constraints.md §3)。
@@ -99,7 +101,7 @@ impl MechanicsSolver {
             restitution_velocity_threshold: contact::DEFAULT_RESTITUTION_VELOCITY_THRESHOLD,
             atmosphere: None,
             water: None,
-            contact_cache: contact::WarmStartCache::new(),
+            contact_cache: contact::ManifoldCache::new(),
             axis_cache: collision::AxisCache::new(),
             joints: Vec::new(),
             ball_joints: Vec::new(),
@@ -115,6 +117,18 @@ impl MechanicsSolver {
 
     pub fn create_body(&mut self, desc: RigidBodyDesc, materials: &MaterialDb) -> usize {
         self.bodies.create_body(desc, materials)
+    }
+
+    /// マニフォールド持続化(設計 docs/10-mechanics/02-collision-detection.md §4.7)の
+    /// 有効/無効。既定は有効。`false` にすると移行前の挙動(feature_id 一致だけで
+    /// 無条件にインパルスを引き継ぎ、GC もしない)に戻る——対照実験専用。
+    pub fn set_manifold_persistence(&mut self, enabled: bool) {
+        self.contact_cache.persistence_enabled = enabled;
+    }
+
+    /// マニフォールド持続化キャッシュが保持している接触点数(GC の検証用)。
+    pub fn cached_contact_point_count(&self) -> usize {
+        self.contact_cache.len()
     }
 
     /// 剛体ごとの運動エネルギー [J](並進+回転、`Solver::total_energy`の`kinetic`と
@@ -334,6 +348,11 @@ impl Solver for MechanicsSolver {
              before={ke_before_contact} after={ke_after_contact}"
         );
         self.last_contact_dissipation = ke_before_contact - ke_after_contact;
+        // 接触が完全に消えたボディ対のエントリを捨てる(設計 §4.7、GC)。スリープで
+        // ソルバをスキップしたペアも「生きている接触」として渡す(`retain_pairs` doc参照)。
+        let live_pairs: std::collections::BTreeSet<(usize, usize)> =
+            manifolds.iter().map(|m| (m.body_a, m.body_b)).collect();
+        self.contact_cache.retain_pairs(&live_pairs);
         // 接触解決後(post-solve)の速度で静止判定する(解決前は重力積分直後でまだ抗力が
         // 相殺していないため静止判定に使えない)。島判定には(スキップした分も含め)
         // 全マニフォールドを使う。
