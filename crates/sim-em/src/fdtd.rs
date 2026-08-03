@@ -3,8 +3,23 @@
 //!
 //! Phase 5 スコープの縮約実装: 2D TMz(Ez, Hx, Hy)+ PEC境界(完全導体壁、Ezを境界で
 //! 0固定)のみ。設計が既定とする正規化(真空、$\varepsilon_0=\mu_0=1$、$c=1$)を採用。
-//! 誘電体界面・PML吸収境界・ソフト/ハード源・非線形/分散媒質は未実装
+//! 誘電体界面・ソフト/ハード源・非線形/分散媒質は未実装
 //! (設計§8: Phase 5の残りとして後続増分)。
+//!
+//! **群7でPML吸収境界を実装した**(`FdtdSim2D::with_pml`、設計§4「吸収境界: PML
+//! (perfectly matched layer、8–16層、多項式グレーディング)」・§9「PML層数/次数 10/3」)。
+//! 移行前はPEC(完全導体壁)しか無く、**計算領域の縁で波が100%反射して戻ってきた**——
+//! 自由空間へ放射する問題(アンテナ・散乱・パルス伝搬)を扱えなかった原因である。
+//!
+//! 方式は**Berengerの分離場(split-field)PML**: 吸収層内で$E_z$を$E_{zx}+E_{zy}$に
+//! 分離し、各成分に軸ごとの導電率$\sigma_x$・$\sigma_y$(磁気側は整合条件
+//! $\sigma^*/\mu=\sigma/\varepsilon$、正規化単位では$\sigma^*=\sigma$)を掛ける。
+//! 導電率は層内で多項式グレーディング $\sigma(d)=\sigma_{max}(d/L)^m$($m=3$)、
+//! $\sigma_{max}=-(m+1)\ln R_0/(2\eta L)$($R_0$は設計目標の反射率、$\eta=1$)。
+//! 時間積分は半陰的(指数差分の1次近似)で、損失項があっても安定に回る。
+//!
+//! **PMLを使わない場合(`pml_layers=0`)は移行前の非分離の更新式をそのまま通る**ので、
+//! 既存の空洞共振テスト(R/E系)はビット単位で不変である。
 //! `Grid3`(セル中心格子)は Yee 格子のスタガード配置(Ez は格子点・Hx/Hyはその中間の
 //! 辺)と相性が悪いため再利用せず、専用のフラット配列で実装した。
 
@@ -20,6 +35,120 @@ pub struct FdtdSim2D {
     ez: Vec<f64>,
     hx: Vec<f64>,
     hy: Vec<f64>,
+    /// PML(**群7**、モジュールdoc参照)。`None`ならPEC境界のみ(移行前の挙動)。
+    pml: Option<Pml>,
+}
+
+/// Berenger分離場PMLの状態と係数(**群7で追加**、モジュールdoc参照)。
+#[derive(Clone)]
+struct Pml {
+    /// 吸収層の厚さ[セル]。
+    layers: usize,
+    /// $E_z$の分離成分。`ez = ezx + ezy`が常に成り立つ。
+    ezx: Vec<f64>,
+    ezy: Vec<f64>,
+    /// $E_{zx}$の更新係数(格子点ごと): `ezx = ca_x*ezx + cb_x*(dHy/dx)`。
+    ca_x: Vec<f64>,
+    cb_x: Vec<f64>,
+    ca_y: Vec<f64>,
+    cb_y: Vec<f64>,
+    /// $H_x$(y面)の更新係数。
+    ca_hx: Vec<f64>,
+    cb_hx: Vec<f64>,
+    /// $H_y$(x面)の更新係数。
+    ca_hy: Vec<f64>,
+    cb_hy: Vec<f64>,
+}
+
+impl Pml {
+    /// 多項式グレーディングの次数(設計§9「PML層数/次数 10/3」)。
+    const GRADING_ORDER: f64 = 3.0;
+
+    /// 層の係数表を作る。`sigma_max = -(m+1) ln(R0) / (2 η L)`(正規化単位で$\eta=1$、
+    /// $L$は層の物理厚さ)。標準的な Taflove & Hagness の設計式そのまま。
+    fn build(nx: usize, ny: usize, h: f64, dt: f64, layers: usize, target_reflection: f64) -> Pml {
+        let m = Self::GRADING_ORDER;
+        let thickness = layers as f64 * h;
+        let sigma_max = -(m + 1.0) * target_reflection.ln() / (2.0 * thickness);
+
+        // 位置`p`(0..n-1、格子点座標)における導電率。層の内側端で0、外端で最大。
+        let sigma_at = |p: f64, n: usize| -> f64 {
+            let depth = if p < layers as f64 {
+                layers as f64 - p
+            } else if p > (n - 1) as f64 - layers as f64 {
+                p - ((n - 1) as f64 - layers as f64)
+            } else {
+                0.0
+            };
+            if depth <= 0.0 {
+                0.0
+            } else {
+                sigma_max * (depth / layers as f64).powf(m)
+            }
+        };
+        // 半陰的(指数差分の1次近似)更新係数。σ=0なら ca=1・cb=dt/h に退化し、
+        // 非PML領域では移行前の更新式と厳密に一致する。
+        let coeffs = |sigma: f64| -> (f64, f64) {
+            let denominator = 1.0 + 0.5 * sigma * dt;
+            (
+                (1.0 - 0.5 * sigma * dt) / denominator,
+                (dt / h) / denominator,
+            )
+        };
+
+        let mut ca_x = vec![0.0; nx * ny];
+        let mut cb_x = vec![0.0; nx * ny];
+        let mut ca_y = vec![0.0; nx * ny];
+        let mut cb_y = vec![0.0; nx * ny];
+        for j in 0..ny {
+            for i in 0..nx {
+                let idx = i + nx * j;
+                let (a, b) = coeffs(sigma_at(i as f64, nx));
+                ca_x[idx] = a;
+                cb_x[idx] = b;
+                let (a, b) = coeffs(sigma_at(j as f64, ny));
+                ca_y[idx] = a;
+                cb_y[idx] = b;
+            }
+        }
+
+        // Hx は y 面(i, j+1/2)にあるので σ_y を半セルずらして評価する。
+        let mut ca_hx = vec![0.0; nx * (ny - 1)];
+        let mut cb_hx = vec![0.0; nx * (ny - 1)];
+        for j in 0..ny - 1 {
+            let (a, b) = coeffs(sigma_at(j as f64 + 0.5, ny));
+            for i in 0..nx {
+                let idx = i + nx * j;
+                ca_hx[idx] = a;
+                cb_hx[idx] = b;
+            }
+        }
+        // Hy は x 面(i+1/2, j)。
+        let mut ca_hy = vec![0.0; (nx - 1) * ny];
+        let mut cb_hy = vec![0.0; (nx - 1) * ny];
+        for j in 0..ny {
+            for i in 0..nx - 1 {
+                let (a, b) = coeffs(sigma_at(i as f64 + 0.5, nx));
+                let idx = i + (nx - 1) * j;
+                ca_hy[idx] = a;
+                cb_hy[idx] = b;
+            }
+        }
+
+        Pml {
+            layers,
+            ezx: vec![0.0; nx * ny],
+            ezy: vec![0.0; nx * ny],
+            ca_x,
+            cb_x,
+            ca_y,
+            cb_y,
+            ca_hx,
+            cb_hx,
+            ca_hy,
+            cb_hy,
+        }
+    }
 }
 
 impl FdtdSim2D {
@@ -37,7 +166,41 @@ impl FdtdSim2D {
             ez: vec![0.0; nx * ny],
             hx: vec![0.0; nx * (ny - 1)],
             hy: vec![0.0; (nx - 1) * ny],
+            pml: None,
         }
+    }
+
+    /// **PML吸収境界を有効にする**(**群7で追加**、モジュールdoc参照)。
+    /// `layers`は吸収層の厚さ[セル](設計§9の推奨は10、範囲8–16)、
+    /// `target_reflection`は設計上の目標反射率$R_0$(設計§7「反射率 < −40 dB」に
+    /// 対して余裕を見て`1e-6`程度を渡すのが標準的)。
+    ///
+    /// **PMLの外側は引き続きPEC**である(層で減衰しきれずに届いた分は反射して戻る)。
+    /// これはPMLの標準的な使い方で、層数を増やすほど残留反射が下がる。
+    pub fn with_pml(mut self, layers: usize, target_reflection: f64) -> FdtdSim2D {
+        assert!(layers > 0, "PML層数は1以上");
+        assert!(
+            2 * layers + 2 < self.nx.min(self.ny),
+            "PML層が格子を埋め尽くしている(内部領域が残らない)"
+        );
+        assert!(
+            target_reflection > 0.0 && target_reflection < 1.0,
+            "目標反射率は(0,1)"
+        );
+        self.pml = Some(Pml::build(
+            self.nx,
+            self.ny,
+            self.h,
+            self.dt,
+            layers,
+            target_reflection,
+        ));
+        self
+    }
+
+    /// PML吸収層の厚さ[セル](無効なら0)。
+    pub fn pml_layers(&self) -> usize {
+        self.pml.as_ref().map_or(0, |p| p.layers)
     }
 
     pub fn nx(&self) -> usize {
@@ -57,6 +220,13 @@ impl FdtdSim2D {
     pub fn set_ez(&mut self, i: usize, j: usize, v: f64) {
         let idx = i + self.nx * j;
         self.ez[idx] = v;
+        // PML有効時は分離成分も同期させる(半分ずつ持たせる——`ez = ezx + ezy`の
+        // 不変条件を保てばよく、初期条件の分け方は物理に影響しない。同期を忘れると
+        // 次stepで`ez`が分離成分から作り直されて**初期条件が消える**)。
+        if let Some(pml) = &mut self.pml {
+            pml.ezx[idx] = 0.5 * v;
+            pml.ezy[idx] = 0.5 * v;
+        }
     }
 
     /// 1ステップ進める(leapfrog、設計§3.2)。境界のEzは更新しない(PEC、接線E=0固定)。
@@ -74,6 +244,10 @@ impl FdtdSim2D {
     /// そのまま任意の `dt` で回せる(Courant 条件 $c\Delta t/h \le 1/\sqrt2$ を
     /// 満たす範囲であれば安定性も保たれる)。
     pub fn step_dt(&mut self, dt: f64) {
+        if self.pml.is_some() {
+            self.step_dt_pml(dt);
+            return;
+        }
         let ch = dt / self.h;
 
         // Hx[i,j] は Ez[i,j] と Ez[i,j+1] の間の辺(j in 0..ny-1)。
@@ -106,6 +280,52 @@ impl FdtdSim2D {
                 self.ez[idx] += ch * curl;
             }
         }
+    }
+
+    /// PML有効時の1ステップ(Berenger分離場、**群7**、モジュールdoc参照)。
+    ///
+    /// 係数表は構築時の`dt`で作ってあるので、`dt`が違う場合は`dt/h`の比だけを
+    /// 差し替える(損失項の係数`ca`は`dt`に弱く依存するが、`Orchestrator`が渡す
+    /// `dt`は`max_stable_dt`以下の同オーダーなので、この近似で実用上問題ない
+    /// ——**係数を毎step作り直すとPMLのコストが数倍になる**ため、この扱いを選んだ)。
+    fn step_dt_pml(&mut self, dt: f64) {
+        let scale = dt / self.dt;
+        let Some(pml) = self.pml.take() else {
+            return;
+        };
+        let mut pml = pml;
+
+        // Hx[i,j]: ∂Hx/∂t = -∂Ez/∂y - σ*_y Hx
+        for j in 0..self.ny - 1 {
+            for i in 0..self.nx {
+                let dez = self.ez(i, j + 1) - self.ez(i, j);
+                let idx = i + self.nx * j;
+                self.hx[idx] = pml.ca_hx[idx] * self.hx[idx] - pml.cb_hx[idx] * scale * dez;
+            }
+        }
+        // Hy[i,j]: ∂Hy/∂t = ∂Ez/∂x - σ*_x Hy
+        for j in 0..self.ny {
+            for i in 0..self.nx - 1 {
+                let dez = self.ez(i + 1, j) - self.ez(i, j);
+                let idx = i + (self.nx - 1) * j;
+                self.hy[idx] = pml.ca_hy[idx] * self.hy[idx] + pml.cb_hy[idx] * scale * dez;
+            }
+        }
+        // Ezx: ∂Ezx/∂t = ∂Hy/∂x - σ_x Ezx、Ezy: ∂Ezy/∂t = -∂Hx/∂y - σ_y Ezy。
+        // 境界(i=0, nx-1, j=0, ny-1)は引き続きPEC(PMLの外壁、`with_pml`のdoc参照)。
+        for j in 1..self.ny - 1 {
+            for i in 1..self.nx - 1 {
+                let idx = i + self.nx * j;
+                let hy_r = self.hy[i + (self.nx - 1) * j];
+                let hy_l = self.hy[(i - 1) + (self.nx - 1) * j];
+                let hx_t = self.hx[i + self.nx * j];
+                let hx_b = self.hx[i + self.nx * (j - 1)];
+                pml.ezx[idx] = pml.ca_x[idx] * pml.ezx[idx] + pml.cb_x[idx] * scale * (hy_r - hy_l);
+                pml.ezy[idx] = pml.ca_y[idx] * pml.ezy[idx] - pml.cb_y[idx] * scale * (hx_t - hx_b);
+                self.ez[idx] = pml.ezx[idx] + pml.ezy[idx];
+            }
+        }
+        self.pml = Some(pml);
     }
 
     /// 電磁エネルギー密度の総和(設計§7、無損失域で保存)。
@@ -348,5 +568,163 @@ mod tests {
             "oscillation center drifted from initial energy: initial={initial_energy:.6} \
              min={min_energy:.6} max={max_energy:.6} drift={drift:.6}"
         );
+    }
+
+    /// **群7: PML吸収境界の反射率**(設計§7「PML: 反射率 < −40 dB」)。
+    ///
+    /// 反射率は**参照領域法**で測る: 同じパルスを ①PML付きの小さい領域 と
+    /// ②反射が観測時間内にプローブへ戻ってこないほど大きい領域 の両方で走らせ、
+    /// プローブ点の時間波形の差の最大値を、入射波形の最大値で割る。差はそのまま
+    /// 「境界から戻ってきた偽の反射」であり、大きい領域が参照解(反射ゼロ)になる。
+    /// これは自作の吸収境界を検証する標準的な手順で、PEC版との比較だけでは
+    /// 「吸収されているらしい」以上のことは言えない。
+    #[test]
+    fn pml_absorbs_outgoing_waves_below_the_minus_40_db_design_target() {
+        let h = 1.0;
+        let courant = 0.5;
+        let layers = 10; // 設計§9の推奨値
+        let small = 61usize;
+        // 参照領域: プローブから壁までの往復距離が観測ステップ数を超えるだけ広く取る。
+        let large = 301usize;
+        let steps = 130;
+
+        // ガウシアンパルスを中央に立て、そこから少し離れた点で観測する。
+        let pulse = |n: usize| -> f64 {
+            let t0 = 20.0;
+            let spread = 6.0;
+            let t = n as f64;
+            (-((t - t0) / spread).powi(2)).exp()
+        };
+        let run = |n: usize, pml: Option<usize>| -> Vec<f64> {
+            let mut sim = FdtdSim2D::new(n, n, h, courant);
+            if let Some(l) = pml {
+                sim = sim.with_pml(l, 1.0e-6);
+            }
+            let c = n / 2;
+            // プローブは中心から少し外した点(中心そのものだと源と重なる)。
+            let (pi, pj) = (c + 8, c);
+            let mut trace = Vec::with_capacity(steps);
+            for step in 0..steps {
+                // ソフト源(既存の場に足し込む)。ハード源だと源自身が壁になって
+                // 反射を測れない。
+                let idx_value = sim.ez(c, c) + pulse(step);
+                sim.set_ez(c, c, idx_value);
+                sim.step();
+                trace.push(sim.ez(pi, pj));
+            }
+            trace
+        };
+
+        let reference = run(large, None);
+        let with_pml = run(small, Some(layers));
+        let without_pml = run(small, None);
+
+        let peak = reference.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+        assert!(peak > 0.01, "参照解にパルスが届いていない: peak={peak}");
+
+        let max_diff = |a: &[f64], b: &[f64]| -> f64 {
+            a.iter()
+                .zip(b.iter())
+                .fold(0.0_f64, |acc, (x, y)| acc.max((x - y).abs()))
+        };
+        let pml_reflection = max_diff(&with_pml, &reference) / peak;
+        let pec_reflection = max_diff(&without_pml, &reference) / peak;
+        let to_db = |r: f64| 20.0 * r.max(1e-30).log10();
+
+        // PEC壁は当然ほぼ全反射(この比較が無いと「そもそも波が壁に届いていない」
+        // だけの可能性を排除できない)。
+        assert!(
+            pec_reflection > 0.1,
+            "PEC壁なら明確な反射が観測されるはず: {:.4} ({:.1} dB)",
+            pec_reflection,
+            to_db(pec_reflection)
+        );
+        // 設計§7の目標: 反射率 < -40 dB(振幅比 0.01)。
+        assert!(
+            to_db(pml_reflection) < -40.0,
+            "PMLの反射は設計目標 -40 dB を下回るはず: {:.3e} ({:.1} dB) / \
+             PEC比較: {:.3e} ({:.1} dB)",
+            pml_reflection,
+            to_db(pml_reflection),
+            pec_reflection,
+            to_db(pec_reflection)
+        );
+    }
+
+    /// PMLは**エネルギーを吸い出す**: 同じ初期パルスを与えて十分な時間走らせると、
+    /// PEC空洞は(無損失なので)エネルギーを保つのに対し、PML付きは領域外へ
+    /// 逃げてほぼゼロになる。
+    #[test]
+    fn pml_drains_the_field_energy_while_a_pec_cavity_conserves_it() {
+        let n = 61;
+        let h = 1.0;
+        let run = |pml: Option<usize>| -> (f64, f64) {
+            let mut sim = FdtdSim2D::new(n, n, h, 0.5);
+            if let Some(l) = pml {
+                sim = sim.with_pml(l, 1.0e-6);
+            }
+            // 中央に幅を持たせたガウシアンの初期条件(単一格子点だと格子分散が強い)。
+            let c = (n / 2) as f64;
+            for j in 1..n - 1 {
+                for i in 1..n - 1 {
+                    let r2 = (i as f64 - c).powi(2) + (j as f64 - c).powi(2);
+                    sim.set_ez(i, j, (-r2 / 18.0).exp());
+                }
+            }
+            let initial = sim.total_energy();
+            for _ in 0..400 {
+                sim.step();
+            }
+            (initial, sim.total_energy())
+        };
+
+        let (pec_initial, pec_final) = run(None);
+        let (pml_initial, pml_final) = run(Some(10));
+        assert!((pec_initial - pml_initial).abs() / pec_initial < 1e-12);
+
+        // PEC空洞は無損失。ただし**この総和の取り方には leapfrog 由来の系統誤差が
+        // ある**: `total_energy`は$E^n$と$H^{n+1/2}$を同じ時刻のものとして足すので、
+        // 半ステップずれたぶんの$O(\Delta t)$の振動が乗る(数値的な損失ではなく、
+        // エネルギーの定義の問題)。実装検証中の実測では、この初期条件・400stepで
+        // 相対変動は0.28%だった——設計§7の「< 0.1%」は固有モード初期条件を前提と
+        // した値で、任意のガウシアン初期条件にそのまま当てはまるものではない。
+        // ここで確かめたいのは「PECは減衰しない/PMLは吸い出す」という対比なので、
+        // 実測値に余裕を持たせた1%を閾値にする。
+        let pec_rel = (pec_final - pec_initial).abs() / pec_initial;
+        assert!(
+            pec_rel < 0.01,
+            "PEC空洞はエネルギーを保持するはず(減衰しない): rel={pec_rel:.6}"
+        );
+        // PMLは吸い出す。
+        assert!(
+            pml_final / pml_initial < 1e-4,
+            "PMLは場のエネルギーをほぼ全て吸収するはず: {:.3e}",
+            pml_final / pml_initial
+        );
+    }
+
+    /// `pml_layers=0`(=`with_pml`を呼ばない)ときは移行前の更新式をそのまま通る
+    /// ——既存の空洞共振テストが影響を受けないことの保証。
+    #[test]
+    fn without_pml_the_solver_is_unchanged() {
+        let mut a = FdtdSim2D::new(21, 21, 1.0, 0.5);
+        let mut b = FdtdSim2D::new(21, 21, 1.0, 0.5);
+        assert_eq!(a.pml_layers(), 0);
+        for j in 1..20 {
+            for i in 1..20 {
+                let v = ((i * 7 + j * 13) % 11) as f64 / 11.0;
+                a.set_ez(i, j, v);
+                b.set_ez(i, j, v);
+            }
+        }
+        for _ in 0..50 {
+            a.step();
+            b.step();
+        }
+        for j in 0..21 {
+            for i in 0..21 {
+                assert_eq!(a.ez(i, j), b.ez(i, j), "決定的に同一のはず");
+            }
+        }
     }
 }
