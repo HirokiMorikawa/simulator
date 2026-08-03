@@ -113,7 +113,7 @@ mod tonemap;
 mod triangle;
 
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal, RoughConductor};
-pub use bvh::{Bvh, BvhDiagnostics};
+pub use bvh::{Bvh, BvhDiagnostics, SplitStrategy};
 pub use camera::{exposure_value_at_iso100, relative_exposure, Camera};
 pub use caustic::{
     ball_lens_paraxial_focal_distance, ball_lens_ray_focus_distance, composite_onto_floor,
