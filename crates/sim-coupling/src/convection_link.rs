@@ -339,6 +339,7 @@ mod tests {
                 em_electrostatics: None,
                 gas: None,
                 grid_fluid: None,
+                grid_fluid_3d: None,
                 sph: None,
             };
             coupling.apply(&mut states, dt);
@@ -484,6 +485,7 @@ mod tests {
             em_electrostatics: None,
             gas: None,
             grid_fluid: None,
+            grid_fluid_3d: None,
             sph: None,
         };
         coupling.apply(&mut states, 0.01);
@@ -518,6 +520,7 @@ mod tests {
             em_electrostatics: None,
             gas: None,
             grid_fluid: Some(&mut fluid),
+            grid_fluid_3d: None,
             sph: None,
         };
         coupling.apply(&mut states, 0.01);
@@ -570,6 +573,7 @@ mod tests {
             em_electrostatics: None,
             gas: None,
             grid_fluid: Some(&mut fluid),
+            grid_fluid_3d: None,
             sph: None,
         };
         coupling.apply(&mut states, dt);

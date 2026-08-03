@@ -13,7 +13,7 @@
 
 use sim_core::DomainId;
 use sim_em::{Circuit, PointChargeSystem};
-use sim_fluid::{GridFluid2D, SphFluid};
+use sim_fluid::{GridFluid2D, GridFluid3D, SphFluid};
 use sim_mechanics::MechanicsSolver;
 use sim_thermal::{GasCompartment, ThermalSolver};
 
@@ -28,6 +28,11 @@ pub struct DomainStates<'a> {
     pub gas: Option<&'a mut GasCompartment>,
     /// 格子流体(設計 docs/11-fluid/02-eulerian-grid.md §4.2、`BoussinesqBuoyancy`が使う)。
     pub grid_fluid: Option<&'a mut GridFluid2D>,
+    /// 3D格子流体(**群9で追加**、`sim_fluid::GridFluid3D`)。2Dと同格のドメインとして
+    /// 結合から到達できるようにしてある。**現時点でこれを使う結合はまだ無い**
+    /// ——`GridFluidRigid`等は2D専用で、3D版の結合は設計の結合行列にも無い。
+    /// ドメインを一級市民として置くための枠であることを正直に記録しておく。
+    pub grid_fluid_3d: Option<&'a mut GridFluid3D>,
     /// SPH流体(設計 docs/11-fluid/03-sph.md、`SphRigid`が使う)。
     pub sph: Option<&'a mut SphFluid>,
 }

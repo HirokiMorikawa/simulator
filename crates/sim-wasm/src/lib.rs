@@ -837,6 +837,24 @@ impl WasmWorld {
         out
     }
 
+    /// 3D格子流体ドメインの概要(**群9で追加**)。無ければ空文字列。
+    ///
+    /// **縮約**: 3Dの速度場・煙場をブラウザで可視化する経路(ボリュームレンダリング等)は
+    /// 無いので、Hierarchy に出す概要文字列だけを返す。設計
+    /// docs/23-frontend/01-editor.md §1.1 の「シーングラフツリー(…Fluids)」に
+    /// **ドメインが載っていること自体は見える**ようにする——これが無いと、
+    /// シーンに3D格子流体があってもエディタ上で存在を確認する手段が全く無い。
+    pub fn grid_fluid_3d_summary(&self) -> String {
+        let Some(grid) = self.inner.grid_fluid_3d() else {
+            return String::new();
+        };
+        let smoke: f64 = grid.smoke_density.iter().sum();
+        format!(
+            "GridFluid3D ({}x{}x{}, h={:.3}m, 煙={:.2})",
+            grid.nx, grid.ny, grid.nz, grid.h, smoke
+        )
+    }
+
     /// 重力加速度の大きさ [m/s^2] を実行時に変更する(**群2で追加**)。
     ///
     /// **「Unityのように物理法則を試せる」ことの中心**——重力を変えて挙動が

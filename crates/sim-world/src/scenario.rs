@@ -117,6 +117,9 @@ pub struct Scenario {
     /// 2D格子流体(`sim_fluid::GridFluid2D`、**増分Hで追加**)。D14(煙と渦)・D15(対流)。
     #[serde(default)]
     pub grid_fluid: Option<GridFluidScenarioJson>,
+    /// 3D格子流体(**群9で追加**、`sim_fluid::GridFluid3D`)。
+    #[serde(default)]
+    pub grid_fluid_3d: Option<GridFluid3DScenarioJson>,
     /// 1D熱伝導棒(`sim_thermal::ConductionRod1D`、**増分Hで追加**)。D16(熱伝導レース)。
     #[serde(default)]
     pub conduction_rod: Option<ConductionRodScenarioJson>,
@@ -944,6 +947,82 @@ pub struct GridFluidScenarioJson {
     pub solids: Vec<GridSolidJson>,
 }
 
+/// `Scenario::grid_fluid_3d`(`sim_fluid::GridFluid3D`、**群9で追加**)。
+///
+/// **解像度に注意**: 3Dは前処理なしPCGなので 64³ で1ステップ約 800 ms かかる
+/// (`sim-fluid/examples/grid_fluid3d_bench.rs` の実測)。ギャラリーのシーンは
+/// 全件が検証テストで60ステップ回されるため、**小さめ(24×16×16 程度まで)**に置くこと。
+#[derive(Deserialize)]
+pub struct GridFluid3DScenarioJson {
+    pub nx: usize,
+    pub ny: usize,
+    pub nz: usize,
+    pub h: f64,
+    #[serde(default)]
+    pub density: Option<f64>,
+    #[serde(default)]
+    pub kinematic_viscosity: Option<f64>,
+    /// `"periodic"`(既定)か `{"channel": {"inflow_speed": 1.0}}`。
+    #[serde(default)]
+    pub boundary: Option<GridBoundaryJson>,
+    /// 渦度強化 $\varepsilon_{conf}$(**非物理的な補償項**、0以外にすると近似バッジが出る)。
+    #[serde(default)]
+    pub vorticity_confinement_epsilon: Option<f64>,
+    /// 任意形状の固体境界。
+    #[serde(default)]
+    pub solids: Vec<GridSolid3DJson>,
+    /// 煙(受動スカラー、設計§3 `smoke_density`)の初期の塊。
+    #[serde(default)]
+    pub smoke_blocks: Vec<SmokeBlockJson>,
+}
+
+/// `GridFluid3DScenarioJson::solids` の1要素(**群9で追加**)。
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GridSolid3DJson {
+    Box {
+        center: [f64; 3],
+        half_extents: [f64; 3],
+    },
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+    },
+}
+
+impl GridSolid3DJson {
+    fn contains(&self, x: f64, y: f64, z: f64) -> bool {
+        match self {
+            GridSolid3DJson::Box {
+                center,
+                half_extents,
+            } => {
+                (x - center[0]).abs() < half_extents[0]
+                    && (y - center[1]).abs() < half_extents[1]
+                    && (z - center[2]).abs() < half_extents[2]
+            }
+            GridSolid3DJson::Sphere { center, radius } => {
+                let (dx, dy, dz) = (x - center[0], y - center[1], z - center[2]);
+                dx * dx + dy * dy + dz * dz < radius * radius
+            }
+        }
+    }
+}
+
+/// `GridFluid3DScenarioJson::smoke_blocks` の1要素(**群9で追加**)。
+/// `min`(セル添字)から各軸`counts`個ぶんのセルへ `density` を書き込む。
+#[derive(Deserialize)]
+pub struct SmokeBlockJson {
+    pub min: [usize; 3],
+    pub counts: [usize; 3],
+    #[serde(default = "one")]
+    pub density: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
 /// `GridFluidScenarioJson::boundary`(**群9で追加**)。
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1541,6 +1620,55 @@ impl World {
                 });
             }
             world.enable_grid_fluid(fluid);
+        }
+
+        if let Some(gf) = &scenario.grid_fluid_3d {
+            let mut fluid = sim_fluid::GridFluid3D::new(gf.nx, gf.ny, gf.nz, gf.h);
+            // 2D版と同じ理由で境界条件を最初に適用する(`Channel`は流入速度で場を
+            // 初期化するため、順序が逆だと初期化が上書きされる)。
+            if let Some(boundary) = &gf.boundary {
+                fluid = fluid.with_boundary(match boundary {
+                    GridBoundaryJson::Periodic => sim_fluid::GridBoundary3D::Periodic,
+                    GridBoundaryJson::Channel { inflow_speed } => {
+                        sim_fluid::GridBoundary3D::Channel {
+                            inflow_speed: *inflow_speed,
+                        }
+                    }
+                });
+            }
+            if let Some(d) = gf.density {
+                fluid.density = d;
+            }
+            if let Some(v) = gf.kinematic_viscosity {
+                fluid.kinematic_viscosity = v;
+            }
+            if let Some(epsilon) = gf.vorticity_confinement_epsilon {
+                fluid.vorticity_confinement_epsilon = epsilon;
+            }
+            if !gf.solids.is_empty() {
+                let solids = &gf.solids;
+                fluid.set_solid_cells(|x, y, z| {
+                    if solids.iter().any(|s| s.contains(x, y, z)) {
+                        Some(sim_math::Vec3::ZERO) // シーン定義の固体は静止
+                    } else {
+                        None
+                    }
+                });
+            }
+            for block in &gf.smoke_blocks {
+                for dk in 0..block.counts[2] {
+                    for dj in 0..block.counts[1] {
+                        for di in 0..block.counts[0] {
+                            let (i, j, k) =
+                                (block.min[0] + di, block.min[1] + dj, block.min[2] + dk);
+                            if i < gf.nx && j < gf.ny && k < gf.nz {
+                                fluid.smoke_density[i + gf.nx * (j + gf.ny * k)] = block.density;
+                            }
+                        }
+                    }
+                }
+            }
+            world.enable_grid_fluid_3d(fluid);
         }
 
         if let Some(rod) = &scenario.conduction_rod {
@@ -3641,6 +3769,69 @@ mod tests {
             final_rms > 1.0e6 * final_mean,
             "RMSは平均より桁違いに大きいはず(これがRMSプローブを足した理由): \
              rms={final_rms} mean={final_mean}"
+        );
+    }
+
+    /// **群9** D14c(3Dの煙): `grid_fluid_3d` ドメインが `World` の固定順序で自動的に
+    /// ステップされ、シーンJSONから**煙の塊・球の固体境界・流路境界・渦度強化**まで
+    /// 一通り組めることを確認する。設計 docs/11-fluid/02-eulerian-grid.md §3 の
+    /// `GridFluid` は最初から3Dで、これがその本来の形。
+    ///
+    /// **解像度は意図的に小さい**(24×12×12)。3Dは前処理なしPCGで 64³ なら1ステップ
+    /// 約800msかかるため、ギャラリーの全シーンを回す検証テストに載せられない。
+    #[test]
+    fn run_headless_scenario_three_dimensional_smoke_is_carried_downstream() {
+        let json = include_str!("../../../scenes/d14c-smoke-3d.json");
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let mut world = World::from_scenario(&scenario).expect("valid world");
+
+        let grid = world.grid_fluid_3d().expect("3D格子流体ドメイン");
+        let (nx, ny, nz) = (grid.nx, grid.ny, grid.nz);
+        let column = |g: &sim_fluid::GridFluid3D, i: usize| -> f64 {
+            let mut sum = 0.0;
+            for k in 0..nz {
+                for j in 0..ny {
+                    sum += g.smoke_density[i + nx * (j + ny * k)];
+                }
+            }
+            sum
+        };
+        let upstream_before = column(grid, 3);
+        let downstream_before = column(grid, 12);
+        assert!(upstream_before > 0.0, "上流に煙の塊が置かれているべき");
+        assert_eq!(downstream_before, 0.0, "下流にはまだ煙が無い");
+
+        // 固体境界も入っていること(球なので立方体マスクではない)。
+        assert_eq!(
+            grid.cell_type_at(7, 6, 6),
+            sim_fluid::CellType::Solid,
+            "球の中心はSolidであるべき"
+        );
+
+        for _ in 0..120 {
+            world.step();
+        }
+
+        let grid = world.grid_fluid_3d().expect("3D格子流体ドメイン");
+        assert!(
+            column(grid, 12) > 0.0,
+            "煙が下流へ運ばれるべき: {}",
+            column(grid, 12)
+        );
+
+        // 非物理的な補償項を有効にしたので近似バッジが出る(嘘の申告を残さない)。
+        let badges: Vec<&'static str> = world
+            .active_approximations()
+            .iter()
+            .map(|a| a.name)
+            .collect();
+        assert!(
+            badges.contains(&"渦度強化(非物理)"),
+            "渦度強化を有効にしたのに申告が無い: {badges:?}"
+        );
+        assert!(
+            badges.contains(&"前処理なしPCG"),
+            "3Dソルバの性能上の限界は常時申告されるべき: {badges:?}"
         );
     }
 

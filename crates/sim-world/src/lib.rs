@@ -441,6 +441,9 @@ pub struct World {
     /// `Solver`トレイトを実装済み(モジュールdoc「全ドメイン合成」参照)のため、`sph`と
     /// 同じ固定順で`step()`が自動的にsub-stepする。
     grid_fluid: Option<sim_fluid::GridFluid2D>,
+    /// 3D格子流体(**群9で追加**、`sim_fluid::GridFluid3D`)。固定順序では
+    /// `grid_fluid`(2D)の直後に置く。
+    grid_fluid_3d: Option<sim_fluid::GridFluid3D>,
     /// ソフトボディ(XPBDロープ、D13「ロープと旗」が使う、シーンが使う場合のみ`Some`)。
     /// **増分Hで`Solver`を実装したので`step()`が自動的にsub-stepする**——
     /// `step`が複数引数(`dt, gravity, n_sub, n_iter, damping`)を取り
@@ -602,6 +605,7 @@ impl World {
             conduction_rod: None,
             sph: None,
             grid_fluid: None,
+            grid_fluid_3d: None,
             soft_body: None,
             quantum_1d: None,
             quantum_2d: None,
@@ -1091,6 +1095,19 @@ impl World {
         self.grid_fluid.as_mut()
     }
 
+    /// 3D格子流体ドメインを有効にする(**群9で追加**)。
+    pub fn enable_grid_fluid_3d(&mut self, grid_fluid_3d: sim_fluid::GridFluid3D) {
+        self.grid_fluid_3d = Some(grid_fluid_3d);
+    }
+
+    pub fn grid_fluid_3d(&self) -> Option<&sim_fluid::GridFluid3D> {
+        self.grid_fluid_3d.as_ref()
+    }
+
+    pub fn grid_fluid_3d_mut(&mut self) -> Option<&mut sim_fluid::GridFluid3D> {
+        self.grid_fluid_3d.as_mut()
+    }
+
     /// ソフトボディ(XPBDロープ)ドメインを有効化する(`conduction_rod_mut().step(dt)`と
     /// 同じ理由で呼び出し側が明示的に`soft_body_mut().step(...)`を呼ぶ必要がある、
     /// モジュールdoc参照)。
@@ -1393,6 +1410,9 @@ impl World {
         if let Some(g) = &self.grid_fluid {
             total = total + g.total_energy();
         }
+        if let Some(g) = &self.grid_fluid_3d {
+            total = total + g.total_energy();
+        }
         // **群3で追加**: `soft_body`(弾性)・`conduction_rod`(熱)・`kinetic_gas`
         // (運動)。いずれもSI単位で閉じた保存系なので合計に入れてよい。
         // 増分Hで`Solver`を実装して`step()`へ繋いだ時点で入れるべきだったが
@@ -1460,6 +1480,9 @@ impl World {
         }
         if let Some(g) = &self.grid_fluid {
             push("GridFluid", g.total_energy(), "J", true, true);
+        }
+        if let Some(g) = &self.grid_fluid_3d {
+            push("GridFluid3D", g.total_energy(), "J", true, true);
         }
         if let Some(b) = &self.soft_body {
             push("SoftBody", b.total_energy(), "J", true, true);
@@ -1529,6 +1552,7 @@ impl World {
                     em_electrostatics: self.em_electrostatics.as_mut(),
                     gas: self.gas.as_mut(),
                     grid_fluid: self.grid_fluid.as_mut(),
+                    grid_fluid_3d: self.grid_fluid_3d.as_mut(),
                     sph: self.sph.as_mut(),
                 };
                 coupling.apply_pre(&mut states, dt);
@@ -1591,6 +1615,15 @@ impl World {
                     );
                 }
                 if let Some(g) = &mut self.grid_fluid {
+                    capped |= run_domain_substeps(
+                        g,
+                        dt,
+                        &self.materials,
+                        &mut self.rng,
+                        &mut self.events,
+                    );
+                }
+                if let Some(g) = &mut self.grid_fluid_3d {
                     capped |= run_domain_substeps(
                         g,
                         dt,
@@ -1723,6 +1756,7 @@ impl World {
                 em_electrostatics: self.em_electrostatics.as_mut(),
                 gas: self.gas.as_mut(),
                 grid_fluid: self.grid_fluid.as_mut(),
+                grid_fluid_3d: self.grid_fluid_3d.as_mut(),
                 sph: self.sph.as_mut(),
             };
             coupling.apply_post(&mut states, dt);
@@ -1908,6 +1942,9 @@ impl World {
         if let Some(g) = &self.grid_fluid {
             out.extend(g.approximations());
         }
+        if let Some(g) = &self.grid_fluid_3d {
+            out.extend(g.approximations());
+        }
         if let Some(b) = &self.soft_body {
             out.extend(b.approximations());
         }
@@ -1943,6 +1980,7 @@ impl World {
             || self.circuit.is_some()
             || self.sph.is_some()
             || self.grid_fluid.is_some()
+            || self.grid_fluid_3d.is_some()
             || !self.mechanics.bodies.is_empty();
         let has_non_si = self.quantum_1d.is_some()
             || self.quantum_2d.is_some()
@@ -2257,6 +2295,7 @@ impl World {
             em_electrostatics: self.em_electrostatics.as_mut(),
             gas: self.gas.as_mut(),
             grid_fluid: self.grid_fluid.as_mut(),
+            grid_fluid_3d: self.grid_fluid_3d.as_mut(),
             sph: self.sph.as_mut(),
         };
         coupling.apply(&mut states, dt);
@@ -2304,6 +2343,10 @@ impl World {
         }
         hasher.write_u64(self.grid_fluid.is_some() as u64);
         if let Some(g) = &self.grid_fluid {
+            g.state_hash(&mut hasher);
+        }
+        hasher.write_u64(self.grid_fluid_3d.is_some() as u64);
+        if let Some(g) = &self.grid_fluid_3d {
             g.state_hash(&mut hasher);
         }
         // **増分Hで追加**。`World::step()`が回すようになった以上、状態ハッシュにも

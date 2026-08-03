@@ -288,6 +288,7 @@ mod tests {
             em_electrostatics: None,
             gas: None,
             grid_fluid: None,
+            grid_fluid_3d: None,
             sph: None,
         }
     }
@@ -304,6 +305,7 @@ mod tests {
             em_electrostatics: None,
             gas: None,
             grid_fluid: None,
+            grid_fluid_3d: None,
             sph: Some(sph),
         }
     }

@@ -148,6 +148,7 @@ mod tests {
                     em_electrostatics: None,
                     gas: Some(&mut gas),
                     grid_fluid: None,
+                    grid_fluid_3d: None,
                     sph: None,
                 },
                 dt,

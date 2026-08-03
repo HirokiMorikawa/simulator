@@ -834,6 +834,16 @@ function setUpHierarchy(
     bodies.appendChild(fluidItem);
   }
 
+  // 3D格子流体(**群9で追加**)。3Dの場をブラウザで可視化する経路は無いので、
+  // ドメインが載っていること自体が見えるよう概要行だけを出す(縮約、
+  // `grid_fluid_3d_summary`のdoc参照)。
+  const gridFluid3dSummary = world.grid_fluid_3d_summary();
+  if (gridFluid3dSummary.length > 0) {
+    const item = document.createElement("li");
+    item.textContent = gridFluid3dSummary;
+    bodies.appendChild(item);
+  }
+
   // Circuits(設計§1.1「シーングラフツリー(...Circuits)」、**増分G2で追加**)。
   // 増分G2で`sim-em::Circuit`へ足した素子アクセサ(それまで全フィールドが
   // privateで、載っている素子を外から数える手段が無かった)を`sim-wasm`の
