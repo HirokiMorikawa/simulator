@@ -84,6 +84,7 @@ fn main() {
         spp: 64,
         max_depth: 4,
         exposure: 1.5,
+        russian_roulette_after: None,
     };
 
     let scene_r = build_scene(0);

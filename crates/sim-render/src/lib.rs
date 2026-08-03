@@ -39,9 +39,29 @@
 //! BSDFサンプリングのパストレースとする(不偏、二重計上が原理的に起きない)。
 //!
 //! GGX粗い誘電体・完全な分光レンダリング(hero wavelength法)・マルチスキャッ
-//! タリング・ミー散乱・煙/水の体積散乱・MIS・三角形メッシュ・SAH分割・露出調整
-//! (EV換算)/シャッター速度/モーションブラーは引き続き後続増分
+//! タリング・ミー散乱・煙/水の体積散乱・SAH分割は引き続き後続増分
 //! (各モジュールdoc「縮約実装の理由」参照)。
+//!
+//! **群6(2026-08-03)で解消した縮約**:
+//! 1. **MIS**(`Scene::enable_mis`、`path_tracer`)——面光源へのNEEを、べき乗
+//!    ヒューリスティック($\beta=2$)で二重計上を打ち消しつつ併用できるようにした。
+//!    小さく明るい光源で標準誤差が半分以下になることを実測。**opt-in**なので
+//!    既定経路(R1–R7・R4)はビット単位で不変。
+//! 2. **ロシアンルーレット**(`Scene::trace_with_roulette`、`RenderSettings::
+//!    russian_roulette_after`)——`max_depth`による単純打切り(必ず下側にバイアス)を
+//!    不偏な確率的打切りへ置き換えられるようにした。
+//! 3. **三角形メッシュ**(`triangle`モジュール)——Möller–Trumbore交差・面積重み付き
+//!    頂点法線・アイコスフィア/グリッド生成。`Primitive::Triangle`としてBVHへそのまま
+//!    載る。細分したアイコスフィアが解析球と**同じ画像**になることまで確認した。
+//! 4. **PNGの実圧縮**(`png`)——`stored`(非圧縮)ブロックしか書いていなかったのを、
+//!    LZ77 + 固定ハフマン(RFC 1951 `BTYPE=01`)にした。実測でレンダリング結果が
+//!    2.6–40倍に縮み、標準の zlib で復元できることも確認済み。
+//! 5. **コースティクスの画像への合成**(`caustic::composite_onto_floor`)と
+//!    **分光コースティクス**(`trace_ball_lens_caustic_spectral`、既存の`spectrum`
+//!    モジュールのCIE等色関数を使う)——移行前は`CausticMap`が独立した成果物で、
+//!    パストレ画像の中に集光模様が現れなかった。生成画像を実際に開いて、ガラス球の
+//!    下の床に明るいプールが出ること・分光版に青い芯→緑→赤いハロの同心リング
+//!    (軸上色収差)が出ることを目視で確認した。
 //!
 //! **増分C1(画像出力パイプライン)**: 上記のとおりR1–R7は全て単一レイ/点推定の
 //! 検証であり、実際に画像を1枚も描いたことが無かった——フレームバッファ・
@@ -89,13 +109,14 @@ mod render;
 mod spectrum;
 mod sphere;
 mod tonemap;
+mod triangle;
 
 pub use bsdf::{CauchyDielectric, Dielectric, Lambertian, Metal, RoughConductor};
 pub use bvh::{Bvh, BvhDiagnostics};
 pub use camera::{exposure_value_at_iso100, relative_exposure, Camera};
 pub use caustic::{
-    ball_lens_paraxial_focal_distance, ball_lens_ray_focus_distance, trace_ball_lens_caustic,
-    CausticMap,
+    ball_lens_paraxial_focal_distance, ball_lens_ray_focus_distance, composite_onto_floor,
+    trace_ball_lens_caustic, trace_ball_lens_caustic_spectral, CausticMap,
 };
 pub use framebuffer::Framebuffer;
 pub use medium::{rayleigh_phase, rayleigh_scattering_coefficient, HomogeneousMedium};
@@ -119,3 +140,4 @@ pub use tonemap::{
     aces_filmic_tonemap, aces_filmic_tonemap_color, reinhard_tonemap, reinhard_tonemap_color,
     relative_luminance,
 };
+pub use triangle::{Triangle, TriangleMesh};

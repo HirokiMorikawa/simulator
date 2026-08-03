@@ -46,6 +46,25 @@ pub struct RenderSettings {
     pub max_depth: u32,
     /// `Framebuffer::to_srgb8`へそのまま渡す露出倍率。
     pub exposure: f64,
+    /// **ロシアンルーレットを開始するバウンス数**(**群6で追加**、設計
+    /// docs/17-rendering/02-path-tracing.md §9「最大経路長 8〜16 + ロシアン
+    /// ルーレット」)。`Some(n)`なら`n`バウンス目以降を確率的に打ち切る
+    /// (不偏、`Scene::trace_with_roulette`のdoc参照)。`None`なら`max_depth`での
+    /// 単純打切りのみ(移行前の挙動)。
+    pub russian_roulette_after: Option<u32>,
+}
+
+impl RenderSettings {
+    /// 設計 §9 の推奨値(最大経路長8 + 3バウンス目以降ロシアンルーレット)に
+    /// `spp`と露出だけを差し替えた設定を作る。
+    pub fn with_roulette(spp: u32, exposure: f64) -> RenderSettings {
+        RenderSettings {
+            spp,
+            max_depth: 8,
+            exposure,
+            russian_roulette_after: Some(3),
+        }
+    }
 }
 
 /// 単一のモノクロ`Scene`をピクセルグリッド全体でレンダリングし、行優先
@@ -78,7 +97,17 @@ pub fn render_channel(
 
                 let direction = camera.pinhole_direction(ndc_x, ndc_y, aspect, vfov);
                 let ray = camera.generate_ray(direction, rng);
-                sum += scene.trace(&ray, rng, settings.max_depth);
+                sum += match settings.russian_roulette_after {
+                    // 「`n`バウンス目以降」= 残り深さが `max_depth - n` 以下
+                    // (`trace_with_roulette`は残り深さで指定を受ける)。
+                    Some(n) if n < settings.max_depth => scene.trace_with_roulette(
+                        &ray,
+                        rng,
+                        settings.max_depth,
+                        settings.max_depth - n,
+                    ),
+                    _ => scene.trace(&ray, rng, settings.max_depth),
+                };
             }
             pixels[py as usize * width as usize + px as usize] = sum / settings.spp as f64;
         }
@@ -175,6 +204,7 @@ mod tests {
             spp: 1,
             max_depth: 4,
             exposure: 1.0,
+            russian_roulette_after: None,
         };
         let mut rng = SimRng::new(1, 1);
         let pixels = render_channel(&scene, &camera, vfov, 8, 8, &settings, &mut rng);
@@ -215,6 +245,7 @@ mod tests {
             spp: 1,
             max_depth: 4,
             exposure: 1.0,
+            russian_roulette_after: None,
         };
         let framebuffer = render_rgb([&scene, &scene, &scene], &camera, 0.5, 8, 8, &settings, 7);
 
@@ -357,6 +388,7 @@ mod spectral_tests {
             spp: 400,
             max_depth: 4,
             exposure: 1.0,
+            russian_roulette_after: None,
         };
         let mut rng = SimRng::new(7, 1);
         let fb = render_spectral(&scene, &camera_at(4.0), 0.6, 4, 4, &settings, 8, &mut rng);

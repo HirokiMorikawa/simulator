@@ -96,6 +96,7 @@ fn main() {
         spp: 6,
         max_depth: 4,
         exposure: 1.5,
+        russian_roulette_after: None,
     };
 
     let mut rng_r = sim_math::SimRng::new(42, 0);

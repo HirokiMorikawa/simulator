@@ -173,6 +173,11 @@ pub struct Scene {
     /// するため、レイごとに作り直さずに済むよう`new`で一度だけ作って保持する
     /// (レイ1本ごとに`Vec`を確保するとBVH導入の目的である高速化が帳消しになる)。
     primitives: Vec<Primitive>,
+    /// 面光源(`Emissive`かつ面積が定義できるプリミティブ)の`objects`内index。
+    /// **群6で追加**、MIS付きNEEの光源リスト(`enable_mis`のdoc参照)。
+    emissive_indices: Vec<usize>,
+    /// 面光源に対してMIS付きNEEを行うか(**群6で追加**、既定`false`=移行前の挙動)。
+    use_mis: bool,
 }
 
 impl Scene {
@@ -185,7 +190,18 @@ impl Scene {
     ) -> Scene {
         let primitives: Vec<Primitive> = objects.iter().map(|o| o.primitive).collect();
         let bvh = Bvh::build(&primitives);
+        let emissive_indices: Vec<usize> = objects
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| {
+                matches!(o.material, Material::Emissive(e) if e.radiance > 0.0)
+                    && o.primitive.area().is_some_and(|a| a > 0.0)
+            })
+            .map(|(i, _)| i)
+            .collect();
         Scene {
+            emissive_indices,
+            use_mis: false,
             objects,
             lights,
             environment_radiance,
@@ -210,6 +226,104 @@ impl Scene {
         self.bvh
             .closest_hit(&self.primitives, ray, t_min)
             .map(|(index, hit)| (hit, &self.objects[index].material))
+    }
+
+    /// `closest_hit`と同じだが、当たった物体の`objects`内indexも返す
+    /// (**群6で追加**、MISで「どの面光源に当たったか」を知るため)。
+    fn closest_hit_indexed(&self, ray: &Ray, t_min: f64) -> Option<(usize, Hit)> {
+        self.bvh.closest_hit(&self.primitives, ray, t_min)
+    }
+
+    /// **面光源へのMIS付きNEEを有効にする**(**群6で追加**、設計
+    /// docs/17-rendering/02-path-tracing.md §5「分散低減: 重要度サンプリング
+    /// (BSDF・光源)、多重重点サンプリング(MIS)」)。既定は`false`で、その場合は
+    /// 移行前とまったく同じ「面光源はBSDFサンプリングのみ」の挙動になる
+    /// (既存テストは一切影響を受けない)。
+    ///
+    /// **なぜMISが要るのか**: 面光源にNEEを併用すると、BSDFサンプリングで偶然
+    /// その面へ到達した経路とNEEの寄与が**二重計上**される。MISは両方の推定量に
+    /// 足して1になる重みを掛けることで二重計上を打ち消しつつ、それぞれが得意な
+    /// 領域(NEEは小さく明るい光源、BSDFサンプリングは大きい光源や鏡面反射)の
+    /// 低分散を両取りする。
+    ///
+    /// 重みは**べき乗ヒューリスティック**($\beta=2$、Veach 1997):
+    /// $w_a = p_a^2/(p_a^2+p_b^2)$。
+    ///
+    /// **対象と縮約**: 面光源は`Quad`・`Triangle`のみ(球の面光源は立体角
+    /// サンプリングが別式になるため対象外)。NEEを行うのは拡散面のみ——鏡面・
+    /// 誘電体・金属はデルタ分布なのでNEEの寄与が測度ゼロになる。
+    /// `RoughConductor`(GGX)はBSDFのpdfを解析的に返す口が無いためMISの対象外
+    /// (BSDFサンプリングのみ、不偏)。
+    pub fn enable_mis(mut self) -> Scene {
+        self.use_mis = true;
+        self
+    }
+
+    /// べき乗ヒューリスティック($\beta=2$)のMIS重み(`enable_mis`のdoc参照)。
+    fn power_heuristic(pdf_a: f64, pdf_b: f64) -> f64 {
+        let (a2, b2) = (pdf_a * pdf_a, pdf_b * pdf_b);
+        if a2 + b2 <= 0.0 {
+            return 0.0;
+        }
+        a2 / (a2 + b2)
+    }
+
+    /// 面光源を方向`direction`で見込むときの**立体角についてのpdf**。
+    /// 面積一様サンプリングのpdf $1/A$ を立体角へ変換する:
+    /// $p_\omega = d^2/(|\cos\theta_l|\,A)$。光源を一様に1つ選ぶ確率 $1/N$ を掛ける。
+    fn light_pdf(&self, direction: Vec3, distance: f64, light_normal: Vec3, area: f64) -> f64 {
+        let cos_light = light_normal.dot(direction).abs();
+        if cos_light < 1e-9 || area <= 0.0 || self.emissive_indices.is_empty() {
+            return 0.0;
+        }
+        distance * distance / (cos_light * area) / self.emissive_indices.len() as f64
+    }
+
+    /// 面光源へのNEE + MIS(`enable_mis`のdoc参照)。拡散面で呼ぶ。
+    /// `bsdf`はLambertianのBRDF値($\rho/\pi$)。
+    fn sample_area_lights(&self, point: Vec3, normal: Vec3, bsdf: f64, rng: &mut SimRng) -> f64 {
+        if self.emissive_indices.is_empty() {
+            return 0.0;
+        }
+        let pick = (rng.next_f64() * self.emissive_indices.len() as f64) as usize;
+        let index = self.emissive_indices[pick.min(self.emissive_indices.len() - 1)];
+        let object = &self.objects[index];
+        let Material::Emissive(emissive) = object.material else {
+            return 0.0;
+        };
+        let Some((light_point, light_normal, area)) = object
+            .primitive
+            .sample_point(rng.next_f64(), rng.next_f64())
+        else {
+            return 0.0;
+        };
+
+        let to_light = light_point - point;
+        let distance = to_light.length();
+        if distance < 1e-9 {
+            return 0.0;
+        }
+        let direction = to_light.scale(1.0 / distance);
+        let cos_surface = direction.dot(normal);
+        if cos_surface <= 0.0 {
+            return 0.0; // 光源が面の裏側。
+        }
+        // 遮蔽判定: 光源自身より手前に何かあれば寄与ゼロ。
+        let shadow_ray = Ray::new(point, direction);
+        if let Some((hit, _)) = self.closest_hit(&shadow_ray, 1e-6) {
+            if hit.t < distance - 1e-4 {
+                return 0.0;
+            }
+        }
+
+        let pdf_light = self.light_pdf(direction, distance, light_normal, area);
+        if pdf_light <= 0.0 {
+            return 0.0;
+        }
+        // 同じ方向をBSDFサンプリングが引く確率(コサイン重み付き半球: cosθ/π)。
+        let pdf_bsdf = cos_surface / std::f64::consts::PI;
+        let weight = Self::power_heuristic(pdf_light, pdf_bsdf);
+        weight * bsdf * emissive.radiance * cos_surface / pdf_light
     }
 
     /// NEE(Next Event Estimation、設計§4「直接光: 光源を明示サンプル」)。全ての
@@ -255,6 +369,30 @@ impl Scene {
         self.trace_at_wavelength(ray, rng, max_depth, None)
     }
 
+    /// **ロシアンルーレット付きの経路追跡**(設計 docs/17-rendering/02-path-tracing.md
+    /// §9「最大経路長 8〜16 + ロシアンルーレット」、**群6で追加**)。
+    ///
+    /// 深さ`roulette_min_depth`を超えたら、そこまでの経路スループット
+    /// (`bsdf*cosθ/pdf`等の積)を生存確率$p$として経路を確率的に打ち切り、
+    /// 生き残った経路の寄与を$1/p$で割り戻す。**期待値は打ち切り前と厳密に等しい**
+    /// (不偏)——`max_depth`による単純打切りが必ず下側にバイアスするのに対し、
+    /// ロシアンルーレットはバイアスを分散へ移し替える。
+    ///
+    /// 生存確率は`[0.05, 0.95]`にクランプする: 上限が無いと吸収の弱い材質で経路が
+    /// ほぼ打ち切られず(RRの意味が無い)、下限が無いと稀に生き残った経路の重みが
+    /// 発散して画像に**ファイアフライ**(孤立した明点)が出る。標準的な実装上の
+    /// 措置であり、クランプしても不偏性は保たれる(打ち切り確率を変えているだけで、
+    /// 割り戻しの分母が常にそれと一致するため)。
+    pub fn trace_with_roulette(
+        &self,
+        ray: &Ray,
+        rng: &mut SimRng,
+        max_depth: u32,
+        roulette_min_depth: u32,
+    ) -> f64 {
+        self.trace_full(ray, rng, max_depth, None, roulette_min_depth, 1.0, None)
+    }
+
     /// **分光経路(分光レンダリング増分で追加)**。`wavelength_nm`をシーン中の
     /// 分散を持つ材質(`Material::CauchyDielectric`)へ伝え、その波長での屈折率で
     /// 経路を追う。返すのはその波長における分光放射輝度。
@@ -279,7 +417,26 @@ impl Scene {
         max_depth: u32,
         wavelength_nm: Option<f64>,
     ) -> f64 {
-        let Some((hit, material)) = self.closest_hit(ray, 1e-6) else {
+        // ロシアンルーレット無効(`u32::MAX`)・MIS用のpdf無しで本体へ。
+        self.trace_full(ray, rng, max_depth, wavelength_nm, u32::MAX, 1.0, None)
+    }
+
+    /// 経路追跡の本体。`roulette_min_depth`はロシアンルーレットを開始する残り深さ
+    /// (`u32::MAX`で無効)、`throughput`はここまでの経路スループット、
+    /// `prev_bsdf_pdf`は直前の頂点がこの方向を引いたBSDFのpdf(MIS用、
+    /// `enable_mis`のdoc参照)。
+    #[allow(clippy::too_many_arguments)]
+    fn trace_full(
+        &self,
+        ray: &Ray,
+        rng: &mut SimRng,
+        max_depth: u32,
+        wavelength_nm: Option<f64>,
+        roulette_min_depth: u32,
+        throughput: f64,
+        prev_bsdf_pdf: Option<f64>,
+    ) -> f64 {
+        let Some((hit_index, hit)) = self.closest_hit_indexed(ray, 1e-6) else {
             return match &self.medium {
                 None => self.environment_radiance,
                 // 空へ抜けるレイ(モジュールdoc「AtmosphereMedium」参照): 平行平面近似の
@@ -293,6 +450,19 @@ impl Scene {
         };
         if max_depth == 0 {
             return 0.0; // 打ち切り(エネルギーを捨てる、通常のロシアンルーレット無し打切りと同じ)。
+        }
+        let material = &self.objects[hit_index].material;
+        // ロシアンルーレット(**群6**、`trace_with_roulette`のdoc参照)。
+        // `roulette_min_depth == u32::MAX`(=既定経路)なら決して発火しない。
+        let mut roulette_weight = 1.0;
+        let mut throughput = throughput;
+        if roulette_min_depth != u32::MAX && max_depth <= roulette_min_depth {
+            let survival = throughput.clamp(0.05, 0.95);
+            if rng.next_f64() >= survival {
+                return 0.0;
+            }
+            roulette_weight = 1.0 / survival;
+            throughput /= survival;
         }
 
         // **分散を持つ材質は、追跡中の波長で単色の誘電体へ具体化してから
@@ -312,17 +482,28 @@ impl Scene {
             // 直前で単色の`Dielectric`へ具体化済みなので、ここには到達しない。
             Material::CauchyDielectric(_) => unreachable!("上で具体化済み"),
             Material::Lambertian(lambertian) => {
-                let direct = self.direct_lighting(hit.point, hit.normal, lambertian.eval());
+                let mut direct = self.direct_lighting(hit.point, hit.normal, lambertian.eval());
+                // 面光源へのMIS付きNEE(**群6**、`enable_mis`のdoc参照)。
+                if self.use_mis {
+                    direct +=
+                        self.sample_area_lights(hit.point, hit.normal, lambertian.eval(), rng);
+                }
 
                 let (direction, pdf) = lambertian.sample(hit.normal, rng);
                 let cos_theta = direction.dot(hit.normal);
                 let bsdf = lambertian.eval();
                 let next_ray = Ray::new(hit.point, direction);
-                let indirect =
-                    self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm)
-                        * bsdf
-                        * cos_theta
-                        / pdf;
+                let weight = bsdf * cos_theta / pdf;
+                let indirect = self.trace_full(
+                    &next_ray,
+                    rng,
+                    max_depth - 1,
+                    wavelength_nm,
+                    roulette_min_depth,
+                    throughput * weight,
+                    // MIS: この方向を引いたBSDFのpdfを次の頂点へ伝える。
+                    self.use_mis.then_some(pdf),
+                ) * weight;
 
                 direct + indirect
             }
@@ -352,14 +533,29 @@ impl Scene {
                         // 1回貫通する経路では入射時のeta=1/iorと出射時のeta=iorの二乗が
                         // 厳密に相殺する(1/ior^2 * ior^2 = 1)ため、この因子を含めても
                         // 白色炉テストの厳密一致(誤差ゼロ)が保たれる。
-                        self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm)
-                            * eta
+                        self.trace_full(
+                            &next_ray,
+                            rng,
+                            max_depth - 1,
+                            wavelength_nm,
+                            roulette_min_depth,
+                            throughput * eta * eta,
+                            None,
+                        ) * eta
                             * eta
                     }
                     _ => {
                         let direction = Dielectric::reflect(ray.direction, outward_normal);
                         let next_ray = Ray::new(hit.point, direction);
-                        self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm)
+                        self.trace_full(
+                            &next_ray,
+                            rng,
+                            max_depth - 1,
+                            wavelength_nm,
+                            roulette_min_depth,
+                            throughput,
+                            None,
+                        )
                     }
                 }
             }
@@ -372,27 +568,57 @@ impl Scene {
                 let r = metal.reflectance(cos_theta_i);
                 let direction = Dielectric::reflect(ray.direction, hit.normal);
                 let next_ray = Ray::new(hit.point, direction);
-                self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm) * r
+                self.trace_full(
+                    &next_ray,
+                    rng,
+                    max_depth - 1,
+                    wavelength_nm,
+                    roulette_min_depth,
+                    throughput * r,
+                    None,
+                ) * r
             }
             Material::Emissive(emissive) => {
                 // 自己発光分をそのまま加算する(NEEは行わない、`Emissive`のdoc参照)。
                 // 反射成分はLambertianと同じ扱い——コサイン重み付き半球サンプリングと
                 // 対にすると`bsdf*cosθ/pdf`が`albedo`に恒等的に一致する(R1と同じ
                 // 完全な相殺)。
-                let mut radiance = emissive.radiance;
+                // **MIS有効なら**、直前の頂点がBSDFサンプリングでこの光源を引き当てた
+                // 確率と、そこからNEEでこの面を選ぶ確率をべき乗ヒューリスティックで
+                // 比べて重み付ける(`enable_mis`のdoc参照)——これが二重計上を打ち消す。
+                // カメラからの一次レイ・デルタ反射の直後はNEEが張り合う相手を持たない
+                // ので重み1。
+                let emitted_weight = match (self.use_mis, prev_bsdf_pdf) {
+                    (true, Some(pdf_bsdf)) => {
+                        let area = self.objects[hit_index].primitive.area().unwrap_or(0.0);
+                        let pdf_light = self.light_pdf(ray.direction, hit.t, hit.normal, area);
+                        Self::power_heuristic(pdf_bsdf, pdf_light)
+                    }
+                    _ => 1.0,
+                };
+                let mut radiance = emissive.radiance * emitted_weight;
                 if emissive.albedo > 0.0 {
                     let lambertian = Lambertian {
                         albedo: emissive.albedo,
                     };
+                    if self.use_mis {
+                        radiance +=
+                            self.sample_area_lights(hit.point, hit.normal, lambertian.eval(), rng);
+                    }
                     let (direction, pdf) = lambertian.sample(hit.normal, rng);
                     let cos_theta = direction.dot(hit.normal);
                     let bsdf = lambertian.eval();
                     let next_ray = Ray::new(hit.point, direction);
-                    radiance +=
-                        self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm)
-                            * bsdf
-                            * cos_theta
-                            / pdf;
+                    let weight = bsdf * cos_theta / pdf;
+                    radiance += self.trace_full(
+                        &next_ray,
+                        rng,
+                        max_depth - 1,
+                        wavelength_nm,
+                        roulette_min_depth,
+                        throughput * weight,
+                        self.use_mis.then_some(pdf),
+                    ) * weight;
                 }
                 radiance
             }
@@ -406,16 +632,25 @@ impl Scene {
                     return 0.0;
                 }
                 let next_ray = Ray::new(hit.point, direction);
-                self.trace_at_wavelength(&next_ray, rng, max_depth - 1, wavelength_nm) * weight
+                self.trace_full(
+                    &next_ray,
+                    rng,
+                    max_depth - 1,
+                    wavelength_nm,
+                    roulette_min_depth,
+                    throughput * weight,
+                    None,
+                ) * weight
             }
         };
 
-        match &self.medium {
+        let composited = match &self.medium {
             None => surface_radiance,
             // 物体に当たったレイ(モジュールdoc参照): 交差距離`hit.t`をそのまま
             // 大気の光路長とする(aerial perspective、手前の大気による霞み)。
             Some(atmosphere) => atmosphere.composite(surface_radiance, hit.t, ray.direction),
-        }
+        };
+        composited * roulette_weight
     }
 }
 
@@ -1501,5 +1736,215 @@ mod tests {
             "the colored box's asymmetry must clearly exceed the symmetric control's \
              residual noise: colored={colored_asymmetry:.4} control={asymmetry:.4}"
         );
+    }
+    /// **群6: ロシアンルーレットが不偏であること**。同じシーン・同じサンプル数で
+    /// ①`max_depth`を十分深く取ってRR無し、②浅い深さからRRを効かせる、の2通りを
+    /// 走らせ、平均が統計誤差の範囲で一致することを確認する。RRの割り戻し($1/p$)を
+    /// 忘れる/確率を取り違えると必ず**下側**にずれるので、これが本質的な検証になる。
+    ///
+    /// あわせて、RRが実際に**打ち切っている**(効いている)ことも確認する——
+    /// 一致するだけなら「RRが一度も発火していない」場合と区別できないため、
+    /// 打ち切られて0を返した経路が相当数あることを別途数える。
+    #[test]
+    fn russian_roulette_is_unbiased_and_actually_terminates_paths() {
+        // **向かい合う2枚の大きな平面**(アルベド0.6)。孤立した凸形状だと経路が
+        // 1バウンスで環境へ抜けてしまい、RRが発火する深さまで届かない(実装検証中に
+        // 孤立球で書いて terminated=0 になり気付いた)。相互反射する配置にすることで
+        // 初めて「深い経路」が実際に生まれ、RRの検証になる。
+        let albedo = 0.6;
+        let plane = |z: f64| SceneObject {
+            primitive: Primitive::Quad(Quad::axis_aligned(2, z, -3.0, 3.0, -3.0, 3.0)),
+            material: Material::Lambertian(Lambertian { albedo }),
+        };
+        let scene = Scene::new(vec![plane(0.0), plane(2.0)], Vec::new(), 1.0, None);
+        // 2枚の間から片側の面へ向けて撃つ。
+        let ray = Ray::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0));
+
+        let samples = 40_000;
+        let mut rng_deep = SimRng::new(11, 0);
+        let mut deep_sum = 0.0;
+        for _ in 0..samples {
+            deep_sum += scene.trace(&ray, &mut rng_deep, 32);
+        }
+        let deep_mean = deep_sum / samples as f64;
+
+        let mut rng_rr = SimRng::new(11, 1);
+        let mut rr_sum = 0.0;
+        let mut terminated = 0usize;
+        for _ in 0..samples {
+            // 残り深さが 30 以下(=3バウンス目以降、スループット0.6^2=0.36)で効かせる。
+            let v = scene.trace_with_roulette(&ray, &mut rng_rr, 32, 30);
+            if v == 0.0 {
+                terminated += 1;
+            }
+            rr_sum += v;
+        }
+        let rr_mean = rr_sum / samples as f64;
+
+        // 有限な2平面の間で数回相互反射してから横へ抜ける配置なので、
+        // 平均は0より明確に大きく、環境放射輝度1.0より小さい。
+        assert!(
+            deep_mean > 0.05 && deep_mean < 1.0,
+            "多重反射のあるシーンとして妥当な明るさのはず: {deep_mean}"
+        );
+        // 不偏性: 相対差が統計誤差(数%)の範囲。
+        let rel_diff = (rr_mean - deep_mean).abs() / deep_mean;
+        assert!(
+            rel_diff < 0.02,
+            "RRは不偏のはず(割り戻し1/pを忘れると下振れする): \
+             deep={deep_mean:.5} rr={rr_mean:.5} rel_diff={rel_diff:.5}"
+        );
+        // 実際に打ち切りが起きていること(RRが発火していないなら一致は意味を持たない)。
+        assert!(
+            terminated > samples / 100,
+            "RRが実際に経路を打ち切っているはず: terminated={terminated}/{samples}"
+        );
+    }
+
+    /// アルベド1(白色炉、R1)ではスループットが1のまま下がらないので、RRを
+    /// 有効にしても生存確率は上限0.95でクランプされ、**期待値は環境放射輝度のまま**。
+    /// クランプの上限が不偏性を壊していないことの確認。
+    #[test]
+    fn russian_roulette_preserves_the_white_furnace_expectation() {
+        let environment = 1.0;
+        let scene = Scene::new(
+            vec![SceneObject {
+                primitive: Primitive::Sphere(Sphere {
+                    center: Vec3::new(0.0, 0.0, 4.0),
+                    radius: 1.0,
+                }),
+                material: Material::Lambertian(Lambertian { albedo: 1.0 }),
+            }],
+            Vec::new(),
+            environment,
+            None,
+        );
+        let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0));
+        let samples = 40_000;
+        let mut rng = SimRng::new(23, 0);
+        let mut sum = 0.0;
+        for _ in 0..samples {
+            sum += scene.trace_with_roulette(&ray, &mut rng, 64, 62);
+        }
+        let mean = sum / samples as f64;
+        let rel_err = (mean - environment).abs() / environment;
+        assert!(
+            rel_err < 0.02,
+            "白色炉はRR有りでも環境放射輝度に一致するはず: mean={mean:.5} rel_err={rel_err:.5}"
+        );
+    }
+
+    /// **群6: MISが不偏であること + 分散が下がること**。小さく明るい面光源を
+    /// 拡散床が受けるシーン——BSDFサンプリングだけでは光源を引き当てる確率が低く、
+    /// まばらに巨大な値が返る(高分散)典型例——で、MIS有無の推定値が一致し、
+    /// **MIS有りのほうが標準誤差が小さい**ことを確認する。
+    ///
+    /// MISの重みを間違えると必ず期待値がずれる(二重計上なら上振れ、重みの
+    /// 掛け忘れなら下振れ)ので、一致すること自体が重みの正しさの検証になる。
+    #[test]
+    fn mis_area_light_sampling_is_unbiased_and_reduces_variance() {
+        // 床(y=0、アルベド0.8)と、その上に小さく明るい面光源(y=2)。
+        let floor = SceneObject::quad(
+            Quad::axis_aligned(1, 0.0, -10.0, 10.0, -10.0, 10.0),
+            Material::Lambertian(Lambertian { albedo: 0.8 }),
+        );
+        let light = SceneObject::quad(
+            Quad::axis_aligned(1, 2.0, -0.15, 0.15, -0.15, 0.15),
+            Material::Emissive(Emissive {
+                radiance: 400.0,
+                albedo: 0.0,
+            }),
+        );
+        let build = || Scene::new(vec![floor, light], Vec::new(), 0.0, None);
+        let plain = build();
+        let mis = build().enable_mis();
+
+        // 床の1点を見る一次レイ(光源の真下からわずかにずらす)。
+        let ray = Ray::new(Vec3::new(0.2, 1.0, 0.1), Vec3::new(0.0, -1.0, 0.0));
+
+        let estimate = |scene: &Scene, stream: u64| -> (f64, f64) {
+            let mut rng = SimRng::new(99, stream);
+            let n = 60_000;
+            let (mut sum, mut sum_sq) = (0.0, 0.0);
+            for _ in 0..n {
+                let v = scene.trace(&ray, &mut rng, 4);
+                sum += v;
+                sum_sq += v * v;
+            }
+            let mean = sum / n as f64;
+            let variance = (sum_sq / n as f64 - mean * mean).max(0.0);
+            (mean, (variance / n as f64).sqrt()) // (平均, 標準誤差)
+        };
+
+        let (plain_mean, plain_stderr) = estimate(&plain, 0);
+        let (mis_mean, mis_stderr) = estimate(&mis, 1);
+
+        assert!(plain_mean > 0.0 && mis_mean > 0.0, "光が届いているはず");
+        // 不偏性: 両推定の差が合成標準誤差の4倍以内。
+        let combined = (plain_stderr * plain_stderr + mis_stderr * mis_stderr).sqrt();
+        assert!(
+            (plain_mean - mis_mean).abs() < 4.0 * combined,
+            "MISは不偏のはず: plain={plain_mean:.5}±{plain_stderr:.5} \
+             mis={mis_mean:.5}±{mis_stderr:.5}"
+        );
+        // 分散低減: 小さい光源ではMISが圧倒的に有利。
+        assert!(
+            mis_stderr < plain_stderr / 2.0,
+            "MISのほうが分散が小さいはず: plain_stderr={plain_stderr:.6} \
+             mis_stderr={mis_stderr:.6}"
+        );
+    }
+
+    /// MISを有効にしても**光源を直接見た画素は変わらない**(一次レイには
+    /// 張り合うNEE経路が無いので重み1)。`prev_bsdf_pdf`が`None`のときに
+    /// 重みを掛けてしまうと光源自体が暗くなるので、それを弾く。
+    #[test]
+    fn mis_does_not_dim_a_directly_visible_area_light() {
+        let radiance = 12.0;
+        let light = SceneObject::quad(
+            Quad::axis_aligned(2, 3.0, -1.0, 1.0, -1.0, 1.0),
+            Material::Emissive(Emissive {
+                radiance,
+                albedo: 0.0,
+            }),
+        );
+        let scene = Scene::new(vec![light], Vec::new(), 0.0, None).enable_mis();
+        let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0));
+        let mut rng = SimRng::new(5, 0);
+        let v = scene.trace(&ray, &mut rng, 4);
+        assert!(
+            (v - radiance).abs() < 1e-12,
+            "直接見た面光源はそのままの放射輝度のはず: {v} vs {radiance}"
+        );
+    }
+
+    /// `enable_mis`を呼ばなければ挙動は移行前と**ビット単位で同一**
+    /// (既存のR1–R7・R4コーネルボックスが影響を受けないことの保証)。
+    #[test]
+    fn mis_is_opt_in_and_leaves_the_default_path_bit_identical() {
+        let floor = SceneObject::quad(
+            Quad::axis_aligned(1, 0.0, -5.0, 5.0, -5.0, 5.0),
+            Material::Lambertian(Lambertian { albedo: 0.7 }),
+        );
+        let light = SceneObject::quad(
+            Quad::axis_aligned(1, 2.0, -0.5, 0.5, -0.5, 0.5),
+            Material::Emissive(Emissive {
+                radiance: 50.0,
+                albedo: 0.0,
+            }),
+        );
+        let scene = Scene::new(vec![floor, light], Vec::new(), 0.3, None);
+        let ray = Ray::new(Vec3::new(0.1, 1.0, 0.2), Vec3::new(0.0, -1.0, 0.0));
+
+        let run = |scene: &Scene| {
+            let mut rng = SimRng::new(3, 0);
+            (0..500)
+                .map(|_| scene.trace(&ray, &mut rng, 5))
+                .sum::<f64>()
+        };
+        let before = run(&scene);
+        // 同じシーンをもう一度作り直しても決定的に同じ(既定はMIS無効)。
+        let again = Scene::new(vec![floor, light], Vec::new(), 0.3, None);
+        assert_eq!(before, run(&again));
     }
 }

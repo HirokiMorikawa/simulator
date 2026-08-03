@@ -220,6 +220,7 @@ mod tests {
             spp: 1,
             max_depth: 4,
             exposure: 1.0,
+            russian_roulette_after: None,
         };
         let shutter_samples = 48;
         let py = height / 2;
@@ -334,6 +335,7 @@ mod tests {
             spp: 1,
             max_depth: 4,
             exposure: 1.0,
+            russian_roulette_after: None,
         };
         let py = height / 2;
         let scene_at =

@@ -1,9 +1,8 @@
 //! シーンを構成する解析形状の総和型。設計 docs/17-rendering/02-path-tracing.md §4
 //! 「BVH: 三角形メッシュ + 解析形状(球・平面)」。
 //!
-//! **縮約実装の理由**: `Sphere`(R1白色炉・R2フレネル等)と`Quad`(R4コーネル
-//! ボックスの壁・面光源)の2種のみ。三角形メッシュは引き続き未実装
-//! (`quad.rs`モジュールdoc参照)。トレイトオブジェクト(`Box<dyn Shape>`)ではなく
+//! `Sphere`(R1白色炉・R2フレネル等)・`Quad`(R4コーネルボックスの壁・面光源)・
+//! `Triangle`(**群6で追加**、`triangle.rs`モジュールdoc参照)の3種。トレイトオブジェクト(`Box<dyn Shape>`)ではなく
 //! enumにするのは、形状の種類が固定で少なく、BVHのリーフから何度も呼ばれる
 //! ホットパスであるため動的ディスパッチを避けたいという理由(`sim_mechanics::
 //! Shape`が同じ理由でenumを採る慣行に揃える)。
@@ -11,12 +10,15 @@
 use crate::quad::Quad;
 use crate::ray::Ray;
 use crate::sphere::{Hit, Sphere};
+use crate::triangle::Triangle;
 use sim_math::Vec3;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Primitive {
     Sphere(Sphere),
     Quad(Quad),
+    /// 三角形(**群6で追加**)。`TriangleMesh::triangles()`が展開して並べる。
+    Triangle(Triangle),
 }
 
 impl Primitive {
@@ -24,6 +26,7 @@ impl Primitive {
         match self {
             Primitive::Sphere(s) => s.intersect(ray, t_min),
             Primitive::Quad(q) => q.intersect(ray, t_min),
+            Primitive::Triangle(t) => t.intersect(ray, t_min),
         }
     }
 
@@ -32,6 +35,38 @@ impl Primitive {
         match self {
             Primitive::Sphere(s) => s.center,
             Primitive::Quad(q) => q.corner + (q.edge_u + q.edge_v).scale(0.5),
+            Primitive::Triangle(t) => t.centroid(),
+        }
+    }
+
+    /// 面積(面光源のサンプリング確率密度に使う、**群6で追加**)。球は面光源として
+    /// 未対応なので`None`(`path_tracer`のMISのdoc参照)。
+    pub fn area(&self) -> Option<f64> {
+        match self {
+            Primitive::Sphere(_) => None,
+            Primitive::Quad(q) => Some(q.area()),
+            Primitive::Triangle(t) => Some(t.area()),
+        }
+    }
+
+    /// 面上の点を**面積について一様に**サンプルする(`(u1,u2)`は`[0,1)`の一様乱数)。
+    /// 戻り値は`(点, 幾何法線, 面積)`。球は`None`(面光源として未対応)。
+    /// **群6で追加**——面光源へのNEE(`path_tracer`のMISのdoc参照)に使う。
+    pub fn sample_point(&self, u1: f64, u2: f64) -> Option<(Vec3, Vec3, f64)> {
+        match self {
+            Primitive::Sphere(_) => None,
+            Primitive::Quad(q) => {
+                let point = q.corner + q.edge_u.scale(u1) + q.edge_v.scale(u2);
+                let normal = q.edge_u.cross(q.edge_v).normalize_or_zero();
+                Some((point, normal, q.area()))
+            }
+            Primitive::Triangle(t) => {
+                // 三角形の一様サンプリング(平方根変換でバリセントリック座標へ)。
+                let su = u1.sqrt();
+                let (b0, b1) = (1.0 - su, u2 * su);
+                let point = t.v0.scale(b0) + t.v1.scale(b1) + t.v2.scale(1.0 - b0 - b1);
+                Some((point, t.geometric_normal(), t.area()))
+            }
         }
     }
 
@@ -60,6 +95,7 @@ impl Primitive {
                 }
                 (min, max)
             }
+            Primitive::Triangle(t) => t.bounds(),
         }
     }
 }

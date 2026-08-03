@@ -101,6 +101,7 @@ fn render_d40(out: &Path) {
         spp: 200,
         max_depth: 8,
         exposure: 1.4,
+        russian_roulette_after: None,
     };
     let (r, g, b) = (d40_scene(0), d40_scene(1), d40_scene(2));
     let fb = render_rgb([&r, &g, &b], &camera, 0.9, WIDTH, HEIGHT, &settings, 40);
@@ -113,6 +114,114 @@ fn render_d40(out: &Path) {
     trace_ball_lens_caustic(radius, ior, 0.9 * radius, focal, 900, &mut map);
     let scale = 0.6 / map.peak_energy().max(1e-12);
     write(&map.to_framebuffer(scale), 1.0, out, "d40_caustic");
+
+    // **群6**: 分光コースティクス(BK7のCauchy分散、軸上色収差で色が付く)。
+    let (a, b) = (1.5046, 4200.0);
+    let n_blue = sim_em::cauchy_refractive_index(a, b, 450.0);
+    let focal_blue = sim_render::ball_lens_paraxial_focal_distance(radius, n_blue);
+    let spectral = sim_render::trace_ball_lens_caustic_spectral(
+        radius,
+        a,
+        b,
+        0.1 * radius,
+        focal_blue,
+        1200,
+        WIDTH as usize,
+        // 集光点が画面いっぱいになるまで寄る(色収差の色分かれを見るため)。
+        0.0035 * radius,
+        // 波長サンプル数(設計 13-em/04 §4「16–64サンプル」の上限)。24本だと
+        // 波長ごとのリングが**縞**として分離して見える(目視で確認)——連続
+        // スペクトルを離散サンプルで近似していることがそのまま像に出る。
+        64,
+    );
+    let peak = spectral
+        .pixels
+        .iter()
+        .map(|p| p.x.max(p.y).max(p.z))
+        .fold(0.0_f64, f64::max);
+    write(
+        &spectral,
+        0.9 / peak.max(1e-12),
+        out,
+        "d40_caustic_spectral",
+    );
+
+    // **群6**: コースティクスをカメラ画像へ合成する(床のLambertian反射として
+    // 足し込む)。移行前は`CausticMap`が独立した成果物で画像に現れなかった。
+    render_d40_composited(out);
+}
+
+/// **群6**: コースティクスをレンダリング画像へ合成したD40の派生シーン。
+/// ガラス球の下の床に集光模様が実際に現れることを目で確かめるためのもの。
+fn render_d40_composited(out: &Path) {
+    let radius = 1.0_f64;
+    let ior = 1.5_f64;
+    // **焦点面より奥に床を置く**。焦点面ちょうどだと集光点が球の真下=球自身の影に
+    // 隠れて、斜め上から見るカメラには写らない(最初にそう作って真っ黒な床しか
+    // 出ず、目視で気付いた)。焦点を過ぎて発散させると、球のシルエットより外側へ
+    // 広がる明るいリングになり、これが実際に目で見える集光模様になる。
+    let floor_distance = 3.0 * radius;
+    // 床は y = -floor_distance の水平面。カメラは斜め上から見下ろす。
+    let camera = Camera {
+        origin: Vec3::new(0.0, 1.2, 5.0),
+        forward: Vec3::new(0.0, -0.62, -1.0).normalize_or_zero(),
+        right: Vec3::new(1.0, 0.0, 0.0),
+        up: Vec3::new(0.0, 1.0, 0.0).normalize_or_zero(),
+        lens_radius: 0.0,
+        focus_distance: 6.0,
+    };
+    // 床(y = -focal)+ ガラス球。
+    let floor_albedo = 0.75;
+    let scene_for = |_channel: usize| {
+        Scene::new(
+            vec![
+                SceneObject::quad(
+                    Quad::axis_aligned(1, -floor_distance, -6.0, 6.0, -6.0, 6.0),
+                    Material::Lambertian(Lambertian {
+                        albedo: floor_albedo,
+                    }),
+                ),
+                SceneObject::sphere(
+                    Sphere {
+                        center: Vec3::ZERO,
+                        radius,
+                    },
+                    Material::Dielectric(Dielectric { ior }),
+                ),
+            ],
+            Vec::new(),
+            0.18,
+            None,
+        )
+    };
+    let settings = RenderSettings {
+        spp: 120,
+        max_depth: 8,
+        exposure: 1.0,
+        russian_roulette_after: Some(3),
+    };
+    let (r, g, b) = (scene_for(0), scene_for(1), scene_for(2));
+    let mut fb = render_rgb([&r, &g, &b], &camera, 0.9, WIDTH, HEIGHT, &settings, 60);
+
+    // 上から降る平行ビームが球を通って床へ落ちる集光模様。
+    // グリッドは集光が届く範囲より**広く**取る。狭いと、堆積が途切れる位置が
+    // 床の上に四角い縁として見えてしまう(最初に1.6Rで作って目視で気付いた)。
+    let mut map = CausticMap::new(320, 320, 3.0 * radius);
+    trace_ball_lens_caustic(radius, ior, 0.9 * radius, floor_distance, 1200, &mut map);
+    sim_render::composite_onto_floor(
+        &mut fb,
+        &camera,
+        0.9,
+        Vec3::new(0.0, 1.0, 0.0),
+        -floor_distance,
+        (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+        Vec3::new(0.0, -floor_distance, 0.0),
+        &map,
+        Vec3::new(floor_albedo, floor_albedo, floor_albedo),
+        // ビームの総放射束 [W]。環境光より明るく見える値を選ぶ(目視で調整)。
+        18.0,
+    );
+    write(&fb, settings.exposure, out, "d40_caustic_composited");
 }
 
 // ------------------------------------------------------------ D41 材質ギャラリー
@@ -168,6 +277,7 @@ fn render_d41(out: &Path) {
         spp: 200,
         max_depth: 8,
         exposure: 1.2,
+        russian_roulette_after: None,
     };
     let (r, g, b) = (
         d41_scene(0, &names),
@@ -218,6 +328,7 @@ fn render_d42(out: &Path) {
         spp: 120,
         max_depth: 2,
         exposure: 1.0,
+        russian_roulette_after: None,
     };
     for (name, elevation_deg) in [("noon", 70.0_f64), ("sunset", 4.0_f64)] {
         let e = elevation_deg.to_radians();
@@ -278,6 +389,7 @@ fn render_d43(out: &Path) {
         spp: 160,
         max_depth: 5,
         exposure: 1.0,
+        russian_roulette_after: None,
     };
 
     // (1) 被写界深度: 中央の球(z=-5)へ合焦し、絞りを開けて手前/奥をぼかす。
@@ -332,6 +444,7 @@ fn render_d43(out: &Path) {
         spp: 40,
         max_depth: 5,
         exposure: 1.0,
+        russian_roulette_after: None,
     };
     let fb = render_motion_blur(
         |t| d43_scene_at(1, t),
