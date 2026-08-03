@@ -24,6 +24,11 @@
 //! モジュールdoc参照)ため、この`Coupling`実装が自身の`SimRng`を保持する(`World`の
 //! 中央ストリーム管理への正式な組み込みは、他のCoupling同様まだ`World::step()`
 //! パイプラインに接続されていないため後続増分)。
+//!
+//! **群5**: ランジュバン更新を`apply_pre`(ドメインソルバの**前**)へ移した。位置への
+//! 拡散がその step の積分に効くようになる(post 相では変位が1step遅れた)。温度は
+//! 熱ソルバが力学の後に走るため pre 相では前stepの値を読むが、この結合が想定する
+//! 「一定温度の熱浴」では差が生じない。
 
 use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
@@ -98,7 +103,7 @@ impl Coupling for BrownianForce {
         vec![self.thermal_node]
     }
 
-    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+    fn apply_pre(&mut self, world: &mut DomainStates, dt: f64) {
         let Some(thermal) = &world.thermal else {
             return;
         };
@@ -120,6 +125,16 @@ impl Coupling for BrownianForce {
         let noise_dv = self.rng.maxwell_boltzmann_velocity(noise_sigma);
 
         world.mechanics.bodies.linear_velocity[self.body_index] = v + drag_dv + noise_dv;
+    }
+
+    /// **post 相では何もしない(群5)**。既定実装は`apply`へ委譲するので、これを省略すると
+    /// `World`が pre と post で同じ力を2回積んでしまう。
+    fn apply_post(&mut self, _world: &mut DomainStates, _dt: f64) {}
+
+    /// **単相で呼ばれた場合の互換経路**(`World`を経由しない直接呼び出し用)。
+    /// 全処理は pre 相にある(モジュールdoc参照)。
+    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+        self.apply_pre(world, dt);
     }
 }
 

@@ -7,11 +7,16 @@
 //! 設計は任意形状のボクセル化境界を想定するが、この縮約は`sim_fluid::GridFluidRigidBox2D`
 //! (X2)が既に採用した縮約(マスキング方式、cut-cell法ではない)と同じ。
 //!
-//! 双方向性は`SphRigid`・`InductionCoupling`と同じ1step遅れの縮約で実現する(設計§2規則3
-//! 「各ステップで前ステップ確定値を読む」と整合): `apply`は、(1)前stepの`GridFluid2D::step`
-//! が計算した圧力場から剛体表面の圧力積分力(`GridFluid2D::pressure_force_on_solid`)を
-//! 読み出して剛体速度に注入し、(2)続けて剛体の(今stepの)位置・速度を`GridFluid2D::solid`
-//! へ書き込む(次stepの`GridFluid2D::step`内のマスキングに反映される)。
+//! 双方向性は`apply`ひとつで実現する: (1)`GridFluid2D::step`が計算した圧力場から
+//! 剛体表面の圧力積分力(`GridFluid2D::pressure_force_on_solid`)を読み出して剛体速度に
+//! 注入し、(2)続けて剛体の位置・速度を`GridFluid2D::solid`へ書き込む。
+//!
+//! **群5でこのdocの記述を訂正した**(実装は変えていない)。移行前は上記を「1step遅れの
+//! 縮約」と書いていたが、`SphRigid`とまったく同じ理由で**圧力積分力に1step遅れは無い**
+//! ——`World::step`は全ドメインソルバ(`grid_fluid`を含む)の後に post 相を呼ぶので、
+//! ここで読む圧力場は今stepのものである。残る遅れは`solid`マスク側だけで、これは
+//! 力学ステップがマスク書き込みと流体ステップの間に挟まることに由来し、pre 相へ移しても
+//! 変わらない(`SphRigid`のモジュールdocに詳述)。
 //!
 //! **検証方針**: `SphRigid`実装検証時に確立したパターンを踏襲する。マスキング+圧力積分
 //! による流体力抽出という手法自体の物理的妥当性は、同じ手法を使う
@@ -74,8 +79,8 @@ impl Coupling for GridFluidRigid {
             return;
         };
 
-        // 反作用: 前stepのGridFluid2Dステップで確定した圧力場からの面積分力を
-        // 剛体へ適用(モジュールdoc「1step遅れ」参照)。
+        // 反作用: 今stepのGridFluid2Dステップで確定した圧力場からの面積分力を
+        // 剛体へ適用(`World`は全ドメインソルバの後に post 相を呼ぶ、モジュールdoc参照)。
         if let Some(force) = grid.pressure_force_on_solid() {
             let idx = self.body_index;
             world.mechanics.bodies.linear_velocity[idx] =
@@ -130,7 +135,7 @@ mod tests {
         let mut mechanics = MechanicsSolver::new(0.0);
         let body = mechanics.create_body(desc, &materials);
 
-        // 「前stepで確定したsolidマスク」を手で設定する(1step遅れの縮約、モジュールdoc
+        // 「今stepの`GridFluid2D::step`が使ったsolidマスク」を手で設定する(モジュールdoc
         // 参照)。剛体の現在位置と同じ場所に置くことで、grid_fluid.rsの
         // `pressure_force_on_solid_integrates_a_known_linear_pressure_field`と同一の
         // ジオメトリ・圧力場になり、期待force=(-9.0,-6.0,0.0)を再利用できる。

@@ -14,8 +14,13 @@
 //! 要求する「鏡像力」である追加実装の`ImageChargeForce`。sub-iteration剛性閾値表
 //! (設計§2規則3、`GridFluidRigid`自身は現状固定的な単一適用で、`sim_fluid::
 //! GridFluidRigidBox2D`(X2)が持つ閾値ベースのsub-iteration機構までは踏襲していない)・
-//! シーンJSON`couplings`セクションからの自動解決・design上のpre/post 2相分離は
-//! 後続増分で追加する。
+//! シーンJSON`couplings`セクションからの自動解決は後続増分で追加する。
+//!
+//! **pre/post 2相分離は群5で完了した**(`Coupling::apply_pre`のdoc参照)。同時に
+//! `MotorCoupling`・`InductionCoupling`の1step遅れを解消し、`SphRigid`・
+//! `GridFluidRigid`のモジュールdocが誤って主張していた「反作用力の1step遅れ」
+//! (実際には`World`経由なら遅れていない)を訂正し、`ConvectionLink`に設計 §4.2 の
+//! 相関式4件を揃えた(自然対流を含む)。
 
 mod boussinesq_buoyancy;
 mod brownian_force;
@@ -34,9 +39,9 @@ mod piston_gas;
 mod sph_rigid;
 pub use boussinesq_buoyancy::BoussinesqBuoyancy;
 pub use brownian_force::BrownianForce;
-pub use buoyancy_drag::BuoyancyDrag;
-pub use convection_link::ConvectionLink;
-pub use dissipation_to_heat::DissipationToHeat;
+pub use buoyancy_drag::{BuoyancyDrag, LiftModel};
+pub use convection_link::{ConvectionLink, ConvectionMode};
+pub use dissipation_to_heat::{effusivity, BodyThermalLink, DissipationToHeat};
 pub use domain_states::{Coupling, CouplingKind, DomainStates, NoopCoupling};
 pub use grid_fluid_rigid::GridFluidRigid;
 pub use image_charge_force::ImageChargeForce;

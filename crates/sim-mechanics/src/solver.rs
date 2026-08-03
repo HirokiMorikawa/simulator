@@ -67,6 +67,18 @@ pub struct MechanicsSolver {
     /// 要するため本増分では見送り、`sim-coupling::DissipationToHeat`の受け入れテスト側で
     /// この系統誤差を踏まえた許容誤差(rel<15%)を設定して対応する。
     pub last_contact_dissipation: f64,
+    /// 直近stepの接触解決で**剛体ごとに**失われた運動エネルギー [J](**群5で追加**、
+    /// `body_index`で引く。総和は`last_contact_dissipation`と厳密に一致する)。
+    ///
+    /// `sim-coupling::DissipationToHeat`が設計 docs/12-thermal/02-heat-transfer.md §4.4
+    /// 「熱浸透率比分配」を実装するために必要になった——散逸熱をどの`ThermalNode`へ
+    /// 配るかは接触ペアごとに決まるので、シーン全体の合計値
+    /// (`last_contact_dissipation`)だけでは配分できない。`last_manifolds`(どの剛体
+    /// どうしが接触したか)と組み合わせて使う。
+    ///
+    /// 上記`last_contact_dissipation`の系統誤差(約9%の過大評価)はこの分解値にも
+    /// そのまま含まれる(同じ測定窓の前後差分を剛体ごとに取っているだけ)。
+    pub last_contact_dissipation_by_body: Vec<f64>,
     /// 直近stepで検出された接触ペア(`(body_a, body_b)`、`ContactManifold`と同じ正規化
     /// 順序)。今stepの検出結果との差分から`EventKind::ContactStarted`/`ContactEnded`
     /// (設計docs/00-foundation/04-architecture.md §1.1.2(5))を`ctx.events`へ発行する
@@ -95,6 +107,7 @@ impl MechanicsSolver {
             hinge_motors: Vec::new(),
             wheel_joints: Vec::new(),
             last_contact_dissipation: 0.0,
+            last_contact_dissipation_by_body: Vec::new(),
             contact_pairs: HashSet::new(),
             last_manifolds: Vec::new(),
         }
@@ -102,6 +115,25 @@ impl MechanicsSolver {
 
     pub fn create_body(&mut self, desc: RigidBodyDesc, materials: &MaterialDb) -> usize {
         self.bodies.create_body(desc, materials)
+    }
+
+    /// 剛体ごとの運動エネルギー [J](並進+回転、`Solver::total_energy`の`kinetic`と
+    /// 同じ式を剛体単位で評価したもの。非`Dynamic`剛体は 0)。
+    /// `last_contact_dissipation_by_body`の算出に使う(**群5で追加**、同フィールドのdoc参照)。
+    fn kinetic_energy_by_body(&self) -> Vec<f64> {
+        (0..self.bodies.len())
+            .map(|i| {
+                if self.bodies.body_type[i] != BodyType::Dynamic {
+                    return 0.0;
+                }
+                let mut ke = 0.5 * self.bodies.mass(i) * self.bodies.linear_velocity[i].length_sq();
+                if let Some(inertia_world) = self.bodies.inv_inertia_world[i].inverse() {
+                    let omega = self.bodies.angular_velocity[i];
+                    ke += 0.5 * omega.dot(inertia_world.mul_vec(omega));
+                }
+                ke
+            })
+            .collect()
     }
 
     pub fn add_distance_joint(&mut self, joint: DistanceJoint) {
@@ -279,6 +311,9 @@ impl Solver for MechanicsSolver {
             .cloned()
             .collect();
         let ke_before_contact = self.total_energy().kinetic;
+        // 剛体ごとの運動エネルギーも控えておく(群5、`last_contact_dissipation_by_body`の
+        // doc参照)。接触解決の前後で同じ関数を使うので、総和は必ず全体値と一致する。
+        let ke_by_body_before = self.kinetic_energy_by_body();
         contact::resolve(
             &active_manifolds,
             &mut self.bodies,
@@ -287,6 +322,12 @@ impl Solver for MechanicsSolver {
             &mut self.contact_cache,
         );
         let ke_after_contact = self.total_energy().kinetic;
+        let ke_by_body_after = self.kinetic_energy_by_body();
+        self.last_contact_dissipation_by_body = ke_by_body_before
+            .iter()
+            .zip(ke_by_body_after.iter())
+            .map(|(before, after)| before - after)
+            .collect();
         debug_assert!(
             ke_after_contact <= ke_before_contact + 1e-6 * ke_before_contact.max(1.0),
             "contact resolution must not increase kinetic energy beyond numerical noise: \

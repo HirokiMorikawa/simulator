@@ -1000,9 +1000,7 @@ mod tests {
         let mut thermal = sim_thermal::ThermalSolver::new(293.15);
         let heat_node = thermal.add_node(sim_thermal::ThermalNode::new(293.15, 1000.0));
         world.enable_thermal(thermal);
-        world.add_coupling(Box::new(sim_coupling::JouleHeat {
-            thermal_node: heat_node,
-        }));
+        world.add_coupling(Box::new(sim_coupling::JouleHeat::to_single_node(heat_node)));
 
         world.step();
 

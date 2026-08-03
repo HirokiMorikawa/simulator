@@ -12,6 +12,8 @@
 //! 接地導体という理想化(電荷を持たない・動かない)で、`LorentzForce`の一様外部場と
 //! 同じく反作用対象を持たない「外部」由来の力として扱う(平板自身の電荷分布の変化は
 //! モデル化しない)。
+//!
+//! **群5**: 力の注入を`apply_pre`(ドメインソルバの**前**)へ移した(理由は`BuoyancyDrag`と同じ)。
 
 use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
@@ -49,7 +51,7 @@ impl Coupling for ImageChargeForce {
         vec![self.body_index]
     }
 
-    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+    fn apply_pre(&mut self, world: &mut DomainStates, dt: f64) {
         let mass = world.mechanics.bodies.mass(self.body_index);
         if mass <= 0.0 {
             return; // 静的/キネマティック剛体には適用しない。
@@ -66,6 +68,16 @@ impl Coupling for ImageChargeForce {
 
         let velocity = world.mechanics.bodies.linear_velocity[self.body_index];
         world.mechanics.bodies.linear_velocity[self.body_index] = velocity + force.scale(dt / mass);
+    }
+
+    /// **post 相では何もしない(群5)**。既定実装は`apply`へ委譲するので、これを省略すると
+    /// `World`が pre と post で同じ力を2回積んでしまう。
+    fn apply_post(&mut self, _world: &mut DomainStates, _dt: f64) {}
+
+    /// **単相で呼ばれた場合の互換経路**(`World`を経由しない直接呼び出し用)。
+    /// 全処理は pre 相にある(モジュールdoc参照)。
+    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+        self.apply_pre(world, dt);
     }
 }
 

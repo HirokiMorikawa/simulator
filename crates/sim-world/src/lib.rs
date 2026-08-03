@@ -39,11 +39,11 @@
 //! `orchestrator::sub_step_count`(設計§1.3の
 //! 決定的sub-step数算出、`max_stable_dt()`から算出)に従いsub-stepする — Lie-Trotter
 //! operator splitting自体(pre/post couplingを挟むパイプライン、
-//! docs/20-integration/01-coupling-matrix.md §4)のうち、pre/postの2相分離は未実装
-//! (現状は全て単一の`apply`、各`sim-coupling`実装のモジュールdoc「1step遅れの縮約」
-//! 参照)だが、登録済み`Coupling`(`add_coupling`)を毎stepの全ドメインsub-step完了後に
-//! 自動適用するレジストリ自体は実装済み(`couplings`フィールド、`apply_coupling`の
-//! doc参照)。シーンJSON`couplings`セクションからの自動解決・排他結合検査
+//! docs/20-integration/01-coupling-matrix.md §4)の**pre/post 2相分離は群5で実装完了**
+//! ——`step()`は「pre 相(全結合)→ 全ドメインsub-step → post 相(全結合)」の順に走る。
+//! 各結合がどちらの相に載るかは`sim-coupling`側の実装が決める(既定は post、
+//! 各モジュールdoc参照)。登録済み`Coupling`(`add_coupling`)を
+//! 自動適用するレジストリも実装済み(`couplings`フィールド、`apply_coupling`のdoc参照)。シーンJSON`couplings`セクションからの自動解決・排他結合検査
 //! (`sim-coupling::validate_exclusive_couplings`)との接続は未実装(`scenario`モジュール
 //! doc参照)。`quantum`/`statistical`は
 //! 専用シーンでのみ有効化する設計方針のため見送る。`gas`
@@ -1971,21 +1971,48 @@ impl World {
                 can_disable: false,
             });
         }
-        // 結合の1step遅れはソルバではなく`World`の適用順序に起因するので、
+        // 結合の適用順序に起因する近似はソルバではなく`World`の責務なので、
         // ここでしか申告できない(どのソルバの近似でもない)。
-        if self.couplings.iter().any(|c| {
+        //
+        // **群5の実測にもとづく整理**。旧「結合の1step遅れ」バッジは
+        // 誘導・モーター・SPH剛体・格子流体剛体の4種を一括で申告していたが、
+        // 実際に測ったところ内訳が違っていた:
+        //  - 誘導・モーターは**本当に1step遅れていた**(post 相で設定した起電力を回路が
+        //    読むのは次step)→ `apply_pre`へ移して解消済み。
+        //  - SPH剛体・格子流体剛体の**反作用力は元から遅れていなかった**(post 相は
+        //    全ドメインソルバの後なので今stepの値を読む)→ doc側の誤記だったので訂正。
+        //    ただし境界形状(境界粒子位置・solidマスク)は下記のとおり今も遅れる。
+        //  - 外力注入型(浮力抗力/クーロン/鏡像/ブラウン)は`apply_pre`へ移し、注入した
+        //    速度がその step の位置積分に乗るようにした。
+        let stale_geometry = self.couplings.iter().any(|c| {
             matches!(
                 c.kind(),
-                sim_coupling::CouplingKind::InductionCoupling
-                    | sim_coupling::CouplingKind::MotorCoupling
-                    | sim_coupling::CouplingKind::SphRigid
-                    | sim_coupling::CouplingKind::GridFluidRigid
+                sim_coupling::CouplingKind::SphRigid | sim_coupling::CouplingKind::GridFluidRigid
             )
-        }) {
+        });
+        if stale_geometry {
             out.push(sim_core::Approximation {
-                name: "結合の1step遅れ",
-                reason: "誘導・モーター・SPH剛体・格子流体剛体は、前stepで確定した量を\
-                         読む縮約になっている(pre/post 2相への移行は未了)。",
+                name: "流体が見る剛体境界が1力学step古い",
+                reason: "SPH剛体・格子流体剛体が流体へ渡す境界形状(境界粒子位置・solid\
+                         マスク)は、書き込みと流体ステップの間に力学ステップが挟まるため\
+                         v*dt だけ遅れる。pre 相へ移しても遅れ量は変わらない(実測で確認)\
+                         ——pre/post の2相しか無いAPIとドメイン固定順序に由来する。",
+                doc: "docs/20-integration/01-coupling-matrix.md",
+                can_disable: false,
+            });
+        }
+        if self
+            .couplings
+            .iter()
+            .any(|c| matches!(c.kind(), sim_coupling::CouplingKind::BoussinesqBuoyancy))
+        {
+            out.push(sim_core::Approximation {
+                name: "熱起因の浮力の位置応答が1step遅れる",
+                reason: "`BoussinesqBuoyancy`は**今stepで確定した温度**を読むため post 相に\
+                         置いている(pre 相にすると前stepの温度を読むことになる)。その結果、\
+                         注入された速度がその step の位置積分には乗らず、位置応答だけが\
+                         1step遅れる。固定ドメイン順序(力学→熱)に由来するので、\
+                         どちらか一方の遅れは避けられない。",
                 doc: "docs/20-integration/01-coupling-matrix.md",
                 can_disable: false,
             });
@@ -2206,11 +2233,10 @@ impl World {
     /// operator splittingパイプライン(pre/postの2相、docs/20-integration/
     /// 01-coupling-matrix.md §4)へ自動的に組み込む想定であり、プログラムから登録した
     /// `Coupling`を毎stepの後に自動適用するレジストリ自体は`add_coupling`/`couplings`
-    /// フィールドとして実装済み(このメソッドのdoc下部参照)。ただしシーンJSON
-    /// `couplings`セクションからの自動解決・排他結合検査(`sim-coupling::
-    /// validate_exclusive_couplings`)との接続、pre/post 2相への分離(現状は全て
-    /// post相当のタイミングで単一`apply`済み、各`sim-coupling`実装のモジュールdoc
-    /// 「1step遅れの縮約」参照)は未実装(`from_scenario`のモジュールdoc参照)。
+    /// フィールドとして実装済み(このメソッドのdoc下部参照)。**pre/post 2相への分離も
+    /// 群5で完了**(`step()`のdoc参照)。シーンJSON`couplings`セクションからの
+    /// 自動解決・排他結合検査(`sim-coupling::validate_exclusive_couplings`)との
+    /// 接続は未実装(`from_scenario`のモジュールdoc参照)。
     /// 本メソッドは、`add_coupling`によるレジストリ登録より前から存在する、呼び出し側が
     /// 呼び出し頻度・タイミングを明示的に管理する下位のプリミティブとして残している
     /// (統合シナリオテストの一部・レジストリ自体の内部実装が使う)。`step()`の後に
@@ -2219,8 +2245,10 @@ impl World {
     /// 読むCoupling(design上の"post")は正しく機能するが、`BrownianForce`・
     /// `LorentzForce`のように力・速度を注入し同stepの位置積分に反映されるべき
     /// Coupling(design上の"pre")は、その注入が次の`step()`まで反映されない
-    /// 1step遅れが生じる(`InductionCoupling`で既に検証・許容した縮約と同じパターン、
-    /// 同モジュールdoc参照)。
+    /// 1step遅れが生じる。**`step()`経由(レジストリ経由)ならこの遅れは無い**
+    /// ——群5でこれらの結合を`apply_pre`へ移し、`step()`がドメインソルバの前に
+    /// pre 相を呼ぶようにしたため(各`sim-coupling`実装のモジュールdoc参照)。
+    /// この下位プリミティブを直接使う呼び出し側だけが上記の注意点を負う。
     pub fn apply_coupling(&mut self, coupling: &mut dyn sim_coupling::Coupling, dt: f64) {
         let mut states = sim_coupling::DomainStates {
             mechanics: &mut self.mechanics,
@@ -2674,9 +2702,14 @@ mod tests {
             ..WorldOptions::default()
         });
         let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
-        // 3体用意し、真ん中(index 1)だけに結合を張る。
-        for _ in 0..3 {
-            let desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.1 }, steel);
+        // 3体用意し、真ん中(index 1)だけに結合を張る。**互いに接触しない位置へ離す**
+        // ——群5で外力注入型の結合を pre 相(力学ステップの前)へ移した結果、原点に
+        // 3体重ねたままだと結合で動かした剛体の速度が同stepの接触解決で隣へ伝わり、
+        // 「実測」に間接的に動いた剛体まで混ざってしまう(結合の申告漏れではなく
+        // テストの測り方の問題。移行前は注入が力学ステップの後だったため隠れていた)。
+        for i in 0..3 {
+            let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.1 }, steel);
+            desc.transform.position = Vec3::new(i as f64 * 5.0, 0.0, 0.0);
             world.create_body(desc);
         }
         // 一様電場を与えれば、結合を張ったボディだけが力を受ける。
@@ -2733,8 +2766,8 @@ mod tests {
     fn every_coupling_kind_is_distinct_and_declares_its_domains() {
         use sim_coupling::{Coupling, CouplingKind};
         let couplings: Vec<Box<dyn Coupling>> = vec![
-            Box::new(sim_coupling::DissipationToHeat { thermal_node: 0 }),
-            Box::new(sim_coupling::JouleHeat { thermal_node: 0 }),
+            Box::new(sim_coupling::DissipationToHeat::to_single_node(0)),
+            Box::new(sim_coupling::JouleHeat::to_single_node(0)),
             Box::new(sim_coupling::LorentzForce {
                 body_index: 0,
                 charge: 1.0,
@@ -3001,6 +3034,8 @@ mod tests {
             fluid_thermal_conductivity: 0.026,
             kinematic_viscosity: 1.5e-5,
             prandtl_number: 0.71,
+            mode: sim_coupling::ConvectionMode::ForcedFlatPlate,
+            thermal_expansion_coefficient: None,
         }));
 
         let surface_temp_before = world.thermal().unwrap().nodes[surface_node].temperature;
@@ -3091,9 +3126,10 @@ mod tests {
     ///
     /// D6のF4部分は埋め込み経路(`apply_forces`内でmechanicsの各sub-stepごとに
     /// 浮力を再評価)のため実質的に減衰項なしでも密着した釣り合いに留まるが、この
-    /// Coupling経由の経路は`SphRigid`・`GridFluidRigid`等と同じ1step遅れの縮約
-    /// (Couplingレジストリはフレームごとに1回だけ適用され、mechanicsの内部sub-step
-    /// ごとには再評価されない)であり、かつ抗力(減衰)を伴わない純粋な浮力の
+    /// Coupling経由の経路はフレーム粒度の縮約(Couplingレジストリはフレームごとに
+    /// 1回だけ適用され、mechanicsの内部sub-stepごとには再評価されない。群5で
+    /// `BuoyancyDrag`を pre 相へ移したので**stepをまたぐ遅れは無い**が、sub-step
+    /// 粒度での再評価が無い点は変わらない)であり、かつ抗力(減衰)を伴わない純粋な浮力の
     /// 復元力のみのため、実装検証中に測定したところ振幅約0.02(side比2%)の非減衰
     /// 振動として恒久的に持続することを発見した(F4のように単調に釣り合いへ収束
     /// するのではなく、有界な振動に留まることを確認する検証に切り替えた、X2の
@@ -3138,6 +3174,7 @@ mod tests {
             body_index: box_id.index as usize,
             water: Some(sim_fluid::StaticWaterRegion::new(0.0, water_density)),
             atmosphere: None,
+            lift: None,
         }));
 
         let mut max_drift: f64 = 0.0;
@@ -3190,9 +3227,9 @@ mod tests {
             let mut thermal = sim_thermal::ThermalSolver::new(293.15);
             let node = thermal.add_node(sim_thermal::ThermalNode::new(293.15, 1000.0));
             world.enable_thermal(thermal);
-            world.add_coupling(Box::new(sim_coupling::DissipationToHeat {
-                thermal_node: node,
-            }));
+            world.add_coupling(Box::new(sim_coupling::DissipationToHeat::to_single_node(
+                node,
+            )));
         };
 
         let mut world = World::new(WorldOptions::default());

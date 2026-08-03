@@ -77,9 +77,7 @@ mod tests {
         let brake_node = thermal.add_node(ThermalNode::new(293.15, 1000.0));
         world.enable_thermal(thermal);
 
-        world.add_coupling(Box::new(DissipationToHeat {
-            thermal_node: brake_node,
-        }));
+        world.add_coupling(Box::new(DissipationToHeat::to_single_node(brake_node)));
 
         for _ in 0..1200 {
             // 10秒: 摩擦(鋼-鋼)で確実に静止するのに十分な時間
@@ -146,9 +144,7 @@ mod tests {
             voltage_source_index: 0,
             torque_constant: k,
         }));
-        world.add_coupling(Box::new(sim_coupling::JouleHeat {
-            thermal_node: heat_node,
-        }));
+        world.add_coupling(Box::new(sim_coupling::JouleHeat::to_single_node(heat_node)));
 
         let dt = WorldOptions::default().dt;
         let steps = 500u32;

@@ -86,7 +86,7 @@
 | 2 | エディタ操作性(カメラ・ツール切替・右クリック・Inspector編集・衝突フィルタ・連鎖削除) | **完了** |
 | 3 | 未統合ドメインをWorldへ(量子・統計・FDTD)/ ソフトボディ・天体・熱場の描画 | **完了** |
 | 4 | 力学の縮約解消(capsule×box接触・WheelJoint(D24)・関節角度制限・ソフトボディ曲げ/体積拘束) | **完了**(マニフォールド永続化・CCD拡張は残置、下記) |
-| 5 | 結合の縮約解消(apply_pre移行で1step遅れ解消・DomainStates汎用化・剛体↔熱ノード対応・PhaseChangeMorphの実体変換・自然対流・揚力) | 未着手 |
+| 5 | 結合の縮約解消(apply_pre移行で1step遅れ解消・剛体↔熱ノード対応・自然対流・揚力) | **完了**(PhaseChangeMorphの実体変換・GridFluid2D温度場は残置、下記) |
 | 6 | レンダラの縮約解消(コースティクス合成・分光コースティクス・NEE+MIS・ロシアンルーレット・金属の複素IOR・PNG deflate・三角形メッシュ) | 未着手 |
 | 7 | 場のソルバの縮約解消(GridFluid流入出/固体境界/3D・ConductionRod ρc_p/3D・FDTD PML・回路Newtonフォールバック連鎖+モータ素子) | 未着手 |
 | 8 | 縮約解消に伴って陳腐化したモジュールdocの訂正 | 群ごとに随時 |
@@ -108,6 +108,34 @@
    なく物理的に正しい要求なので、**上限(1000)で打ち切ったうえで打ち切ったことを
    近似バッジで申告する**形にした(壁時計ではなく状態から決まる固定上限なので
    設計§1.3「壁時計ベースの打ち切り禁止」に反さず、決定論も保たれる)。
+
+**群5(2026-08-03)で見つけて直したドキュメントの嘘(1件)と、残置した2件**:
+
+- **「1step遅れ」の申告が4件中2件は事実ではなかった**。旧`World::active_approximations()`は
+  誘導・モーター・SPH剛体・格子流体剛体の4種を「結合の1step遅れ」として一括申告して
+  いたが、実際に pre 相へ移して測ったところ内訳が違っていた。
+  - **本当に遅れていた**: `InductionCoupling`・`MotorCoupling`。post 相で設定した
+    起電力を回路が読むのは次stepなので、確かに1step遅れる。→ `apply_pre`へ移して解消。
+    対照実験つきのテストで確認(単相なら$i_n=k\omega_{n-1}/R$、2相なら$i_n=k\omega_n/R$)。
+  - **遅れていなかった**: `SphRigid`・`GridFluidRigid`の**反作用力**。`World::step`は
+    全ドメインソルバの**後**に post 相を呼ぶので、post 相で読む`boundary_force`・
+    圧力場はどちらも**今step**の値である。「前stepの値を読む」という記述は、`World`が
+    結合レジストリを持つ前(呼び出し側が手で`apply(); sph.step();`と書いていた頃)の
+    名残がそのまま残っていたもの。→ **実装は変えずdocを訂正**した。
+    ただし境界形状(境界粒子位置・solidマスク)は今も1力学step古く、これは
+    書き込みと流体ステップの間に力学ステップが挟まるためで、pre 相へ移しても
+    遅れ量は変わらない(実測で確認)。この残差だけを新しい近似バッジで申告する。
+  - あわせて`BuoyancyDrag`・`LorentzForce`・`ImageChargeForce`・`BrownianForce`を
+    pre 相へ移した(post 相だと注入した速度がその step の位置積分に乗らない)。
+    この変更で`coupling_referenced_bodies_match_the_bodies_actually_affected`が
+    落ちたが、原因は**テストの測り方**——3体を原点に重ねて置いていたため、結合で
+    動かした剛体の速度が同stepの接触解決で隣へ伝わっていた(移行前は注入が力学
+    ステップの後だったので隠れていた)。剛体を離して修正。
+- **残置1: `PhaseChangeMorph`の実体変換**(融けた剛体を消して流体粒子を生成する)。
+  剛体の消滅は実装済みだが、消えた質量ぶんのSPH粒子生成は`World`側に「結合から
+  ドメインへ実体を追加する」経路が無く、`DomainStates`の設計変更が要る。
+- **残置2: `GridFluid2D`のセルごと温度場**。`BoussinesqBuoyancy`が空間的に変化する
+  浮力を出すために必要だが、格子流体ソルバ本体(群7)の話なのでそちらへ回す。
 
 以前の記録: **増分H(スキーマ一括拡張)完了** —— `soft_body`/`grid_fluid`/
 `conduction_rod`/`sph`の4ドメイン、熱ドメインの`links`/`emissivity`、結合8種
@@ -914,7 +942,20 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
 - [x] 重力(実装済み)。抗力(球、Schiller-Naumann補正付き、`sim-fluid::aero`+
       `MechanicsSolver::apply_forces`)を実装、F1–F3 Green化。浮力(直立直方体、
       `sim-fluid::buoyancy`+`MechanicsSolver.water`)を実装、F4–F6 Green化(一般姿勢の
-      凸多面体切断・球冠体積・水中抗力は Phase 3)
+      凸多面体切断・球冠体積・水中抗力は Phase 3)。
+      **群5(2026-08-03)で揚力(設計 docs/11-fluid/05-aero-hydrodynamics.md §2.2)を
+      実装した**——`thin_airfoil_lift_coefficient`(薄翼理論 $C_L\approx2\pi\alpha$ +
+      失速)・`wing_lift_force`・`magnus_force_sphere`($C_M\approx0.2S$、設計が
+      「$S<1$の経験式」と書いているので$S>1$はクランプ)を`sim-fluid::aero`へ足し、
+      `sim-coupling::BuoyancyDrag::lift`(`LiftModel::{Wing, MagnusSphere}`)として
+      剛体へ配線した。翼弦・スパンはローカル指定で剛体の姿勢に追従する。
+      **実装中に見つけた符号の誤り**: 最初の実装は迎角を「翼弦→流れ」の回転で測って
+      おり、水平な翼で上昇飛行すると上向きの揚力が出ていた(実際は上面から風を受ける
+      ので下向き)。相対風が$-\mathbf v_{rel}$であることを踏まえ「流れ→翼弦」に直した。
+      3姿勢(機首上げ/上昇/90°ロール)の対照テストで固定。
+      **失速角30°で揚力ゼロ**という完全失速角は設計に根拠が無い本実装独自の選択で、
+      再付着・ヒステリシスは再現しない(モジュールdocに明記)。
+      設計 §2.3 の回転抗力・Box3・Panels(布)・乱流風は引き続き Phase 3–4。
 - [x] 熱ノード(基礎)— `crates/sim-thermal/src/lib.rs`。集中熱容量ノード網 + ニュートン冷却
       (対流)+ 放射(Newton線形化、現在温度周りの補正項込み)+ 陰的Euler(matrix-free PCG、
       `sim_math::pcg`)。Antoine式(`antoine_boiling_point_celsius`、設計12-thermal/03 §2)も追加
@@ -1389,6 +1430,17 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       理論EMFに収束、`PistonGas`はピストン運動エネルギー+気体内部エネルギーの保存
       (実測rel_err最大約1.4%)で検証、剛体/抵抗↔熱ノード対応表・剛体の電荷フィールド・
       正式なHingeジョイントは未実装)。`World`にも`circuit`・`gas`ドメインを追加済み。
+      **群5(2026-08-03)の更新**: (a)`InductionCoupling`・`MotorCoupling`の1step遅れを
+      `apply_pre`移行で解消(対照実験つきテスト)、(b)**剛体↔熱ノード対応表**を
+      `DissipationToHeat::body_links`として、**抵抗↔熱ノード対応表**を
+      `JouleHeat::resistor_nodes`として実装し、設計 docs/12-thermal/02-heat-transfer.md
+      §4.4 の熱浸透率比分配($Q_A/Q_B=e_{t,A}/e_{t,B}$、$e_t=\sqrt{k\rho c_p}$)と
+      「ジュール熱は素子のノードへ全量」を満たすようにした。対応表は結合自身が持つ
+      (`ConvectionLink`の物性値と同じ「呼び出し側が直接渡す」パターン)。
+      分配には`MechanicsSolver::last_contact_dissipation_by_body`(群5で新設した
+      剛体ごとの散逸)を使う。**残る近似**: 剛体が同時に複数の接触を持つ場合、
+      その損失を接触ペアへ均等配分する(単一接触では恒等的に正しい。総熱量はどちらでも
+      厳密保存)。剛体の電荷フィールド・正式なHingeジョイントは引き続き未実装。
       `World::step()`パイプラインへのCoupling接続(`sim_coupling::Coupling`に
       dyn-safeな`CouplingClone`を追加し`Box<dyn Coupling>`を`World`が`#[derive(Clone)]`
       のまま保持できるようにした上で、`couplings`フィールド+`add_coupling`によるregistry、
@@ -1399,10 +1451,23 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       持たないための単純化)、9種目の`ConvectionLink`(流体/媒質⇔`ThermalNode`、
       強制対流(平板・Blasius解)相関式$\overline{Nu}=0.664Re^{1/2}Pr^{1/3}$、特性速度は
       `GridFluid2D`速度場のRMS速度、熱源側・受熱面側とも単一`ThermalNode`で2ノード間
-      厳密対記帳)、11種目の`SphRigid`(SPH⇔剛体、境界粒子。`SphFluid`に新設した
+      厳密対記帳。**群5(2026-08-03)で設計 docs/12-thermal/02-heat-transfer.md §4.2 の
+      相関式表4件を全て実装した**(`ConvectionMode`: 自然対流(垂直面)$0.59Ra^{1/4}$・
+      自然対流(球)$2+0.43Ra^{1/4}$・強制対流(球)$2+0.6Re^{1/2}Pr^{1/3}$・
+      強制対流(平板)。レイリー数 $Ra=g\beta|\Delta T|L^3\nu^{-2}Pr$、$\beta$省略時は
+      理想気体近似$1/T_{film}$)。**移行前の役割分担が誤りだった**——自然対流3件を
+      「流速に依存しないので`BoussinesqBuoyancy`の範疇」として外していたが、
+      `BoussinesqBuoyancy`が担うのは温度差が生む**浮力(運動量)**であって自然対流が
+      運ぶ**熱流**ではなく、静止流体中の冷却はどちらでも表現できていなかった。
+      自然対流モードは`grid_fluid`ドメインが無くても働く。実測$h\approx7$W/(m²K)が
+      設計 §4.2 の目安「静止空気中 5–10」に入ることもテストで確認。
+      混合対流(自然+強制の合成則)は設計の表が排他的な「状況」として並べているため
+      対象外)、11種目の`SphRigid`(SPH⇔剛体、境界粒子。`SphFluid`に新設した
       `boundary_force`(境界粒子が流体から受ける反作用力、Newton第3法則)を使い、
       球剛体のみ対象(フィボナッチ格子の境界粒子群、回転は反映しない)・
-      `InductionCoupling`と同じ1step遅れの縮約で双方向結合)、12種目の
+      `InductionCoupling`と同じ1step遅れの縮約で双方向結合。
+      **群5で「反作用力の1step遅れ」という記述が誤りだったことが判明**——`World`経由
+      なら post 相は全ドメインソルバの後なので今stepの値を読む。docのみ訂正した)、12種目の
       `GridFluidRigid`(格子流体⇔剛体、ボクセル化境界・圧力積分)を追加済み(10種目の
       `ImageChargeForce`は元の12種カウント外の追加実装、D26の項目参照)。
       `GridFluidRigid`の実装に先立ち`GridFluid2D`に単一矩形剛体のマスキング機構
@@ -1433,6 +1498,12 @@ Green 管理は [§8](#8-解析解テスト-green-管理表) で行う):
       sub-iteration剛性閾値表(`GridFluidRigid`自身は現状固定的な単一適用で、
       `GridFluidRigidBox2D`が持つ閾値ベースのsub-iteration機構までは踏襲していない)
       は未実装。
+      **群5(2026-08-03)で pre/post 2相分離を完了した**——`World::step`は
+      「pre 相(全結合)→ 全ドメインsub-step → post 相(全結合)」の順に走り、
+      注入型の6結合(誘導・モーター・浮力抗力・クーロン・鏡像・ブラウン)が pre 相に、
+      今stepの確定値を読む7結合(散逸熱・ジュール熱・対流・Boussinesq・SPH剛体・
+      格子流体剛体・ピストン気体)が post 相に載る。`Coupling::apply_pre`のdocに
+      どちらへ載せるべきかの判定基準を明記した。sub-iteration剛性閾値表は引き続き未実装。
       **増分F1でシーンJSONの排他結合検査を接続した**——設計§2規則2が列挙する3組を
       `sim_coupling::validate_exclusive_couplings`で、**シーンを構築する前に**弾く
       (同じ物理量を二重計上したワールドは走らせてもエラーにならずエネルギー台帳の

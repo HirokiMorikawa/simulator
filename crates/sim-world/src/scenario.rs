@@ -480,6 +480,31 @@ pub enum JointJson {
     },
 }
 
+/// `ConvectionLink`の相関式選択(`sim_coupling::ConvectionMode`のシーンJSON表現、
+/// **群5で追加**)。省略時は移行前と同じ強制対流(平板)。
+#[derive(Deserialize, Default, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ConvectionModeJson {
+    NaturalVerticalPlate,
+    NaturalSphere,
+    ForcedSphere,
+    #[default]
+    ForcedFlatPlate,
+}
+
+impl ConvectionModeJson {
+    fn to_domain(self) -> sim_coupling::ConvectionMode {
+        match self {
+            ConvectionModeJson::NaturalVerticalPlate => {
+                sim_coupling::ConvectionMode::NaturalVerticalPlate
+            }
+            ConvectionModeJson::NaturalSphere => sim_coupling::ConvectionMode::NaturalSphere,
+            ConvectionModeJson::ForcedSphere => sim_coupling::ConvectionMode::ForcedSphere,
+            ConvectionModeJson::ForcedFlatPlate => sim_coupling::ConvectionMode::ForcedFlatPlate,
+        }
+    }
+}
+
 /// `Scenario::couplings`の1件(モジュールdoc「縮約実装の理由」参照 — 現時点で
 /// `ImageChargeForce`のみ対応)。
 #[derive(Deserialize)]
@@ -502,7 +527,15 @@ pub enum CouplingJson {
         thermal_expansion_coefficient: f64,
     },
     /// D10(摩擦の熱)向け(`sim_coupling::DissipationToHeat`)。力学の散逸を熱ノードへ。
-    DissipationToHeat { thermal_node: usize },
+    ///
+    /// **群5**: `body_links`(剛体名 → 熱ノード + 熱浸透率)を追加した。指定すると
+    /// 設計 docs/12-thermal/02-heat-transfer.md §4.4 の熱浸透率比分配が働く。
+    /// 省略時は移行前と同じ「全量を`thermal_node`へ」。
+    DissipationToHeat {
+        thermal_node: usize,
+        #[serde(default)]
+        body_links: Vec<BodyThermalLinkJson>,
+    },
     /// D18(氷と飲み物)向け(`sim_coupling::PhaseChangeMorph`)。
     /// `initial_enthalpy`が負なら融点未満の固相から始まる。
     PhaseChangeMorph {
@@ -548,6 +581,13 @@ pub enum CouplingJson {
         fluid_thermal_conductivity: f64,
         kinematic_viscosity: f64,
         prandtl_number: f64,
+        /// 設計 §4.2 の相関式表から選ぶ(**群5で追加**)。省略時は移行前と同じ
+        /// 強制対流(平板)。
+        #[serde(default)]
+        mode: ConvectionModeJson,
+        /// 自然対流の体膨張係数 $\beta$ [1/K]。省略時は理想気体近似 $1/T_{film}$。
+        #[serde(default)]
+        thermal_expansion_coefficient: Option<f64>,
     },
     /// D17(ピストン)向け(`sim_coupling::PistonGas`、**増分H3で追加**)。
     /// `initial_volume`は`gas.volume`と同じ値を書く(結合が基準体積として使う)。
@@ -560,7 +600,13 @@ pub enum CouplingJson {
     /// D19(電気工作台)向け(`sim_coupling::JouleHeat`、**増分G2で追加**)。
     /// 回路の抵抗損失を熱ノードへ注入する。`thermal_node`は`thermal.nodes`配列の
     /// インデックス(`BrownianForce`と同じ縮約)。
-    JouleHeat { thermal_node: usize },
+    /// **群5**: `resistor_nodes`(抵抗index → 熱ノードindex)を追加した。省略時は
+    /// 移行前と同じ「回路全体の損失を`thermal_node`へ」。
+    JouleHeat {
+        thermal_node: usize,
+        #[serde(default)]
+        resistor_nodes: Vec<(usize, usize)>,
+    },
     /// D25(ブラウン運動)向け(`sim_coupling::BrownianForce`)。`thermal_node`は
     /// `thermal.nodes`配列のインデックス(`ProbeJson::NodeTemp`と同じ縮約、
     /// 名前解決を経ない)。
@@ -596,11 +642,65 @@ pub enum CouplingJson {
     /// **縮約**: `water`は`fluids[].static_water`とは独立にここで指定する
     /// (registry経由の適用は`MechanicsSolver::water`の埋め込み経路とは別物で
     /// あることを明示するため)。`atmosphere`は`world.atmosphere`と同じ形。
+    ///
+    /// **群5**: `atmosphere`(抗力・揚力の媒質)と`lift`(揚力モデル)を追加した。
+    /// 省略時はどちらも無効で、移行前と同じ「水域のみ」の挙動になる。
     BuoyancyDrag {
         body: String,
-        water_level: f64,
-        water_density: f64,
+        #[serde(default)]
+        water_level: Option<f64>,
+        #[serde(default)]
+        water_density: Option<f64>,
+        #[serde(default)]
+        atmosphere: Option<AtmosphereJson>,
+        #[serde(default)]
+        lift: Option<LiftModelJson>,
     },
+}
+
+/// `DissipationToHeat::body_links`の1件(**群5で追加**)。`effusivity`を省略すると
+/// その剛体の材料から $e_t=\sqrt{k\rho c_p}$ を自動計算する(材料DBが手元にある
+/// シーン読み込み時だけ可能な便宜であり、`sim_coupling`側は常に明示値を要求する)。
+#[derive(Deserialize)]
+pub struct BodyThermalLinkJson {
+    pub body: String,
+    pub thermal_node: usize,
+    #[serde(default)]
+    pub effusivity: Option<f64>,
+}
+
+/// `BuoyancyDrag::lift`(`sim_coupling::LiftModel`のシーンJSON表現、**群5で追加**)。
+/// 設計 docs/11-fluid/05-aero-hydrodynamics.md §2.2。
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiftModelJson {
+    /// 翼(薄翼理論)。`chord_local`・`span_local`は剛体ローカル座標の単位ベクトル。
+    Wing {
+        area: f64,
+        chord_local: [f64; 3],
+        span_local: [f64; 3],
+    },
+    /// 回転球のマグヌス効果。
+    MagnusSphere { radius: f64 },
+}
+
+impl LiftModelJson {
+    fn to_domain(&self) -> sim_coupling::LiftModel {
+        match self {
+            LiftModelJson::Wing {
+                area,
+                chord_local,
+                span_local,
+            } => sim_coupling::LiftModel::Wing {
+                area: *area,
+                chord_local: Vec3::new(chord_local[0], chord_local[1], chord_local[2]),
+                span_local: Vec3::new(span_local[0], span_local[1], span_local[2]),
+            },
+            LiftModelJson::MagnusSphere { radius } => {
+                sim_coupling::LiftModel::MagnusSphere { radius: *radius }
+            }
+        }
+    }
 }
 
 /// `Scenario::circuit`(モジュールdoc「縮約実装の理由」参照)。
@@ -1753,17 +1853,27 @@ impl World {
                     body,
                     water_level,
                     water_density,
+                    atmosphere,
+                    lift,
                 } => {
                     let id = body_ids_by_name
                         .get(body)
                         .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    // 水域は`water_level`と`water_density`が**両方**書かれたときだけ
+                    // 有効にする(片方だけでは物理が決まらない)。
+                    let water = match (water_level, water_density) {
+                        (Some(level), Some(density)) => {
+                            Some(sim_fluid::StaticWaterRegion::new(*level, *density))
+                        }
+                        _ => None,
+                    };
                     world.add_coupling(Box::new(sim_coupling::BuoyancyDrag {
                         body_index: id.index as usize,
-                        water: Some(sim_fluid::StaticWaterRegion::new(
-                            *water_level,
-                            *water_density,
-                        )),
-                        atmosphere: None,
+                        water,
+                        atmosphere: atmosphere
+                            .as_ref()
+                            .map(|a| sim_fluid::Atmosphere::still(a.density, a.viscosity)),
+                        lift: lift.as_ref().map(|l| l.to_domain()),
                     }));
                 }
                 CouplingJson::ImageChargeForce {
@@ -1793,9 +1903,35 @@ impl World {
                         thermal_expansion_coefficient: *thermal_expansion_coefficient,
                     }));
                 }
-                CouplingJson::DissipationToHeat { thermal_node } => {
+                CouplingJson::DissipationToHeat {
+                    thermal_node,
+                    body_links,
+                } => {
+                    // 熱浸透率が省略されていれば、その剛体の材料から
+                    // e_t = sqrt(k ρ c_p) を作る(群5、`BodyThermalLinkJson`のdoc参照)。
+                    let mut links = Vec::with_capacity(body_links.len());
+                    for link in body_links {
+                        let id = *body_ids_by_name
+                            .get(&link.body)
+                            .ok_or_else(|| SceneError::UnknownBodyName(link.body.clone()))?;
+                        let body_index = id.index as usize;
+                        let effusivity = match link.effusivity {
+                            Some(e) => e,
+                            None => {
+                                let material_id = world.mechanics().bodies.material[body_index];
+                                let m = world.materials().get(material_id);
+                                sim_coupling::effusivity(m.conductivity, m.density, m.specific_heat)
+                            }
+                        };
+                        links.push(sim_coupling::BodyThermalLink {
+                            body_index,
+                            thermal_node: link.thermal_node,
+                            effusivity,
+                        });
+                    }
                     world.add_coupling(Box::new(sim_coupling::DissipationToHeat {
                         thermal_node: *thermal_node,
+                        body_links: links,
                     }));
                 }
                 CouplingJson::PhaseChangeMorph {
@@ -1900,6 +2036,8 @@ impl World {
                     fluid_thermal_conductivity,
                     kinematic_viscosity,
                     prandtl_number,
+                    mode,
+                    thermal_expansion_coefficient,
                 } => {
                     world.add_coupling(Box::new(sim_coupling::ConvectionLink {
                         fluid_node: *fluid_node,
@@ -1909,6 +2047,8 @@ impl World {
                         fluid_thermal_conductivity: *fluid_thermal_conductivity,
                         kinematic_viscosity: *kinematic_viscosity,
                         prandtl_number: *prandtl_number,
+                        mode: mode.to_domain(),
+                        thermal_expansion_coefficient: *thermal_expansion_coefficient,
                     }));
                 }
                 CouplingJson::PistonGas {
@@ -1931,9 +2071,13 @@ impl World {
                     );
                     world.add_coupling(Box::new(coupling));
                 }
-                CouplingJson::JouleHeat { thermal_node } => {
+                CouplingJson::JouleHeat {
+                    thermal_node,
+                    resistor_nodes,
+                } => {
                     world.add_coupling(Box::new(sim_coupling::JouleHeat {
                         thermal_node: *thermal_node,
+                        resistor_nodes: resistor_nodes.clone(),
                     }));
                 }
                 CouplingJson::BrownianForce {

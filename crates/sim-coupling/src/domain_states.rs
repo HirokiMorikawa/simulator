@@ -153,14 +153,22 @@ pub trait Coupling: CouplingClone {
     /// 呼ばれる。今stepの積分に効かせたい力・熱・電流の**注入**はここに置く。
     ///
     /// **なぜ2相が要るのか**: 単一の`apply`しか無いと、注入型の結合は必ず
-    /// 「ソルバが進んだ後」に効くため**常に1step遅れる**。実際
-    /// `InductionCoupling`・`MotorCoupling`は「1step遅れの縮約」としてその遅れを
-    /// 明示的に受け入れており、`PistonGas`も同様である。pre 相があれば、
-    /// 注入を今stepに間に合わせる実装が書けるようになる。
+    /// 「ソルバが進んだ後」に効くため**常に1step遅れる**。
     ///
-    /// 既定は**何もしない**。既存の全実装は`apply`だけを持つので、この既定に
-    /// よって**挙動は一切変わらない**(2相分離は機構として用意され、各結合が
-    /// 必要に応じて移行する)。
+    /// **群5で移行済みの結合**: `InductionCoupling`・`MotorCoupling`(起電力を
+    /// 今stepの回路solveへ間に合わせる)、`BuoyancyDrag`・`LorentzForce`・
+    /// `ImageChargeForce`・`BrownianForce`(注入した速度を今stepの位置積分へ効かせる)。
+    ///
+    /// **post のままが正しい結合**: `DissipationToHeat`・`JouleHeat`・
+    /// `ConvectionLink`・`BoussinesqBuoyancy`・`SphRigid`・`GridFluidRigid`・
+    /// `PistonGas` — いずれも今stepのソルバが確定させた量(散逸熱・抵抗損失・温度・
+    /// 圧力場・境界力)を読むか、次stepの積分がそのまま消費する累算器
+    /// (`force_accum`)へ書くため、post 相で遅れが生じない。
+    ///
+    /// 既定は**何もしない**。`apply`だけを持つ実装はこの既定によって従来どおり
+    /// post 相でのみ呼ばれる(挙動は変わらない)。**`apply_pre`を上書きする実装は
+    /// `apply_post`も必ず上書きすること** — `apply_post`の既定は`apply`へ委譲する
+    /// ので、上書きを忘れると同じ処理が1stepに2回走る。
     fn apply_pre(&mut self, _world: &mut DomainStates, _dt: f64) {}
 
     /// **post 相**——ドメインソルバを進めた**後**に呼ばれる。前stepではなく

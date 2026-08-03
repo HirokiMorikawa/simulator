@@ -18,8 +18,9 @@ mod karman;
 mod poiseuille;
 mod sph;
 pub use aero::{
-    drag_coefficient_sphere, drag_force_sphere, reynolds_number, terminal_velocity_high_re,
-    Atmosphere,
+    drag_coefficient_sphere, drag_force_sphere, magnus_force_sphere, reynolds_number,
+    terminal_velocity_high_re, thin_airfoil_lift_coefficient, wing_lift_force, Atmosphere,
+    FULL_STALL_ANGLE, STALL_ANGLE,
 };
 pub use buoyancy::{
     buoyancy_force, hydrostatic_pressure, submerged_box_axis_aligned, StaticWaterRegion,

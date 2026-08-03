@@ -20,9 +20,19 @@
 //! `SceneCouplingConfig`の`static_water_buoyancy`フラグが表す区別と同じ)。
 //!
 //! 浮力は直立姿勢の直方体のみ(`sim_fluid::buoyancy`冒頭注記と同じ縮約)、抗力は球のみ
-//! (`sim_fluid::aero`冒頭注記と同じ縮約)を対象とする。設計名`BuoyancyDrag`が挙げる
-//! 「揚力」は`sim_fluid`側にも式自体が未実装のため対象外(設計から乖離している範囲を
-//! 正直に文書化する、他の縮約実装と同じ方針)。
+//! (`sim_fluid::aero`冒頭注記と同じ縮約)を対象とする。
+//!
+//! **群5で「揚力」を実装した**(`lift`フィールド)。移行前は設計名`BuoyancyDrag`が挙げる
+//! 揚力を「`sim_fluid`側にも式自体が未実装のため対象外」としていた——縮約の理由が
+//! **この結合の外**(下位クレートの欠落)にあったので、`sim_fluid::aero`へ
+//! 薄翼理論の`wing_lift_force`とマグヌス力の`magnus_force_sphere`(設計
+//! docs/11-fluid/05-aero-hydrodynamics.md §2.2)を足した上でここへ配線した。
+//! 揚力面の姿勢は剛体の回転で追従する(翼弦・スパンをローカル軸で与え、毎step
+//! ワールドへ回す)。マグヌス力は剛体の角速度をそのまま使う。
+//!
+//! **群5**: 浮力・抗力の速度注入を`apply_pre`(ドメインソルバの**前**)へ移した。
+//! post 相に置くと、その step の位置積分は注入前の速度で行われるため、外力が位置応答に
+//! 1step遅れて現れる。pre 相なら重力と同じ相で効く。
 
 use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
@@ -30,12 +40,31 @@ use sim_fluid::{Atmosphere, StaticWaterRegion};
 use sim_math::Vec3;
 use sim_mechanics::{DragModel, Shape};
 
-/// 剛体(`body_index`)を静的水域・大気による浮力・抗力に結合する(モジュールdoc参照)。
+/// 揚力の与え方(設計 docs/11-fluid/05-aero-hydrodynamics.md §2.2、**群5で追加**)。
+/// `atmosphere`が`None`なら評価されない(揚力は媒質密度に比例するため)。
+#[derive(Clone, Copy, Debug)]
+pub enum LiftModel {
+    /// 翼(薄翼理論 $C_L\approx2\pi\alpha$ + 失速)。`chord_local`・`span_local`は
+    /// **剛体ローカル座標**の翼弦方向・スパン方向(毎step剛体の姿勢でワールドへ回す)。
+    Wing {
+        /// 翼面積 $A$ [m^2]。
+        area: f64,
+        chord_local: Vec3,
+        span_local: Vec3,
+    },
+    /// 回転球のマグヌス効果($C_M\approx0.2S$)。剛体の角速度をそのまま使う。
+    MagnusSphere { radius: f64 },
+}
+
+/// 剛体(`body_index`)を静的水域・大気による浮力・抗力・揚力に結合する
+/// (モジュールdoc参照)。
 #[derive(Clone)]
 pub struct BuoyancyDrag {
     pub body_index: usize,
     pub water: Option<StaticWaterRegion>,
     pub atmosphere: Option<Atmosphere>,
+    /// 揚力(**群5で追加**)。`None`なら揚力を評価しない(移行前と同じ挙動)。
+    pub lift: Option<LiftModel>,
 }
 
 impl Coupling for BuoyancyDrag {
@@ -60,7 +89,7 @@ impl Coupling for BuoyancyDrag {
         vec![self.body_index]
     }
 
-    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+    fn apply_pre(&mut self, world: &mut DomainStates, dt: f64) {
         let idx = self.body_index;
         let mass = world.mechanics.bodies.mass(idx);
         if mass <= 0.0 {
@@ -80,18 +109,48 @@ impl Coupling for BuoyancyDrag {
             }
         }
         if let Some(atm) = &self.atmosphere {
+            let velocity = world.mechanics.bodies.linear_velocity[idx];
             if let DragModel::Sphere { radius } = world.mechanics.bodies.drag[idx] {
-                force = force
-                    + sim_fluid::drag_force_sphere(
-                        radius,
-                        atm,
-                        world.mechanics.bodies.linear_velocity[idx],
-                    );
+                force = force + sim_fluid::drag_force_sphere(radius, atm, velocity);
+            }
+            // 揚力(**群5で追加**、モジュールdoc参照)。
+            match self.lift {
+                Some(LiftModel::Wing {
+                    area,
+                    chord_local,
+                    span_local,
+                }) => {
+                    // 翼弦・スパンは剛体ローカル指定なので、今stepの姿勢でワールドへ回す。
+                    let r = world.mechanics.bodies.rotation[idx];
+                    force = force
+                        + sim_fluid::wing_lift_force(
+                            area,
+                            r.rotate(chord_local),
+                            r.rotate(span_local),
+                            atm,
+                            velocity,
+                        );
+                }
+                Some(LiftModel::MagnusSphere { radius }) => {
+                    let omega = world.mechanics.bodies.angular_velocity[idx];
+                    force = force + sim_fluid::magnus_force_sphere(radius, atm, velocity, omega);
+                }
+                None => {}
             }
         }
 
         world.mechanics.bodies.linear_velocity[idx] =
             world.mechanics.bodies.linear_velocity[idx] + force.scale(dt / mass);
+    }
+
+    /// **post 相では何もしない(群5)**。既定実装は`apply`へ委譲するので、これを省略すると
+    /// `World`が pre と post で同じ力を2回積んでしまう。
+    fn apply_post(&mut self, _world: &mut DomainStates, _dt: f64) {}
+
+    /// **単相で呼ばれた場合の互換経路**(`World`を経由しない直接呼び出し用)。
+    /// 全処理は pre 相にある(モジュールdoc参照)。
+    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+        self.apply_pre(world, dt);
     }
 }
 
@@ -142,6 +201,7 @@ mod tests {
             body_index: body,
             water: Some(water),
             atmosphere: None,
+            lift: None,
         };
         let dt = 0.01;
         let velocity_before = mechanics.bodies.linear_velocity[body];
@@ -178,6 +238,7 @@ mod tests {
             body_index: body,
             water: None,
             atmosphere: Some(atmosphere),
+            lift: None,
         };
         let dt = 0.001;
         let velocity_before = mechanics.bodies.linear_velocity[body];
@@ -210,6 +271,7 @@ mod tests {
             body_index: body,
             water: Some(StaticWaterRegion::new(0.0, 1000.0)),
             atmosphere: None,
+            lift: None,
         };
         let velocity_before = mechanics.bodies.linear_velocity[body];
         coupling.apply(&mut states(&mut mechanics), 0.01);
@@ -238,9 +300,160 @@ mod tests {
             body_index: body,
             water: Some(StaticWaterRegion::new(0.5, 1000.0)),
             atmosphere: None,
+            lift: None,
         };
         coupling.apply(&mut states(&mut mechanics), 0.01);
 
         assert_eq!(mechanics.bodies.linear_velocity[body], Vec3::ZERO);
+    }
+
+    /// **群5: 揚力の配線**。マグヌス力が剛体の角速度から作られ、`sim_fluid`側の式と
+    /// 厳密に一致する量が速度へ注入されること、`lift: None`なら一切注入されないこと
+    /// (移行前の挙動が保たれること)を確認する。
+    #[test]
+    fn buoyancy_drag_injects_magnus_lift_from_the_bodys_angular_velocity() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let radius = 0.037;
+        let mass = 0.058;
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, steel);
+        desc.mass_override = Some(mass);
+        desc.linear_velocity = Vec3::new(25.0, 0.0, 0.0);
+        desc.angular_velocity = Vec3::new(0.0, 0.0, 50.0); // バックスピン
+        desc.drag = DragModel::None; // 抗力を切って揚力だけを見る
+        let mut mechanics = MechanicsSolver::new(0.0);
+        let body = mechanics.create_body(desc, &materials);
+
+        let atmosphere = Atmosphere::still(1.225, 1.81e-5);
+        let expected = sim_fluid::magnus_force_sphere(
+            radius,
+            &atmosphere,
+            Vec3::new(25.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 50.0),
+        );
+        assert!(
+            expected.y > 0.0,
+            "test setup should produce upward Magnus lift"
+        );
+
+        let dt = 0.001;
+        let velocity_before = mechanics.bodies.linear_velocity[body];
+        let mut coupling = BuoyancyDrag {
+            body_index: body,
+            water: None,
+            atmosphere: Some(atmosphere),
+            lift: Some(LiftModel::MagnusSphere { radius }),
+        };
+        coupling.apply(&mut states(&mut mechanics), dt);
+        let measured = mechanics.bodies.linear_velocity[body];
+        let expected_velocity = velocity_before + expected.scale(dt / mass);
+        assert!(
+            (measured - expected_velocity).length() < 1e-15,
+            "measured={measured:?} expected={expected_velocity:?}"
+        );
+
+        // `lift: None` なら何も注入されない(移行前の挙動)。
+        let mut mechanics2 = MechanicsSolver::new(0.0);
+        let mut desc2 = RigidBodyDesc::dynamic(Shape::Sphere { radius }, steel);
+        desc2.mass_override = Some(mass);
+        desc2.linear_velocity = Vec3::new(25.0, 0.0, 0.0);
+        desc2.angular_velocity = Vec3::new(0.0, 0.0, 50.0);
+        desc2.drag = DragModel::None;
+        let body2 = mechanics2.create_body(desc2, &materials);
+        let mut no_lift = BuoyancyDrag {
+            body_index: body2,
+            water: None,
+            atmosphere: Some(atmosphere),
+            lift: None,
+        };
+        no_lift.apply(&mut states(&mut mechanics2), dt);
+        assert_eq!(
+            mechanics2.bodies.linear_velocity[body2],
+            Vec3::new(25.0, 0.0, 0.0),
+            "lift: None は移行前どおり揚力を一切与えない"
+        );
+    }
+
+    /// **群5**: 翼の揚力が剛体の**姿勢**に追従すること(翼弦・スパンはローカル指定
+    /// なので、ローカル→ワールド変換を忘れていれば破れる)。3つの姿勢で確認する:
+    /// ①機首上げ$\alpha$で水平飛行 → 上向きの揚力
+    /// ②翼は水平のまま速度を$\alpha$上向きに傾ける(=上昇) → **下向き**の揚力
+    ///   (上昇中の翼は上面から風を受ける。符号を取り違えていればここで破れる)
+    /// ③進行軸まわりに90°ロール → 流れの上下成分が丸ごと横滑りになるので揚力は消える
+    #[test]
+    fn buoyancy_drag_wing_lift_follows_the_bodys_orientation() {
+        let materials = MaterialDb::standard();
+        let alu = materials.find_by_name("アルミニウム").unwrap();
+        let mass = 5.0;
+        let atmosphere = Atmosphere::still(1.225, 1.81e-5);
+        let alpha = 5.0_f64.to_radians();
+        let speed = 30.0;
+        let lift = LiftModel::Wing {
+            area: 2.0,
+            chord_local: Vec3::new(1.0, 0.0, 0.0),
+            span_local: Vec3::new(0.0, 0.0, 1.0),
+        };
+
+        // 1step ぶんの速度変化 = 揚力 * dt / mass(抗力を切ってあるので揚力のみ)。
+        let lift_impulse = |rotation: sim_math::Quat, velocity: Vec3| -> Vec3 {
+            let mut desc = RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(1.0, 0.1, 2.0),
+                },
+                alu,
+            );
+            desc.mass_override = Some(mass);
+            desc.linear_velocity = velocity;
+            desc.drag = DragModel::None;
+            desc.transform.rotation = rotation;
+            let mut mechanics = MechanicsSolver::new(0.0);
+            let body = mechanics.create_body(desc, &materials);
+            let mut coupling = BuoyancyDrag {
+                body_index: body,
+                water: None,
+                atmosphere: Some(atmosphere),
+                lift: Some(lift),
+            };
+            coupling.apply(&mut states(&mut mechanics), 0.001);
+            mechanics.bodies.linear_velocity[body] - velocity
+        };
+
+        let z = Vec3::new(0.0, 0.0, 1.0);
+        let x = Vec3::new(1.0, 0.0, 0.0);
+
+        // ① 機首上げ alpha(スパン +z まわりに +alpha 回す)で水平飛行 → 上向き。
+        let nose_up = lift_impulse(sim_math::Quat::from_axis_angle(z, alpha), x.scale(speed));
+        assert!(
+            nose_up.y > 0.0 && nose_up.x.abs() < 1e-12,
+            "機首上げでは上向きの揚力: {nose_up:?}"
+        );
+
+        // ② 翼は水平のまま上昇(速度を alpha だけ上へ傾ける)→ 下向き。
+        let climbing = lift_impulse(
+            sim_math::Quat::IDENTITY,
+            Vec3::new(alpha.cos(), alpha.sin(), 0.0).scale(speed),
+        );
+        assert!(
+            climbing.y < 0.0,
+            "上昇中の水平翼は上面から風を受けるので下向きの揚力: {climbing:?}"
+        );
+        // 迎角の大きさは同じなので揚力の大きさも一致する(符号だけが違う)。
+        assert!(
+            (climbing.length() - nose_up.length()).abs() / nose_up.length() < 1e-9,
+            "|nose_up|={} |climbing|={}",
+            nose_up.length(),
+            climbing.length()
+        );
+
+        // ③ 進行軸(+x)まわりに90°ロールすると、スパンが +z から -y へ回り、
+        //    流れの上下成分が丸ごとスパン方向(横滑り)になるので迎角が消える。
+        let rolled = lift_impulse(
+            sim_math::Quat::from_axis_angle(x, std::f64::consts::FRAC_PI_2),
+            Vec3::new(alpha.cos(), alpha.sin(), 0.0).scale(speed),
+        );
+        assert!(
+            rolled.length() < 1e-12,
+            "90度ロールで迎角が消えるので揚力もゼロ: {rolled:?}"
+        );
     }
 }

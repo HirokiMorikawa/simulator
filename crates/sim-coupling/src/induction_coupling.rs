@@ -18,7 +18,10 @@
 //! パイプラインへのCoupling接続自体が未実装(他のCoupling実装も同様、各モジュールdoc参照)
 //! のため、本実装は単一の`apply`呼び出し内で「今step確定した速度から次の回路stepへ渡す
 //! 起電力を設定」+「前回の回路stepで解かれた電流からレンツ力を今step反映」を両方行う
-//! 1step遅れの縮約版とする(設計§2規則3「各ステップで前ステップ確定値を読む」と整合)。
+//! **群5で1step遅れを解消した**——`apply_pre`(起電力を今stepの回路solveへ渡す)と
+//! `apply_post`(今step確定した電流で制動力を加える)の2相に分けた。
+//! 以下は移行前の記録: 1step遅れの縮約版とする(設計§2規則3「各ステップで前ステップ
+//! 確定値を読む」と整合)。
 //! この1step遅れによる数値誤差は、`dt`が時定数$\tau$に対して十分小さければ無視できる
 //! 程度に収まることをテストで確認する(実測rel_err、テストdoc参照)。
 
@@ -64,28 +67,48 @@ impl Coupling for InductionCoupling {
         vec![self.voltage_source_index]
     }
 
-    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+    /// **pre 相: 起電力を今stepの回路solveへ間に合わせる(群5で1step遅れを解消)**。
+    ///
+    /// ファラデー則 $\mathcal{E}=B\ell v$ の $v$ は**step開始時の速度**であり、
+    /// この step の回路が解くべき起電力そのものである。pre 相(ドメインソルバを
+    /// 進める前)で設定すれば、同じ step の `Circuit::step` がこの起電力で電流を解く。
+    fn apply_pre(&mut self, world: &mut DomainStates, _dt: f64) {
         let Some(circuit) = &mut world.em_circuit else {
+            return;
+        };
+        if world.mechanics.bodies.mass(self.body_index) <= 0.0 {
+            return;
+        }
+        let v = world.mechanics.bodies.linear_velocity[self.body_index].dot(self.axis);
+        let emf = self.magnetic_field * self.length * v;
+        circuit.set_voltage_source_voltage(self.voltage_source_index, emf);
+    }
+
+    /// **post 相: 今step確定した電流でレンツ則の制動力を加える**。
+    ///
+    /// 符号は`Circuit`のMNA電流の向き規約(`source_current`のdoc参照)に対し
+    /// 実験的に確認した(制動(速度と逆向き)になる符号を採用)。
+    fn apply_post(&mut self, world: &mut DomainStates, dt: f64) {
+        let Some(circuit) = &world.em_circuit else {
             return;
         };
         let mass = world.mechanics.bodies.mass(self.body_index);
         if mass <= 0.0 {
             return; // 静的/キネマティック剛体には適用しない。
         }
-
-        // レンツ則の制動力(前回の回路stepで解かれた電流、モジュールdoc「1step遅れ」参照)。
-        // 符号は`Circuit`のMNA電流の向き規約(`source_current`のdoc参照)に対し実験的に
-        // 確認した(制動(速度と逆向き)になる符号を採用)。
         let current = circuit.source_current(self.voltage_source_index);
         let force = self.magnetic_field * current * self.length;
         let idx = self.body_index;
         world.mechanics.bodies.linear_velocity[idx] =
             world.mechanics.bodies.linear_velocity[idx] + self.axis.scale(force / mass * dt);
+    }
 
-        // ファラデー則の起電力(今step確定した速度、次の回路stepで使われる)。
-        let v = world.mechanics.bodies.linear_velocity[idx].dot(self.axis);
-        let emf = self.magnetic_field * self.length * v;
-        circuit.set_voltage_source_voltage(self.voltage_source_index, emf);
+    /// **単相で呼ばれた場合の互換経路**(`World`を経由しない直接呼び出し用)。
+    /// pre → post の順で両相を続けて実行する。`World`は`apply_pre`/`apply_post`を
+    /// 個別に呼ぶのでこちらは通らない。
+    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+        self.apply_pre(world, dt);
+        self.apply_post(world, dt);
     }
 }
 

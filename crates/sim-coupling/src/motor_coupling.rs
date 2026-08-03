@@ -10,13 +10,24 @@
 //! あたる。剛体の回転軸はワールド座標の固定軸(`axis`)まわりの1自由度に限定する
 //! (正式なHingeジョイントは未実装、`HingeMotorPd`の縮約と同じ精神)。
 //!
-//! `InductionCoupling`と同じ理由(モジュールdoc参照)で、単一`apply`呼び出し内に
-//! 「今step確定した角速度から次の回路stepへ渡す起電力を設定」+「前回の回路stepで
-//! 解かれた電流から反作用トルクを`torque_accum`に積む(次stepの`integrate_velocities`
-//! で消費される、`Command::ApplyForce`の`torque_accum`と同じ消費経路)」を両方行う
-//! 1step遅れの縮約版とする。反作用トルクは`Dynamic`剛体にのみ意味を持つ
-//! (`Kinematic`剛体は`torque_accum`を無視して外部指定の角速度をそのまま維持する設計
-//! ——「手回し発電」シナリオで手が任意の負荷に対して一定回転数を保つ理想化に対応)。
+//! **群5で1step遅れを解消した** — `InductionCoupling`(並進版)と同じく`apply_pre`
+//! (今stepの角速度から起電力を設定し、**この step の回路 solve に間に合わせる**)と
+//! `apply_post`(**この step で確定した電流**から反作用トルクを角速度へ直接注入する)の
+//! 2相に分けた。`World::step`は pre → 各ドメインソルバ → post の順に呼ぶ
+//! (`Coupling::apply_pre`のdoc参照)。
+//!
+//! 反作用トルクの注入先を`torque_accum`から**角速度への直接積分**($\Delta\omega =
+//! I^{-1}\tau\,\Delta t$、`inv_inertia_world`を使う)へ変えた。`torque_accum`は次stepの
+//! `integrate_velocities`でしか消費されないため、post 相に置いても1step遅れが残って
+//! しまうのが理由。`Kinematic`/`Static`剛体は`inv_inertia_world`がゼロ行列なので
+//! **この式のまま角速度が変化しない** — 「手回し発電」シナリオで手が任意の負荷に対して
+//! 一定回転数を保つ理想化(旧実装が`torque_accum`を無視することで得ていた性質)は
+//! 明示的な分岐なしにそのまま保たれる。
+//!
+//! 以下は移行前の記録: 単一`apply`呼び出し内に「今step確定した角速度から次の回路stepへ
+//! 渡す起電力を設定」+「前回の回路stepで解かれた電流から反作用トルクを`torque_accum`に
+//! 積む」を両方行う1step遅れの縮約版だった(設計§2規則3「各ステップで前ステップ確定値を
+//! 読む」)。
 
 use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
@@ -58,25 +69,38 @@ impl Coupling for MotorCoupling {
         vec![self.voltage_source_index]
     }
 
-    fn apply(&mut self, world: &mut DomainStates, _dt: f64) {
+    /// **pre 相: 起電力を今stepの回路solveへ間に合わせる(群5で1step遅れを解消)**。
+    /// ファラデー則 $\mathcal{E}=k\omega$。
+    fn apply_pre(&mut self, world: &mut DomainStates, _dt: f64) {
+        let omega = world.mechanics.bodies.angular_velocity[self.body_index].dot(self.axis);
         let Some(circuit) = &mut world.em_circuit else {
             return;
         };
-
-        // 反作用トルク(前回の回路stepで解かれた電流、モジュールdoc「1step遅れ」参照)。
-        // `torque_accum`へ積む(`Command::ApplyForce`と同じ消費経路、次stepの
-        // `integrate_velocities`で消費される)。符号は`InductionCoupling`と同じ経験的
-        // 確認による(発電時に回転を妨げる向き)。
-        let current = circuit.source_current(self.voltage_source_index);
-        let torque = self.torque_constant * current;
-        let idx = self.body_index;
-        world.mechanics.bodies.torque_accum[idx] =
-            world.mechanics.bodies.torque_accum[idx] + self.axis.scale(torque);
-
-        // ファラデー則の起電力(今step確定した角速度、次の回路stepで使われる)。
-        let omega = world.mechanics.bodies.angular_velocity[idx].dot(self.axis);
         let emf = self.torque_constant * omega;
         circuit.set_voltage_source_voltage(self.voltage_source_index, emf);
+    }
+
+    /// **post 相: 今step確定した電流から反作用トルクを角速度へ直接注入する**
+    /// ($\tau=ki$、$\Delta\omega=I^{-1}\tau\,\Delta t$)。`Kinematic`/`Static`剛体は
+    /// `inv_inertia_world`がゼロ行列なので角速度は変化しない(モジュールdoc参照)。
+    /// 符号は`InductionCoupling`と同じ経験的確認による(発電時に回転を妨げる向き)。
+    fn apply_post(&mut self, world: &mut DomainStates, dt: f64) {
+        let Some(circuit) = &world.em_circuit else {
+            return;
+        };
+        let current = circuit.source_current(self.voltage_source_index);
+        let torque = self.axis.scale(self.torque_constant * current);
+        let idx = self.body_index;
+        let delta = world.mechanics.bodies.inv_inertia_world[idx].mul_vec(torque.scale(dt));
+        world.mechanics.bodies.angular_velocity[idx] =
+            world.mechanics.bodies.angular_velocity[idx] + delta;
+    }
+
+    /// **単相で呼ばれた場合の互換経路**(`World`を経由しない直接呼び出し用)。
+    /// pre → post の順で両相を続けて実行する。
+    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+        self.apply_pre(world, dt);
+        self.apply_post(world, dt);
     }
 }
 
@@ -86,6 +110,22 @@ mod tests {
     use sim_core::MaterialDb;
     use sim_em::{Circuit, GROUND};
     use sim_mechanics::{BodyType, MechanicsSolver, RigidBodyDesc, Shape};
+
+    /// `World::step`が組み立てるのと同じ`DomainStates`(力学+回路のみ)を作るヘルパー。
+    fn states_of<'a>(
+        mechanics: &'a mut MechanicsSolver,
+        circuit: &'a mut Circuit,
+    ) -> DomainStates<'a> {
+        DomainStates {
+            mechanics,
+            thermal: None,
+            em_circuit: Some(circuit),
+            em_electrostatics: None,
+            gas: None,
+            grid_fluid: None,
+            sph: None,
+        }
+    }
 
     /// 「手回し発電」統合シナリオの核: 一定回転数(理想化された手回し、`Kinematic`剛体
     /// なので反作用トルクの影響を受けない、モジュールdoc参照)で回る軸が
@@ -121,20 +161,11 @@ mod tests {
 
         let dt = 0.001;
         for _ in 0..500 {
+            // `World::step`と同じ順序(pre → ドメインソルバ → post)で回す。
             // 抵抗回路のみ(RC/RL要素なし)なので初回解で即座に定常状態に達する。
-            coupling.apply(
-                &mut DomainStates {
-                    mechanics: &mut mechanics,
-                    thermal: None,
-                    em_circuit: Some(&mut circuit),
-                    em_electrostatics: None,
-                    gas: None,
-                    grid_fluid: None,
-                    sph: None,
-                },
-                dt,
-            );
+            coupling.apply_pre(&mut states_of(&mut mechanics, &mut circuit), dt);
             circuit.step(dt);
+            coupling.apply_post(&mut states_of(&mut mechanics, &mut circuit), dt);
         }
 
         let expected_emf = k * omega0;
@@ -144,6 +175,141 @@ mod tests {
         assert!(
             rel_err < 0.01,
             "measured_power={measured_power} expected_power={expected_power} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// **群5: 1step遅れが実際に消えたことの検証**。角速度を毎step変える(ランプさせる)と、
+    /// 遅れの有無が電流に直接現れる — 起電力が今stepのωから作られていれば
+    /// $i_n = k\omega_n/R$、1step遅れていれば $i_n = k\omega_{n-1}/R$ になる。
+    /// 同じシナリオを ①`World::step`の順序(pre → circuit.step → post)と
+    /// ②移行前の順序(circuit.step → apply)の両方で回し、①が今stepの値・②が前stepの値に
+    /// 一致することを**対照実験**として同時に確認する(片側だけだと「たまたま合った」と
+    /// 区別できないため)。
+    #[test]
+    fn motor_coupling_pre_phase_removes_the_one_step_lag_in_the_emf() {
+        let materials = MaterialDb::standard();
+        let k = 0.05;
+        let r = 10.0;
+        let dt = 0.001;
+        let omega_at = |n: usize| 1.0 + n as f64; // 毎step変化する角速度
+
+        let build = || {
+            let mut mechanics = MechanicsSolver::new(0.0);
+            let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+            let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+            desc.body_type = BodyType::Kinematic;
+            let body = mechanics.create_body(desc, &materials);
+            let mut circuit = Circuit::new(2);
+            circuit.add_voltage_source(1, GROUND, 0.0);
+            circuit.add_resistor(1, GROUND, r);
+            let coupling = MotorCoupling {
+                body_index: body,
+                axis: Vec3::new(0.0, 1.0, 0.0),
+                voltage_source_index: 0,
+                torque_constant: k,
+            };
+            (mechanics, circuit, coupling, body)
+        };
+
+        // ① 2相(現行)。
+        let (mut mechanics, mut circuit, mut coupling, body) = build();
+        let mut two_phase = Vec::new();
+        for n in 0..5 {
+            mechanics.bodies.angular_velocity[body] = Vec3::new(0.0, omega_at(n), 0.0);
+            coupling.apply_pre(&mut states_of(&mut mechanics, &mut circuit), dt);
+            circuit.step(dt);
+            coupling.apply_post(&mut states_of(&mut mechanics, &mut circuit), dt);
+            two_phase.push(circuit.source_current(0));
+        }
+
+        // ② 移行前(単相`apply`を全ドメインstepの**後**に呼ぶ = 旧`World`の適用順序)。
+        let (mut mechanics, mut circuit, mut coupling, body) = build();
+        let mut single_phase = Vec::new();
+        for n in 0..5 {
+            mechanics.bodies.angular_velocity[body] = Vec3::new(0.0, omega_at(n), 0.0);
+            circuit.step(dt);
+            coupling.apply(&mut states_of(&mut mechanics, &mut circuit), dt);
+            single_phase.push(circuit.source_current(0));
+        }
+
+        for n in 0..5 {
+            let expected_now = k * omega_at(n) / r;
+            assert!(
+                (two_phase[n].abs() - expected_now).abs() < 1e-12,
+                "step {n}: 2相なら今stepのωが効くはず measured={} expected={expected_now}",
+                two_phase[n].abs()
+            );
+            // n=0 は「前step」が存在しない(ω=0相当)ので 0、以降は1step前の値。
+            let expected_lagged = if n == 0 { 0.0 } else { k * omega_at(n - 1) / r };
+            assert!(
+                (single_phase[n].abs() - expected_lagged).abs() < 1e-12,
+                "step {n}: 単相は1step遅れるはず(対照実験) measured={} expected={expected_lagged}",
+                single_phase[n].abs()
+            );
+        }
+    }
+
+    /// post 相の反作用トルクが**今stepで確定した電流**から $\Delta\omega=I^{-1}k i\,\Delta t$
+    /// として角速度に直接入ること(`torque_accum`経由ではないこと)を1stepで解析的に確認する。
+    /// 併せて`Kinematic`剛体では`inv_inertia_world`がゼロなので角速度が動かないこと
+    /// (「手回し発電」の理想化、モジュールdoc参照)も確認する。
+    #[test]
+    fn motor_coupling_post_phase_injects_reaction_torque_into_angular_velocity() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let k = 0.05;
+        let r = 4.0;
+        let battery = 12.0;
+        let dt = 0.01;
+        let axis = Vec3::new(0.0, 1.0, 0.0);
+
+        let mut mechanics = MechanicsSolver::new(0.0);
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        desc.mass_override = Some(1.0);
+        let body = mechanics.create_body(desc, &materials);
+
+        let mut circuit = Circuit::new(2);
+        circuit.add_voltage_source(1, GROUND, battery);
+        circuit.add_resistor(1, GROUND, r);
+
+        let mut coupling = MotorCoupling {
+            body_index: body,
+            axis,
+            voltage_source_index: 0,
+            torque_constant: k,
+        };
+
+        // pre は ω=0 から起電力0を設定 → 電池ではなく`set_voltage_source_voltage`で
+        // 上書きされるため、この構成では電源電圧そのものが coupling の管理下にある。
+        // 反作用トルクの検証にはそれで十分(電流値を読んでから期待値を組み立てる)。
+        coupling.apply_pre(&mut states_of(&mut mechanics, &mut circuit), dt);
+        circuit.step(dt);
+        let current = circuit.source_current(0);
+        let inv_i = mechanics.bodies.inv_inertia_world[body];
+        let expected = inv_i.mul_vec(axis.scale(k * current * dt));
+        coupling.apply_post(&mut states_of(&mut mechanics, &mut circuit), dt);
+        let measured = mechanics.bodies.angular_velocity[body];
+        assert!(
+            (measured - expected).length() < 1e-15,
+            "measured={measured:?} expected={expected:?}"
+        );
+        assert_eq!(
+            mechanics.bodies.torque_accum[body],
+            Vec3::ZERO,
+            "post 相は torque_accum を経由しない(次stepまで消費されず遅れるため)"
+        );
+
+        // `Kinematic`剛体は inv_inertia_world がゼロ行列 → 角速度は動かない。
+        let mut kin_desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        kin_desc.body_type = BodyType::Kinematic;
+        kin_desc.angular_velocity = Vec3::new(0.0, 7.0, 0.0);
+        let kin = mechanics.create_body(kin_desc, &materials);
+        coupling.body_index = kin;
+        coupling.apply_post(&mut states_of(&mut mechanics, &mut circuit), dt);
+        assert_eq!(
+            mechanics.bodies.angular_velocity[kin],
+            Vec3::new(0.0, 7.0, 0.0),
+            "Kinematic は負荷によらず外部指定の角速度を保つ"
         );
     }
 }

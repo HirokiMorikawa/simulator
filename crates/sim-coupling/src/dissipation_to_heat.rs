@@ -1,13 +1,30 @@
 //! `DissipationToHeat`(設計 docs/20-integration/01-coupling-matrix.md §3「P1: 摩擦・衝突・
 //! 抗力散逸 → ThermalNode(熱浸透率比分配)」)。
 //!
-//! **縮約実装の理由**: 「熱浸透率比分配」(接触する2物体それぞれの熱浸透率
-//! $e=\sqrt{k\rho c}$ の比で散逸熱を配分する)には、各`RigidBody`がどの`ThermalNode`に
-//! 対応するかの対応表が必要だが、`sim_mechanics::RigidBodySet`はまだ剛体↔熱ノードの
-//! 関連付けを持たない(エンティティ層 or `World`のシーン記述が担う想定、いずれも未実装)。
-//! そのため本実装は単一の対象`ThermalNode`(既定: シーン全体の「環境」を表す1ノード)に
-//! 全散逸熱を注入する縮約版とする — 複数ノードへの熱浸透率比分配は、剛体↔熱ノード対応表が
-//! 導入される増分で拡張する。
+//! **群5で「熱浸透率比分配」(設計 docs/12-thermal/02-heat-transfer.md §4.4)を実装した**。
+//! 移行前は「剛体↔熱ノードの対応表が無い」という理由で、単一の対象`ThermalNode`
+//! (シーン全体の「環境」)へ全散逸熱を注入する縮約版だった。群5では
+//!
+//! 1. 対応表を**この結合自身が持つ**(`body_links`。`ConvectionLink`の物性値・
+//!    `PistonGas`の`area`と同じ「呼び出し側が直接渡す」パターン。熱浸透率
+//!    $e_t=\sqrt{k\rho c_p}$ も同様に呼び出し側が計算して渡す —
+//!    `DomainStates`が`MaterialDb`を持たないため)、
+//! 2. `sim_mechanics::MechanicsSolver::last_contact_dissipation_by_body`
+//!    (**群5で新設**した剛体ごとの散逸)と`last_manifolds`(接触ペア)を突き合わせて
+//!    ペアごとの散逸熱$\Delta Q$を作り、
+//! 3. 設計どおり $Q_A/Q_B=e_{t,A}/e_{t,B}$ で2ノードへ配る。
+//!
+//! **残る近似**: 接触ソルバ(sequential impulses)は全マニフォールドを連立で解くため、
+//! 「剛体$i$の運動エネルギー損失」を接触ペアごとに厳密に切り分ける情報が原理的に無い
+//! (剛体が同時に複数の接触を持つ場合)。そこで**剛体$i$の損失をその剛体が関与する
+//! マニフォールドへ均等配分**する。単一接触(床の上を滑る箱など、大半のデモ)では
+//! 均等配分は恒等的に正しく、多接触の場合のみ近似になる。総熱量はどちらでも厳密に
+//! 保存する(配分の内訳が変わるだけ)。
+//!
+//! `body_links`が空なら移行前とまったく同じ挙動(全量を`thermal_node`へ)。対応表に
+//! 無い剛体は熱浸透率0として扱い、相手側が持って行く(静的な床など、熱容量を
+//! モデル化していない相手にペアの熱を吸わせないため)。両方とも未登録なら
+//! 既定ノード`thermal_node`へ落とす。
 //!
 //! 散逸源は`sim_mechanics::MechanicsSolver::last_contact_dissipation`(接触解決(摩擦+反発)
 //! 直前直後の運動エネルギー差分、同crateのdoc参照)のみで、抗力による散逸は含まない
@@ -22,7 +39,42 @@ use sim_core::DomainId;
 /// そのまま注入し、消費済みとしてリセットする)。
 #[derive(Clone)]
 pub struct DissipationToHeat {
+    /// 対応表(`body_links`)に載っていない散逸の受け皿(シーン全体の「環境」ノード)。
     pub thermal_node: usize,
+    /// 剛体↔熱ノード対応表(**群5で追加**、モジュールdoc参照)。空なら移行前と同じ
+    /// 「全量を`thermal_node`へ」。
+    pub body_links: Vec<BodyThermalLink>,
+}
+
+/// 剛体1体と`ThermalNode`の対応 + その材料の熱浸透率(**群5で追加**)。
+#[derive(Clone, Copy, Debug)]
+pub struct BodyThermalLink {
+    pub body_index: usize,
+    pub thermal_node: usize,
+    /// 熱浸透率 $e_t=\sqrt{k\rho c_p}$ [J/(m²·K·s^(1/2))]。呼び出し側が材料から
+    /// 計算して渡す(`effusivity`ヘルパーを使える)。
+    pub effusivity: f64,
+}
+
+/// 熱浸透率 $e_t=\sqrt{k\rho c_p}$(設計 docs/12-thermal/02-heat-transfer.md §4.4、
+/// 半無限体の接触理論)。`sim_core::Material`の`conductivity`・`density`・
+/// `specific_heat`から作る(**群5で追加**)。
+pub fn effusivity(conductivity: f64, density: f64, specific_heat: f64) -> f64 {
+    (conductivity * density * specific_heat).max(0.0).sqrt()
+}
+
+impl DissipationToHeat {
+    /// 対応表なし(移行前と同じ「全量を単一ノードへ」)。
+    pub fn to_single_node(thermal_node: usize) -> DissipationToHeat {
+        DissipationToHeat {
+            thermal_node,
+            body_links: Vec::new(),
+        }
+    }
+
+    fn link_of(&self, body: usize) -> Option<&BodyThermalLink> {
+        self.body_links.iter().find(|l| l.body_index == body)
+    }
 }
 
 impl Coupling for DissipationToHeat {
@@ -38,8 +90,18 @@ impl Coupling for DissipationToHeat {
         format!("DissipationToHeat -> thermal_node[{}]", self.thermal_node)
     }
 
+    fn referenced_bodies(&self) -> Vec<usize> {
+        self.body_links.iter().map(|l| l.body_index).collect()
+    }
+
     fn referenced_thermal_nodes(&self) -> Vec<usize> {
-        vec![self.thermal_node]
+        let mut nodes = vec![self.thermal_node];
+        for link in &self.body_links {
+            if !nodes.contains(&link.thermal_node) {
+                nodes.push(link.thermal_node);
+            }
+        }
+        nodes
     }
 
     fn apply(&mut self, world: &mut DomainStates, _dt: f64) {
@@ -48,16 +110,104 @@ impl Coupling for DissipationToHeat {
         // 稀に負値になりうるが、それを含めて注入することで対記帳の総量が長時間で正しく
         // 相殺される)。
         if dissipated != 0.0 {
+            // (node_index, heat) の並び。総和は必ず`dissipated`と一致する。
+            let injections = if self.body_links.is_empty() {
+                vec![(self.thermal_node, dissipated)]
+            } else {
+                self.distribute_by_effusivity(world, dissipated)
+            };
             if let Some(thermal) = &mut world.thermal {
-                if let Some(node) = thermal.nodes.get_mut(self.thermal_node) {
-                    // 対記帳: mechanics側から取り出した量(dissipated)をそのまま
-                    // thermal側へ注入する(ΔE = C・ΔT)。
-                    node.temperature += dissipated / node.heat_capacity;
+                for (node_index, heat) in injections {
+                    if let Some(node) = thermal.nodes.get_mut(node_index) {
+                        // 対記帳: mechanics側から取り出した量をそのままthermal側へ
+                        // 注入する(ΔE = C・ΔT)。
+                        node.temperature += heat / node.heat_capacity;
+                    }
                 }
             }
         }
         // 次stepで前stepの散逸を二重計上しないよう消費済みにする。
         world.mechanics.last_contact_dissipation = 0.0;
+        world.mechanics.last_contact_dissipation_by_body.clear();
+    }
+}
+
+impl DissipationToHeat {
+    /// 設計 §4.4「熱浸透率比分配」。剛体ごとの散逸を接触ペアへ均等配分してから、
+    /// ペアごとに $Q_A/Q_B=e_{t,A}/e_{t,B}$ で2ノードへ配る(モジュールdoc参照)。
+    /// 対応表に無い剛体の分・どちらも未登録のペアの分は既定ノードへ落とす。
+    /// 戻り値の熱量の総和は`total`と厳密に一致する(丸め誤差を除く)。
+    fn distribute_by_effusivity(&self, world: &DomainStates, total: f64) -> Vec<(usize, f64)> {
+        let per_body = &world.mechanics.last_contact_dissipation_by_body;
+        let manifolds = &world.mechanics.last_manifolds;
+        let mut out: Vec<(usize, f64)> = Vec::new();
+        let mut add = |node: usize, heat: f64| {
+            if let Some(entry) = out.iter_mut().find(|(n, _)| *n == node) {
+                entry.1 += heat;
+            } else {
+                out.push((node, heat));
+            }
+        };
+
+        // 1) 剛体ごとの散逸を、その剛体が関与するマニフォールドへ均等配分する。
+        let mut pair_heat: Vec<(usize, usize, f64)> = manifolds
+            .iter()
+            .map(|m| (m.body_a, m.body_b, 0.0))
+            .collect();
+        let mut attributed = 0.0;
+        for (body, &loss) in per_body.iter().enumerate() {
+            if loss == 0.0 {
+                continue;
+            }
+            let touching: Vec<usize> = (0..pair_heat.len())
+                .filter(|&k| pair_heat[k].0 == body || pair_heat[k].1 == body)
+                .collect();
+            if touching.is_empty() {
+                // 接触マニフォールドが無いのに散逸した(スリープ判定でスキップされた
+                // ペア等)。配分先が決まらないので既定ノードへ。
+                add(self.thermal_node, loss);
+                attributed += loss;
+                continue;
+            }
+            let share = loss / touching.len() as f64;
+            for k in touching {
+                pair_heat[k].2 += share;
+            }
+            attributed += loss;
+        }
+
+        // 2) ペアごとに熱浸透率比で2ノードへ配る(設計 §4.4)。
+        for (a, b, heat) in pair_heat {
+            if heat == 0.0 {
+                continue;
+            }
+            let link_a = self.link_of(a);
+            let link_b = self.link_of(b);
+            let e_a = link_a.map_or(0.0, |l| l.effusivity.max(0.0));
+            let e_b = link_b.map_or(0.0, |l| l.effusivity.max(0.0));
+            let sum = e_a + e_b;
+            if sum <= 0.0 {
+                // 両方未登録(または熱浸透率0)。既定ノードへ落とす。
+                add(self.thermal_node, heat);
+                continue;
+            }
+            match link_a {
+                Some(l) => add(l.thermal_node, heat * e_a / sum),
+                None => add(self.thermal_node, heat * e_a / sum),
+            }
+            match link_b {
+                Some(l) => add(l.thermal_node, heat * e_b / sum),
+                None => add(self.thermal_node, heat * e_b / sum),
+            }
+        }
+
+        // 3) 剛体ごとの内訳が取れなかった残り(`last_contact_dissipation_by_body`が
+        //    空の場合など)は既定ノードへ。これで総和が必ず`total`に一致する。
+        let residual = total - attributed;
+        if residual != 0.0 {
+            add(self.thermal_node, residual);
+        }
+        out
     }
 }
 
@@ -115,9 +265,7 @@ mod tests {
 
         let mut thermal = ThermalSolver::new(293.15);
         let floor_node = thermal.add_node(ThermalNode::new(293.15, 1000.0));
-        let mut coupling = DissipationToHeat {
-            thermal_node: floor_node,
-        };
+        let mut coupling = DissipationToHeat::to_single_node(floor_node);
 
         let dt = 1.0 / 120.0;
         for _ in 0..1200 {
@@ -161,6 +309,151 @@ mod tests {
         assert!(
             rel_err < 0.15,
             "heat_gained={heat_gained:.4} mechanical_energy_lost={mechanical_energy_lost:.4} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// **群5: 熱浸透率比分配**(設計 docs/12-thermal/02-heat-transfer.md §4.4)。
+    /// 鋼の箱が鋼の床の上を滑って止まるシナリオで、散逸熱が箱ノードと床ノードへ
+    /// $e_{t,A}:e_{t,B}$ の比で配られること、総熱量が単一ノード版とまったく同じに
+    /// なること(配分の内訳が変わるだけで総量は保存されること)を確認する。
+    ///
+    /// 比を検出可能にするため、床側の熱浸透率を箱側の3倍に設定する(同じ材料どうしだと
+    /// 1:1 になり、比を取り違えても気付けない)。
+    #[test]
+    fn dissipation_to_heat_splits_between_two_nodes_by_effusivity_ratio() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+
+        // 単一ノード版と2ノード版で、まったく同じ力学シナリオを2回走らせる。
+        let run = |links: Vec<BodyThermalLink>| -> (f64, f64, f64) {
+            let mut rng = SimRng::new(1, 1);
+            let mut events = EventQueue::new();
+            let mut mechanics = MechanicsSolver::new(9.80665);
+            let mut floor_desc = RigidBodyDesc::dynamic(
+                Shape::Plane {
+                    normal: Vec3::new(0.0, 1.0, 0.0),
+                    d: 0.0,
+                },
+                steel,
+            );
+            floor_desc.body_type = BodyType::Static;
+            let floor = mechanics.create_body(floor_desc, &materials);
+            let mut box_desc = RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(0.5, 0.5, 0.5),
+                },
+                steel,
+            );
+            box_desc.transform.position = Vec3::new(0.0, 0.5, 0.0);
+            box_desc.linear_velocity = Vec3::new(5.0, 0.0, 0.0);
+            let boxed = mechanics.create_body(box_desc, &materials);
+            assert_eq!((floor, boxed), (0, 1));
+
+            let mut thermal = ThermalSolver::new(293.15);
+            let env = thermal.add_node(ThermalNode::new(293.15, 1000.0));
+            let box_node = thermal.add_node(ThermalNode::new(293.15, 1000.0));
+            let floor_node = thermal.add_node(ThermalNode::new(293.15, 2000.0));
+            // テスト側で対応表のノード番号を組み立て直す(引数は body_index と
+            // effusivity だけを指定してもらう)。
+            let links: Vec<BodyThermalLink> = links
+                .into_iter()
+                .map(|l| BodyThermalLink {
+                    thermal_node: if l.body_index == boxed {
+                        box_node
+                    } else {
+                        floor_node
+                    },
+                    ..l
+                })
+                .collect();
+            let mut coupling = DissipationToHeat {
+                thermal_node: env,
+                body_links: links,
+            };
+
+            let dt = 1.0 / 120.0;
+            for _ in 0..600 {
+                let mut ctx = SolverContext {
+                    materials: &materials,
+                    rng: &mut rng,
+                    events: &mut events,
+                };
+                mechanics.step(dt, &mut ctx);
+                coupling.apply(
+                    &mut DomainStates {
+                        mechanics: &mut mechanics,
+                        thermal: Some(&mut thermal),
+                        em_circuit: None,
+                        em_electrostatics: None,
+                        gas: None,
+                        grid_fluid: None,
+                        sph: None,
+                    },
+                    dt,
+                );
+            }
+            let heat_of = |node: usize, c: f64| c * (thermal.nodes[node].temperature - 293.15);
+            (
+                heat_of(env, 1000.0),
+                heat_of(box_node, 1000.0),
+                heat_of(floor_node, 2000.0),
+            )
+        };
+
+        // ① 対応表なし(移行前の挙動): 全量が環境ノードへ。
+        let (env_only, box_only, floor_only) = run(Vec::new());
+        assert!(env_only > 0.0, "摩擦で熱が出るはず: {env_only}");
+        assert_eq!((box_only, floor_only), (0.0, 0.0));
+
+        // ② 対応表あり: 箱 e=1、床 e=3 → 箱 1/4、床 3/4。
+        let (env_split, box_heat, floor_heat) = run(vec![
+            BodyThermalLink {
+                body_index: 1, // boxed
+                thermal_node: 0,
+                effusivity: 1.0,
+            },
+            BodyThermalLink {
+                body_index: 0, // floor
+                thermal_node: 0,
+                effusivity: 3.0,
+            },
+        ]);
+
+        // 総熱量は単一ノード版と厳密に一致(力学は同一、配分先だけが違う)。
+        let total_split = env_split + box_heat + floor_heat;
+        assert!(
+            (total_split - env_only).abs() / env_only < 1e-9,
+            "総熱量は配分方法によらず同じはず: single={env_only} split={total_split}"
+        );
+        // 環境ノードへは(両方とも対応表にあるので)ほとんど落ちない。
+        assert!(
+            env_split.abs() / total_split < 1e-9,
+            "両方登録済みなら環境ノードへは落ちないはず: env={env_split}"
+        );
+        // 設計 §4.4 の比 Q_A/Q_B = e_A/e_B = 1/3。
+        let ratio = box_heat / floor_heat;
+        assert!(
+            (ratio - 1.0 / 3.0).abs() < 1e-9,
+            "熱浸透率比 1:3 で配られるはず: box={box_heat} floor={floor_heat} ratio={ratio}"
+        );
+    }
+
+    /// `effusivity`ヘルパーが $\sqrt{k\rho c_p}$ そのものであること、鋼と木で
+    /// 実際に桁の違う値になること(比分配が意味を持つこと)を確認する。
+    #[test]
+    fn effusivity_helper_matches_the_square_root_of_k_rho_cp() {
+        let materials = MaterialDb::standard();
+        let steel = materials.get(materials.find_by_name("鋼(炭素鋼)").unwrap());
+        let wood = materials.get(materials.find_by_name("木材(松)").unwrap());
+        let e_steel = effusivity(steel.conductivity, steel.density, steel.specific_heat);
+        let e_wood = effusivity(wood.conductivity, wood.density, wood.specific_heat);
+        assert!(
+            (e_steel - (steel.conductivity * steel.density * steel.specific_heat).sqrt()).abs()
+                < 1e-9
+        );
+        assert!(
+            e_steel > 5.0 * e_wood,
+            "鋼の熱浸透率は木材よりずっと大きいはず: steel={e_steel} wood={e_wood}"
         );
     }
 }

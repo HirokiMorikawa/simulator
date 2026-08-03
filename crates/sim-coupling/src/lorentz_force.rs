@@ -13,6 +13,9 @@
 //! ペアごとに構成するため総運動量の変化は構成上ゼロになる)。一様外部場由来の項
 //! (`UniformField`)は「外部」由来のため反作用対象を持たない
 //! (`PointChargeSystem::step()`自身が一様外場をそう扱っているのと同じ規約)。
+//!
+//! **群5**: 力の注入を`apply_pre`(ドメインソルバの**前**)へ移した。剛体側の速度注入も
+//! 点電荷側の反作用も、その step の積分に効くようになる(post 相では位置応答が1step遅れた)。
 
 use crate::domain_states::{Coupling, CouplingKind, DomainStates};
 use sim_core::DomainId;
@@ -44,7 +47,7 @@ impl Coupling for LorentzForce {
         vec![self.body_index]
     }
 
-    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+    fn apply_pre(&mut self, world: &mut DomainStates, dt: f64) {
         let Some(em) = &mut world.em_electrostatics else {
             return;
         };
@@ -78,6 +81,16 @@ impl Coupling for LorentzForce {
         let total_force = coulomb_force + uniform_force;
         world.mechanics.bodies.linear_velocity[self.body_index] =
             body_vel + total_force.scale(dt / mass);
+    }
+
+    /// **post 相では何もしない(群5)**。既定実装は`apply`へ委譲するので、これを省略すると
+    /// `World`が pre と post で同じ力を2回積んでしまう。
+    fn apply_post(&mut self, _world: &mut DomainStates, _dt: f64) {}
+
+    /// **単相で呼ばれた場合の互換経路**(`World`を経由しない直接呼び出し用)。
+    /// 全処理は pre 相にある(モジュールdoc参照)。
+    fn apply(&mut self, world: &mut DomainStates, dt: f64) {
+        self.apply_pre(world, dt);
     }
 }
 
