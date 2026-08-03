@@ -204,6 +204,15 @@
       ]
     },
     {
+      "file": "d14b-cylinder-channel.json",
+      "demo": "D14",
+      "title": "円柱まわりの流れ(流路+渦度強化)",
+      "description": "流入/流出境界を持つ流路に円柱(矩形ではない任意形状の固体境界)を置いた格子流体。後流の鉛直速度RMSが立ち上がることを確認する。渦度強化(非物理の補償項、ε=1.0)を有効にしているため近似バッジが出る。",
+      "domains": [
+        "grid_fluid"
+      ]
+    },
+    {
       "file": "d15-convection.json",
       "demo": "D15",
       "title": "対流",

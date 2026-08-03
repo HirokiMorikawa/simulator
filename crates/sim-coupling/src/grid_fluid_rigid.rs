@@ -92,12 +92,12 @@ impl Coupling for GridFluidRigid {
         let idx = self.body_index;
         let pos = world.mechanics.bodies.position[idx];
         let vel = world.mechanics.bodies.linear_velocity[idx];
-        grid.solid = Some(GridSolidBox {
+        grid.set_solid_box(Some(GridSolidBox {
             center: (pos.x, pos.y),
             half_width: self.half_width,
             half_height: self.half_height,
             velocity: Vec3::new(vel.x, vel.y, 0.0),
-        });
+        }));
     }
 }
 
@@ -139,12 +139,12 @@ mod tests {
         // 参照)。剛体の現在位置と同じ場所に置くことで、grid_fluid.rsの
         // `pressure_force_on_solid_integrates_a_known_linear_pressure_field`と同一の
         // ジオメトリ・圧力場になり、期待force=(-9.0,-6.0,0.0)を再利用できる。
-        grid.solid = Some(sim_fluid::GridSolidBox {
+        grid.set_solid_box(Some(sim_fluid::GridSolidBox {
             center: (2.0, 2.0),
             half_width,
             half_height,
             velocity: Vec3::ZERO,
-        });
+        }));
 
         let mut coupling = GridFluidRigid::new(body, half_width, half_height);
         let expected_force = Vec3::new(-9.0, -6.0, 0.0);
@@ -175,7 +175,7 @@ mod tests {
         // (2) `solid`マスクが今stepの剛体位置・(注入後の)速度へ追従していること。
         let body_pos = mechanics.bodies.position[body];
         let body_vel = mechanics.bodies.linear_velocity[body];
-        let solid = grid.solid.expect("apply should have set solid");
+        let solid = grid.solid_box().expect("apply should have set solid");
         assert!((solid.center.0 - body_pos.x).abs() < 1e-12);
         assert!((solid.center.1 - body_pos.y).abs() < 1e-12);
         assert_eq!(solid.half_width, half_width);
@@ -211,7 +211,7 @@ mod tests {
         coupling.apply(&mut states, 0.01);
 
         assert!(
-            grid.solid.is_none(),
+            grid.solid_box().is_none(),
             "static body: early return, solid mask is never set"
         );
     }

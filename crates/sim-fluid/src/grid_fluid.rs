@@ -15,9 +15,26 @@
 //! とした。流出側に圧力Dirichletが入るのでポアソン方程式が**非特異になり**、
 //! 周期境界で必要だった「右辺の平均引き」(可解性条件)が不要になる。
 //!
-//! **残る縮約**: 3D化・渦度強化・任意形状の固体境界(現状は`GridSolidBox`の単一矩形を
-//! マスキングする方式)は引き続き未実装。壁は自由すべりで、粘着(no-slip)境界層は
-//! 作れない——ポアズイユ流(F7)は専用の`PoiseuilleChannel1D`が別途担っている。
+//! **群9で渦度強化と任意形状の固体境界を追加した**:
+//!
+//! - **渦度強化**(設計§4.5、Fedkiw et al. 2001): `vorticity_confinement_epsilon` が
+//!   既定 0.0 = 検証モードで、`> 0` のときだけ発動し**近似バッジを申告する**
+//!   (設計§4.5「非物理的な補償項であることをUIの近似表示で明示し、検証モードでは
+//!   無効化する」)。移流の直後・粘性の前に外力として加える(設計§4.6のステップ順)。
+//! - **任意形状の固体境界**: セル種別 `CellType`(設計§3の `cell_type: Grid3<CellType>`
+//!   の2D縮約)を持ち、`set_solid_cells` に「座標 → その点の固体速度」を返す閉包を渡す
+//!   だけで**形状の種類に依存せず**固体を埋め込める(円柱・多角形・複数個も可)。
+//!   移行前は`GridSolidBox`の単一矩形を**投影の後に速度で上書きする**マスキング方式
+//!   だったが、群9で**圧力ポアソンの側で Solid 面を Neumann として扱い、Solid セルを
+//!   未知数から外す**形(設計§4.4)へ変えた。`pressure_force_on_solid` も
+//!   Solid–Fluid 面の一般の面積分 $\mathbf{F}=-\sum p\,\hat{n}\,h$ になった。
+//!   `GridSolidBox` は既存の`sim_coupling::GridFluidRigid`結合のために残してあり、
+//!   `step`の冒頭でセル種別へラスタライズされる。
+//!
+//! **残る縮約**: 3D化は引き続き未実装(`GridFluid3D`は群9-4)。`CellType`に `Empty`
+//! (自由表面)は持たない——この縮約実装は閉領域/流路の非圧縮流に限っており、自由表面は
+//! SPH側(`sph.rs`)が担う。壁は自由すべりで、粘着(no-slip)境界層は作れない
+//! ——ポアズイユ流(F7)は専用の`PoiseuilleChannel1D`が別途担っている。
 //!
 //! 格子は staggered(MAC)配置: 圧力・スカラーはセル中心 $((i+\tfrac12)h,(j+\tfrac12)h)$、
 //! `u` は x面 $(ih,(j+\tfrac12)h)$、`v` は y面 $((i+\tfrac12)h,jh)$ に置く。周期境界のため
@@ -50,6 +67,14 @@ pub enum GridBoundary {
     },
 }
 
+/// セル種別(設計§3 `cell_type: Grid3<CellType>` の2D縮約、**群9で追加**)。
+/// `Empty`(自由表面)は持たない——モジュールdocの「残る縮約」参照。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellType {
+    Fluid,
+    Solid,
+}
+
 /// 2D格子流体。`u`・`v` は共に長さ `nx*ny`(staggered配置、モジュールdoc参照)。
 #[derive(Clone)]
 pub struct GridFluid2D {
@@ -64,11 +89,21 @@ pub struct GridFluid2D {
     /// `Solver::step`が使う既定動粘性係数。0.0なら陽的粘性拡散をスキップする
     /// (設計§4.3: 粘性が無視できるほど小さい場合の既定分岐)。
     pub kinematic_viscosity: f64,
+    /// 渦度強化の強さ $\varepsilon_{conf}$(設計§4.5、**群9で追加**)。
+    /// **既定 0.0 = 検証モード**(設計§4.5「検証モードでは無効化する」)。
+    /// `> 0` にすると非物理的な補償項が入るので、`approximations()` が近似バッジを申告する。
+    pub vorticity_confinement_epsilon: f64,
     /// 境界条件(**群7で追加**、モジュールdoc参照)。
     boundary: GridBoundary,
-    /// `GridFluidRigid`結合用の単一剛体マスク。`None`なら従来どおり完全周期境界
-    /// (既存の挙動に一切変更なし)。
-    pub solid: Option<GridSolidBox>,
+    /// `GridFluidRigid`結合用の単一剛体マスク。`None`なら固体無し。
+    /// `set_solid_box`(設定と同時に`cell_type`/`solid_velocity`へラスタライズする)
+    /// でのみ書き換える——既存の結合コードのための後方互換経路(モジュールdoc参照)。
+    /// 任意形状を使うときは`set_solid_cells`を呼ぶ(そちらは`solid`を`None`にする)。
+    solid: Option<GridSolidBox>,
+    /// セル種別(**群9で追加**、モジュールdoc参照)。長さ`nx*ny`。
+    cell_type: Vec<CellType>,
+    /// Solidセルの速度 [m/s](Fluidセルでは未使用)。長さ`nx*ny`。
+    solid_velocity: Vec<Vec3>,
     /// 直近の`step`が投影した圧力場(`sim_coupling::GridFluidRigid`の圧力積分抽出専用、
     /// `boundary_force`(`sph.rs`)と同じ理由でpub)。次の`step`呼び出しの冒頭で必ず
     /// 上書きされる導出値(派生キャッシュ)のため、`state_hash`には含めない(スナップショット
@@ -90,9 +125,93 @@ impl GridFluid2D {
             v: vec![0.0; nx * ny],
             density: 1.0,
             kinematic_viscosity: 0.0,
+            vorticity_confinement_epsilon: 0.0,
             solid: None,
+            cell_type: vec![CellType::Fluid; nx * ny],
+            solid_velocity: vec![Vec3::ZERO; nx * ny],
             last_pressure: vec![0.0; nx * ny],
             boundary: GridBoundary::Periodic,
+        }
+    }
+
+    /// **任意形状の固体境界を設定する**(**群9で追加**、モジュールdoc参照)。
+    /// `f(x, y)` がその点の固体速度を返せばそのセルは `Solid`、`None` なら `Fluid`。
+    /// 判定はセル中心 $((i+\frac12)h,(j+\frac12)h)$ で行う(セル単位のラスタライズ、
+    /// cut-cell法ではない縮約——半端に切れたセルは丸ごと Solid か Fluid になる)。
+    /// `solid`(単一矩形の後方互換経路)はクリアされる。
+    pub fn set_solid_cells(&mut self, f: impl Fn(f64, f64) -> Option<Vec3>) {
+        self.solid = None;
+        for j in 0..self.ny {
+            for i in 0..self.nx {
+                let x = (i as f64 + 0.5) * self.h;
+                let y = (j as f64 + 0.5) * self.h;
+                let idx = i + self.nx * j;
+                match f(x, y) {
+                    Some(velocity) => {
+                        self.cell_type[idx] = CellType::Solid;
+                        self.solid_velocity[idx] = velocity;
+                    }
+                    None => {
+                        self.cell_type[idx] = CellType::Fluid;
+                        self.solid_velocity[idx] = Vec3::ZERO;
+                    }
+                }
+            }
+        }
+    }
+
+    /// セル種別(読み取り)。範囲外は `Fluid` 扱い(周期境界では`wrap`される)。
+    pub fn cell_type_at(&self, i: i64, j: i64) -> CellType {
+        self.cell_type[self.idx(i, j)]
+    }
+
+    fn is_solid(&self, i: i64, j: i64) -> bool {
+        self.cell_type_at(i, j) == CellType::Solid
+    }
+
+    fn has_solid(&self) -> bool {
+        self.cell_type.contains(&CellType::Solid)
+    }
+
+    /// 単一矩形の固体マスクを設定する(後方互換経路、`solid`フィールドのdoc参照)。
+    /// 設定と同時にセル種別へラスタライズするので、`step`を呼ぶ前でも
+    /// `pressure_force_on_solid`が正しい面を選べる。
+    pub fn set_solid_box(&mut self, solid: Option<GridSolidBox>) {
+        self.solid = solid;
+        match solid {
+            Some(_) => self.rasterize_solid_box(),
+            None => {
+                for k in 0..self.cell_type.len() {
+                    self.cell_type[k] = CellType::Fluid;
+                    self.solid_velocity[k] = Vec3::ZERO;
+                }
+            }
+        }
+    }
+
+    /// 設定されている単一矩形の固体マスク(後方互換経路)。
+    pub fn solid_box(&self) -> Option<GridSolidBox> {
+        self.solid
+    }
+
+    /// `solid`(単一矩形)をセル種別へラスタライズする(後方互換経路、モジュールdoc参照)。
+    fn rasterize_solid_box(&mut self) {
+        let Some(solid) = self.solid else {
+            return;
+        };
+        for j in 0..self.ny {
+            for i in 0..self.nx {
+                let x = (i as f64 + 0.5) * self.h;
+                let y = (j as f64 + 0.5) * self.h;
+                let idx = i + self.nx * j;
+                if Self::is_solid_at(&solid, x, y) {
+                    self.cell_type[idx] = CellType::Solid;
+                    self.solid_velocity[idx] = solid.velocity;
+                } else {
+                    self.cell_type[idx] = CellType::Fluid;
+                    self.solid_velocity[idx] = Vec3::ZERO;
+                }
+            }
         }
     }
 
@@ -250,16 +369,9 @@ impl GridFluid2D {
         let old_u = self.u.clone();
         let old_v = self.v.clone();
         let old = GridFluid2D {
-            nx: self.nx,
-            ny: self.ny,
-            h: self.h,
             u: old_u,
             v: old_v,
-            density: self.density,
-            kinematic_viscosity: self.kinematic_viscosity,
-            solid: self.solid,
-            last_pressure: self.last_pressure.clone(),
-            boundary: self.boundary,
+            ..self.clone()
         };
 
         for j in 0..self.ny as i64 {
@@ -318,85 +430,79 @@ impl GridFluid2D {
             && (y - solid.center.1).abs() < solid.half_height
     }
 
-    /// 剛体内部(または面上)のセルの速度を剛体の速度に強制する(`GridFluidRigidBox2D`
-    /// (X2)と同じマスキング方式の縮約実装、設計 docs/11-fluid/02-eulerian-grid.md §6
-    /// 「剛体→流体」)。
-    fn apply_solid_mask(&mut self, solid: &GridSolidBox) {
+    /// Solid セルに触れる面の法線速度を固体の速度に一致させる(設計§4.4
+    /// 「Solidセル面: $\mathbf{u}\cdot\hat n=\mathbf{u}_{solid}\cdot\hat n$」)。
+    /// **群9でセル種別ベースへ一般化**(移行前は`GridSolidBox`の矩形内外判定だった)。
+    /// x面 `i` はセル `(i-1,j)` と `(i,j)` の間にある。
+    fn enforce_solid_faces(&mut self) {
         for j in 0..self.ny as i64 {
             for i in 0..self.nx as i64 {
-                let x = i as f64 * self.h;
-                let y = (j as f64 + 0.5) * self.h;
-                if Self::is_solid_at(solid, x, y) {
+                // x面 i(セル i-1 と i の間)。
+                let left_solid = self.is_solid(i - 1, j);
+                let right_solid = self.is_solid(i, j);
+                if left_solid || right_solid {
+                    let source = if right_solid {
+                        self.solid_velocity[self.idx(i, j)]
+                    } else {
+                        self.solid_velocity[self.idx(i - 1, j)]
+                    };
                     let idx = self.idx(i, j);
-                    self.u[idx] = solid.velocity.x;
+                    self.u[idx] = source.x;
                 }
-            }
-        }
-        for j in 0..self.ny as i64 {
-            for i in 0..self.nx as i64 {
-                let x = (i as f64 + 0.5) * self.h;
-                let y = j as f64 * self.h;
-                if Self::is_solid_at(solid, x, y) {
+                // y面 j(セル j-1 と j の間)。
+                let below_solid = self.is_solid(i, j - 1);
+                let above_solid = self.is_solid(i, j);
+                if below_solid || above_solid {
+                    let source = if above_solid {
+                        self.solid_velocity[self.idx(i, j)]
+                    } else {
+                        self.solid_velocity[self.idx(i, j - 1)]
+                    };
                     let idx = self.idx(i, j);
-                    self.v[idx] = solid.velocity.y;
+                    self.v[idx] = source.y;
                 }
             }
         }
     }
 
-    /// 剛体表面の圧力積分による流体力(設計 docs/11-fluid/02-eulerian-grid.md §6
-    /// 「流体→剛体: 剛体表面セルの圧力を面積分」)。`self.solid`が`None`なら`None`を返す。
-    /// `x`・`y`成分とも、剛体を囲む4面(左右・上下)それぞれの圧力差を積分する
-    /// (`GridFluidRigidBox2D::pressure_force_on_box`は鉛直方向のみだったが、こちらは
-    /// 剛体が2自由度で自由運動できる一般結合のため両方向を計算する)。
+    /// 固体表面の圧力積分による流体力(設計 docs/11-fluid/02-eulerian-grid.md §6
+    /// 「流体→剛体: 剛体表面セルの圧力を面積分」)。固体セルが1つも無ければ `None`。
+    ///
+    /// **群9で任意形状に対応する一般の面積分へ置き換えた**:
+    /// $\mathbf{F}=-\sum_{\text{Solid–Fluid 面}} p\,\hat n\,h$($\hat n$ は固体から
+    /// 外向き)。移行前は「矩形を囲むバウンディングindexを走査する」実装で、
+    /// **矩形以外の形では正しい面を選べなかった**。粘性せん断は省略(設計§6が明記する
+    /// 誤差要因)。
     pub fn pressure_force_on_solid(&self) -> Option<Vec3> {
-        let solid = self.solid?;
-        let nx = self.nx as i64;
-        let ny = self.ny as i64;
-
-        let mut i_min = None;
-        let mut i_max = None;
-        for i in 0..nx {
-            let x = (i as f64 + 0.5) * self.h;
-            if Self::is_solid_at(&solid, x, solid.center.1) {
-                i_min = Some(i_min.map_or(i, |m: i64| m.min(i)));
-                i_max = Some(i_max.map_or(i, |m: i64| m.max(i)));
-            }
+        if !self.has_solid() {
+            return None;
         }
-        let mut j_min = None;
-        let mut j_max = None;
-        for j in 0..ny {
-            let y = (j as f64 + 0.5) * self.h;
-            if Self::is_solid_at(&solid, solid.center.0, y) {
-                j_min = Some(j_min.map_or(j, |m: i64| m.min(j)));
-                j_max = Some(j_max.map_or(j, |m: i64| m.max(j)));
-            }
-        }
-        let (Some(i_min), Some(i_max), Some(j_min), Some(j_max)) = (i_min, i_max, j_min, j_max)
-        else {
-            return Some(Vec3::ZERO);
-        };
-        let i_left = i_min - 1;
-        let i_right = i_max + 1;
-        let j_below = j_min - 1;
-        let j_above = j_max + 1;
-
         let mut fx = 0.0;
-        for j in j_min..=j_max {
-            let y = (j as f64 + 0.5) * self.h;
-            if (y - solid.center.1).abs() < solid.half_height {
-                let p_left = self.last_pressure[self.idx(i_left, j)];
-                let p_right = self.last_pressure[self.idx(i_right, j)];
-                fx += self.h * (p_left - p_right);
-            }
-        }
         let mut fy = 0.0;
-        for i in i_min..=i_max {
-            let x = (i as f64 + 0.5) * self.h;
-            if (x - solid.center.0).abs() < solid.half_width {
-                let p_below = self.last_pressure[self.idx(i, j_below)];
-                let p_above = self.last_pressure[self.idx(i, j_above)];
-                fy += self.h * (p_below - p_above);
+        for j in 0..self.ny as i64 {
+            for i in 0..self.nx as i64 {
+                // x面 i(セル (i-1,j) と (i,j) の間)。片側だけが Solid のときが固体表面。
+                let left_solid = self.is_solid(i - 1, j);
+                let right_solid = self.is_solid(i, j);
+                if left_solid != right_solid {
+                    if right_solid {
+                        // 固体は右。外向き法線は -x。dF_x = -p·(-1)·h = +p·h。
+                        fx += self.last_pressure[self.idx(i - 1, j)] * self.h;
+                    } else {
+                        // 固体は左。外向き法線は +x。
+                        fx -= self.last_pressure[self.idx(i, j)] * self.h;
+                    }
+                }
+                // y面 j(セル (i,j-1) と (i,j) の間)。
+                let below_solid = self.is_solid(i, j - 1);
+                let above_solid = self.is_solid(i, j);
+                if below_solid != above_solid {
+                    if above_solid {
+                        fy += self.last_pressure[self.idx(i, j - 1)] * self.h;
+                    } else {
+                        fy -= self.last_pressure[self.idx(i, j)] * self.h;
+                    }
+                }
             }
         }
         Some(Vec3::new(fx, fy, 0.0))
@@ -409,10 +515,18 @@ impl GridFluid2D {
     /// (`GridFluidRigid`の圧力積分抽出に使う、既存呼び出し元は戻り値を無視すればよい)。
     pub fn project(&mut self, dt: f64, density: f64) -> Vec<f64> {
         let n = self.nx * self.ny;
+        // Solidセルは未知数から外す(恒等行 + rhs=0、設計§4.4)。**群9で追加**。
+        let solid_cell: Vec<bool> = (0..n)
+            .map(|k| self.cell_type[k] == CellType::Solid)
+            .collect();
         let mut rhs = vec![0.0; n];
         for j in 0..self.ny as i64 {
             for i in 0..self.nx as i64 {
-                rhs[self.idx(i, j)] = density / dt * self.divergence(i, j);
+                let idx = self.idx(i, j);
+                if solid_cell[idx] {
+                    continue; // 恒等行
+                }
+                rhs[idx] = density / dt * self.divergence(i, j);
             }
         }
         // 流出列は圧力Dirichlet p=0(上の`apply_a`の恒等行と対にする)。
@@ -424,10 +538,24 @@ impl GridFluid2D {
         // 周期境界ではラプラシアンが特異(定数関数が零空間)なので右辺の平均を引く。
         // **開境界(Channel)では流出面に圧力Dirichlet $p=0$ が入るため非特異**で、
         // 平均引きは不要どころか**やってはいけない**(可解な系の右辺を歪める)。
+        //
+        // **群9**: Solidセルを恒等行に落としたので、可解性条件の平均は**Fluidセルだけ**で
+        // 取る(Solid行のrhsは0固定であり、平均引きの対象に含めると流体側の右辺を歪める)。
         if self.boundary == GridBoundary::Periodic {
-            let mean: f64 = rhs.iter().sum::<f64>() / n as f64;
-            for r in rhs.iter_mut() {
-                *r -= mean;
+            let fluid_count = solid_cell.iter().filter(|s| !**s).count();
+            if fluid_count > 0 {
+                let mean: f64 = rhs
+                    .iter()
+                    .zip(solid_cell.iter())
+                    .filter(|(_, s)| !**s)
+                    .map(|(r, _)| *r)
+                    .sum::<f64>()
+                    / fluid_count as f64;
+                for (r, s) in rhs.iter_mut().zip(solid_cell.iter()) {
+                    if !*s {
+                        *r -= mean;
+                    }
+                }
             }
         }
 
@@ -439,13 +567,30 @@ impl GridFluid2D {
             for j in 0..ny as i64 {
                 for i in 0..nx as i64 {
                     let idx = wrap(i, nx) + nx * wrap(j, ny);
+                    // Solidセルは恒等行(未知数から外す、設計§4.4)。**群9で追加**。
+                    if solid_cell[idx] {
+                        out[idx] = x[idx];
+                        continue;
+                    }
                     match boundary {
                         GridBoundary::Periodic => {
-                            let ip = wrap(i + 1, nx) + nx * wrap(j, ny);
-                            let im = wrap(i - 1, nx) + nx * wrap(j, ny);
-                            let jp = wrap(i, nx) + nx * wrap(j + 1, ny);
-                            let jm = wrap(i, nx) + nx * wrap(j - 1, ny);
-                            out[idx] = (x[ip] + x[im] + x[jp] + x[jm] - 4.0 * x[idx]) / h2;
+                            // Solid隣接面はNeumann(∂p/∂n=0)なので、その方向は鏡像に
+                            // なり寄与が相殺する = 対角の係数がその方向ぶん減る。
+                            let mut sum = 0.0;
+                            let mut diag = 0.0;
+                            let mut neighbour = |ii: i64, jj: i64| {
+                                let k = wrap(ii, nx) + nx * wrap(jj, ny);
+                                if solid_cell[k] {
+                                    return;
+                                }
+                                sum += x[k];
+                                diag += 1.0;
+                            };
+                            neighbour(i + 1, j);
+                            neighbour(i - 1, j);
+                            neighbour(i, j + 1);
+                            neighbour(i, j - 1);
+                            out[idx] = (sum - diag * x[idx]) / h2;
                         }
                         GridBoundary::Channel { .. } => {
                             // 流出列(i = nx-1)は圧力Dirichlet p=0。恒等行にして
@@ -454,8 +599,8 @@ impl GridFluid2D {
                                 out[idx] = x[idx];
                                 continue;
                             }
-                            // 流入面(i=0の左)と y壁 はNeumann(∂p/∂n=0)なので、
-                            // 隣接セルが領域外なら**自分自身を鏡像として使う**
+                            // 流入面(i=0の左)・y壁・Solid隣接面 はNeumann(∂p/∂n=0)なので、
+                            // 隣接セルが領域外/固体なら**自分自身を鏡像として使う**
                             // ——その結果、対角の係数がその方向ぶん減る。
                             let mut sum = 0.0;
                             let mut diag = 0.0;
@@ -463,7 +608,11 @@ impl GridFluid2D {
                                 if ii < 0 || ii >= nx as i64 || jj < 0 || jj >= ny as i64 {
                                     return; // Neumann: 鏡像なので寄与が相殺する。
                                 }
-                                sum += x[ii as usize + nx * jj as usize];
+                                let k = ii as usize + nx * jj as usize;
+                                if solid_cell[k] {
+                                    return; // Solid面もNeumann(**群9**)。
+                                }
+                                sum += x[k];
                                 diag += 1.0;
                             };
                             neighbour(i + 1, j);
@@ -492,10 +641,24 @@ impl GridFluid2D {
         );
 
         let scale = dt / density;
+        // **群9**: Solid に接する面は補正しない(そこは圧力勾配ではなく固体速度が決める。
+        // 補正すると Neumann 条件を自分で壊すことになる)。補正後に `enforce_solid_faces`
+        // で改めて固体速度へ戻す。
+        let x_face_is_free = |i: i64, j: i64| -> bool {
+            !solid_cell[wrap(i, nx) + nx * wrap(j, ny)]
+                && !solid_cell[wrap(i - 1, nx) + nx * wrap(j, ny)]
+        };
+        let y_face_is_free = |i: i64, j: i64| -> bool {
+            !solid_cell[wrap(i, nx) + nx * wrap(j, ny)]
+                && !solid_cell[wrap(i, nx) + nx * wrap(j - 1, ny)]
+        };
         match self.boundary {
             GridBoundary::Periodic => {
                 for j in 0..self.ny as i64 {
                     for i in 0..=self.nx as i64 {
+                        if !x_face_is_free(i, j) {
+                            continue;
+                        }
                         let ip = wrap(i, nx) + nx * wrap(j, ny);
                         let im = wrap(i - 1, nx) + nx * wrap(j, ny);
                         let dpdx = (pressure[ip] - pressure[im]) / self.h;
@@ -505,6 +668,9 @@ impl GridFluid2D {
                 }
                 for j in 0..=self.ny as i64 {
                     for i in 0..self.nx as i64 {
+                        if !y_face_is_free(i, j) {
+                            continue;
+                        }
                         let jp = wrap(i, nx) + nx * wrap(j, ny);
                         let jm = wrap(i, nx) + nx * wrap(j - 1, ny);
                         let dpdy = (pressure[jp] - pressure[jm]) / self.h;
@@ -516,14 +682,22 @@ impl GridFluid2D {
             GridBoundary::Channel { .. } => {
                 // 内部の面だけを補正する。流入面(i=0)は速度Dirichletなので触らない、
                 // y壁(j=0)は v=0 のまま。
-                for j in 0..self.ny {
-                    for i in 1..self.nx {
+                for j in 0..self.ny as i64 {
+                    for i in 1..self.nx as i64 {
+                        if !x_face_is_free(i, j) {
+                            continue;
+                        }
+                        let (i, j) = (i as usize, j as usize);
                         let dpdx = (pressure[i + nx * j] - pressure[(i - 1) + nx * j]) / self.h;
                         self.u[i + nx * j] -= scale * dpdx;
                     }
                 }
-                for j in 1..self.ny {
-                    for i in 0..self.nx {
+                for j in 1..self.ny as i64 {
+                    for i in 0..self.nx as i64 {
+                        if !y_face_is_free(i, j) {
+                            continue;
+                        }
+                        let (i, j) = (i as usize, j as usize);
                         let dpdy = (pressure[i + nx * j] - pressure[i + nx * (j - 1)]) / self.h;
                         self.v[i + nx * j] -= scale * dpdy;
                     }
@@ -551,23 +725,84 @@ impl GridFluid2D {
         max_sq.sqrt()
     }
 
-    /// `Solver::step`が呼ぶ1ステップ分の処理(設計§4.6のステップまとめから、
-    /// このモジュールが実装する範囲——移流+粘性拡散+投影(+`solid`が設定されていれば
-    /// 剛体マスキング)——を抜き出したもの)。外力・煙/温度移流(§4.2, §4.6)はこの
-    /// 縮約実装の対象外。剛体マスクは投影の前後両方に適用する(`GridFluidRigidBox2D::step`
-    /// と同じ理由: 投影前に境界条件として与え、投影後に丸め誤差で漏れた分を再度矯正する)。
+    /// セル中心 $((i+\frac12)h,(j+\frac12)h)$ の渦度 $\omega_z=\partial v/\partial x-
+    /// \partial u/\partial y$(設計§4.5)。面アクセサ経由で読むので境界条件を尊重する。
+    fn vorticity_at(&self, i: i64, j: i64) -> f64 {
+        let u_center = |ii: i64, jj: i64| 0.5 * (self.u_face(ii, jj) + self.u_face(ii + 1, jj));
+        let v_center = |ii: i64, jj: i64| 0.5 * (self.v_face(ii, jj) + self.v_face(ii, jj + 1));
+        let dvdx = (v_center(i + 1, j) - v_center(i - 1, j)) / (2.0 * self.h);
+        let dudy = (u_center(i, j + 1) - u_center(i, j - 1)) / (2.0 * self.h);
+        dvdx - dudy
+    }
+
+    /// **渦度強化**(設計§4.5、Fedkiw et al. 2001、**群9で追加**):
+    /// $\mathbf{N}=\nabla|\omega|/|\nabla|\omega||$ として
+    /// $\mathbf{f}_{conf}=\varepsilon_{conf}\,h\,(\mathbf{N}\times\boldsymbol\omega)$。
+    /// 2Dでは $\boldsymbol\omega=\omega\hat z$ なので
+    /// $f_x=\varepsilon h N_y\omega$、$f_y=-\varepsilon h N_x\omega$。
+    ///
+    /// **非物理的な補償項**なので、`epsilon > 0` のときは `approximations()` が
+    /// 近似バッジを申告する(設計§4.5「UIの近似表示で明示し、検証モードでは無効化する」)。
+    /// 投影より前に加えるので非圧縮性は壊れない。
+    pub fn apply_vorticity_confinement(&mut self, dt: f64, epsilon: f64) {
+        if epsilon == 0.0 {
+            return;
+        }
+        let (nx, ny) = (self.nx, self.ny);
+        let mut abs_omega = vec![0.0; nx * ny];
+        for j in 0..ny as i64 {
+            for i in 0..nx as i64 {
+                abs_omega[self.idx(i, j)] = self.vorticity_at(i, j).abs();
+            }
+        }
+        // 加算は元の速度場から独立に決まるようまとめて計算してから適用する。
+        let mut du = vec![0.0; nx * ny];
+        let mut dv = vec![0.0; nx * ny];
+        for j in 0..ny as i64 {
+            for i in 0..nx as i64 {
+                if self.is_solid(i, j) {
+                    continue; // 固体セルには外力を入れない
+                }
+                let gx = (abs_omega[self.idx(i + 1, j)] - abs_omega[self.idx(i - 1, j)])
+                    / (2.0 * self.h);
+                let gy = (abs_omega[self.idx(i, j + 1)] - abs_omega[self.idx(i, j - 1)])
+                    / (2.0 * self.h);
+                let magnitude = (gx * gx + gy * gy).sqrt();
+                if magnitude < 1e-12 {
+                    continue; // 勾配ゼロ(一様な渦度)では方向が定まらない
+                }
+                let (n_x, n_y) = (gx / magnitude, gy / magnitude);
+                let omega = self.vorticity_at(i, j);
+                let force_x = epsilon * self.h * n_y * omega;
+                let force_y = -epsilon * self.h * n_x * omega;
+                // セル中心の力を、そのセルを挟む2面へ半分ずつ配る。
+                du[self.idx(i, j)] += 0.5 * force_x * dt;
+                du[self.idx(i + 1, j)] += 0.5 * force_x * dt;
+                dv[self.idx(i, j)] += 0.5 * force_y * dt;
+                dv[self.idx(i, j + 1)] += 0.5 * force_y * dt;
+            }
+        }
+        for k in 0..nx * ny {
+            self.u[k] += du[k];
+            self.v[k] += dv[k];
+        }
+    }
+
+    /// `Solver::step`が呼ぶ1ステップ分の処理。設計§4.6のステップまとめの順序
+    /// **移流 → 外力(渦度強化)→ 粘性 → 境界条件 → 投影** に従う。
+    /// 煙/温度の移流(§4.2, §4.6)はこの縮約実装の対象外。
+    /// 固体面の速度矯正は投影の前後両方に適用する(投影前は境界条件として、投影後は
+    /// 丸め誤差で漏れた分の再矯正——`GridFluidRigidBox2D::step`と同じ理由)。
     pub fn step(&mut self, dt: f64) {
+        self.rasterize_solid_box();
         self.advect_velocity(dt);
+        self.apply_vorticity_confinement(dt, self.vorticity_confinement_epsilon);
         if self.kinematic_viscosity > 0.0 {
             self.diffuse_explicit(dt, self.kinematic_viscosity);
         }
-        if let Some(solid) = self.solid {
-            self.apply_solid_mask(&solid);
-        }
+        self.enforce_solid_faces();
         self.last_pressure = self.project(dt, self.density);
-        if let Some(solid) = self.solid {
-            self.apply_solid_mask(&solid);
-        }
+        self.enforce_solid_faces();
     }
 }
 
@@ -634,23 +869,64 @@ impl Solver for GridFluid2D {
             }
             None => hasher.write_u64(0),
         }
+        // 任意形状の固体境界(**群9**)。`solid`(単一矩形)を使わず`set_solid_cells`で
+        // 直接設定された場合はこちらだけが状態を持つので、同様にハッシュへ含める。
+        for k in 0..self.cell_type.len() {
+            hasher.write_u64(if self.cell_type[k] == CellType::Solid {
+                1
+            } else {
+                0
+            });
+            if self.cell_type[k] == CellType::Solid {
+                hasher.write_vec3(self.solid_velocity[k]);
+            }
+        }
+        hasher.write_f64(self.vorticity_confinement_epsilon);
     }
 
     fn approximations(&self) -> Vec<Approximation> {
-        let mut out = vec![
-            Approximation {
+        let mut out = vec![Approximation {
+            name: "semi-Lagrangian移流",
+            reason: "無条件安定だが数値拡散が大きい(低粘性域では真の粘性より拡散的)。",
+            doc: "docs/11-fluid/02-eulerian-grid.md",
+            can_disable: false,
+        }];
+        // 境界の申告は設定に応じて変える(**群9**。移行前は「2D・周期境界」固定文言で、
+        // 群7で`Channel`を、群9で固体境界を足したあとも嘘のまま残っていた)。
+        out.push(match self.boundary {
+            GridBoundary::Periodic => Approximation {
                 name: "2D・周期境界",
-                reason: "流入/流出境界も固体境界も持たないため、下流の後流が上流へ回り込む。",
+                reason: "全方向が周期境界のため、下流の後流が上流へ回り込む。",
+                doc: "docs/11-fluid/02-eulerian-grid.md",
+                can_disable: true,
+            },
+            GridBoundary::Channel { .. } => Approximation {
+                name: "2D・開境界(流路)",
+                reason: "x−から流入・x+へ流出、y壁は自由すべり。粘着(no-slip)境界層は作れない。",
+                doc: "docs/11-fluid/02-eulerian-grid.md",
+                can_disable: true,
+            },
+        });
+        if self.has_solid() {
+            out.push(Approximation {
+                name: "セル単位の固体境界",
+                reason: "固体はセル中心の内外判定でラスタライズする(cut-cell法ではないため、\
+                         半端に切れたセルは丸ごと固体か流体になり表面が階段状になる)。",
                 doc: "docs/11-fluid/02-eulerian-grid.md",
                 can_disable: false,
-            },
-            Approximation {
-                name: "semi-Lagrangian移流",
-                reason: "無条件安定だが数値拡散が大きい(低粘性域では真の粘性より拡散的)。",
+            });
+        }
+        if self.vorticity_confinement_epsilon > 0.0 {
+            // 設計§4.5「**非物理的な補償項**であることをUIの近似表示で明示し、
+            // 検証モードでは無効化する」。既定(0.0)ではこのバッジは出ない。
+            out.push(Approximation {
+                name: "渦度強化(非物理)",
+                reason: "数値拡散で失われた小渦を補償する非物理的な外力を加えている\
+                         (Fedkiw et al. 2001)。検証時は epsilon=0 にすること。",
                 doc: "docs/11-fluid/02-eulerian-grid.md",
-                can_disable: false,
-            },
-        ];
+                can_disable: true,
+            });
+        }
         if self.kinematic_viscosity == 0.0 {
             // **設定によって効いている近似が変わる例**。粘性0なら陽的粘性拡散を
             // 丸ごとスキップするので、その事実を申告する(Worldの側からドメインの
@@ -848,12 +1124,12 @@ mod tests {
         }
         // box_center=(2.0,2.0), half=0.75 => セル中心 x=1.75,2.25 (i=3,4) が箱内、
         // i_left=2, i_right=5(y方向も同型でj_below=2, j_above=5)。
-        fluid.solid = Some(GridSolidBox {
+        fluid.set_solid_box(Some(GridSolidBox {
             center: (2.0, 2.0),
             half_width: 0.75,
             half_height: 0.75,
             velocity: Vec3::ZERO,
-        });
+        }));
 
         let force = fluid.pressure_force_on_solid().expect("solid is set");
         assert!(
@@ -884,12 +1160,12 @@ mod tests {
             fluid.u[i] = 0.3;
         }
         let solid_velocity = Vec3::new(1.5, -2.0, 0.0);
-        fluid.solid = Some(GridSolidBox {
+        fluid.set_solid_box(Some(GridSolidBox {
             center: (2.0, 2.0),
             half_width: 0.75,
             half_height: 0.75,
             velocity: solid_velocity,
-        });
+        }));
 
         fluid.step(0.001);
 
@@ -953,12 +1229,12 @@ mod tests {
             inflow_speed: inflow,
         });
         // 流路の中ほどに矩形障害物を置く。
-        fluid.solid = Some(GridSolidBox {
+        fluid.set_solid_box(Some(GridSolidBox {
             center: (nx as f64 * h * 0.35, ny as f64 * h * 0.5),
             half_width: 2.0 * h,
             half_height: 3.0 * h,
             velocity: Vec3::ZERO,
-        });
+        }));
 
         for _ in 0..400 {
             fluid.step(0.002);

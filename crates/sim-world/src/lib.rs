@@ -2683,9 +2683,16 @@ mod tests {
         }
         // 現状オフにできる機構が無いものは`can_disable=false`で申告される
         // (UIが「オフにできます」という嘘のトグルを出さないため)。
+        // semi-Lagrangian移流は移流スキーム自体なので外しようがない。
         assert!(inviscid
             .iter()
-            .any(|a| a.name == "2D・周期境界" && !a.can_disable));
+            .any(|a| a.name == "semi-Lagrangian移流" && !a.can_disable));
+        // 逆に、**群7で`GridBoundary::Channel`、群9で固体境界が入って実際に切り替えられる
+        // ようになった**境界の申告は`can_disable=true`になる(嘘のトグルの逆——
+        // 切り替えられるのに「できない」と申告し続けるのも同じく嘘である)。
+        assert!(inviscid
+            .iter()
+            .any(|a| a.name == "2D・周期境界" && a.can_disable));
     }
 
     /// **群1: 結合の内省が「捏造でない」こと**——`referenced_bodies()`が申告する
@@ -3107,7 +3114,7 @@ mod tests {
         let solid = world
             .grid_fluid()
             .unwrap()
-            .solid
+            .solid_box()
             .expect("GridFluidRigid should have set the solid mask by now");
         let body_pos = world.body_position(body).unwrap();
         assert!(

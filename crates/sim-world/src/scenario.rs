@@ -913,6 +913,57 @@ pub struct GridFluidScenarioJson {
     /// このシーンが示すのは「障害物が一様流を実際に乱すこと」までである。
     #[serde(default)]
     pub initial_velocity: Option<[f64; 2]>,
+    /// 境界条件(**群9で公開**、群7で`GridFluid2D`側には入っていたがシーンJSONから
+    /// 選べなかった)。`"periodic"`(既定)か `{"channel": {"inflow_speed": 1.0}}`。
+    /// `Channel`にすると `initial_velocity` を書かなくても流入面から流れが入ってくる。
+    #[serde(default)]
+    pub boundary: Option<GridBoundaryJson>,
+    /// 渦度強化 $\varepsilon_{conf}$(設計§4.5、**群9で公開**)。
+    /// **非物理的な補償項**なので、0以外にすると近似バッジが出る。既定 0(検証モード)。
+    #[serde(default)]
+    pub vorticity_confinement_epsilon: Option<f64>,
+    /// 任意形状の固体境界(**群9で公開**)。複数置ける。
+    #[serde(default)]
+    pub solids: Vec<GridSolidJson>,
+}
+
+/// `GridFluidScenarioJson::boundary`(**群9で追加**)。
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GridBoundaryJson {
+    Periodic,
+    Channel { inflow_speed: f64 },
+}
+
+/// `GridFluidScenarioJson::solids` の1要素(**群9で追加**)。
+/// `GridFluid2D::set_solid_cells` はどんな形でも受けられるので、ここは
+/// シーンJSONで書きたい代表的な形だけを列挙する(必要になったら足せばよい)。
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GridSolidJson {
+    Box {
+        center: [f64; 2],
+        half_extents: [f64; 2],
+    },
+    Circle {
+        center: [f64; 2],
+        radius: f64,
+    },
+}
+
+impl GridSolidJson {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        match self {
+            GridSolidJson::Box {
+                center,
+                half_extents,
+            } => (x - center[0]).abs() < half_extents[0] && (y - center[1]).abs() < half_extents[1],
+            GridSolidJson::Circle { center, radius } => {
+                let (dx, dy) = (x - center[0], y - center[1]);
+                dx * dx + dy * dy < radius * radius
+            }
+        }
+    }
 }
 
 /// `Scenario::conduction_rod`(`sim_thermal::ConductionRod1D`、**増分Hで追加**)。
@@ -1443,9 +1494,34 @@ impl World {
             if let Some(v) = gf.kinematic_viscosity {
                 fluid.kinematic_viscosity = v;
             }
+            // 境界条件は初期速度より先に適用する(`with_boundary`はChannelのとき
+            // 流入速度で場を初期化するので、順序が逆だと初期速度が上書きされる)。
+            if let Some(boundary) = &gf.boundary {
+                fluid = fluid.with_boundary(match boundary {
+                    GridBoundaryJson::Periodic => sim_fluid::GridBoundary::Periodic,
+                    GridBoundaryJson::Channel { inflow_speed } => {
+                        sim_fluid::GridBoundary::Channel {
+                            inflow_speed: *inflow_speed,
+                        }
+                    }
+                });
+            }
             if let Some([u0, v0]) = gf.initial_velocity {
                 fluid.u.iter_mut().for_each(|x| *x = u0);
                 fluid.v.iter_mut().for_each(|x| *x = v0);
+            }
+            if let Some(epsilon) = gf.vorticity_confinement_epsilon {
+                fluid.vorticity_confinement_epsilon = epsilon;
+            }
+            if !gf.solids.is_empty() {
+                let solids = &gf.solids;
+                fluid.set_solid_cells(|x, y| {
+                    if solids.iter().any(|s| s.contains(x, y)) {
+                        Some(sim_math::Vec3::ZERO) // シーン定義の固体は静止(動く固体は結合が担う)
+                    } else {
+                        None
+                    }
+                });
             }
             world.enable_grid_fluid(fluid);
         }
@@ -2234,6 +2310,7 @@ pub fn run_headless_scenario(json: &str, steps: u32) -> Result<HeadlessRunResult
 mod tests {
     use super::*;
     use crate::BodyId;
+    use sim_core::Solver;
 
     /// 設計docs/20-integration/04-world-api.md §3の例示JSON(浮力デモの縮約版、
     /// `fluids`/`couplings`/`probes`セクションを除く)を実際にパースして`World`を構築し、
@@ -3539,6 +3616,65 @@ mod tests {
             final_rms > 1.0e6 * final_mean,
             "RMSは平均より桁違いに大きいはず(これがRMSプローブを足した理由): \
              rms={final_rms} mean={final_mean}"
+        );
+    }
+
+    /// **群9** D14b(円柱まわりの流れ): 群9で`GridFluid2D`に入れた
+    /// **任意形状の固体境界**と**開境界(流路)**と**渦度強化**が、シーンJSONから
+    /// そのまま組めることを`scenes/d14b-cylinder-channel.json`経由で確認する。
+    ///
+    /// 既存のD14(`d14-vortex.json`)との違いがそのまま群9の成果である:
+    /// D14は**周期境界**+**動的剛体に貼り付けた矩形マスク**でしか障害物を置けず、
+    /// 「下流の後流が上流へ回り込む」限界を抱えていた。こちらは流入/流出境界を持ち、
+    /// 障害物は**円柱**(矩形ではない)で、剛体を1つも置かずに固体境界だけで組める。
+    #[test]
+    fn run_headless_scenario_cylinder_in_a_channel_sheds_a_wake() {
+        let json = include_str!("../../../scenes/d14b-cylinder-channel.json");
+        let result = run_headless_scenario(json, 300).expect("valid scenario JSON");
+        let rms = &result.probe_histories[0];
+
+        // D14 と違って**1ステップ目から**鉛直速度が立つ。流路境界では最初から
+        // 流入面に一様流が入っており、円柱の固体境界が最初の投影で即座に流れを
+        // 曲げるため(D14 は結合が剛体位置からマスクを書くまで障害物が存在しない)。
+        let final_rms = *rms.last().expect("履歴が空でない");
+        assert!(
+            final_rms > 0.01,
+            "円柱が流れを乱して鉛直方向の速度成分が立つべき: {final_rms}"
+        );
+        // 実測: rms[0]=0.1194 → final=0.1472(300ステップ)。後流は減衰せず育つ。
+        assert!(
+            final_rms > rms[0],
+            "後流は時間とともに育つべき(減衰していない): rms[0]={} final={final_rms}",
+            rms[0]
+        );
+    }
+
+    /// **群9** シーンJSONで `vorticity_confinement_epsilon` を有効にしたシーンは、
+    /// **近似バッジ「渦度強化(非物理)」を実際に申告する**(設計§4.5)。
+    /// エディタのInspectorへそのまま出るので、嘘の申告が残らないことを固定する。
+    #[test]
+    fn a_scene_that_enables_vorticity_confinement_reports_the_non_physical_badge() {
+        let json = include_str!("../../../scenes/d14b-cylinder-channel.json");
+        let scenario = Scenario::from_json(json).expect("valid scenario JSON");
+        let world = World::from_scenario(&scenario).expect("scenario builds a world");
+        let badges: Vec<&'static str> = world
+            .grid_fluid()
+            .expect("the scene defines a grid fluid")
+            .approximations()
+            .iter()
+            .map(|a| a.name)
+            .collect();
+        assert!(
+            badges.contains(&"渦度強化(非物理)"),
+            "非物理的な補償項を有効にしたのに申告が無い: {badges:?}"
+        );
+        assert!(
+            badges.contains(&"セル単位の固体境界"),
+            "固体境界を置いたのに申告が無い: {badges:?}"
+        );
+        assert!(
+            badges.contains(&"2D・開境界(流路)"),
+            "流路境界なのに周期境界と申告してはいけない: {badges:?}"
         );
     }
 
