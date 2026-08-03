@@ -1515,6 +1515,7 @@ impl WasmWorld {
             kp: 20.0,
             kd: 2.0,
             torque_max: 50.0,
+            limit: None,
             disabled: false,
         });
         let index = self.body_count();

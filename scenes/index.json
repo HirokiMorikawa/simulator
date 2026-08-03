@@ -362,6 +362,15 @@
       "domains": [
         "quantum"
       ]
+    },
+    {
+      "file": "d24-car.json",
+      "demo": "D24",
+      "title": "車の実験場",
+      "description": "4輪を WheelJoint(サスペンション+駆動モーター)で支持した車。後輪駆動で前進し、サスペンションで車体が浮いた高さを保つ。群4で WheelJoint を実装して解禁した。",
+      "domains": [
+        "mechanics"
+      ]
     }
   ]
 }

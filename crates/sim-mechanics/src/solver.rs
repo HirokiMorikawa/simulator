@@ -44,6 +44,9 @@ pub struct MechanicsSolver {
     pub slider_joints: Vec<SliderJoint>,
     /// PD位置サーボ付きヒンジモーター一覧(設計 §4.5、`joint`モジュールdoc参照)。
     pub hinge_motors: Vec<HingeMotorPd>,
+    /// ホイールジョイント一覧(設計 §3「Wheel: サス+駆動+操舵の複合」、**群4で追加**)。
+    /// D24(車の実験場)が要求する4輪支持の土台。
+    pub wheel_joints: Vec<joint::WheelJoint>,
     /// 直近stepの接触解決(摩擦+反発)による運動エネルギー散逸量(設計
     /// docs/20-integration/01-coupling-matrix.md `DissipationToHeat`が読む、
     /// `sim-coupling`クレートのdoc参照)。接触解決の直前直後の運動エネルギー差分として
@@ -90,6 +93,7 @@ impl MechanicsSolver {
             ball_joints: Vec::new(),
             slider_joints: Vec::new(),
             hinge_motors: Vec::new(),
+            wheel_joints: Vec::new(),
             last_contact_dissipation: 0.0,
             contact_pairs: HashSet::new(),
             last_manifolds: Vec::new(),
@@ -260,6 +264,8 @@ impl Solver for MechanicsSolver {
         joint::resolve_distance(&self.joints, &mut self.bodies, dt);
         joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
         joint::resolve_slider(&self.slider_joints, &mut self.bodies, dt);
+        joint::resolve_wheel(&self.wheel_joints, &mut self.bodies, dt);
+        joint::resolve_hinge_limits(&self.hinge_motors, &mut self.bodies, dt);
         let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
         self.emit_contact_events(&manifolds, ctx);
         self.last_manifolds = manifolds.clone();
@@ -560,6 +566,7 @@ mod tests {
             kp: 20.0,
             kd: 2.0,
             torque_max: 50.0,
+            limit: None,
             disabled: false,
         });
 

@@ -244,6 +244,17 @@ pub struct BodyScenarioDesc {
     /// シナリオに対応するため追加。
     #[serde(default)]
     pub mass_override: Option<f64>,
+    /// 衝突フィルタ(**群4で追加**、群2で `sim-mechanics` に実装した
+    /// `collision_group`/`collision_mask` のシーンJSON側)。未指定なら既定
+    /// (グループ1・全マスク)で、既存シーンの挙動は一切変わらない。
+    ///
+    /// **D24(車)で実際に必要になった**——サスペンションで繋がったシャシーと
+    /// 車輪は幾何的に必ず重なるので、接触ソルバが働くとジョイントと綱引きになり
+    /// サスペンションが沈まない。
+    #[serde(default)]
+    pub collision_group: Option<u32>,
+    #[serde(default)]
+    pub collision_mask: Option<u32>,
 }
 
 /// 設計§3の例示に現れる3形状のみ(`Capsule`/`Compound`/`ConvexMesh`は`raycast`/
@@ -431,6 +442,41 @@ pub enum JointJson {
         body_b: Option<String>,
         #[serde(default)]
         anchor_b: [f64; 3],
+    },
+    /// **ホイールジョイント(`sim_mechanics::WheelJoint`、群4で追加)**。
+    /// サスペンション(ソフト拘束)+ 駆動モーター + 操舵を1つにまとめた複合拘束。
+    /// D24(車の実験場)を組むのに要る——**この型が無かったことが D24 が
+    /// 「新規物理待ちでスコープ外」だった直接の原因**。
+    Wheel {
+        /// 車体(シャシー)のボディ名。
+        chassis: String,
+        /// 車輪のボディ名。
+        wheel: String,
+        /// シャシーローカルのサスペンション取り付け点。
+        anchor_chassis: [f64; 3],
+        /// サスペンションの自然長 [m]。
+        rest_length: f64,
+        /// サスペンション軸(シャシーローカル)。未指定なら下向き `(0,-1,0)`。
+        #[serde(default)]
+        suspension_axis: Option<[f64; 3]>,
+        /// 車軸方向(シャシーローカル)。未指定なら `(1,0,0)`。
+        #[serde(default)]
+        axle_axis: Option<[f64; 3]>,
+        /// ばねの固有振動数 [Hz]。未指定なら乗用車相当(1.5 Hz)。
+        #[serde(default)]
+        frequency: Option<f64>,
+        /// 減衰比。未指定なら 0.3。
+        #[serde(default)]
+        damping_ratio: Option<f64>,
+        /// 操舵角 [rad]。
+        #[serde(default)]
+        steer_angle: Option<f64>,
+        /// 駆動モーターの目標角速度 [rad/s]。
+        #[serde(default)]
+        motor_speed: Option<f64>,
+        /// 駆動モーターのトルク上限 [N·m](0 なら空転)。
+        #[serde(default)]
+        motor_max_torque: Option<f64>,
     },
 }
 
@@ -1074,6 +1120,13 @@ impl World {
             desc.linear_velocity = array_to_vec3(body.linear_velocity);
             desc.angular_velocity = array_to_vec3(body.angular_velocity);
             desc.mass_override = body.mass_override;
+            // 衝突フィルタ(群4で追加、フィールドのdoc参照)。
+            if let Some(group) = body.collision_group {
+                desc.collision_group = group;
+            }
+            if let Some(mask) = body.collision_mask {
+                desc.collision_mask = mask;
+            }
             desc.body_type = match body.body_type.as_deref() {
                 Some("static") => BodyType::Static,
                 Some("kinematic") => BodyType::Kinematic,
@@ -1642,6 +1695,54 @@ impl World {
                             anchor_b: array_to_vec3(*anchor_b),
                             disabled: false,
                         });
+                }
+                JointJson::Wheel {
+                    chassis,
+                    wheel,
+                    anchor_chassis,
+                    rest_length,
+                    suspension_axis,
+                    axle_axis,
+                    frequency,
+                    damping_ratio,
+                    steer_angle,
+                    motor_speed,
+                    motor_max_torque,
+                } => {
+                    let chassis_id = body_ids_by_name
+                        .get(chassis)
+                        .ok_or_else(|| SceneError::UnknownBodyName(chassis.clone()))?;
+                    let wheel_id = body_ids_by_name
+                        .get(wheel)
+                        .ok_or_else(|| SceneError::UnknownBodyName(wheel.clone()))?;
+                    let mut joint = sim_mechanics::WheelJoint::new(
+                        chassis_id.index as usize,
+                        wheel_id.index as usize,
+                        array_to_vec3(*anchor_chassis),
+                        *rest_length,
+                    );
+                    if let Some(axis) = suspension_axis {
+                        joint.suspension_axis = array_to_vec3(*axis);
+                    }
+                    if let Some(axis) = axle_axis {
+                        joint.axle_axis = array_to_vec3(*axis);
+                    }
+                    if let Some(f) = frequency {
+                        joint.soft.frequency = *f;
+                    }
+                    if let Some(z) = damping_ratio {
+                        joint.soft.damping_ratio = *z;
+                    }
+                    if let Some(a) = steer_angle {
+                        joint.steer_angle = *a;
+                    }
+                    if let Some(v) = motor_speed {
+                        joint.motor_speed = *v;
+                    }
+                    if let Some(t) = motor_max_torque {
+                        joint.motor_max_torque = *t;
+                    }
+                    world.mechanics_mut().wheel_joints.push(joint);
                 }
             }
         }
@@ -4017,6 +4118,66 @@ mod tests {
     /// ファイルを見ているため、シーン自体の正しさは`run_headless_scenario_*`の各
     /// テストが個別に検証済みだが、本テストは「マニフェストに載っている全ファイルが
     /// 実在し壊れていないこと」をマニフェスト側から検証する)。
+    /// **D24(車の実験場)がシーンJSONから組めて、実際に走ること**(群4)。
+    ///
+    /// D24 は長らく「新規物理待ちでスコープ外」だった——`WheelJoint`
+    /// (サスペンション+駆動+操舵)が `sim-mechanics` に存在せず、
+    /// 実車体を4輪で支持する手段が無かったため。群4で `SoftParams`(設計§4.3の
+    /// ソフト拘束)と `WheelJoint` を実装し、シーンJSONの `joints[].wheel` と
+    /// `bodies[].collision_group/mask` を足したことで、**ギャラリーに出せる**
+    /// ようになった。
+    #[test]
+    fn d24_car_scene_drives_forward_on_its_suspension() {
+        let json = include_str!("../../../scenes/d24-car.json");
+        let scenario = Scenario::from_json(json).expect("D24 シーンはパースできる");
+        let mut world = World::from_scenario(&scenario).expect("D24 シーンは構築できる");
+
+        // ① 4輪ともホイールジョイントで支持されている。
+        assert_eq!(world.mechanics().wheel_joints.len(), 4);
+
+        // ② **サスペンションで車体が浮いた状態を保つ**。自然長 0.43 に対し、
+        //    車重で沈むが、車輪(半径0.32)にめり込むほどは沈まない。
+        for _ in 0..600 {
+            world.step();
+        }
+        let chassis_y = world.probe(1).unwrap().history().last().copied().unwrap();
+        assert!(
+            chassis_y > 0.5 && chassis_y < 0.8,
+            "車体はサスペンションで浮いた高さに落ち着くはず: y={chassis_y}"
+        );
+
+        // ③ **後輪駆動で前進する**。x 位置が単調に増え、速度が有限に留まる
+        //    (発散していない)。
+        let start_x = world.probe(0).unwrap().history().last().copied().unwrap();
+        for _ in 0..600 {
+            world.step();
+        }
+        let end_x = world.probe(0).unwrap().history().last().copied().unwrap();
+        assert!(
+            end_x > start_x + 0.5,
+            "駆動輪が回れば前進するはず: start={start_x} end={end_x}"
+        );
+        let speed = world.probe(2).unwrap().history().last().copied().unwrap();
+        assert!(
+            speed.is_finite() && speed < 50.0,
+            "速度が発散していないこと: speed={speed}"
+        );
+
+        // ④ **駆動を切ると加速が止まる**(モーターが実際に効いていることの対照実験)。
+        for joint in &mut world.mechanics_mut().wheel_joints {
+            joint.motor_max_torque = 0.0;
+        }
+        let coast_start = world.probe(2).unwrap().history().last().copied().unwrap();
+        for _ in 0..600 {
+            world.step();
+        }
+        let coast_end = world.probe(2).unwrap().history().last().copied().unwrap();
+        assert!(
+            coast_end <= coast_start + 1e-6,
+            "駆動を切れば加速しないはず: start={coast_start} end={coast_end}"
+        );
+    }
+
     /// **群3で追加した7シーン(D27–D33)の物理的な検証**。
     ///
     /// マニフェストのテストは「壊れたアセットを出荷しない」ための安全網で、

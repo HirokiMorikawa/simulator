@@ -31,10 +31,11 @@ pub use collision::{ContactManifold, ContactPoint};
 pub use gjk::{
     conservative_advancement_toi, epa_penetration, gjk_distance, ConvexShape, EpaResult, GjkResult,
 };
-pub use joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint};
+pub use joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint, SoftParams, WheelJoint};
 pub use shape::{Aabb, Shape};
 pub use soft_body::{
-    rope, DistanceConstraint, SoftBody, DEFAULT_DAMPING, DEFAULT_ITERATIONS, DEFAULT_SUBSTEPS,
+    rope, tetrahedron_volume, BendingConstraint, DistanceConstraint, SoftBody, VolumeConstraint,
+    DEFAULT_DAMPING, DEFAULT_ITERATIONS, DEFAULT_SUBSTEPS,
 };
 pub use solver::MechanicsSolver;
 pub use vehicle::{pacejka_force, pacejka_peak_slip, PacejkaParams};
