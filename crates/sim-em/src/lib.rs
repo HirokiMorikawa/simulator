@@ -24,7 +24,7 @@ mod magnetism;
 mod motor;
 mod optics;
 mod raytracer;
-pub use circuit::{Circuit, GROUND};
+pub use circuit::{Circuit, MotorHandle, GROUND};
 pub use electrostatics::{PointChargeSystem, UniformField, COULOMB_CONSTANT, VACUUM_PERMITTIVITY};
 pub use fdtd::FdtdSim2D;
 pub use induction_rod::InductionRod;
