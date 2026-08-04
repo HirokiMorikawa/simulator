@@ -20,16 +20,63 @@
 //!   離散化パターンから離れる方が危険と判断した(2Dとの交差検証テストが効くのは
 //!   両者の離散化が同型だからである)。
 //! - `CellType` に `Empty`(自由表面)は無い(2D版と同じ理由。自由表面は SPH 側)。
-//! - **前処理なしのPCG**。設計§4.4 が「マルチグリッド前処理は性能ベンチが要求したときに
-//!   導入する(機能でなく性能の最適化)」と定めており、実測は§10の 64³/4ms 予算に
-//!   全く届かない(64³ で 795.7 ms/step、約200倍の超過。
-//!   `examples/grid_fluid3d_bench.rs` に実測を記録)。近似バッジ「前処理なしPCG」で
-//!   常時申告し、黙って予算未達にしない。
 //! - 壁は自由すべり(no-slip 境界層は作れない)。2D版と同じ。
+//!
+//! **圧力ソルバ(群10で置き換え)**: 当初は前処理なしPCGで、設計§10の 64³/4 ms 予算に
+//! 全く届かなかった(実測 795.7 ms/step)。設計§4.4 の「マルチグリッド前処理は性能ベンチが
+//! 要求したときに導入する」に従い、[`crate::pressure_multigrid`] の V サイクル前処理
+//! (MGPCG)へ置き換えた。反復数が解像度にほぼ依存しなくなり、実測は
+//! `examples/grid_fluid3d_bench.rs` に記録してある。**予算 4 ms にはまだ届かない**
+//! (単精度SIMD・並列化・GPU がいずれも未導入のため)ので、近似バッジで常時申告する。
 
 use crate::grid_fluid::CellType;
+use crate::pressure_multigrid::{MultigridPoisson, PressureCell};
 use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::Vec3;
+
+/// 圧力投影の相対残差の許容値。設計§9 の表は「10⁻⁴(対話)/ 10⁻⁶(検証)」だが、
+/// MGPCG では 10⁻⁸ まで詰めても数反復しか増えないため、常に検証側より厳しく取る。
+const PRESSURE_TOLERANCE: f64 = 1e-8;
+/// 圧力投影の反復数上限(設計§4.4「反復数上限は固定、未収束は残差を診断で報告」)。
+const PRESSURE_MAX_ITERATIONS: usize = 2000;
+
+/// 直近の圧力投影の診断。設計§4.4 は「未収束は残差を診断イベントで報告」すること、
+/// および粗格子化の打ち切りを申告することを求めている。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PressureSolveReport {
+    pub iterations: usize,
+    pub residual_norm: f64,
+    pub converged: bool,
+    /// マルチグリッド階層の段数。1 なら V サイクルは減衰 Jacobi 掃引に退化している
+    /// (= Jacobi 前処理 PCG への退行)。
+    pub multigrid_levels: usize,
+    /// 設計§4.4 の分岐条件(混在セル30%超)で粗格子化を打ち切ったか。
+    pub coarsening_truncated: bool,
+}
+
+impl Default for PressureSolveReport {
+    fn default() -> PressureSolveReport {
+        PressureSolveReport {
+            iterations: 0,
+            residual_norm: 0.0,
+            converged: true,
+            multigrid_levels: 1,
+            coarsening_truncated: false,
+        }
+    }
+}
+
+/// マルチグリッド階層の派生キャッシュ。**複製しない**——`GridFluid3D` は移流の途中で
+/// clone されるうえ、階層はセル種別から決定論的に再構築できるからである
+/// (`Clone` が `None` を返すのは意図的)。
+#[derive(Default)]
+struct MultigridCache(Option<MultigridPoisson>);
+
+impl Clone for MultigridCache {
+    fn clone(&self) -> MultigridCache {
+        MultigridCache(None)
+    }
+}
 
 /// 境界条件(2D版の `GridBoundary` と同じ意味を3Dへ持ち上げたもの)。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,10 +110,279 @@ pub struct GridFluid3D {
     solid_velocity: Vec<Vec3>,
     /// 直近の`step`が投影した圧力場(派生キャッシュ、`state_hash`には含めない)。
     pub last_pressure: Vec<f64>,
+    /// 直近の圧力投影の診断(派生キャッシュ、`state_hash`には含めない)。
+    last_solve: PressureSolveReport,
+    multigrid: MultigridCache,
 }
 
+/// 周期ラップつきの添字。**範囲内を分岐で先に抜く**のが要点で、`rem_euclid` は
+/// 整数除算になるため、これを全アクセスで踏むと移流と圧力ステンシルの支配項になる
+/// (群10の性能改善で計測して判明した。ホットパスは1セルあたり数百回ここを通る)。
+#[inline(always)]
 fn wrap(i: i64, n: usize) -> usize {
-    i.rem_euclid(n as i64) as usize
+    if i >= 0 && (i as usize) < n {
+        i as usize
+    } else {
+        i.rem_euclid(n as i64) as usize
+    }
+}
+
+/// 移流が使う読み取り専用の速度場ビュー。`GridFluid3D` 全体を clone せずに
+/// 「移流前の速度場」を引くために切り出してある(境界条件つきの面アクセスと
+/// 三線形補間の**唯一の実装**でもあり、`GridFluid3D` 側はここへ委譲する)。
+#[derive(Clone, Copy)]
+struct VelocityField<'a> {
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    h: f64,
+    boundary: GridBoundary3D,
+    u: &'a [f64],
+    v: &'a [f64],
+    w: &'a [f64],
+}
+
+impl<'a> VelocityField<'a> {
+    #[inline(always)]
+    fn idx(&self, i: i64, j: i64, k: i64) -> usize {
+        wrap(i, self.nx) + self.nx * (wrap(j, self.ny) + self.ny * wrap(k, self.nz))
+    }
+
+    /// x面の $u$(境界条件を考慮)。`i` は面index。`Channel` では `i<=0` が流入面
+    /// (固定値)、`i>=nx` は流出(勾配ゼロ = 最終層の複製)。
+    #[inline(always)]
+    fn u_face(&self, i: i64, j: i64, k: i64) -> f64 {
+        match self.boundary {
+            GridBoundary3D::Periodic => self.u[self.idx(i, j, k)],
+            GridBoundary3D::Channel { inflow_speed } => {
+                let jj = j.clamp(0, self.ny as i64 - 1);
+                let kk = k.clamp(0, self.nz as i64 - 1);
+                if i <= 0 {
+                    inflow_speed
+                } else if i >= self.nx as i64 {
+                    self.u[self.idx(self.nx as i64 - 1, jj, kk)]
+                } else {
+                    self.u[self.idx(i, jj, kk)]
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn v_face(&self, i: i64, j: i64, k: i64) -> f64 {
+        match self.boundary {
+            GridBoundary3D::Periodic => self.v[self.idx(i, j, k)],
+            GridBoundary3D::Channel { .. } => {
+                if j <= 0 || j >= self.ny as i64 {
+                    0.0 // y壁(自由すべり)
+                } else {
+                    let ii = i.clamp(0, self.nx as i64 - 1);
+                    let kk = k.clamp(0, self.nz as i64 - 1);
+                    self.v[self.idx(ii, j, kk)]
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn w_face(&self, i: i64, j: i64, k: i64) -> f64 {
+        match self.boundary {
+            GridBoundary3D::Periodic => self.w[self.idx(i, j, k)],
+            GridBoundary3D::Channel { .. } => {
+                if k <= 0 || k >= self.nz as i64 {
+                    0.0 // z壁(自由すべり)
+                } else {
+                    let ii = i.clamp(0, self.nx as i64 - 1);
+                    let jj = j.clamp(0, self.ny as i64 - 1);
+                    self.w[self.idx(ii, jj, k)]
+                }
+            }
+        }
+    }
+
+    /// 補間点を「下側の格子添字 + 各軸の小数部」に落とす。
+    #[inline(always)]
+    fn stencil(&self, offset: Vec3, pos: Vec3) -> (i64, i64, i64, f64, f64, f64) {
+        let local = Vec3::new(
+            (pos.x - offset.x) / self.h,
+            (pos.y - offset.y) / self.h,
+            (pos.z - offset.z) / self.h,
+        );
+        let (i0f, j0f, k0f) = (local.x.floor(), local.y.floor(), local.z.floor());
+        (
+            i0f as i64,
+            j0f as i64,
+            k0f as i64,
+            local.x - i0f,
+            local.y - j0f,
+            local.z - k0f,
+        )
+    }
+
+    /// 三線形補間の8点合成。`get(a, b, c)` の添字は 0/1(下側/上側)。
+    #[inline(always)]
+    fn blend(fx: f64, fy: f64, fz: f64, get: impl Fn(usize, usize, usize) -> f64) -> f64 {
+        let mut acc = 0.0;
+        for (c, wz) in [(0, 1.0 - fz), (1, fz)] {
+            for (b, wy) in [(0, 1.0 - fy), (1, fy)] {
+                acc += wz * wy * ((1.0 - fx) * get(0, b, c) + fx * get(1, b, c));
+            }
+        }
+        acc
+    }
+
+    /// 周期ラップを**軸ごとに1度だけ**解いて、ストライドを掛けた添字にしておく。
+    /// 素朴に8点それぞれで `idx` を呼ぶと周期ラップ(整数除算)が3倍走り、そこが
+    /// 移流の支配項になる——群10の性能改善で計測して判明した。
+    #[inline(always)]
+    fn periodic_taps(&self, i0: i64, j0: i64, k0: i64) -> ([usize; 2], [usize; 2], [usize; 2]) {
+        let plane = self.nx * self.ny;
+        (
+            [wrap(i0, self.nx), wrap(i0 + 1, self.nx)],
+            [wrap(j0, self.ny) * self.nx, wrap(j0 + 1, self.ny) * self.nx],
+            [wrap(k0, self.nz) * plane, wrap(k0 + 1, self.nz) * plane],
+        )
+    }
+
+    /// `Channel` の自由すべり壁で使う、範囲内へ畳んだ添字(`*_face` の `clamp` と同じ)。
+    #[inline(always)]
+    fn clamped(index: i64, n: usize, stride: usize) -> usize {
+        index.clamp(0, n as i64 - 1) as usize * stride
+    }
+
+    #[inline(always)]
+    fn sample_u(&self, pos: Vec3) -> f64 {
+        let offset = Vec3::new(0.0, 0.5 * self.h, 0.5 * self.h);
+        let (i0, j0, k0, fx, fy, fz) = self.stencil(offset, pos);
+        match self.boundary {
+            GridBoundary3D::Periodic => {
+                let (ii, jj, kk) = self.periodic_taps(i0, j0, k0);
+                Self::blend(fx, fy, fz, |a, b, c| self.u[ii[a] + jj[b] + kk[c]])
+            }
+            GridBoundary3D::Channel { inflow_speed } => {
+                let plane = self.nx * self.ny;
+                let jj = [
+                    Self::clamped(j0, self.ny, self.nx),
+                    Self::clamped(j0 + 1, self.ny, self.nx),
+                ];
+                let kk = [
+                    Self::clamped(k0, self.nz, plane),
+                    Self::clamped(k0 + 1, self.nz, plane),
+                ];
+                // `u_face` と同じ規則: i<=0 は流入面(定数)、i>=nx は最終層の複製。
+                let tap = |i: i64| -> Option<usize> {
+                    if i <= 0 {
+                        None
+                    } else if i >= self.nx as i64 {
+                        Some(self.nx - 1)
+                    } else {
+                        Some(i as usize)
+                    }
+                };
+                let ii = [tap(i0), tap(i0 + 1)];
+                Self::blend(fx, fy, fz, |a, b, c| match ii[a] {
+                    None => inflow_speed,
+                    Some(i) => self.u[i + jj[b] + kk[c]],
+                })
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn sample_v(&self, pos: Vec3) -> f64 {
+        let offset = Vec3::new(0.5 * self.h, 0.0, 0.5 * self.h);
+        let (i0, j0, k0, fx, fy, fz) = self.stencil(offset, pos);
+        match self.boundary {
+            GridBoundary3D::Periodic => {
+                let (ii, jj, kk) = self.periodic_taps(i0, j0, k0);
+                Self::blend(fx, fy, fz, |a, b, c| self.v[ii[a] + jj[b] + kk[c]])
+            }
+            GridBoundary3D::Channel { .. } => {
+                let plane = self.nx * self.ny;
+                let ii = [
+                    Self::clamped(i0, self.nx, 1),
+                    Self::clamped(i0 + 1, self.nx, 1),
+                ];
+                let kk = [
+                    Self::clamped(k0, self.nz, plane),
+                    Self::clamped(k0 + 1, self.nz, plane),
+                ];
+                // y壁(自由すべり)の法線速度はゼロ。
+                let tap = |j: i64| -> Option<usize> {
+                    if j <= 0 || j >= self.ny as i64 {
+                        None
+                    } else {
+                        Some(j as usize * self.nx)
+                    }
+                };
+                let jj = [tap(j0), tap(j0 + 1)];
+                Self::blend(fx, fy, fz, |a, b, c| match jj[b] {
+                    None => 0.0,
+                    Some(j) => self.v[ii[a] + j + kk[c]],
+                })
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn sample_w(&self, pos: Vec3) -> f64 {
+        let offset = Vec3::new(0.5 * self.h, 0.5 * self.h, 0.0);
+        let (i0, j0, k0, fx, fy, fz) = self.stencil(offset, pos);
+        match self.boundary {
+            GridBoundary3D::Periodic => {
+                let (ii, jj, kk) = self.periodic_taps(i0, j0, k0);
+                Self::blend(fx, fy, fz, |a, b, c| self.w[ii[a] + jj[b] + kk[c]])
+            }
+            GridBoundary3D::Channel { .. } => {
+                let plane = self.nx * self.ny;
+                let ii = [
+                    Self::clamped(i0, self.nx, 1),
+                    Self::clamped(i0 + 1, self.nx, 1),
+                ];
+                let jj = [
+                    Self::clamped(j0, self.ny, self.nx),
+                    Self::clamped(j0 + 1, self.ny, self.nx),
+                ];
+                // z壁(自由すべり)の法線速度はゼロ。
+                let tap = |k: i64| -> Option<usize> {
+                    if k <= 0 || k >= self.nz as i64 {
+                        None
+                    } else {
+                        Some(k as usize * plane)
+                    }
+                };
+                let kk = [tap(k0), tap(k0 + 1)];
+                Self::blend(fx, fy, fz, |a, b, c| match kk[c] {
+                    None => 0.0,
+                    Some(k) => self.w[ii[a] + jj[b] + k],
+                })
+            }
+        }
+    }
+
+    /// セル中心に置かれた受動スカラー(煙)の補間。境界によらず周期ラップで引く
+    /// (煙は面ではなくセル中心の量なので境界条件を持たない。従来と同じ扱い)。
+    #[inline(always)]
+    fn sample_cell_scalar(&self, field: &[f64], pos: Vec3) -> f64 {
+        let half = 0.5 * self.h;
+        let (i0, j0, k0, fx, fy, fz) = self.stencil(Vec3::new(half, half, half), pos);
+        let (ii, jj, kk) = self.periodic_taps(i0, j0, k0);
+        Self::blend(fx, fy, fz, |a, b, c| field[ii[a] + jj[b] + kk[c]])
+    }
+
+    #[inline(always)]
+    fn velocity_at(&self, pos: Vec3) -> Vec3 {
+        Vec3::new(self.sample_u(pos), self.sample_v(pos), self.sample_w(pos))
+    }
+
+    /// 出発点をRK2(中点法)で逆追跡する(設計§4.1)。
+    #[inline(always)]
+    fn backtrace(&self, pos: Vec3, dt: f64) -> Vec3 {
+        let vel = self.velocity_at(pos);
+        let mid = pos - vel.scale(0.5 * dt);
+        let vel_mid = self.velocity_at(mid);
+        pos - vel_mid.scale(dt)
+    }
 }
 
 impl GridFluid3D {
@@ -88,6 +404,8 @@ impl GridFluid3D {
             cell_type: vec![CellType::Fluid; n],
             solid_velocity: vec![Vec3::ZERO; n],
             last_pressure: vec![0.0; n],
+            last_solve: PressureSolveReport::default(),
+            multigrid: MultigridCache::default(),
         }
     }
 
@@ -161,120 +479,54 @@ impl GridFluid3D {
         self.w[self.idx(i, j, k)]
     }
 
-    /// x面の $u$(境界条件を考慮)。`i` は面index。`Channel` では `i<=0` が流入面
-    /// (固定値)、`i>=nx` は流出(勾配ゼロ = 最終層の複製)。
-    fn u_face(&self, i: i64, j: i64, k: i64) -> f64 {
-        match self.boundary {
-            GridBoundary3D::Periodic => self.u_at(i, j, k),
-            GridBoundary3D::Channel { inflow_speed } => {
-                let jj = j.clamp(0, self.ny as i64 - 1);
-                let kk = k.clamp(0, self.nz as i64 - 1);
-                if i <= 0 {
-                    inflow_speed
-                } else if i >= self.nx as i64 {
-                    self.u[self.idx(self.nx as i64 - 1, jj, kk)]
-                } else {
-                    self.u[self.idx(i, jj, kk)]
-                }
-            }
+    /// 境界条件つきの面アクセスと補間は [`VelocityField`] が唯一の実装で、
+    /// ここはその薄いビューを作るだけ(コピーは6ワードなのでインライン後は消える)。
+    #[inline(always)]
+    fn velocity_field(&self) -> VelocityField<'_> {
+        VelocityField {
+            nx: self.nx,
+            ny: self.ny,
+            nz: self.nz,
+            h: self.h,
+            boundary: self.boundary,
+            u: &self.u,
+            v: &self.v,
+            w: &self.w,
         }
+    }
+
+    fn u_face(&self, i: i64, j: i64, k: i64) -> f64 {
+        self.velocity_field().u_face(i, j, k)
     }
 
     fn v_face(&self, i: i64, j: i64, k: i64) -> f64 {
-        match self.boundary {
-            GridBoundary3D::Periodic => self.v_at(i, j, k),
-            GridBoundary3D::Channel { .. } => {
-                if j <= 0 || j >= self.ny as i64 {
-                    0.0 // y壁(自由すべり)
-                } else {
-                    let ii = i.clamp(0, self.nx as i64 - 1);
-                    let kk = k.clamp(0, self.nz as i64 - 1);
-                    self.v[self.idx(ii, j, kk)]
-                }
-            }
-        }
+        self.velocity_field().v_face(i, j, k)
     }
 
     fn w_face(&self, i: i64, j: i64, k: i64) -> f64 {
-        match self.boundary {
-            GridBoundary3D::Periodic => self.w_at(i, j, k),
-            GridBoundary3D::Channel { .. } => {
-                if k <= 0 || k >= self.nz as i64 {
-                    0.0 // z壁(自由すべり)
-                } else {
-                    let ii = i.clamp(0, self.nx as i64 - 1);
-                    let jj = j.clamp(0, self.ny as i64 - 1);
-                    self.w[self.idx(ii, jj, k)]
-                }
-            }
-        }
+        self.velocity_field().w_face(i, j, k)
     }
 
     /// セル(i,j,k)の発散(MAC格子の標準式、設計§4.4)。
     pub fn divergence(&self, i: i64, j: i64, k: i64) -> f64 {
-        (self.u_face(i + 1, j, k) - self.u_face(i, j, k)) / self.h
-            + (self.v_face(i, j + 1, k) - self.v_face(i, j, k)) / self.h
-            + (self.w_face(i, j, k + 1) - self.w_face(i, j, k)) / self.h
-    }
-
-    /// 三線形補間。`get` はサンプル点の格子添字から値を引く(境界条件を知っている
-    /// 面アクセサ、または周期ラップ)。
-    fn trilinear(&self, offset: Vec3, pos: Vec3, get: impl Fn(i64, i64, i64) -> f64) -> f64 {
-        let local = Vec3::new(
-            (pos.x - offset.x) / self.h,
-            (pos.y - offset.y) / self.h,
-            (pos.z - offset.z) / self.h,
-        );
-        let (i0f, j0f, k0f) = (local.x.floor(), local.y.floor(), local.z.floor());
-        let (fx, fy, fz) = (local.x - i0f, local.y - j0f, local.z - k0f);
-        let (i0, j0, k0) = (i0f as i64, j0f as i64, k0f as i64);
-        let mut acc = 0.0;
-        for (dk, wk) in [(0, 1.0 - fz), (1, fz)] {
-            for (dj, wj) in [(0, 1.0 - fy), (1, fy)] {
-                for (di, wi) in [(0, 1.0 - fx), (1, fx)] {
-                    acc += wi * wj * wk * get(i0 + di, j0 + dj, k0 + dk);
-                }
-            }
-        }
-        acc
-    }
-
-    fn sample_u(&self, pos: Vec3) -> f64 {
-        let offset = Vec3::new(0.0, 0.5 * self.h, 0.5 * self.h);
-        self.trilinear(offset, pos, |i, j, k| self.u_face(i, j, k))
-    }
-    fn sample_v(&self, pos: Vec3) -> f64 {
-        let offset = Vec3::new(0.5 * self.h, 0.0, 0.5 * self.h);
-        self.trilinear(offset, pos, |i, j, k| self.v_face(i, j, k))
-    }
-    fn sample_w(&self, pos: Vec3) -> f64 {
-        let offset = Vec3::new(0.5 * self.h, 0.5 * self.h, 0.0);
-        self.trilinear(offset, pos, |i, j, k| self.w_face(i, j, k))
-    }
-    fn sample_smoke(&self, pos: Vec3) -> f64 {
-        let offset = Vec3::new(0.5 * self.h, 0.5 * self.h, 0.5 * self.h);
-        self.trilinear(offset, pos, |i, j, k| self.smoke_density[self.idx(i, j, k)])
-    }
-
-    fn velocity_at(&self, pos: Vec3) -> Vec3 {
-        Vec3::new(self.sample_u(pos), self.sample_v(pos), self.sample_w(pos))
-    }
-
-    /// 出発点をRK2(中点法)で逆追跡する(設計§4.1)。
-    fn backtrace(&self, pos: Vec3, dt: f64) -> Vec3 {
-        let vel = self.velocity_at(pos);
-        let mid = pos - vel.scale(0.5 * dt);
-        let vel_mid = self.velocity_at(mid);
-        pos - vel_mid.scale(dt)
+        let field = self.velocity_field();
+        (field.u_face(i + 1, j, k) - field.u_face(i, j, k)) / self.h
+            + (field.v_face(i, j + 1, k) - field.v_face(i, j, k)) / self.h
+            + (field.w_face(i, j, k + 1) - field.w_face(i, j, k)) / self.h
     }
 
     /// semi-Lagrangian移流(速度、設計§4.1)。
     pub fn advect_velocity(&mut self, dt: f64) {
-        let old = GridFluid3D {
-            u: self.u.clone(),
-            v: self.v.clone(),
-            w: self.w.clone(),
-            ..self.clone()
+        let (old_u, old_v, old_w) = (self.u.clone(), self.v.clone(), self.w.clone());
+        let old = VelocityField {
+            nx: self.nx,
+            ny: self.ny,
+            nz: self.nz,
+            h: self.h,
+            boundary: self.boundary,
+            u: &old_u,
+            v: &old_v,
+            w: &old_w,
         };
         let h = self.h;
         for k in 0..self.nz {
@@ -297,24 +549,24 @@ impl GridFluid3D {
     /// 速度と煙は同じ $\mathbf u^n$ で運ばれる)。
     pub fn advect_smoke(&mut self, dt: f64) {
         let old_smoke = self.smoke_density.clone();
-        let sampler = GridFluid3D {
-            smoke_density: old_smoke,
-            ..self.clone()
-        };
+        let field = self.velocity_field();
         let h = self.h;
-        for k in 0..self.nz {
-            for j in 0..self.ny {
-                for i in 0..self.nx {
-                    let idx = self.flat(i, j, k);
+        let (nx, ny, nz) = (self.nx, self.ny, self.nz);
+        let mut advected = vec![0.0; old_smoke.len()];
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + nx * (j + ny * k);
                     let p = Vec3::new(
                         (i as f64 + 0.5) * h,
                         (j as f64 + 0.5) * h,
                         (k as f64 + 0.5) * h,
                     );
-                    self.smoke_density[idx] = sampler.sample_smoke(sampler.backtrace(p, dt));
+                    advected[idx] = field.sample_cell_scalar(&old_smoke, field.backtrace(p, dt));
                 }
             }
         }
+        self.smoke_density = advected;
     }
 
     /// 陽的粘性拡散(7点ラプラシアン、設計§4.3)。
@@ -479,120 +731,126 @@ impl GridFluid3D {
         Some(force)
     }
 
-    /// 圧力投影(設計§4.4)。2D版と同一の構成: Solidセルは恒等行で未知数から外し、
+    /// 圧力ポアソンのセル種別。Solid は未知数から外し、`Channel` の流出層は圧力
+    /// Dirichlet $p=0$ にする(**Solid が優先**——流出層に固体が刺さっている場合、
+    /// そこは Neumann のままでなければ従来の離散化と食い違う)。
+    fn pressure_cell_kinds(&self) -> Vec<PressureCell> {
+        let mut kinds: Vec<PressureCell> = self
+            .cell_type
+            .iter()
+            .map(|t| {
+                if *t == CellType::Solid {
+                    PressureCell::Solid
+                } else {
+                    PressureCell::Fluid
+                }
+            })
+            .collect();
+        if let GridBoundary3D::Channel { .. } = self.boundary {
+            for k in 0..self.nz {
+                for j in 0..self.ny {
+                    let idx = self.flat(self.nx - 1, j, k);
+                    if kinds[idx] != PressureCell::Solid {
+                        kinds[idx] = PressureCell::Dirichlet;
+                    }
+                }
+            }
+        }
+        kinds
+    }
+
+    /// 直近の圧力投影の診断(反復数・残差・マルチグリッド階層)。
+    pub fn last_pressure_solve(&self) -> PressureSolveReport {
+        self.last_solve
+    }
+
+    /// 圧力投影(設計§4.4)。2D版と同一の構成: Solidセルは未知数から外し、
     /// Solid面・壁はNeumann、`Channel` の流出層は圧力Dirichlet $p=0$。
     /// 周期境界では特異なので右辺の(流体セルのみの)平均を引く。
+    ///
+    /// **解法は MGPCG**([`crate::pressure_multigrid`])。作用素は $L=-\nabla^2$
+    /// (正定値)なので右辺の符号を合わせる——解 $p$ は従来と同一である。
     pub fn project(&mut self, dt: f64, density: f64) -> Vec<f64> {
         let (nx, ny, nz) = (self.nx, self.ny, self.nz);
         let n = nx * ny * nz;
-        let solid_cell: Vec<bool> = (0..n)
-            .map(|m| self.cell_type[m] == CellType::Solid)
-            .collect();
-
-        let mut rhs = vec![0.0; n];
-        for k in 0..nz as i64 {
-            for j in 0..ny as i64 {
-                for i in 0..nx as i64 {
-                    let idx = self.idx(i, j, k);
-                    if solid_cell[idx] {
-                        continue; // 恒等行
-                    }
-                    rhs[idx] = density / dt * self.divergence(i, j, k);
-                }
-            }
+        let kinds = self.pressure_cell_kinds();
+        let periodic = self.boundary == GridBoundary3D::Periodic;
+        // 階層はセル種別だけで決まるので、トポロジが変わらない限り作り直さない
+        // (剛体のボクセル化で毎ステップ形が変わる場合だけ再構築される)。
+        if self
+            .multigrid
+            .0
+            .as_ref()
+            .is_none_or(|mg| mg.cell_kinds() != kinds.as_slice())
+        {
+            self.multigrid.0 = Some(MultigridPoisson::build(
+                nx,
+                ny,
+                nz,
+                self.h,
+                periodic,
+                kinds.clone(),
+            ));
         }
-        if let GridBoundary3D::Channel { .. } = self.boundary {
+
+        let (pressure, result, report) = {
+            let multigrid = self.multigrid.0.as_ref().expect("直前に構築した");
+
+            let mut rhs = vec![0.0; n];
             for k in 0..nz as i64 {
                 for j in 0..ny as i64 {
-                    rhs[self.idx(nx as i64 - 1, j, k)] = 0.0;
-                }
-            }
-        }
-        if self.boundary == GridBoundary3D::Periodic {
-            // 全Neumann/周期では特異なので可解性条件を満たす(平均は流体セルのみで取る)。
-            let fluid_count = solid_cell.iter().filter(|s| !**s).count();
-            if fluid_count > 0 {
-                let mean: f64 = rhs
-                    .iter()
-                    .zip(solid_cell.iter())
-                    .filter(|(_, s)| !**s)
-                    .map(|(r, _)| *r)
-                    .sum::<f64>()
-                    / fluid_count as f64;
-                for (r, s) in rhs.iter_mut().zip(solid_cell.iter()) {
-                    if !*s {
-                        *r -= mean;
+                    for i in 0..nx as i64 {
+                        let idx = self.idx(i, j, k);
+                        if kinds[idx] != PressureCell::Fluid {
+                            continue; // 未知数から外したセル
+                        }
+                        rhs[idx] = -density / dt * self.divergence(i, j, k);
                     }
                 }
             }
-        }
+            if multigrid.is_singular() {
+                // 全Neumann/周期では特異なので可解性条件を満たす(平均は流体セルのみで取る)。
+                let fluid_count = kinds.iter().filter(|k| **k == PressureCell::Fluid).count();
+                if fluid_count > 0 {
+                    let mean: f64 = rhs.iter().sum::<f64>() / fluid_count as f64;
+                    for (r, kind) in rhs.iter_mut().zip(kinds.iter()) {
+                        if *kind == PressureCell::Fluid {
+                            *r -= mean;
+                        }
+                    }
+                }
+            }
 
-        let h2 = self.h * self.h;
+            let mut pressure = vec![0.0; n];
+            let precondition = |r: &[f64], z: &mut [f64]| multigrid.precondition(r, z);
+            let result = sim_math::pcg(
+                |x: &[f64], out: &mut [f64]| multigrid.apply_operator(x, out),
+                &rhs,
+                &mut pressure,
+                &sim_math::Preconditioner::Custom(&precondition),
+                PRESSURE_TOLERANCE,
+                PRESSURE_MAX_ITERATIONS,
+            );
+            (pressure, result, multigrid.report())
+        };
+
+        self.last_solve = PressureSolveReport {
+            iterations: result.iterations,
+            residual_norm: result.residual_norm,
+            converged: result.converged,
+            multigrid_levels: report.levels,
+            coarsening_truncated: report.truncated_by_mixed_cells,
+        };
+        debug_assert!(
+            result.converged,
+            "3D pressure projection MGPCG did not converge: {result:?}"
+        );
+
+        let solid_cell: Vec<bool> = kinds.iter().map(|k| *k == PressureCell::Solid).collect();
         let boundary = self.boundary;
         let flat = |i: i64, j: i64, k: i64| -> usize {
             wrap(i, nx) + nx * (wrap(j, ny) + ny * wrap(k, nz))
         };
-        let apply_a = |x: &[f64], out: &mut [f64]| {
-            for k in 0..nz as i64 {
-                for j in 0..ny as i64 {
-                    for i in 0..nx as i64 {
-                        let idx = flat(i, j, k);
-                        if solid_cell[idx] {
-                            out[idx] = x[idx];
-                            continue;
-                        }
-                        if let GridBoundary3D::Channel { .. } = boundary {
-                            if i == nx as i64 - 1 {
-                                out[idx] = x[idx]; // 流出層は圧力Dirichlet p=0
-                                continue;
-                            }
-                        }
-                        let mut sum = 0.0;
-                        let mut diag = 0.0;
-                        let mut neighbour = |a: i64, b: i64, c: i64| {
-                            if boundary != GridBoundary3D::Periodic
-                                && (a < 0
-                                    || a >= nx as i64
-                                    || b < 0
-                                    || b >= ny as i64
-                                    || c < 0
-                                    || c >= nz as i64)
-                            {
-                                return; // 壁・流入面はNeumann(鏡像で相殺)
-                            }
-                            let m = flat(a, b, c);
-                            if solid_cell[m] {
-                                return; // Solid面もNeumann
-                            }
-                            sum += x[m];
-                            diag += 1.0;
-                        };
-                        neighbour(i + 1, j, k);
-                        neighbour(i - 1, j, k);
-                        neighbour(i, j + 1, k);
-                        neighbour(i, j - 1, k);
-                        neighbour(i, j, k + 1);
-                        neighbour(i, j, k - 1);
-                        out[idx] = (sum - diag * x[idx]) / h2;
-                    }
-                }
-            }
-        };
-
-        let mut pressure = vec![0.0; n];
-        let result = sim_math::pcg(
-            apply_a,
-            &rhs,
-            &mut pressure,
-            &sim_math::Preconditioner::None,
-            1e-8,
-            2000,
-        );
-        debug_assert!(
-            result.converged,
-            "3D pressure projection PCG did not converge: {result:?}"
-        );
-
         let scale = dt / density;
         // Solid に接する面は補正しない(そこは圧力勾配ではなく固体速度が決める)。
         let free = |lower: usize, upper: usize| !solid_cell[lower] && !solid_cell[upper];
@@ -743,12 +1001,24 @@ impl Solver for GridFluid3D {
             },
         });
         out.push(Approximation {
-            name: "前処理なしPCG",
-            reason: "圧力ポアソンを前処理なしのPCGで解いており、設計§10の 64³/4ms 予算に\
-                     全く届かない(実測 795.7 ms/step、約200倍)。マルチグリッド前処理は未実装。",
+            name: "CPU単精度なしのMGPCG",
+            reason: "圧力ポアソンはマルチグリッド前処理PCG(Vサイクル)で解いており、反復数は\
+                     解像度にほぼ依存しない。ただし設計§10が並べる残りの手段——SIMD・\
+                     rayon並列化・WebGPU——がいずれも未導入のため、64³/4ms 予算にはまだ\
+                     届かない(実測は examples/grid_fluid3d_bench.rs)。",
             doc: "docs/11-fluid/02-eulerian-grid.md",
             can_disable: false,
         });
+        if self.last_solve.coarsening_truncated {
+            out.push(Approximation {
+                name: "粗格子化の打ち切り",
+                reason: "固体境界が粗レベルで解像できず(8子が solid/fluid 混在する粗セルが\
+                         30%超)、設計§4.4 の分岐条件によって V サイクルを短縮している。\
+                         収束は遅くなるが解と決定論は変わらない。",
+                doc: "docs/11-fluid/02-eulerian-grid.md",
+                can_disable: false,
+            });
+        }
         if self.has_solid() {
             out.push(Approximation {
                 name: "セル単位の固体境界",

@@ -19,6 +19,7 @@ mod grid_fluid3d;
 mod grid_fluid_rigid;
 mod karman;
 mod poiseuille;
+pub mod pressure_multigrid;
 mod sph;
 pub use aero::{
     drag_coefficient_sphere, drag_force_sphere, magnus_force_sphere, reynolds_number,
@@ -29,7 +30,7 @@ pub use buoyancy::{
     buoyancy_force, hydrostatic_pressure, submerged_box_axis_aligned, StaticWaterRegion,
 };
 pub use grid_fluid::{CellType, GridBoundary, GridFluid2D, GridSolidBox};
-pub use grid_fluid3d::{GridBoundary3D, GridFluid3D};
+pub use grid_fluid3d::{GridBoundary3D, GridFluid3D, PressureSolveReport};
 pub use grid_fluid_rigid::GridFluidRigidBox2D;
 pub use karman::KarmanChannel2D;
 pub use poiseuille::PoiseuilleChannel1D;
