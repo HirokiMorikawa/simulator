@@ -30,9 +30,17 @@ npx vite --port 5199 --strictPort --host 127.0.0.1 &
 
 # 3. 検証を回す(demo/tests/qa から実行する — node_modules の解決に必要)
 cd tests/qa
-node qa-physics.mjs        # 物理法則: 19 項目
-node qa-operability.mjs    # 操作性:   28 項目
+node qa-physics.mjs        # 物理法則:     19 項目
+node qa-operability.mjs    # 操作性:       28 項目
+node qa-coupling.mjs       # 法則の組合せ: 37 項目
 node qa-defects.mjs        # 既知の不具合の再現
+```
+
+`wasm-pack` が無い環境では、同じ成果物を次の 2 コマンドで作れる。
+
+```bash
+cargo build --release --target wasm32-unknown-unknown -p sim-wasm
+wasm-bindgen --target web --out-dir demo/pkg target/wasm32-unknown-unknown/release/sim_wasm.wasm
 ```
 
 環境変数で上書きできる。
@@ -50,7 +58,11 @@ node qa-defects.mjs        # 既知の不具合の再現
 | `qa-lib.mjs` | 共通部。起動待ち・シーン読み込み・`⏭` 送り・座標投影 |
 | `qa-physics.mjs` | D1/D3/D5/D11/D30/D34 の解析解照合、決定論、Settings の重力反映 |
 | `qa-operability.mjs` | カメラ・W/E/R/Q・Gizmo 3種・Undo/Redo・Edit/Play・Timeline・Console・ピック |
+| `qa-coupling.mjs` | **ドメイン間結合**(D10/D14/D15/D17/D18b/D19/D20/D21/D23/D25/D26)の橋の両側の照合と、UI からドメインを足したとき既存の結合が拾うか([報告書](../../../docs/reviews/2026-08-04-coupling-qa.md)) |
 | `qa-defects.mjs` | 2026-08-04 に見つかった不具合 9 件の再現 |
+
+`qa-coupling.mjs` は不具合 8 件が未修正のあいだ 29/37 PASS で終わる(`qa-defects.mjs` と同じく
+FAIL は「異常」ではなく「未修正」と読む)。
 
 `qa-defects.mjs` は**不具合が残っているあいだ FAIL する**。修正が入れば PASS に転じるので、
 そのまま回帰確認に使える。他の 2 本と違い、FAIL は「異常」ではなく「未修正」と読む。
