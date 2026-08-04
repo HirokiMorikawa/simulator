@@ -1,14 +1,20 @@
 //! 前処理付き共役勾配法(PCG)。設計: docs/01-math/02-fields.md §5。
 //!
 //! 圧力 Poisson・陰的熱伝導などの SPD・matrix-free 線形システム A x = b を解く。
-//! IC(0)(不完全コレスキー)は具体的な疎行列パターン(格子ラプラシアンのステンシル)を
-//! 要するため、その構造を持つドメイン crate(P3 流体/熱ウェーブ)側で追加する。
-//! ここでは前処理なし・対角(Jacobi)前処理の2種を提供する。
+//! IC(0)(不完全コレスキー)やマルチグリッドは具体的な疎行列パターン(格子ラプラシアンの
+//! ステンシル)と粗格子化の規則を要するため、その構造を持つドメイン crate 側で組む。
+//! ここでは前処理なし・対角(Jacobi)前処理の2種を直接提供し、それ以外は
+//! `Preconditioner::Custom` で外から差し込めるようにする
+//! (実例: `sim_fluid::pressure_multigrid` の V サイクル前処理)。
 
 /// 前処理の種類。`Jacobi` は行列 A の対角成分そのもの(逆数は内部で計算)。
 pub enum Preconditioner<'a> {
     None,
     Jacobi(&'a [f64]),
+    /// 任意の前処理作用素 $z = M^{-1} r$。**呼び出し側が $M$ の対称正定値性を保証する**
+    /// (PCG の収束理論はそれを前提にしている)。`Fn` なので内部状態を書き換えたい場合は
+    /// `RefCell` 等で包むこと——作業配列を毎回確保しないための逃げ道である。
+    Custom(&'a dyn Fn(&[f64], &mut [f64])),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,6 +36,7 @@ fn apply_preconditioner(precond: &Preconditioner, r: &[f64], z: &mut [f64]) {
                 z[i] = r[i] / diag[i];
             }
         }
+        Preconditioner::Custom(apply) => apply(r, z),
     }
 }
 
@@ -167,6 +174,47 @@ mod tests {
         for i in 0..n {
             assert!((x[i] - x_exact[i]).abs() < 1e-6);
         }
+    }
+
+    /// `Custom` は「外から差し込んだ $M^{-1}$」であって、それ以上の意味を持たない
+    /// ——同じ作用素を `Jacobi` として渡したときと反復ごとに同一の結果になること
+    /// (ドメイン crate 側のマルチグリッドを信頼して差し込むための前提)。
+    #[test]
+    fn a_custom_preconditioner_matches_the_equivalent_builtin() {
+        let n = 50;
+        let x_exact: Vec<f64> = (0..n).map(|i| (0.07 * i as f64).cos()).collect();
+        let mut b = vec![0.0; n];
+        poisson_1d_apply(n)(&x_exact, &mut b);
+        let diag = vec![2.0; n];
+
+        let mut x_builtin = vec![0.0; n];
+        let builtin = pcg(
+            poisson_1d_apply(n),
+            &b,
+            &mut x_builtin,
+            &Preconditioner::Jacobi(&diag),
+            1e-10,
+            500,
+        );
+
+        let apply_m_inverse = |r: &[f64], z: &mut [f64]| {
+            for i in 0..r.len() {
+                z[i] = r[i] / 2.0;
+            }
+        };
+        let mut x_custom = vec![0.0; n];
+        let custom = pcg(
+            poisson_1d_apply(n),
+            &b,
+            &mut x_custom,
+            &Preconditioner::Custom(&apply_m_inverse),
+            1e-10,
+            500,
+        );
+
+        assert!(custom.converged);
+        assert_eq!(custom.iterations, builtin.iterations);
+        assert_eq!(x_custom, x_builtin);
     }
 
     /// 設計 §7: SPD 性の乱数テスト — ランダムな対角優位対称行列でも収束する。

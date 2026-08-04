@@ -302,8 +302,8 @@ fn an_embedded_sphere_blocks_the_flow_without_breaking_incompressibility() {
 }
 
 /// 近似バッジが設定に追従すること(2D版と同じ規律)。
-/// 3Dでは「前処理なしPCG」が常時の近似として申告される——設計§10の 64³/4ms 予算に
-/// 届かないことを黙って隠さない。
+/// 3Dでは圧力ソルバのバッジが常時の近似として申告される——マルチグリッド前処理を
+/// 入れてもなお設計§10の 64³/4ms 予算に届かないことを黙って隠さない。
 #[test]
 fn approximations_follow_the_configuration() {
     let mut fluid = GridFluid3D::new(8, 8, 8, 0.1);
@@ -311,7 +311,7 @@ fn approximations_follow_the_configuration() {
         f.approximations().iter().map(|a| a.name).collect()
     };
     assert!(names(&fluid).contains(&"3D・周期境界"));
-    assert!(names(&fluid).contains(&"前処理なしPCG"));
+    assert!(names(&fluid).contains(&"CPU単精度なしのMGPCG"));
     assert!(!names(&fluid).contains(&"渦度強化(非物理)"));
 
     fluid.vorticity_confinement_epsilon = 1.0;

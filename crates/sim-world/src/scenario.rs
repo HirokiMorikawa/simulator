@@ -949,8 +949,8 @@ pub struct GridFluidScenarioJson {
 
 /// `Scenario::grid_fluid_3d`(`sim_fluid::GridFluid3D`、**群9で追加**)。
 ///
-/// **解像度に注意**: 3Dは前処理なしPCGなので 64³ で1ステップ約 800 ms かかる
-/// (`sim-fluid/examples/grid_fluid3d_bench.rs` の実測)。ギャラリーのシーンは
+/// **解像度に注意**: 3Dはマルチグリッド前処理PCG(群10)でも 64³ で1ステップ約 207 ms
+/// かかる(`sim-fluid/examples/grid_fluid3d_bench.rs` の実測)。ギャラリーのシーンは
 /// 全件が検証テストで60ステップ回されるため、**小さめ(24×16×16 程度まで)**に置くこと。
 #[derive(Deserialize)]
 pub struct GridFluid3DScenarioJson {
@@ -3777,8 +3777,9 @@ mod tests {
     /// 一通り組めることを確認する。設計 docs/11-fluid/02-eulerian-grid.md §3 の
     /// `GridFluid` は最初から3Dで、これがその本来の形。
     ///
-    /// **解像度は意図的に小さい**(24×12×12)。3Dは前処理なしPCGで 64³ なら1ステップ
-    /// 約800msかかるため、ギャラリーの全シーンを回す検証テストに載せられない。
+    /// **解像度は意図的に小さい**(24×12×12)。3Dはマルチグリッド前処理PCG(群10)でも
+    /// 64³ なら1ステップ約207msかかるため、ギャラリーの全シーンを回す検証テストに
+    /// 載せられない。
     #[test]
     fn run_headless_scenario_three_dimensional_smoke_is_carried_downstream() {
         let json = include_str!("../../../scenes/d14c-smoke-3d.json");
@@ -3830,7 +3831,7 @@ mod tests {
             "渦度強化を有効にしたのに申告が無い: {badges:?}"
         );
         assert!(
-            badges.contains(&"前処理なしPCG"),
+            badges.contains(&"CPU単精度なしのMGPCG"),
             "3Dソルバの性能上の限界は常時申告されるべき: {badges:?}"
         );
     }

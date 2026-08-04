@@ -10,7 +10,7 @@
 ## 特徴
 
 - **7 ドメインを 1 つの `World` に統合** — `sim_world::World` が有効化されたドメインを固定順(力学 → 熱 → 電磁 → 天体 → 回路 → SPH → 格子流体)で進め、Lie–Trotter 分割で前後に結合処理を挟む。結合は 15 モジュール実装済み([crates/sim-coupling/src/](crates/sim-coupling/src/): `lorentz_force`・`joule_heat`・`phase_change_morph`・`sph_rigid`・`piston_gas` ほか)。
-- **検証可能性** — `#[test]` 634 件が、解析解テスト表([docs/21-verification/01-analytic-tests.md](docs/21-verification/01-analytic-tests.md) の M/F/T/E/Q/S/A/R 系 ID)と保存則([docs/21-verification/02-conservation-laws.md](docs/21-verification/02-conservation-laws.md))に紐づく。`EnergyLedger` が実行中の数値誤差を常時可視化する。
+- **検証可能性** — `#[test]` 644 件が、解析解テスト表([docs/21-verification/01-analytic-tests.md](docs/21-verification/01-analytic-tests.md) の M/F/T/E/Q/S/A/R 系 ID)と保存則([docs/21-verification/02-conservation-laws.md](docs/21-verification/02-conservation-laws.md))に紐づく。`EnergyLedger` が実行中の数値誤差を常時可視化する。
 - **決定論** — 固定タイムステップ・シード付き PRNG・状態ハッシュにより、同条件ならビット単位で同じ結果になる。リプレイ・共有・回帰テストの基盤。
 - **近似の自己申告** — 各 `Solver` は使用中の近似を `sim_core::Approximation { name, reason, doc, can_disable }` として申告し、エディタがバッジで表示する。何を諦めているかが実行時に見える。
 - **依存が実質ゼロ** — 線形代数・FFT・PRNG・PNG 書き出しに至るまで自前実装。外部クレートは物理コアの `serde`/`serde_json`、WASM 境界の `wasm-bindgen`/`js-sys`、ベンチの `criterion` のみ。
@@ -124,7 +124,7 @@ pub trait Solver {
 ## アーキテクチャ
 
 ```
-crates/    Rust ワークスペース(13 crate、約 56,000 行)
+crates/    Rust ワークスペース(13 crate、約 58,000 行)
 demo/      Vite + TypeScript + Three.js の統合エディタ
 scenes/    検証デモシーン(43 本の JSON + マニフェスト)
 docs/      設計書(日本語 59 文書)
@@ -138,7 +138,7 @@ crate は下から順に積み上がる。
 | [sim-math](crates/sim-math/) | `Vec3`/`Quat`/`Mat3`、場の補間、数値積分、決定論的 PRNG。依存ゼロ |
 | [sim-core](crates/sim-core/) | `Solver` トレイト、`EnergyLedger`、`Approximation`、`MaterialDb`、状態ハッシュ、イベントキュー |
 | [sim-mechanics](crates/sim-mechanics/) | 剛体、BVH broadphase、SAT/GJK/EPA、sequential impulses、摩擦、ジョイント、XPBD ソフトボディ、CCD、車両 |
-| [sim-fluid](crates/sim-fluid/) | MAC 格子 Eulerian 2D/3D(PCG 圧力解法・渦度強化)、WCSPH、浮力、空力・水力 |
+| [sim-fluid](crates/sim-fluid/) | MAC 格子 Eulerian 2D/3D(PCG 圧力解法・3D はマルチグリッド前処理・渦度強化)、WCSPH、浮力、空力・水力 |
 | [sim-thermal](crates/sim-thermal/) | 熱伝導・対流・放射、相変化(エンタルピー法)、気体コンパートメント |
 | [sim-em](crates/sim-em/) | 静電磁場、MNA 回路(非線形素子つき)、FDTD(PML 吸収境界)、幾何光学、モーター |
 | [sim-quantum](crates/sim-quantum/) | 1D/2D 時間依存シュレディンガー(split-step Fourier)、虚時間発展による固有状態探索 |
@@ -167,7 +167,7 @@ Playwright のスモークテストが守るのは「起動し、wasm が初期�
 
 ### ベンチマーク
 
-criterion ベンチが 3 本ある(`sim-mechanics`: `contact_solver`、`sim-fluid`: `grid_fluid_pcg` / `sph_neighbor_search`)。
+criterion ベンチが 3 本ある(`sim-mechanics`: `contact_solver`、`sim-fluid`: `grid_fluid_pcg`(2D 64² と 3D 32³)/ `sph_neighbor_search`)。3D の解像度スケーリングは criterion では重すぎるので `cargo run --release -p sim-fluid --example grid_fluid3d_bench` が別に測る(32³/64³/128³)。
 
 ```bash
 cargo bench --workspace
@@ -218,7 +218,7 @@ Phase 0(骨格)/ A(テスト先行)/ B(ドメイン実装)/ C(結合)/ D(レン�
 
 既知の制約:
 
-- **3D 格子流体の性能** — 64³ で 795.7 ms/step(設計予算 4 ms に対し約 200 倍)。原因は前処理なし PCG で、マルチグリッド前処理は未実装([crates/sim-fluid/examples/grid_fluid3d_bench.rs](crates/sim-fluid/examples/grid_fluid3d_bench.rs))。
+- **3D 格子流体の性能** — 64³ で 206.8 ms/step(設計予算 4 ms に対し約 50 倍)。マルチグリッド前処理 PCG([crates/sim-fluid/src/pressure_multigrid.rs](crates/sim-fluid/src/pressure_multigrid.rs))の導入で 795.7 ms/step から約 3.5 倍縮み、圧力投影の反復数は解像度に依存しなくなった(32³/64³/128³ のいずれも 7〜8 反復)が、SIMD・並列化・GPU が未着手なため予算には届かない([crates/sim-fluid/examples/grid_fluid3d_bench.rs](crates/sim-fluid/examples/grid_fluid3d_bench.rs))。
 - **GPU 未対応** — 現状は CPU 実装のみ。WebGPU は設計上の選択肢として残してある([docs/00-foundation/06-performance-strategy.md](docs/00-foundation/06-performance-strategy.md))。
 
 ## コントリビュート

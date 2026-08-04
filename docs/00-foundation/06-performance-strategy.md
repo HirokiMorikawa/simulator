@@ -24,7 +24,7 @@ crate: 横断(全ドメイン)。「検証して遊ぶ」に必要な速度を�
 |---|---|---|---|
 | 衝突 broadphase | 総当たり $O(n^2)$ | Sweep-and-Prune → BVH(動的 AABB木) | $O(n\log n)$ |
 | 衝突 narrowphase | — | GJK/EPA(凸)、SAT(箱) | 定数 |
-| 圧力 Poisson(流体) | Jacobi | PCG → **マルチグリッド前処理** | ~$O(n)$ |
+| 圧力 Poisson(流体) | Jacobi | PCG → **マルチグリッド前処理**(3D は群10で実装済み、[11-fluid/02](../11-fluid/02-eulerian-grid.md) §10.1 に実測) | ~$O(n)$ |
 | SPH 近傍探索 | 総当たり | 空間ハッシュ + Morton 順 | $O(n)$ |
 | 熱・拡散 | 陽的反復 | 陰的 + マルチグリッド | 無条件安定 |
 | N体重力 | 総当たり $O(n^2)$ | **Barnes-Hut** → FMM | $O(n\log n)$ / $O(n)$ |
