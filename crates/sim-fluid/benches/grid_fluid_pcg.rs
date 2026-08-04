@@ -9,14 +9,8 @@
 //! 初期条件に使う — 全域ゼロの速度場では発散がどこでも0になりPCGが実質1反復で収束して
 //! しまい、圧力投影の典型的な負荷を代表しないため。
 
-//! **群10で3Dを追加**: 3Dの圧力投影はマルチグリッド前処理(MGPCG)へ置き換わり、
-//! 反復数が解像度にほぼ依存しなくなった(`examples/grid_fluid3d_bench.rs` に実測)。
-//! 前処理が壊れると反復数が跳ね上がって数倍遅くなる——それは回帰ゲートで捕まえたい
-//! 種類の変化なので、3Dも1本測る。解像度が 32³ なのは CI 時間のため
-//! (64³ は1ステップ 0.2 秒で、criterion のサンプリングに載せると数十秒かかる)。
-
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
-use sim_fluid::{GridFluid2D, GridFluid3D};
+use sim_fluid::GridFluid2D;
 
 fn build_taylor_green(nx: usize, ny: usize) -> GridFluid2D {
     let length = 1.0;
@@ -43,39 +37,10 @@ fn build_taylor_green(nx: usize, ny: usize) -> GridFluid2D {
     fluid
 }
 
-fn build_taylor_green_3d(n: usize) -> GridFluid3D {
-    let h = 1.0 / n as f64;
-    let k = 2.0 * std::f64::consts::PI;
-    let mut fluid = GridFluid3D::new(n, n, n, h);
-    for kk in 0..n {
-        for j in 0..n {
-            for i in 0..n {
-                let idx = i + n * (j + n * kk);
-                fluid.u[idx] = -(k * (i as f64 * h)).cos() * (k * ((j as f64 + 0.5) * h)).sin();
-                fluid.v[idx] = (k * ((i as f64 + 0.5) * h)).sin() * (k * (j as f64 * h)).cos();
-            }
-        }
-    }
-    fluid
-}
-
 fn bench_grid_fluid_pcg(c: &mut Criterion) {
     c.bench_function("grid_fluid_2d_step_64x64_taylor_green", |b| {
         b.iter_batched(
             || build_taylor_green(64, 64),
-            |mut fluid| {
-                let dt = 0.0005;
-                fluid.advect_velocity(black_box(dt));
-                fluid.diffuse_explicit(dt, 0.2);
-                fluid.project(dt, 1.0);
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    c.bench_function("grid_fluid_3d_step_32x32x32_taylor_green", |b| {
-        b.iter_batched(
-            || build_taylor_green_3d(32),
             |mut fluid| {
                 let dt = 0.0005;
                 fluid.advect_velocity(black_box(dt));

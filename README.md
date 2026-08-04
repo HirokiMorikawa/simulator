@@ -167,7 +167,7 @@ Playwright のスモークテストが守るのは「起動し、wasm が初期�
 
 ### ベンチマーク
 
-criterion ベンチが 3 本ある(`sim-mechanics`: `contact_solver`、`sim-fluid`: `grid_fluid_pcg`(2D 64² と 3D 32³)/ `sph_neighbor_search`)。3D の解像度スケーリングは criterion では重すぎるので `cargo run --release -p sim-fluid --example grid_fluid3d_bench` が別に測る(32³/64³/128³)。
+criterion ベンチが 4 本ある(`sim-mechanics`: `contact_solver`、`sim-fluid`: `grid_fluid_pcg` / `grid_fluid3d_mgpcg` / `sph_neighbor_search`)。3D の解像度スケーリングは criterion では重すぎるので `cargo run --release -p sim-fluid --example grid_fluid3d_bench` が別に測る(32³/64³/128³)。
 
 ```bash
 cargo bench --workspace

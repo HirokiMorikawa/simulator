@@ -16,5 +16,9 @@ name = "grid_fluid_pcg"
 harness = false
 
 [[bench]]
+name = "grid_fluid3d_mgpcg"
+harness = false
+
+[[bench]]
 name = "sph_neighbor_search"
 harness = false
