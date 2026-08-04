@@ -208,7 +208,7 @@ python3 scripts/check_bench_regression.py --threshold 0.25
 | [21-verification](docs/21-verification/) | 解析解テスト表、保存則、デモシナリオ集 |
 | [22-roadmap](docs/22-roadmap/) | 実装フェーズ計画(TDD: Phase A/B/C/D)と機能チェックリスト |
 | [23-frontend](docs/23-frontend/) | 統合エディタの設計 |
-| [reviews](docs/reviews/) | 設計レビューの記録と対応 |
+| [reviews](docs/reviews/) | 設計レビュー・品質チェックの記録と対応 |
 
 文書は日本語で、数式は GitHub Markdown の `$...$` 記法を使う。数値パラメータには必ず出典を、近似には必ず物理的な正当化を添える([docs/README.md](docs/README.md) の「文書規約」)。
 
