@@ -1,0 +1,928 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; }
+    img, svg { max-width: 100%; }
+  </style>
+<title>最終成果物像 — シーンドキュメントを中心に据えた統合エディタ</title>
+<style>
+  :root {
+    --ground: #F2F4F4;
+    --surface: #FFFFFF;
+    --surface-2: #E8ECEC;
+    --ink: #161B1C;
+    --ink-2: #3D4A4B;
+    --muted: #647274;
+    --rule: #D2DADA;
+    --accent: #0E7C86;
+    --accent-soft: #DBEDEF;
+    --warn: #A8481B;
+    --warn-soft: #F5E4DA;
+    --font-display: "Hiragino Mincho ProN", "Yu Mincho", YuMincho, "Noto Serif JP", "Songti SC", serif;
+    --font-body: "Hiragino Kaku Gothic ProN", "Yu Gothic", YuGothic, "Noto Sans JP", "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0E1213;
+      --surface: #151A1B;
+      --surface-2: #1D2425;
+      --ink: #E3E9E9;
+      --ink-2: #B7C3C4;
+      --muted: #839394;
+      --rule: #2A3334;
+      --accent: #4FBAC4;
+      --accent-soft: #133439;
+      --warn: #D98A57;
+      --warn-soft: #33231A;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0E1213;
+    --surface: #151A1B;
+    --surface-2: #1D2425;
+    --ink: #E3E9E9;
+    --ink-2: #B7C3C4;
+    --muted: #839394;
+    --rule: #2A3334;
+    --accent: #4FBAC4;
+    --accent-soft: #133439;
+    --warn: #D98A57;
+    --warn-soft: #33231A;
+  }
+  :root[data-theme="light"] {
+    --ground: #F2F4F4;
+    --surface: #FFFFFF;
+    --surface-2: #E8ECEC;
+    --ink: #161B1C;
+    --ink-2: #3D4A4B;
+    --muted: #647274;
+    --rule: #D2DADA;
+    --accent: #0E7C86;
+    --accent-soft: #DBEDEF;
+    --warn: #A8481B;
+    --warn-soft: #F5E4DA;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.85;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page {
+    max-width: 60rem;
+    margin: 0 auto;
+    padding: 4rem 1.5rem 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 3.5rem;
+  }
+  .masthead { display: flex; flex-direction: column; gap: 0.9rem; }
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-size: clamp(1.9rem, 4.2vw, 2.9rem);
+    line-height: 1.35;
+    font-weight: 600;
+    text-wrap: balance;
+    margin: 0;
+  }
+  .standfirst {
+    font-size: 1.06rem;
+    color: var(--ink-2);
+    max-width: 42rem;
+    margin: 0;
+  }
+  .masthead hr {
+    border: 0;
+    border-top: 1px solid var(--rule);
+    margin: 0.6rem 0 0;
+  }
+
+  section { display: flex; flex-direction: column; gap: 1.15rem; }
+  h2 {
+    font-family: var(--font-display);
+    font-size: clamp(1.25rem, 2.4vw, 1.55rem);
+    font-weight: 600;
+    line-height: 1.5;
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 0.85rem;
+    text-wrap: balance;
+  }
+  h2 .num {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    flex: none;
+  }
+  p { margin: 0; max-width: 40rem; }
+  p + p { margin-top: -0.35rem; }
+  strong { font-weight: 600; }
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+    background: var(--surface-2);
+    padding: 0.1em 0.36em;
+    border-radius: 3px;
+  }
+
+  figure {
+    margin: 0.5rem 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .figframe {
+    overflow-x: auto;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    padding: 1.35rem 1.2rem;
+  }
+  .figframe > svg { min-width: 42rem; }
+  figcaption {
+    font-size: 0.86rem;
+    color: var(--muted);
+    line-height: 1.75;
+    max-width: 44rem;
+  }
+  figcaption b { color: var(--ink-2); font-weight: 600; }
+
+  .tablewrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; min-width: 36rem; font-size: 0.92rem; }
+  th, td { text-align: left; vertical-align: top; padding: 0.7rem 0.85rem; border-bottom: 1px solid var(--rule); line-height: 1.7; }
+  thead th {
+    font-size: 0.74rem;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    font-weight: 600;
+    border-bottom: 1px solid var(--ink-2);
+  }
+  tbody th { font-weight: 600; width: 8.5rem; }
+  td.now { color: var(--muted); }
+  td.then { color: var(--ink); }
+
+  .closing {
+    border-left: 2px solid var(--accent);
+    padding: 0.15rem 0 0.15rem 1.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .defs-only { position: absolute; width: 0; height: 0; overflow: hidden; }
+  .d { display: block; width: 100%; height: auto; }
+  .mk-ink { fill: var(--ink-2); }
+  .mk-accent { fill: var(--accent); }
+  .mk-warn { fill: var(--warn); }
+  .d-box { fill: var(--surface); stroke: var(--rule); stroke-width: 1.25; }
+  .d-box-2 { fill: var(--surface-2); stroke: var(--rule); stroke-width: 1.25; }
+  .d-box-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.6; }
+  .d-box-w { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.25; }
+  .d-box-o { fill: none; stroke: var(--accent); stroke-width: 1.2; stroke-dasharray: 4 3; }
+  .d-t { fill: var(--ink); font: 600 13px var(--font-body); }
+  .d-s { fill: var(--muted); font: 400 11px var(--font-body); }
+  .d-m { fill: var(--ink-2); font: 400 11.5px var(--font-mono); }
+  .d-l { fill: var(--muted); font: 400 11px var(--font-body); }
+  .d-la { fill: var(--accent); font: 600 11px var(--font-body); }
+  .d-lw { fill: var(--warn); font: 600 11px var(--font-body); }
+  .d-eb { fill: var(--muted); font: 600 11px var(--font-body); letter-spacing: 0.14em; }
+  .d-ln { stroke: var(--ink-2); stroke-width: 1.25; fill: none; }
+  .d-ln-a { stroke: var(--accent); stroke-width: 1.5; fill: none; }
+  .d-ln-w { stroke: var(--warn); stroke-width: 1.25; fill: none; stroke-dasharray: 5 4; }
+  .d-rule { stroke: var(--rule); stroke-width: 1; }
+  .d-star { fill: var(--accent); font: 600 12px var(--font-body); }
+</style>
+</head>
+<body>
+<svg class="defs-only" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="mk-ink"/>
+    </marker>
+    <marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="mk-accent"/>
+    </marker>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="mk-warn"/>
+    </marker>
+  </defs>
+</svg>
+
+<div class="page">
+
+  <header class="masthead">
+    <div class="kicker">Target architecture</div>
+    <h1>最終成果物像 — シーンドキュメントを中心に据えた統合エディタ</h1>
+    <p class="standfirst">物体と環境を自由に編集し、複雑なシナリオを組んで検証できる状態。到達点を6枚の図で示します。中心にある一つの判断は、<strong>真実の所在をソルバの状態からシーンドキュメントへ移すこと</strong>。他はすべてその帰結です。</p>
+    <hr/>
+  </header>
+
+  <section>
+    <h2><span class="num">01</span>いま何が起きていて、何に変えるのか</h2>
+    <p>現状はソルバの状態（<code>World</code>）が真実で、UIはそこを直接読み書きします。書き出しは <code>World</code> を覗いて手書きの文字列で再構成するため、表現できないものが黙って落ちます。完成後は<strong>ドキュメントが真実</strong>で、<code>World</code> はそこから毎回コンパイルされる導出物になります。保存は手元のドキュメントを書き出すだけになり、脱落が起こりようがなくなります。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 900 348" role="img" aria-label="現状は World が真実で書き出しがボディ3形状しか通らない一方通行。完成後はシーンドキュメントが真実で、保存・読込・コンパイル・編集が閉じた輪になる。">
+          <text class="d-eb" x="24" y="20">現状</text>
+
+          <rect class="d-box" x="24" y="34" width="150" height="58" rx="3"/>
+          <text class="d-t" x="99" y="60" text-anchor="middle">scenes/*.json</text>
+          <text class="d-s" x="99" y="78" text-anchor="middle">人手で書いた43本</text>
+
+          <rect class="d-box" x="240" y="34" width="150" height="58" rx="3"/>
+          <text class="d-t" x="315" y="60" text-anchor="middle">Scenario</text>
+          <text class="d-s" x="315" y="78" text-anchor="middle">Deserialize のみ</text>
+
+          <rect class="d-box-2" x="456" y="34" width="150" height="58" rx="3"/>
+          <text class="d-t" x="531" y="60" text-anchor="middle">World</text>
+          <text class="d-s" x="531" y="78" text-anchor="middle">真実の所在</text>
+
+          <rect class="d-box" x="712" y="34" width="164" height="58" rx="3"/>
+          <text class="d-t" x="794" y="60" text-anchor="middle">エディタ UI</text>
+          <text class="d-s" x="794" y="78" text-anchor="middle">Gizmo・Inspector</text>
+
+          <line class="d-ln" x1="176" y1="66" x2="234" y2="66" marker-end="url(#ar)"/>
+          <text class="d-l" x="205" y="53" text-anchor="middle">読込</text>
+          <line class="d-ln" x1="392" y1="66" x2="450" y2="66" marker-end="url(#ar)"/>
+          <text class="d-m" x="421" y="53" text-anchor="middle">from_scenario</text>
+          <line class="d-ln" x1="708" y1="66" x2="612" y2="66" marker-end="url(#ar)" marker-start="url(#ar)"/>
+          <text class="d-l" x="659" y="53" text-anchor="middle">直接読み書き</text>
+          <text class="d-l" x="659" y="86" text-anchor="middle">手書きシム 52本</text>
+
+          <path class="d-ln-w" d="M531,92 L531,120" marker-end="url(#arw)"/>
+          <rect class="d-box" x="426" y="126" width="210" height="46" rx="3"/>
+          <text class="d-m" x="531" y="147" text-anchor="middle">export_scene_json</text>
+          <text class="d-s" x="531" y="164" text-anchor="middle">format! で手書き</text>
+          <line class="d-ln-w" x1="638" y1="149" x2="660" y2="149" marker-end="url(#arw)"/>
+          <rect class="d-box-w" x="666" y="126" width="210" height="46" rx="3"/>
+          <text class="d-lw" x="771" y="145" text-anchor="middle">bodies 3形状しか通らない</text>
+          <text class="d-s" x="771" y="163" text-anchor="middle">ジョイント・結合・流体・熱は脱落</text>
+
+          <text class="d-eb" x="24" y="208">完成後</text>
+
+          <rect class="d-box" x="24" y="236" width="150" height="58" rx="3"/>
+          <text class="d-t" x="99" y="262" text-anchor="middle">.json ファイル</text>
+          <text class="d-s" x="99" y="280" text-anchor="middle">共有・版管理</text>
+
+          <rect class="d-box-a" x="240" y="236" width="150" height="58" rx="3"/>
+          <text class="d-t" x="315" y="262" text-anchor="middle">Scene Document</text>
+          <text class="d-s" x="315" y="280" text-anchor="middle">真実の所在</text>
+
+          <rect class="d-box" x="456" y="236" width="150" height="58" rx="3"/>
+          <text class="d-t" x="531" y="262" text-anchor="middle">World</text>
+          <text class="d-s" x="531" y="280" text-anchor="middle">導出物</text>
+
+          <rect class="d-box" x="712" y="236" width="164" height="58" rx="3"/>
+          <text class="d-t" x="794" y="262" text-anchor="middle">エディタ UI</text>
+          <text class="d-s" x="794" y="280" text-anchor="middle">全ドメインを編集</text>
+
+          <line class="d-ln-a" x1="178" y1="265" x2="234" y2="265" marker-end="url(#ara)" marker-start="url(#ara)"/>
+          <text class="d-la" x="205" y="224" text-anchor="middle">保存 / 読込</text>
+          <text class="d-l" x="205" y="210" text-anchor="middle">無損失・全ドメイン</text>
+          <line class="d-ln-a" x1="392" y1="265" x2="450" y2="265" marker-end="url(#ara)"/>
+          <text class="d-m" x="421" y="224" text-anchor="middle">compile</text>
+          <line class="d-ln" x1="608" y1="265" x2="706" y2="265" marker-end="url(#ar)"/>
+          <text class="d-l" x="657" y="224" text-anchor="middle">観測（読み取り）</text>
+
+          <path class="d-ln-a" d="M794,294 L794,326 L315,326 L315,298" marker-end="url(#ara)"/>
+          <text class="d-la" x="554" y="320" text-anchor="middle">編集はドキュメントへ</text>
+        </svg>
+      </div>
+      <figcaption><b>図1 ── 一方通行が輪になる。</b>現状（上）で <code>World</code> から出ていく矢印は一本しかなく、しかも痩せている。完成後（下）はドキュメントを起点に、保存・コンパイル・観測・編集が閉じる。<code>from_scenario</code> は既に <code>Scenario → World</code> の純粋関数として存在するので、下段のコンパイル矢印は<b>新規に作るものではなく既にあるもの</b>。足りないのは逆向きの表現力（<code>Serialize</code>）と、編集がドキュメントへ戻る経路。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">02</span>編集はどこへ行くのか</h2>
+    <p>ドキュメントが真実になると「編集のたびに <code>World</code> を作り直すのか」という問いが立ちます。答えは半分だけ「はい」で、境界は都合ではなく原則で引きます。<strong>その値が <code>World</code> の構築時にしか読まれないなら再構築、実行中に意味を持つ値なら Command</strong>。後者はリプレイと決定論の記録に載ります。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 860 400" role="img" aria-label="編集操作は、World 構築時にしか読まれない値かどうかで二経路に分かれる。トポロジー編集は再構築、状態編集は Command として次ステップ先頭で適用される。">
+          <rect class="d-box" x="330" y="20" width="200" height="44" rx="3"/>
+          <text class="d-t" x="430" y="48" text-anchor="middle">編集操作</text>
+          <line class="d-ln" x1="430" y1="64" x2="430" y2="84" marker-end="url(#ar)"/>
+
+          <rect class="d-box-a" x="240" y="88" width="380" height="52" rx="3"/>
+          <text class="d-t" x="430" y="112" text-anchor="middle">その値は World の構築時にしか読まれないか</text>
+          <text class="d-s" x="430" y="130" text-anchor="middle">判定は型で表す。都合で使い分けない</text>
+
+          <path class="d-ln" d="M430,140 L430,160 L170,160 L170,184" marker-end="url(#ar)"/>
+          <text class="d-l" x="300" y="153" text-anchor="middle">はい</text>
+          <path class="d-ln" d="M430,140 L430,160 L690,160 L690,184" marker-end="url(#ar)"/>
+          <text class="d-l" x="560" y="153" text-anchor="middle">いいえ</text>
+
+          <rect class="d-box" x="40" y="186" width="260" height="114" rx="3"/>
+          <text class="d-t" x="170" y="212" text-anchor="middle">トポロジー編集 → 再構築</text>
+          <text class="d-s" x="170" y="238" text-anchor="middle">ボディの追加・削除</text>
+          <text class="d-s" x="170" y="258" text-anchor="middle">ジョイント・結合の付け外し</text>
+          <text class="d-s" x="170" y="278" text-anchor="middle">流体・熱・回路の領域</text>
+
+          <rect class="d-box" x="560" y="186" width="260" height="114" rx="3"/>
+          <text class="d-t" x="690" y="212" text-anchor="middle">状態編集 → Command</text>
+          <text class="d-s" x="690" y="238" text-anchor="middle">位置・姿勢・速度</text>
+          <text class="d-s" x="690" y="258" text-anchor="middle">質量・スイッチ・スロットル</text>
+          <text class="d-la" x="690" y="278" text-anchor="middle">リプレイと決定論の記録に載る</text>
+
+          <path class="d-ln" d="M170,300 L170,326 L390,326 L390,340" marker-end="url(#ar)"/>
+          <text class="d-l" x="280" y="320" text-anchor="middle">ドキュメントから再コンパイル</text>
+          <path class="d-ln" d="M690,300 L690,326 L470,326 L470,340" marker-end="url(#ar)"/>
+          <text class="d-l" x="580" y="320" text-anchor="middle">次 step の先頭で適用</text>
+
+          <rect class="d-box-2" x="350" y="344" width="160" height="44" rx="3"/>
+          <text class="d-t" x="430" y="372" text-anchor="middle">World</text>
+        </svg>
+      </div>
+      <figcaption><b>図2 ── 二経路と、その分け方。</b>左は素直で安全、右は速く記録に残る。<code>World</code> は <code>Clone</code> を持ち <code>snapshot()/restore()</code> が既にあり、Timeline が1秒ごとに丸ごと複製しているので、<b>作り直しはこのコードベースで日常的に起きている操作</b>。ただし3D格子流体（64³で206ms/step）のような重いシーンでは再構築が効かないため、そこは左経路でも差分適用の速い道を用意する。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">03</span>編集欄はどこから生えるのか</h2>
+    <p>いま機能を1つ足すには <code>sim-wasm</code> に専用メソッドを1本、TypeScript にフォームを1枚書きます。すでに公開メソッドは118本・2,798行。ジョイント7種と結合15種を同じやり方で足したら破綻します。だから境界を <code>schema()</code> / <code>read()</code> / <code>apply()</code> の3つに畳み、<strong>Inspector のフォームをスキーマから生成</strong>します。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 860 276" role="img" aria-label="現状は機能ごとに wasm シムと TS フォームを手書きするため費用が機能数に比例する。完成後はどの機能も同じ schema・read・apply を通り、Inspector のフォームが自動生成される。">
+          <text class="d-eb" x="24" y="24">現状 ── 機能ごとに2箇所を手書き</text>
+
+          <rect class="d-box" x="24" y="46" width="92" height="34" rx="3"/>
+          <text class="d-s" x="70" y="68" text-anchor="middle">ジョイント</text>
+          <line class="d-ln" x1="118" y1="63" x2="142" y2="63" marker-end="url(#ar)"/>
+          <rect class="d-box" x="144" y="46" width="106" height="34" rx="3"/>
+          <text class="d-m" x="197" y="68" text-anchor="middle">wasm シム</text>
+          <line class="d-ln" x1="252" y1="63" x2="276" y2="63" marker-end="url(#ar)"/>
+          <rect class="d-box" x="278" y="46" width="106" height="34" rx="3"/>
+          <text class="d-m" x="331" y="68" text-anchor="middle">TS フォーム</text>
+
+          <rect class="d-box" x="24" y="92" width="92" height="34" rx="3"/>
+          <text class="d-s" x="70" y="114" text-anchor="middle">結合</text>
+          <line class="d-ln" x1="118" y1="109" x2="142" y2="109" marker-end="url(#ar)"/>
+          <rect class="d-box" x="144" y="92" width="106" height="34" rx="3"/>
+          <text class="d-m" x="197" y="114" text-anchor="middle">wasm シム</text>
+          <line class="d-ln" x1="252" y1="109" x2="276" y2="109" marker-end="url(#ar)"/>
+          <rect class="d-box" x="278" y="92" width="106" height="34" rx="3"/>
+          <text class="d-m" x="331" y="114" text-anchor="middle">TS フォーム</text>
+
+          <rect class="d-box" x="24" y="138" width="92" height="34" rx="3"/>
+          <text class="d-s" x="70" y="160" text-anchor="middle">流体領域</text>
+          <line class="d-ln" x1="118" y1="155" x2="142" y2="155" marker-end="url(#ar)"/>
+          <rect class="d-box" x="144" y="138" width="106" height="34" rx="3"/>
+          <text class="d-m" x="197" y="160" text-anchor="middle">wasm シム</text>
+          <line class="d-ln" x1="252" y1="155" x2="276" y2="155" marker-end="url(#ar)"/>
+          <rect class="d-box" x="278" y="138" width="106" height="34" rx="3"/>
+          <text class="d-m" x="331" y="160" text-anchor="middle">TS フォーム</text>
+
+          <text class="d-s" x="204" y="196" text-anchor="middle">⋮</text>
+          <text class="d-lw" x="204" y="222" text-anchor="middle">費用は機能数に比例する</text>
+          <text class="d-s" x="204" y="242" text-anchor="middle">現在 118本 / 2,798行</text>
+
+          <line class="d-rule" x1="420" y1="16" x2="420" y2="256"/>
+
+          <text class="d-eb" x="452" y="24">完成後 ── 定義は1箇所</text>
+
+          <rect class="d-box" x="452" y="46" width="106" height="34" rx="3"/>
+          <text class="d-s" x="505" y="68" text-anchor="middle">ジョイント</text>
+          <rect class="d-box" x="452" y="92" width="106" height="34" rx="3"/>
+          <text class="d-s" x="505" y="114" text-anchor="middle">結合</text>
+          <rect class="d-box" x="452" y="138" width="106" height="34" rx="3"/>
+          <text class="d-s" x="505" y="160" text-anchor="middle">流体領域</text>
+
+          <path class="d-ln" d="M560,63 L590,63 L590,105 L616,105" marker-end="url(#ar)"/>
+          <path class="d-ln" d="M560,109 L616,109" marker-end="url(#ar)"/>
+          <path class="d-ln" d="M560,155 L590,155 L590,113 L616,113" marker-end="url(#ar)"/>
+
+          <rect class="d-box-a" x="618" y="66" width="116" height="86" rx="3"/>
+          <text class="d-m" x="676" y="94" text-anchor="middle">schema()</text>
+          <text class="d-m" x="676" y="114" text-anchor="middle">read()</text>
+          <text class="d-m" x="676" y="134" text-anchor="middle">apply()</text>
+
+          <line class="d-ln-a" x1="736" y1="109" x2="758" y2="109" marker-end="url(#ara)"/>
+          <rect class="d-box" x="760" y="82" width="76" height="54" rx="3"/>
+          <text class="d-s" x="798" y="104" text-anchor="middle">Inspector</text>
+          <text class="d-s" x="798" y="122" text-anchor="middle">フォーム</text>
+
+          <text class="d-la" x="644" y="222" text-anchor="middle">費用は機能数によらず一定</text>
+          <text class="d-s" x="644" y="242" text-anchor="middle">Rust に Desc を定義した時点で編集欄が生える</text>
+        </svg>
+      </div>
+      <figcaption><b>図3 ── 選んでいるのは費用の傾き。</b>左右で違うのは箱の数ではなく、<b>新しい機能を足したときに何本の線が増えるか</b>。左は2本、右はゼロ。serde が既に55構造体を記述しているので、右のスキーマ生成はほぼ機械作業になる。飛行機の空力面や推進を足すときの費用も、ここで決まる。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">04</span>検証はどう回るのか</h2>
+    <p>「複雑なシナリオを検証できる」の中身です。合格基準をシーンに書けるようにし、パラメータを振って何通りも走らせ、結果を重ねて比べる。決定論がビット単位で保証されているエンジンなので、<strong>何を変えたら何が変わったかを厳密に切り分けられる</strong>——これは Unity には無い、このエンジン固有の強みです。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 880 322" role="img" aria-label="シーンドキュメントに合格基準を書き、パラメータを掃引してヘッドレスで並列実行し、プローブ履歴と状態ハッシュを回収して合否と差分を判定し、結果をエディタに返す循環。二つのCIゲートがこの輪を守る。">
+          <rect class="d-box-a" x="24" y="48" width="180" height="60" rx="3"/>
+          <text class="d-t" x="114" y="74" text-anchor="middle">Scene Document</text>
+          <text class="d-s" x="114" y="92" text-anchor="middle">+ 合格基準（期待値と許容誤差）</text>
+
+          <line class="d-ln" x1="210" y1="78" x2="242" y2="78" marker-end="url(#ar)"/>
+          <text class="d-l" x="226" y="40" text-anchor="middle">宣言</text>
+
+          <rect class="d-box" x="248" y="48" width="170" height="60" rx="3"/>
+          <text class="d-t" x="333" y="74" text-anchor="middle">パラメータ掃引</text>
+          <text class="d-s" x="333" y="92" text-anchor="middle">変える値と範囲</text>
+
+          <line class="d-ln" x1="424" y1="78" x2="456" y2="78" marker-end="url(#ar)"/>
+          <text class="d-l" x="440" y="40" text-anchor="middle">展開</text>
+
+          <rect class="d-box" x="462" y="48" width="164" height="60" rx="3"/>
+          <text class="d-t" x="544" y="74" text-anchor="middle">ヘッドレス実行 ×N</text>
+          <text class="d-s" x="544" y="92" text-anchor="middle">固定 dt・同一シード</text>
+
+          <line class="d-ln" x1="632" y1="78" x2="664" y2="78" marker-end="url(#ar)"/>
+          <text class="d-l" x="648" y="40" text-anchor="middle">回収</text>
+
+          <rect class="d-box" x="670" y="48" width="186" height="60" rx="3"/>
+          <text class="d-t" x="763" y="74" text-anchor="middle">プローブ履歴 + hash</text>
+          <text class="d-s" x="763" y="92" text-anchor="middle">実行ごとに1本</text>
+
+          <path class="d-ln" d="M763,108 L763,140 L500,140 L500,164" marker-end="url(#ar)"/>
+
+          <rect class="d-box" x="340" y="166" width="320" height="56" rx="3"/>
+          <text class="d-t" x="500" y="192" text-anchor="middle">合否判定・系列の重ね描き・実行間の差分</text>
+          <text class="d-s" x="500" y="210" text-anchor="middle">どの条件で基準を割ったかが一目で出る</text>
+
+          <path class="d-ln-a" d="M340,194 L114,194 L114,112" marker-end="url(#ara)"/>
+          <text class="d-la" x="227" y="188" text-anchor="middle">結果をエディタへ返す</text>
+
+          <rect class="d-box-o" x="24" y="248" width="410" height="52" rx="3"/>
+          <text class="d-la" x="44" y="270">CI ゲート ①</text>
+          <text class="d-s" x="44" y="290">編集 → 保存 → 読込 → state_hash が一致する</text>
+
+          <rect class="d-box-o" x="446" y="248" width="410" height="52" rx="3"/>
+          <text class="d-la" x="466" y="270">CI ゲート ②</text>
+          <text class="d-s" x="466" y="290">43シーンを Desc API だけで構築できる</text>
+        </svg>
+      </div>
+      <figcaption><b>図4 ── 輪と、それを守る二本の杭。</b>下の2つは設計書に文章としては既に書かれていて、テストになっていないだけ（<code>01-editor.md</code> §9 と <code>04-world-api.md</code> §5）。これを最初に Red で置くことで、「エディタが弱い」という終わりのない話が「この2本が緑になれば土台は完成」という有限の話になる。そして<b>同じ穴は二度と開かない</b>。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">05</span>画面としての完成像</h2>
+    <p>パネルの骨格は既に Unity 風に揃っていて、操作性はQAで28項目すべて通っています。変わるのは中身の通り方です。下図の色つきの箇所が今回作る部分になります。</p>
+    <p>ただし <strong>Scene View は器としても不完全</strong>です。描けるのは球・箱・平面の3種だけで、カプセルはスポーンパレット経由の固定寸法のときしか描かれず、Compound と ConvexMesh には生成コードがありません。しかも <code>ShapeJson</code> は増分Lで <code>Capsule</code> を受け付けるようになったのに TypeScript 側の型は3種のままなので、<strong>カプセルを含むシーンを読み込むと物理は正しく動くのに画面には直径0.6mの球が出ます</strong>。出荷済み43シーンがカプセルを使っていないため、今日はまだ誰も踏んでいないだけです。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 900 548" role="img" aria-label="完成時のエディタ画面の配置図。ツールバー、Hierarchy、Scene View、Inspector、Timeline、Console、検証パネルからなり、ジョイント・結合・Probe・環境設定・Add Component・検証パネルが新設部分。">
+          <rect class="d-box-2" x="24" y="24" width="852" height="38" rx="3"/>
+          <text class="d-s" x="40" y="48">▶  ⏸  ⏭</text>
+          <text class="d-s" x="130" y="48">時間倍率</text>
+          <text class="d-s" x="212" y="48">Scene</text>
+          <text class="d-s" x="278" y="48">Layout</text>
+          <text class="d-m" x="352" y="48">hash: 0xa8b1…</text>
+          <text class="d-la" x="500" y="48">★ 環境設定（重力ベクトル・大気・風・水域・周囲温度）</text>
+
+          <rect class="d-box" x="24" y="74" width="210" height="310" rx="3"/>
+          <text class="d-t" x="40" y="98">Hierarchy</text>
+          <text class="d-s" x="46" y="126">Bodies</text>
+          <text class="d-la" x="46" y="150">★ Joints</text>
+          <text class="d-la" x="46" y="174">★ Couplings</text>
+          <text class="d-s" x="46" y="198">Fluids</text>
+          <text class="d-s" x="46" y="222">Thermal</text>
+          <text class="d-s" x="46" y="246">Circuits</text>
+          <text class="d-la" x="46" y="270">★ Probes</text>
+          <text class="d-s" x="46" y="294">Frames</text>
+          <text class="d-s" x="46" y="318">Materials</text>
+
+          <rect class="d-box" x="244" y="74" width="396" height="310" rx="3"/>
+          <text class="d-t" x="260" y="98">Scene View</text>
+          <text class="d-s" x="442" y="222" text-anchor="middle">3D ビューポート・Gizmo・オーバーレイ</text>
+          <text class="d-s" x="442" y="244" text-anchor="middle">接触点／速度／拘束線／場／重心／フレーム軸</text>
+          <text class="d-la" x="442" y="266" text-anchor="middle">★ 形状の描画（Capsule・Compound・ConvexMesh）</text>
+          <text class="d-la" x="442" y="288" text-anchor="middle">★ 風と大気の可視化・チェイスカメラ</text>
+
+          <rect class="d-box" x="650" y="74" width="226" height="310" rx="3"/>
+          <text class="d-t" x="666" y="98">Inspector</text>
+          <text class="d-s" x="672" y="126">Transform</text>
+          <text class="d-s" x="672" y="150">RigidBody</text>
+          <text class="d-la" x="672" y="174">★ Joint</text>
+          <text class="d-la" x="672" y="198">★ Coupling</text>
+          <text class="d-la" x="672" y="222">★ Probe</text>
+          <text class="d-s" x="672" y="246">Approximation バッジ</text>
+          <rect class="d-box-o" x="666" y="266" width="194" height="34" rx="3"/>
+          <text class="d-la" x="763" y="288" text-anchor="middle">★ + Add Component</text>
+          <text class="d-s" x="763" y="322" text-anchor="middle">フォームはスキーマから生成</text>
+
+          <rect class="d-box-2" x="24" y="394" width="852" height="42" rx="3"/>
+          <text class="d-s" x="40" y="420">Timeline ── スクラブ・ブックマーク・Replay 再生</text>
+
+          <rect class="d-box" x="24" y="448" width="418" height="72" rx="3"/>
+          <text class="d-t" x="40" y="472">Console</text>
+          <text class="d-s" x="40" y="496">接触・イベント・診断・CFL 違反・発散警告</text>
+
+          <rect class="d-box" x="458" y="448" width="418" height="72" rx="3"/>
+          <text class="d-t" x="474" y="472">Probe グラフ<tspan class="d-star">　★ 検証</tspan></text>
+          <text class="d-s" x="474" y="496">合格基準の合否・掃引結果の重ね描き・実行間の差分</text>
+
+          <text class="d-la" x="24" y="540">★ = 今回作る部分。パネルの骨格と操作性は既にある</text>
+        </svg>
+      </div>
+      <figcaption><b>図5 ── 完成時の画面配置。</b>新設は7箇所で、レイアウトは変わらない。<code>Add Component</code> は設計書 §1.3 が明記しながら未実装のもので、これが入ると Hierarchy の空のサブツリー（Joints・Couplings・Probes）が初めて中身を持つ。形状の描画がここに入るのは、<b>Rust と TypeScript に独立した形状パーサが2つあり、手で同期させる契約になっている</b>から——これは図3で畳む境界の問題がそのまま描画側に現れたもので、直し方も同じ（形状も <code>describe()</code> から受け取り、TS 側のパーサを捨てる）。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">06</span>形状 ── 描画の穴の下に、物理の穴がある</h2>
+    <p>形状が描けないのは表層でした。<code>Shape</code> は6種に育っていますが、<strong>ワークスペースに残る <code>todo!()</code> は4箇所で、その4箇所すべてが Compound と ConvexMesh</strong> です。AABB・接触生成・体積・慣性のどれも未実装で、質量を訊いた瞬間に panic します。つまりこの2種は<strong>型としてしか存在しない</strong>。</p>
+    <p>さらに、形状の表現は engine の中に4つあり、どれも <code>Shape</code> から導出されていません。シーンJSONの <code>ShapeJson</code>、TypeScript の独自パーサ、そしてパストレーサの <code>Primitive</code>。<code>sim-render</code> は <code>sim-mechanics</code> に依存すらしていないので、<strong>パストレーサが物理シーンを描く経路は存在しません</strong>（D40–D43 はシーンを手で組んでいます）。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 880 396" role="img" aria-label="6つの形状と5つの能力の対応表。球・箱・平面は全対応、カプセルは Scene View の描画のみ限定、Compound と ConvexMesh は全項目が未実装で型としてしか存在しない。">
+          <text class="d-s" x="246" y="24" text-anchor="middle">物理</text>
+          <text class="d-t" x="246" y="42" text-anchor="middle">AABB</text>
+          <text class="d-s" x="384" y="24" text-anchor="middle">物理</text>
+          <text class="d-t" x="384" y="42" text-anchor="middle">接触生成</text>
+          <text class="d-s" x="522" y="24" text-anchor="middle">物理</text>
+          <text class="d-t" x="522" y="42" text-anchor="middle">質量・慣性</text>
+          <text class="d-s" x="660" y="24" text-anchor="middle">保存</text>
+          <text class="d-t" x="660" y="42" text-anchor="middle">シーンJSON</text>
+          <text class="d-s" x="798" y="24" text-anchor="middle">編集画面</text>
+          <text class="d-t" x="798" y="42" text-anchor="middle">Scene View</text>
+
+          <rect x="24" y="222" width="848" height="84" fill="var(--warn-soft)"/>
+          <line class="d-rule" x1="24" y1="54" x2="872" y2="54"/>
+
+          <text class="d-m" x="168" y="80" text-anchor="end">Sphere</text>
+          <text class="d-l" x="246" y="80" text-anchor="middle">●</text>
+          <text class="d-l" x="384" y="80" text-anchor="middle">●</text>
+          <text class="d-l" x="522" y="80" text-anchor="middle">●</text>
+          <text class="d-l" x="660" y="80" text-anchor="middle">●</text>
+          <text class="d-l" x="798" y="80" text-anchor="middle">●</text>
+          <line class="d-rule" x1="24" y1="96" x2="872" y2="96"/>
+
+          <text class="d-m" x="168" y="122" text-anchor="end">Box</text>
+          <text class="d-l" x="246" y="122" text-anchor="middle">●</text>
+          <text class="d-l" x="384" y="122" text-anchor="middle">●</text>
+          <text class="d-l" x="522" y="122" text-anchor="middle">●</text>
+          <text class="d-l" x="660" y="122" text-anchor="middle">●</text>
+          <text class="d-l" x="798" y="122" text-anchor="middle">●</text>
+          <line class="d-rule" x1="24" y1="138" x2="872" y2="138"/>
+
+          <text class="d-m" x="168" y="164" text-anchor="end">Capsule</text>
+          <text class="d-l" x="246" y="164" text-anchor="middle">●</text>
+          <text class="d-l" x="384" y="164" text-anchor="middle">●</text>
+          <text class="d-l" x="522" y="164" text-anchor="middle">●</text>
+          <text class="d-l" x="660" y="164" text-anchor="middle">●</text>
+          <text class="d-lw" x="798" y="164" text-anchor="middle">△ 固定寸法のみ</text>
+          <line class="d-rule" x1="24" y1="180" x2="872" y2="180"/>
+
+          <text class="d-m" x="168" y="206" text-anchor="end">Plane</text>
+          <text class="d-l" x="246" y="206" text-anchor="middle">●</text>
+          <text class="d-l" x="384" y="206" text-anchor="middle">●</text>
+          <text class="d-l" x="522" y="206" text-anchor="middle">— static 専用</text>
+          <text class="d-l" x="660" y="206" text-anchor="middle">●</text>
+          <text class="d-l" x="798" y="206" text-anchor="middle">●</text>
+          <line class="d-rule" x1="24" y1="222" x2="872" y2="222"/>
+
+          <text class="d-m" x="168" y="248" text-anchor="end">Compound</text>
+          <text class="d-lw" x="246" y="248" text-anchor="middle">todo!()</text>
+          <text class="d-lw" x="384" y="248" text-anchor="middle">todo!()</text>
+          <text class="d-lw" x="522" y="248" text-anchor="middle">todo!()</text>
+          <text class="d-lw" x="660" y="248" text-anchor="middle">✕</text>
+          <text class="d-lw" x="798" y="248" text-anchor="middle">✕</text>
+          <line class="d-rule" x1="24" y1="264" x2="872" y2="264"/>
+
+          <text class="d-m" x="168" y="290" text-anchor="end">ConvexMesh</text>
+          <text class="d-lw" x="246" y="290" text-anchor="middle">todo!()</text>
+          <text class="d-lw" x="384" y="290" text-anchor="middle">todo!()</text>
+          <text class="d-lw" x="522" y="290" text-anchor="middle">todo!()</text>
+          <text class="d-lw" x="660" y="290" text-anchor="middle">✕</text>
+          <text class="d-lw" x="798" y="290" text-anchor="middle">✕</text>
+          <line class="d-rule" x1="24" y1="306" x2="872" y2="306"/>
+
+          <rect class="d-box-w" x="24" y="322" width="848" height="48" rx="3"/>
+          <text class="d-lw" x="44" y="342">パストレーサ（sim-render）はこの表に載らない</text>
+          <text class="d-s" x="44" y="360">Sphere / Quad / Triangle という別の形状型を持ち、sim-mechanics に依存していない — 物理シーンを描く経路が存在しない</text>
+
+          <text class="d-l" x="24" y="390">● 対応　／　△ 限定　／　✕ 未対応　／　todo!() = 型はあるが実装が無く、呼ぶと panic する</text>
+        </svg>
+      </div>
+      <figcaption><b>図6 ── オレンジの帯が「型としてしか存在しない」範囲。</b>この2行が埋まらない限り、造形しても剛体にはならない。列は互いに独立した表現で、<code>Shape</code> から生成されるものは一つもない——<b>図3で畳もうとしている境界の問題が、そのまま形状に現れている</b>。直し方も同じで、形状も <code>describe()</code> から受け取り、TypeScript 側のパーサを捨てる。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">07</span>全ドメインが同じ形をしている</h2>
+    <p>形状だけの話ではありません。全ドメインを「ソルバが持つ種別数 / シーンJSONが書ける数 / UIから作れる数」で並べると、どの領域も同じ形をしています。<strong>シーンJSONはソルバによく追随していて（結合は14種すべて）、落ちているのは常にUIの側</strong>です。</p>
+    <p>電子回路だけが例外的に進んでいます。ノード数を決めて任意のトポロジーを組める<strong>本物の自由配線エディタ</strong>があり、組んだ回路をMNAが解いて解析解と厳密一致することがPlaywrightで検証済みです。ただし素子は抵抗・電圧源・スイッチの3種だけ。皮肉なことに、<strong>D19「電気工作台」自身がコンデンサとダイオードを使っているので、そのD19をUIで組み直すことはできません</strong>。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 880 580" role="img" aria-label="12領域について、ソルバが持つ種別数・シーンJSONが書ける数・UIから作れる数を並べた表。合計はソルバ51、シーンJSON46、UI9で、UIだけが極端に少ない。">
+          <text class="d-t" x="280" y="44" text-anchor="middle">ソルバ</text>
+          <text class="d-t" x="400" y="44" text-anchor="middle">シーンJSON</text>
+          <text class="d-t" x="520" y="44" text-anchor="middle">UIから作れる</text>
+          <text class="d-s" x="580" y="44">備考</text>
+          <line class="d-rule" x1="24" y1="56" x2="856" y2="56"/>
+
+          <text class="d-s" x="204" y="76" text-anchor="end">形状</text>
+          <text class="d-l" x="280" y="76" text-anchor="middle">6</text>
+          <text class="d-l" x="400" y="76" text-anchor="middle">4</text>
+          <text class="d-lw" x="520" y="76" text-anchor="middle">3</text>
+          <text class="d-s" x="580" y="76">固定寸法。2種は todo!()</text>
+
+          <text class="d-s" x="204" y="106" text-anchor="end">ジョイント</text>
+          <text class="d-l" x="280" y="106" text-anchor="middle">5</text>
+          <text class="d-l" x="400" y="106" text-anchor="middle">4</text>
+          <text class="d-lw" x="520" y="106" text-anchor="middle">1</text>
+          <text class="d-s" x="580" y="106">振り子の固定構成のみ</text>
+
+          <text class="d-s" x="204" y="136" text-anchor="end">結合</text>
+          <text class="d-l" x="280" y="136" text-anchor="middle">14</text>
+          <text class="d-l" x="400" y="136" text-anchor="middle">14</text>
+          <text class="d-lw" x="520" y="136" text-anchor="middle">0</text>
+          <text class="d-s" x="580" y="136">JSONは全種そろう</text>
+
+          <text class="d-s" x="204" y="166" text-anchor="end">回路素子</text>
+          <text class="d-l" x="280" y="166" text-anchor="middle">7</text>
+          <text class="d-l" x="400" y="166" text-anchor="middle">6</text>
+          <text class="d-la" x="520" y="166" text-anchor="middle">3</text>
+          <text class="d-la" x="580" y="166">唯一の自由配線エディタ</text>
+
+          <text class="d-s" x="204" y="196" text-anchor="end">流体</text>
+          <text class="d-l" x="280" y="196" text-anchor="middle">4</text>
+          <text class="d-l" x="400" y="196" text-anchor="middle">4</text>
+          <text class="d-lw" x="520" y="196" text-anchor="middle">1</text>
+          <text class="d-s" x="580" y="196">SPH塊のスポーンのみ</text>
+
+          <text class="d-s" x="204" y="226" text-anchor="end">熱</text>
+          <text class="d-l" x="280" y="226" text-anchor="middle">3</text>
+          <text class="d-l" x="400" y="226" text-anchor="middle">3</text>
+          <text class="d-lw" x="520" y="226" text-anchor="middle">0</text>
+          <text class="d-s" x="580" y="226">ヒーターのON/OFFのみ</text>
+
+          <text class="d-s" x="204" y="256" text-anchor="end">電磁場</text>
+          <text class="d-l" x="280" y="256" text-anchor="middle">2</text>
+          <text class="d-l" x="400" y="256" text-anchor="middle">1</text>
+          <text class="d-lw" x="520" y="256" text-anchor="middle">0</text>
+          <text class="d-s" x="580" y="256">静電場はJSONにも無い</text>
+
+          <text class="d-s" x="204" y="286" text-anchor="end">量子</text>
+          <text class="d-l" x="280" y="286" text-anchor="middle">2</text>
+          <text class="d-l" x="400" y="286" text-anchor="middle">2</text>
+          <text class="d-lw" x="520" y="286" text-anchor="middle">0</text>
+
+          <text class="d-s" x="204" y="316" text-anchor="end">統計</text>
+          <text class="d-l" x="280" y="316" text-anchor="middle">3</text>
+          <text class="d-l" x="400" y="316" text-anchor="middle">3</text>
+          <text class="d-lw" x="520" y="316" text-anchor="middle">0</text>
+
+          <text class="d-s" x="204" y="346" text-anchor="end">天体</text>
+          <text class="d-l" x="280" y="346" text-anchor="middle">1</text>
+          <text class="d-l" x="400" y="346" text-anchor="middle">1</text>
+          <text class="d-lw" x="520" y="346" text-anchor="middle">0</text>
+
+          <text class="d-s" x="204" y="376" text-anchor="end">ソフトボディ</text>
+          <text class="d-l" x="280" y="376" text-anchor="middle">1</text>
+          <text class="d-l" x="400" y="376" text-anchor="middle">1</text>
+          <text class="d-lw" x="520" y="376" text-anchor="middle">0</text>
+
+          <text class="d-s" x="204" y="406" text-anchor="end">環境（重力・大気・水域）</text>
+          <text class="d-l" x="280" y="406" text-anchor="middle">3</text>
+          <text class="d-l" x="400" y="406" text-anchor="middle">3</text>
+          <text class="d-lw" x="520" y="406" text-anchor="middle">1</text>
+          <text class="d-s" x="580" y="406">重力の大きさのみ</text>
+
+          <line class="d-rule" x1="24" y1="420" x2="856" y2="420"/>
+          <text class="d-t" x="204" y="446" text-anchor="end">合計</text>
+          <text class="d-t" x="280" y="446" text-anchor="middle">51</text>
+          <text class="d-t" x="400" y="446" text-anchor="middle">46</text>
+          <text class="d-lw" x="520" y="446" text-anchor="middle" style="font-size:13px">9</text>
+
+          <text class="d-s" x="264" y="492" text-anchor="end">ソルバ</text>
+          <rect class="d-box-2" x="280" y="478" width="500" height="18" rx="2"/>
+          <text class="d-m" x="792" y="492">51</text>
+
+          <text class="d-s" x="264" y="522" text-anchor="end">シーンJSON</text>
+          <rect class="d-box-2" x="280" y="508" width="451" height="18" rx="2"/>
+          <text class="d-m" x="743" y="522">46</text>
+
+          <text class="d-s" x="264" y="552" text-anchor="end">UIから作れる</text>
+          <rect x="280" y="538" width="88" height="18" rx="2" fill="var(--warn)"/>
+          <text class="d-m" x="380" y="552">9</text>
+
+          <text class="d-l" x="24" y="574">単位は「その領域で選べる種別の数」。ソルバに実装があってもJSONやUIに口が無ければ数えない</text>
+        </svg>
+      </div>
+      <figcaption><b>図7 ── 落ちているのは常にUIの側。</b>シーンJSONはソルバの90%に追随している（46/51）のに、UIは18%（9/51）で止まる。これは<b>能力の差ではなく、口の作り方の差</b>——JSONは serde が構造体から自動で生成するのに対し、UIだけが手書きだから。図3で境界を畳む理由がここに出ている。回路が唯一まともなのは、素子を「種別＋ノード＋値」というスキーマ的なフォームで扱う一般形にたどり着いたからで、<b>正解のかたちは既にこのリポジトリの中にある</b>。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">08</span>造形（3D CAD）をどこに置くか</h2>
+    <p>造形はこのエンジンでは飾りになりません。質量を<strong>形状の体積 × 材料密度</strong>から算出するので、造形すると本物の質量と慣性テンソルが出ます。「アルミの翼を鋼で作り直したら重心が動いて失速特性が変わる」が実験できる——これは <code>01-vision.md</code> の「現実の写像」そのものです。</p>
+    <p>ただし判断が要る点が一つ。造形の結果をドキュメントに<strong>レシピ（操作列）で持つか、ベイクした凸片で持つか</strong>。レシピだけを持つと読み込みのたびにカーネルを再実行することになり、数値的に脆いブーリアンが決定論の経路に入ります。<strong>両方を持ち、境界をドキュメントの内側に引く</strong>のが答えです。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 880 300" role="img" aria-label="造形UIがシーンドキュメント内のレシピを編集し、凸分解カーネルによる明示的なベイクを経てベイク済み凸片になる。決定論の境界はドキュメントの内側、レシピと凸片のあいだを通る。">
+          <line class="d-ln-a" x1="405" y1="14" x2="405" y2="268" stroke-dasharray="6 5"/>
+          <text class="d-la" x="405" y="288" text-anchor="middle">決定論の境界</text>
+
+          <rect class="d-box-w" x="196" y="30" width="190" height="48" rx="3"/>
+          <text class="d-t" x="291" y="52" text-anchor="middle">凸分解・ブーリアン</text>
+          <text class="d-s" x="291" y="69" text-anchor="middle">数値的に脆い部分</text>
+
+          <rect class="d-box-o" x="170" y="110" width="470" height="120" rx="5"/>
+          <text class="d-la" x="184" y="128">Scene Document</text>
+
+          <rect class="d-box" x="24" y="142" width="130" height="60" rx="3"/>
+          <text class="d-t" x="89" y="168" text-anchor="middle">造形UI</text>
+          <text class="d-s" x="89" y="186" text-anchor="middle">押し出し・配置</text>
+
+          <rect class="d-box" x="196" y="142" width="190" height="60" rx="3"/>
+          <text class="d-t" x="291" y="168" text-anchor="middle">造形レシピ</text>
+          <text class="d-s" x="291" y="186" text-anchor="middle">操作列（あとで編集できる）</text>
+
+          <rect class="d-box-a" x="424" y="142" width="190" height="60" rx="3"/>
+          <text class="d-t" x="519" y="168" text-anchor="middle">ベイク済み凸片</text>
+          <text class="d-s" x="519" y="186" text-anchor="middle">GJK / EPA が食える形</text>
+
+          <rect class="d-box" x="700" y="142" width="150" height="60" rx="3"/>
+          <text class="d-t" x="775" y="168" text-anchor="middle">World</text>
+          <text class="d-s" x="775" y="186" text-anchor="middle">凸片しか見ない</text>
+
+          <line class="d-ln" x1="158" y1="172" x2="192" y2="172" marker-end="url(#ar)"/>
+          <text class="d-l" x="175" y="134" text-anchor="middle">編集</text>
+
+          <path class="d-ln-w" d="M291,142 L291,82" marker-end="url(#arw)"/>
+          <path class="d-ln-w" d="M386,54 L519,54 L519,138" marker-end="url(#arw)"/>
+          <text class="d-lw" x="460" y="44" text-anchor="middle">ベイク（明示操作）</text>
+
+          <line class="d-ln-a" x1="618" y1="172" x2="696" y2="172" marker-end="url(#ara)"/>
+          <text class="d-m" x="657" y="134" text-anchor="middle">compile</text>
+
+          <text class="d-s" x="250" y="258" text-anchor="middle">カーネルの揺れはここで止まる</text>
+          <text class="d-la" x="560" y="258" text-anchor="middle">state_hash はここから右で守られる</text>
+        </svg>
+      </div>
+      <figcaption><b>図8 ── 境界はドキュメントの内側を通る。</b>レシピは編集のために残し、ソルバが読むのはベイク済みの凸片だけ。再ベイクは明示操作なので、カーネルを差し替えても<b>ベイクし直すまで結果は1ビットも動かない</b>。Blender のモディファイア＋適用、Unity のプレハブ＋ベイクと同じ形で、図1のドキュメント中心アーキテクチャがそのまま受け止める。</figcaption>
+    </figure>
+
+    <p>段階は4つに分かれ、価値の大半は前半にあります。<strong>⓪ <code>todo!()</code> 4箇所を埋める</strong>（これ抜きでは何も動かない）→ <strong>① Compound を UI で組む</strong>（部品の配置・スナップ・対称ミラー。カーネル不要でここまでで実用性の8割）→ ② スケッチと押し出し → ③ ブーリアン。</p>
+    <p>②以降は正直に重い。凸でない形は GJK/EPA が扱えないので<strong>凸分解が必ず挟まり</strong>、「外部クレートは実質ゼロ」という本プロジェクトの方針を踏まえると自前実装になります。<strong>物理ソルバ1ドメイン分の仕事</strong>で、勢いで入る領域ではありません。翼型を手で数値指定して不便を感じたときが、着手すべき時期の合図です。</p>
+  </section>
+
+  <section>
+    <h2><span class="num">09</span>何が変わるか</h2>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th scope="col"></th><th scope="col">現状</th><th scope="col">完成後</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">シーンの保存</th><td class="now">bodies の3形状のみ。ジョイント・結合・流体・熱・回路・プローブは脱落する</td><td class="then">全ドメインを無損失。読み直して state_hash が一致する</td></tr>
+          <tr><th scope="row">ジョイント</th><td class="now">UIから作れない（振り子スポーンが内部で作る1本のみ）</td><td class="then">Add Component から7種を追加・編集</td></tr>
+          <tr><th scope="row">結合15種</th><td class="now">シーンJSONを手書きするしかない</td><td class="then">同上。フォームはスキーマから自動生成される</td></tr>
+          <tr><th scope="row">形状</th><td class="now">実用は球・箱・平面のみ。Compound と ConvexMesh は型だけで、質量を訊くと panic する</td><td class="then">6種すべてが動的剛体になる。部品を組んで本物の慣性テンソルを持たせられる</td></tr>
+          <tr><th scope="row">電子回路</th><td class="now">自由配線で組めるが素子は3種。削除も値の編集もできず、組んだ回路は保存されない</td><td class="then">7素子すべて。削除・値編集・2D回路図サブモード。シーンに保存される</td></tr>
+          <tr><th scope="row">環境</th><td class="now">重力の大きさと dt だけ</td><td class="then">重力ベクトル・大気（高度依存）・風の場・水域・周囲温度</td></tr>
+          <tr><th scope="row">観測</th><td class="now">シーンJSONに書いたプローブを読むだけ。容量600固定、軸も単位も無い</td><td class="then">任意に追加、容量可変、時間軸と単位つき、CSV とグラフ</td></tr>
+          <tr><th scope="row">検証</th><td class="now">Rust の <code>#[test]</code> を書く。UIからは何も検証できない</td><td class="then">シーンに合格基準を書く。掃引と差分がUIで回る</td></tr>
+          <tr><th scope="row">飛行機</th><td class="now">不可能（空力がトルクを生まず、推進も操縦入力も無い）</td><td class="then">空力面と推進を Desc として足すだけ。UIは自動で付いてくる</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">10</span>どの順で到達するか</h2>
+    <p>層ごとに積み上げず、<strong>全層を薄く貫く縦串</strong>を1本ずつ通します。積み上げ式だと下2層が終わるまで誰も価値を確認できず、判断を誤っても分かりません。最初の縦串をジョイント（＝車の組み立て）にするのは、それが<strong>他のボディを参照する</strong>ため、安定IDから逃げられなくなるからです。合格判定も明快になります——「UIで車を組み立てて、保存して、読み直したら D24 と同じ挙動になる」。</p>
+
+    <figure>
+      <div class="figframe">
+        <svg class="d" viewBox="0 0 880 342" role="img" aria-label="6つの層と5つの縦串の対応表。第一の縦串ジョイントは全層を新規に作り、以降の縦串は境界とUIが自動的に満たされる。最後の飛行機は物理ドメインと検証だけを新規に作る。">
+          <text class="d-m" x="212" y="26" text-anchor="middle">①</text>
+          <text class="d-t" x="212" y="46" text-anchor="middle">ジョイント</text>
+          <text class="d-m" x="346" y="26" text-anchor="middle">②</text>
+          <text class="d-t" x="346" y="46" text-anchor="middle">結合15種</text>
+          <text class="d-m" x="480" y="26" text-anchor="middle">③</text>
+          <text class="d-t" x="480" y="46" text-anchor="middle">環境・大気</text>
+          <text class="d-m" x="614" y="26" text-anchor="middle">④</text>
+          <text class="d-t" x="614" y="46" text-anchor="middle">検証機能</text>
+          <text class="d-m" x="748" y="26" text-anchor="middle">⑤</text>
+          <text class="d-t" x="748" y="46" text-anchor="middle">飛行機</text>
+
+          <line class="d-rule" x1="24" y1="60" x2="856" y2="60"/>
+
+          <text class="d-s" x="182" y="88" text-anchor="end">物理ドメイン</text>
+          <rect class="d-box-a" x="156" y="70" width="112" height="26" rx="3"/>
+          <text class="d-la" x="212" y="88" text-anchor="middle">todo!() を埋める</text>
+          <text class="d-s" x="346" y="88" text-anchor="middle">—</text>
+          <rect class="d-box-a" x="424" y="70" width="112" height="26" rx="3"/>
+          <text class="d-la" x="480" y="88" text-anchor="middle">作る</text>
+          <text class="d-s" x="614" y="88" text-anchor="middle">—</text>
+          <rect class="d-box-a" x="692" y="70" width="112" height="26" rx="3"/>
+          <text class="d-la" x="748" y="88" text-anchor="middle">作る</text>
+          <line class="d-rule" x1="24" y1="104" x2="856" y2="104"/>
+
+          <text class="d-s" x="182" y="132" text-anchor="end">シーンドキュメント</text>
+          <rect class="d-box-a" x="156" y="114" width="112" height="26" rx="3"/>
+          <text class="d-la" x="212" y="132" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="290" y="114" width="112" height="26" rx="3"/>
+          <text class="d-la" x="346" y="132" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="424" y="114" width="112" height="26" rx="3"/>
+          <text class="d-la" x="480" y="132" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="558" y="114" width="112" height="26" rx="3"/>
+          <text class="d-la" x="614" y="132" text-anchor="middle">作る</text>
+          <rect class="d-box-o" x="692" y="114" width="112" height="26" rx="3"/>
+          <text class="d-l" x="748" y="132" text-anchor="middle">自動</text>
+          <line class="d-rule" x1="24" y1="148" x2="856" y2="148"/>
+
+          <text class="d-s" x="182" y="176" text-anchor="end">World API</text>
+          <rect class="d-box-a" x="156" y="158" width="112" height="26" rx="3"/>
+          <text class="d-la" x="212" y="176" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="290" y="158" width="112" height="26" rx="3"/>
+          <text class="d-la" x="346" y="176" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="424" y="158" width="112" height="26" rx="3"/>
+          <text class="d-la" x="480" y="176" text-anchor="middle">作る</text>
+          <rect class="d-box-o" x="558" y="158" width="112" height="26" rx="3"/>
+          <text class="d-l" x="614" y="176" text-anchor="middle">自動</text>
+          <rect class="d-box-o" x="692" y="158" width="112" height="26" rx="3"/>
+          <text class="d-l" x="748" y="176" text-anchor="middle">自動</text>
+          <line class="d-rule" x1="24" y1="192" x2="856" y2="192"/>
+
+          <text class="d-s" x="182" y="220" text-anchor="end">wasm 境界</text>
+          <rect class="d-box-a" x="156" y="202" width="112" height="26" rx="3"/>
+          <text class="d-la" x="212" y="220" text-anchor="middle">作る</text>
+          <rect class="d-box-o" x="290" y="202" width="112" height="26" rx="3"/>
+          <text class="d-l" x="346" y="220" text-anchor="middle">自動</text>
+          <rect class="d-box-o" x="424" y="202" width="112" height="26" rx="3"/>
+          <text class="d-l" x="480" y="220" text-anchor="middle">自動</text>
+          <rect class="d-box-o" x="558" y="202" width="112" height="26" rx="3"/>
+          <text class="d-l" x="614" y="220" text-anchor="middle">自動</text>
+          <rect class="d-box-o" x="692" y="202" width="112" height="26" rx="3"/>
+          <text class="d-l" x="748" y="220" text-anchor="middle">自動</text>
+          <line class="d-rule" x1="24" y1="236" x2="856" y2="236"/>
+
+          <text class="d-s" x="182" y="264" text-anchor="end">エディタ UI</text>
+          <rect class="d-box-a" x="156" y="246" width="112" height="26" rx="3"/>
+          <text class="d-la" x="212" y="264" text-anchor="middle">作る</text>
+          <rect class="d-box-o" x="290" y="246" width="112" height="26" rx="3"/>
+          <text class="d-l" x="346" y="264" text-anchor="middle">自動</text>
+          <rect class="d-box-o" x="424" y="246" width="112" height="26" rx="3"/>
+          <text class="d-l" x="480" y="264" text-anchor="middle">自動</text>
+          <rect class="d-box-a" x="558" y="246" width="112" height="26" rx="3"/>
+          <text class="d-la" x="614" y="264" text-anchor="middle">作る</text>
+          <rect class="d-box-o" x="692" y="246" width="112" height="26" rx="3"/>
+          <text class="d-l" x="748" y="264" text-anchor="middle">自動</text>
+          <line class="d-rule" x1="24" y1="280" x2="856" y2="280"/>
+
+          <text class="d-s" x="182" y="308" text-anchor="end">検証</text>
+          <rect class="d-box-a" x="156" y="290" width="112" height="26" rx="3"/>
+          <text class="d-la" x="212" y="308" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="290" y="290" width="112" height="26" rx="3"/>
+          <text class="d-la" x="346" y="308" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="424" y="290" width="112" height="26" rx="3"/>
+          <text class="d-la" x="480" y="308" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="558" y="290" width="112" height="26" rx="3"/>
+          <text class="d-la" x="614" y="308" text-anchor="middle">作る</text>
+          <rect class="d-box-a" x="692" y="290" width="112" height="26" rx="3"/>
+          <text class="d-la" x="748" y="308" text-anchor="middle">作る</text>
+          <line class="d-rule" x1="24" y1="324" x2="856" y2="324"/>
+
+          <text class="d-l" x="24" y="340">「作る」= その段で新規に実装する　／　「自動」= ①で作った仕組みがそのまま効く　／　「—」= 触らない</text>
+        </svg>
+      </div>
+      <figcaption><b>図9 ── 最初の1本が重く、以降が軽い。</b>①の列だけが全層に「作る」が並ぶ。②以降で境界とUIが「自動」に変わるのが、図3で選んだ費用の傾きの帰結。そして⑤の列では<b>物理ドメインと検証しか残らない</b>——飛行機が独立した機能追加ではなく、土台が本物かどうかを測る受け入れ試験になる、というのはこの意味です。①の物理ドメインに図6の <code>todo!()</code> 4箇所を合流させたのは、車体を「単一の箱」ではなく Compound として組めば、<b>①の合格判定がそのまま Compound の受け入れ試験になる</b>から。</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2><span class="num">11</span>最初の一手</h2>
+    <div class="closing">
+      <p><strong>挙動を一切変えない変更から入ります。</strong>図4の下段——2本のCIゲートを、いま必ず落ちるテストとして置く。あわせて、コード中に262箇所ある自己申告された「縮約」を機械集計する監査スクリプトを足す。チェックボックスが隠していた総和を可視化するためです。</p>
+      <p>ここが緑になる道筋に合意できたら、そのまま図9の縦串①（ジョイント＝車の組み立て）に進みます。既存の物理ソルバには触りません——644本のテストと解析解1%以内という資産は、この作業でリスクに晒す場所ではない。<code>todo!()</code> 4箇所を埋めるのは<b>空白を埋める作業であって、既存の振る舞いを変える作業ではない</b>ので、この線引きの内側に収まります。</p>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>
