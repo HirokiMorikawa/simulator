@@ -1156,6 +1156,11 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
   const int = (id: string) => Math.trunc(num(id));
   button.addEventListener("click", () => {
     const body = int("add-coupling-body");
+    const [axisX, axisY, axisZ] = [
+      num("add-coupling-axis-x"),
+      num("add-coupling-axis-y"),
+      num("add-coupling-axis-z"),
+    ];
     const [p1, p2, p3, p4, p5] = [
       num("add-coupling-p1"),
       num("add-coupling-p2"),
@@ -1173,6 +1178,43 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
           break;
         case "buoyancy_drag":
           world.add_buoyancy_drag_coupling(body, p1, p2);
+          break;
+        case "dissipation_to_heat":
+          world.add_dissipation_to_heat_coupling(Math.trunc(p1));
+          break;
+        case "joule_heat":
+          world.add_joule_heat_coupling(Math.trunc(p1));
+          break;
+        case "brownian_force":
+          world.add_brownian_force_coupling(
+            body,
+            p1,
+            p2,
+            Math.trunc(p3),
+            BigInt(Math.trunc(p4)),
+            BigInt(Math.trunc(p5)),
+          );
+          break;
+        case "motor_coupling":
+          world.add_motor_coupling(
+            body,
+            axisX,
+            axisY,
+            axisZ,
+            Math.trunc(p1),
+            p2,
+          );
+          break;
+        case "induction_coupling":
+          world.add_induction_coupling(
+            body,
+            Math.trunc(p1),
+            p2,
+            p3,
+            axisX,
+            axisY,
+            axisZ,
+          );
           break;
       }
     } catch (err) {
@@ -1558,13 +1600,21 @@ function renderInspectorExtraComponents(
     </div>
   `);
 
-  // Add Coupling(**残タスク完遂の縦串②増分**、`WasmWorld::add_*_coupling`
-  // 3種の薄いフォーム)。結合14種のうち、剛体参照だけで完結する
-  // (熱ノード・回路素子・SPH等、他ドメインの参照を要らない)3種——
-  // ImageChargeForce・LorentzForce・BuoyancyDrag——のみを対象とする。
-  // 残り11種は対応するドメイン(熱ノード・回路・SPH/格子流体)がUIから
-  // 作れるようになってから配線する方が手戻りが少ない(Add Jointと同じ
-  // 縮約方針、モジュールdoc参照)。
+  // Add Coupling(**残タスク完遂の縦串②増分、8種に拡張**、
+  // `WasmWorld::add_*_coupling`の薄いフォーム)。結合14種のうち8種を対象
+  // とする——剛体参照だけで完結する3種(ImageChargeForce・LorentzForce・
+  // BuoyancyDrag)に加え、熱ノード・電圧源を**indexで参照するだけ**の5種
+  // (DissipationToHeat・JouleHeat・BrownianForce・MotorCoupling・
+  // InductionCoupling)。既定の起動シーンは熱ノード1個(index 0)・
+  // 電圧源1個(index 0)を最初から持つため、それらを参照するだけなら
+  // 対応ドメインをUIから作る手段がまだ無くても意味を持つ——ただし
+  // Add Componentで一から組んだシーン(熱・回路ドメインが無い)では、
+  // これらのindexが常に無効になり`Err`になる(wasm側`try_thermal_node_
+  // _index`/`try_voltage_source_index`が明示的に拒否する、無言で無効な
+  // 状態になるより失敗として伝わる方を選んだ)。
+  // 残り6種(PhaseChangeMorph・SphRigid・GridFluidRigid・ConvectionLink・
+  // PistonGas・BoussinesqBuoyancy)は熱ノード**を作る**か、SPH/格子流体
+  // ドメイン自体をUIから作れるようにならないと意味を持たないため対象外。
   sections.push(`
     <div class="inspector-component" data-stacked>
       <h3>Add Coupling</h3>
@@ -1574,29 +1624,43 @@ function renderInspectorExtraComponents(
           <option value="image_charge_force">ImageChargeForce(鏡像力)</option>
           <option value="lorentz_force">LorentzForce(ローレンツ力)</option>
           <option value="buoyancy_drag">BuoyancyDrag(浮力・抗力)</option>
+          <option value="dissipation_to_heat">DissipationToHeat(摩擦の熱、要熱ドメイン)</option>
+          <option value="joule_heat">JouleHeat(回路損失の熱、要熱・回路ドメイン)</option>
+          <option value="brownian_force">BrownianForce(ブラウン運動、要熱ドメイン)</option>
+          <option value="motor_coupling">MotorCoupling(モーター、要回路ドメイン)</option>
+          <option value="induction_coupling">InductionCoupling(電磁誘導、要回路ドメイン)</option>
         </select>
       </div>
       <div class="inspector-field">
         <span>Body</span>
-        <input type="number" id="add-coupling-body" step="1" value="${index}" title="対象ボディのindex" />
+        <input type="number" id="add-coupling-body" step="1" value="${index}" title="対象ボディのindex(DissipationToHeat/JouleHeatは未使用)" />
+      </div>
+      <div class="inspector-field">
+        <span>Axis</span>
+        <span class="inspector-joint-row">
+          <input type="number" id="add-coupling-axis-x" step="0.1" value="0" title="回転軸/レール方向x(MotorCoupling/InductionCouplingのみ)" />
+          <input type="number" id="add-coupling-axis-y" step="0.1" value="1" title="軸y" />
+          <input type="number" id="add-coupling-axis-z" step="0.1" value="0" title="軸z" />
+        </span>
       </div>
       <div class="inspector-field">
         <span>Param 1〜3</span>
         <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-p1" step="0.1" value="1e-6" title="charge[C](ImageChargeForce/LorentzForce)/water_level[m](BuoyancyDrag)" />
-          <input type="number" id="add-coupling-p2" step="0.1" value="1" title="plane_normal.x(ImageChargeForceのみ)/water_density[kg/m^3](BuoyancyDrag、既定1000=水)" />
-          <input type="number" id="add-coupling-p3" step="0.1" value="0" title="plane_normal.y(ImageChargeForceのみ)" />
+          <input type="number" id="add-coupling-p1" step="0.1" value="1e-6" title="charge[C](ImageChargeForce/LorentzForce)/water_level[m](BuoyancyDrag)/thermal_node index(DissipationToHeat/JouleHeat)/radius[m](BrownianForce)/voltage_source index(MotorCoupling/InductionCoupling)" />
+          <input type="number" id="add-coupling-p2" step="0.1" value="1" title="plane_normal.x(ImageChargeForce)/water_density(BuoyancyDrag)/viscosity(BrownianForce)/torque_constant(MotorCoupling)/length[m](InductionCoupling)" />
+          <input type="number" id="add-coupling-p3" step="0.1" value="0" title="plane_normal.y(ImageChargeForce)/thermal_node index(BrownianForce)/magnetic_field[T](InductionCoupling)" />
         </span>
       </div>
       <div class="inspector-field">
-        <span>Param 4〜5</span>
+        <span>Param 4〜6</span>
         <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-p4" step="0.1" value="0" title="plane_normal.z(ImageChargeForceのみ)" />
-          <input type="number" id="add-coupling-p5" step="0.1" value="0" title="plane_d(ImageChargeForceのみ、平面 p・n=d)" />
+          <input type="number" id="add-coupling-p4" step="0.1" value="0" title="plane_normal.z(ImageChargeForce)/seed(BrownianForce)" />
+          <input type="number" id="add-coupling-p5" step="0.1" value="0" title="plane_d(ImageChargeForce)/stream(BrownianForce)" />
+          <input type="number" id="add-coupling-p6" step="0.1" value="0" title="未使用(将来の拡張用)" />
         </span>
       </div>
       <button id="add-coupling-button">Coupling を追加</button>
-      <p class="inspector-note">Add Jointと同じく即座に反映される。残り11種(熱・回路・SPH/格子流体の参照が要るもの)は対応ドメインがUIから作れるようになってから追加する。</p>
+      <p class="inspector-note">使うフィールドは種別により異なる(各入力のツールチップ参照)。熱ノード・電圧源を参照する5種は、対応ドメインが有効なシーン(既定の起動シーンはどちらもindex 0を1つ持つ)でのみ成功する。残り6種(熱ノード自体を作る/SPH・格子流体を要するもの)は対応ドメインがUIから作れるようになってから追加する。</p>
     </div>
   `);
 

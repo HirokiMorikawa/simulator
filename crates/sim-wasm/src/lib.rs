@@ -2146,6 +2146,144 @@ impl WasmWorld {
         Ok(())
     }
 
+    /// 熱ノードindexが有効(熱ドメインが有効、かつ範囲内)かを確認する
+    /// (残り5種のAdd Couplingが参照する`thermal_node`向け共通ガード)。
+    fn try_thermal_node_index(&self, index: usize) -> Result<usize, JsValue> {
+        let count = self.inner.thermal().map(|t| t.nodes.len()).unwrap_or(0);
+        if index >= count {
+            return Err(JsValue::from_str(&format!(
+                "thermal node index {index} out of range (thermal node count={count}, \
+                 is the thermal domain enabled in this scene?)"
+            )));
+        }
+        Ok(index)
+    }
+
+    /// 電圧源indexが有効(回路ドメインが有効、かつ範囲内)かを確認する
+    /// (MotorCoupling/InductionCouplingが参照する`voltage_source_index`向け)。
+    fn try_voltage_source_index(&self, index: usize) -> Result<usize, JsValue> {
+        let count = self
+            .inner
+            .circuit()
+            .map(|c| c.voltage_sources().len())
+            .unwrap_or(0);
+        if index >= count {
+            return Err(JsValue::from_str(&format!(
+                "voltage source index {index} out of range (voltage source count={count}, \
+                 is the circuit domain enabled in this scene?)"
+            )));
+        }
+        Ok(index)
+    }
+
+    /// Add Coupling——`sim_coupling::DissipationToHeat`の薄い写像
+    /// (`to_single_node`、剛体↔熱ノード対応表は空=全量を`thermal_node`へ)。
+    /// D10(摩擦の熱)向け。**熱ドメインが有効なシーンでのみ意味を持つ**——
+    /// 既定の起動シーンは熱ノードを1つ(index 0)持つが、Add Componentで
+    /// 一から組んだシーンには熱ドメインを追加する手段がまだ無い(縦串③の
+    /// 対象外として残した既知の限界、`docs/22-roadmap/03-editor-todo.md`参照)。
+    pub fn add_dissipation_to_heat_coupling(&mut self, thermal_node: usize) -> Result<(), JsValue> {
+        let node = self.try_thermal_node_index(thermal_node)?;
+        self.inner
+            .add_coupling(Box::new(sim_coupling::DissipationToHeat {
+                thermal_node: node,
+                body_links: Vec::new(),
+            }));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::JouleHeat`の薄い写像
+    /// (`to_single_node`、抵抗↔熱ノード対応表は空=回路全体の損失を
+    /// `thermal_node`へ)。D19(電気工作台)向け、熱・回路の両ドメインが
+    /// 有効なシーンでのみ意味を持つ(`add_dissipation_to_heat_coupling`と
+    /// 同じ既知の限界)。
+    pub fn add_joule_heat_coupling(&mut self, thermal_node: usize) -> Result<(), JsValue> {
+        let node = self.try_thermal_node_index(thermal_node)?;
+        self.inner
+            .add_coupling(Box::new(sim_coupling::JouleHeat::to_single_node(node)));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::BrownianForce`の薄い写像。D25
+    /// (ブラウン運動)向け、熱ドメインが有効なシーンでのみ意味を持つ
+    /// (同上の既知の限界)。`seed`/`stream`はPRNGの乱数系列
+    /// (`SimRng::new`、同じ値なら同じ揺らぎが再現される)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_brownian_force_coupling(
+        &mut self,
+        body: usize,
+        radius: f64,
+        viscosity: f64,
+        thermal_node: usize,
+        seed: u64,
+        stream: u64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        let node = self.try_thermal_node_index(thermal_node)?;
+        self.inner
+            .add_coupling(Box::new(sim_coupling::BrownianForce::new(
+                id.index as usize,
+                radius,
+                viscosity,
+                node,
+                seed,
+                stream,
+            )));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::MotorCoupling`の薄い写像。D20
+    /// (モーターと発電)向け、回路ドメインが有効なシーンでのみ意味を持つ
+    /// (`add_dissipation_to_heat_coupling`と同じ既知の限界、対象は熱でなく
+    /// 回路)。
+    pub fn add_motor_coupling(
+        &mut self,
+        body: usize,
+        axis_x: f64,
+        axis_y: f64,
+        axis_z: f64,
+        voltage_source_index: usize,
+        torque_constant: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        let source = self.try_voltage_source_index(voltage_source_index)?;
+        self.inner
+            .add_coupling(Box::new(sim_coupling::MotorCoupling {
+                body_index: id.index as usize,
+                axis: Vec3::new(axis_x, axis_y, axis_z),
+                voltage_source_index: source,
+                torque_constant,
+            }));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::InductionCoupling`の薄い写像。D21
+    /// (磁石遊び・銅管落下)向け、回路ドメインが有効なシーンでのみ意味を持つ
+    /// (同上の既知の限界)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_induction_coupling(
+        &mut self,
+        body: usize,
+        voltage_source_index: usize,
+        length: f64,
+        magnetic_field: f64,
+        axis_x: f64,
+        axis_y: f64,
+        axis_z: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        let source = self.try_voltage_source_index(voltage_source_index)?;
+        self.inner
+            .add_coupling(Box::new(sim_coupling::InductionCoupling {
+                body_index: id.index as usize,
+                voltage_source_index: source,
+                length,
+                magnetic_field,
+                axis: Vec3::new(axis_x, axis_y, axis_z),
+            }));
+        Ok(())
+    }
+
     /// フレーム軸オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「フレーム
     /// サブモード」の土台)向けに、ROOTの子として指定角速度(z軸まわり)で自転する
     /// フレームを追加する(`World::add_frame`+`sim_core::FrameTree::step`が毎step
@@ -3184,6 +3322,58 @@ mod tests {
 
         // 死んだボディを指すと`Err`(パニックしない、成功パスのみのテスト
         // モジュール方針は`add_joint_methods_succeed...`のdoc参照)。
+    }
+
+    /// Add Coupling——熱・回路ドメインを参照する5種
+    /// (DissipationToHeat/JouleHeat/BrownianForce/MotorCoupling/
+    /// InductionCoupling)。`new_world()`(既定の起動シーンと同じ構成)は
+    /// 熱ノード1個(index 0)・電圧源1個(index 0)を最初から持つため、
+    /// それらを参照して成功することを確認する。範囲外indexで`Err`になる
+    /// こと自体は`try_thermal_node_index`/`try_voltage_source_index`の
+    /// 実装(境界チェック)で保証されるが、実行時の確認はErrパスの検証に
+    /// wasm-bindgen-testが要るため対象外(下記コメント参照)。
+    #[test]
+    fn add_thermal_and_circuit_coupling_methods_succeed_with_valid_indices_and_reject_invalid_ones()
+    {
+        let mut world = new_world();
+        let body = world
+            .spawn_sphere(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .unwrap();
+
+        world
+            .add_dissipation_to_heat_coupling(0)
+            .expect("dissipation to heat with valid thermal node must succeed");
+        world
+            .add_joule_heat_coupling(0)
+            .expect("joule heat with valid thermal node must succeed");
+        world
+            .add_brownian_force_coupling(body, 0.05, 1e-3, 0, 1, 2)
+            .expect("brownian force with valid thermal node must succeed");
+        world
+            .add_motor_coupling(body, 0.0, 1.0, 0.0, 0, 0.1)
+            .expect("motor coupling with valid voltage source must succeed");
+        world
+            .add_induction_coupling(body, 0, 0.5, 1.0, 0.0, 1.0, 0.0)
+            .expect("induction coupling with valid voltage source must succeed");
+        assert_eq!(world.coupling_count(), 5);
+
+        let text = world.coupling_info_text(-1);
+        for kind in [
+            "DissipationToHeat",
+            "JouleHeat",
+            "BrownianForce",
+            "MotorCoupling",
+            "InductionCoupling",
+        ] {
+            assert!(
+                text.contains(kind),
+                "coupling_info_text must report a {kind} line, got:\n{text}"
+            );
+        }
+
+        // 範囲外indexで`Err`になることの実行時確認は、本テストモジュール
+        // 冒頭のdoc comment(Errパスの検証にはwasm-bindgen-testが要る、
+        // `add_joint_methods_succeed...`と同じ理由)が示すとおり対象外。
     }
 
     /// `spawn_sphere`/`spawn_box`が正しい材質名で成功し、`body_count`が

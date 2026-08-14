@@ -121,19 +121,27 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   ([2026-08-04-editor-qa.md](../reviews/2026-08-04-editor-qa.md) の既知不具合)。
   再現スクリプト(`demo/tests/qa/qa-defects.mjs`)が0/16→16/16 PASSへ転じたことを
   確認済み。Playwrightスモーク23件・Rust側テストも無傷。
-- [x] 結合14種を縦串②として配線する(**3種のみ**)
+- [x] 結合14種を縦串②として配線する(**8種**)
   `WasmWorld::add_image_charge_force_coupling`/`add_lorentz_force_coupling`/
-  `add_buoyancy_drag_coupling`(`sim_coupling`の3種の薄い写像)を新設し、
-  InspectorにAdd Couplingフォームを追加(Add Jointと同じ「種別セレクト+
-  汎用Param欄」縮約)。対象は**剛体参照だけで完結する**(熱ノード・回路素子・
-  SPH/格子流体等、他ドメインの参照を要らない)3種——ImageChargeForce・
-  LorentzForce・BuoyancyDrag。残り11種
-  (BoussinesqBuoyancy/DissipationToHeat/PhaseChangeMorph/MotorCoupling/
-  SphRigid/GridFluidRigid/ConvectionLink/PistonGas/JouleHeat/BrownianForce/
-  InductionCoupling)は熱ノード・回路素子・SPH/格子流体をUIから作る手段が
-  まだ無く、それらを参照するフォームを今作っても実際には使えないため対象外
-  ——対応ドメインのUI作成(縦串③以降、または別途)が先に要る。
-  Rust側テスト・Playwrightでの実UI経由操作(3種すべて追加→
+  `add_buoyancy_drag_coupling`/`add_dissipation_to_heat_coupling`/
+  `add_joule_heat_coupling`/`add_brownian_force_coupling`/
+  `add_motor_coupling`/`add_induction_coupling`(`sim_coupling`8種の薄い
+  写像)を新設し、InspectorにAdd Couplingフォームを追加(Add Jointと同じ
+  「種別セレクト+汎用Param欄」縮約)。**レビューで「3種だけで大丈夫か」と
+  指摘を受け、剛体参照だけで完結する3種(ImageChargeForce・LorentzForce・
+  BuoyancyDrag)に加え、熱ノード・電圧源を`usize`のindexで参照するだけの
+  5種(DissipationToHeat・JouleHeat・BrownianForce・MotorCoupling・
+  InductionCoupling)へ拡張した**——既定の起動シーンが熱ノード1個・電圧源
+  1個(いずれもindex 0)を最初から持つため、それらを参照するだけならUIから
+  熱ノード自体を作る手段が無くても実用になる。範囲外indexを渡すと
+  `try_thermal_node_index`/`try_voltage_source_index`が明示的に`Err`を返す
+  (熱・回路ドメインが無いシーンで追加しようとした時に、無言で無効な状態に
+  なるより失敗として伝わる)。
+  残り6種(PhaseChangeMorph/SphRigid/GridFluidRigid/ConvectionLink/
+  PistonGas/BoussinesqBuoyancy)は熱ノード**自体を作る**か、SPH/格子流体
+  ドメインをUIから作れるようにならないと意味を持たないため対象外——
+  対応ドメインのUI作成(別途)が先に要る。
+  Rust側テスト・Playwrightでの実UI経由操作(8種すべて追加→
   `coupling_info_text`に反映)の両方で確認、QA16/16・スモーク24/24維持。
 - [x] 環境と大気の場を縦串③として実装する(**大気・水域のみ、重力ベクトル化は対象外**)
   Settingsに「環境(大気・水域)」パネルを追加。`sim_fluid::Atmosphere`は
