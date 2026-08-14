@@ -2730,13 +2730,15 @@ function setUpProjectDrawer(
   /// し、パラメータを振って`run_headless_scenario`をN回実行、結果を重ねて
   /// グラフ・差分表示する」)。
   ///
-  /// **縮約**: 「合格基準」をシーンJSONスキーマの一部として書ける形には
-  /// していない(`Scenario`のスキーマ拡張は別の"物理コアへの変更"に準じる
-  /// 判断が要るため対象外とした、`docs/22-roadmap/03-editor-todo.md`参照)。
-  /// 代わりに、基準(probe index・比較演算子・しきい値)はこのタブのUI状態
-  /// として持ち、`run_headless_scenario_json`が返すprobe履歴の最終値に対して
-  /// フロントエンド側で評価する——「シーンに書ける」を「このタブで組める」で
-  /// 代替した。
+  /// 合格基準(probe index・比較演算子・しきい値)は`Scenario::pass_criteria`
+  /// としてシーンJSONスキーマの一部になっている(`prediction_prompts`と同じ
+  /// 著者向けメタデータ扱い、物理には影響しない)。このタブはBase scene JSON
+  /// に`pass_criteria`があれば読み込んでフォームへ反映し、「基準をシーンJSON
+  /// へ書き込む」ボタンでフォームの内容を逆にJSONへ書き戻せる——UI状態と
+  /// シーンJSONが往復する。
+  const operatorToJson: Record<string, string> = { ">=": "ge", "<=": "le", "~=": "approx" };
+  const operatorFromJson: Record<string, string> = { ge: ">=", le: "<=", approx: "~=" };
+
   function renderValidationTab() {
     body.innerHTML = "";
 
@@ -2759,7 +2761,9 @@ function setUpProjectDrawer(
       } catch (err) {
         window.alert(`シーンの読み込みに失敗しました: ${String(err)}`);
       }
+      loadCriteriaFromBaseJson();
     });
+    baseJsonArea.addEventListener("change", () => loadCriteriaFromBaseJson());
     body.append("Base scene JSON: ", reloadButton, baseJsonArea);
 
     const form = document.createElement("div");
@@ -2811,6 +2815,8 @@ function setUpProjectDrawer(
     thresholdInput.step = "0.01";
     thresholdInput.value = "0";
     thresholdInput.title = "合格基準のしきい値(probeの最終値と比較する)";
+    const writeCriteriaButton = document.createElement("button");
+    writeCriteriaButton.textContent = "基準をシーンJSONへ書き込む";
     criteriaForm.append(
       "合格基準: probe ",
       probeIndexInput,
@@ -2818,8 +2824,45 @@ function setUpProjectDrawer(
       operatorSelect,
       " ",
       thresholdInput,
+      " ",
+      writeCriteriaButton,
     );
     body.appendChild(criteriaForm);
+
+    /// Base scene JSONの`pass_criteria[0]`をフォームへ反映する(あれば)。
+    function loadCriteriaFromBaseJson(): void {
+      try {
+        const obj = JSON.parse(baseJsonArea.value) as {
+          pass_criteria?: { probe_index: number; operator: string; threshold: number }[];
+        };
+        const criterion = obj.pass_criteria?.[0];
+        if (!criterion) return;
+        probeIndexInput.value = String(criterion.probe_index);
+        operatorSelect.value = operatorFromJson[criterion.operator] ?? ">=";
+        thresholdInput.value = String(criterion.threshold);
+      } catch {
+        // Base scene JSONがまだ不正/空の場合は何もしない。
+      }
+    }
+    loadCriteriaFromBaseJson();
+
+    writeCriteriaButton.addEventListener("click", () => {
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(baseJsonArea.value) as Record<string, unknown>;
+      } catch (err) {
+        window.alert(`Base scene JSONが不正です: ${String(err)}`);
+        return;
+      }
+      obj.pass_criteria = [
+        {
+          probe_index: Math.max(0, Math.trunc(Number(probeIndexInput.value) || 0)),
+          operator: operatorToJson[operatorSelect.value] ?? "ge",
+          threshold: Number(thresholdInput.value) || 0,
+        },
+      ];
+      baseJsonArea.value = JSON.stringify(obj, null, 2);
+    });
 
     const runButton = document.createElement("button");
     runButton.textContent = "スイープを実行";

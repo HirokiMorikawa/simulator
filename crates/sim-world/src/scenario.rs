@@ -162,6 +162,16 @@ pub struct Scenario {
     /// 比較表を表示するためだけの、意味を検証しない自由記述のヒント。
     #[serde(default)]
     pub prediction_prompts: Vec<PredictionPromptJson>,
+    /// 検証タブ(縦串④)の合格基準(設計docs/reviews/2026-08-14-
+    /// editor-implementation-plan.md「シーンに合格基準を書けるようにし」、
+    /// **残タスク完遂増分**——レビュー指摘「勝手に対象外にするのは禁止令」
+    /// への対応)。`prediction_prompts`と同じ扱い: 物理には影響しない
+    /// (`from_scenario`/`append_scenario_bodies`はこのフィールドを読まない)、
+    /// `to_scenario`(実行中`World`からの逆写像)は常に空を返す——`World`は
+    /// この著者向けメタデータを実行時状態として持たないため
+    /// (`prediction_prompts`と全く同じ理由・全く同じ制約)。
+    #[serde(default)]
+    pub pass_criteria: Vec<PassCriterionJson>,
 }
 
 /// `Scenario::prediction_prompts`の1件(モジュールdoc参照)。
@@ -171,6 +181,28 @@ pub struct PredictionPromptJson {
     /// `probes`配列内でのインデックス(0起点)。この予測が対応するプローブ。
     pub probe_index: usize,
     pub expected_value: f64,
+}
+
+/// `Scenario::pass_criteria`の1件(モジュールdoc参照)。検証タブが
+/// `probes[probe_index]`の最終値を`operator`/`threshold`と比較する。
+#[derive(Deserialize, Serialize, Clone)]
+pub struct PassCriterionJson {
+    /// `probes`配列内でのインデックス(0起点)。
+    pub probe_index: usize,
+    pub operator: PassCriterionOperator,
+    pub threshold: f64,
+}
+
+/// `PassCriterionJson::operator`(比較演算子)。
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PassCriterionOperator {
+    /// `probe値 >= threshold`。
+    Ge,
+    /// `probe値 <= threshold`。
+    Le,
+    /// `|probe値 - threshold| < 0.01`(近似一致)。
+    Approx,
 }
 
 impl Scenario {
@@ -5109,5 +5141,48 @@ mod tests {
             world.mechanics().gravity_direction,
             sim_math::Vec3::new(1.0, 0.0, 0.0)
         );
+    }
+
+    /// **残タスク完遂増分**(レビュー指摘「勝手に対象外にするのは禁止令」への
+    /// 対応): 検証タブの合格基準がシーンJSONスキーマの一部として往復する
+    /// ことを確認する——`pass_criteria`を含むシーンJSONが`Scenario`へ
+    /// デシリアライズでき、内容(probe_index/operator/threshold)が失われない。
+    #[test]
+    fn scene_json_with_pass_criteria_round_trips_through_scenario() {
+        let json = r#"
+        {
+          "name": "with-pass-criteria",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [],
+          "pass_criteria": [
+            { "probe_index": 2, "operator": "ge", "threshold": 1.5 }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).unwrap();
+        assert_eq!(scenario.pass_criteria.len(), 1);
+        assert_eq!(scenario.pass_criteria[0].probe_index, 2);
+        assert!(scenario.pass_criteria[0].operator == PassCriterionOperator::Ge);
+        assert_eq!(scenario.pass_criteria[0].threshold, 1.5);
+
+        // ワールド構築には影響しない(`prediction_prompts`と同じ著者向け
+        // メタデータ扱い)ことも確認する。
+        let world = World::from_scenario(&scenario);
+        assert!(world.is_ok());
+    }
+
+    /// `pass_criteria`を省略した既存形式のシーンJSONが`#[serde(default)]`
+    /// により空配列として引き続きパースできることを確認する(後方互換)。
+    #[test]
+    fn scene_json_without_pass_criteria_defaults_to_empty() {
+        let json = r#"
+        {
+          "name": "no-pass-criteria",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": []
+        }
+        "#;
+        let scenario = Scenario::from_json(json).unwrap();
+        assert!(scenario.pass_criteria.is_empty());
     }
 }

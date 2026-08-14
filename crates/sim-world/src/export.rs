@@ -83,6 +83,10 @@ pub fn to_scenario(world: &World, name: &str) -> Scenario {
         fdtd: None,
         probes: export_probes(world, &names),
         prediction_prompts: Vec::new(),
+        // `prediction_prompts`と同じ理由(モジュールdocの`Scenario::
+        // pass_criteria`参照)——著者向けメタデータであり`World`は
+        // 実行時状態として持たない。
+        pass_criteria: Vec::new(),
     }
 }
 

@@ -63,8 +63,8 @@ mod scenario;
 pub use export::{shape_to_shape_json, to_scenario};
 pub use scenario::{
     run_headless_scenario, shape_json_to_shape, BodyScenarioDesc, CompoundChildJson,
-    HeadlessRunResult, MaterialOverride, PredictionPromptJson, Scenario, SceneError, ShapeJson,
-    WorldScenarioOptions,
+    HeadlessRunResult, MaterialOverride, PassCriterionJson, PassCriterionOperator,
+    PredictionPromptJson, Scenario, SceneError, ShapeJson, WorldScenarioOptions,
 };
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};

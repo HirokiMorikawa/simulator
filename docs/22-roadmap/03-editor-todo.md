@@ -272,10 +272,18 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   例`world.gravity`)+値のリストを指定してN回ヘッドレス実行、結果を
   テーブル(パラメータ値・final_time・final_state_hash・probe最終値・
   合格基準の可否)と、probe履歴を実行ごとに重ね書きしたcanvasグラフで表示する。
-  **縮約**: 「合格基準」をシーンJSONスキーマの一部にはしていない
-  (`Scenario`のスキーマ拡張は別途判断が要るため対象外)——probe index・
-  比較演算子・しきい値をタブのUI状態として持ち、ヘッドレス実行結果に対して
-  フロントエンド側で評価する形で代替した。
+  **残タスク完遂増分**(レビュー指摘「勝手に対象外にするのは禁止令発令中！！！」
+  への対応): 「合格基準」(probe index・比較演算子・しきい値)は当初タブの
+  UI状態のみで持っていたが、`Scenario::pass_criteria: Vec<PassCriterionJson>`
+  としてシーンJSONスキーマの一部にした。`prediction_prompts`(Task#…の
+  予測プロンプト)と全く同じ扱いの著者向けメタデータ——`from_scenario`/
+  `append_scenario_bodies`はこのフィールドを読まない(物理には影響しない)、
+  `to_scenario`(実行中`World`からの逆写像)は常に空を返す(`World`はこの
+  データを実行時状態として持たない)。Validationタブは、Base scene JSON
+  テキストエリアを編集/貼り付け(`change`イベント)すると`pass_criteria[0]`が
+  あればフォーム(probe index・比較演算子・しきい値)へ自動反映し、逆に
+  「基準をシーンJSONへ書き込む」ボタンでフォームの内容を`pass_criteria`
+  としてJSONへ書き戻せる——UI状態とシーンJSONが実際に往復する。
 
   **副次的に発見・修正した実バグ**(このタブの実装中に発覚): `WasmWorld::
   export_scene_json`/`bookmark_export_scene_json`が、Task#4で`sim_world::
@@ -294,6 +302,17 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   入力→スイープ実行)にテーブル・グラフが実データで表示されることを確認、
   QA16/16・スモーク24/24とも維持(単一ファイルExportのスモークテストが
   `export_scene_json`書き換えの回帰検知として機能することも確認)。
+
+  `pass_criteria`スキーマ化の追加検証: Rust側新規テスト2本
+  (`scene_json_with_pass_criteria_round_trips_through_scenario`
+  ——`pass_criteria`を含むシーンJSONが`Scenario`へデシリアライズでき
+  内容が失われないこと・`World::from_scenario`に影響しないこと、
+  `scene_json_without_pass_criteria_defaults_to_empty`——省略時は
+  `#[serde(default)]`で空配列になる後方互換)、cargo test --workspace全緑、
+  fmt/clippyクリーン。Playwright新規テスト(「検証タブ: 合格基準がシーン
+  JSONスキーマ(pass_criteria)へ往復する」)でBase scene JSONへの貼り付け→
+  フォーム反映、フォーム編集→書き込みボタン→JSON反映の両方向を確認、
+  スモーク28/28(既存27本+新規1本)全緑を維持。
 - [x] 飛行機の物理を縦串⑤として実装する
   推力: 新しいCoupling/Commandを物理コアへ足さず、既存の`Command::ApplyForce`
   (wasm `push_apply_force`)をそのまま再利用して実装(`ThrustState`、

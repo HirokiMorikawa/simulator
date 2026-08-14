@@ -1122,3 +1122,45 @@ test("縦串⑤(飛行機の物理): 翼揚力/マグヌス揚力をUIから追�
 
   expect(errors).toEqual([]);
 });
+
+test("検証タブ: 合格基準がシーンJSONスキーマ(pass_criteria)へ往復する", async ({ page }) => {
+  // **残タスク完遂増分**(レビュー指摘「勝手に対象外にするのは禁止令発令中！！！」
+  // への対応): 合格基準(probe index・比較演算子・しきい値)は`Scenario::
+  // pass_criteria`としてシーンJSONスキーマの一部になった。このタブがBase scene
+  // JSONの`pass_criteria`をフォームへ読み込み、「基準をシーンJSONへ書き込む」で
+  // フォームの内容を逆にJSONへ書き戻せることを確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  await page.click('.project-tab[data-tab="validation"]');
+  const baseJsonArea = page.locator("#validation-base-json");
+  await expect(baseJsonArea).toBeVisible();
+
+  const probeIndexInput = page.locator('input[title*="probe index"]');
+  const thresholdInputForRead = page.locator('input[title="合格基準のしきい値(probeの最終値と比較する)"]');
+
+  // ① Base scene JSONへ直接`pass_criteria`を貼り付けて`change`イベントを
+  // 発火させると(テキストエリアを手で編集/貼り付けした状況の再現)、
+  // フォームの3フィールドへ反映される。
+  const seeded = await baseJsonArea.inputValue();
+  const seededObj = JSON.parse(seeded);
+  seededObj.pass_criteria = [{ probe_index: 3, operator: "le", threshold: 2.5 }];
+  await baseJsonArea.fill(JSON.stringify(seededObj));
+  await baseJsonArea.dispatchEvent("change");
+  await expect(probeIndexInput).toHaveValue("3");
+  await expect(thresholdInputForRead).toHaveValue("2.5");
+
+  // ② フォームの値を変更してから書き込みボタンを押すと、Base scene JSONの
+  // `pass_criteria`が更新される。
+  await probeIndexInput.fill("5");
+  await thresholdInputForRead.fill("7.25");
+  await page.click('button:has-text("基準をシーンJSONへ書き込む")');
+
+  const written = JSON.parse(await baseJsonArea.inputValue());
+  expect(written.pass_criteria).toHaveLength(1);
+  expect(written.pass_criteria[0].probe_index).toBe(5);
+  expect(written.pass_criteria[0].threshold).toBe(7.25);
+
+  expect(errors).toEqual([]);
+});
