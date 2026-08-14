@@ -31,8 +31,12 @@ use sim_mechanics::{BodyType, DragModel, RigidBodyDesc, Shape};
 use std::collections::HashMap;
 
 /// `probes`セクションで名前解決を経ずにプローブ履歴の容量を指定する仕組みが設計JSONに
-/// 無いため、この縮約実装では固定容量を使う(600サンプル、既定`dt`(1/120)で5秒相当)。
-const DEFAULT_PROBE_CAPACITY: usize = 600;
+/// 無いため、この縮約実装では固定容量を使う。**QA不具合9
+/// (docs/reviews/2026-08-04-editor-qa.md)で600→6000へ拡大**:
+/// 600(既定dtで5秒相当)だと900step実行しただけで無言に先頭が切り詰められ、
+/// UI上での合格基準の数値読み取りに支障が出ていた。6000サンプル
+/// (既定dtで50秒相当)でも1系列48KB程度で無視できる規模。
+const DEFAULT_PROBE_CAPACITY: usize = 6000;
 
 /// シーンロードの失敗(設計§3「validator: 参照整合(名前解決)…を位置つきエラーで返す」
 /// の縮約版 — 位置情報は持たず、エラー種別と関連する名前のみ)。

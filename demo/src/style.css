@@ -81,27 +81,49 @@ body {
 #toolbar {
   grid-area: toolbar;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  gap: 8px 16px;
   padding: 4px 10px;
-  overflow: visible;
+  /* QA不具合1: 内容幅がウィンドウ幅を超えると `Settings`/`Scene`/`Layout`/
+     状態ハッシュ表示に到達できなくなっていた(`overflow: visible`のため、
+     はみ出した分は画面外へ切れるだけで、横スクロールでも救えなかった)。
+     この行の高さはグリッド側が`auto`(`style.css`冒頭の`grid-template-rows`
+     参照)なので、`flex-wrap: wrap`で複数行に折り返せば全コントロールが
+     必ず画面内に収まる——横スクロールは狭い画面での保険として残す。 */
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .toolbar-group {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* 幅が足りないとき`toolbar-group`自体が潰れてラベルの折り返しを誘発しない
+     よう、自然幅を保つ(下の「ラベルを折り返さない」と対で効く)。 */
+  flex-shrink: 0;
 }
 
 .toolbar-spacer {
   flex: 1;
+  /* 中身が無いスペーサーなので縮んでよい(むしろ縮んで欲しい)——
+     `flex-shrink: 0`を継承させないため、他の`toolbar-group`とは別に明示する。 */
+  min-width: 0;
+}
+
+#toolbar button,
+#toolbar select,
+#toolbar label,
+#toolbar span {
+  /* ラベルを折り返さない(群2)。折り返すとツールバーが数行ぶんの高さに
+     膨れ、1文字ずつ縦に並んで読めなくなる(QA不具合1、「時間倍率」ラベルで
+     実際に発生した——`label`/`span`には元々このルールが効いていなかった)。 */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 #toolbar button,
 #toolbar select {
-  /* ラベルを折り返さない(群2)。折り返すとツールバーが数行ぶんの高さに
-     膨れ、1文字ずつ縦に並んで読めなくなる。 */
-  white-space: nowrap;
   background: #2a2a2a;
   color: #eee;
   border: 1px solid #3a3a3a;
@@ -535,6 +557,15 @@ body {
 .probe-controls button:hover {
   background: #343434;
   color: #eee;
+}
+
+/* QA不具合9: グラフに時刻の目盛りが無く、どこが何秒なのか画面から分から
+   なかった。表示中の系列が覆う時間範囲(古い側〜新しい側)をテキストで
+   出す(`updateProbeGraph`のdoc参照)。 */
+.probe-time-range {
+  margin-left: auto;
+  font-family: monospace;
+  color: #778;
 }
 
 #probe-canvas {

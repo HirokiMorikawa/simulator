@@ -31,12 +31,20 @@ const toolbar = await page.evaluate(() => {
 const unreachable = Object.entries(toolbar.reachable).filter(([, ok]) => !ok).map(([id]) => id);
 r.check("F1-1", "1280px でツールバーの全コントロールに届く", unreachable.length === 0,
   `画面外: ${unreachable.join(", ") || "なし"}(内容幅 ${toolbar.scrollWidth}px / 表示幅 ${toolbar.clientWidth}px、overflow-x=${toolbar.overflowX})`);
-const scrolled = await page.evaluate(() => {
+// 修正後は `flex-wrap: wrap` で複数行に折り返すため、1280px では横方向の
+// はみ出し自体が発生しない(= F1-1 が示す「全コントロールに届く」を、
+// スクロールに頼らず達成する)。`overflow-x: auto` はさらに狭い画面向けの
+// 保険として残しているので、「はみ出しが無いか、はみ出してもスクロールで
+// 救える」の両方を許容する形へ検証を更新する。
+const scroll = await page.evaluate(() => {
   const tb = document.getElementById("toolbar");
+  const before = { scrollWidth: tb.scrollWidth, clientWidth: tb.clientWidth };
   tb.scrollLeft = 9999;
-  return tb.scrollLeft;
+  return { ...before, scrollLeft: tb.scrollLeft };
 });
-r.check("F1-2", "はみ出し分を横スクロールで救える", scrolled > 0, `scrollLeft = ${scrolled}px`);
+const noOverflow = scroll.scrollWidth <= scroll.clientWidth;
+r.check("F1-2", "はみ出しが無いか、はみ出しても横スクロールで救える", noOverflow || scroll.scrollLeft > 0,
+  `内容幅 ${scroll.scrollWidth}px / 表示幅 ${scroll.clientWidth}px、scrollLeft = ${scroll.scrollLeft}px`);
 r.check("F1-3", "ツールバーのラベルが折り返さない", toolbar.tall.length === 0, `縦に伸びた要素: ${toolbar.tall.join(", ") || "なし"}`);
 await page.setViewportSize({ width: 1600, height: 1000 });
 await page.waitForTimeout(300);
@@ -113,16 +121,19 @@ r.check("F4-1", "シーン切替で Console が引き継がれない", consoleSt
   `接触が起きえないシーン(body_count=${consoleState.bodyCount})に残る接触ログ ${consoleState.contactLines} 件`);
 
 // ---------------------------------------------------------------- 不具合 5
-// ⏭ が再生中は無反応(ボタンは有効のまま)。
+// ⏭ が再生中は無反応なのにボタンが有効のままだった(修正: 再生中は
+// disabled にする)。ボタンが無効化されていること自体に加え、万一
+// force-click されてもクリックハンドラ側のガード(`mode === "play" &&
+// !playing`)で空振りすることも二重に確認する(defense in depth)。
 await page.locator("#btn-mode-play").click();
 await page.waitForTimeout(300);
 const stepEnabledWhilePlaying = !(await page.locator("#btn-step").isDisabled());
 const s0 = await page.evaluate(() => Number(window.__world.step_count()));
 await page.locator("#input-step-count").fill("1");
-await page.locator("#btn-step").click();
+await page.locator("#btn-step").click({ force: true });
 await page.waitForTimeout(100);
 await page.locator("#input-step-count").fill("500");
-await page.locator("#btn-step").click();
+await page.locator("#btn-step").click({ force: true });
 await page.waitForTimeout(100);
 const s1 = await page.evaluate(() => Number(window.__world.step_count()));
 r.check("F5-1", "再生中の ⏭ が無効化されている(空振りしない)", !stepEnabledWhilePlaying,
@@ -158,15 +169,22 @@ await page.waitForTimeout(300);
 r.check("F6-1", "Ctrl+Z で Undo できる", Math.abs((await px()) - x0) < 1e-3,
   `x: ${x0.toFixed(3)} → ドラッグ ${x1.toFixed(3)} → Ctrl+Z 後 ${(await px()).toFixed(3)}`);
 
+// Ctrl+D を先に確かめる(Delete は選択中の箱そのものを消すため、後段の
+// 複製対象が床(複製非対応)しか残らなくなる——Delete→Duplicate の順で
+// 検証すると「箱を消した後、床を複製しようとして無反応」という無関係な
+// 挙動を拾ってしまうため、消費順ではなく生成が先に来る順にした)。
+const nBeforeDup = await page.locator("#hierarchy-tree .tree-body").count();
+await page.keyboard.press("Control+d");
+await page.waitForTimeout(400);
+r.check("F6-3", "Ctrl+D で複製できる",
+  (await page.locator("#hierarchy-tree .tree-body").count()) === nBeforeDup + 1,
+  `${nBeforeDup} → ${await page.locator("#hierarchy-tree .tree-body").count()} 体`);
+
 const n0 = await page.locator("#hierarchy-tree .tree-body").count();
 await page.keyboard.press("Delete");
 await page.waitForTimeout(400);
 const n1 = await page.locator("#hierarchy-tree .tree-body").count();
 r.check("F6-2", "Delete キーで選択中のボディを削除できる", n1 === n0 - 1, `${n0} → ${n1} 体`);
-await page.keyboard.press("Control+d");
-await page.waitForTimeout(400);
-r.check("F6-3", "Ctrl+D で複製できる", (await page.locator("#hierarchy-tree .tree-body").count()) === n1 + 1,
-  `${n1} → ${await page.locator("#hierarchy-tree .tree-body").count()} 体`);
 await page.locator("#btn-mode-play").click();
 await page.waitForTimeout(200);
 const play0 = await page.locator("#btn-play").textContent();

@@ -480,7 +480,7 @@ function setUpConsole(
   jumpToStepRef: JumpToStepRef,
   selectBodyRef: SelectBodyRef,
   consoleDiagnosticsRef: ConsoleDiagnosticsRef,
-): (eventsText: string) => void {
+): { append: (eventsText: string) => void; clear: () => void } {
   const log = document.getElementById("console-log")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".console-tab");
   let activeLevel = "all";
@@ -529,6 +529,10 @@ function setUpConsole(
   const initial = document.createElement("li");
   initial.dataset.level = "info";
   initial.dataset.category = "info";
+  // シーン切替時の`clear()`(QA不具合4)が消してよいのは前シーンの実行時
+  // イベント(接触・ステップ等の「もう存在しないボディを指しうる」行)であって、
+  // このシステム起動バナー自体はシーンに依存しないため対象外にする。
+  initial.dataset.permanent = "true";
   initial.textContent =
     "[INFO] World起動 — SolverDiagnostics接続済み(ContactStarted/ContactEndedを表示)";
   log.appendChild(initial);
@@ -576,7 +580,18 @@ function setUpConsole(
   }
   consoleDiagnosticsRef.current = updateDiagnostics;
 
-  return (eventsText: string) => {
+  // QA不具合4: シーン切替時にConsoleがクリアされず、前シーンの接触ログが
+  // 現シーンに存在しないボディindexを指したまま残っていた(クリックすると
+  // 無関係なボディが選択される)。`clear`を公開し、シーン切替の入口
+  // (`setUpSceneView`の`sceneGalleryRef.current`)から呼べるようにする。
+  function clear() {
+    for (const li of Array.from(log.children)) {
+      if ((li as HTMLElement).dataset.permanent !== "true") li.remove();
+    }
+    applyFilter();
+  }
+
+  function append(eventsText: string) {
     if (!eventsText) return;
     for (const line of eventsText.split("\n")) {
       const [level, message] = line.split("::", 2);
@@ -615,7 +630,9 @@ function setUpConsole(
     }
     applyFilter();
     log.scrollTop = log.scrollHeight;
-  };
+  }
+
+  return { append, clear };
 }
 
 // Hierarchyパネル(設計docs/23-frontend/01-editor.md §1.1「シーングラフツリー
@@ -2191,7 +2208,11 @@ function probeSeriesToCsv(series: ProbeSeries[]): string {
 // (`render()`内の`isGalleryScene`分岐参照)。
 const PROBE_GRAPH_COLORS = ["#9cf", "#fc6", "#f9c", "#9fc", "#c9f", "#ffcc99"];
 
-function setUpProbeGraph(): (series: ProbeSeries[]) => void {
+function setUpProbeGraph(): (
+  series: ProbeSeries[],
+  dt: number,
+  currentTime: number,
+) => void {
   const canvas = document.getElementById("probe-canvas") as HTMLCanvasElement;
   const ctx = canvas.getContext("2d")!;
   const logToggle = document.getElementById(
@@ -2200,6 +2221,7 @@ function setUpProbeGraph(): (series: ProbeSeries[]) => void {
   const csvButton = document.getElementById(
     "btn-probe-csv",
   ) as HTMLButtonElement;
+  const timeRangeLabel = document.getElementById("probe-time-range")!;
 
   // CSVボタンは「今まさに描かれている系列」を書き出す。`render()`が毎フレーム
   // 渡してくる最新の配列をここで覚えておく(描画とエクスポートで同じデータを
@@ -2218,7 +2240,7 @@ function setUpProbeGraph(): (series: ProbeSeries[]) => void {
     URL.revokeObjectURL(url);
   });
 
-  return (series: ProbeSeries[]) => {
+  return (series: ProbeSeries[], dt: number, currentTime: number) => {
     latest = series;
     const useLog = logToggle.checked;
     const w = canvas.clientWidth;
@@ -2229,6 +2251,20 @@ function setUpProbeGraph(): (series: ProbeSeries[]) => void {
     }
     ctx.clearRect(0, 0, w, h);
     ctx.font = "11px monospace";
+
+    // QA不具合9: グラフのどこが何秒なのか画面から分からず、リングバッファの
+    // 打ち切り(`PROBE_HISTORY_CAPACITY`/`DEFAULT_PROBE_CAPACITY`のdoc参照)と
+    // 相まって「第1バウンドを数回あとの極大と取り違える」ような読み違いが
+    // 実際に起きた。最長の系列を基準に、画面の左端(古い側)〜右端(新しい側、
+    // = 現在時刻)の時刻を表示する——`ProbeSeries`自体は絶対時刻を持たない
+    // (`probeSeriesToCsv`のdoc参照)ので、`currentTime`と`dt`から逆算する。
+    const longest = series.reduce((m, s) => Math.max(m, s.history.length), 0);
+    if (longest >= 2 && dt > 0) {
+      const oldestTime = currentTime - (longest - 1) * dt;
+      timeRangeLabel.textContent = `t = ${oldestTime.toFixed(2)}s 〜 ${currentTime.toFixed(2)}s`;
+    } else {
+      timeRangeLabel.textContent = "";
+    }
 
     let legendY = 12;
     for (const s of series) {
@@ -2272,8 +2308,13 @@ function setUpProbeGraph(): (series: ProbeSeries[]) => void {
 }
 
 async function setUpSceneView(
-  updateProbeGraph: (series: ProbeSeries[]) => void,
+  updateProbeGraph: (
+    series: ProbeSeries[],
+    dt: number,
+    currentTime: number,
+  ) => void,
   appendConsoleEntries: (eventsText: string) => void,
+  clearConsole: () => void,
   jumpToStepRef: JumpToStepRef,
   materialsRef: MaterialsRef,
   circuitRef: CircuitRef,
@@ -2535,9 +2576,37 @@ async function setUpSceneView(
   // **リポジトリ全体で0件**で、ショートカットが一切無かった。
   // テキスト入力中(input/textarea)は横取りしない——ブックマーク名や
   // 数値入力を打てなくなるため。
+  //
+  // QA不具合6: `event.ctrlKey || event.metaKey || event.altKey`で即returnして
+  // いたため、修飾キー付きショートカット(Ctrl+Z Undo・Ctrl+Y Redo・Delete・
+  // Ctrl+D 複製)が構造的に1つも通らなかった。いずれも機能自体はボタンや
+  // 右クリックメニューに既に存在するので、対応するボタンの`.click()`を
+  // 呼ぶだけで済む(無効化されたボタンへの`.click()`は実ブラウザでは
+  // 発火しないため、モードガードは既存のクリックハンドラ側にそのまま乗る)。
   window.addEventListener("keydown", (event) => {
     const target = event.target as HTMLElement | null;
     if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+
+    const ctrlOrCmd = event.ctrlKey || event.metaKey;
+    if (ctrlOrCmd && !event.altKey) {
+      switch (event.key.toLowerCase()) {
+        case "z":
+          (event.shiftKey ? redoButton : undoButton).click();
+          break;
+        case "y":
+          redoButton.click();
+          break;
+        case "d":
+          if (hasSelectedBody()) {
+            hierarchyActionsRef.current?.duplicate(selectedBodyIndex);
+          }
+          break;
+        default:
+          return; // 他のCtrl/Cmd組み合わせはブラウザ既定の動作へ委ねる。
+      }
+      event.preventDefault();
+      return;
+    }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     switch (event.key.toLowerCase()) {
       case "w":
@@ -2555,6 +2624,22 @@ async function setUpSceneView(
       case "f":
         // 選択中のボディへカメラを寄せる(Unityの F と同じ)。
         focusCameraOnSelection();
+        break;
+      case "delete":
+        // QA不具合6: 選択中のボディを削除する(Hierarchy右クリックの「削除」と同じ経路)。
+        if (hasSelectedBody()) {
+          hierarchyActionsRef.current?.remove(selectedBodyIndex);
+        }
+        break;
+      case " ":
+        // QA不具合6: 再生/一時停止(Playモードでのみ意味を持つ、`playButton`の
+        // 既存ガード`mode !== "play"`にそのまま乗る)。
+        playButton.click();
+        break;
+      case "x":
+        // QA不具合7: `title`とREADMEは実装済みと書いていたが、keydownの
+        // switchに`x`のcaseが無く実際には効かなかった(ボタンクリックのみ有効)。
+        setGizmoSpace(gizmoSpace === "world" ? "local" : "world");
         break;
       default:
         return;
@@ -3133,7 +3218,15 @@ async function setUpSceneView(
       box.union(objectBox);
       hasContent = true;
     };
-    for (const mesh of bodyMeshes.values()) expand(mesh);
+    // QA不具合2: 静的な床(D4等では20m四方)を含めると、注視距離が対象では
+    // なく床の大きさで決まってしまい、対象が画面の数%しか占めない、あるいは
+    // (前シーンから引き継いだ視線方向によっては)カメラが床の下に潜り込んで
+    // 何も見えなくなっていた。動的ボディだけを対象にする——静的な床・壁は
+    // 「シーンの一部」ではあっても「観察対象」ではないため。
+    for (const [bodyIndex, mesh] of bodyMeshes) {
+      if (world.body_is_static_at(bodyIndex)) continue;
+      expand(mesh);
+    }
     expand(softBodyPoints);
     expand(astroGroup);
     expand(gasCloud.points);
@@ -3146,7 +3239,23 @@ async function setUpSceneView(
     // 現在の視線方向を保ったまま距離だけ合わせる(向きの好みを壊さない)。
     const direction = camera.position.clone().sub(center);
     if (direction.lengthSq() < 1e-9) direction.set(1, 0.7, 1.2);
-    camera.position.copy(center).add(direction.normalize().multiplyScalar(radius * 2.6));
+    const normalizedDirection = direction.normalize();
+    // QA不具合2続き: 前のシーンから引き継いだ視線方向の仰角が低い(または
+    // 水平面より下を向いている)と、対象が地面近くにある場合(D11/D12/D13等)
+    // カメラが計算上そのまま床の下へ潜り込んでしまう。仰角の最低ラインを
+    // 設けて、床の下からは絶対に見上げない(=床の中に埋まらない)ようにする
+    // ——向きの「好み」より「対象が見えること」を優先する。
+    const MIN_ELEVATION = 0.25; // sin(約14.5°)。低すぎると地面すれすれで違和感が出るため床下だけを防ぐ最小限の値。
+    if (normalizedDirection.y < MIN_ELEVATION) {
+      normalizedDirection.y = MIN_ELEVATION;
+      normalizedDirection.normalize();
+    }
+    camera.position.copy(center).add(normalizedDirection.multiplyScalar(radius * 2.6));
+    // 仰角クランプだけでは(対象が地面近くにある・半径が小さい等の組み合わせで)
+    // なお僅かに地面下へ出るケースが残ったため、最終防衛線として絶対高さも
+    // 下限クランプする(このプロジェクトの地面は常にy=0の平面、モジュールdoc
+    // 「床の下に潜り込む」参照)。
+    camera.position.y = Math.max(camera.position.y, 0.3);
     orbit.update();
   }
 
@@ -3914,7 +4023,8 @@ async function setUpSceneView(
     playing = next === "play";
     playButton.textContent = playing ? "⏸" : "▶";
     playButton.disabled = mode === "edit";
-    stepButton.disabled = mode === "edit";
+    // `stepButton.disabled` は `render()` が毎フレーム`playing`込みで
+    // 同期する(QA不具合5、再生中は無効化する必要があるため)。
     nudgeButton.disabled = mode === "edit";
     motorToggleButton.disabled =
       mode === "edit" || !motorArmBodies.has(selectedBodyIndex);
@@ -4163,7 +4273,11 @@ async function setUpSceneView(
   //   いずれも回路を持たないため、固定デモ回路のスイッチ(`circuit_switch_index`
   //   はプレースホルダ値0、`from_scene_json`のdoc参照)を無効化する
   //   (自由配線回路エディタと同じ保護、`circuitFreeWiringState`のdoc参照)。
+  // - Console(QA不具合4): クリアしないと前シーンの接触ログ(存在しない
+  //   ボディindexを指す)が残り続け、クリックすると無関係なボディが
+  //   選択されてしまう。
   sceneGalleryRef.current = (json: string) => {
+    clearConsole();
     const parsed = JSON.parse(json) as ImportedScenarioJson;
     const bodies = parsed.bodies ?? [];
 
@@ -4705,7 +4819,20 @@ async function setUpSceneView(
       const pickIndex = pickables.findIndex((p) => p.bodyIndex === index);
       if (pickIndex >= 0) pickables.splice(pickIndex, 1);
       hierarchyMultiSelection.delete(index);
-      if (selectedBodyIndex === index) selectBody(BODY_INDEX_BOX);
+      if (selectedBodyIndex === index) {
+        // QA不具合6続き(Deleteキー対応中に発見した実バグ): `BODY_INDEX_BOX`を
+        // 無条件のフォールバック選択先にしていたが、削除対象そのものが
+        // `BODY_INDEX_BOX`だった場合(既定シーンの箱を削除する等)、
+        // 存在しないボディを`selectBody`してしまい、Inspector/HUDの
+        // 読み出しが例外を投げてrender()ループが壊れる。削除対象と別なら
+        // `BODY_INDEX_BOX`、それも無理なら床(常に存在する`BODY_INDEX_GROUND`)
+        // へ落とす。
+        const boxAlive =
+          index !== BODY_INDEX_BOX &&
+          BODY_INDEX_BOX < world.body_count() &&
+          !world.body_is_removed_at(BODY_INDEX_BOX);
+        selectBody(boxAlive ? BODY_INDEX_BOX : BODY_INDEX_GROUND);
+      }
       highlightHierarchy = rebuildHierarchy();
     },
     isolate(index) {
@@ -5215,6 +5342,12 @@ async function setUpSceneView(
 
   function render() {
     updatePredictionResults();
+    // QA不具合5: 再生中は⏭(Nstep送り)を押しても無反応なのに、ボタンは
+    // 有効なまま(理由の表示も無い)だった。Unityの Step は「一時停止して
+    // 1フレーム進める」操作なので、実際に再生中(`playing`)は無効化して
+    // 空振りを防ぐ——クリックハンドラの`mode === "play" && !playing`という
+    // 条件そのものをボタンの見た目にも反映する。
+    stepButton.disabled = mode === "edit" || playing;
 
     // 全ボディのメッシュ位置/姿勢/スケールを同期する(**残タスク完遂の
     // シーンギャラリー増分**で`box`だけの決め打ち同期を統合、`bodyMeshes`の
@@ -5347,20 +5480,24 @@ async function setUpSceneView(
           history: world.imported_probe_history_f64(i),
         });
       }
-      updateProbeGraph(series);
+      updateProbeGraph(series, world.dt(), world.time());
     } else {
-      updateProbeGraph([
-        {
-          label: "BodyPosY",
-          color: "#9cf",
-          history: world.y_probe_history_f64(),
-        },
-        {
-          label: "BodySpeed",
-          color: "#fc6",
-          history: world.speed_probe_history_f64(),
-        },
-      ]);
+      updateProbeGraph(
+        [
+          {
+            label: "BodyPosY",
+            color: "#9cf",
+            history: world.y_probe_history_f64(),
+          },
+          {
+            label: "BodySpeed",
+            color: "#fc6",
+            history: world.speed_probe_history_f64(),
+          },
+        ],
+        world.dt(),
+        world.time(),
+      );
     }
 
     const speed = inspectorVelocity.length();
@@ -5432,12 +5569,19 @@ async function setUpSceneView(
     }
 
     const hashFull = world.state_hash();
+    // QA不具合8: 該当ドメインを持たないシーンで`heater T = NaN K`と表示され、
+    // `circuit V = 0.000 V`は「回路が無い」のか「測って0Vだった」のか区別が
+    // 付かなかった。熱ドメインの無は`heater_node_temperature()`が返すNaNを
+    // そのまま検出できる。回路は`circuit_element_count() === 0`(=回路
+    // ドメインが無効、または素子ゼロの意味を持たない状態)を「無」の判定に使う。
+    const heaterTemperature = world.heater_node_temperature();
+    const hasCircuit = world.circuit_element_count() > 0;
     hud.textContent = [
       `t = ${world.time().toFixed(3)} s`,
       `step = ${world.step_count().toString()}`,
       `y = ${selectedBodyValid ? selectedPosition[1].toFixed(4) : "—"} m`,
-      `circuit V = ${world.circuit_divider_voltage().toFixed(3)} V`,
-      `heater T = ${world.heater_node_temperature().toFixed(2)} K`,
+      `circuit V = ${hasCircuit ? world.circuit_divider_voltage().toFixed(3) + " V" : "—"}`,
+      `heater T = ${Number.isNaN(heaterTemperature) ? "—" : heaterTemperature.toFixed(2) + " K"}`,
     ].join("\n");
     timelineTime.textContent = `t = ${world.time().toFixed(3)} s`;
     timelineStep.textContent = `step = ${world.step_count().toString()}`;
@@ -5511,6 +5655,16 @@ async function setUpSceneView(
     requestAnimationFrame(frame);
   }
 
+  // QA不具合3: 自動フレーミング(`frameCameraOnContent`)はギャラリーシーンの
+  // 読み込み時にしか呼ばれておらず、起動直後の既定シーン(箱がy=10mに立つ)は
+  // カメラの固定初期位置のままだったため、開いて最初に見えるのが空の床
+  // だけになっていた。ループを開始する前に一度呼ぶ——ただし`box`メッシュの
+  // Three.js側の位置は`render()`が毎フレーム`world.body_position_at_f32`から
+  // 反映するまで構築時の既定値(0,0,0)のままなので、先に`render()`を1回
+  // 呼んでメッシュを実際の物理状態へ同期させてからでないと、存在しない
+  // (0,0,0)を対象に画角を合わせてしまう。
+  render();
+  frameCameraOnContent();
   requestAnimationFrame(frame);
 }
 
@@ -5543,7 +5697,7 @@ function main() {
   }
 
   const consoleDiagnosticsRef: ConsoleDiagnosticsRef = { current: null };
-  const appendConsoleEntries = setUpConsole(
+  const { append: appendConsoleEntries, clear: clearConsole } = setUpConsole(
     jumpToStepRef,
     selectBodyRef,
     consoleDiagnosticsRef,
@@ -5581,6 +5735,7 @@ function main() {
   setUpSceneView(
     updateProbeGraph,
     appendConsoleEntries,
+    clearConsole,
     jumpToStepRef,
     materialsRef,
     circuitRef,

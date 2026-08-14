@@ -103,6 +103,10 @@ test("剛体を持たないシーン(D9 熱のみ)を読み込んでも描画ル
   await expect(page.locator("#hud")).toContainText("t =");
 
   await page.click("#btn-mode-play");
+  // QA不具合5の修正でPlayモードに入った直後は`playing`が真になり、⏭は
+  // 一時停止中のみ有効になった(Unityの Step と同じ意味論)。停止してから
+  // stepを使う。
+  await page.click("#btn-play");
   await page.click("#btn-step");
   await page.click("#btn-step");
   expect(errors).toEqual([]);

@@ -29,7 +29,12 @@ use wasm_bindgen::prelude::*;
 /// `docs/23-frontend/01-editor.md`のProbe Graphsパネル(§1.4「複数系列」)デモ用に、
 /// 箱のy座標を毎step記録するプローブの履歴長。1step=dt秒、`PROBE_HISTORY_CAPACITY`
 /// step分(≈`PROBE_HISTORY_CAPACITY*dt`秒)のスクロールウィンドウになる。
-const PROBE_HISTORY_CAPACITY: usize = 600;
+/// **QA不具合9(docs/reviews/2026-08-04-editor-qa.md)で600→6000へ拡大**:
+/// 600だと既定dt(1/120)で5秒分しか残らず、900step(7.5秒)実行しただけで
+/// 無言に先頭が切り詰められていた。6000でも1系列あたり48KB(f64×6000)程度で
+/// 無視できる規模——「有限のスクロールウィンドウ」という設計自体は変えず、
+/// 窓を通常の観察セッションで実際に打ち切りに当たらない大きさへ広げる。
+const PROBE_HISTORY_CAPACITY: usize = 6000;
 
 /// Timelineパネルのスナップショットリングバッファ(設計docs/00-foundation/
 /// 04-architecture.md §「巻き戻しのスナップショット予算」: 既定1s間隔・
