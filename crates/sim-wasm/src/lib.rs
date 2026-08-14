@@ -922,6 +922,97 @@ impl WasmWorld {
         self.inner.dt()
     }
 
+    /// Settingsの環境パネル(**残タスク完遂の縦串③増分**)——大気(密度・
+    /// 動粘性・風)を設定する。`sim_fluid::Atmosphere`は既に`wind: Vec3`を
+    /// 持っていた(P1スケッチどおり)が、UIから設定する手段が無かった。
+    /// `World::set_environment`経由なので重力・水域・周囲温度は変えない。
+    pub fn set_atmosphere(
+        &mut self,
+        density: f64,
+        viscosity: f64,
+        wind_x: f64,
+        wind_y: f64,
+        wind_z: f64,
+    ) {
+        let mut env = self.inner.environment();
+        env.atmosphere = Some(sim_fluid::Atmosphere {
+            density,
+            viscosity,
+            wind: Vec3::new(wind_x, wind_y, wind_z),
+        });
+        self.inner.set_environment(env);
+    }
+
+    /// 大気を無効化する(密度0の真空という意味ではなく「大気ドメイン自体を
+    /// 評価しない」——`BuoyancyDrag`等の抗力・浮力の大気項が効かなくなる)。
+    pub fn clear_atmosphere(&mut self) {
+        let mut env = self.inner.environment();
+        env.atmosphere = None;
+        self.inner.set_environment(env);
+    }
+
+    /// 大気密度[kg/m^3]。大気ドメインが無効なら`NaN`(`heater_node_temperature`
+    /// と同じ「無ければNaN」規約)。
+    pub fn atmosphere_density(&self) -> f64 {
+        self.inner
+            .environment()
+            .atmosphere
+            .map(|a| a.density)
+            .unwrap_or(f64::NAN)
+    }
+
+    /// 大気の動粘性係数[m^2/s]。大気ドメインが無効なら`NaN`。
+    pub fn atmosphere_viscosity(&self) -> f64 {
+        self.inner
+            .environment()
+            .atmosphere
+            .map(|a| a.viscosity)
+            .unwrap_or(f64::NAN)
+    }
+
+    /// 風速ベクトル`[x,y,z]`。大気ドメインが無効なら`[NaN,NaN,NaN]`。
+    pub fn atmosphere_wind(&self) -> Float64Array {
+        let wind = match self.inner.environment().atmosphere {
+            Some(a) => [a.wind.x, a.wind.y, a.wind.z],
+            None => [f64::NAN, f64::NAN, f64::NAN],
+        };
+        Float64Array::from(&wind[..])
+    }
+
+    /// Settingsの環境パネル——静的水域(水位・密度)を設定する
+    /// (`World::add_fluid_region`の薄い写像、`set_environment`経由なので
+    /// 重力・大気・周囲温度は変えない)。
+    pub fn set_water_region(&mut self, water_level: f64, density: f64) {
+        let mut env = self.inner.environment();
+        env.water = Some(sim_fluid::StaticWaterRegion::new(water_level, density));
+        self.inner.set_environment(env);
+    }
+
+    /// 静的水域を無効化する。
+    pub fn clear_water_region(&mut self) {
+        let mut env = self.inner.environment();
+        env.water = None;
+        self.inner.set_environment(env);
+    }
+
+    /// 静的水域の水位[m]。無効なら`NaN`。
+    pub fn water_level(&self) -> f64 {
+        self.inner
+            .environment()
+            .water
+            .map(|w| w.water_level)
+            .unwrap_or(f64::NAN)
+    }
+
+    /// 静的水域の密度[kg/m^3]。無効なら`NaN`。
+    pub fn water_density(&self) -> f64 {
+        self.inner
+            .environment()
+            .water
+            .map(|w| w.density)
+            .unwrap_or(f64::NAN)
+    }
+
     /// エネルギー台帳の残差(**増分Kで追加**)。Consoleの発散警告バッジが使う
     /// ——保存則が壊れた(発散した)ことは、残差が有限でなくなるか急激に増える
     /// ことに現れる。
@@ -3030,6 +3121,35 @@ mod tests {
         }
         // 存在しないボディを指すとErrになる実行時の確認は、本テストモジュール冒頭の
         // doc comment(Errパスの検証にはwasm-bindgen-testが要る)が示すとおり対象外。
+    }
+
+    /// Settingsの環境パネル(**残タスク完遂の縦串③増分**)——大気・水域の
+    /// 設定/解除が期待どおり反映され、未設定なら`NaN`を返すこと。
+    #[test]
+    fn set_and_clear_atmosphere_and_water_region_round_trip() {
+        let mut world = new_world();
+        assert!(world.atmosphere_density().is_nan());
+        assert!(world.water_level().is_nan());
+
+        world.set_atmosphere(1.225, 1.5e-5, 2.0, 0.0, -1.0);
+        assert_eq!(world.atmosphere_density(), 1.225);
+        assert_eq!(world.atmosphere_viscosity(), 1.5e-5);
+        // `atmosphere_wind`は`Float64Array`を返すため、このテストモジュール
+        // 冒頭のdoc comment(`Float32Array`/`Float64Array`はネイティブでは
+        // 構築できない)どおり、ここでは呼ばない。
+
+        world.set_water_region(0.0, 1000.0);
+        assert_eq!(world.water_level(), 0.0);
+        assert_eq!(world.water_density(), 1000.0);
+
+        world.clear_atmosphere();
+        assert!(world.atmosphere_density().is_nan());
+        // 大気を消しても水域は無事(`set_environment`が両方を毎回まとめて
+        // 書き直すため、片方だけ変えるつもりが他方を巻き込まないことの確認)。
+        assert_eq!(world.water_level(), 0.0);
+
+        world.clear_water_region();
+        assert!(world.water_level().is_nan());
     }
 
     /// Inspectorの Add Coupling(**残タスク完遂の縦串②増分**)——3種

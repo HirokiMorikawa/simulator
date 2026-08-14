@@ -112,6 +112,23 @@
             <label>重力 [m/s²] <input type="number" id="input-gravity" step="0.1" min="0" /></label>
             <label>dt [s] <input type="number" id="input-dt" step="0.001" min="0.0001" /></label>
             <p class="settings-note">dt の変更はリプレイの再現性に影響するため Edit モードのみ。</p>
+            <h4>環境(大気・水域)</h4>
+            <label><input type="checkbox" id="toggle-atmosphere" /> 大気を有効化</label>
+            <label>密度 [kg/m³] <input type="number" id="input-atmosphere-density" step="0.01" min="0" value="1.225" /></label>
+            <label>動粘性 [m²/s] <input type="number" id="input-atmosphere-viscosity" step="0.0000001" min="0" value="0.0000148" /></label>
+            <label>風 x,y,z [m/s]
+              <span class="inspector-scale-fields">
+                <input type="number" id="input-wind-x" step="0.1" value="0" />
+                <input type="number" id="input-wind-y" step="0.1" value="0" />
+                <input type="number" id="input-wind-z" step="0.1" value="0" />
+              </span>
+            </label>
+            <label>高度 [m](ISA標準大気から密度を計算) <input type="number" id="input-isa-altitude" step="100" value="0" /></label>
+            <button id="btn-apply-isa-density" title="国際標準大気(対流圏近似)の高度依存密度を密度欄へ書き込む">ISA密度を計算</button>
+            <label><input type="checkbox" id="toggle-water" /> 静的水域を有効化</label>
+            <label>水位 [m] <input type="number" id="input-water-level" step="0.1" value="0" /></label>
+            <label>水密度 [kg/m³] <input type="number" id="input-water-density" step="1" min="0" value="1000" /></label>
+            <p class="settings-note">大気・水域は`BuoyancyDrag`結合(Inspectorの Add Coupling)を持つ剛体にのみ効く。設定はEditモード・Playモードどちらでも即座に反映される。</p>
             <h4>グリッド</h4>
             <label>スナップ [m] <input type="number" id="input-grid-snap" step="0.01" min="0" value="0.1" /></label>
             <h4>決定論</h4>

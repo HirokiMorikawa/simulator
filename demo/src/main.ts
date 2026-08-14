@@ -2859,6 +2859,38 @@ async function setUpSceneView(
       dtInput.value = world.dt().toFixed(6);
     }
     if (dtInput) dtInput.disabled = mode !== "edit";
+
+    // 環境パネル(残タスク完遂の縦串③増分)。シーンJSON(`world.atmosphere`/
+    // `fluids[].static_water`)経由で設定された場合もここで拾えるよう、
+    // `World::environment()`が読む同じフィールドを毎フレーム反映する
+    // (フォーカス中の欄は書き換えない、`updateInspectorRigidBodyFields`と
+    // 同じ理由)。
+    const density = world.atmosphere_density();
+    if (atmosphereToggle) atmosphereToggle.checked = !Number.isNaN(density);
+    if (atmosphereDensityInput && document.activeElement !== atmosphereDensityInput && !Number.isNaN(density)) {
+      atmosphereDensityInput.value = density.toFixed(4);
+    }
+    const viscosity = world.atmosphere_viscosity();
+    if (atmosphereViscosityInput && document.activeElement !== atmosphereViscosityInput && !Number.isNaN(viscosity)) {
+      atmosphereViscosityInput.value = viscosity.toFixed(8);
+    }
+    if (!Number.isNaN(density)) {
+      const wind = world.atmosphere_wind();
+      windInputs.forEach((input, i) => {
+        if (input && document.activeElement !== input) {
+          input.value = wind[i].toFixed(3);
+        }
+      });
+    }
+    const level = world.water_level();
+    if (waterToggle) waterToggle.checked = !Number.isNaN(level);
+    if (waterLevelInput && document.activeElement !== waterLevelInput && !Number.isNaN(level)) {
+      waterLevelInput.value = level.toFixed(3);
+    }
+    const waterDensity = world.water_density();
+    if (waterDensityInput && document.activeElement !== waterDensityInput && !Number.isNaN(waterDensity)) {
+      waterDensityInput.value = waterDensity.toFixed(1);
+    }
   }
   gravityInput?.addEventListener("change", () => {
     const value = Number(gravityInput.value);
@@ -2875,6 +2907,133 @@ async function setUpSceneView(
     } catch (err) {
       window.alert(`dt の変更に失敗しました: ${String(err)}`);
     }
+  });
+
+  // **環境(大気・水域、残タスク完遂の縦串③増分)**。`sim_fluid::Atmosphere`
+  // (密度・動粘性・風)/`StaticWaterRegion`(水位・密度)自体は既に実装済み
+  // だったが、UIから設定する手段が無かった。`BuoyancyDrag`結合(Add
+  // Couplingフォーム、縦串②)を持つ剛体にのみ効く。
+  //
+  // **群フィールドを1つずつローカル変数へ確定する**(collision group/mask
+  // と同じ理由、`pushFilter`のdoc参照)——変更のたびに他の欄をDOMから
+  // 読み直すと、毎フレーム更新(該当なし、ここは即時反映なので実際は無害
+  // だが将来の踏襲ミスを避けるため同じ設計に揃える)や、欄を1つずつ順に
+  // fillする操作と衝突しうる。
+  const atmosphereToggle = document.getElementById(
+    "toggle-atmosphere",
+  ) as HTMLInputElement | null;
+  const atmosphereDensityInput = document.getElementById(
+    "input-atmosphere-density",
+  ) as HTMLInputElement | null;
+  const atmosphereViscosityInput = document.getElementById(
+    "input-atmosphere-viscosity",
+  ) as HTMLInputElement | null;
+  const windInputs = (["x", "y", "z"] as const).map(
+    (axis) =>
+      document.getElementById(`input-wind-${axis}`) as HTMLInputElement | null,
+  );
+  const pendingAtmosphere = {
+    density: Number(atmosphereDensityInput?.value ?? 1.225),
+    viscosity: Number(atmosphereViscosityInput?.value ?? 1.48e-5),
+    wind: windInputs.map((input) => Number(input?.value ?? 0)) as [
+      number,
+      number,
+      number,
+    ],
+  };
+  function applyAtmosphere() {
+    if (!atmosphereToggle?.checked) return;
+    world.set_atmosphere(
+      pendingAtmosphere.density,
+      pendingAtmosphere.viscosity,
+      pendingAtmosphere.wind[0],
+      pendingAtmosphere.wind[1],
+      pendingAtmosphere.wind[2],
+    );
+  }
+  atmosphereToggle?.addEventListener("change", () => {
+    if (atmosphereToggle.checked) applyAtmosphere();
+    else world.clear_atmosphere();
+  });
+  atmosphereDensityInput?.addEventListener("change", () => {
+    pendingAtmosphere.density = Number(atmosphereDensityInput.value);
+    applyAtmosphere();
+  });
+  atmosphereViscosityInput?.addEventListener("change", () => {
+    pendingAtmosphere.viscosity = Number(atmosphereViscosityInput.value);
+    applyAtmosphere();
+  });
+  windInputs.forEach((input, i) =>
+    input?.addEventListener("change", () => {
+      pendingAtmosphere.wind[i] = Number(input.value);
+      applyAtmosphere();
+    }),
+  );
+
+  /// 国際標準大気(ISA)対流圏近似(高度11kmまで)の気圧公式から密度を計算する
+  /// (設計docs/22-roadmap/03-editor-todo.md「環境と大気の場」——ISA標準大気
+  /// (高度依存密度))。$\rho(h)=\rho_0(1-Lh/T_0)^{gM/(RL)-1}$、
+  /// $\rho_0$=1.225kg/m³・$T_0$=288.15K・$L$=0.0065K/m・$g$=9.80665m/s²・
+  /// $M$=0.0289644kg/mol・$R$=8.3144598J/(mol·K)。物理コア(sim-fluid)には
+  /// 触れない——密度という1つの数値をJS側で計算しdensity欄へ書くだけの
+  /// フロントエンド機能に留める(物理コアへの変更は縦串③の対象外、
+  /// docs/22-roadmap/03-editor-todo.md末尾「物理コアへの変更を再評価する」
+  /// 参照)。
+  function isaAirDensity(altitudeMeters: number): number {
+    const rho0 = 1.225;
+    const t0 = 288.15;
+    const lapse = 0.0065;
+    const g = 9.80665;
+    const molarMass = 0.0289644;
+    const gasConstant = 8.3144598;
+    const exponent = (g * molarMass) / (gasConstant * lapse) - 1;
+    const ratio = 1 - (lapse * altitudeMeters) / t0;
+    return ratio > 0 ? rho0 * Math.pow(ratio, exponent) : 0;
+  }
+  document
+    .getElementById("btn-apply-isa-density")
+    ?.addEventListener("click", () => {
+      const altitudeInput = document.getElementById(
+        "input-isa-altitude",
+      ) as HTMLInputElement | null;
+      const altitude = Number(altitudeInput?.value ?? 0);
+      if (!Number.isFinite(altitude)) return;
+      const density = isaAirDensity(altitude);
+      pendingAtmosphere.density = density;
+      if (atmosphereDensityInput) {
+        atmosphereDensityInput.value = density.toFixed(4);
+      }
+      applyAtmosphere();
+    });
+
+  const waterToggle = document.getElementById(
+    "toggle-water",
+  ) as HTMLInputElement | null;
+  const waterLevelInput = document.getElementById(
+    "input-water-level",
+  ) as HTMLInputElement | null;
+  const waterDensityInput = document.getElementById(
+    "input-water-density",
+  ) as HTMLInputElement | null;
+  const pendingWater = {
+    level: Number(waterLevelInput?.value ?? 0),
+    density: Number(waterDensityInput?.value ?? 1000),
+  };
+  function applyWater() {
+    if (!waterToggle?.checked) return;
+    world.set_water_region(pendingWater.level, pendingWater.density);
+  }
+  waterToggle?.addEventListener("change", () => {
+    if (waterToggle.checked) applyWater();
+    else world.clear_water_region();
+  });
+  waterLevelInput?.addEventListener("change", () => {
+    pendingWater.level = Number(waterLevelInput.value);
+    applyWater();
+  });
+  waterDensityInput?.addEventListener("change", () => {
+    pendingWater.density = Number(waterDensityInput.value);
+    applyWater();
   });
 
   /// グリッドスナップ幅 [m](設計 §1.2「グリッド・スナップ(既定 10 cm、変更可)」)。
