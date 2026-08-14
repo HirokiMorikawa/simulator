@@ -169,9 +169,9 @@ await page.waitForTimeout(300);
 r.check("A6-2", "Play モードで再生ボタンが有効・ギズモ非表示",
   !(await page.locator("#btn-play").isDisabled()) && (await visibleGizmos()) === 0,
   `ギズモ表示数=${await visibleGizmos()}`);
-const step0 = await page.evaluate(() => Number(window.__world.step_count()));
+const step0 = await page.evaluate(() => Number(window.__world.read_component("step_count", "")));
 await page.waitForTimeout(1500);
-const step1 = await page.evaluate(() => Number(window.__world.step_count()));
+const step1 = await page.evaluate(() => Number(window.__world.read_component("step_count", "")));
 r.check("A6-3", "Play で step が進む", step1 > step0, `step ${step0} → ${step1}`);
 
 // Play モードでの掴み(Command::Grab 経由)
@@ -192,11 +192,11 @@ await page.locator("#btn-add-bookmark").click();
 await page.waitForTimeout(300);
 r.check("A8-1", "ブックマーク登録", /QA/.test(await page.locator("#bookmark-list").textContent()),
   `list="${(await page.locator("#bookmark-list").textContent()).trim().slice(0, 30)}"`);
-const tBefore = await page.evaluate(() => window.__world.time());
+const tBefore = await page.evaluate(() => Number(window.__world.read_component("time", "")));
 await page.locator("#timeline-scrubber").fill("0");
 await page.locator("#timeline-scrubber").dispatchEvent("input");
 await page.waitForTimeout(400);
-const tAfter = await page.evaluate(() => window.__world.time());
+const tAfter = await page.evaluate(() => Number(window.__world.read_component("time", "")));
 r.check("A8-2", "Timeline スクラブで巻き戻る", tAfter < tBefore, `t = ${tBefore.toFixed(3)} → ${tAfter.toFixed(3)} s`);
 
 await page.locator('.console-tab[data-tab="contacts"]').click();

@@ -883,7 +883,7 @@ impl WasmWorld {
     /// `probe_index`は`scenario.probes`配列内でのインデックス(`prediction_prompts
     /// [].probe_index`と同じ添字系)。範囲外、または該当プローブの履歴がまだ
     /// 1件も無い(1stepも進んでいない)場合は0.0を返す。
-    pub fn imported_probe_value_at(&self, probe_index: usize) -> f64 {
+    fn imported_probe_value_at_impl(&self, probe_index: usize) -> f64 {
         self.imported_probe_handles
             .get(probe_index)
             .and_then(|&handle| self.inner.probe(handle))
@@ -900,7 +900,7 @@ impl WasmWorld {
             .ok_or_else(|| {
                 JsValue::from_str(&format!(
                     "imported probe index {index} out of range (imported_probe_count={})",
-                    self.imported_probe_count()
+                    self.imported_probe_count_impl()
                 ))
             })
     }
@@ -924,7 +924,7 @@ impl WasmWorld {
     /// 直近の`from_scene_json`/`import_scene_json`が`scenario.probes`から作成した
     /// プローブの本数を返す(`imported_probe_label_at`/`imported_probe_history_f64`
     /// の`index`引数の有効範囲は`0..imported_probe_count()`)。
-    pub fn imported_probe_count(&self) -> usize {
+    fn imported_probe_count_impl(&self) -> usize {
         self.imported_probe_handles.len()
     }
 
@@ -1123,13 +1123,13 @@ impl WasmWorld {
     /// エネルギー台帳の残差(**増分Kで追加**)。Consoleの発散警告バッジが使う
     /// ——保存則が壊れた(発散した)ことは、残差が有限でなくなるか急激に増える
     /// ことに現れる。
-    pub fn energy_residual(&self) -> f64 {
+    fn energy_residual_impl(&self) -> f64 {
         self.inner.energy_residual()
     }
 
     /// 全剛体の速さの最大値(**増分Kで追加**)。ConsoleのCFL警告バッジが使う
     /// ——CFL条件の目安 `v·dt/L` を出すのに要る。
-    pub fn max_body_speed(&self) -> f64 {
+    fn max_body_speed_impl(&self) -> f64 {
         (0..self.inner.mechanics().bodies.position.len())
             .map(|i| self.inner.mechanics().bodies.linear_velocity[i].length())
             .fold(0.0_f64, f64::max)
@@ -1242,7 +1242,7 @@ impl WasmWorld {
     /// 1行1件、`名前\t理由\t出典\tオフ可否` のタブ区切り(**群1で拡張**)。
     /// 設計 §1.3 の `ApproximationBadge` が要求する「名前・出典・オフ可否」を
     /// すべて渡す(以前は名前だけの文字列だった)。
-    pub fn active_approximations_text(&self) -> String {
+    fn active_approximations_text_impl(&self) -> String {
         self.inner
             .active_approximations()
             .iter()
@@ -1341,7 +1341,7 @@ impl WasmWorld {
 
     /// `index`番目のインポート済みプローブの人間可読ラベル(Probe Graphsパネルの
     /// 凡例表示用)。`probe_target_label`のdoc参照。
-    pub fn imported_probe_label_at(&self, index: usize) -> Result<String, JsValue> {
+    fn imported_probe_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
         let handle = self.try_imported_probe_handle_at(index)?;
         let probe = self.try_imported_probe_at(handle)?;
         Ok(self.probe_target_label(probe.target))
@@ -1794,7 +1794,7 @@ impl WasmWorld {
     /// モーターを持たないボディに呼ぶと`JsValue`エラーを返す(呼び出し側UIが
     /// モーターを持つボディだけに対して呼ぶ前提だが、`try_body_id_at`のdocと
     /// 同じ理由でResult化した)。
-    pub fn set_motor_target_at(&mut self, index: usize, theta_target: f64) -> Result<(), JsValue> {
+    fn set_motor_target_at_impl(&mut self, index: usize, theta_target: f64) -> Result<(), JsValue> {
         let hinge_motor_index = self.try_body_meta_at(index)?.hinge_motor_index;
         let hinge_motor_index = hinge_motor_index
             .ok_or_else(|| JsValue::from_str(&format!("body index {index} has no hinge motor")))?;
@@ -2522,6 +2522,24 @@ impl WasmWorld {
                 self.push_heat_source_impl(f("watts"));
                 Ok("{}".to_string())
             }
+            "add_rotating_frame" => {
+                let index = self.add_rotating_frame_impl(f("angular_velocity_z"));
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "add_child_frame" => {
+                let index = self.add_child_frame_impl(
+                    u("parent_index"),
+                    f("origin_offset_x"),
+                    f("origin_offset_y"),
+                    f("origin_offset_z"),
+                    f("angular_velocity_z"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "set_motor_target_at" => {
+                self.set_motor_target_at_impl(u("index"), f("theta_target"))?;
+                Ok("{}".to_string())
+            }
             _ => Err(JsValue::from_str(&format!(
                 "apply_component: unknown kind \"{kind}\""
             ))),
@@ -2629,6 +2647,26 @@ impl WasmWorld {
                 Ok(self.circuit_node_voltage_impl(node).to_string())
             }
             "heater_node_temperature" => Ok(self.heater_node_temperature_impl().to_string()),
+            "time" => Ok(self.time_impl().to_string()),
+            "step_count" => Ok(self.step_count_impl().to_string()),
+            "state_hash" => Ok(self.state_hash_impl()),
+            "energy_residual" => Ok(self.energy_residual_impl().to_string()),
+            "max_body_speed" => Ok(self.max_body_speed_impl().to_string()),
+            "active_approximations_text" => Ok(self.active_approximations_text_impl()),
+            "imported_probe_count" => Ok(self.imported_probe_count_impl().to_string()),
+            "imported_probe_label_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.imported_probe_label_at_impl(index)
+            }
+            "imported_probe_value_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.imported_probe_value_at_impl(index).to_string())
+            }
+            "frame_count" => Ok(self.frame_count_impl().to_string()),
+            "frame_parent_index" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.frame_parent_index_impl(index)?.to_string())
+            }
             _ => Err(JsValue::from_str(&format!(
                 "read_component: unknown kind \"{kind}\""
             ))),
@@ -2670,7 +2708,8 @@ impl WasmWorld {
                 "circuit_editor_add_switch", "circuit_editor_set_switch_closed",
                 "circuit_editor_add_capacitor", "circuit_editor_add_inductor",
                 "circuit_editor_add_diode", "circuit_editor_add_dc_motor",
-                "circuit_editor_set_motor_speed", "push_heat_source"
+                "circuit_editor_set_motor_speed", "push_heat_source",
+                "add_rotating_frame", "add_child_frame", "set_motor_target_at"
             ],
             "read": [
                 "coupling_count", "coupling_info_text", "coupling_kind_summary",
@@ -2686,7 +2725,11 @@ impl WasmWorld {
                 "body_shape_params_f64_at", "material_properties_f64",
                 "circuit_element_count", "circuit_element_label_at",
                 "circuit_divider_voltage", "circuit_editor_motor_current",
-                "circuit_node_voltage", "heater_node_temperature"
+                "circuit_node_voltage", "heater_node_temperature",
+                "time", "step_count", "state_hash", "energy_residual",
+                "max_body_speed", "active_approximations_text",
+                "imported_probe_count", "imported_probe_label_at",
+                "imported_probe_value_at", "frame_count", "frame_parent_index"
             ]
         })
         .to_string()
@@ -3391,7 +3434,7 @@ impl WasmWorld {
     /// フレームを追加する(`World::add_frame`+`sim_core::FrameTree::step`が毎step
     /// 自動的に回転を進める)。返り値はこのフレームの`FrameId`(`frame_rotation_
     /// at_f32`に渡すindex)。
-    pub fn add_rotating_frame(&mut self, angular_velocity_z: f64) -> usize {
+    fn add_rotating_frame_impl(&mut self, angular_velocity_z: f64) -> usize {
         let id = self.inner.add_frame(
             FrameId::ROOT,
             Vec3::ZERO,
@@ -3409,12 +3452,12 @@ impl WasmWorld {
     /// `add_child_frame`で単調増加するのみ(削除が無い)ため、
     /// `frame_index < frame_count()`が有効性の必要十分条件になる。
     fn check_frame_index(&self, frame_index: usize) -> Result<(), JsValue> {
-        if frame_index < self.frame_count() {
+        if frame_index < self.frame_count_impl() {
             Ok(())
         } else {
             Err(JsValue::from_str(&format!(
                 "frame index {frame_index} out of range (frame_count={})",
-                self.frame_count()
+                self.frame_count_impl()
             )))
         }
     }
@@ -3441,14 +3484,14 @@ impl WasmWorld {
     /// 全フレーム数(ROOT含む、`sim_core::FrameTree::frame_count`の素通し)。
     /// フレーム階層ドリルインUI(Hierarchyの「Frames」サブツリー)がフレーム
     /// 一覧を列挙するために使う。
-    pub fn frame_count(&self) -> usize {
+    fn frame_count_impl(&self) -> usize {
         self.inner.frames().frame_count()
     }
 
     /// `frame_index`番目のフレームの親のindex。ROOT自身(index 0)は親を
     /// 持たないため`-1`を返す(フレーム階層ドリルインUIがツリー構造を
     /// 組み立てるための情報)。
-    pub fn frame_parent_index(&self, frame_index: usize) -> Result<i32, JsValue> {
+    fn frame_parent_index_impl(&self, frame_index: usize) -> Result<i32, JsValue> {
         self.check_frame_index(frame_index)?;
         Ok(
             match self
@@ -3506,7 +3549,7 @@ impl WasmWorld {
     /// 親フレーム内での原点位置(Scene View上でネストしたフレームが重ならない
     /// よう、呼び出し側が親からのオフセットを指定する)。返り値は新規フレームの
     /// index(`frame_world_position_f32`/`frame_world_rotation_f32`に渡す)。
-    pub fn add_child_frame(
+    fn add_child_frame_impl(
         &mut self,
         parent_index: usize,
         origin_offset_x: f64,
@@ -3880,16 +3923,16 @@ impl WasmWorld {
         Ok(())
     }
 
-    pub fn time(&self) -> f64 {
+    fn time_impl(&self) -> f64 {
         self.inner.time()
     }
 
-    pub fn step_count(&self) -> u64 {
+    fn step_count_impl(&self) -> u64 {
         self.inner.step_count()
     }
 
     /// 決定論検証・UI 表示用の状態ハッシュ(16進文字列)。
-    pub fn state_hash(&self) -> String {
+    fn state_hash_impl(&self) -> String {
         format!("{:016x}", self.inner.state_hash())
     }
 
@@ -4772,6 +4815,78 @@ mod tests {
             .unwrap();
     }
 
+    /// **Task#8第六弾の回帰テスト**: フレーム(`add_rotating_frame`/
+    /// `add_child_frame`)・ヒンジモーター(`set_motor_target_at`)の適用系3個と、
+    /// 時刻/step/ハッシュ/エネルギー/近似バッジ/インポート済みprobe/frameの
+    /// 内省11個も`apply_component`/`read_component`経由で操作できることを
+    /// 確認する。
+    #[test]
+    fn apply_component_and_read_component_wire_frames_and_read_misc_info_via_generic_dispatch() {
+        let mut world = new_world();
+
+        assert_eq!(world.read_component("step_count", "").unwrap(), "0");
+        assert_eq!(world.read_component("time", "").unwrap(), "0");
+        let hash_before = world.read_component("state_hash", "").unwrap();
+        assert_eq!(hash_before.len(), 16);
+        world.step();
+        assert_eq!(world.read_component("step_count", "").unwrap(), "1");
+        let _ = world
+            .read_component("energy_residual", "")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        let _ = world
+            .read_component("max_body_speed", "")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        // 既定シーンの各ソルバが自己申告する近似・縮約(タブ区切り、複数行)。
+        assert!(!world
+            .read_component("active_approximations_text", "")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            world.read_component("imported_probe_count", "").unwrap(),
+            "0"
+        );
+
+        let result = world
+            .apply_component("add_rotating_frame", r#"{"angular_velocity_z":1.0}"#)
+            .expect("add_rotating_frame via apply_component must succeed");
+        assert_eq!(result, "{\"index\":1}");
+        assert_eq!(world.read_component("frame_count", "").unwrap(), "2");
+        assert_eq!(
+            world.read_component("frame_parent_index", "1").unwrap(),
+            "0"
+        );
+
+        let result = world
+            .apply_component(
+                "add_child_frame",
+                r#"{"parent_index":1,"origin_offset_x":0.0,"origin_offset_y":0.0,"origin_offset_z":0.0,"angular_velocity_z":0.5}"#,
+            )
+            .expect("add_child_frame via apply_component must succeed");
+        assert_eq!(result, "{\"index\":2}");
+        assert_eq!(
+            world.read_component("frame_parent_index", "2").unwrap(),
+            "1"
+        );
+
+        // `set_motor_target_at`はヒンジモーターを持たないボディへ呼ぶと`Err`に
+        // なる経路(`JsValue::Err`のネイティブ構築がSIGABRTする既知の制約、
+        // モジュールdoc参照)があるため、成功パスのみ確認する——`spawn_motor_arm`
+        // (Rustのpub fnとして現存、モーターを実際に持つボディを作る)を使う。
+        let motor_arm = world
+            .spawn_motor_arm(0.0, 2.0, 0.0, "アルミニウム".to_string())
+            .expect("spawn_motor_arm must succeed");
+        world
+            .apply_component(
+                "set_motor_target_at",
+                &format!(r#"{{"index":{motor_arm},"theta_target":0.5}}"#),
+            )
+            .expect("set_motor_target_at via apply_component must succeed");
+    }
+
     /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
     /// `set_gravity_direction`が既定の下向きから変更でき、正規化されること。
     /// `gravity_direction()`は`Float64Array`を返すためここでは呼ばない
@@ -5198,14 +5313,14 @@ mod tests {
     #[test]
     fn add_child_frame_succeeds_and_reports_correct_parent() {
         let mut world = new_world();
-        assert_eq!(world.frame_count(), 1); // ROOTのみ。
+        assert_eq!(world.frame_count_impl(), 1); // ROOTのみ。
         let child = world
-            .add_child_frame(0, 1.0, 0.0, 0.0, 0.5)
+            .add_child_frame_impl(0, 1.0, 0.0, 0.0, 0.5)
             .expect("ROOT is always a valid parent");
         assert_eq!(child, 1);
-        assert_eq!(world.frame_count(), 2);
-        assert_eq!(world.frame_parent_index(child).unwrap(), 0);
-        assert_eq!(world.frame_parent_index(0).unwrap(), -1); // ROOTは親を持たない。
+        assert_eq!(world.frame_count_impl(), 2);
+        assert_eq!(world.frame_parent_index_impl(child).unwrap(), 0);
+        assert_eq!(world.frame_parent_index_impl(0).unwrap(), -1); // ROOTは親を持たない。
     }
 
     /// ブックマークの追加・ラベル/時刻の読み取り・巻き戻しが成功パスで
@@ -5214,7 +5329,7 @@ mod tests {
     fn bookmark_add_and_restore_round_trips_successfully() {
         let mut world = new_world();
         world.step();
-        let time_at_bookmark = world.time();
+        let time_at_bookmark = world.time_impl();
         world.add_bookmark("test-bookmark".to_string());
         assert_eq!(world.bookmark_count(), 1);
         assert_eq!(world.bookmark_label_at(0).unwrap(), "test-bookmark");
@@ -5222,10 +5337,10 @@ mod tests {
 
         world.step();
         world.step();
-        assert!(world.time() > time_at_bookmark);
+        assert!(world.time_impl() > time_at_bookmark);
 
         world.restore_bookmark(0).expect("bookmark 0 must exist");
-        assert!((world.time() - time_at_bookmark).abs() < 1e-12);
+        assert!((world.time_impl() - time_at_bookmark).abs() < 1e-12);
     }
 
     /// 位置/姿勢の直接編集(Gizmo相当)が成功パスで正しく反映されること
@@ -5306,7 +5421,7 @@ mod tests {
     #[test]
     fn imported_probe_count_is_zero_for_the_default_scene() {
         let world = new_world();
-        assert_eq!(world.imported_probe_count(), 0);
+        assert_eq!(world.imported_probe_count_impl(), 0);
     }
 
     /// D6(浮き沈み、`scenes/d6-floating-box-f4.json`)は`probes`に
@@ -5318,8 +5433,11 @@ mod tests {
         let json = include_str!("../../../scenes/d6-floating-box-f4.json");
         let world = WasmWorld::from_scene_json(json.to_string())
             .expect("scenes/d6-floating-box-f4.json must be a valid scene");
-        assert_eq!(world.imported_probe_count(), 1);
-        assert_eq!(world.imported_probe_label_at(0).unwrap(), "BodyPosY(box)");
+        assert_eq!(world.imported_probe_count_impl(), 1);
+        assert_eq!(
+            world.imported_probe_label_at_impl(0).unwrap(),
+            "BodyPosY(box)"
+        );
     }
 
     /// D11(振り子、`scenes/d11-pendulum.json`)は`probes`に`body_pos_x`/
@@ -5330,9 +5448,15 @@ mod tests {
         let json = include_str!("../../../scenes/d11-pendulum.json");
         let world = WasmWorld::from_scene_json(json.to_string())
             .expect("scenes/d11-pendulum.json must be a valid scene");
-        assert_eq!(world.imported_probe_count(), 2);
-        assert_eq!(world.imported_probe_label_at(0).unwrap(), "BodyPosX(bob)");
-        assert_eq!(world.imported_probe_label_at(1).unwrap(), "BodyPosY(bob)");
+        assert_eq!(world.imported_probe_count_impl(), 2);
+        assert_eq!(
+            world.imported_probe_label_at_impl(0).unwrap(),
+            "BodyPosX(bob)"
+        );
+        assert_eq!(
+            world.imported_probe_label_at_impl(1).unwrap(),
+            "BodyPosY(bob)"
+        );
     }
 
     /// **残タスク完遂の増分B3(D9/D34/D35)**: `from_scene_json`が力学ボディを
@@ -5363,7 +5487,7 @@ mod tests {
                 "{path} should define zero bodies"
             );
             assert_eq!(
-                world.imported_probe_count(),
+                world.imported_probe_count_impl(),
                 expected_imported_probes,
                 "{path} probe count mismatch"
             );

@@ -107,7 +107,7 @@ test("縦串①: D24車をUIのみで組み立てるとD24シーンJSONの実行
   const referenceHash: string = await page.evaluate((steps) => {
     const w = (window as unknown as { __world: any }).__world;
     for (let i = 0; i < steps; i += 1) w.step();
-    return w.state_hash();
+    return w.read_component("state_hash", "");
   }, STEPS);
 
   // ---- UIのみでD24相当を組み立てる ----
@@ -201,7 +201,7 @@ test("縦串①: D24車をUIのみで組み立てるとD24シーンJSONの実行
   const builtHash: string = await page.evaluate((steps) => {
     const w = (window as unknown as { __world: any }).__world;
     for (let i = 0; i < steps; i += 1) w.step();
-    return w.state_hash();
+    return w.read_component("state_hash", "");
   }, STEPS);
 
   expect(builtHash).toBe(referenceHash);

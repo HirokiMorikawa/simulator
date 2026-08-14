@@ -191,7 +191,7 @@ await enterPlayPaused(page);
   const after = await page.evaluate(() => ({
     particles: window.__world.fluid_particle_count(),
     temp: Number(window.__world.read_component("heater_node_temperature", "")),
-    t: window.__world.time(),
+    t: Number(window.__world.read_component("time", "")),
   }));
   r.check("X6-1", "熱 → 相変化 → 流体: 融けた質量が SPH 粒子として湧く",
     before === 0 && after.particles > 0,
@@ -461,8 +461,8 @@ await run("d19-electric-workbench", 600);
   await page.locator("#timeline-scrubber").fill("1"); // fill は input イベントを出す
   await page.waitForTimeout(300);
   const rewound = await page.evaluate(() => ({
-    t: window.__world.time(),
-    step: Number(window.__world.step_count()),
+    t: Number(window.__world.read_component("time", "")),
+    step: Number(window.__world.read_component("step_count", "")),
     temp: Number(window.__world.read_component("heater_node_temperature", "")),
     v: Number(window.__world.read_component("circuit_node_voltage", "3")), // RC 放電の途中電圧
   }));

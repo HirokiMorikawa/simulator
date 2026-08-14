@@ -923,13 +923,13 @@ function setUpHierarchy(
   // `frame_parent_index`(親子関係)から再帰的にネストした`<ul>`を組み立てる——
   // 「階層ドリルイン」の名のとおり、クリックしたフレームを選択すると
   // 「+ フレーム」ボタンがそのフレームの子として次のフレームを追加するようになる。
-  const frameCount = world.frame_count();
+  const frameCount = readNumber(world, "frame_count");
   if (frameCount > 1) {
     function buildFrameSubtree(parentIndex: number): HTMLUListElement {
       const ul = document.createElement("ul");
       ul.className = "tree-nested";
       for (let i = 1; i < frameCount; i++) {
-        if (world.frame_parent_index(i) !== parentIndex) continue;
+        if (Number(world.read_component("frame_parent_index", String(i))) !== parentIndex) continue;
         const item = document.createElement("li");
         item.textContent = `Frame ${i}`;
         item.classList.add("tree-selectable");
@@ -997,13 +997,13 @@ function setUpHierarchy(
   // **縮約**: プローブは選択対象にしない(Inspectorに専用のComponent表示が
   // 無いため、クリックしても見せるものが無い)。現在値はProbe Graphsパネルの
   // 凡例が既に出している。
-  const probeCount = world.imported_probe_count();
+  const probeCount = readNumber(world, "imported_probe_count");
   if (probeCount > 0) {
     const probeList = document.createElement("ul");
     probeList.className = "tree-nested";
     for (let i = 0; i < probeCount; i++) {
       const item = document.createElement("li");
-      item.textContent = world.imported_probe_label_at(i);
+      item.textContent = world.read_component("imported_probe_label_at", String(i));
       probeList.appendChild(item);
     }
     bodies.appendChild(makeGroup("probes", "Probes", probeList));
@@ -1781,13 +1781,13 @@ function renderInspectorExtraComponents(
   }
 
   // Probe: シーンJSONが宣言した観測量。
-  const probeCount = world.imported_probe_count();
+  const probeCount = readNumber(world, "imported_probe_count");
   if (probeCount > 0) {
     const rows: string[] = [];
     for (let k = 0; k < probeCount; k += 1) {
       rows.push(
-        `<div class="inspector-field"><span>${escape(world.imported_probe_label_at(k))}</span>` +
-          `<span>${world.imported_probe_value_at(k).toFixed(4)}</span></div>`,
+        `<div class="inspector-field"><span>${escape(world.read_component("imported_probe_label_at", String(k)))}</span>` +
+          `<span>${readNumber(world, "imported_probe_value_at", String(k)).toFixed(4)}</span></div>`,
       );
     }
     sections.push(
@@ -1799,7 +1799,7 @@ function renderInspectorExtraComponents(
   // 有効か」から推測した固定文字列を並べていた。`Solver::approximations()`で
   // 各ソルバが申告する形になり、設計 §1.3 が要求する「名前・**出典**・
   // **オフ可否**」が揃った(タブ区切りの4列)。
-  const approximations = world.active_approximations_text();
+  const approximations = world.read_component("active_approximations_text", "");
   if (approximations.length > 0) {
     const badges = approximations
       .split("\n")
@@ -2163,8 +2163,8 @@ function pushCommandLog(
 ) {
   commandLog.push({
     ...entry,
-    t: world.time(),
-    step: Number(world.step_count()),
+    t: readNumber(world, "time"),
+    step: readNumber(world, "step_count"),
   } as CommandLogEntry);
 }
 
@@ -3389,7 +3389,7 @@ async function setUpSceneView(
   // ギャラリーシーン(`sceneGalleryRef.current`)を読み込み中かどうか
   // (増分B1「シーン定義プローブをProbe Graphsパネルへ配線」)。既定シーンでは
   // `y_probe`/`speed_probe`(BodyPosY/BodySpeedの固定2系列)をそのまま表示し、
-  // ギャラリーシーンでは`world.imported_probe_count()`本のシーン定義プローブへ
+  // ギャラリーシーンでは`readNumber(world, "imported_probe_count")`本のシーン定義プローブへ
   // 切り替える(`render()`内`updateProbeGraph`呼び出し参照)。既定シーンへ戻す
   // UI(リロード以外)は現状無いため、falseへ戻す経路は無い(正直な制約)。
   let isGalleryScene = false;
@@ -4145,13 +4145,13 @@ async function setUpSceneView(
     frameAxesHelpers.set(frameIndex, helper);
   }
 
-  const initialFrameIndex = world.add_child_frame(
-    0,
-    0,
-    3,
-    0,
-    FRAME_AXIS_ANGULAR_VELOCITY,
-  );
+  const initialFrameIndex = applyComponent(world, "add_child_frame", {
+    parent_index: 0,
+    origin_offset_x: 0,
+    origin_offset_y: 3,
+    origin_offset_z: 0,
+    angular_velocity_z: FRAME_AXIS_ANGULAR_VELOCITY,
+  }).index as number;
   createFrameAxesHelper(initialFrameIndex);
   selectedFrameIndex = initialFrameIndex;
 
@@ -5583,7 +5583,7 @@ async function setUpSceneView(
       const guessInput = document.getElementById(
         `prediction-guess-${i}`,
       ) as HTMLInputElement | null;
-      const actual = world.imported_probe_value_at(prompt.probe_index);
+      const actual = readNumber(world, "imported_probe_value_at", String(prompt.probe_index));
       const guessText = guessInput?.value
         ? Number(guessInput.value).toFixed(3)
         : "(未入力)";
@@ -5937,7 +5937,10 @@ async function setUpSceneView(
           break;
         case "SetMotorTarget":
           if (entry.bodyIndex < readNumber(replayWorld, "body_count")) {
-            replayWorld.set_motor_target_at(entry.bodyIndex, entry.targetAngle);
+            applyComponent(replayWorld, "set_motor_target_at", {
+              index: entry.bodyIndex,
+              theta_target: entry.targetAngle,
+            });
           }
           break;
         case "SetSwitch":
@@ -5994,7 +5997,7 @@ async function setUpSceneView(
 
   replayVerifyRef.current = () => {
     const replayWorld = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
-    const totalSteps = Number(world.step_count());
+    const totalSteps = readNumber(world, "step_count");
     const sceneChanged = readNumber(world, "body_count") !== 2;
     const commandsByStep = groupCommandsByStep();
     const heater: ReplayHeaterState = { on: false, watts: 0 };
@@ -6013,8 +6016,8 @@ async function setUpSceneView(
     const liveBoxPos = sceneChanged
       ? new Float32Array(3)
       : world.body_position_at_f32(BODY_INDEX_BOX);
-    const finalStateHash = replayWorld.state_hash();
-    const liveStateHash = world.state_hash();
+    const finalStateHash = replayWorld.read_component("state_hash", "");
+    const liveStateHash = world.read_component("state_hash", "");
     return {
       totalSteps,
       commandCount: commandLog.length,
@@ -6055,7 +6058,7 @@ async function setUpSceneView(
       if (readNumber(world, "body_count") !== 2) {
         return { started: false, reason: "既定シーン(床+箱)でのみライブ再生できます。" };
       }
-      const totalSteps = Number(world.step_count());
+      const totalSteps = readNumber(world, "step_count");
       if (totalSteps === 0) {
         return { started: false, reason: "再生する step がありません(まず Play で進めてください)。" };
       }
@@ -6646,13 +6649,13 @@ async function setUpSceneView(
   // 手軽に組み立てられる(選択を変えれば任意のフレームの下に分岐させることも
   // できる)。
   document.getElementById("btn-add-frame")!.addEventListener("click", () => {
-    const newFrameIndex = world.add_child_frame(
-      selectedFrameIndex,
-      FRAME_CHILD_OFFSET,
-      0,
-      0,
-      FRAME_AXIS_ANGULAR_VELOCITY,
-    );
+    const newFrameIndex = applyComponent(world, "add_child_frame", {
+      parent_index: selectedFrameIndex,
+      origin_offset_x: FRAME_CHILD_OFFSET,
+      origin_offset_y: 0,
+      origin_offset_z: 0,
+      angular_velocity_z: FRAME_AXIS_ANGULAR_VELOCITY,
+    }).index as number;
     createFrameAxesHelper(newFrameIndex);
     selectFrame(newFrameIndex);
   });
@@ -6687,8 +6690,8 @@ async function setUpSceneView(
       // 診断バッジ(増分K)。毎フレーム最新の残差・最大速度で更新する。
       if (consoleDiagnosticsRef.current) {
         consoleDiagnosticsRef.current(
-          world.energy_residual(),
-          world.max_body_speed(),
+          readNumber(world, "energy_residual"),
+          readNumber(world, "max_body_speed"),
           readNumber(world, "dt"),
         );
       }
@@ -6817,7 +6820,7 @@ async function setUpSceneView(
       bodies: sceneExportRef.current ? sceneExportRef.current() : [],
       commandLog: [...commandLog],
       bookmarks,
-      stateHash: world.state_hash(),
+      stateHash: world.read_component("state_hash", ""),
     };
   };
   // 一括Exportしたら「保存済み」とみなす(ファイルが手元に残るため)。
@@ -6827,7 +6830,7 @@ async function setUpSceneView(
 
   addBookmarkButton.addEventListener("click", () => {
     const label =
-      bookmarkLabelInput.value.trim() || `t=${world.time().toFixed(1)}s`;
+      bookmarkLabelInput.value.trim() || `t=${readNumber(world, "time").toFixed(1)}s`;
     world.add_bookmark(label);
     bookmarkLabelInput.value = "";
     renderBookmarkList();
@@ -6897,7 +6900,10 @@ async function setUpSceneView(
       currentMotorTarget.get(selectedBodyIndex) ?? MOTOR_TARGET_LOW;
     const next =
       current === MOTOR_TARGET_LOW ? MOTOR_TARGET_HIGH : MOTOR_TARGET_LOW;
-    world.set_motor_target_at(selectedBodyIndex, next);
+    applyComponent(world, "set_motor_target_at", {
+      index: selectedBodyIndex,
+      theta_target: next,
+    });
     currentMotorTarget.set(selectedBodyIndex, next);
     pushCommandLog(world, {
       kind: "SetMotorTarget",
@@ -7068,16 +7074,16 @@ async function setUpSceneView(
       // 乏しい/無いデモを含む)は、シーンJSONの`probes`セクションが宣言した
       // 本数の系列を全て束ねる(0本でも`updateProbeGraph([])`が安全に空描画
       // する、`setUpProbeGraph`のdoc参照)。
-      const probeCount = world.imported_probe_count();
+      const probeCount = readNumber(world, "imported_probe_count");
       const series: ProbeSeries[] = [];
       for (let i = 0; i < probeCount; i++) {
         series.push({
-          label: world.imported_probe_label_at(i),
+          label: world.read_component("imported_probe_label_at", String(i)),
           color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
           history: world.imported_probe_history_f64(i),
         });
       }
-      updateProbeGraph(series, readNumber(world, "dt"), world.time());
+      updateProbeGraph(series, readNumber(world, "dt"), readNumber(world, "time"));
     } else {
       updateProbeGraph(
         [
@@ -7093,7 +7099,7 @@ async function setUpSceneView(
           },
         ],
         readNumber(world, "dt"),
-        world.time(),
+        readNumber(world, "time"),
       );
     }
 
@@ -7165,7 +7171,7 @@ async function setUpSceneView(
       }
     }
 
-    const hashFull = world.state_hash();
+    const hashFull = world.read_component("state_hash", "");
     // QA不具合8: 該当ドメインを持たないシーンで`heater T = NaN K`と表示され、
     // `circuit V = 0.000 V`は「回路が無い」のか「測って0Vだった」のか区別が
     // 付かなかった。熱ドメインの無は`heater_node_temperature()`が返すNaNを
@@ -7174,14 +7180,14 @@ async function setUpSceneView(
     const heaterTemperature = readNumber(world, "heater_node_temperature");
     const hasCircuit = readNumber(world, "circuit_element_count") > 0;
     hud.textContent = [
-      `t = ${world.time().toFixed(3)} s`,
-      `step = ${world.step_count().toString()}`,
+      `t = ${readNumber(world, "time").toFixed(3)} s`,
+      `step = ${readNumber(world, "step_count").toString()}`,
       `y = ${selectedBodyValid ? selectedPosition[1].toFixed(4) : "—"} m`,
       `circuit V = ${hasCircuit ? readNumber(world, "circuit_divider_voltage").toFixed(3) + " V" : "—"}`,
       `heater T = ${Number.isNaN(heaterTemperature) ? "—" : heaterTemperature.toFixed(2) + " K"}`,
     ].join("\n");
-    timelineTime.textContent = `t = ${world.time().toFixed(3)} s`;
-    timelineStep.textContent = `step = ${world.step_count().toString()}`;
+    timelineTime.textContent = `t = ${readNumber(world, "time").toFixed(3)} s`;
+    timelineStep.textContent = `step = ${readNumber(world, "step_count").toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
     hashDisplay.title = hashFull;
     playModeBadge.textContent =
@@ -7199,7 +7205,7 @@ async function setUpSceneView(
     renderer.render(scene, camera);
   }
   hashDisplay.addEventListener("click", () => {
-    navigator.clipboard?.writeText(world.state_hash()).catch(() => {});
+    navigator.clipboard?.writeText(world.read_component("state_hash", "")).catch(() => {});
   });
 
   let accumulator = 0;
@@ -7242,8 +7248,8 @@ async function setUpSceneView(
       // 診断バッジ(増分K)。毎フレーム最新の残差・最大速度で更新する。
       if (consoleDiagnosticsRef.current) {
         consoleDiagnosticsRef.current(
-          world.energy_residual(),
-          world.max_body_speed(),
+          readNumber(world, "energy_residual"),
+          readNumber(world, "max_body_speed"),
           DT,
         );
       }

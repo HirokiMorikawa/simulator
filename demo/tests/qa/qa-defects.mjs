@@ -132,14 +132,14 @@ r.check("F4-1", "シーン切替で Console が引き継がれない", consoleSt
 await page.locator("#btn-mode-play").click();
 await page.waitForTimeout(300);
 const stepEnabledWhilePlaying = !(await page.locator("#btn-step").isDisabled());
-const s0 = await page.evaluate(() => Number(window.__world.step_count()));
+const s0 = await page.evaluate(() => Number(window.__world.read_component("step_count", "")));
 await page.locator("#input-step-count").fill("1");
 await page.locator("#btn-step").click({ force: true });
 await page.waitForTimeout(100);
 await page.locator("#input-step-count").fill("500");
 await page.locator("#btn-step").click({ force: true });
 await page.waitForTimeout(100);
-const s1 = await page.evaluate(() => Number(window.__world.step_count()));
+const s1 = await page.evaluate(() => Number(window.__world.read_component("step_count", "")));
 r.check("F5-1", "再生中の ⏭ が無効化されている(空振りしない)", !stepEnabledWhilePlaying,
   `再生中もボタンは有効=${stepEnabledWhilePlaying}。1 と 500 を要求しても合計 ${s1 - s0} step(自由走行分のみ)`);
 
@@ -220,7 +220,7 @@ await enterPlayPaused(page);
 await stepN(page, 900);
 const probeState = await page.evaluate(() => ({
   length: window.__world.imported_probe_history_f64(0).length,
-  step: Number(window.__world.step_count()),
+  step: Number(window.__world.read_component("step_count", "")),
   panelText: document.getElementById("probe-graphs").textContent.replace(/\s+/g, " ").trim(),
 }));
 r.check("F9-1", "Probe 履歴が step 数ぶん残る(打ち切りが無い)", probeState.length >= probeState.step,

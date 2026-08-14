@@ -63,8 +63,8 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (頂点列のみ)ため、体積/慣性/AABBはAABB近似で対応、接触生成(実際に
   衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
-- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第五弾完了**、
-  元165本→73本)
+- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第六弾完了**、
+  元165本→60本)
   **残タスク完遂増分**(レビュー「Full collapse now」指示への対応、着手前は
   本文書のTODO群の中で唯一の未着手項目だった)。第一弾でJoint(5種の追加)・
   Coupling(14種の追加+操縦面舵角の実行時変更)・熱ノード追加/流体・気体
@@ -190,6 +190,32 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   ——Circuit要素の列挙を直接使う経路——含む)・QA(defects16/16
   ——HUDの回路電圧/ヒーター表示を経由・physics19/19・coupling29/37
   ——ヒーター/Circuitタブ関連のY2-1・Y4-1・Y4-2も含め結果不変)とも維持。
+
+  **第六弾**: フレーム(`add_rotating_frame`/`add_child_frame`)・ヒンジ
+  モーター(`set_motor_target_at`)の適用系3個と、時刻/step/状態ハッシュ/
+  エネルギー残差/最大速度/近似バッジ/インポート済みprobe/frameの内省11個
+  (`time`/`step_count`/`state_hash`/`energy_residual`/`max_body_speed`/
+  `active_approximations_text`/`imported_probe_count`/
+  `imported_probe_label_at`/`imported_probe_value_at`/`frame_count`/
+  `frame_parent_index`)、計14個を同じ2メソッドへ追加で畳んだ(第一〜六弾で
+  計110個、元165本→60本)。`frame_count`/`imported_probe_count`は内部的にも
+  `check_frame_index`/`try_imported_probe_handle_at`(ホットパスとして残す
+  `frame_rotation_at_f32`等が経由する入口検証)から参照されており、
+  `body_count`と同種の横断的なリネームが必要だった。
+
+  検証中に副次的な調査(**回帰ではないことを確認**): `qa-operability.mjs`
+  でA2-2(右ドラッグでパン)・C3-1(Rotate Gizmoのドラッグ)がFAILしたため、
+  第五弾のコミット時点(この増分の変更を`git stash`で退避)まで戻して
+  同じ2件が同じ結果でFAILすることを確認した——この増分より前から存在する
+  未修正の不具合であり、この増分の変更が原因ではない。
+
+  検証: Rust側新規テスト(`add_rotating_frame`/`add_child_frame`/
+  `set_motor_target_at`をJSON経由で実際に呼び、frame階層・時刻/step/
+  ハッシュ/エネルギー等の内省に反映されることを確認)、cargo test -p
+  sim-wasm 29/29全緑。cargo test --workspace全緑、fmt/clippyクリーン、
+  Playwrightスモーク28/28(D24受け入れテストの`state_hash`比較含む)・
+  QA(defects16/16・physics19/19・coupling29/37・operability26/28
+  ——A2-2/C3-1は上記のとおり既存の不具合と確認済み)とも維持。
 
   検証: Rust側新規テスト(`apply_component`/`read_component`をJSON経由で
   実際に呼び、Joint/Coupling/熱ノードの追加・内省が代替できることを確認、
