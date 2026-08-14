@@ -337,13 +337,35 @@ impl WasmWorld {
     /// `Result<T, JsValue>`を返すexport関数を、成功時は`T`をそのまま返し失敗時は
     /// 通常の(捕捉可能な)JS例外をthrowする形にバインドするため、TypeScript側の
     /// 呼び出し規約は変わらない)。
+    ///
+    /// **安定ID(世代付き)の生存確認もここで行う(統合エディタ実装計画、
+    /// docs/reviews/2026-08-14-editor-implementation-plan.md 参照)**:
+    /// `self.bodies`は`index`が範囲内であることしか保証しない。Timelineの
+    /// 巻き戻し(`restore_snapshot`)は`self.inner`だけを過去の`World`へ
+    /// 差し替え、`self.bodies`(フロント向けのindexテーブル)はそのまま残す
+    /// ——巻き戻した時点より後に作られたボディを指す`meta.id`が
+    /// `self.bodies`側には生き続ける。この`meta.id`をそのまま
+    /// `mechanics().bodies.position[id.index as usize]`のような生indexアクセスに
+    /// 使うと、`generations`(延いては`RigidBodySet`の各`Vec`)がその`index`より
+    /// 短くなっていて**範囲外パニックでモジュール全体が使用不能になる**
+    /// (`remove_body_at`で削除済みのボディも同様に世代が進んでいるため、
+    /// 同じ理由でここに引っかかる——`removed`フラグと意味的に一致する)。
+    /// `World::is_body_alive`(`is_valid`の公開版)で確認し、生存していなければ
+    /// このまま範囲外と同じ`Err`にする。
     fn try_body_id_at(&self, index: usize) -> Result<BodyId, JsValue> {
-        self.bodies.get(index).map(|meta| meta.id).ok_or_else(|| {
+        let id = self.bodies.get(index).map(|meta| meta.id).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "body index {index} out of range (body_count={})",
                 self.body_count()
             ))
-        })
+        })?;
+        if !self.inner.is_body_alive(id) {
+            return Err(JsValue::from_str(&format!(
+                "body index {index} no longer exists in the current World state \
+                 (removed, or created after the currently restored Timeline snapshot)"
+            )));
+        }
+        Ok(id)
     }
 
     /// `index`が範囲外なら`JsValue`エラーを返す`self.bodies[index]`の
@@ -2181,11 +2203,14 @@ impl WasmWorld {
     fn export_scene_json_from(&self, name: &str, snapshot: &World) -> Result<String, JsValue> {
         let mut bodies_json = Vec::new();
         for i in 0..self.body_count() {
-            // `i`は`0..body_count()`の範囲内なので必ず解決できる
-            // (`try_body_id_at`のdoc参照——削除が無いため常に有効)。
-            let id = self
-                .try_body_id_at(i)
-                .expect("index within 0..body_count() is always valid");
+            // `try_body_id_at`は範囲チェックに加えて`self.inner`での生存確認も行う
+            // (`try_body_id_at`のdoc参照)。削除済み・Timeline巻き戻しで
+            // まだ存在しない世代のボディは`Err`になるので、下の
+            // `body_position`等の`None`ガードと同じ「このスナップショットには
+            // まだ/もう存在しない」としてスキップする。
+            let Ok(id) = self.try_body_id_at(i) else {
+                continue;
+            };
             let (Some(position), Some(rotation), Some(velocity)) = (
                 snapshot.body_position(id),
                 snapshot.body_rotation(id),

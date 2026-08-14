@@ -1336,6 +1336,22 @@ impl World {
             && self.generations[id.index as usize] == id.generation
     }
 
+    /// `id`が現在の`World`でまだ生存しているか(`is_valid`の公開版)。
+    ///
+    /// **なぜ要るか**: `sim-wasm::WasmWorld`は`BodyId`をフロント向けの安定
+    /// index(`self.bodies: Vec<SpawnedBodyMeta>`の位置)へ対応付けて保持するが、
+    /// Timeline の巻き戻し(`restore_snapshot`、`World::restore`のdoc参照)は
+    /// `self.inner`だけを過去の`World`へ差し替え、`self.bodies`はそのまま残す。
+    /// そのため「巻き戻した時点より後に作られたボディ」を指す`BodyId`が
+    /// `self.bodies`側には生き続ける——これを`is_valid`で確認せずに
+    /// `mechanics().bodies.position[id.index as usize]`のような生indexアクセスを
+    /// すると、`generations`(延いては`RigidBodySet`の各`Vec`)がその`index`より
+    /// 短くなっていて**範囲外パニック**になる(wasmのパニックはモジュール全体を
+    /// 使用不能にする、`try_body_id_at`のdoc参照)。
+    pub fn is_body_alive(&self, id: BodyId) -> bool {
+        self.is_valid(id)
+    }
+
     /// ボディを削除する。世代カウンタをインクリメントし、以後この `id` (と古い世代の
     /// 再利用)へのアクセスは `None` になる(設計の不変条件)。下層の `RigidBodySet`
     /// スロット自体はまだ真に解放されない(モジュールdoc参照) — 無効化として
@@ -2552,6 +2568,42 @@ mod tests {
         }
         assert!(world.body_position(b).is_some());
         assert!(world.body_position(a).is_none());
+    }
+
+    /// `is_body_alive`(`sim-wasm`の`try_body_id_at`がTimeline巻き戻し後の
+    /// 生存確認に使う、モジュールdoc参照)が、スナップショットより後に作られた
+    /// ボディを正しく「もう存在しない」と判定すること。また、そのボディの
+    /// `index`が復元後の`RigidBodySet`の各`Vec`の範囲外になること(=
+    /// 生存確認をせずに生indexアクセスすると範囲外パニックになりうること)も
+    /// 確認する——`is_body_alive`がこの危険を防ぐ根拠そのもの。
+    #[test]
+    fn is_body_alive_detects_bodies_that_did_not_exist_yet_at_an_earlier_snapshot() {
+        let mut world = World::new(WorldOptions::default());
+        let a = create_falling_box(&mut world);
+        let snapshot = world.snapshot();
+
+        let b = create_falling_box(&mut world);
+        assert!(world.is_body_alive(a));
+        assert!(world.is_body_alive(b));
+
+        world.restore(&snapshot);
+
+        assert!(
+            world.is_body_alive(a),
+            "body created before the snapshot must still be alive after restore"
+        );
+        assert!(
+            !world.is_body_alive(b),
+            "body created after the snapshot must not be alive after restoring to it"
+        );
+        // これが `is_body_alive` の確認を省いて `mechanics().bodies.position\
+        // [b.index as usize]` のような生indexアクセスをすると危険な理由:
+        // 復元後の `RigidBodySet` は `b` を一度も知らないので、そのindexは
+        // 配列長の範囲外になる。
+        assert!(
+            b.index as usize >= world.mechanics().bodies.position.len(),
+            "the restored World's RigidBodySet must be shorter than the removed body's index"
+        );
     }
 
     /// 未知(存在しない index)の`BodyId`も`None`(パニックしない)。
