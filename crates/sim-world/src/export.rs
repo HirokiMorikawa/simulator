@@ -760,10 +760,7 @@ fn lift_model_to_json(lift: &sim_coupling::LiftModel) -> LiftModelJson {
 fn export_probes(world: &World, names: &HashMap<BodyId, String>) -> Vec<ProbeJson> {
     let mut out = Vec::new();
     let mut handle = 0usize;
-    loop {
-        let Some(probe) = world.probe(handle) else {
-            break;
-        };
+    while let Some(probe) = world.probe(handle) {
         if let Some(json) = probe_target_to_json(&probe.target, names) {
             out.push(json);
         }
