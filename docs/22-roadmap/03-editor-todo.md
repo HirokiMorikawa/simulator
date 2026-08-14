@@ -63,8 +63,8 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (頂点列のみ)ため、体積/慣性/AABBはAABB近似で対応、接触生成(実際に
   衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
-- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第二弾完了**、
-  元165本→124本)
+- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第三弾完了**、
+  元165本→109本)
   **残タスク完遂増分**(レビュー「Full collapse now」指示への対応、着手前は
   本文書のTODO群の中で唯一の未着手項目だった)。第一弾でJoint(5種の追加)・
   Coupling(14種の追加+操縦面舵角の実行時変更)・熱ノード追加/流体・気体
@@ -114,6 +114,30 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   スモーク28/28・QA(qa-defects 16/16・qa-physics 19/19・qa-coupling
   29/37——後者はこの増分と無関係な既存の物理的既知事項、`qa-coupling.mjs`
   冒頭が参照する`docs/reviews/2026-08-04-coupling-qa.md`参照)とも維持。
+
+  **第三弾**: ボディのGizmo直接編集・Command系15個(`set_body_position_at`/
+  `set_body_rotation_at`/`set_body_scale_at`/`set_body_scale_xyz_at`/
+  `push_apply_force`/`push_set_body_mass`/`push_set_body_type`/
+  `push_set_collision_filter`/`push_grab`/`push_move_grab`/`push_release`の
+  「適用」系11個、`body_mass_at`/`body_type_at`/`body_collision_group_at`/
+  `body_collision_mask_at`の「内省」系4個)を同じ2メソッドへ追加で畳んだ
+  (第一〜三弾で計60個、元165本→109本)。このファミリーは呼び出し箇所が
+  最も多く(Inspector編集・Scene ViewのGizmoドラッグ/grab・Undo/Redo・
+  Thrust・Replay再構築・QAスクリプト、計30箇所超)、Task#8のうちで最も
+  危険度が高いスライスだったが、`_impl`ヘルパー化(ロジック不変)+
+  全呼び出し箇所の機械的な置き換えで完遂した。`set_body_scale_xyz_at`
+  (元は`bool`を返す——非Box形状には軸別スケールが効かないことを伝える)は
+  `{"applied":true/false}`とJSON化し、フロントの`applyComponent`ヘルパーの
+  戻り値型を`{index?, applied?}`へ拡張して対応。
+
+  検証: Rust側新規テスト(ボディ位置/姿勢/スケール直接編集・質量/body type/
+  衝突フィルタ変更・grab/move_grab/release・apply_forceをJSON経由で実際に
+  操作し、質量/body type/衝突フィルタの内省に反映されることを確認)、
+  cargo test -p sim-wasm 26/26全緑。cargo test --workspace全緑、
+  fmt/clippyクリーン、Playwrightスモーク28/28・QA(qa-defects 16/16
+  ——Undo/Redo・ドラッグ・grab・質量編集を経由して回帰検知・qa-coupling
+  29/37——前回と同じ既存の物理的既知事項のみ、`body_mass_at`を使う
+  X2-2/X2-3も含め結果不変)とも維持。
 
   検証: Rust側新規テスト(`apply_component`/`read_component`をJSON経由で
   実際に呼び、Joint/Coupling/熱ノードの追加・内省が代替できることを確認、

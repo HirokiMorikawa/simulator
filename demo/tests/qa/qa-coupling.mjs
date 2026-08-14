@@ -89,7 +89,7 @@ await run("d10-brake-heat", 600);
   const ps = await probes(page);
   const speed = byLabel(ps, "BodySpeed").h;
   const temp = byLabel(ps, "NodeTemp").h;
-  const mass = await page.evaluate(() => window.__world.body_mass_at(1));
+  const mass = await page.evaluate(() => Number(window.__world.read_component("body_mass_at", "1")));
   const heat = (i) => 1000.0 * (temp[i] - 293.15); // C = 1000 J/K
   // 「止まった」= スリープ閾値(SLEEP_LINEAR_THRESHOLD = 0.01 m/s)を下回った step。
   // 実際に速度が厳密な 0 になるのはスリープに入る 0.5 秒後なので、そこを止まった

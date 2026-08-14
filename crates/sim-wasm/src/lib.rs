@@ -2060,6 +2060,12 @@ impl WasmWorld {
         let f = |key: &str| -> f64 { v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0) };
         let u = |key: &str| -> usize { v.get(key).and_then(|x| x.as_u64()).unwrap_or(0) as usize };
         let i = |key: &str| -> i32 { v.get(key).and_then(|x| x.as_i64()).unwrap_or(0) as i32 };
+        let s = |key: &str| -> String {
+            v.get(key)
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
         match kind {
             "add_distance_joint" => {
                 let index = self.add_distance_joint_impl(
@@ -2334,6 +2340,60 @@ impl WasmWorld {
                 self.clear_water_region_impl();
                 Ok("{}".to_string())
             }
+            "set_body_position_at" => {
+                self.set_body_position_at_impl(u("index"), f("x"), f("y"), f("z"))?;
+                Ok("{}".to_string())
+            }
+            "set_body_rotation_at" => {
+                self.set_body_rotation_at_impl(u("index"), f("x"), f("y"), f("z"), f("w"))?;
+                Ok("{}".to_string())
+            }
+            "set_body_scale_at" => {
+                self.set_body_scale_at_impl(u("index"), f("scale"))?;
+                Ok("{}".to_string())
+            }
+            "set_body_scale_xyz_at" => {
+                let applied =
+                    self.set_body_scale_xyz_at_impl(u("index"), f("sx"), f("sy"), f("sz"))?;
+                Ok(format!("{{\"applied\":{applied}}}"))
+            }
+            "push_apply_force" => {
+                self.push_apply_force_impl(u("body_index"), f("fx"), f("fy"), f("fz"))?;
+                Ok("{}".to_string())
+            }
+            "push_set_body_mass" => {
+                self.push_set_body_mass_impl(u("body_index"), f("mass"))?;
+                Ok("{}".to_string())
+            }
+            "push_set_body_type" => {
+                self.push_set_body_type_impl(u("body_index"), s("kind"))?;
+                Ok("{}".to_string())
+            }
+            "push_set_collision_filter" => {
+                self.push_set_collision_filter_impl(
+                    u("body_index"),
+                    u("group") as u32,
+                    u("mask") as u32,
+                )?;
+                Ok("{}".to_string())
+            }
+            "push_grab" => {
+                self.push_grab_impl(u("body_index"), f("target_x"), f("target_y"), f("target_z"))?;
+                Ok("{}".to_string())
+            }
+            "push_move_grab" => {
+                self.push_move_grab_impl(
+                    u("body_index"),
+                    f("target_x"),
+                    f("target_y"),
+                    f("target_z"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "push_release" => {
+                self.push_release_impl(u("body_index"))?;
+                Ok("{}".to_string())
+            }
             _ => Err(JsValue::from_str(&format!(
                 "apply_component: unknown kind \"{kind}\""
             ))),
@@ -2370,6 +2430,22 @@ impl WasmWorld {
             }
             "water_level" => Ok(self.water_level_impl().to_string()),
             "water_density" => Ok(self.water_density_impl().to_string()),
+            "body_mass_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_mass_at_impl(index)?.to_string())
+            }
+            "body_type_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.body_type_at_impl(index)
+            }
+            "body_collision_group_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_collision_group_at_impl(index)?.to_string())
+            }
+            "body_collision_mask_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_collision_mask_at_impl(index)?.to_string())
+            }
             _ => Err(JsValue::from_str(&format!(
                 "read_component: unknown kind \"{kind}\""
             ))),
@@ -2398,14 +2474,20 @@ impl WasmWorld {
                 "add_phase_change_morph_coupling",
                 "set_gravity", "set_gravity_direction", "set_dt",
                 "set_atmosphere", "clear_atmosphere",
-                "set_water_region", "clear_water_region"
+                "set_water_region", "clear_water_region",
+                "set_body_position_at", "set_body_rotation_at", "set_body_scale_at",
+                "set_body_scale_xyz_at", "push_apply_force", "push_set_body_mass",
+                "push_set_body_type", "push_set_collision_filter", "push_grab",
+                "push_move_grab", "push_release"
             ],
             "read": [
                 "coupling_count", "coupling_info_text", "coupling_kind_summary",
                 "joint_info_text", "thermal_node_count",
                 "gravity", "gravity_direction", "dt",
                 "atmosphere_density", "atmosphere_viscosity", "atmosphere_wind",
-                "water_level", "water_density"
+                "water_level", "water_density",
+                "body_mass_at", "body_type_at", "body_collision_group_at",
+                "body_collision_mask_at"
             ]
         })
         .to_string()
@@ -3378,7 +3460,7 @@ impl WasmWorld {
 
     /// Editモードの回転Gizmo向けの直接編集(`set_body_position_at`の姿勢版、
     /// 同じくCommandキューを経由しない直接書き換え)。
-    pub fn set_body_rotation_at(
+    fn set_body_rotation_at_impl(
         &mut self,
         index: usize,
         x: f64,
@@ -3398,7 +3480,7 @@ impl WasmWorld {
     /// 相対値ではなく、常に基準形状からの絶対倍率(Translate/Rotate Gizmoの
     /// 「ドラッグ開始値+差分」ではなく「基準値×絶対倍率」という設計、複数回の
     /// ドラッグを重ねても誤差が蓄積しない)。
-    pub fn set_body_scale_at(&mut self, index: usize, scale: f64) -> Result<(), JsValue> {
+    fn set_body_scale_at_impl(&mut self, index: usize, scale: f64) -> Result<(), JsValue> {
         let id = self.try_body_id_at(index)?;
         if index == 0 {
             return Err(JsValue::from_str(
@@ -3429,7 +3511,7 @@ impl WasmWorld {
     /// Capsule/Convex)に楕円体が無い以上、ここで勝手に作るより「効かない」
     /// ことを返り値で正直に伝える(`false` を返す)。球は `set_body_scale_at`
     /// の等方スケールを使う。
-    pub fn set_body_scale_xyz_at(
+    fn set_body_scale_xyz_at_impl(
         &mut self,
         index: usize,
         sx: f64,
@@ -3653,7 +3735,7 @@ impl WasmWorld {
     /// 追加**(以前は常に固定の箱(index 1)決め打ちだったが、シーンギャラリー
     /// (`from_scene_json`)で任意のボディが存在するようになったため、呼び出し側が
     /// 対象を選べるようにした)。
-    pub fn push_apply_force(
+    fn push_apply_force_impl(
         &mut self,
         body_index: usize,
         fx: f64,
@@ -3678,13 +3760,13 @@ impl WasmWorld {
     ///
     /// いずれも`Command`経由なので、**Playモード中でも決定論とリプレイ再現性を
     /// 保ったまま**編集できる(Gizmoドラッグのような直接書き換えとは違う)。
-    pub fn body_mass_at(&self, index: usize) -> Result<f64, JsValue> {
+    fn body_mass_at_impl(&self, index: usize) -> Result<f64, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(self.inner.mechanics().bodies.mass(id.index as usize))
     }
 
     /// Body type を表す文字列(`"Dynamic"`/`"Static"`/`"Kinematic"`)。
-    pub fn body_type_at(&self, index: usize) -> Result<String, JsValue> {
+    fn body_type_at_impl(&self, index: usize) -> Result<String, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.body_type[id.index as usize] {
@@ -3696,17 +3778,17 @@ impl WasmWorld {
         )
     }
 
-    pub fn body_collision_group_at(&self, index: usize) -> Result<u32, JsValue> {
+    fn body_collision_group_at_impl(&self, index: usize) -> Result<u32, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(self.inner.mechanics().bodies.collision_group[id.index as usize])
     }
 
-    pub fn body_collision_mask_at(&self, index: usize) -> Result<u32, JsValue> {
+    fn body_collision_mask_at_impl(&self, index: usize) -> Result<u32, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(self.inner.mechanics().bodies.collision_mask[id.index as usize])
     }
 
-    pub fn push_set_body_mass(&mut self, body_index: usize, mass: f64) -> Result<(), JsValue> {
+    fn push_set_body_mass_impl(&mut self, body_index: usize, mass: f64) -> Result<(), JsValue> {
         if mass <= 0.0 || !mass.is_finite() {
             return Err(JsValue::from_str("mass must be a positive finite number"));
         }
@@ -3720,7 +3802,7 @@ impl WasmWorld {
     /// 復元できないため、切替前の値を読んで `Command` に載せる。
     /// 既に非 Dynamic で質量が 0 になっているボディを Dynamic へ戻す場合は、
     /// 形状と材質密度から `create_body` と同じ式で計算し直す。
-    pub fn push_set_body_type(&mut self, body_index: usize, kind: String) -> Result<(), JsValue> {
+    fn push_set_body_type_impl(&mut self, body_index: usize, kind: String) -> Result<(), JsValue> {
         let body = self.try_body_id_at(body_index)?;
         let body_type = match kind.as_str() {
             "Dynamic" => BodyType::Dynamic,
@@ -3747,7 +3829,7 @@ impl WasmWorld {
         Ok(())
     }
 
-    pub fn push_set_collision_filter(
+    fn push_set_collision_filter_impl(
         &mut self,
         body_index: usize,
         group: u32,
@@ -3763,7 +3845,7 @@ impl WasmWorld {
     /// 「Gizmo」に相当する最小デモ、`Command::Grab`——重心(`anchor_local=
     /// Vec3::ZERO`)をワールド座標`target`へ剛にピン留めする)。`push_apply_force`
     /// と同じ理由で`body_index`引数を追加した。
-    pub fn push_grab(
+    fn push_grab_impl(
         &mut self,
         body_index: usize,
         target_x: f64,
@@ -3781,7 +3863,7 @@ impl WasmWorld {
 
     /// ドラッグ中の`Command::MoveGrab`(既存のgrabの目標点をマウス位置へ追従させる)。
     /// `push_grab`と同じ`body_index`引数。
-    pub fn push_move_grab(
+    fn push_move_grab_impl(
         &mut self,
         body_index: usize,
         target_x: f64,
@@ -3798,7 +3880,7 @@ impl WasmWorld {
 
     /// ドラッグ終了時の`Command::Release`(grabを解除、以後は通常の物理に戻る)。
     /// `push_grab`と同じ`body_index`引数。
-    pub fn push_release(&mut self, body_index: usize) -> Result<(), JsValue> {
+    fn push_release_impl(&mut self, body_index: usize) -> Result<(), JsValue> {
         let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::Release { body });
         Ok(())
@@ -3814,7 +3896,7 @@ impl WasmWorld {
     /// 公開していないため(`mechanics_mut().bodies.position`はP1設計が定める
     /// `RigidBodySet`のSoAレイアウト、`docs/10-mechanics/01-rigid-body.md` §4)、
     /// ここで直接アクセスする。
-    pub fn set_body_position_at(
+    fn set_body_position_at_impl(
         &mut self,
         index: usize,
         x: f64,
@@ -4159,6 +4241,108 @@ mod tests {
             .parse::<f64>()
             .unwrap()
             .is_nan());
+    }
+
+    /// **Task#8第三弾の回帰テスト**: ボディのGizmo直接編集・Command系(質量・
+    /// body type・衝突フィルタ・grab)・その内省4個も`apply_component`/
+    /// `read_component`経由で操作できることを確認する。
+    #[test]
+    fn apply_component_and_read_component_change_body_properties_via_generic_dispatch() {
+        let mut world = new_world();
+        let body = world
+            .spawn_box(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
+            .unwrap();
+
+        world
+            .apply_component(
+                "set_body_position_at",
+                &format!(r#"{{"index":{body},"x":1.0,"y":2.0,"z":3.0}}"#),
+            )
+            .expect("set_body_position_at via apply_component must succeed");
+        world
+            .apply_component(
+                "set_body_rotation_at",
+                &format!(r#"{{"index":{body},"x":0.0,"y":0.0,"z":0.0,"w":1.0}}"#),
+            )
+            .expect("set_body_rotation_at via apply_component must succeed");
+        world
+            .apply_component(
+                "set_body_scale_at",
+                &format!(r#"{{"index":{body},"scale":2.0}}"#),
+            )
+            .expect("set_body_scale_at via apply_component must succeed");
+
+        let result = world
+            .apply_component(
+                "push_set_body_mass",
+                &format!(r#"{{"body_index":{body},"mass":5.0}}"#),
+            )
+            .expect("push_set_body_mass via apply_component must succeed");
+        assert_eq!(result, "{}");
+        world.step();
+        assert_eq!(
+            world
+                .read_component("body_mass_at", &body.to_string())
+                .unwrap(),
+            5.0_f64.to_string()
+        );
+
+        world
+            .apply_component(
+                "push_set_collision_filter",
+                &format!(r#"{{"body_index":{body},"group":2,"mask":4}}"#),
+            )
+            .expect("push_set_collision_filter via apply_component must succeed");
+        world.step();
+        assert_eq!(
+            world
+                .read_component("body_collision_group_at", &body.to_string())
+                .unwrap(),
+            "2"
+        );
+        assert_eq!(
+            world
+                .read_component("body_collision_mask_at", &body.to_string())
+                .unwrap(),
+            "4"
+        );
+
+        world
+            .apply_component(
+                "push_set_body_type",
+                &format!(r#"{{"body_index":{body},"kind":"Static"}}"#),
+            )
+            .expect("push_set_body_type via apply_component must succeed");
+        world.step();
+        assert_eq!(
+            world
+                .read_component("body_type_at", &body.to_string())
+                .unwrap(),
+            "Static"
+        );
+
+        world
+            .apply_component(
+                "push_grab",
+                &format!(r#"{{"body_index":{body},"target_x":1.0,"target_y":1.0,"target_z":1.0}}"#),
+            )
+            .expect("push_grab via apply_component must succeed");
+        world
+            .apply_component(
+                "push_move_grab",
+                &format!(r#"{{"body_index":{body},"target_x":2.0,"target_y":1.0,"target_z":1.0}}"#),
+            )
+            .expect("push_move_grab via apply_component must succeed");
+        world
+            .apply_component("push_release", &format!(r#"{{"body_index":{body}}}"#))
+            .expect("push_release via apply_component must succeed");
+        world
+            .apply_component(
+                "push_apply_force",
+                &format!(r#"{{"body_index":{body},"fx":0.0,"fy":0.0,"fz":0.0}}"#),
+            )
+            .expect("push_apply_force via apply_component must succeed");
+        world.step();
     }
 
     /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
@@ -4621,8 +4805,10 @@ mod tests {
     #[test]
     fn set_body_position_and_rotation_succeed_for_a_valid_body() {
         let mut world = new_world();
-        world.set_body_position_at(1, 7.0, 8.0, 9.0).unwrap();
-        world.set_body_rotation_at(1, 0.0, 0.0, 0.0, 1.0).unwrap();
+        world.set_body_position_at_impl(1, 7.0, 8.0, 9.0).unwrap();
+        world
+            .set_body_rotation_at_impl(1, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
     }
 
     /// Scale Gizmo(`set_body_scale_at`)がスポーンした球のスケールを
@@ -4633,7 +4819,7 @@ mod tests {
         let sphere_index = world
             .spawn_sphere(0.0, 0.0, 0.0, 0.5, "コンクリート".to_string())
             .expect("known material name must succeed");
-        world.set_body_scale_at(sphere_index, 2.0).unwrap();
+        world.set_body_scale_at_impl(sphere_index, 2.0).unwrap();
         assert_eq!(world.body_shape_kind_at(sphere_index).unwrap(), "sphere");
     }
 
@@ -4673,10 +4859,10 @@ mod tests {
     #[test]
     fn push_commands_accept_an_explicit_body_index_for_a_valid_body() {
         let mut world = new_world();
-        world.push_apply_force(1, 0.0, 1.0, 0.0).unwrap();
-        world.push_grab(1, 0.0, 1.0, 0.0).unwrap();
-        world.push_move_grab(1, 0.0, 1.0, 0.0).unwrap();
-        world.push_release(1).unwrap();
+        world.push_apply_force_impl(1, 0.0, 1.0, 0.0).unwrap();
+        world.push_grab_impl(1, 0.0, 1.0, 0.0).unwrap();
+        world.push_move_grab_impl(1, 0.0, 1.0, 0.0).unwrap();
+        world.push_release_impl(1).unwrap();
     }
 
     /// **増分B1(シーン定義プローブをProbe Graphsパネルへ配線)**: 既定シーン

@@ -1139,10 +1139,11 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
 function applyComponent(
   world: WasmWorld,
   kind: string,
-  payload: Record<string, number>,
-): { index?: number } {
+  payload: Record<string, number | string>,
+): { index?: number; applied?: boolean } {
   return JSON.parse(world.apply_component(kind, JSON.stringify(payload))) as {
     index?: number;
+    applied?: boolean;
   };
 }
 
@@ -1508,10 +1509,10 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
 /// (`World::apply_pending_commands`)。Gizmo ドラッグのような直接書き換えと
 /// 違い、Play モード中でもリプレイ再現性と決定論が壊れない。
 function renderRigidBodyComponent(world: WasmWorld, index: number): string {
-  const mass = world.body_mass_at(index);
-  const bodyType = world.body_type_at(index);
-  const group = world.body_collision_group_at(index);
-  const mask = world.body_collision_mask_at(index);
+  const mass = readNumber(world, "body_mass_at", String(index));
+  const bodyType = world.read_component("body_type_at", String(index));
+  const group = readNumber(world, "body_collision_group_at", String(index));
+  const mask = readNumber(world, "body_collision_mask_at", String(index));
   const option = (value: string) =>
     `<option value="${value}"${value === bodyType ? " selected" : ""}>${value}</option>`;
   // 質量 0 は「無限質量」(Static/Kinematic)を意味するので、数値入力には
@@ -2017,21 +2018,21 @@ function updateInspectorRigidBodyFields(world: WasmWorld, index: number): void {
     "inspector-mass",
   ) as HTMLInputElement | null;
   if (massInput) {
-    const mass = world.body_mass_at(index);
+    const mass = readNumber(world, "body_mass_at", String(index));
     // Static/Kinematic は inv_mass=0(無限質量)なので欄を空にして無効化する。
     massInput.disabled = !(mass > 0);
     if (document.activeElement !== massInput) {
       massInput.value = mass > 0 ? mass.toPrecision(6) : "";
     }
   }
-  setIfIdle("inspector-body-type", world.body_type_at(index));
+  setIfIdle("inspector-body-type", world.read_component("body_type_at", String(index)));
   setIfIdle(
     "inspector-collision-group",
-    String(world.body_collision_group_at(index)),
+    world.read_component("body_collision_group_at", String(index)),
   );
   setIfIdle(
     "inspector-collision-mask",
-    String(world.body_collision_mask_at(index)),
+    world.read_component("body_collision_mask_at", String(index)),
   );
 }
 
@@ -4828,17 +4829,17 @@ async function setUpSceneView(
   inspectorEditRef.current = {
     setMass(bodyIndex, mass) {
       if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
-      world.push_set_body_mass(bodyIndex, mass);
+      applyComponent(world, "push_set_body_mass", { body_index: bodyIndex, mass });
       pushCommandLog(world, { kind: "SetBodyMass", bodyIndex, mass });
     },
     setBodyType(bodyIndex, kind) {
       if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
-      world.push_set_body_type(bodyIndex, kind);
+      applyComponent(world, "push_set_body_type", { body_index: bodyIndex, kind });
       pushCommandLog(world, { kind: "SetBodyType", bodyIndex, bodyType: kind });
     },
     setCollisionFilter(bodyIndex, group, mask) {
       if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
-      world.push_set_collision_filter(bodyIndex, group, mask);
+      applyComponent(world, "push_set_collision_filter", { body_index: bodyIndex, group, mask });
       pushCommandLog(world, {
         kind: "SetCollisionFilter",
         bodyIndex,
@@ -4848,18 +4849,23 @@ async function setUpSceneView(
     },
     setScaleXyz(bodyIndex, sx, sy, sz) {
       if (bodyIndex <= 0 || bodyIndex >= world.body_count()) return false;
-      const applied = world.set_body_scale_xyz_at(bodyIndex, sx, sy, sz);
+      const { applied } = applyComponent(world, "set_body_scale_xyz_at", {
+        index: bodyIndex,
+        sx,
+        sy,
+        sz,
+      });
       if (applied) {
         // Three.js 側のメッシュは基準ジオメトリ×スケールで表示しているので、
         // 同じ倍率を掛ける(`currentScale` は等方スケール用なので触らない)。
         currentScaleXyz.set(bodyIndex, [sx, sy, sz]);
       }
-      return applied;
+      return applied ?? false;
     },
     setScale(bodyIndex, scale) {
       if (bodyIndex <= 0 || bodyIndex >= world.body_count()) return false;
       try {
-        world.set_body_scale_at(bodyIndex, scale);
+        applyComponent(world, "set_body_scale_at", { index: bodyIndex, scale });
         currentScale.set(bodyIndex, scale);
         currentScaleXyz.delete(bodyIndex);
         return true;
@@ -4869,7 +4875,7 @@ async function setUpSceneView(
     },
     setPosition(bodyIndex, x, y, z) {
       if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
-      world.set_body_position_at(bodyIndex, x, y, z);
+      applyComponent(world, "set_body_position_at", { index: bodyIndex, x, y, z });
     },
   };
   renderInspectorFor(world, selectedBodyIndex);
@@ -5150,7 +5156,12 @@ async function setUpSceneView(
           pointerDownHit.worldPoint,
         );
         const p = world.body_position_at_f32(grabbedBodyIndex);
-        world.push_grab(grabbedBodyIndex, p[0], p[1], p[2]);
+        applyComponent(world, "push_grab", {
+          body_index: grabbedBodyIndex,
+          target_x: p[0],
+          target_y: p[1],
+          target_z: p[2],
+        });
         pushCommandLog(world, {
           kind: "Grab",
           bodyIndex: grabbedBodyIndex,
@@ -5173,13 +5184,13 @@ async function setUpSceneView(
         deltaAngle,
       );
       const newQuat = deltaQuat.multiply(rotateStartQuat);
-      world.set_body_rotation_at(
-        selectedBodyIndex,
-        newQuat.x,
-        newQuat.y,
-        newQuat.z,
-        newQuat.w,
-      );
+      applyComponent(world, "set_body_rotation_at", {
+        index: selectedBodyIndex,
+        x: newQuat.x,
+        y: newQuat.y,
+        z: newQuat.z,
+        w: newQuat.w,
+      });
       return;
     }
     if (dragMode === "scale") {
@@ -5196,7 +5207,7 @@ async function setUpSceneView(
         ),
         SCALE_MAX,
       );
-      world.set_body_scale_at(selectedBodyIndex, factor);
+      applyComponent(world, "set_body_scale_at", { index: selectedBodyIndex, scale: factor });
       currentScale.set(selectedBodyIndex, factor);
       // 等方スケール Gizmo を使ったら軸別スケールは破棄する(両方を同時に
       // 効かせると `set_body_scale_at`(基準形状×倍率)と食い違う)。
@@ -5229,27 +5240,27 @@ async function setUpSceneView(
               Math.abs(gizmoAxisDir.y) > 0.5 ? snapToGrid(newPos.y) : newPos.y,
               Math.abs(gizmoAxisDir.z) > 0.5 ? snapToGrid(newPos.z) : newPos.z,
             );
-      world.set_body_position_at(
-        selectedBodyIndex,
-        snapped.x,
-        snapped.y,
-        snapped.z,
-      );
+      applyComponent(world, "set_body_position_at", {
+        index: selectedBodyIndex,
+        x: snapped.x,
+        y: snapped.y,
+        z: snapped.z,
+      });
       markUnsaved();
     } else if (dragMode === "grab") {
-      world.push_move_grab(
-        grabbedBodyIndex,
-        dragPlaneHit.x,
-        dragPlaneHit.y,
-        dragPlaneHit.z,
-      );
+      applyComponent(world, "push_move_grab", {
+        body_index: grabbedBodyIndex,
+        target_x: dragPlaneHit.x,
+        target_y: dragPlaneHit.y,
+        target_z: dragPlaneHit.z,
+      });
     }
   });
 
   renderer.domElement.addEventListener("pointerup", () => {
     if (isDragging) {
       if (dragMode === "grab") {
-        world.push_release(grabbedBodyIndex);
+        applyComponent(world, "push_release", { body_index: grabbedBodyIndex });
         pushCommandLog(world, { kind: "Release", bodyIndex: grabbedBodyIndex });
       }
     } else if (pointerDownHit) {
@@ -5309,12 +5320,12 @@ async function setUpSceneView(
         .set(state.axis[0], state.axis[1], state.axis[2])
         .applyQuaternion(thrustQuat);
       const magnitude = state.throttle * state.maxThrust;
-      world.push_apply_force(
-        bodyIndex,
-        thrustAxis.x * magnitude,
-        thrustAxis.y * magnitude,
-        thrustAxis.z * magnitude,
-      );
+      applyComponent(world, "push_apply_force", {
+        body_index: bodyIndex,
+        fx: thrustAxis.x * magnitude,
+        fy: thrustAxis.y * magnitude,
+        fz: thrustAxis.z * magnitude,
+      });
     }
   }
 
@@ -5406,22 +5417,25 @@ async function setUpSceneView(
 
   function applyEditEntry(entry: EditUndoEntry) {
     if (entry.kind === "position") {
-      world.set_body_position_at(
-        entry.bodyIndex,
-        entry.position.x,
-        entry.position.y,
-        entry.position.z,
-      );
+      applyComponent(world, "set_body_position_at", {
+        index: entry.bodyIndex,
+        x: entry.position.x,
+        y: entry.position.y,
+        z: entry.position.z,
+      });
     } else if (entry.kind === "rotation") {
-      world.set_body_rotation_at(
-        entry.bodyIndex,
-        entry.rotation.x,
-        entry.rotation.y,
-        entry.rotation.z,
-        entry.rotation.w,
-      );
+      applyComponent(world, "set_body_rotation_at", {
+        index: entry.bodyIndex,
+        x: entry.rotation.x,
+        y: entry.rotation.y,
+        z: entry.rotation.z,
+        w: entry.rotation.w,
+      });
     } else {
-      world.set_body_scale_at(entry.bodyIndex, entry.scale);
+      applyComponent(world, "set_body_scale_at", {
+        index: entry.bodyIndex,
+        scale: entry.scale,
+      });
       currentScale.set(entry.bodyIndex, entry.scale);
       renderInspectorFor(world, entry.bodyIndex);
     }
@@ -5876,27 +5890,27 @@ async function setUpSceneView(
       switch (entry.kind) {
         case "Grab":
           if (entry.bodyIndex < replayWorld.body_count()) {
-            replayWorld.push_grab(
-              entry.bodyIndex,
-              entry.targetX,
-              entry.targetY,
-              entry.targetZ,
-            );
+            applyComponent(replayWorld, "push_grab", {
+              body_index: entry.bodyIndex,
+              target_x: entry.targetX,
+              target_y: entry.targetY,
+              target_z: entry.targetZ,
+            });
           }
           break;
         case "Release":
           if (entry.bodyIndex < replayWorld.body_count()) {
-            replayWorld.push_release(entry.bodyIndex);
+            applyComponent(replayWorld, "push_release", { body_index: entry.bodyIndex });
           }
           break;
         case "ApplyForce":
           if (entry.bodyIndex < replayWorld.body_count()) {
-            replayWorld.push_apply_force(
-              entry.bodyIndex,
-              entry.fx,
-              entry.fy,
-              entry.fz,
-            );
+            applyComponent(replayWorld, "push_apply_force", {
+              body_index: entry.bodyIndex,
+              fx: entry.fx,
+              fy: entry.fy,
+              fz: entry.fz,
+            });
           }
           break;
         case "SetMotorTarget":
@@ -5929,21 +5943,27 @@ async function setUpSceneView(
           break;
         case "SetBodyMass":
           if (entry.bodyIndex < replayWorld.body_count()) {
-            replayWorld.push_set_body_mass(entry.bodyIndex, entry.mass);
+            applyComponent(replayWorld, "push_set_body_mass", {
+              body_index: entry.bodyIndex,
+              mass: entry.mass,
+            });
           }
           break;
         case "SetBodyType":
           if (entry.bodyIndex < replayWorld.body_count()) {
-            replayWorld.push_set_body_type(entry.bodyIndex, entry.bodyType);
+            applyComponent(replayWorld, "push_set_body_type", {
+              body_index: entry.bodyIndex,
+              kind: entry.bodyType,
+            });
           }
           break;
         case "SetCollisionFilter":
           if (entry.bodyIndex < replayWorld.body_count()) {
-            replayWorld.push_set_collision_filter(
-              entry.bodyIndex,
-              entry.group,
-              entry.mask,
-            );
+            applyComponent(replayWorld, "push_set_collision_filter", {
+              body_index: entry.bodyIndex,
+              group: entry.group,
+              mask: entry.mask,
+            });
           }
           break;
       }
@@ -6800,7 +6820,12 @@ async function setUpSceneView(
     // ボディが無いシーン(D9/D34/D35のようなギャラリーシーン)では力を
     // 加える対象が無い(`hasSelectedBody`のdoc参照)。
     if (!hasSelectedBody()) return;
-    world.push_apply_force(selectedBodyIndex, 0.0, NUDGE_FORCE_NEWTONS, 0.0);
+    applyComponent(world, "push_apply_force", {
+      body_index: selectedBodyIndex,
+      fx: 0.0,
+      fy: NUDGE_FORCE_NEWTONS,
+      fz: 0.0,
+    });
     pushCommandLog(world, {
       kind: "ApplyForce",
       bodyIndex: selectedBodyIndex,
