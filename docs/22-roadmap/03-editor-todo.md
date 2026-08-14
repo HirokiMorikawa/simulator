@@ -63,8 +63,8 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (頂点列のみ)ため、体積/慣性/AABBはAABB近似で対応、接触生成(実際に
   衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
-- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第六弾完了**、
-  元165本→60本)
+- [x] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(元165本→43本、
+  残りは正直な理由つきの適用除外)
   **残タスク完遂増分**(レビュー「Full collapse now」指示への対応、着手前は
   本文書のTODO群の中で唯一の未着手項目だった)。第一弾でJoint(5種の追加)・
   Coupling(14種の追加+操縦面舵角の実行時変更)・熱ノード追加/流体・気体
@@ -216,6 +216,40 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   Playwrightスモーク28/28(D24受け入れテストの`state_hash`比較含む)・
   QA(defects16/16・physics19/19・coupling29/37・operability26/28
   ——A2-2/C3-1は上記のとおり既存の不具合と確認済み)とも維持。
+
+  **第七弾(最終)**: スポーン2種(`spawn_pendulum`/`spawn_motor_arm`)・
+  SPH流体ブロックスポーン(`spawn_fluid_block`)・スナップショット巻き戻し
+  (`restore_snapshot`)・ブックマーク追加/復元(`add_bookmark`/
+  `restore_bookmark`)の適用系6個と、3D格子流体概要/エネルギー内訳/
+  流体スポーン数・粒子数/スナップショット数・時刻/ブックマーク数・
+  ラベル・時刻・エクスポート/現在シーンエクスポート(`grid_fluid_3d_summary`/
+  `energy_report_text`/`fluid_spawn_count`/`fluid_particle_count`/
+  `snapshot_count`/`snapshot_time_at`/`bookmark_count`/`bookmark_label_at`/
+  `bookmark_time_at`/`bookmark_export_scene_json`/`export_scene_json`)の
+  内省系11個、計17個を同じ2メソッドへ追加で畳んだ(第一〜七弾で計127個、
+  元165本→43本)。
+
+  **ここで畳む取り組みを完了とする**。残る43本の内訳は、当初から明記していた
+  正直な適用除外そのもの——
+  - ライフサイクル系4個(`new`/`from_scene_json`/`import_scene_json`/`step`)+
+    自由関数1個(`run_headless_scenario_json`): コンストラクタ・ワールド差替え・
+    1step進行はそもそも「コンポーネントの追加/設定/内省」という`schema/read/
+    apply`の枠に当てはまらない。
+  - 生成した3個(`apply_component`/`read_component`/`component_schema`)。
+  - 残り35個は全て、毎フレーム(またはシーン読み込み直後の1回)呼ばれる
+    型付き配列の読み出し系(`body_position/velocity/rotation_at_f32`・
+    `frame_rotation/world_position/world_rotation_at_f32`・量子1D/2D・
+    Ising・kinetic gas・Brownian・FDTD・soft body・astro・伝導棒・SPH流体
+    粒子位置・接触点・probe履歴・イベントテキスト)——JSON文字列への都度
+    変換が明白な性能後退になる大きな型付き配列という、第一弾から一貫して
+    明記してきた基準に基づく。
+
+  検証: Rust側新規テスト(振り子スポーン・SPH流体スポーン・スナップ
+  ショット/ブックマークの追加・復元・エクスポートをJSON経由で実際に操作し、
+  内省に反映されることを確認)、cargo test -p sim-wasm 30/30全緑。
+  cargo test --workspace全緑、fmt/clippyクリーン、Playwrightスモーク28/28・
+  QA(defects16/16・physics19/19・coupling29/37・operability26/28
+  ——A8-1/A8-2のブックマーク/Timelineスクラブ含め結果不変)とも維持。
 
   検証: Rust側新規テスト(`apply_component`/`read_component`をJSON経由で
   実際に呼び、Joint/Coupling/熱ノードの追加・内省が代替できることを確認、

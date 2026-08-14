@@ -330,7 +330,7 @@ type SceneExportRef = { current: (() => SceneBodyExport[]) | null };
 type SceneImportRef = { current: ((json: string) => number) | null };
 /// 検証タブ(**残タスク完遂の縦串④増分**)が、現在のワールドを
 /// `sim_world::Scenario`形式のJSON文字列として読むための口
-/// (`world.export_scene_json()`の薄い写像、`SceneExportRef`と同じ理由で
+/// (`world.read_component("export_scene_json", "")`の薄い写像、`SceneExportRef`と同じ理由で
 /// refを介す——`setUpProjectDrawer`は`world`を直接持たない)。
 type ValidationBaseJsonRef = { current: (() => string) | null };
 
@@ -951,17 +951,17 @@ function setUpHierarchy(
   // 持たないため)、スポーンした水塊の数+総粒子数の概要表示のみとする
   // (縮約実装、`spawn_fluid_block`が複数回スポーンで水塊を追加できるように
   // なったことを受けての最小限のHierarchy反映)。
-  const fluidSpawnCount = world.fluid_spawn_count();
+  const fluidSpawnCount = readNumber(world, "fluid_spawn_count");
   if (fluidSpawnCount > 0) {
     const fluidItem = document.createElement("li");
-    fluidItem.textContent = `Fluids (${fluidSpawnCount}塊, ${world.fluid_particle_count()}粒子)`;
+    fluidItem.textContent = `Fluids (${fluidSpawnCount}塊, ${readNumber(world, "fluid_particle_count")}粒子)`;
     bodies.appendChild(fluidItem);
   }
 
   // 3D格子流体(**群9で追加**)。3Dの場をブラウザで可視化する経路は無いので、
   // ドメインが載っていること自体が見えるよう概要行だけを出す(縮約、
   // `grid_fluid_3d_summary`のdoc参照)。
-  const gridFluid3dSummary = world.grid_fluid_3d_summary();
+  const gridFluid3dSummary = world.read_component("grid_fluid_3d_summary", "");
   if (gridFluid3dSummary.length > 0) {
     const item = document.createElement("li");
     item.textContent = gridFluid3dSummary;
@@ -3483,7 +3483,7 @@ async function setUpSceneView(
     }
     return bodies;
   };
-  validationBaseJsonRef.current = () => world.export_scene_json();
+  validationBaseJsonRef.current = () => world.read_component("export_scene_json", "");
 
   const host = document.getElementById("scene-view-canvas-host")!;
 
@@ -6588,13 +6588,13 @@ async function setUpSceneView(
     .addEventListener("click", () => {
       const { x, z } = nextSpawnPosition();
       const material = spawnMaterialSelect.value;
-      const bodyIndex = world.spawn_pendulum(
-        x,
-        PENDULUM_PIVOT_HEIGHT,
-        z,
-        PENDULUM_ARM_LENGTH,
-        material,
-      );
+      const bodyIndex = applyComponent(world, "spawn_pendulum", {
+        pivot_x: x,
+        pivot_y: PENDULUM_PIVOT_HEIGHT,
+        pivot_z: z,
+        arm_length: PENDULUM_ARM_LENGTH,
+        material_name: material,
+      }).index as number;
       const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(0.3, 16, 12),
         new THREE.MeshStandardMaterial({ color: 0xff66cc }),
@@ -6615,12 +6615,12 @@ async function setUpSceneView(
   document.getElementById("btn-spawn-motor")!.addEventListener("click", () => {
     const { x, z } = nextSpawnPosition();
     const material = spawnMaterialSelect.value;
-    const bodyIndex = world.spawn_motor_arm(
-      x,
-      PENDULUM_PIVOT_HEIGHT,
-      z,
-      material,
-    );
+    const bodyIndex = applyComponent(world, "spawn_motor_arm", {
+      pivot_x: x,
+      pivot_y: PENDULUM_PIVOT_HEIGHT,
+      pivot_z: z,
+      material_name: material,
+    }).index as number;
     motorArmBodies.add(bodyIndex);
     currentMotorTarget.set(bodyIndex, MOTOR_TARGET_LOW);
     const mesh = new THREE.Mesh(
@@ -6631,8 +6631,8 @@ async function setUpSceneView(
   });
 
   document.getElementById("btn-spawn-fluid")!.addEventListener("click", () => {
-    world.spawn_fluid_block();
-    const count = world.fluid_particle_count();
+    applyComponent(world, "spawn_fluid_block", {});
+    const count = readNumber(world, "fluid_particle_count");
     fluidPositionAttribute = new THREE.BufferAttribute(
       new Float32Array(count * 3),
       3,
@@ -6714,7 +6714,7 @@ async function setUpSceneView(
     playButton.textContent = "▶";
   });
   scrubber.addEventListener("input", () => {
-    world.restore_snapshot(Number(scrubber.value));
+    applyComponent(world, "restore_snapshot", { index: Number(scrubber.value) });
     render();
   });
   scrubber.addEventListener("pointerup", () => {
@@ -6735,16 +6735,16 @@ async function setUpSceneView(
 
   function renderBookmarkList() {
     bookmarkList.innerHTML = "";
-    const count = world.bookmark_count();
+    const count = readNumber(world, "bookmark_count");
     for (let i = 0; i < count; i++) {
       const item = document.createElement("span");
       const chip = document.createElement("button");
       chip.className = "bookmark-chip";
-      chip.textContent = `${world.bookmark_label_at(i)} (${world.bookmark_time_at(i).toFixed(1)}s)`;
+      chip.textContent = `${world.read_component("bookmark_label_at", String(i))} (${readNumber(world, "bookmark_time_at", String(i)).toFixed(1)}s)`;
       chip.addEventListener("click", () => {
         playing = false;
         playButton.textContent = "▶";
-        world.restore_bookmark(i);
+        applyComponent(world, "restore_bookmark", { index: i });
         render();
       });
       item.appendChild(chip);
@@ -6760,12 +6760,12 @@ async function setUpSceneView(
       exportButton.title =
         "このブックマークをシーンJSONとしてエクスポート(Importで読み込み可能)";
       exportButton.addEventListener("click", () => {
-        const json = world.bookmark_export_scene_json(i);
+        const json = world.read_component("bookmark_export_scene_json", String(i));
         const blob = new Blob([json], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `bookmark_${world.bookmark_label_at(i)}.json`;
+        a.download = `bookmark_${world.read_component("bookmark_label_at", String(i))}.json`;
         a.click();
         URL.revokeObjectURL(url);
       });
@@ -6799,18 +6799,18 @@ async function setUpSceneView(
   // ブックマーク一覧に至っては書き出す手段が無かった(個々のブックマークを
   // シーンJSONとして落とせるだけ)。
   //
-  // 現在の状態は `world.export_scene_json()` が `sim_world::Scenario` 形式で返す
+  // 現在の状態は `world.read_component("export_scene_json", "")` が `sim_world::Scenario` 形式で返す
   // (**群2で追加**——それまで「現在状態をシーンJSONにする」経路は
   // `bookmark_export_scene_json` しかなく、書き出すたびに一時ブックマークが
   // 一覧に残る実装になっていた。実装検証中に気付いて Rust 側へ
   // `export_scene_json` を切り出した)。
   projectBundleRef.current = () => {
-    const sceneJson = world.export_scene_json();
+    const sceneJson = world.read_component("export_scene_json", "");
     const bookmarks: { label: string; time: number }[] = [];
-    for (let i = 0; i < world.bookmark_count(); i += 1) {
+    for (let i = 0; i < readNumber(world, "bookmark_count"); i += 1) {
       bookmarks.push({
-        label: world.bookmark_label_at(i),
-        time: world.bookmark_time_at(i),
+        label: world.read_component("bookmark_label_at", String(i)),
+        time: readNumber(world, "bookmark_time_at", String(i)),
       });
     }
     return {
@@ -6831,7 +6831,7 @@ async function setUpSceneView(
   addBookmarkButton.addEventListener("click", () => {
     const label =
       bookmarkLabelInput.value.trim() || `t=${readNumber(world, "time").toFixed(1)}s`;
-    world.add_bookmark(label);
+    applyComponent(world, "add_bookmark", { label });
     bookmarkLabelInput.value = "";
     renderBookmarkList();
   });
@@ -6841,13 +6841,15 @@ async function setUpSceneView(
   // 埋め込まれたstep番号の時刻に最も近いスナップショットへ巻き戻す(スナップショット
   // は1s間隔のため厳密なstep一致ではなく最近傍、`restore_snapshot`と同じ挙動)。
   jumpToStepRef.current = (step: number) => {
-    const count = world.snapshot_count();
+    const count = readNumber(world, "snapshot_count");
     if (count === 0) return;
     const targetTime = step * DT;
     let bestIndex = 0;
     let bestDiff = Infinity;
     for (let i = 0; i < count; i++) {
-      const diff = Math.abs(world.snapshot_time_at(i) - targetTime);
+      const diff = Math.abs(
+        readNumber(world, "snapshot_time_at", String(i)) - targetTime,
+      );
       if (diff < bestDiff) {
         bestDiff = diff;
         bestIndex = i;
@@ -6855,7 +6857,7 @@ async function setUpSceneView(
     }
     playing = false;
     playButton.textContent = "▶";
-    world.restore_snapshot(bestIndex);
+    applyComponent(world, "restore_snapshot", { index: bestIndex });
     render();
   };
 
@@ -7194,7 +7196,7 @@ async function setUpSceneView(
       mode === "edit" ? "Edit" : playing ? "Playing" : "Paused";
 
     if (!scrubbing) {
-      const latestIndex = Math.max(world.snapshot_count() - 1, 0);
+      const latestIndex = Math.max(readNumber(world, "snapshot_count") - 1, 0);
       scrubber.max = String(latestIndex);
       scrubber.value = String(latestIndex);
     }

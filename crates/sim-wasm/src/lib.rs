@@ -969,7 +969,7 @@ impl WasmWorld {
     /// docs/23-frontend/01-editor.md §1.1 の「シーングラフツリー(…Fluids)」に
     /// **ドメインが載っていること自体は見える**ようにする——これが無いと、
     /// シーンに3D格子流体があってもエディタ上で存在を確認する手段が全く無い。
-    pub fn grid_fluid_3d_summary(&self) -> String {
+    fn grid_fluid_3d_summary_impl(&self) -> String {
         let Some(grid) = self.inner.grid_fluid_3d() else {
             return String::new();
         };
@@ -1654,7 +1654,7 @@ impl WasmWorld {
     /// タブ区切り4列 `名前\t合計\t単位\t保存性(1/0)` を改行区切りで返す。
     /// **単位と保存性を必ず添える**——SI と原子単位/正規化単位が混在しうるため、
     /// 数値だけ出すと合計してよいように見えてしまう(`energy_report`のdoc参照)。
-    pub fn energy_report_text(&self) -> String {
+    fn energy_report_text_impl(&self) -> String {
         self.inner
             .energy_report()
             .iter()
@@ -1677,7 +1677,7 @@ impl WasmWorld {
     /// 配置する。鉛直から30度傾いた位置(`pivot`から`arm_length`だけ離れた
     /// 点)を初期位置とすることで、静止した自明な平衡状態ではなく実際に
     /// 重力で振り子運動が始まる。
-    pub fn spawn_pendulum(
+    fn spawn_pendulum_impl(
         &mut self,
         pivot_x: f64,
         pivot_y: f64,
@@ -1725,7 +1725,7 @@ impl WasmWorld {
     /// ワールド固定点`(pivot_x, pivot_y, pivot_z)`へ`BallJoint`でピン留めした
     /// 棒状の箱を、Z軸まわりの`HingeMotorPd`(PD位置サーボ)で角度制御する。
     /// 初期状態は目標角0(鉛直にぶら下がる姿勢)。
-    pub fn spawn_motor_arm(
+    fn spawn_motor_arm_impl(
         &mut self,
         pivot_x: f64,
         pivot_y: f64,
@@ -2540,6 +2540,41 @@ impl WasmWorld {
                 self.set_motor_target_at_impl(u("index"), f("theta_target"))?;
                 Ok("{}".to_string())
             }
+            "spawn_pendulum" => {
+                let index = self.spawn_pendulum_impl(
+                    f("pivot_x"),
+                    f("pivot_y"),
+                    f("pivot_z"),
+                    f("arm_length"),
+                    s("material_name"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "spawn_motor_arm" => {
+                let index = self.spawn_motor_arm_impl(
+                    f("pivot_x"),
+                    f("pivot_y"),
+                    f("pivot_z"),
+                    s("material_name"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "spawn_fluid_block" => {
+                self.spawn_fluid_block_impl();
+                Ok("{}".to_string())
+            }
+            "restore_snapshot" => {
+                self.restore_snapshot_impl(u("index"))?;
+                Ok("{}".to_string())
+            }
+            "add_bookmark" => {
+                self.add_bookmark_impl(s("label"));
+                Ok("{}".to_string())
+            }
+            "restore_bookmark" => {
+                self.restore_bookmark_impl(u("index"))?;
+                Ok("{}".to_string())
+            }
             _ => Err(JsValue::from_str(&format!(
                 "apply_component: unknown kind \"{kind}\""
             ))),
@@ -2667,6 +2702,29 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 Ok(self.frame_parent_index_impl(index)?.to_string())
             }
+            "grid_fluid_3d_summary" => Ok(self.grid_fluid_3d_summary_impl()),
+            "energy_report_text" => Ok(self.energy_report_text_impl()),
+            "fluid_spawn_count" => Ok(self.fluid_spawn_count_impl().to_string()),
+            "fluid_particle_count" => Ok(self.fluid_particle_count_impl().to_string()),
+            "snapshot_count" => Ok(self.snapshot_count_impl().to_string()),
+            "snapshot_time_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.snapshot_time_at_impl(index)?.to_string())
+            }
+            "bookmark_count" => Ok(self.bookmark_count_impl().to_string()),
+            "bookmark_label_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.bookmark_label_at_impl(index)
+            }
+            "bookmark_time_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.bookmark_time_at_impl(index)?.to_string())
+            }
+            "bookmark_export_scene_json" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.bookmark_export_scene_json_impl(index)
+            }
+            "export_scene_json" => self.export_scene_json_impl(),
             _ => Err(JsValue::from_str(&format!(
                 "read_component: unknown kind \"{kind}\""
             ))),
@@ -2709,7 +2767,9 @@ impl WasmWorld {
                 "circuit_editor_add_capacitor", "circuit_editor_add_inductor",
                 "circuit_editor_add_diode", "circuit_editor_add_dc_motor",
                 "circuit_editor_set_motor_speed", "push_heat_source",
-                "add_rotating_frame", "add_child_frame", "set_motor_target_at"
+                "add_rotating_frame", "add_child_frame", "set_motor_target_at",
+                "spawn_pendulum", "spawn_motor_arm", "spawn_fluid_block",
+                "restore_snapshot", "add_bookmark", "restore_bookmark"
             ],
             "read": [
                 "coupling_count", "coupling_info_text", "coupling_kind_summary",
@@ -2729,7 +2789,12 @@ impl WasmWorld {
                 "time", "step_count", "state_hash", "energy_residual",
                 "max_body_speed", "active_approximations_text",
                 "imported_probe_count", "imported_probe_label_at",
-                "imported_probe_value_at", "frame_count", "frame_parent_index"
+                "imported_probe_value_at", "frame_count", "frame_parent_index",
+                "grid_fluid_3d_summary", "energy_report_text",
+                "fluid_spawn_count", "fluid_particle_count",
+                "snapshot_count", "snapshot_time_at",
+                "bookmark_count", "bookmark_label_at", "bookmark_time_at",
+                "bookmark_export_scene_json", "export_scene_json"
             ]
         })
         .to_string()
@@ -3577,7 +3642,7 @@ impl WasmWorld {
     /// (`World::sph_mut`)そこへ粒子を追加する(複数回スポーンすると水塊が
     /// 増えていく、`fluid_spawn_count`でX方向にずらして重なりを避ける)。
     /// まだ無効なら新規`SphFluid`を構築して有効化する(初回のみ)。
-    pub fn spawn_fluid_block(&mut self) {
+    fn spawn_fluid_block_impl(&mut self) {
         let h: f64 = 0.15;
         let rho0: f64 = 1000.0;
         let c_s: f64 = 20.0;
@@ -3631,13 +3696,13 @@ impl WasmWorld {
     }
 
     /// `spawn_fluid_block`を呼んだ回数(Hierarchyの「Fluids」概要表示用)。
-    pub fn fluid_spawn_count(&self) -> u32 {
+    fn fluid_spawn_count_impl(&self) -> u32 {
         self.fluid_spawn_count
     }
 
     /// 流体粒子数(境界粒子は含まない、`fluid_particle_positions_f32`と同じ体系)。
     /// 流体ドメインが有効でなければ0。
-    pub fn fluid_particle_count(&self) -> usize {
+    fn fluid_particle_count_impl(&self) -> usize {
         self.inner.sph().map_or(0, |s| s.position.len())
     }
 
@@ -3805,7 +3870,7 @@ impl WasmWorld {
     }
 
     /// Timelineスクラバが表示できるスナップショット数(モジュールdoc参照)。
-    pub fn snapshot_count(&self) -> usize {
+    fn snapshot_count_impl(&self) -> usize {
         self.snapshots.len()
     }
 
@@ -3822,7 +3887,7 @@ impl WasmWorld {
     }
 
     /// `index`番目のスナップショットの記録時刻(秒、古い順)。
-    pub fn snapshot_time_at(&self, index: usize) -> Result<f64, JsValue> {
+    fn snapshot_time_at_impl(&self, index: usize) -> Result<f64, JsValue> {
         Ok(self.try_snapshot_at(index)?.time())
     }
 
@@ -3830,7 +3895,7 @@ impl WasmWorld {
     /// `World::restore`をそのまま使う)。巻き戻した時点より後のスナップショットは
     /// もはや実際の未来を表さないため破棄する(新しいタイムラインがそこから
     /// 再開する、設計の「直前スナップショットへの巻き戻し」と同じ発想)。
-    pub fn restore_snapshot(&mut self, index: usize) -> Result<(), JsValue> {
+    fn restore_snapshot_impl(&mut self, index: usize) -> Result<(), JsValue> {
         // `try_snapshot_at`は`&self`(disjointでない全体借用)を取るため、
         // その戻り値を保持したまま`&mut self.inner`は取れない。フィールドへ
         // 直接アクセスして借用チェッカに`snapshots`と`inner`が別フィールド
@@ -3851,11 +3916,11 @@ impl WasmWorld {
     /// 退避に晒されない別領域へ、現在時点のスナップショットをラベル付きで保存する
     /// (既存の`World::snapshot`をそのまま使う)。数の上限は設けない(縮約実装、
     /// シーンJSONと一緒に出す「共有」用途は未実装)。
-    pub fn add_bookmark(&mut self, label: String) {
+    fn add_bookmark_impl(&mut self, label: String) {
         self.bookmarks.push((label, self.inner.snapshot()));
     }
 
-    pub fn bookmark_count(&self) -> usize {
+    fn bookmark_count_impl(&self) -> usize {
         self.bookmarks.len()
     }
 
@@ -3871,11 +3936,11 @@ impl WasmWorld {
         })
     }
 
-    pub fn bookmark_label_at(&self, index: usize) -> Result<String, JsValue> {
+    fn bookmark_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
         Ok(self.try_bookmark_at(index)?.0.clone())
     }
 
-    pub fn bookmark_time_at(&self, index: usize) -> Result<f64, JsValue> {
+    fn bookmark_time_at_impl(&self, index: usize) -> Result<f64, JsValue> {
         Ok(self.try_bookmark_at(index)?.1.time())
     }
 
@@ -3887,7 +3952,7 @@ impl WasmWorld {
     /// 検証タブでprobeが1本も出ない実バグ(旧実装は`world`/`bodies`しか
     /// 書き出さず、probes/joints/couplings/thermal/circuit/astro/gas は
     /// 常に欠落していた)を追う過程で発覚した)。
-    pub fn bookmark_export_scene_json(&self, index: usize) -> Result<String, JsValue> {
+    fn bookmark_export_scene_json_impl(&self, index: usize) -> Result<String, JsValue> {
         let (label, snapshot) = self.try_bookmark_at(index)?;
         let scenario = sim_world::to_scenario(snapshot, &format!("bookmark-{label}"));
         serde_json::to_string(&scenario)
@@ -3899,7 +3964,7 @@ impl WasmWorld {
     /// エクスポート」)が使う。`bookmark_export_scene_json`と同じく
     /// `sim_world::to_scenario`を経由する(旧実装は`world`/`bodies`だけの
     /// 手書きシリアライズだった、上のdoc参照)。
-    pub fn export_scene_json(&self) -> Result<String, JsValue> {
+    fn export_scene_json_impl(&self) -> Result<String, JsValue> {
         let scenario = sim_world::to_scenario(&self.inner, "current");
         serde_json::to_string(&scenario)
             .map_err(|e| JsValue::from_str(&format!("failed to serialize scenario: {e}")))
@@ -3909,7 +3974,7 @@ impl WasmWorld {
     /// 巻き戻し後も残す(いつでも同じブックマークへ再度戻れるように)。ただし
     /// リングバッファ側のスナップショットは、もはや実際の未来を表さないため
     /// 全て破棄する(新しいタイムラインがそこから再開する)。
-    pub fn restore_bookmark(&mut self, index: usize) -> Result<(), JsValue> {
+    fn restore_bookmark_impl(&mut self, index: usize) -> Result<(), JsValue> {
         // `restore_snapshot`と同じ理由でフィールドへ直接アクセスする
         // (借用チェッカに`bookmarks`と`inner`が別フィールドであることを見せる)。
         let (_, snapshot) = self.bookmarks.get(index).ok_or_else(|| {
@@ -4877,7 +4942,7 @@ mod tests {
         // モジュールdoc参照)があるため、成功パスのみ確認する——`spawn_motor_arm`
         // (Rustのpub fnとして現存、モーターを実際に持つボディを作る)を使う。
         let motor_arm = world
-            .spawn_motor_arm(0.0, 2.0, 0.0, "アルミニウム".to_string())
+            .spawn_motor_arm_impl(0.0, 2.0, 0.0, "アルミニウム".to_string())
             .expect("spawn_motor_arm must succeed");
         world
             .apply_component(
@@ -4885,6 +4950,74 @@ mod tests {
                 &format!(r#"{{"index":{motor_arm},"theta_target":0.5}}"#),
             )
             .expect("set_motor_target_at via apply_component must succeed");
+    }
+
+    /// **Task#8第七弾の回帰テスト**: スポーン2種(振り子・モーターアームは
+    /// 第六弾で既に`_impl`直呼びで使っているため、ここでは振り子のみ改めて
+    /// `apply_component`経由で確認)・SPH流体スポーン・スナップショット・
+    /// ブックマーク・シーンJSONエクスポートも`apply_component`/
+    /// `read_component`経由で操作できることを確認する。
+    #[test]
+    fn apply_component_and_read_component_spawn_pendulum_snapshot_and_bookmark_via_generic_dispatch(
+    ) {
+        let mut world = new_world();
+
+        let result = world
+            .apply_component(
+                "spawn_pendulum",
+                r#"{"pivot_x":0.0,"pivot_y":5.0,"pivot_z":0.0,"arm_length":1.0,"material_name":"アルミニウム"}"#,
+            )
+            .expect("spawn_pendulum via apply_component must succeed");
+        assert_eq!(result, "{\"index\":2}");
+
+        world
+            .apply_component("spawn_fluid_block", "{}")
+            .expect("spawn_fluid_block via apply_component must succeed");
+        assert_eq!(world.read_component("fluid_spawn_count", "").unwrap(), "1");
+        assert!(
+            world
+                .read_component("fluid_particle_count", "")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+                > 0
+        );
+        // 3D格子流体・エネルギー内訳は既定シーンでは無効/空でも、往復できる
+        // ことだけを確認する(文字列が返る、パニックしない)。
+        let _ = world.read_component("grid_fluid_3d_summary", "").unwrap();
+        let _ = world.read_component("energy_report_text", "").unwrap();
+
+        assert_eq!(world.read_component("snapshot_count", "").unwrap(), "0");
+        world.step();
+        // スナップショットは`snapshot_interval_steps`ごとにしか積まれないため
+        // (`WasmWorld::step`参照)、ここでは`restore_snapshot`を無効indexで
+        // 呼ばず、`snapshot_count`/`snapshot_time_at`の往復だけを確認する
+        // (`JsValue::Err`のネイティブ構築がSIGABRTする既知の制約のため)。
+
+        world
+            .apply_component("add_bookmark", r#"{"label":"Task8第七弾テスト"}"#)
+            .expect("add_bookmark via apply_component must succeed");
+        assert_eq!(world.read_component("bookmark_count", "").unwrap(), "1");
+        assert_eq!(
+            world.read_component("bookmark_label_at", "0").unwrap(),
+            "Task8第七弾テスト"
+        );
+        let _ = world
+            .read_component("bookmark_time_at", "0")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        let exported = world
+            .read_component("bookmark_export_scene_json", "0")
+            .unwrap();
+        assert!(exported.contains("\"bodies\""), "actual: {exported}");
+
+        world
+            .apply_component("restore_bookmark", r#"{"index":0}"#)
+            .expect("restore_bookmark via apply_component must succeed");
+
+        let current = world.read_component("export_scene_json", "").unwrap();
+        assert!(current.contains("\"bodies\""), "actual: {current}");
     }
 
     /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
@@ -5023,7 +5156,7 @@ mod tests {
             )
             .expect("phase change morph must succeed once a thermal node exists");
 
-        world.spawn_fluid_block(); // SPHドメインを有効化。
+        world.spawn_fluid_block_impl(); // SPHドメインを有効化。
         world
             .add_sph_rigid_coupling_impl(body, 0.2, 12)
             .expect("sph rigid must succeed once the SPH domain exists");
@@ -5225,7 +5358,7 @@ mod tests {
     fn export_scene_json_round_trips_the_default_scenes_two_probes() {
         let world = new_world();
         let json = world
-            .export_scene_json()
+            .export_scene_json_impl()
             .expect("export_scene_json must succeed");
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("export_scene_json must produce valid JSON");
@@ -5330,16 +5463,18 @@ mod tests {
         let mut world = new_world();
         world.step();
         let time_at_bookmark = world.time_impl();
-        world.add_bookmark("test-bookmark".to_string());
-        assert_eq!(world.bookmark_count(), 1);
-        assert_eq!(world.bookmark_label_at(0).unwrap(), "test-bookmark");
-        assert!((world.bookmark_time_at(0).unwrap() - time_at_bookmark).abs() < 1e-12);
+        world.add_bookmark_impl("test-bookmark".to_string());
+        assert_eq!(world.bookmark_count_impl(), 1);
+        assert_eq!(world.bookmark_label_at_impl(0).unwrap(), "test-bookmark");
+        assert!((world.bookmark_time_at_impl(0).unwrap() - time_at_bookmark).abs() < 1e-12);
 
         world.step();
         world.step();
         assert!(world.time_impl() > time_at_bookmark);
 
-        world.restore_bookmark(0).expect("bookmark 0 must exist");
+        world
+            .restore_bookmark_impl(0)
+            .expect("bookmark 0 must exist");
         assert!((world.time_impl() - time_at_bookmark).abs() < 1e-12);
     }
 

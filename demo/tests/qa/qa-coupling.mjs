@@ -186,10 +186,10 @@ await boot(page);
 await loadScene(page, "d18b-ice-melts");
 await enterPlayPaused(page);
 {
-  const before = await page.evaluate(() => window.__world.fluid_particle_count());
+  const before = await page.evaluate(() => Number(window.__world.read_component("fluid_particle_count", "")));
   await stepN(page, 10000); // dt=2 ms → 20 s(融解の潜熱を通すのにこれだけ要る)
   const after = await page.evaluate(() => ({
-    particles: window.__world.fluid_particle_count(),
+    particles: Number(window.__world.read_component("fluid_particle_count", "")),
     temp: Number(window.__world.read_component("heater_node_temperature", "")),
     t: Number(window.__world.read_component("time", "")),
   }));
@@ -409,7 +409,7 @@ await boot(page);
   await page.locator("#btn-add").click();
   await page.getByText("＋ 流体 (SPH 水塊)").click();
   await page.waitForTimeout(200);
-  const spawned = await page.evaluate(() => window.__world.fluid_particle_count());
+  const spawned = await page.evaluate(() => Number(window.__world.read_component("fluid_particle_count", "")));
   await enterPlayPaused(page);
   const y0 = await page.evaluate(() => Array.from(window.__world.fluid_particle_positions_f32()).filter((_, i) => i % 3 === 1));
   await stepN(page, 240);
