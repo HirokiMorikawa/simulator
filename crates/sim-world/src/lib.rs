@@ -175,6 +175,17 @@ pub enum Command {
     /// を設定する。broadphase で双方向 AND を取るため、片側の変更だけで
     /// ペアを落とせる。
     SetCollisionFilter { body: BodyId, group: u32, mask: u32 },
+    /// 登録済みCoupling(`World::couplings()`が返す`CouplingInfo::index`)へ
+    /// 実行時パラメータを設定する(**残タスク完遂の縦串⑤増分**、操縦面の
+    /// 舵角変更が最初の用途)。Coupling registryは元々「追加のみ・実行時
+    /// パラメータ変更不可」だったため、この Command がその唯一の書き換え経路。
+    /// 範囲外indexや対応しないパラメータは無言で無視する(他のCommandの
+    /// `is_valid`ガードと同じ「無効な入力は無視する」方針)。
+    SetCouplingParam {
+        coupling_index: usize,
+        param: sim_coupling::CouplingParam,
+        value: f64,
+    },
 }
 
 /// `World::energy_report`の1ドメイン分(**群3で追加**、`energy_report`のdoc参照)。
@@ -1076,6 +1087,15 @@ impl World {
                         // フィルタ変更で新たに触れるようになった相手を拾うため、
                         // 静止仮定を解除する(`set_shape` と同じ理由)。
                         self.mechanics.bodies.asleep[body.index as usize] = false;
+                    }
+                }
+                Command::SetCouplingParam {
+                    coupling_index,
+                    param,
+                    value,
+                } => {
+                    if let Some(coupling) = self.couplings.get_mut(coupling_index) {
+                        coupling.set_scalar_param(param, value);
                     }
                 }
             }
@@ -2624,8 +2644,12 @@ impl World {
     /// `apply_coupling`を呼ぶ手間を無くす、Coupling registryの縮約版(シーンJSON
     /// `couplings`セクションからの自動解決・排他結合検査との接続は後続増分、
     /// `scenario`モジュールdoc参照)。
-    pub fn add_coupling(&mut self, coupling: Box<dyn sim_coupling::Coupling>) {
+    /// 戻り値はこのCouplingの登録index(`CouplingInfo::index`と同じ並び、
+    /// `Command::SetCouplingParam`が参照するindex——**残タスク完遂の縦串⑤増分**
+    /// で追加、それまでは戻り値`()`で呼び出し側は捨てるだけだった)。
+    pub fn add_coupling(&mut self, coupling: Box<dyn sim_coupling::Coupling>) -> usize {
         self.couplings.push(coupling);
+        self.couplings.len() - 1
     }
 
     /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:

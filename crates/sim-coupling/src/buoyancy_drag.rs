@@ -34,7 +34,7 @@
 //! post 相に置くと、その step の位置積分は注入前の速度で行われるため、外力が位置応答に
 //! 1step遅れて現れる。pre 相なら重力と同じ相で効く。
 
-use crate::domain_states::{Coupling, CouplingKind, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, CouplingParam, DomainStates};
 use sim_core::DomainId;
 use sim_fluid::{Atmosphere, StaticWaterRegion};
 use sim_math::Vec3;
@@ -51,6 +51,12 @@ pub enum LiftModel {
         area: f64,
         chord_local: Vec3,
         span_local: Vec3,
+        /// 操縦面(エルロン・エレベーター・ラダー)の舵角[rad]、既定0
+        /// (**残タスク完遂の縦串⑤増分**)。`chord_local`を`span_local`軸まわりに
+        /// この角度だけ追加回転させてから使う——`Coupling::set_scalar_param`
+        /// (`CouplingParam::ControlSurfaceDeflection`)経由で実行時に変更できる、
+        /// Coupling registryで唯一書き換え可能なパラメータ。
+        control_surface_deflection: f64,
     },
     /// 回転球のマグヌス効果($C_M\approx0.2S$)。剛体の角速度をそのまま使う。
     MagnusSphere { radius: f64 },
@@ -119,13 +125,21 @@ impl Coupling for BuoyancyDrag {
                     area,
                     chord_local,
                     span_local,
+                    control_surface_deflection,
                 }) => {
-                    // 翼弦・スパンは剛体ローカル指定なので、今stepの姿勢でワールドへ回す。
+                    // 舵角(**残タスク完遂の縦串⑤増分**)をspan_local軸まわりの
+                    // 追加回転として先に適用してから、剛体の姿勢でワールドへ回す。
+                    let deflected_chord_local = if control_surface_deflection != 0.0 {
+                        sim_math::Quat::from_axis_angle(span_local, control_surface_deflection)
+                            .rotate(chord_local)
+                    } else {
+                        chord_local
+                    };
                     let r = world.mechanics.bodies.rotation[idx];
                     force = force
                         + sim_fluid::wing_lift_force(
                             area,
-                            r.rotate(chord_local),
+                            r.rotate(deflected_chord_local),
                             r.rotate(span_local),
                             atm,
                             velocity,
@@ -151,6 +165,24 @@ impl Coupling for BuoyancyDrag {
     /// 全処理は pre 相にある(モジュールdoc参照)。
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {
         self.apply_pre(world, dt);
+    }
+
+    /// `ControlSurfaceDeflection`(`self.lift`が`LiftModel::Wing`の場合のみ)を
+    /// 受け付ける(**残タスク完遂の縦串⑤増分**、`CouplingParam`のdoc参照)。
+    fn set_scalar_param(&mut self, param: CouplingParam, value: f64) -> bool {
+        match (param, &mut self.lift) {
+            (
+                CouplingParam::ControlSurfaceDeflection,
+                Some(LiftModel::Wing {
+                    control_surface_deflection,
+                    ..
+                }),
+            ) => {
+                *control_surface_deflection = value;
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -393,6 +425,7 @@ mod tests {
             area: 2.0,
             chord_local: Vec3::new(1.0, 0.0, 0.0),
             span_local: Vec3::new(0.0, 0.0, 1.0),
+            control_surface_deflection: 0.0,
         };
 
         // 1step ぶんの速度変化 = 揚力 * dt / mass(抗力を切ってあるので揚力のみ)。
@@ -456,5 +489,74 @@ mod tests {
             rolled.length() < 1e-12,
             "90度ロールで迎角が消えるので揚力もゼロ: {rolled:?}"
         );
+    }
+
+    /// **残タスク完遂の縦串⑤増分**——`Coupling::set_scalar_param`
+    /// (`CouplingParam::ControlSurfaceDeflection`)で舵角を設定すると、
+    /// 同じ角度だけ機体姿勢を回転させたのと同一の揚力が出ること(舵角は
+    /// `chord_local`を`span_local`軸まわりに追加回転させるだけなので、
+    /// 「翼を傾ける」か「機体ごと傾ける」かは等価であるはず)。あわせて
+    /// `set_scalar_param`が既定の`false`(未対応パラメータ)を正しく返す
+    /// ケースも確認する。
+    #[test]
+    fn control_surface_deflection_matches_an_equivalent_body_rotation() {
+        let materials = MaterialDb::standard();
+        let alu = materials.find_by_name("アルミニウム").unwrap();
+        let mass = 5.0;
+        let atmosphere = Atmosphere::still(1.225, 1.81e-5);
+        let alpha = 5.0_f64.to_radians();
+        let speed = 30.0;
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let z = Vec3::new(0.0, 0.0, 1.0);
+
+        let lift_impulse = |rotation: sim_math::Quat, deflection: f64| -> Vec3 {
+            let mut desc = RigidBodyDesc::dynamic(
+                Shape::Box {
+                    half_extents: Vec3::new(1.0, 0.1, 2.0),
+                },
+                alu,
+            );
+            desc.mass_override = Some(mass);
+            desc.linear_velocity = x.scale(speed);
+            desc.drag = DragModel::None;
+            desc.transform.rotation = rotation;
+            let mut mechanics = MechanicsSolver::new(0.0);
+            let body = mechanics.create_body(desc, &materials);
+            let mut coupling = BuoyancyDrag {
+                body_index: body,
+                water: None,
+                atmosphere: Some(atmosphere),
+                lift: Some(LiftModel::Wing {
+                    area: 2.0,
+                    chord_local: x,
+                    span_local: z,
+                    control_surface_deflection: 0.0,
+                }),
+            };
+            if deflection != 0.0 {
+                assert!(
+                    coupling.set_scalar_param(CouplingParam::ControlSurfaceDeflection, deflection)
+                );
+            }
+            let velocity_before = mechanics.bodies.linear_velocity[body];
+            coupling.apply(&mut states(&mut mechanics), 0.001);
+            mechanics.bodies.linear_velocity[body] - velocity_before
+        };
+
+        let via_body_rotation = lift_impulse(sim_math::Quat::from_axis_angle(z, alpha), 0.0);
+        let via_control_surface = lift_impulse(sim_math::Quat::IDENTITY, alpha);
+        assert!(
+            (via_control_surface - via_body_rotation).length() / via_body_rotation.length() < 1e-9,
+            "舵角による揚力は機体回転による揚力と一致するはず: via_control_surface={via_control_surface:?} via_body_rotation={via_body_rotation:?}"
+        );
+
+        // 未対応のパラメータ・Couplingでは`false`を返す(既定実装の確認)。
+        let mut plain = BuoyancyDrag {
+            body_index: 0,
+            water: None,
+            atmosphere: None,
+            lift: None,
+        };
+        assert!(!plain.set_scalar_param(CouplingParam::ControlSurfaceDeflection, alpha));
     }
 }

@@ -767,6 +767,10 @@ pub enum LiftModelJson {
         area: f64,
         chord_local: [f64; 3],
         span_local: [f64; 3],
+        /// 操縦面の舵角[rad]。未指定なら0(既存のシーンJSONと後方互換、
+        /// **残タスク完遂の縦串⑤増分**で追加)。
+        #[serde(default)]
+        control_surface_deflection: f64,
     },
     /// 回転球のマグヌス効果。
     MagnusSphere { radius: f64 },
@@ -779,10 +783,12 @@ impl LiftModelJson {
                 area,
                 chord_local,
                 span_local,
+                control_surface_deflection,
             } => sim_coupling::LiftModel::Wing {
                 area: *area,
                 chord_local: Vec3::new(chord_local[0], chord_local[1], chord_local[2]),
                 span_local: Vec3::new(span_local[0], span_local[1], span_local[2]),
+                control_surface_deflection: *control_surface_deflection,
             },
             LiftModelJson::MagnusSphere { radius } => {
                 sim_coupling::LiftModel::MagnusSphere { radius: *radius }

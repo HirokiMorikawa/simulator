@@ -1010,11 +1010,16 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
     await page.click("#add-coupling-button");
   };
 
-  // ① PhaseChangeMorph: body=Box_1, thermal_node=1(新設), initial_mass=1kg,
-  // conductance=10W/K, initial_enthalpy=-50000J(融点未満の固相から開始)。
+  // ① PhaseChangeMorph: body=Box_1, thermal_node=1(新設)、材質は氷/水
+  // (melting_temperature=273.15K/latent_heat_fusion=334000/specific_heat_solid=
+  // 2100、いずれもAxis欄)、specific_heat_liquid=4186、initial_mass=1kg、
+  // conductance=10W/K、initial_enthalpy=-50000J(融点未満の固相から開始)。
+  // 材質もUIから明示的に指定できること自体が「縮約させない」の検証点
+  // (**残タスク完遂増分**)。
   await addCoupling("phase_change_morph", {
     body: 1,
-    params: [1, 1, 10, -50000],
+    axis: [273.15, 334000, 2100],
+    params: [1, 4186, 1, 10, -50000],
   });
   await expect(inspector.getByText("PhaseChangeMorph", { exact: true })).toBeVisible();
 
@@ -1033,8 +1038,13 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
   await expect(inspector.getByText("BoussinesqBuoyancy", { exact: true })).toBeVisible();
 
   // ⑤ ConvectionLink: fluid_node=0(既定シーンのノード), surface_node=1(新設),
-  // area=0.01m^2, characteristic_length=0.05m, mode=3(強制対流・平板)。
-  await addCoupling("convection_link", { params: [0, 1, 0.01, 0.05, 3] });
+  // area=0.01m^2, characteristic_length=0.05m, mode=3(強制対流・平板)、
+  // 流体物性値(空気の目安値、Axis欄)もUIから明示的に指定する
+  // (**残タスク完遂増分**、`ConvectionLink::default()`固定ではないことの検証点)。
+  await addCoupling("convection_link", {
+    axis: [0.026, 1.5e-5, 0.71],
+    params: [0, 1, 0.01, 0.05, 3, 0],
+  });
   await expect(inspector.getByText("ConvectionLink", { exact: true })).toBeVisible();
 
   // ⑥ PistonGas: body=Box_1, axis=(0,1,0), area=0.01m^2, initial_volume=0.001m^3。
@@ -1044,6 +1054,71 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
     params: [0.01, 0.001],
   });
   await expect(inspector.getByText("PistonGas", { exact: true })).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
+test("縦串⑤(飛行機の物理): 翼揚力/マグヌス揚力をUIから追加でき、操縦面の舵角を実行時に変更できる", async ({
+  page,
+}) => {
+  // レビュー指摘(「これについては、コア変更してもオッケー」)を受けて実装。
+  // `sim_coupling::BuoyancyDrag::lift`(薄翼理論+マグヌス効果)は物理コア側に
+  // 既に実装済みだったが、Add Couplingフォームでは`None`固定で到達できな
+  // かった——WingLift/MagnusLiftとして解禁する。さらに、Coupling registryは
+  // 元々「追加のみ・実行時パラメータ変更不可」だったため、飛行中に操縦面
+  // (エルロン・エレベーター・ラダー)の舵角を変える手段が無かった——
+  // `Coupling::set_scalar_param`(`CouplingParam::ControlSurfaceDeflection`)+
+  // `Command::SetCouplingParam`という新しい書き換え経路を追加し、Inspectorの
+  // Coupling行に出る「操縦面舵角」欄から実際に操作できることを確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
+  const inspector = page.locator("#inspector-body");
+
+  // ① WingLift: body=Box_1, chord_local=(1,0,0)(Axis欄), span_local=(0,0,1),
+  // wing_area=2m^2, atmosphere_density=1.225, atmosphere_viscosity=1.81e-5。
+  await page.selectOption("#add-coupling-kind", "wing_lift");
+  await page.fill("#add-coupling-body", "1");
+  await page.fill("#add-coupling-axis-x", "1");
+  await page.fill("#add-coupling-axis-y", "0");
+  await page.fill("#add-coupling-axis-z", "0");
+  await page.fill("#add-coupling-p1", "0");
+  await page.fill("#add-coupling-p2", "0");
+  await page.fill("#add-coupling-p3", "1");
+  await page.fill("#add-coupling-p4", "2");
+  await page.fill("#add-coupling-p5", "1.225");
+  await page.fill("#add-coupling-p6", "1.81e-5");
+  await page.click("#add-coupling-button");
+  await expect(inspector.getByText("BuoyancyDrag", { exact: true }).first()).toBeVisible();
+
+  // ② MagnusLift: body=Box_1, radius=0.3, atmosphere_density=1.225,
+  // atmosphere_viscosity=1.81e-5。
+  await page.selectOption("#add-coupling-kind", "magnus_lift");
+  await page.fill("#add-coupling-p1", "0.3");
+  await page.fill("#add-coupling-p2", "1.225");
+  await page.fill("#add-coupling-p3", "1.81e-5");
+  await page.click("#add-coupling-button");
+  await expect(inspector.getByText("BuoyancyDrag", { exact: true })).toHaveCount(2);
+
+  // ③ 操縦面舵角欄がWingLift/MagnusLiftの両方(いずれもBuoyancyDrag)の行に
+  // 出ており、値を変更してもクラッシュしないこと(MagnusLiftには効かない
+  // ——`set_scalar_param`が`false`を返して無言で無視される、モジュールdoc
+  // 参照——が、それ自体はエラーにならない)。
+  const deflectionInputs = page.locator('input[id^="coupling-deflection-"]');
+  await expect(deflectionInputs).toHaveCount(2);
+  await deflectionInputs.nth(0).fill("15");
+  await deflectionInputs.nth(0).dispatchEvent("change");
+  await deflectionInputs.nth(1).fill("-10");
+  await deflectionInputs.nth(1).dispatchEvent("change");
+
+  // ④ N step進めても(舵角適用込みで)クラッシュしないこと。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.fill("#input-step-count", "30");
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
 
   expect(errors).toEqual([]);
 });

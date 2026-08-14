@@ -1127,7 +1127,29 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   wireInspectorEditFields(index);
   wireAddJointForm(world, index);
   wireAddCouplingForm(world, index);
+  wireCouplingControlSurfaceInputs(world);
   wireThrustForm(index);
+}
+
+/// `couplingRow`が`BuoyancyDrag`の各行に出す「操縦面舵角」欄を配線する
+/// (**残タスク完遂の縦串⑤増分**)。度→ラジアン変換して
+/// `push_set_coupling_control_surface_deflection`へ送るだけの薄い配線——
+/// Wing揚力を持たない結合では`Coupling::set_scalar_param`が無言で無視する
+/// (`couplingRow`のdoc参照)ので、対象を絞り込む必要が無い。
+function wireCouplingControlSurfaceInputs(world: WasmWorld): void {
+  document
+    .querySelectorAll<HTMLInputElement>('input[id^="coupling-deflection-"]')
+    .forEach((input) => {
+      const couplingIndex = Number(input.id.replace("coupling-deflection-", ""));
+      input.addEventListener("change", () => {
+        const degrees = Number(input.value);
+        if (!Number.isFinite(degrees)) return;
+        world.push_set_coupling_control_surface_deflection(
+          couplingIndex,
+          (degrees * Math.PI) / 180,
+        );
+      });
+    });
 }
 
 /// `renderInspectorExtraComponents`が生成した Thrust フォームを配線する
@@ -1265,12 +1287,13 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
       num("add-coupling-axis-y"),
       num("add-coupling-axis-z"),
     ];
-    const [p1, p2, p3, p4, p5] = [
+    const [p1, p2, p3, p4, p5, p6] = [
       num("add-coupling-p1"),
       num("add-coupling-p2"),
       num("add-coupling-p3"),
       num("add-coupling-p4"),
       num("add-coupling-p5"),
+      num("add-coupling-p6"),
     ];
     try {
       switch (kindSelect.value) {
@@ -1321,12 +1344,18 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
           );
           break;
         case "phase_change_morph":
+          // 材質(融点・融解潜熱・固相/液相比熱)もUIから明示的に指定する
+          // (**残タスク完遂増分**、Axisの3欄を材質の一部として流用)。
           world.add_phase_change_morph_coupling(
             body,
             Math.trunc(p1),
+            axisX,
+            axisY,
+            axisZ,
             p2,
             p3,
             p4,
+            p5,
           );
           break;
         case "sph_rigid":
@@ -1339,16 +1368,39 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
           world.add_boussinesq_buoyancy_coupling(Math.trunc(p1), p2, p3);
           break;
         case "convection_link":
+          // 流体物性値(熱伝導率・動粘性・プラントル数)もUIから明示的に指定する
+          // (**残タスク完遂増分**、Axisの3欄を流体物性値として流用)。
           world.add_convection_link_coupling(
             Math.trunc(p1),
             Math.trunc(p2),
             p3,
             p4,
             Math.trunc(p5),
+            axisX,
+            axisY,
+            axisZ,
+            p6,
           );
           break;
         case "piston_gas":
           world.add_piston_gas_coupling(body, axisX, axisY, axisZ, p1, p2);
+          break;
+        case "wing_lift":
+          world.add_wing_lift_coupling(
+            body,
+            p4,
+            axisX,
+            axisY,
+            axisZ,
+            p1,
+            p2,
+            p3,
+            p5,
+            p6,
+          );
+          break;
+        case "magnus_lift":
+          world.add_magnus_lift_coupling(body, p1, p2, p3);
           break;
       }
     } catch (err) {
@@ -1588,8 +1640,8 @@ function renderInspectorExtraComponents(
   // 見えないと困る(実際D10でこの問題を踏んだ)。回路と同じくシーン単位の
   // コンポーネントとして別枠で出す。
   const parseCoupling = (line: string) => {
-    const [kind, description, domains, bodies] = line.split("\t");
-    return { kind, description, domains, bodies };
+    const [kind, description, domains, bodies, indexStr] = line.split("\t");
+    return { kind, description, domains, bodies, index: Number(indexStr) };
   };
   const allCouplings = world
     .coupling_info_text(-1)
@@ -1603,14 +1655,28 @@ function renderInspectorExtraComponents(
       .includes(String(index)),
   );
   const sceneWide = allCouplings.filter((c) => c.bodies.length === 0);
+  // **残タスク完遂の縦串⑤増分(操縦面)**: `BuoyancyDrag`は`LiftModel::Wing`を
+  // 持つかどうかを`coupling_info_text`の文字列表現だけからは区別できない
+  // (`describe()`は`water`/`atmosphere`の有無しか書かない、`lift`はモジュール
+  // doc参照)。区別する専用の内省を増やすより、舵角入力を全ての`BuoyancyDrag`行に
+  // 出し、Wing以外では`Coupling::set_scalar_param`が`false`を返して無言で
+  // 無視される(モジュールdocの既定実装)という縮退に任せる——実害が無く、
+  // wasm境界を増やさずに済む。
   const couplingRow = (c: {
     kind: string;
     description: string;
     domains: string;
+    index: number;
   }) =>
     `<div class="inspector-field" title="${escape(world.coupling_kind_summary(c.kind))}">` +
     `<span>${escape(c.kind)}</span>` +
-    `<span>${escape(c.description)} <em>[${escape(c.domains)}]</em></span></div>`;
+    `<span>${escape(c.description)} <em>[${escape(c.domains)}]</em></span></div>` +
+    (c.kind === "BuoyancyDrag"
+      ? `<div class="inspector-field">` +
+        `<span>操縦面舵角 [deg]</span>` +
+        `<input type="number" id="coupling-deflection-${c.index}" step="1" value="0" title="Wing揚力を持つ結合にのみ効く(Magnus/水域/大気のみの結合では無視される)" />` +
+        `</div>`
+      : "");
   if (forThisBody.length > 0) {
     sections.push(
       `<div class="inspector-component" data-stacked><h3>Coupling</h3>` +
@@ -1779,8 +1845,11 @@ function renderInspectorExtraComponents(
   // _index`/`try_voltage_source_index`が明示的に拒否する、無言で無効な
   // 状態になるより失敗として伝わる方を選んだ)。
   // 残り6種(PhaseChangeMorph・SphRigid・GridFluidRigid・ConvectionLink・
-  // PistonGas・BoussinesqBuoyancy)は熱ノード**を作る**か、SPH/格子流体
-  // ドメイン自体をUIから作れるようにならないと意味を持たないため対象外。
+  // PistonGas・BoussinesqBuoyancy)も解禁済み——Settingsの「ドメイン」パネル
+  // (熱ノード・格子流体・気体)と既存の「＋ 流体」(SPH)で対応ドメインを
+  // 先に有効化すれば追加できる。加えてWingLift/MagnusLift(いずれも
+  // BuoyancyDragの薄翼理論/マグヌス効果、縦串⑤で解禁)も同じフォームから
+  // 追加できる。
   sections.push(`
     <div class="inspector-component" data-stacked>
       <h3>Add Coupling</h3>
@@ -1801,34 +1870,36 @@ function renderInspectorExtraComponents(
           <option value="boussinesq_buoyancy">BoussinesqBuoyancy(温度差浮力、要熱・格子流体ドメイン)</option>
           <option value="convection_link">ConvectionLink(対流熱伝達、要熱ドメイン)</option>
           <option value="piston_gas">PistonGas(ピストン気体、要気体ドメイン)</option>
+          <option value="wing_lift">BuoyancyDrag+翼揚力(薄翼理論、Axisを翼弦に使用)</option>
+          <option value="magnus_lift">BuoyancyDrag+マグヌス揚力(回転球)</option>
         </select>
       </div>
       <div class="inspector-field">
         <span>Body</span>
-        <input type="number" id="add-coupling-body" step="1" value="${index}" title="対象ボディのindex(DissipationToHeat/JouleHeat/BoussinesqBuoyancy/ConvectionLinkは未使用)" />
+        <input type="number" id="add-coupling-body" step="1" value="${index}" title="対象ボディのindex(DissipationToHeat/JouleHeat/BoussinesqBuoyancy/ConvectionLink/MagnusLiftは未使用——MagnusLiftはBody欄でなくAxis/Paramの並びで指定するため対象外)" />
       </div>
       <div class="inspector-field">
         <span>Axis</span>
         <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-axis-x" step="0.1" value="0" title="回転軸/レール方向x(MotorCoupling/InductionCoupling/PistonGasのみ)" />
-          <input type="number" id="add-coupling-axis-y" step="0.1" value="1" title="軸y" />
-          <input type="number" id="add-coupling-axis-z" step="0.1" value="0" title="軸z" />
+          <input type="number" id="add-coupling-axis-x" step="0.1" value="0" title="回転軸/レール方向x(MotorCoupling/InductionCoupling/PistonGas)/chord_local.x=翼弦(WingLift)/melting_temperature[K](PhaseChangeMorph)/fluid_thermal_conductivity[W/(m*K)](ConvectionLink)" />
+          <input type="number" id="add-coupling-axis-y" step="0.1" value="1" title="軸y / chord_local.y(WingLift)/latent_heat_fusion[J/kg](PhaseChangeMorph)/kinematic_viscosity[m^2/s](ConvectionLink)" />
+          <input type="number" id="add-coupling-axis-z" step="0.1" value="0" title="軸z / chord_local.z(WingLift)/specific_heat_solid[J/(kg*K)](PhaseChangeMorph)/prandtl_number(ConvectionLink)" />
         </span>
       </div>
       <div class="inspector-field">
         <span>Param 1〜3</span>
         <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-p1" step="0.1" value="1e-6" title="charge[C](ImageChargeForce/LorentzForce)/water_level[m](BuoyancyDrag)/thermal_node index(DissipationToHeat/JouleHeat)/radius[m](BrownianForce/SphRigid)/voltage_source index(MotorCoupling/InductionCoupling)/thermal_node index(PhaseChangeMorph)/half_width[m](GridFluidRigid)/thermal_node index=fluid_node(BoussinesqBuoyancy/ConvectionLinkのfluid_node)/area[m^2](PistonGas)" />
-          <input type="number" id="add-coupling-p2" step="0.1" value="1" title="plane_normal.x(ImageChargeForce)/water_density(BuoyancyDrag)/viscosity(BrownianForce)/torque_constant(MotorCoupling)/length[m](InductionCoupling)/initial_mass[kg](PhaseChangeMorph)/boundary_points(SphRigid)/half_height[m](GridFluidRigid)/ambient_temperature[K](BoussinesqBuoyancy)/thermal_node index=surface_node(ConvectionLink)/initial_volume[m^3](PistonGas)" />
-          <input type="number" id="add-coupling-p3" step="0.1" value="0" title="plane_normal.y(ImageChargeForce)/thermal_node index(BrownianForce)/magnetic_field[T](InductionCoupling)/conductance[W/K](PhaseChangeMorph)/thermal_expansion_coefficient[1/K](BoussinesqBuoyancy)/area[m^2](ConvectionLink)" />
+          <input type="number" id="add-coupling-p1" step="0.1" value="1e-6" title="charge[C](ImageChargeForce/LorentzForce)/water_level[m](BuoyancyDrag)/thermal_node index(DissipationToHeat/JouleHeat/PhaseChangeMorph)/radius[m](BrownianForce/SphRigid/MagnusLift)/voltage_source index(MotorCoupling/InductionCoupling)/half_width[m](GridFluidRigid)/thermal_node index=fluid_node(BoussinesqBuoyancy/ConvectionLinkのfluid_node)/area[m^2](PistonGas)/span_local.x(WingLift)" />
+          <input type="number" id="add-coupling-p2" step="0.1" value="1" title="plane_normal.x(ImageChargeForce)/water_density(BuoyancyDrag)/viscosity(BrownianForce)/torque_constant(MotorCoupling)/length[m](InductionCoupling)/specific_heat_liquid[J/(kg*K)](PhaseChangeMorph)/boundary_points(SphRigid)/half_height[m](GridFluidRigid)/ambient_temperature[K](BoussinesqBuoyancy)/thermal_node index=surface_node(ConvectionLink)/initial_volume[m^3](PistonGas)/span_local.y(WingLift)/atmosphere_density(MagnusLift)" />
+          <input type="number" id="add-coupling-p3" step="0.1" value="0" title="plane_normal.y(ImageChargeForce)/thermal_node index(BrownianForce)/magnetic_field[T](InductionCoupling)/initial_mass[kg](PhaseChangeMorph)/thermal_expansion_coefficient[1/K](BoussinesqBuoyancy)/area[m^2](ConvectionLink)/span_local.z(WingLift)/atmosphere_viscosity(MagnusLift)" />
         </span>
       </div>
       <div class="inspector-field">
         <span>Param 4〜6</span>
         <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-p4" step="0.1" value="0" title="plane_normal.z(ImageChargeForce)/seed(BrownianForce)/initial_enthalpy[J](PhaseChangeMorph、負なら融点未満の固相から開始)/characteristic_length[m](ConvectionLink)" />
-          <input type="number" id="add-coupling-p5" step="0.1" value="0" title="plane_d(ImageChargeForce)/stream(BrownianForce)/mode 0-3(ConvectionLink: 0=自然対流(垂直面)/1=自然対流(球)/2=強制対流(球)/3=強制対流(平板))" />
-          <input type="number" id="add-coupling-p6" step="0.1" value="0" title="未使用(将来の拡張用)" />
+          <input type="number" id="add-coupling-p4" step="0.1" value="0" title="plane_normal.z(ImageChargeForce)/seed(BrownianForce)/conductance[W/K](PhaseChangeMorph)/characteristic_length[m](ConvectionLink)/wing_area[m^2](WingLift)" />
+          <input type="number" id="add-coupling-p5" step="0.1" value="0" title="plane_d(ImageChargeForce)/stream(BrownianForce)/initial_enthalpy[J](PhaseChangeMorph、負なら融点未満の固相から開始)/mode 0-3(ConvectionLink: 0=自然対流(垂直面)/1=自然対流(球)/2=強制対流(球)/3=強制対流(平板))/atmosphere_density(WingLift)" />
+          <input type="number" id="add-coupling-p6" step="0.1" value="0" title="thermal_expansion_coefficient[1/K](ConvectionLink、0以下なら理想気体近似=省略扱い)/atmosphere_viscosity(WingLift、他は未使用)" />
         </span>
       </div>
       <button id="add-coupling-button">Coupling を追加</button>

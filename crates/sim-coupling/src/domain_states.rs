@@ -185,6 +185,29 @@ pub trait Coupling: CouplingClone + AsAnyCoupling {
     fn apply_post(&mut self, world: &mut DomainStates, dt: f64) {
         self.apply(world, dt);
     }
+
+    /// **残タスク完遂の縦串⑤増分**——登録済みのこのCouplingへ実行時パラメータを
+    /// 設定する(`sim_world::Command::SetCouplingParam`経由、操縦面の舵角変更が
+    /// 最初の用途)。それまでCoupling registryは「追加のみ・実行時パラメータ
+    /// 変更不可」だったため、飛行中に舵角を変える(=登録済み`BuoyancyDrag`の
+    /// `LiftModel::Wing`を書き換える)手段が無かった——この仕組みがそのギャップを
+    /// 埋める。対応しないパラメータ・値なら`false`を返す(既定実装、ほとんどの
+    /// Couplingは実行時に変更できるパラメータを持たない)。
+    fn set_scalar_param(&mut self, _param: CouplingParam, _value: f64) -> bool {
+        false
+    }
+}
+
+/// `Coupling::set_scalar_param`が受け付けるパラメータの種別(**残タスク完遂の
+/// 縦串⑤増分**)。文字列ではなくenumにするのは`CouplingKind`と同じ理由
+/// (コンパイラに網羅性を保証させ、対応漏れを検出できるようにするため)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CouplingParam {
+    /// `BuoyancyDrag::lift`が`LiftModel::Wing`の場合のみ有効。`chord_local`を
+    /// `span_local`軸まわりにこの角度[rad]だけ追加回転させる——操縦面
+    /// (エルロン・エレベーター・ラダー)の舵角に相当する。値は毎回**絶対値として
+    /// 設定**され(累積しない)、UIのスライダー/入力欄と直感的に対応する。
+    ControlSurfaceDeflection,
 }
 
 /// `Box<dyn Coupling>`をクローン可能にするdyn-safeなヘルパー(`sim_world::World`が

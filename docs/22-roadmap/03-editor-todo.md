@@ -190,24 +190,35 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
     (いずれも既定パラメータ・冪等)を新設し、同じく「ドメイン」パネルへ
     ボタンとして配置。SPHドメインは既存の「＋ 流体 (SPH 水塊)」
     (`spawn_fluid_block`)をそのまま流用——別のSPH作成経路を増やさない。
-  - `add_phase_change_morph_coupling`(材質は氷/水の定数に固定、4物性値を
-    別々にUIへ出す複雑さを避けた縮約)・`add_sph_rigid_coupling`・
+  - `add_phase_change_morph_coupling`・`add_sph_rigid_coupling`・
     `add_grid_fluid_rigid_coupling`・`add_boussinesq_buoyancy_coupling`・
-    `add_convection_link_coupling`(流体物性値は`ConvectionLink::default()`
-    (空気20℃)を継承し、UIには`fluid_node`/`surface_node`/`area`/
-    `characteristic_length`/`mode`のみ出す縮約)・`add_piston_gas_coupling`
-    を新設し、Add Couplingフォームの種別セレクトへ追加。対応ドメインが
-    無効な状態で呼ぶと明示的に`Err`を返す(他8種と同じ方針)。
+    `add_convection_link_coupling`・`add_piston_gas_coupling`を新設し、
+    Add Couplingフォームの種別セレクトへ追加。対応ドメインが無効な状態で
+    呼ぶと明示的に`Err`を返す(他8種と同じ方針)。
   - Rust側単体テスト(6種すべて成功パスで追加でき`coupling_info_text`に
     反映されること)、Playwrightで実UI経由(Settingsの「ドメイン」パネルで
     熱ノード・格子流体・気体を有効化→「＋ 流体」でSPHを有効化→Add
     Couplingフォームで6種すべて追加→Inspectorに反映)の受け入れテストを
     追加して確認、QA16/16・スモーク26/26維持。
-  - **なお残る、正直な縮約**: `PhaseChangeMorph`の材質(氷/水固定)・
-    `ConvectionLink`の流体物性値(空気固定)はUIから個別に変更できない。
-    汎用Add Couplingフォーム(P1-P6の数値欄のみ)の枠内に収めるための
-    妥協で、任意の材質/流体物性値を扱うには専用フォーム(またはTask#8の
-    schema/read/apply化)が要る。
+
+  **レビュー指摘(「ﾋﾟﾋﾟﾋﾟｯ縮約禁止令発令中」「設定できるようになってますか？
+  諦めていませんか？」)を受けて、上記の時点で残っていた2件の縮約
+  (`PhaseChangeMorph`の材質固定・`ConvectionLink`の流体物性値固定)も
+  解消した:**
+  - `add_phase_change_morph_coupling`のシグネチャに`melting_temperature`/
+    `latent_heat_fusion`/`specific_heat_solid`/`specific_heat_liquid`
+    (材質の4物性値)を追加し、氷/水の定数への固定をやめた——Axisの3欄
+    (元々MotorCoupling等の回転軸専用だった汎用欄)を融点・融解潜熱・
+    固相比熱に、Param欄の1つを液相比熱に割り当てることで、専用フォームを
+    新設せず汎用Add Couplingフォームの枠内に収めた。
+  - `add_convection_link_coupling`のシグネチャに`fluid_thermal_conductivity`/
+    `kinematic_viscosity`/`prandtl_number`/`thermal_expansion_coefficient`
+    (流体物性値)を追加し、`ConvectionLink::default()`(空気20℃)固定を
+    やめた——同じくAxisの3欄を熱伝導率・動粘性・プラントル数に割り当てた。
+    `thermal_expansion_coefficient`は`Option<f64>`なので、UIの数値欄1個で
+    表現するため「0以下なら`None`(理想気体近似)」という符号化にした。
+  - Rust側テスト・Playwrightテストとも新シグネチャに合わせて更新、
+    実際に材質/流体物性値を明示指定して追加できることを確認。
 - [x] 環境と大気の場を縦串③として実装する(**大気・水域・重力の向き**)
   Settingsに「環境(大気・水域)」パネルを追加。`sim_fluid::Atmosphere`は
   既に`density`/`viscosity`/`wind: Vec3`(風の場)を持っていた
@@ -283,23 +294,51 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   入力→スイープ実行)にテーブル・グラフが実データで表示されることを確認、
   QA16/16・スモーク24/24とも維持(単一ファイルExportのスモークテストが
   `export_scene_json`書き換えの回帰検知として機能することも確認)。
-- [ ] 飛行機の物理を縦串⑤として実装する(**推力・着陸装置は完了、揚力配線と操縦面Commandが残**)
+- [x] 飛行機の物理を縦串⑤として実装する
   推力: 新しいCoupling/Commandを物理コアへ足さず、既存の`Command::ApplyForce`
   (wasm `push_apply_force`)をそのまま再利用して実装(`ThrustState`、
   Inspectorの Thrust セクション)。Playモード中、毎stepローカル軸をボディの
   姿勢でワールドへ回し、スロットル×最大推力を`ApplyForce`で送る。
   着陸装置: 既存の`WheelJoint`+Pacejkaタイヤモデルがそのまま使える(Add Joint
   フォームの"Wheel"種別、追加のRust側実装は不要と確認済み)。
-  残: `sim_coupling::BuoyancyDrag::lift`(`LiftModel::Wing`薄翼理論+失速・
-  `MagnusSphere`マグヌス効果、**すでに物理コア側に実装済み**)がAdd Coupling
-  フォームで`None`固定のまま(縦串③時点では「大気場は縦串③、揚力は縦串⑤で
-  別途配線」と意図的に先送りしていた)——UIから翼を持つ飛行機を組めない。
-  操縦面(エルロン・エレベーター・ラダー)Commandは、既存のCoupling registry
-  が「追加のみ・実行時パラメータ変更不可」という設計のため、舵角変化で
-  揚力係数を動的に変えるには「登録済みCouplingをCommand経由で書き換える」
-  新しい仕組みが要る(現状に無い)——`BuoyancyDrag::apply_pre`の力積分方式
-  変更も含め、物理コアへの実質的な変更を伴うため、末尾「物理コアへの変更を
-  再評価する」の着手条件との整理が要る。
+
+  **レビュー指摘(「これについては、コア変更してもオッケー」)を受けて、
+  揚力の配線と操縦面Commandも物理コア変更を含めて完遂した:**
+  - `sim_coupling::BuoyancyDrag::lift`(`LiftModel::Wing`薄翼理論+失速・
+    `MagnusSphere`マグヌス効果)は物理コア側に実装済みだったがAdd Coupling
+    フォームで`None`固定のままだったため、`WasmWorld::add_wing_lift_coupling`/
+    `add_magnus_lift_coupling`を新設して解禁した(種別セレクトへ
+    `wing_lift`/`magnus_lift`として追加、Axis欄を翼弦`chord_local`に流用)。
+    同じ剛体に複数回呼べるので、主翼・水平尾翼・垂直尾翼・補助翼をそれぞれ
+    別の翼として追加できる。
+  - 操縦面(エルロン・エレベーター・ラダー)Commandは、Coupling registryが
+    元々「追加のみ・実行時パラメータ変更不可」だったギャップを埋める
+    **物理コア変更**として実装した: `sim_coupling::Coupling`トレイトへ
+    `set_scalar_param(CouplingParam, f64) -> bool`(既定`false`の空実装、
+    ほとんどのCouplingは対応不要)を追加し、`BuoyancyDrag`が
+    `CouplingParam::ControlSurfaceDeflection`を受けて`LiftModel::Wing`の
+    `chord_local`を`span_local`軸まわりに追加回転させる(新設フィールド
+    `control_surface_deflection`、既定0)。`World`に`Command::
+    SetCouplingParam { coupling_index, param, value }`を新設し、
+    `World::add_coupling`の戻り値を`usize`(登録index)化——他の`Command`
+    (`ApplyForce`等)と同じ「次stepの先頭で適用・リプレイ再現性を保つ」
+    経路。wasm `push_set_coupling_control_surface_deflection`+
+    Inspectorの各`BuoyancyDrag`行に舵角入力欄(度→ラジアン変換)を追加。
+  - **正直な設計判断**: `BuoyancyDrag::apply_pre`の力積分方式変更(直接
+    速度キック方式)は、実装時点で具体的な数値不安定性の証拠が無かったため
+    **見送った**——「TODOに書いた懸念」を実測せずに変更すると、D6/D26等の
+    既存シーンへ影響しうる物理コア変更を検証なしに行うことになり、それ自体が
+    「あるべき姿を検討せず変更した」縮約になりかねないため。Rust側テストで
+    舵角による揚力変化が機体回転による揚力変化と解析的に一致すること
+    (`control_surface_deflection_matches_an_equivalent_body_rotation`)、
+    Playwrightで実UI経由(翼揚力/マグヌス揚力の追加→舵角変更→N step実行)
+    にクラッシュしないことを確認済み——数値不安定性の兆候は出ていない。
+    将来、高角速度・高舵角の実シナリオで具体的な問題が観測された場合に
+    改めて対処する。
+  - 検証: Rust側新規テスト(舵角の解析的検証、`set_scalar_param`の既定`false`
+    確認)、cargo test --workspace全緑、fmt/clippyクリーン。Playwrightで
+    実UI経由(WingLift/MagnusLift追加→Inspectorの舵角欄操作→N step実行)を
+    確認、QA16/16・スモーク27/27維持。
 - [ ] 3D CADモデリング(スケッチ・押し出し・ブーリアン)を実装する
   着手条件: 縦串⑤(飛行機)で凸分解の欠如が実際に不便になった時点。
   凸分解が必須になり「外部クレート実質ゼロ」の方針では自前実装が要る

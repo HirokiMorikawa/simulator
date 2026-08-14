@@ -725,10 +725,12 @@ fn lift_model_to_json(lift: &sim_coupling::LiftModel) -> LiftModelJson {
             area,
             chord_local,
             span_local,
+            control_surface_deflection,
         } => LiftModelJson::Wing {
             area: *area,
             chord_local: vec3_to_array(*chord_local),
             span_local: vec3_to_array(*span_local),
+            control_surface_deflection: *control_surface_deflection,
         },
         sim_coupling::LiftModel::MagnusSphere { radius } => {
             LiftModelJson::MagnusSphere { radius: *radius }

@@ -1166,12 +1166,17 @@ impl WasmWorld {
             .map(|c| {
                 let domains: Vec<String> = c.domains.iter().map(|d| format!("{d:?}")).collect();
                 let bodies: Vec<String> = c.bodies.iter().map(|b| b.to_string()).collect();
+                // 5番目のindex列(**残タスク完遂の縦串⑤増分**で追加)は
+                // `push_set_coupling_control_surface_deflection`が参照する
+                // `World::couplings()`の登録indexそのもの——既存の4列パースは
+                // 先頭4つだけを読むため後方互換(末尾への追加のみ)。
                 format!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     c.kind.name(),
                     c.description,
                     domains.join("+"),
-                    bodies.join(",")
+                    bodies.join(","),
+                    c.index
                 )
             })
             .collect::<Vec<_>>()
@@ -2519,6 +2524,93 @@ impl WasmWorld {
         Ok(())
     }
 
+    /// Add Coupling——翼(薄翼理論)による揚力を持つ`sim_coupling::BuoyancyDrag`を
+    /// 追加する(**残タスク完遂の縦串⑤増分**、`LiftModel::Wing`は物理コア側に
+    /// 既に実装済みだったが、Add Couplingフォームでは`None`固定で到達できな
+    /// かった)。`chord_local`/`span_local`は剛体ローカル座標(毎step姿勢で
+    /// ワールドへ回す)。同じ剛体に複数回呼べる——主翼・水平尾翼(エレベーター)・
+    /// 垂直尾翼(ラダー)・補助翼(エルロン)をそれぞれ別の翼として追加し、
+    /// 戻り値のindexを`push_set_coupling_control_surface_deflection`で
+    /// 個別に操作する、という使い方を想定している。
+    /// 戻り値は`World::couplings()`の`index`(`CouplingInfo::index`と同じ並び)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_wing_lift_coupling(
+        &mut self,
+        body: usize,
+        wing_area: f64,
+        chord_x: f64,
+        chord_y: f64,
+        chord_z: f64,
+        span_x: f64,
+        span_y: f64,
+        span_z: f64,
+        atmosphere_density: f64,
+        atmosphere_viscosity: f64,
+    ) -> Result<usize, JsValue> {
+        let id = self.try_body_id_at(body)?;
+        let index = self
+            .inner
+            .add_coupling(Box::new(sim_coupling::BuoyancyDrag {
+                body_index: id.index as usize,
+                water: None,
+                atmosphere: Some(sim_fluid::Atmosphere::still(
+                    atmosphere_density,
+                    atmosphere_viscosity,
+                )),
+                lift: Some(sim_coupling::LiftModel::Wing {
+                    area: wing_area,
+                    chord_local: Vec3::new(chord_x, chord_y, chord_z),
+                    span_local: Vec3::new(span_x, span_y, span_z),
+                    control_surface_deflection: 0.0,
+                }),
+            }));
+        Ok(index)
+    }
+
+    /// Add Coupling——回転球のマグヌス効果による揚力を持つ`sim_coupling::
+    /// BuoyancyDrag`を追加する(`add_wing_lift_coupling`と同じ理由で解禁)。
+    pub fn add_magnus_lift_coupling(
+        &mut self,
+        body: usize,
+        radius: f64,
+        atmosphere_density: f64,
+        atmosphere_viscosity: f64,
+    ) -> Result<usize, JsValue> {
+        let id = self.try_body_id_at(body)?;
+        let index = self
+            .inner
+            .add_coupling(Box::new(sim_coupling::BuoyancyDrag {
+                body_index: id.index as usize,
+                water: None,
+                atmosphere: Some(sim_fluid::Atmosphere::still(
+                    atmosphere_density,
+                    atmosphere_viscosity,
+                )),
+                lift: Some(sim_coupling::LiftModel::MagnusSphere { radius }),
+            }));
+        Ok(index)
+    }
+
+    /// 登録済みの翼(`add_wing_lift_coupling`が返したindex)の操縦面舵角[rad]を
+    /// 実行時に変更する(**残タスク完遂の縦串⑤増分**)。`Command::
+    /// SetCouplingParam`(`CouplingParam::ControlSurfaceDeflection`)を積み、
+    /// 次stepの先頭で適用される——他の`push_*`系メソッドと同じCommand経由の
+    /// 規約(Playモード中でもリプレイ再現性と決定論が壊れない)。範囲外index・
+    /// 翼以外のCouplingを指しても(無効な入力として無言で無視される、
+    /// `Command`のdoc参照)エラーにはならない——UIから毎フレーム舵角を送っても
+    /// 安全なように、あえて`Result`ではなく無条件に成功する設計にした。
+    pub fn push_set_coupling_control_surface_deflection(
+        &mut self,
+        coupling_index: usize,
+        deflection_radians: f64,
+    ) {
+        self.inner.push_command(Command::SetCouplingParam {
+            coupling_index,
+            param: sim_coupling::CouplingParam::ControlSurfaceDeflection,
+            value: deflection_radians,
+        });
+    }
+
     /// Add Coupling——`sim_coupling::BoussinesqBuoyancy`の薄い写像。
     /// 格子流体ドメインが無効なら明示的に`Err`(適用対象が無いため、
     /// `add_grid_fluid_rigid_coupling`と同じ方針)。
@@ -2544,12 +2636,15 @@ impl WasmWorld {
     }
 
     /// Add Coupling——`sim_coupling::ConvectionLink`の薄い写像。流体の物性値
-    /// (熱伝導率・動粘性・プラントル数・自然対流の体膨張係数)は
-    /// `ConvectionLink::default()`(空気20℃・強制対流平板)から引き継ぎ、
-    /// UIには`mode`(対流の状況)を含む最小限のパラメータのみ出す——
-    /// 汎用Add Couplingフォーム(P1-P6の数値欄のみ)の枠内に収める縮約。
-    /// `mode`は`0..=3`の整数(NaturalVerticalPlate/NaturalSphere/
-    /// ForcedSphere/ForcedFlatPlate、UIのtitleツールチップ参照)。
+    /// (熱伝導率・動粘性・プラントル数・自然対流の体膨張係数)もUIから明示的に
+    /// 指定できる(**残タスク完遂増分**、レビュー指摘「縮約禁止令」への対応
+    /// ——以前は`ConvectionLink::default()`(空気20℃)固定だった)。
+    /// `thermal_expansion_coefficient`は`<=0`なら`None`(理想気体近似
+    /// $\beta=1/T_{film}$、`ConvectionLink`のdoc参照)として扱う——負の体膨張
+    /// 係数は物理的に無意味なので、`Option`をUIのフラットな数値入力へ写す
+    /// ための素直な符号化とした。`mode`は`0..=3`の整数(NaturalVerticalPlate/
+    /// NaturalSphere/ForcedSphere/ForcedFlatPlate、UIのtitleツールチップ参照)。
+    #[allow(clippy::too_many_arguments)]
     pub fn add_convection_link_coupling(
         &mut self,
         fluid_node: usize,
@@ -2557,6 +2652,10 @@ impl WasmWorld {
         area: f64,
         characteristic_length: f64,
         mode: u32,
+        fluid_thermal_conductivity: f64,
+        kinematic_viscosity: f64,
+        prandtl_number: f64,
+        thermal_expansion_coefficient: f64,
     ) -> Result<(), JsValue> {
         let fluid_node = self.try_thermal_node_index(fluid_node)?;
         let surface_node = self.try_thermal_node_index(surface_node)?;
@@ -2573,22 +2672,32 @@ impl WasmWorld {
                 area,
                 characteristic_length,
                 mode,
-                ..sim_coupling::ConvectionLink::default()
+                fluid_thermal_conductivity,
+                kinematic_viscosity,
+                prandtl_number,
+                thermal_expansion_coefficient: (thermal_expansion_coefficient > 0.0)
+                    .then_some(thermal_expansion_coefficient),
             }));
         Ok(())
     }
 
     /// Add Coupling——`sim_coupling::PhaseChangeMorph`の薄い写像。D18(氷と
-    /// 飲み物)向け。材質は氷/水の定数(`melting_temperature=273.15K`・
-    /// `latent_heat_fusion=334000 J/kg`・`specific_heat_solid=2100 J/(kg·K)`・
-    /// `specific_heat_liquid=4186 J/(kg·K)`、標準的な値)に固定——4つの物性値を
-    /// 別々にUIへ出すと汎用Add Couplingフォームの枠を超えるための縮約
-    /// (`ConvectionLink`と同じ考え方)。融解質量のSPH粒子生成(`melt_spawn`)は
-    /// このメソッドでは`None`のまま(既定、移行前と同じ挙動)。
+    /// 飲み物)向け。材質(融点・融解潜熱・固相/液相比熱)もUIから明示的に
+    /// 指定できる(**残タスク完遂増分**、レビュー指摘「縮約禁止令」への対応
+    /// ——以前は氷/水の定数に固定していた)。融解質量のSPH粒子生成
+    /// (`melt_spawn`)はこのメソッドでは`None`のまま(既定、移行前と同じ挙動
+    /// ——粒子生成のばらつき半径・乱数シードまで含めると汎用フォームの
+    /// 枠を明確に超えるため、こちらは専用フォームが要る妥当な残作業として
+    /// 正直に残す)。
+    #[allow(clippy::too_many_arguments)]
     pub fn add_phase_change_morph_coupling(
         &mut self,
         body: usize,
         thermal_node: usize,
+        melting_temperature: f64,
+        latent_heat_fusion: f64,
+        specific_heat_solid: f64,
+        specific_heat_liquid: f64,
         initial_mass: f64,
         conductance: f64,
         initial_enthalpy: f64,
@@ -2596,10 +2705,10 @@ impl WasmWorld {
         let id = self.try_body_id_at(body)?;
         let node = self.try_thermal_node_index(thermal_node)?;
         let material = sim_thermal::PhaseMaterial {
-            melting_temperature: 273.15,
-            latent_heat_fusion: 334_000.0,
-            specific_heat_solid: 2100.0,
-            specific_heat_liquid: 4186.0,
+            melting_temperature,
+            latent_heat_fusion,
+            specific_heat_solid,
+            specific_heat_liquid,
         };
         let coupling = sim_coupling::PhaseChangeMorph::new(
             id.index as usize,
@@ -3731,7 +3840,9 @@ mod tests {
         assert_eq!(world.thermal_node_count(), 2);
 
         world
-            .add_phase_change_morph_coupling(body, node, 1.0, 10.0, -50_000.0)
+            .add_phase_change_morph_coupling(
+                body, node, 273.15, 334_000.0, 2100.0, 4186.0, 1.0, 10.0, -50_000.0,
+            )
             .expect("phase change morph must succeed once a thermal node exists");
 
         world.spawn_fluid_block(); // SPHドメインを有効化。
@@ -3747,7 +3858,7 @@ mod tests {
             .add_boussinesq_buoyancy_coupling(node, 293.15, 3.4e-3)
             .expect("boussinesq buoyancy must succeed once the grid fluid domain exists");
         world
-            .add_convection_link_coupling(0, node, 0.01, 0.05, 3)
+            .add_convection_link_coupling(0, node, 0.01, 0.05, 3, 0.026, 1.5e-5, 0.71, 0.0)
             .expect("convection link must succeed with valid thermal node indices");
 
         world.enable_gas_compartment();
@@ -3776,6 +3887,50 @@ mod tests {
         // ターゲットでは構築した時点でプロセスごとSIGABRTする、`Result::
         // is_err()`で受けても回避できない)が示すとおり対象外——
         // Errパスの検証にはwasm-bindgen-testが要る。
+    }
+
+    /// **残タスク完遂の縦串⑤増分**(飛行機の物理: 揚力の配線+操縦面Command)。
+    /// `add_wing_lift_coupling`/`add_magnus_lift_coupling`が成功パスで追加でき、
+    /// `coupling_info_text`にBuoyancyDragとして反映され(揚力自体は`LiftModel`の
+    /// 内部状態でありkind名には出ない、他の`lift`フィールドを持つ結合と同じ)、
+    /// `push_set_coupling_control_surface_deflection`が(範囲外indexでも)
+    /// パニックせず1step適用できることを確認する。
+    #[test]
+    fn wing_and_magnus_lift_couplings_succeed_and_control_surface_deflection_applies_without_panicking(
+    ) {
+        let mut world = new_world();
+        let body = world
+            .spawn_box(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
+            .unwrap();
+
+        let wing_index = world
+            .add_wing_lift_coupling(body, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.225, 1.81e-5)
+            .expect("wing lift coupling must succeed");
+        assert_eq!(wing_index, 0);
+
+        let magnus_body = world
+            .spawn_sphere(3.0, 5.0, 0.0, 0.3, "アルミニウム".to_string())
+            .unwrap();
+        let magnus_index = world
+            .add_magnus_lift_coupling(magnus_body, 0.3, 1.225, 1.81e-5)
+            .expect("magnus lift coupling must succeed");
+        assert_eq!(magnus_index, 1);
+
+        assert_eq!(world.coupling_count(), 2);
+        let text = world.coupling_info_text(-1);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "both lift couplings are BuoyancyDrag under the hood, got:\n{text}"
+        );
+        assert!(lines.iter().all(|l| l.starts_with("BuoyancyDrag\t")));
+
+        // 操縦面の舵角をCommand経由で設定し、1step進めてもパニックしないこと
+        // (無効なindexを渡しても無言で無視される、Commandのdoc参照)。
+        world.push_set_coupling_control_surface_deflection(wing_index, 0.1);
+        world.push_set_coupling_control_surface_deflection(9999, 0.1);
+        world.step();
     }
 
     /// `export_scene_json`が`sim_world::to_scenario`経由に置き換わったこと
