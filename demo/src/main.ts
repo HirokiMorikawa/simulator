@@ -427,6 +427,7 @@ type PrefabSaveRef = { current: ((prefab: PrefabDefinition) => void) | null };
 type ImportedShapeJson =
   | { box: { half: [number, number, number] } }
   | { sphere: { radius: number } }
+  | { capsule: { radius: number; half_height: number } }
   | { plane: { normal: [number, number, number]; d: number } };
 type ImportedBodyJson = { shape: ImportedShapeJson };
 // 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5)向け。
@@ -4194,6 +4195,82 @@ async function setUpSceneView(
     });
   }
 
+  /// **形状描画をShape記述に一本化(縦串①の独立項目)**。以前は
+  /// `sceneImportRef.current`と`sceneGalleryRef.current`にほぼ同一の形状パーサ
+  /// (plane/sphere/box の分岐)が2箇所コピーされており、`ImportedShapeJson`が
+  /// `Capsule`を受け付けないままだったため**カプセルを含むシーンは0.3mの球として
+  /// 描かれていた**(出荷済みシーンが未使用のため当時は未発現)。この1関数へ
+  /// 集約し、Capsuleも実寸法で描く。Plane以外の未知形状はコンソール警告を出す
+  /// (黙って0.3mの球を出さない)。
+  ///
+  /// Plane専用の位置決め(normal/dから逆算)は他の形状(ボディの現在位置/姿勢を
+  /// worldへ問い合わせる)と経路が異なるため、戻り値に`isPlane`を含めて呼び出し側が
+  /// 分岐する。
+  function meshFromShapeJson(shape: ImportedShapeJson | undefined): {
+    mesh: THREE.Mesh;
+    isPlane: boolean;
+  } {
+    if (shape && "plane" in shape) {
+      const [nx, ny, nz] = shape.plane.normal;
+      const normal = new THREE.Vector3(nx, ny, nz).normalize();
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(20, 20),
+        new THREE.MeshStandardMaterial({
+          color: 0x777755,
+          side: THREE.DoubleSide,
+        }),
+      );
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+      mesh.position.copy(normal.multiplyScalar(shape.plane.d));
+      return { mesh, isPlane: true };
+    }
+    if (shape && "sphere" in shape) {
+      return {
+        mesh: new THREE.Mesh(
+          new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
+          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+        ),
+        isPlane: false,
+      };
+    }
+    if (shape && "box" in shape) {
+      const [hx, hy, hz] = shape.box.half;
+      return {
+        mesh: new THREE.Mesh(
+          new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2),
+          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+        ),
+        isPlane: false,
+      };
+    }
+    if (shape && "capsule" in shape) {
+      // THREE.CapsuleGeometryのlengthは「円柱部の長さ」= 2*half_height
+      // (`spawnShapeAt`の同じ変換のdoc参照)。
+      return {
+        mesh: new THREE.Mesh(
+          new THREE.CapsuleGeometry(
+            shape.capsule.radius,
+            shape.capsule.half_height * 2,
+            8,
+            16,
+          ),
+          new THREE.MeshStandardMaterial({ color: 0xcc88ff }),
+        ),
+        isPlane: false,
+      };
+    }
+    console.warn(
+      `未知の形状(${shape ? Object.keys(shape).join(",") : "undefined"})を検出——0.3mの球で代用します。`,
+    );
+    return {
+      mesh: new THREE.Mesh(
+        new THREE.SphereGeometry(0.3, 16, 12),
+        new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+      ),
+      isPlane: false,
+    };
+  }
+
   sceneImportRef.current = (json: string) => {
     const count = world.import_scene_json(json);
     const parsed = JSON.parse(json) as ImportedScenarioJson;
@@ -4205,41 +4282,10 @@ async function setUpSceneView(
 
     for (let i = 0; i < count; i++) {
       const bodyIndex = startIndex + i;
-      const shape = bodies[i]?.shape;
-      if (shape && "plane" in shape) {
-        const [nx, ny, nz] = shape.plane.normal;
-        const normal = new THREE.Vector3(nx, ny, nz).normalize();
-        const mesh = new THREE.Mesh(
-          new THREE.PlaneGeometry(20, 20),
-          new THREE.MeshStandardMaterial({
-            color: 0x777755,
-            side: THREE.DoubleSide,
-          }),
-        );
-        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
-        mesh.position.copy(normal.multiplyScalar(shape.plane.d));
+      const { mesh, isPlane } = meshFromShapeJson(bodies[i]?.shape);
+      if (isPlane) {
         addSpawnedMesh(bodyIndex, mesh);
         continue;
-      }
-
-      let mesh: THREE.Mesh;
-      if (shape && "sphere" in shape) {
-        mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
-          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
-        );
-      } else if (shape && "box" in shape) {
-        const [hx, hy, hz] = shape.box.half;
-        mesh = new THREE.Mesh(
-          new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2),
-          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
-        );
-      } else {
-        // 形状情報が読めない(想定外のJSON構造)場合のフォールバック。
-        mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(0.3, 16, 12),
-          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
-        );
       }
       const pos = world.body_position_at_f32(bodyIndex);
       mesh.position.set(pos[0], pos[1], pos[2]);
@@ -4342,40 +4388,10 @@ async function setUpSceneView(
     renderPredictionPanel();
 
     for (let bodyIndex = 0; bodyIndex < bodies.length; bodyIndex++) {
-      const shape = bodies[bodyIndex]?.shape;
-      if (shape && "plane" in shape) {
-        const [nx, ny, nz] = shape.plane.normal;
-        const normal = new THREE.Vector3(nx, ny, nz).normalize();
-        const mesh = new THREE.Mesh(
-          new THREE.PlaneGeometry(20, 20),
-          new THREE.MeshStandardMaterial({
-            color: 0x777755,
-            side: THREE.DoubleSide,
-          }),
-        );
-        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
-        mesh.position.copy(normal.multiplyScalar(shape.plane.d));
+      const { mesh, isPlane } = meshFromShapeJson(bodies[bodyIndex]?.shape);
+      if (isPlane) {
         addSpawnedMesh(bodyIndex, mesh);
         continue;
-      }
-
-      let mesh: THREE.Mesh;
-      if (shape && "sphere" in shape) {
-        mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
-          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
-        );
-      } else if (shape && "box" in shape) {
-        const [hx, hy, hz] = shape.box.half;
-        mesh = new THREE.Mesh(
-          new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2),
-          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
-        );
-      } else {
-        mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(0.3, 16, 12),
-          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
-        );
       }
       const pos = world.body_position_at_f32(bodyIndex);
       mesh.position.set(pos[0], pos[1], pos[2]);
