@@ -48,9 +48,14 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   BodyId直接参照)・`add_fluid_region`・`EnvironmentDesc`(重力・大気・水域・
   周囲温度をまとめて読み書き)を追加。Inspector UI・wasm境界からの配線は
   未着手(Add Component/schema-read-applyの各タスクで行う)。
-- [ ] `Shape` の `todo!()` 4箇所を埋める(Compound/ConvexMesh)
-  AABB・接触生成・体積・慣性テンソル。
-  (`crates/sim-mechanics/src/shape.rs:55,111`、`collision.rs:91,1157`)
+- [x] `Shape` の `todo!()` 4箇所を埋める(Compound/ConvexMesh)(**一部近似**)
+  AABB・接触生成・体積・慣性テンソル。「質量を訊くとpanicする」は両形状とも
+  解消。Compoundは接触生成(narrowphase)まで含めてフル実装
+  (部品ごとに既存の解析的ペア関数へ再帰分解、L字形ボディが地面に落ちて
+  静止するところまでE2Eテストで確認)。ConvexMeshは面情報を持たない
+  (頂点列のみ)ため、体積/慣性/AABBはAABB近似で対応、接触生成(実際に
+  衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
+  範囲外——`None`(すり抜け)を返す既知の限界として明記。
 - [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(現状118本・2,798行)
 - [ ] Inspectorに Add Component とスキーマ駆動フォームを実装する
 - [ ] 形状描画をShape記述に一本化する
