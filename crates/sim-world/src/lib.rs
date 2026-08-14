@@ -2933,6 +2933,76 @@ mod tests {
         assert_eq!(world.thermal().unwrap().ambient_temperature, 210.0);
     }
 
+    /// `Shape::Compound`の`todo!()`穴埋め(統合エディタ実装計画の縦串①)の
+    /// エンドツーエンド検証: L字形(2つの箱を組んだ)のCompoundボディを作り、
+    /// 地面(y=0の平面)へ落として`step`を回す——質量照会でパニックしない
+    /// (これがtodo!()の直接の症状だった)ことと、接触解決を経て床の上に
+    /// 静止することの両方を確認する。
+    #[test]
+    fn compound_body_can_be_created_and_settles_on_the_ground_without_panicking() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = world.materials().find_by_name("コンクリート").unwrap();
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground.body_type = BodyType::Static;
+        world.create_body(ground);
+
+        // L字形: 縦棒(0.5×2.0×0.5)+横棒(1.0×0.5×0.5、縦棒の下端に接続)。
+        let l_shape = Shape::Compound {
+            children: vec![
+                (
+                    Transform {
+                        position: Vec3::new(0.0, 0.75, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: Vec3::new(0.25, 1.0, 0.25),
+                    },
+                ),
+                (
+                    Transform {
+                        position: Vec3::new(0.25, -0.25, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: Vec3::new(0.5, 0.25, 0.25),
+                    },
+                ),
+            ],
+        };
+        let mut desc = RigidBodyDesc::dynamic(l_shape, steel);
+        desc.transform.position = Vec3::new(0.0, 5.0, 0.0);
+        // `create_body`が内部で`shape.volume()`/`unit_mass_inertia_diagonal()`を
+        // 呼ぶ——todo!()が残っていればここで即パニックしていた。
+        let body = world.create_body(desc);
+
+        // L字形は非対称なので、着地後にわずかに揺れてから静止するまで
+        // 単純な箱よりも時間がかかる(実測: 約12秒)。余裕を見て20秒回す。
+        for _ in 0..1200 {
+            world.step();
+        }
+
+        let final_y = world.body_position(body).unwrap().y;
+        let final_speed = world.body_velocity(body).unwrap().length();
+        assert!(
+            final_speed < 0.05,
+            "10秒後には静止しているはず(速さ={final_speed})"
+        );
+        // 横棒(下端)の底面が y=-0.5 の位置(本体原点から-0.5)で床に接するので、
+        // 静止時の本体原点は概ね y=0.5 のはず。
+        assert!(
+            (final_y - 0.5).abs() < 0.1,
+            "床の上で静止しているはず(y={final_y})"
+        );
+    }
+
     /// 未知(存在しない index)の`BodyId`も`None`(パニックしない)。
     #[test]
     fn unknown_body_id_returns_none() {

@@ -87,8 +87,43 @@ fn aabb_of(shape: &Shape, xf: Transform) -> Aabb {
                 max: Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)) + r,
             }
         }
-        Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
-            todo!("Phase 5 で実装")
+        // **群10で実装**。各部品のAABB(親のxfと部品ローカルxfを合成した
+        // ワールド変換で評価)の和集合。
+        Shape::Compound { children } => {
+            let mut result: Option<Aabb> = None;
+            for (child_xf, child_shape) in children {
+                let world_xf = xf.compose(*child_xf);
+                let child_aabb = aabb_of(child_shape, world_xf);
+                result = Some(match result {
+                    Some(acc) => Aabb {
+                        min: Vec3::new(
+                            acc.min.x.min(child_aabb.min.x),
+                            acc.min.y.min(child_aabb.min.y),
+                            acc.min.z.min(child_aabb.min.z),
+                        ),
+                        max: Vec3::new(
+                            acc.max.x.max(child_aabb.max.x),
+                            acc.max.y.max(child_aabb.max.y),
+                            acc.max.z.max(child_aabb.max.z),
+                        ),
+                    },
+                    None => child_aabb,
+                });
+            }
+            result.unwrap_or(Aabb {
+                min: xf.position,
+                max: xf.position,
+            })
+        }
+        // **群10で実装**。頂点をワールド座標へ変換したAABB(`shape::points_aabb`、
+        // `Shape::volume`のdoc「既知の限界」参照——面情報が無いため凸包そのもの
+        // ではなく点群のAABB)。
+        Shape::ConvexMesh { vertices } => {
+            let world_points: Vec<Vec3> = vertices.iter().map(|p| xf.apply_point(*p)).collect();
+            crate::shape::points_aabb(&world_points).unwrap_or(Aabb {
+                min: xf.position,
+                max: xf.position,
+            })
         }
     }
 }
@@ -1154,7 +1189,84 @@ fn shape_pair_manifold(
             },
         ) => capsule_box(xf_b, *radius, *half_height, xf_a, *half_extents),
 
-        _ => todo!("Compound/ConvexMesh は Phase 5"),
+        // **群10で実装**。`Compound`は「部品ごとに既存の解析的ペア関数へ
+        // 帰着させる」形で解く——GJK/EPA等の新しい幾何アルゴリズムは要らない。
+        // 部品Aの各要素×shape_b(shape_bもCompoundなら、この再帰の次段で
+        // 今度は`(_, Compound)`側の枝に落ちて部品Bの各要素へさらに分解される、
+        // つまりCompound×Compoundは部品どうしの総当たりに帰着する)。
+        //
+        // 複数の部品が同時に接触する場合、`ContactManifold`は法線1本しか
+        // 持てない設計のため、**貫入量が最大の部品ペアの法線を代表として採用し、
+        // 全部品の接触点をその1本の法線へ束ねる**近似を取る(車体を組んだ
+        // シャシーが地面に接するような「全部品の法線が一致する」典型例では
+        // 厳密に正しく、法線が食い違う稀なケース(隅に挟まる等)でのみ近似になる、
+        // モジュールdoc参照)。`feature_id`は部品indexで空間を分けて warm start の
+        // 衝突を避ける。
+        (Shape::Compound { children }, _) => {
+            let mut merged: Option<(Vec3, Vec<ContactPoint>)> = None;
+            for (child_index, (child_xf, child_shape)) in children.iter().enumerate() {
+                let world_xf = xf_a.compose(*child_xf);
+                if let Some(result) = shape_pair_manifold(child_shape, world_xf, shape_b, xf_b) {
+                    merged = Some(merge_compound_manifolds(merged, result, child_index));
+                }
+            }
+            merged
+        }
+        (_, Shape::Compound { children }) => {
+            let mut merged: Option<(Vec3, Vec<ContactPoint>)> = None;
+            for (child_index, (child_xf, child_shape)) in children.iter().enumerate() {
+                let world_xf = xf_b.compose(*child_xf);
+                if let Some(result) = shape_pair_manifold(shape_a, xf_a, child_shape, world_xf) {
+                    merged = Some(merge_compound_manifolds(merged, result, child_index));
+                }
+            }
+            merged
+        }
+
+        // **既知の限界**(`Shape::volume`のdoc参照): `ConvexMesh`は頂点列のみで
+        // 面情報を持たないため、接触生成(narrowphase)には凸包計算が要る——
+        // 「外部クレート実質ゼロ」の方針で3D凸包をゼロから実装するのは本増分の
+        // 範囲外。AABB(`aabb_of`)・体積・慣性は既に近似実装済みなので
+        // `ConvexMesh`のボディ自体は作成・シミュレートできるが、**この形状は
+        // まだ何とも衝突しない(すり抜ける)**。todo!()によるパニックより
+        // 安全な既定として`None`を返す。
+        (Shape::ConvexMesh { .. }, _) | (_, Shape::ConvexMesh { .. }) => None,
+    }
+}
+
+/// `shape_pair_manifold`のCompound分解が複数の部品ペアから得た
+/// `(normal, points)`を1つの`ContactManifold`へ束ねる(モジュールdoc
+/// 「複数の部品が同時に接触する場合」参照)。`child_index`は`feature_id`の
+/// 名前空間を部品ごとに分けてwarm startingの衝突を避けるためのオフセット。
+fn merge_compound_manifolds(
+    acc: Option<(Vec3, Vec<ContactPoint>)>,
+    next: (Vec3, Vec<ContactPoint>),
+    child_index: usize,
+) -> (Vec3, Vec<ContactPoint>) {
+    let offset = (child_index as u32).wrapping_mul(1_000_003);
+    let (next_normal, mut next_points) = next;
+    for p in &mut next_points {
+        p.feature_id = p.feature_id.wrapping_add(offset);
+    }
+    match acc {
+        None => (next_normal, next_points),
+        Some((acc_normal, mut acc_points)) => {
+            let acc_max_pen = acc_points
+                .iter()
+                .map(|p| p.penetration)
+                .fold(f64::MIN, f64::max);
+            let next_max_pen = next_points
+                .iter()
+                .map(|p| p.penetration)
+                .fold(f64::MIN, f64::max);
+            let normal = if next_max_pen > acc_max_pen {
+                next_normal
+            } else {
+                acc_normal
+            };
+            acc_points.extend(next_points);
+            (normal, acc_points)
+        }
     }
 }
 
@@ -1456,6 +1568,110 @@ mod tests {
         half.set_collision_filter(0, 0b01, 0b11);
         half.set_collision_filter(1, 0b10, 0b10);
         assert_eq!(detect(&half, &mut cache).len(), 0, "片側だけでは通らない");
+    }
+
+    /// `Compound`のAABBが各部品(ローカルtransform込み)のAABBの和集合になること。
+    #[test]
+    fn compound_aabb_is_the_union_of_its_children_aabbs() {
+        let compound = Shape::Compound {
+            children: vec![
+                (
+                    identity_xf(Vec3::new(-2.0, 0.0, 0.0)),
+                    Shape::Sphere { radius: 0.5 },
+                ),
+                (
+                    identity_xf(Vec3::new(2.0, 0.0, 0.0)),
+                    Shape::Box {
+                        half_extents: Vec3::new(1.0, 1.0, 1.0),
+                    },
+                ),
+            ],
+        };
+        let aabb = aabb_of(&compound, identity_xf(Vec3::ZERO));
+        assert!((aabb.min.x - -2.5).abs() < 1e-12);
+        assert!((aabb.max.x - 3.0).abs() < 1e-12);
+        assert!((aabb.min.y - -1.0).abs() < 1e-12);
+        assert!((aabb.max.y - 1.0).abs() < 1e-12);
+    }
+
+    /// `Compound`(単一の箱を部品に持つ)と地面平面の接触が、同じ寸法の
+    /// 素の`Box`と地面平面の接触に一致すること(部品分解が既存のBox-Plane
+    /// 解析解へ正しく帰着することの確認)。
+    #[test]
+    fn compound_of_a_single_box_against_a_plane_matches_a_plain_box() {
+        let half_extents = Vec3::new(1.0, 1.0, 1.0);
+        let plane = Shape::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+        // 箱の下面が y=-0.1 (めり込み量0.1)になるよう、中心を y=0.9 に置く。
+        let body_xf = identity_xf(Vec3::new(0.0, 0.9, 0.0));
+
+        let plain_box = Shape::Box { half_extents };
+        let (plain_normal, plain_points) =
+            dispatch_for_test(&plain_box, body_xf, &plane, identity_xf(Vec3::ZERO))
+                .expect("box penetrates the plane");
+
+        let compound = Shape::Compound {
+            children: vec![(identity_xf(Vec3::ZERO), Shape::Box { half_extents })],
+        };
+        let (compound_normal, compound_points) =
+            dispatch_for_test(&compound, body_xf, &plane, identity_xf(Vec3::ZERO))
+                .expect("compound must penetrate exactly like the plain box");
+
+        assert!((compound_normal - plain_normal).length() < 1e-12);
+        assert_eq!(compound_points.len(), plain_points.len());
+        let max_pen = |pts: &[ContactPoint]| pts.iter().map(|p| p.penetration).fold(0.0, f64::max);
+        assert!((max_pen(&compound_points) - max_pen(&plain_points)).abs() < 1e-12);
+    }
+
+    /// `Compound`の複数部品(左右の車輪相当の2球)が同時に地面へ接触する場合、
+    /// 両方の接触点が1つのマニフォールドへ束ねられること。
+    #[test]
+    fn compound_merges_contacts_from_multiple_penetrating_children() {
+        let plane = Shape::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+        let compound = Shape::Compound {
+            children: vec![
+                (
+                    identity_xf(Vec3::new(-2.0, 0.0, 0.0)),
+                    Shape::Sphere { radius: 1.0 },
+                ),
+                (
+                    identity_xf(Vec3::new(2.0, 0.0, 0.0)),
+                    Shape::Sphere { radius: 1.0 },
+                ),
+            ],
+        };
+        // 両方の球の中心を y=0.9 に置く(半径1.0なので貫入量0.1)。
+        let body_xf = identity_xf(Vec3::new(0.0, 0.9, 0.0));
+        let (_normal, points) =
+            dispatch_for_test(&compound, body_xf, &plane, identity_xf(Vec3::ZERO))
+                .expect("both spheres penetrate the plane");
+        assert_eq!(points.len(), 2, "両方の球からの接触点が1つに束ねられる");
+        assert_ne!(
+            points[0].feature_id, points[1].feature_id,
+            "部品ごとにfeature_idが別空間になっている"
+        );
+    }
+
+    /// `ConvexMesh`はまだ何とも衝突しない(すり抜ける、既知の限界)ことを
+    /// パニックしないことも含めて確認する。
+    #[test]
+    fn convex_mesh_does_not_collide_with_anything_yet() {
+        let mesh = Shape::ConvexMesh {
+            vertices: vec![Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)],
+        };
+        let sphere = Shape::Sphere { radius: 5.0 };
+        assert!(dispatch_for_test(
+            &mesh,
+            identity_xf(Vec3::ZERO),
+            &sphere,
+            identity_xf(Vec3::ZERO)
+        )
+        .is_none());
     }
 
     #[test]
