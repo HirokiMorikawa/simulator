@@ -43,9 +43,11 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   モジュール全体が壊れる、再現・回帰テストとも確認済み)。52箇所すべてが経由する
   単一の解決点 `try_body_id_at` に `World::is_body_alive`(世代確認)を追加して
   修正——52本の署名を書き換えるより的確で、JS側の呼び出し規約も変えずに済む。
-- [ ] World APIに部品作成メソッドを実装する
-  `create_joint` / `add_coupling` / `add_fluid_region` / `add_probe`。
-  あわせて重力ベクトル・大気・水域・周囲温度を `EnvironmentDesc` として第一級にする。
+- [x] World APIに部品作成メソッドを実装する
+  `add_coupling`/`add_probe`は既存。未実装だった`create_joint`(JointDesc、
+  BodyId直接参照)・`add_fluid_region`・`EnvironmentDesc`(重力・大気・水域・
+  周囲温度をまとめて読み書き)を追加。Inspector UI・wasm境界からの配線は
+  未着手(Add Component/schema-read-applyの各タスクで行う)。
 - [ ] `Shape` の `todo!()` 4箇所を埋める(Compound/ConvexMesh)
   AABB・接触生成・体積・慣性テンソル。
   (`crates/sim-mechanics/src/shape.rs:55,111`、`collision.rs:91,1157`)
