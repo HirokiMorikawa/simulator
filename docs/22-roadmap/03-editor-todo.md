@@ -35,7 +35,14 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   `kinetic_gas`/`ising`/`fdtd` ——シーンJSON側が「構築レシピ」形式(波束の中心・
   分散、SPH粒子を敷き詰める直方体ブロック等)で状態スナップショットを表現できない
   ため、生値スナップショット形式のスキーマ拡張が別途要る。
-- [ ] 安定ID(世代付き)をwasm境界まで通す(52本の `index: usize` 署名を置き換え)
+- [x] 安定ID(世代付き)をwasm境界まで通す
+  監査の結果、JS向けのindex自体(`self.bodies: Vec<SpawnedBodyMeta>`の位置)は
+  削除でもシフトしないため署名としては既に安定していた。実際の欠陥は
+  「そこから解決した`BodyId`を、その後generation確認なしにWorldの生配列へ
+  直接インデックスしていた」こと(Timeline巻き戻し後に範囲外パニックで
+  モジュール全体が壊れる、再現・回帰テストとも確認済み)。52箇所すべてが経由する
+  単一の解決点 `try_body_id_at` に `World::is_body_alive`(世代確認)を追加して
+  修正——52本の署名を書き換えるより的確で、JS側の呼び出し規約も変えずに済む。
 - [ ] World APIに部品作成メソッドを実装する
   `create_joint` / `add_coupling` / `add_fluid_region` / `add_probe`。
   あわせて重力ベクトル・大気・水域・周囲温度を `EnvironmentDesc` として第一級にする。
