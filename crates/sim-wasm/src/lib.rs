@@ -1991,6 +1991,70 @@ impl WasmWorld {
         }))
     }
 
+    /// Inspectorの Add Coupling(**残タスク完遂の縦串②増分**)——
+    /// `sim_coupling::ImageChargeForce`の薄い写像。対象剛体を点電荷近似し、
+    /// 平板(法線・符号付き距離)への鏡像力(D26帯電風船と同じ物理)を追加する。
+    /// 剛体参照だけで完結する結合(他ドメインの参照を要らない)なので、
+    /// 縦串②で最初に配線した3種の1つ。
+    pub fn add_image_charge_force_coupling(
+        &mut self,
+        body: usize,
+        charge: f64,
+        plane_normal_x: f64,
+        plane_normal_y: f64,
+        plane_normal_z: f64,
+        plane_d: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        self.inner
+            .add_coupling(Box::new(sim_coupling::ImageChargeForce {
+                body_index: id.index as usize,
+                charge,
+                plane_normal: Vec3::new(plane_normal_x, plane_normal_y, plane_normal_z),
+                plane_d,
+            }));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::LorentzForce`の薄い写像。対象剛体に電荷を
+    /// 持たせ、`em_electrostatics`ドメインの電場からのローレンツ力を注入する
+    /// (電場が無い/点電荷が無ければ力はゼロ、パニックはしない)。
+    pub fn add_lorentz_force_coupling(&mut self, body: usize, charge: f64) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        self.inner
+            .add_coupling(Box::new(sim_coupling::LorentzForce {
+                body_index: id.index as usize,
+                charge,
+            }));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::BuoyancyDrag`の薄い写像。静的水域による
+    /// 浮力・抗力をCoupling registry経由で剛体単位に適用する(`fluids[].
+    /// static_water`の埋め込み経路とは別物、`BuoyancyDrag`のRustdoc参照)。
+    /// `atmosphere`/`lift`(揚力)はUIフォームに出さず`None`のまま——
+    /// 大気場は縦串③(環境と大気の場)の対象、揚力は縦串⑤(飛行機の物理)の
+    /// 対象として別途配線する。
+    pub fn add_buoyancy_drag_coupling(
+        &mut self,
+        body: usize,
+        water_level: f64,
+        water_density: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        self.inner
+            .add_coupling(Box::new(sim_coupling::BuoyancyDrag {
+                body_index: id.index as usize,
+                water: Some(sim_fluid::StaticWaterRegion::new(
+                    water_level,
+                    water_density,
+                )),
+                atmosphere: None,
+                lift: None,
+            }));
+        Ok(())
+    }
+
     /// フレーム軸オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「フレーム
     /// サブモード」の土台)向けに、ROOTの子として指定角速度(z軸まわり)で自転する
     /// フレームを追加する(`World::add_frame`+`sim_core::FrameTree::step`が毎step
@@ -2966,6 +3030,40 @@ mod tests {
         }
         // 存在しないボディを指すとErrになる実行時の確認は、本テストモジュール冒頭の
         // doc comment(Errパスの検証にはwasm-bindgen-testが要る)が示すとおり対象外。
+    }
+
+    /// Inspectorの Add Coupling(**残タスク完遂の縦串②増分**)——3種
+    /// (ImageChargeForce/LorentzForce/BuoyancyDrag、いずれも剛体参照だけで
+    /// 完結する)がパニックせず追加でき、`coupling_count`/`coupling_info_text`
+    /// (Inspectorの読み取り側)に反映されること。
+    #[test]
+    fn add_coupling_methods_succeed_and_are_visible_in_coupling_info_text() {
+        let mut world = new_world();
+        let body = world
+            .spawn_sphere(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .unwrap();
+
+        world
+            .add_image_charge_force_coupling(body, 1e-6, 1.0, 0.0, 0.0, 2.0)
+            .expect("image charge force coupling must succeed");
+        world
+            .add_lorentz_force_coupling(body, 1e-6)
+            .expect("lorentz force coupling must succeed");
+        world
+            .add_buoyancy_drag_coupling(body, 0.0, 1000.0)
+            .expect("buoyancy drag coupling must succeed");
+
+        assert_eq!(world.coupling_count(), 3);
+        let text = world.coupling_info_text(-1);
+        for kind in ["ImageChargeForce", "LorentzForce", "BuoyancyDrag"] {
+            assert!(
+                text.contains(kind),
+                "coupling_info_text must report a {kind} line, got:\n{text}"
+            );
+        }
+
+        // 死んだボディを指すと`Err`(パニックしない、成功パスのみのテスト
+        // モジュール方針は`add_joint_methods_succeed...`のdoc参照)。
     }
 
     /// `spawn_sphere`/`spawn_box`が正しい材質名で成功し、`body_count`が

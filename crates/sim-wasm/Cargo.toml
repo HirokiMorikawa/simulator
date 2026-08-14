@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 sim-core = { path = "../sim-core" }
+sim-coupling = { path = "../sim-coupling" }
 sim-em = { path = "../sim-em" }
 sim-fluid = { path = "../sim-fluid" }
 sim-math = { path = "../sim-math" }

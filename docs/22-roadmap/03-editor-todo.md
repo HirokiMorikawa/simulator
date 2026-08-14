@@ -121,7 +121,20 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   ([2026-08-04-editor-qa.md](../reviews/2026-08-04-editor-qa.md) の既知不具合)。
   再現スクリプト(`demo/tests/qa/qa-defects.mjs`)が0/16→16/16 PASSへ転じたことを
   確認済み。Playwrightスモーク23件・Rust側テストも無傷。
-- [ ] 結合14種を縦串②として配線する
+- [x] 結合14種を縦串②として配線する(**3種のみ**)
+  `WasmWorld::add_image_charge_force_coupling`/`add_lorentz_force_coupling`/
+  `add_buoyancy_drag_coupling`(`sim_coupling`の3種の薄い写像)を新設し、
+  InspectorにAdd Couplingフォームを追加(Add Jointと同じ「種別セレクト+
+  汎用Param欄」縮約)。対象は**剛体参照だけで完結する**(熱ノード・回路素子・
+  SPH/格子流体等、他ドメインの参照を要らない)3種——ImageChargeForce・
+  LorentzForce・BuoyancyDrag。残り11種
+  (BoussinesqBuoyancy/DissipationToHeat/PhaseChangeMorph/MotorCoupling/
+  SphRigid/GridFluidRigid/ConvectionLink/PistonGas/JouleHeat/BrownianForce/
+  InductionCoupling)は熱ノード・回路素子・SPH/格子流体をUIから作る手段が
+  まだ無く、それらを参照するフォームを今作っても実際には使えないため対象外
+  ——対応ドメインのUI作成(縦串③以降、または別途)が先に要る。
+  Rust側テスト・Playwrightでの実UI経由操作(3種すべて追加→
+  `coupling_info_text`に反映)の両方で確認、QA16/16・スモーク24/24維持。
 - [ ] 環境と大気の場を縦串③として実装する
   重力ベクトル化、ISA標準大気(高度依存密度)、風の場
 - [ ] 検証機能(合格基準・掃引・差分)を縦串④として実装する

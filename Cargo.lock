@@ -539,6 +539,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "sim-core",
+ "sim-coupling",
  "sim-em",
  "sim-fluid",
  "sim-math",

@@ -1061,6 +1061,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   `;
   wireInspectorEditFields(index);
   wireAddJointForm(world, index);
+  wireAddCouplingForm(world, index);
 }
 
 /// `renderInspectorExtraComponents`が生成した Add Joint フォームのボタンを配線する
@@ -1136,6 +1137,46 @@ function wireAddJointForm(world: WasmWorld, index: number): void {
       }
     } catch (err) {
       window.alert(`Joint の追加に失敗しました: ${String(err)}`);
+      return;
+    }
+    renderInspectorFor(world, index);
+  });
+}
+
+/// `renderInspectorExtraComponents`が生成した Add Coupling フォームのボタンを
+/// 配線する(`wireAddJointForm`と同じ設計)。
+function wireAddCouplingForm(world: WasmWorld, index: number): void {
+  const kindSelect = document.getElementById(
+    "add-coupling-kind",
+  ) as HTMLSelectElement | null;
+  const button = document.getElementById("add-coupling-button");
+  if (!kindSelect || !button) return;
+  const num = (id: string) =>
+    Number((document.getElementById(id) as HTMLInputElement | null)?.value ?? 0);
+  const int = (id: string) => Math.trunc(num(id));
+  button.addEventListener("click", () => {
+    const body = int("add-coupling-body");
+    const [p1, p2, p3, p4, p5] = [
+      num("add-coupling-p1"),
+      num("add-coupling-p2"),
+      num("add-coupling-p3"),
+      num("add-coupling-p4"),
+      num("add-coupling-p5"),
+    ];
+    try {
+      switch (kindSelect.value) {
+        case "image_charge_force":
+          world.add_image_charge_force_coupling(body, p1, p2, p3, p4, p5);
+          break;
+        case "lorentz_force":
+          world.add_lorentz_force_coupling(body, p1);
+          break;
+        case "buoyancy_drag":
+          world.add_buoyancy_drag_coupling(body, p1, p2);
+          break;
+      }
+    } catch (err) {
+      window.alert(`Coupling の追加に失敗しました: ${String(err)}`);
       return;
     }
     renderInspectorFor(world, index);
@@ -1514,6 +1555,48 @@ function renderInspectorExtraComponents(
       </div>
       <button id="add-joint-button">Joint を追加</button>
       <p class="inspector-note">使うフィールドは種別により異なる(各入力のツールチップ参照)。追加は即座に反映され、Command化されない(シーン構築操作のため——設計 docs/20-integration/04-world-api.md §1)。</p>
+    </div>
+  `);
+
+  // Add Coupling(**残タスク完遂の縦串②増分**、`WasmWorld::add_*_coupling`
+  // 3種の薄いフォーム)。結合14種のうち、剛体参照だけで完結する
+  // (熱ノード・回路素子・SPH等、他ドメインの参照を要らない)3種——
+  // ImageChargeForce・LorentzForce・BuoyancyDrag——のみを対象とする。
+  // 残り11種は対応するドメイン(熱ノード・回路・SPH/格子流体)がUIから
+  // 作れるようになってから配線する方が手戻りが少ない(Add Jointと同じ
+  // 縮約方針、モジュールdoc参照)。
+  sections.push(`
+    <div class="inspector-component" data-stacked>
+      <h3>Add Coupling</h3>
+      <div class="inspector-field">
+        <span>種別</span>
+        <select id="add-coupling-kind">
+          <option value="image_charge_force">ImageChargeForce(鏡像力)</option>
+          <option value="lorentz_force">LorentzForce(ローレンツ力)</option>
+          <option value="buoyancy_drag">BuoyancyDrag(浮力・抗力)</option>
+        </select>
+      </div>
+      <div class="inspector-field">
+        <span>Body</span>
+        <input type="number" id="add-coupling-body" step="1" value="${index}" title="対象ボディのindex" />
+      </div>
+      <div class="inspector-field">
+        <span>Param 1〜3</span>
+        <span class="inspector-joint-row">
+          <input type="number" id="add-coupling-p1" step="0.1" value="1e-6" title="charge[C](ImageChargeForce/LorentzForce)/water_level[m](BuoyancyDrag)" />
+          <input type="number" id="add-coupling-p2" step="0.1" value="1" title="plane_normal.x(ImageChargeForceのみ)/water_density[kg/m^3](BuoyancyDrag、既定1000=水)" />
+          <input type="number" id="add-coupling-p3" step="0.1" value="0" title="plane_normal.y(ImageChargeForceのみ)" />
+        </span>
+      </div>
+      <div class="inspector-field">
+        <span>Param 4〜5</span>
+        <span class="inspector-joint-row">
+          <input type="number" id="add-coupling-p4" step="0.1" value="0" title="plane_normal.z(ImageChargeForceのみ)" />
+          <input type="number" id="add-coupling-p5" step="0.1" value="0" title="plane_d(ImageChargeForceのみ、平面 p・n=d)" />
+        </span>
+      </div>
+      <button id="add-coupling-button">Coupling を追加</button>
+      <p class="inspector-note">Add Jointと同じく即座に反映される。残り11種(熱・回路・SPH/格子流体の参照が要るもの)は対応ドメインがUIから作れるようになってから追加する。</p>
     </div>
   `);
 
