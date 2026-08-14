@@ -138,6 +138,12 @@ type InspectorEditHandlers = {
   /// 軸別スケール(群2、設計 §1.2 の Gizmo は Transform を編集する)。
   /// Box 以外では効かないので、適用できたかを返す。
   setScaleXyz(bodyIndex: number, sx: number, sy: number, sz: number): boolean;
+  /// 等方スケール(**残タスク完遂の縦串①増分**)。既存のScale Gizmoドラッグと
+  /// 同じ`set_body_scale_at`——球等、軸別スケールが効かない形状の半径を
+  /// 正確な数値で指定する手段がGizmoのマウスドラッグしか無かった
+  /// (D24車の車輪半径0.32mのような値をUIだけで再現できなかった)。
+  /// 適用できたかを返す(Ground等は`false`)。
+  setScale(bodyIndex: number, scale: number): boolean;
   /// Position の直接編集(**残タスク完遂の縦串①増分**)。Gizmo ドラッグと同じく
   /// `set_body_position_at`を直接呼ぶ(Commandを経由しない、構築時の位置決め
   /// なので次stepまで待たせる理由が無い——設計docs/20-integration/
@@ -1048,7 +1054,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
           <input type="number" id="inspector-scale-z" min="0.01" step="0.1" value="1" />
         </span>
       </div>
-      <p class="inspector-note">軸別スケールは Box のみ(球・カプセルは形状表現に非等方の自由度が無い)。</p>
+      <p class="inspector-note">軸別スケールは Box のみ(球・カプセルは形状表現に非等方の自由度が無い)。3欄を同じ値にすると等方スケールとして球にも効く。</p>
     </div>
     ${renderRigidBodyComponent(world, index)}
     ${renderInspectorExtraComponents(world, index)}
@@ -1225,20 +1231,35 @@ function wireInspectorEditFields(index: number): void {
   const maskInput = document.getElementById(
     "inspector-collision-mask",
   ) as HTMLInputElement | null;
+  // group/maskは`setCollisionFilter`が2つ一緒に1つのCommandとして送る必要が
+  // あるため、変更時に**両方の欄をDOMから読み直す**素朴な実装だと、
+  // 適用がまだ次stepまで反映されない間に`updateInspectorRigidBodyFields`の
+  // 毎フレーム更新(フォーカスが外れた欄を「まだ効いていない実際の値」へ
+  // 戻す、下記の同関数のdoc参照)が割り込み、片方の欄を変更してもう片方を
+  // 変更するまでの間に最初の欄がフレーム更新で古い値へ戻ってしまうと、
+  // 2つ目の変更が古い値と組んで送られてしまう(**残タスク完遂の縦串①増分で
+  // 発見**)。ローカル変数へ「最後に自分の欄で確定した値」を保持し、
+  // DOMを読み直さないことでこれを避ける。
+  let pendingGroup = Number(groupInput?.value ?? 0);
+  let pendingMask = Number(maskInput?.value ?? 0);
   const pushFilter = () => {
-    const group = Number(groupInput?.value);
-    const mask = Number(maskInput?.value);
     if (
-      !Number.isInteger(group) ||
-      !Number.isInteger(mask) ||
-      group < 0 ||
-      mask < 0
+      !Number.isInteger(pendingGroup) ||
+      !Number.isInteger(pendingMask) ||
+      pendingGroup < 0 ||
+      pendingMask < 0
     )
       return;
-    handlers.setCollisionFilter(index, group, mask);
+    handlers.setCollisionFilter(index, pendingGroup, pendingMask);
   };
-  groupInput?.addEventListener("change", pushFilter);
-  maskInput?.addEventListener("change", pushFilter);
+  groupInput?.addEventListener("change", () => {
+    pendingGroup = Number(groupInput.value);
+    pushFilter();
+  });
+  maskInput?.addEventListener("change", () => {
+    pendingMask = Number(maskInput.value);
+    pushFilter();
+  });
 
   // 軸別スケール(群2)。Gizmo ドラッグと違い**Edit モードでの直接編集**なので
   // Command を経由しない(既存の Scale Gizmo と同じ扱い)。
@@ -1248,16 +1269,27 @@ function wireInspectorEditFields(index: number): void {
         `inspector-scale-${axis}`,
       ) as HTMLInputElement | null,
   );
-  const pushScale = () => {
+  const pushScale = (changedValue: number) => {
     const [sx, sy, sz] = scaleInputs.map((input) => Number(input?.value));
     if (![sx, sy, sz].every((s) => Number.isFinite(s) && s > 0)) return;
-    if (!handlers.setScaleXyz(index, sx, sy, sz)) {
-      // 効かない形状(球・カプセル)では入力を 1 に戻す——「入れたのに何も
-      // 起きない」より「この形状には効かない」と見えるほうが正直。
-      scaleInputs.forEach((input) => input && (input.value = "1"));
-    }
+    if (handlers.setScaleXyz(index, sx, sy, sz)) return;
+    // 軸別スケールが効かない形状(球等)では、**変更された欄の値**を等方
+    // スケールとして使う(**残タスク完遂の縦串①増分**)。3欄すべての一致を
+    // 条件にすると、欄を1つずつ順にfillするUI(人間がTabで移る場合も同じ)
+    // では、まだ更新していない残り2欄が古い値のままなので毎回不一致になり、
+    // 一度も適用されない——以前はその不一致のたびに全欄を1へ巻き戻していた。
+    // 球にはX/Y/Zの区別が無い以上、変更された欄だけを信じるのが正しい。
+    // (他の2欄は書き戻さない——ユーザーが続けて別の欄を編集している最中に
+    // 値を書き換えると、入力中の文字列と競合して壊れる。次にInspectorが
+    // 再描画されるタイミングで実際の形状に基づいた値へ揃う。)
+    if (handlers.setScale(index, changedValue)) return;
+    // それでも効かない(Ground等)場合のみ、入力を1に戻す——「入れたのに
+    // 何も起きない」より「この形状には効かない」と見えるほうが正直。
+    scaleInputs.forEach((input) => input && (input.value = "1"));
   };
-  scaleInputs.forEach((input) => input?.addEventListener("change", pushScale));
+  scaleInputs.forEach((input) =>
+    input?.addEventListener("change", () => pushScale(Number(input.value))),
+  );
 }
 
 /// **増分K: Componentビューの残り(Joint/Circuit/Coupling/Probe/近似バッジ)**。
@@ -2642,6 +2674,18 @@ async function setUpSceneView(
   // 差し替え前の古いインスタンスを掴んだままになる。
   Object.defineProperty(window, "__world", { get: () => world, configurable: true });
   Object.defineProperty(window, "__scene", { get: () => scene, configurable: true });
+  // テスト専用フック(**残タスク完遂の縦串①増分**): シーンギャラリーの
+  // 「ワールドを差し替えて読み込み」(`sceneGalleryRef.current`)を任意のJSON
+  // 文字列で直接呼べるようにする。UI上に「新規シーン」ボタンは無いが、
+  // 縦串①の受け入れテスト(D24相当をUIのみで組み立てる)が「回路・熱を
+  // 含まない、床だけのワールド」から始める必要があり、それを作る手段が
+  // シーンギャラリー(常に完全な差し替え)以外に無いため、既存の差し替え
+  // ロジックをテストから直接呼べる形で露出した(実行時の挙動には影響しない、
+  // `__camera`/`__world`/`__scene`と同じテスト専用露出)。
+  (window as unknown as { __loadSceneJson?: (json: string) => void }).__loadSceneJson =
+    (json: string) => {
+      sceneGalleryRef.current?.(json);
+    };
 
   // **ツール状態(群2)**。設計 §1.2 の W/E/R/Q に対応する。
   type GizmoTool = "translate" | "rotate" | "scale" | "none";
@@ -3725,6 +3769,17 @@ async function setUpSceneView(
         currentScaleXyz.set(bodyIndex, [sx, sy, sz]);
       }
       return applied;
+    },
+    setScale(bodyIndex, scale) {
+      if (bodyIndex <= 0 || bodyIndex >= world.body_count()) return false;
+      try {
+        world.set_body_scale_at(bodyIndex, scale);
+        currentScale.set(bodyIndex, scale);
+        currentScaleXyz.delete(bodyIndex);
+        return true;
+      } catch {
+        return false;
+      }
     },
     setPosition(bodyIndex, x, y, z) {
       if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;

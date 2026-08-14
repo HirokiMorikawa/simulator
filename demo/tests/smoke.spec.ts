@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { addViaMenu, collectPageErrors, waitForWorld } from "./helpers";
 
 // 統合エディタのスモークテスト(増分D2)。これまで各増分で手動実行してきた
 // Playwright 確認を、CI で毎回回るテストとして資産化したもの。
@@ -9,33 +10,11 @@ import { expect, test, type Page } from "@playwright/test";
 // ——実際、増分3-3・B2・B3 で見つかったバグ(heater_node_temperature の unwrap、
 // Circuit::node_voltage の範囲外、ボディ0個シーンでの render ループ崩壊)は
 // いずれもこの層でしか踏めない種類だった。
-
-/** ページ全体で発生した未捕捉例外を集める。favicon の 404 は除外する。 */
-function collectPageErrors(page: Page): string[] {
-  const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(String(e)));
-  return errors;
-}
-
-/** wasm 初期化を待つ(Hierarchy にボディが並ぶまで)。 */
-async function waitForWorld(page: Page) {
-  await expect(page.locator("#hierarchy-tree .tree-selectable").first()).toBeVisible({
-    timeout: 30_000,
-  });
-}
-
-
-/**
- * ツールバーの「＋ 追加」メニューから項目を選ぶ(群2)。
- * スポーン系8個のボタンはツールバーを3行ぶんの高さに膨らませていたため
- * 1つのメニューへ畳んだ。個々のボタンは `hidden` で DOM に残してあるが、
- * **`hidden` な要素は Playwright からクリックできない**ので、テストも
- * 実ユーザーと同じくメニュー経由で操作する。
- */
-async function addViaMenu(page: Page, label: string) {
-  await page.click("#btn-add");
-  await page.locator("#context-menu button", { hasText: label }).first().click();
-}
+//
+// `collectPageErrors`/`waitForWorld`/`addViaMenu` は `./helpers` へ切り出した
+// (Playwright は *.spec.ts 同士の import を許さないため、縦串①の受け入れ
+// テスト(acceptance-d24.spec.ts)と共有するにはテストファイルでない
+// モジュールに置く必要があった)。
 
 test("起動して wasm が初期化され、既定シーンが Hierarchy と HUD に現れる", async ({ page }) => {
   const errors = collectPageErrors(page);
