@@ -498,6 +498,26 @@ test("群2: カメラ操作・ツール切替ショートカット・Settings �
   // dt は Edit モードでのみ変更できる(決定論を守るため)。
   await expect(page.locator("#input-dt")).toBeEnabled();
 
+  // ③b 重力の向き(残タスク完遂増分、レビュー指摘「見送らず対応すること」への
+  // 対応)。既定は下向き(0,-1,0)、x欄だけ変えて+x向きに変更できること。
+  await expect(page.locator("#input-gravity-direction-x")).toHaveValue("0.000");
+  await expect(page.locator("#input-gravity-direction-y")).toHaveValue("-1.000");
+  await page.fill("#input-gravity-direction-x", "1");
+  await page.locator("#input-gravity-direction-x").dispatchEvent("change");
+  await page.fill("#input-gravity-direction-y", "0");
+  await page.locator("#input-gravity-direction-y").dispatchEvent("change");
+  await page.locator("#input-gravity-direction-y").blur();
+  await page.waitForTimeout(200);
+  const direction = await page.evaluate(() => {
+    const w = (window as unknown as { __world: { gravity_direction: () => Float64Array } })
+      .__world;
+    return Array.from(w.gravity_direction());
+  });
+  expect(direction[0]).toBeCloseTo(1.0, 3);
+  expect(direction[1]).toBeCloseTo(0.0, 3);
+  expect(direction[2]).toBeCloseTo(0.0, 3);
+  await expect(page.locator("#input-gravity-direction-x")).toHaveValue("1.000");
+
   expect(errors).toEqual([]);
 });
 
@@ -931,6 +951,99 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
   await page.locator("#context-menu button", { hasText: "複製" }).first().click();
   await page.waitForTimeout(200);
   expect(await rowCount()).toBeGreaterThan(beforeDuplicate);
+
+  expect(errors).toEqual([]);
+});
+
+test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体/気体ドメインを要するもの)がUIから追加できる", async ({
+  page,
+}) => {
+  // レビュー指摘(「やり遂げて欲しい」「対応できていますか？出来ていなければ
+  // 対応して」)への対応。PhaseChangeMorph/SphRigid/GridFluidRigid/
+  // BoussinesqBuoyancy/ConvectionLink/PistonGasは、参照する熱ノード・SPH流体・
+  // 格子流体・気体区画をUIから作る手段が無く追加できなかった
+  // (`docs/22-roadmap/03-editor-todo.md`に明記していた既知の欠落)。
+  // Settingsの「ドメイン」パネル(新設)でこれらを先に有効化し、
+  // Add Couplingフォームで6種すべてが実際に追加できることを確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // Box_1 を選択する(Inspector の Add Coupling フォームを開くため)。
+  await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
+  const inspector = page.locator("#inspector-body");
+
+  // ---- ドメインをSettingsから有効化する ----
+  await page.click("#btn-settings");
+  // 熱ノードを1個追加(既定シーンのindex 0とは別、新設ノードはindex 1)。
+  await page.click("#btn-add-thermal-node");
+  await expect(page.locator("#thermal-node-count-display")).toContainText("2");
+  await page.click("#btn-enable-grid-fluid");
+  await page.click("#btn-enable-gas");
+  await page.click("#btn-settings"); // ポップオーバーを閉じる。
+
+  // SPHドメインは既存の「+ 流体」ボタン(スポーンパレット)で有効化する。
+  await addViaMenu(page, "＋ 流体 (SPH 水塊)");
+
+  const addCoupling = async (
+    kind: string,
+    opts: {
+      body?: number;
+      axis?: [number, number, number];
+      params?: number[];
+    },
+  ) => {
+    await page.selectOption("#add-coupling-kind", kind);
+    if (opts.body !== undefined) {
+      await page.fill("#add-coupling-body", String(opts.body));
+    }
+    if (opts.axis) {
+      await page.fill("#add-coupling-axis-x", String(opts.axis[0]));
+      await page.fill("#add-coupling-axis-y", String(opts.axis[1]));
+      await page.fill("#add-coupling-axis-z", String(opts.axis[2]));
+    }
+    // `Array.forEach`はコールバックのawaitを待たない(並行実行される)ため、
+    // 直列に`page.fill`を呼ぶには明示的なforループが要る。
+    for (let i = 0; i < (opts.params ?? []).length; i += 1) {
+      await page.fill(`#add-coupling-p${i + 1}`, String(opts.params![i]));
+    }
+    await page.click("#add-coupling-button");
+  };
+
+  // ① PhaseChangeMorph: body=Box_1, thermal_node=1(新設), initial_mass=1kg,
+  // conductance=10W/K, initial_enthalpy=-50000J(融点未満の固相から開始)。
+  await addCoupling("phase_change_morph", {
+    body: 1,
+    params: [1, 1, 10, -50000],
+  });
+  await expect(inspector.getByText("PhaseChangeMorph", { exact: true })).toBeVisible();
+
+  // ② SphRigid: body=Box_1, radius=0.2m, boundary_points=12。
+  await addCoupling("sph_rigid", { body: 1, params: [0.2, 12] });
+  await expect(inspector.getByText("SphRigid", { exact: true })).toBeVisible();
+
+  // ③ GridFluidRigid: body=Box_1, half_width=0.3m, half_height=0.3m。
+  await addCoupling("grid_fluid_rigid", { body: 1, params: [0.3, 0.3] });
+  await expect(inspector.getByText("GridFluidRigid", { exact: true })).toBeVisible();
+
+  // ④ BoussinesqBuoyancy: thermal_node=1, ambient_temperature=293.15K,
+  // thermal_expansion_coefficient=3.4e-3(空気の目安値)。bodyを参照しない
+  // 結合なので「Coupling (シーン全体)」に出る。
+  await addCoupling("boussinesq_buoyancy", { params: [1, 293.15, 0.0034] });
+  await expect(inspector.getByText("BoussinesqBuoyancy", { exact: true })).toBeVisible();
+
+  // ⑤ ConvectionLink: fluid_node=0(既定シーンのノード), surface_node=1(新設),
+  // area=0.01m^2, characteristic_length=0.05m, mode=3(強制対流・平板)。
+  await addCoupling("convection_link", { params: [0, 1, 0.01, 0.05, 3] });
+  await expect(inspector.getByText("ConvectionLink", { exact: true })).toBeVisible();
+
+  // ⑥ PistonGas: body=Box_1, axis=(0,1,0), area=0.01m^2, initial_volume=0.001m^3。
+  await addCoupling("piston_gas", {
+    body: 1,
+    axis: [0, 1, 0],
+    params: [0.01, 0.001],
+  });
+  await expect(inspector.getByText("PistonGas", { exact: true })).toBeVisible();
 
   expect(errors).toEqual([]);
 });

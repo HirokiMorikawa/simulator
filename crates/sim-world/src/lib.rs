@@ -665,12 +665,17 @@ pub enum JointDesc {
 /// docs/20-integration/04-world-api.md §2「重力ベクトル・大気・水域・
 /// 周囲温度を`EnvironmentDesc`として第一級にする」)。
 ///
-/// **縮約**: `gravity`は現状`sim_mechanics::MechanicsSolver::gravity`と同じ
-/// スカラー(下向き固定)——ベクトル化(任意方向の重力場)は縦串③
-/// (環境と大気の場)の対象。
+/// **レビュー指摘(「見送らず対応すること」)を受けて重力の向き
+/// (`gravity_direction`)も追加した**——`sim_mechanics::MechanicsSolver::
+/// gravity_direction`のdocが示すとおり、影響範囲は自由体への直接の重力
+/// 積分とポテンシャルエネルギー計算のみ(浮力・大気抗力は向きに依存しない、
+/// `sim-fluid`crateの水面モデルが水平面固定であることに由来する既存の
+/// 制約で、本増分の対象外)。
 #[derive(Clone, Copy, Debug)]
 pub struct EnvironmentDesc {
     pub gravity: f64,
+    /// 重力の向き(単位ベクトルとして正規化される、既定は下向き`(0,-1,0)`)。
+    pub gravity_direction: sim_math::Vec3,
     pub atmosphere: Option<sim_fluid::Atmosphere>,
     pub water: Option<sim_fluid::StaticWaterRegion>,
     /// `None`なら熱ドメインが無効(`enable_thermal`未呼び出し)、または
@@ -2447,6 +2452,7 @@ impl World {
     pub fn environment(&self) -> EnvironmentDesc {
         EnvironmentDesc {
             gravity: self.mechanics.gravity,
+            gravity_direction: self.mechanics.gravity_direction,
             atmosphere: self.mechanics.atmosphere,
             water: self.mechanics.water,
             ambient_temperature: self.thermal.as_ref().map(|t| t.ambient_temperature),
@@ -2459,6 +2465,7 @@ impl World {
     /// シーン構築の責務であり、環境設定の責務ではないため)。
     pub fn set_environment(&mut self, desc: EnvironmentDesc) {
         self.mechanics.gravity = desc.gravity;
+        self.mechanics.set_gravity_direction(desc.gravity_direction);
         self.mechanics.atmosphere = desc.atmosphere;
         self.mechanics.water = desc.water;
         if let Some(t) = desc.ambient_temperature {
@@ -2929,8 +2936,10 @@ mod tests {
         assert_eq!(world.mechanics().water.unwrap().water_level, 2.0);
     }
 
-    /// `environment`/`set_environment`が重力・大気・水域・周囲温度を
-    /// 往復できること。
+    /// `environment`/`set_environment`が重力(大きさ・向き)・大気・水域・
+    /// 周囲温度を往復できること。向きの往復確認は**残タスク完遂増分**
+    /// (レビュー指摘「見送らず対応すること」への対応で`gravity_direction`を
+    /// 追加した際に拡張)。
     #[test]
     fn environment_desc_round_trips_gravity_atmosphere_water_and_ambient_temperature() {
         let mut world = World::new(WorldOptions::default());
@@ -2938,6 +2947,7 @@ mod tests {
 
         let desc = EnvironmentDesc {
             gravity: 3.71, // 火星の重力
+            gravity_direction: sim_math::Vec3::new(1.0, 0.0, 0.0),
             atmosphere: Some(sim_fluid::Atmosphere::still(0.02, 1.1e-5)),
             water: Some(sim_fluid::StaticWaterRegion::new(-1.0, 1000.0)),
             ambient_temperature: Some(210.0),
@@ -2946,6 +2956,10 @@ mod tests {
 
         let read_back = world.environment();
         assert_eq!(read_back.gravity, 3.71);
+        assert_eq!(
+            read_back.gravity_direction,
+            sim_math::Vec3::new(1.0, 0.0, 0.0)
+        );
         assert_eq!(read_back.atmosphere.unwrap().density, 0.02);
         assert_eq!(read_back.water.unwrap().water_level, -1.0);
         assert_eq!(read_back.ambient_temperature, Some(210.0));

@@ -11,34 +11,21 @@ import { addViaMenu, collectPageErrors, waitForWorld } from "./helpers";
 // のUI操作だけ**で組み立て、既存の D24 シーンJSONをそのまま実行した結果と
 // `state_hash()` が一致することで検証する。
 //
-// **「UIのみ」の境界と、唯一のテスト専用の例外**: ボディの生成(スポーン
-// パレット)・位置(Position入力)・スケール(Scale入力、球にも等方フォール
-// バックが効く——本増分で追加)・質量(Massコマンド)・衝突フィルタ・
-// Joint追加(Add Jointフォーム、本増分で追加)は、すべて実際にエディタが
-// 提供するUI操作を`page.fill`/`page.click`/`page.selectOption`で叩く。
-// 唯一の例外は開始状態: 既定の起動シーンには回路・熱ドメインの実演用
-// セットアップが最初から載っており(`WasmWorld::new`)、これを消して
-// 「床だけの空シーン」から始める手段がUIに無い(「新規シーン」ボタンが
-// 存在しない、という現状のギャップ——別途 03-editor-todo.md に追記)。
-// この1点だけ`window.__loadSceneJson`(シーンギャラリーの「ワールドを
-// 差し替えて読み込み」処理をテストから直接叩くための露出、main.tsの
-// 同フックのdoc参照)で、D24のground相当だけを持つ最小シーンへ差し替える。
-// それ以降のシャシー・車輪・Jointは全てUI操作のみで組み立てる。
+// **「UIのみ」で完結する**: ボディの生成(スポーンパレット)・位置
+// (Position入力)・スケール(Scale入力、球にも等方フォールバックが効く——
+// 本増分で追加)・質量(Massコマンド)・衝突フィルタ・Joint追加(Add Joint
+// フォーム、本増分で追加)は、すべて実際にエディタが提供するUI操作を
+// `page.fill`/`page.click`/`page.selectOption`で叩く。開始状態も例外では
+// ない——既定の起動シーンには回路・熱ドメインの実演用セットアップが最初から
+// 載っている(`WasmWorld::new`)ため、まず「新規シーン」ボタン(`#btn-new-scene`、
+// レビュー指摘「出来るようにして欲しい」への対応で追加)を押して床だけの
+// シーンへ差し替え、続けてSettingsの`dt`欄(Editモードのみ編集可能、
+// `world.set_dt`経由)をD24シーンと同じ値へUIから書き換える。
+// **テスト専用フックは一切使わない**(以前は`window.__loadSceneJson`で
+// ground相当のJSONを直接注入していたが、「新規シーン」ボタンの新設により
+// 不要になった)。
 
-const D24_BASE_SCENE_JSON = JSON.stringify({
-  name: "d24-ui-base",
-  world: { gravity: 9.80665, dt: 1 / 240 },
-  bodies: [
-    {
-      name: "ground",
-      shape: { plane: { normal: [0, 1, 0], d: 0.0 } },
-      material: "コンクリート",
-      type: "static",
-      collision_group: 1,
-      collision_mask: 4294967295,
-    },
-  ],
-});
+const D24_DT = 1 / 240;
 
 const STEPS = 60;
 
@@ -126,12 +113,19 @@ test("縦串①: D24車をUIのみで組み立てるとD24シーンJSONの実行
   // ---- UIのみでD24相当を組み立てる ----
   await page.goto("/");
   await waitForWorld(page);
-  await page.evaluate((json) => {
-    (window as unknown as { __loadSceneJson: (j: string) => void }).__loadSceneJson(
-      json,
-    );
-  }, D24_BASE_SCENE_JSON);
+  // 「新規シーン」ボタン(実UI)で床だけのシーンへ差し替える。
+  await page.click("#btn-new-scene");
   await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+  // dtをD24シーンと同じ値へ、Settingsの実入力欄からUI操作で書き換える
+  // (Editモードのみ編集可能——起動直後は既定でEditモードなのでそのまま使える)。
+  // `change`を明示dispatchするのは既存の「群2」テスト(重力欄)と同じ理由
+  // (`page.fill`だけではリスナーが拾わない)。
+  await page.click("#btn-settings");
+  await page.fill("#input-dt", String(D24_DT));
+  await page.locator("#input-dt").dispatchEvent("change");
+  await page.locator("#input-dt").blur();
+  await page.waitForTimeout(100);
+  await page.click("#btn-settings"); // ポップオーバーを閉じる。
 
   // シャシー(Box、body index 1)。既定スポーン半径0.4→半径[1.2,0.25,0.6]へ
   // 軸別スケール、質量600kg、collision_group=2 mask=4294967289(D24と同一)。

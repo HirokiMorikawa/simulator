@@ -996,6 +996,22 @@ impl WasmWorld {
         self.inner.mechanics().gravity
     }
 
+    /// 重力の向きを実行時に変更する(**残タスク完遂増分**、レビュー指摘
+    /// 「見送らず対応すること」への対応)。ゼロベクトルは
+    /// `MechanicsSolver::set_gravity_direction`が既定の下向きへ安全に
+    /// フォールバックする(壊れた入力で重力が消えない)。
+    pub fn set_gravity_direction(&mut self, x: f64, y: f64, z: f64) {
+        self.inner
+            .mechanics_mut()
+            .set_gravity_direction(Vec3::new(x, y, z));
+    }
+
+    /// 現在の重力の向き(正規化済み単位ベクトル)を`[x, y, z]`で返す。
+    pub fn gravity_direction(&self) -> Float64Array {
+        let d = self.inner.mechanics().gravity_direction;
+        Float64Array::from(&[d.x, d.y, d.z][..])
+    }
+
     /// タイムステップ [s] を実行時に変更する(**群2で追加**)。
     ///
     /// **決定論を壊しうる操作**なので、フロントエンドはEditモードでのみ
@@ -2375,6 +2391,228 @@ impl WasmWorld {
         Ok(())
     }
 
+    /// **残タスク完遂の縦串②残り6種を解禁する増分**——レビュー指摘
+    /// (「やり遂げて欲しい」「対応できていますか？出来ていなければ対応して」)
+    /// への対応。熱ドメインが無効なら既定の周囲温度293.15K(他コードの既定と
+    /// 揃える、`ThermalSolver::new`の呼び出し例参照)で自動的に有効化してから
+    /// ノードを追加する——「Add Componentで一から組んだシーンには熱ドメインを
+    /// 追加する手段が無い」という、上の`add_dissipation_to_heat_coupling`の
+    /// docに書かれていたギャップそのものを埋める。戻り値は追加したノードの
+    /// index(他のCoupling系メソッドが受け取る`thermal_node`引数にそのまま渡せる)。
+    pub fn add_thermal_node(&mut self, temperature: f64, heat_capacity: f64) -> usize {
+        if self.inner.thermal().is_none() {
+            self.inner
+                .enable_thermal(sim_thermal::ThermalSolver::new(293.15));
+        }
+        self.inner
+            .thermal_mut()
+            .expect("just enabled above")
+            .add_node(sim_thermal::ThermalNode::new(temperature, heat_capacity))
+    }
+
+    /// Inspector/Hierarchy向けの熱ノード数(熱ドメイン未有効なら0)。
+    pub fn thermal_node_count(&self) -> usize {
+        self.inner.thermal().map(|t| t.nodes.len()).unwrap_or(0)
+    }
+
+    /// 格子流体(2D)ドメインを既定パラメータ(D14/D15など既存ギャラリーシーンの
+    /// 値と同オーダー)で有効化する——`GridFluidRigid`/`BoussinesqBuoyancy`結合が
+    /// 参照する`world.grid_fluid`はシーンJSON経由でしか作れず、UIから一から
+    /// 組む経路が無かった既知の欠落を埋める。既に有効なら何もしない(冪等、
+    /// 複数回押しても壊れない)。
+    pub fn enable_grid_fluid_2d_domain(&mut self) {
+        if self.inner.grid_fluid().is_none() {
+            self.inner
+                .enable_grid_fluid(sim_fluid::GridFluid2D::new(32, 32, 0.05));
+        }
+    }
+
+    /// 気体区画(`PistonGas`が参照する`world.gas`)を既定パラメータ(空気1mol、
+    /// 体積1L、常温)で有効化する——`enable_grid_fluid_2d_domain`と同じ理由・
+    /// 同じ冪等性。
+    pub fn enable_gas_compartment(&mut self) {
+        if self.inner.gas().is_none() {
+            self.inner.enable_gas(sim_thermal::GasCompartment {
+                n_moles: 1.0,
+                volume: 0.001,
+                temperature: 293.15,
+                gas: sim_thermal::GasSpecies::AIR,
+            });
+        }
+    }
+
+    /// Add Coupling——`sim_coupling::SphRigid`の薄い写像。D23(注ぐ水)向け。
+    /// SPHドメインが無効だと`SphRigid::new`が境界粒子を確保する先が無いため、
+    /// 先に「＋ 流体 (SPH 水塊)」(`spawn_fluid_block`)でSPH流体を有効化して
+    /// もらう必要がある——無効なら明示的に`Err`を返す(他のCoupling系
+    /// メソッドの「無言で無効化けより失敗として伝わる」方針と同じ)。
+    pub fn add_sph_rigid_coupling(
+        &mut self,
+        body: usize,
+        radius: f64,
+        boundary_points: usize,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        let sph = self.inner.sph_mut().ok_or_else(|| {
+            JsValue::from_str(
+                "SPH fluid domain is not enabled (spawn a fluid block first via \"+ 流体\")",
+            )
+        })?;
+        let coupling = sim_coupling::SphRigid::new(sph, id.index as usize, radius, boundary_points);
+        self.inner.add_coupling(Box::new(coupling));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::GridFluidRigid`の薄い写像。D14(煙と渦)向け。
+    /// 格子流体ドメインが無効なら明示的に`Err`(`enable_grid_fluid_2d_domain`を
+    /// 先に呼ぶ必要がある、`add_sph_rigid_coupling`と同じ方針)。
+    pub fn add_grid_fluid_rigid_coupling(
+        &mut self,
+        body: usize,
+        half_width: f64,
+        half_height: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        if self.inner.grid_fluid().is_none() {
+            return Err(JsValue::from_str(
+                "grid fluid domain is not enabled (call enable_grid_fluid_2d_domain first)",
+            ));
+        }
+        self.inner
+            .add_coupling(Box::new(sim_coupling::GridFluidRigid::new(
+                id.index as usize,
+                half_width,
+                half_height,
+            )));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::PistonGas`の薄い写像。D17(ピストン)向け。
+    /// 気体区画が無効なら明示的に`Err`(`enable_gas_compartment`を先に呼ぶ
+    /// 必要がある)。基準体積(`initial_volume`)はUIから明示的に渡す
+    /// (シーンJSON側の`gas.volume`と同じ値を渡す規約、`CouplingJson::
+    /// PistonGas`のdoc参照)。
+    pub fn add_piston_gas_coupling(
+        &mut self,
+        body: usize,
+        axis_x: f64,
+        axis_y: f64,
+        axis_z: f64,
+        area: f64,
+        initial_volume: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        if self.inner.gas().is_none() {
+            return Err(JsValue::from_str(
+                "gas compartment is not enabled (call enable_gas_compartment first)",
+            ));
+        }
+        let axis = Vec3::new(axis_x, axis_y, axis_z);
+        let coupling = sim_coupling::PistonGas::new(
+            &self.inner.mechanics().bodies,
+            id.index as usize,
+            axis,
+            area,
+            initial_volume,
+        );
+        self.inner.add_coupling(Box::new(coupling));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::BoussinesqBuoyancy`の薄い写像。
+    /// 格子流体ドメインが無効なら明示的に`Err`(適用対象が無いため、
+    /// `add_grid_fluid_rigid_coupling`と同じ方針)。
+    pub fn add_boussinesq_buoyancy_coupling(
+        &mut self,
+        thermal_node: usize,
+        ambient_temperature: f64,
+        thermal_expansion_coefficient: f64,
+    ) -> Result<(), JsValue> {
+        let node = self.try_thermal_node_index(thermal_node)?;
+        if self.inner.grid_fluid().is_none() {
+            return Err(JsValue::from_str(
+                "grid fluid domain is not enabled (call enable_grid_fluid_2d_domain first)",
+            ));
+        }
+        self.inner
+            .add_coupling(Box::new(sim_coupling::BoussinesqBuoyancy {
+                thermal_node: node,
+                ambient_temperature,
+                thermal_expansion_coefficient,
+            }));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::ConvectionLink`の薄い写像。流体の物性値
+    /// (熱伝導率・動粘性・プラントル数・自然対流の体膨張係数)は
+    /// `ConvectionLink::default()`(空気20℃・強制対流平板)から引き継ぎ、
+    /// UIには`mode`(対流の状況)を含む最小限のパラメータのみ出す——
+    /// 汎用Add Couplingフォーム(P1-P6の数値欄のみ)の枠内に収める縮約。
+    /// `mode`は`0..=3`の整数(NaturalVerticalPlate/NaturalSphere/
+    /// ForcedSphere/ForcedFlatPlate、UIのtitleツールチップ参照)。
+    pub fn add_convection_link_coupling(
+        &mut self,
+        fluid_node: usize,
+        surface_node: usize,
+        area: f64,
+        characteristic_length: f64,
+        mode: u32,
+    ) -> Result<(), JsValue> {
+        let fluid_node = self.try_thermal_node_index(fluid_node)?;
+        let surface_node = self.try_thermal_node_index(surface_node)?;
+        let mode = match mode {
+            0 => sim_coupling::ConvectionMode::NaturalVerticalPlate,
+            1 => sim_coupling::ConvectionMode::NaturalSphere,
+            2 => sim_coupling::ConvectionMode::ForcedSphere,
+            _ => sim_coupling::ConvectionMode::ForcedFlatPlate,
+        };
+        self.inner
+            .add_coupling(Box::new(sim_coupling::ConvectionLink {
+                fluid_node,
+                surface_node,
+                area,
+                characteristic_length,
+                mode,
+                ..sim_coupling::ConvectionLink::default()
+            }));
+        Ok(())
+    }
+
+    /// Add Coupling——`sim_coupling::PhaseChangeMorph`の薄い写像。D18(氷と
+    /// 飲み物)向け。材質は氷/水の定数(`melting_temperature=273.15K`・
+    /// `latent_heat_fusion=334000 J/kg`・`specific_heat_solid=2100 J/(kg·K)`・
+    /// `specific_heat_liquid=4186 J/(kg·K)`、標準的な値)に固定——4つの物性値を
+    /// 別々にUIへ出すと汎用Add Couplingフォームの枠を超えるための縮約
+    /// (`ConvectionLink`と同じ考え方)。融解質量のSPH粒子生成(`melt_spawn`)は
+    /// このメソッドでは`None`のまま(既定、移行前と同じ挙動)。
+    pub fn add_phase_change_morph_coupling(
+        &mut self,
+        body: usize,
+        thermal_node: usize,
+        initial_mass: f64,
+        conductance: f64,
+        initial_enthalpy: f64,
+    ) -> Result<(), JsValue> {
+        let id = self.try_body_id_at(body)?;
+        let node = self.try_thermal_node_index(thermal_node)?;
+        let material = sim_thermal::PhaseMaterial {
+            melting_temperature: 273.15,
+            latent_heat_fusion: 334_000.0,
+            specific_heat_solid: 2100.0,
+            specific_heat_liquid: 4186.0,
+        };
+        let coupling = sim_coupling::PhaseChangeMorph::new(
+            id.index as usize,
+            node,
+            material,
+            initial_mass,
+            conductance,
+            initial_enthalpy,
+        );
+        self.inner.add_coupling(Box::new(coupling));
+        Ok(())
+    }
+
     /// フレーム軸オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「フレーム
     /// サブモード」の土台)向けに、ROOTの子として指定角速度(z軸まわり)で自転する
     /// フレームを追加する(`World::add_frame`+`sim_core::FrameTree::step`が毎step
@@ -3362,6 +3600,32 @@ mod tests {
         assert!(world.water_level().is_nan());
     }
 
+    /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
+    /// `set_gravity_direction`が既定の下向きから変更でき、正規化されること。
+    /// `gravity_direction()`は`Float64Array`を返すためここでは呼ばない
+    /// (本テストモジュール冒頭のdoc comment参照)——`self.inner`経由で
+    /// `MechanicsSolver::gravity_direction`を直接読む。
+    #[test]
+    fn set_gravity_direction_changes_and_normalizes_the_stored_direction() {
+        let mut world = new_world();
+        assert_eq!(
+            world.inner.mechanics().gravity_direction,
+            sim_math::Vec3::new(0.0, -1.0, 0.0)
+        );
+
+        world.set_gravity_direction(3.0, 0.0, 0.0);
+        let direction = world.inner.mechanics().gravity_direction;
+        assert!((direction.length() - 1.0).abs() < 1e-12);
+        assert!((direction.x - 1.0).abs() < 1e-12);
+
+        // ゼロベクトルは既定の下向きへ安全にフォールバックする。
+        world.set_gravity_direction(0.0, 0.0, 0.0);
+        assert_eq!(
+            world.inner.mechanics().gravity_direction,
+            sim_math::Vec3::new(0.0, -1.0, 0.0)
+        );
+    }
+
     /// Inspectorの Add Coupling(**残タスク完遂の縦串②増分**)——3種
     /// (ImageChargeForce/LorentzForce/BuoyancyDrag、いずれも剛体参照だけで
     /// 完結する)がパニックせず追加でき、`coupling_count`/`coupling_info_text`
@@ -3446,6 +3710,72 @@ mod tests {
         // 範囲外indexで`Err`になることの実行時確認は、本テストモジュール
         // 冒頭のdoc comment(Errパスの検証にはwasm-bindgen-testが要る、
         // `add_joint_methods_succeed...`と同じ理由)が示すとおり対象外。
+    }
+
+    /// **残タスク完遂の縦串②残り6種を解禁する増分**——レビュー指摘
+    /// (「やり遂げて欲しい」)への対応。`add_thermal_node`/
+    /// `enable_grid_fluid_2d_domain`/`enable_gas_compartment`(いずれも
+    /// UIから一から組んだシーンにドメインを作る新設経路)を先に呼んでから、
+    /// PhaseChangeMorph/SphRigid/GridFluidRigid/ConvectionLink/PistonGas/
+    /// BoussinesqBuoyancyの6種すべてが成功パスで追加できることを確認する。
+    #[test]
+    fn remaining_six_coupling_kinds_succeed_once_their_domains_are_created_via_new_wasm_methods() {
+        let mut world = new_world();
+        let body = world
+            .spawn_sphere(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .unwrap();
+
+        // 熱ノードをUIから新規作成(index 1、既定シーンのindex 0は別ノード)。
+        let node = world.add_thermal_node(273.15, 100.0);
+        assert_eq!(node, 1);
+        assert_eq!(world.thermal_node_count(), 2);
+
+        world
+            .add_phase_change_morph_coupling(body, node, 1.0, 10.0, -50_000.0)
+            .expect("phase change morph must succeed once a thermal node exists");
+
+        world.spawn_fluid_block(); // SPHドメインを有効化。
+        world
+            .add_sph_rigid_coupling(body, 0.2, 12)
+            .expect("sph rigid must succeed once the SPH domain exists");
+
+        world.enable_grid_fluid_2d_domain();
+        world
+            .add_grid_fluid_rigid_coupling(body, 0.3, 0.3)
+            .expect("grid fluid rigid must succeed once the grid fluid domain exists");
+        world
+            .add_boussinesq_buoyancy_coupling(node, 293.15, 3.4e-3)
+            .expect("boussinesq buoyancy must succeed once the grid fluid domain exists");
+        world
+            .add_convection_link_coupling(0, node, 0.01, 0.05, 3)
+            .expect("convection link must succeed with valid thermal node indices");
+
+        world.enable_gas_compartment();
+        world
+            .add_piston_gas_coupling(body, 0.0, 1.0, 0.0, 0.01, 0.001)
+            .expect("piston gas must succeed once the gas compartment exists");
+
+        assert_eq!(world.coupling_count(), 6);
+        let text = world.coupling_info_text(-1);
+        for kind in [
+            "PhaseChangeMorph",
+            "SphRigid",
+            "GridFluidRigid",
+            "BoussinesqBuoyancy",
+            "ConvectionLink",
+            "PistonGas",
+        ] {
+            assert!(
+                text.contains(kind),
+                "coupling_info_text must report a {kind} line, got:\n{text}"
+            );
+        }
+
+        // ドメイン未有効な状態で`Err`になることの実行時確認は、本テスト
+        // モジュール冒頭のdoc comment(`JsValue::from_str`はネイティブ
+        // ターゲットでは構築した時点でプロセスごとSIGABRTする、`Result::
+        // is_err()`で受けても回避できない)が示すとおり対象外——
+        // Errパスの検証にはwasm-bindgen-testが要る。
     }
 
     /// `export_scene_json`が`sim_world::to_scenario`経由に置き換わったこと

@@ -112,6 +112,14 @@
           <label><input type="checkbox" id="toggle-heater" /> ヒーター</label>
             <h4>物理パラメータ</h4>
             <label>重力 [m/s²] <input type="number" id="input-gravity" step="0.1" min="0" /></label>
+            <label>重力の向き x,y,z(正規化される)
+              <span class="inspector-scale-fields">
+                <input type="number" id="input-gravity-direction-x" step="0.1" value="0" />
+                <input type="number" id="input-gravity-direction-y" step="0.1" value="-1" />
+                <input type="number" id="input-gravity-direction-z" step="0.1" value="0" />
+              </span>
+            </label>
+            <p class="settings-note">重力の向きが影響するのは自由体への直接の重力積分のみ——浮力・大気抗力の向きは水域モデルが水平面固定なため変わらない(既知の制約)。</p>
             <label>dt [s] <input type="number" id="input-dt" step="0.001" min="0.0001" /></label>
             <p class="settings-note">dt の変更はリプレイの再現性に影響するため Edit モードのみ。</p>
             <h4>環境(大気・水域)</h4>
@@ -131,12 +139,26 @@
             <label>水位 [m] <input type="number" id="input-water-level" step="0.1" value="0" /></label>
             <label>水密度 [kg/m³] <input type="number" id="input-water-density" step="1" min="0" value="1000" /></label>
             <p class="settings-note">大気・水域は`BuoyancyDrag`結合(Inspectorの Add Coupling)を持つ剛体にのみ効く。設定はEditモード・Playモードどちらでも即座に反映される。</p>
+            <h4>ドメイン(熱ノード・格子流体・気体)</h4>
+            <p class="settings-note">Add Couplingの残り6種(PhaseChangeMorph/SphRigid/GridFluidRigid/BoussinesqBuoyancy/ConvectionLink/PistonGas)は、参照するドメインが有効なシーンでのみ追加できる。ここで先にドメインを作る(冪等——複数回押しても壊れない)。</p>
+            <label>温度 [K] <input type="number" id="input-new-thermal-node-temperature" step="1" value="293.15" /></label>
+            <label>熱容量 [J/K] <input type="number" id="input-new-thermal-node-heat-capacity" step="1" min="0" value="100" /></label>
+            <button id="btn-add-thermal-node" title="熱ノードを1個追加する(熱ドメインが無効なら周囲温度293.15Kで自動的に有効化する)">熱ノードを追加</button>
+            <span id="thermal-node-count-display"></span>
+            <button id="btn-enable-grid-fluid" title="格子流体(2D)ドメインを既定パラメータで有効化する(GridFluidRigid/BoussinesqBuoyancyが必要とする)">格子流体ドメインを有効化</button>
+            <button id="btn-enable-gas" title="気体区画を既定パラメータ(空気1mol・1L・常温)で有効化する(PistonGasが必要とする)">気体ドメインを有効化</button>
             <h4>グリッド</h4>
             <label>スナップ [m] <input type="number" id="input-grid-snap" step="0.01" min="0" value="0.1" /></label>
             <h4>決定論</h4>
             <label>PRNG シード <input type="number" id="input-seed" step="1" min="0" value="0" disabled /></label>
             <p class="settings-note">シードは World 構築時に決まるため、変更にはシーン再読み込みが要る。</p>
           </div>
+          <button
+            id="btn-new-scene"
+            title="床だけの空シーンへ切り替える(回路・熱ドメインの実演セットアップを含まない、まっさらな開始状態)"
+          >
+            🆕 新規シーン
+          </button>
           <label for="select-scene">Scene</label>
           <select id="select-scene"><option value="">(既定シーン)</option></select>
           <label for="select-layout">Layout</label>

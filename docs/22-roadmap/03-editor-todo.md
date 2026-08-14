@@ -161,7 +161,7 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   ([2026-08-04-editor-qa.md](../reviews/2026-08-04-editor-qa.md) の既知不具合)。
   再現スクリプト(`demo/tests/qa/qa-defects.mjs`)が0/16→16/16 PASSへ転じたことを
   確認済み。Playwrightスモーク23件・Rust側テストも無傷。
-- [x] 結合14種を縦串②として配線する(**8種**)
+- [x] 結合14種を縦串②として配線する(**14種すべて**)
   `WasmWorld::add_image_charge_force_coupling`/`add_lorentz_force_coupling`/
   `add_buoyancy_drag_coupling`/`add_dissipation_to_heat_coupling`/
   `add_joule_heat_coupling`/`add_brownian_force_coupling`/
@@ -177,13 +177,38 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   `try_thermal_node_index`/`try_voltage_source_index`が明示的に`Err`を返す
   (熱・回路ドメインが無いシーンで追加しようとした時に、無言で無効な状態に
   なるより失敗として伝わる)。
-  残り6種(PhaseChangeMorph/SphRigid/GridFluidRigid/ConvectionLink/
-  PistonGas/BoussinesqBuoyancy)は熱ノード**自体を作る**か、SPH/格子流体
-  ドメインをUIから作れるようにならないと意味を持たないため対象外——
-  対応ドメインのUI作成(別途)が先に要る。
-  Rust側テスト・Playwrightでの実UI経由操作(8種すべて追加→
-  `coupling_info_text`に反映)の両方で確認、QA16/16・スモーク24/24維持。
-- [x] 環境と大気の場を縦串③として実装する(**大気・水域のみ、重力ベクトル化は対象外**)
+
+  **レビュー指摘(「やり遂げて欲しい」「対応できていますか？出来ていなければ
+  対応して」)を受けて、残り6種(PhaseChangeMorph/SphRigid/GridFluidRigid/
+  ConvectionLink/PistonGas/BoussinesqBuoyancy)も完遂した:**
+  「熱ノード自体を作る手段が無い」「SPH/格子流体/気体ドメインをUIから
+  作れない」という、対象外にしていた理由そのものを埋めた——
+  - `WasmWorld::add_thermal_node(temperature, heat_capacity) -> usize`
+    (熱ドメインが無効なら周囲温度293.15Kで自動的に有効化してから追加、
+    Settingsの「ドメイン」パネルから呼べる)。
+  - `WasmWorld::enable_grid_fluid_2d_domain()`/`enable_gas_compartment()`
+    (いずれも既定パラメータ・冪等)を新設し、同じく「ドメイン」パネルへ
+    ボタンとして配置。SPHドメインは既存の「＋ 流体 (SPH 水塊)」
+    (`spawn_fluid_block`)をそのまま流用——別のSPH作成経路を増やさない。
+  - `add_phase_change_morph_coupling`(材質は氷/水の定数に固定、4物性値を
+    別々にUIへ出す複雑さを避けた縮約)・`add_sph_rigid_coupling`・
+    `add_grid_fluid_rigid_coupling`・`add_boussinesq_buoyancy_coupling`・
+    `add_convection_link_coupling`(流体物性値は`ConvectionLink::default()`
+    (空気20℃)を継承し、UIには`fluid_node`/`surface_node`/`area`/
+    `characteristic_length`/`mode`のみ出す縮約)・`add_piston_gas_coupling`
+    を新設し、Add Couplingフォームの種別セレクトへ追加。対応ドメインが
+    無効な状態で呼ぶと明示的に`Err`を返す(他8種と同じ方針)。
+  - Rust側単体テスト(6種すべて成功パスで追加でき`coupling_info_text`に
+    反映されること)、Playwrightで実UI経由(Settingsの「ドメイン」パネルで
+    熱ノード・格子流体・気体を有効化→「＋ 流体」でSPHを有効化→Add
+    Couplingフォームで6種すべて追加→Inspectorに反映)の受け入れテストを
+    追加して確認、QA16/16・スモーク26/26維持。
+  - **なお残る、正直な縮約**: `PhaseChangeMorph`の材質(氷/水固定)・
+    `ConvectionLink`の流体物性値(空気固定)はUIから個別に変更できない。
+    汎用Add Couplingフォーム(P1-P6の数値欄のみ)の枠内に収めるための
+    妥協で、任意の材質/流体物性値を扱うには専用フォーム(またはTask#8の
+    schema/read/apply化)が要る。
+- [x] 環境と大気の場を縦串③として実装する(**大気・水域・重力の向き**)
   Settingsに「環境(大気・水域)」パネルを追加。`sim_fluid::Atmosphere`は
   既に`density`/`viscosity`/`wind: Vec3`(風の場)を持っていた
   (物理コアは無変更)が、UIから設定する手段が無かった——
@@ -194,14 +219,37 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   フロントエンドJS側で計算し、高度入力→密度欄へ書き込むボタンとして実装
   (物理コアには触れない——1つの数値をJSで計算するだけなので「物理コアへの
   変更」ではない)。`BuoyancyDrag`結合(縦串②)を持つ剛体に効く。
-  **重力ベクトル化(任意方向の重力場)は対象外**——現状
-  `MechanicsSolver::gravity: f64`(下向き固定スカラー)の変更はワークスペース
-  全体の呼び出し規約・全テストへ波及する物理コア変更であり、
-  末尾の「物理コアへの変更を再評価する」の着手条件(新規/既存ドメインの
-  拡張が具体的に必要になった時点)に該当するため、配線(エディタ側)の
-  完成を優先する本方針どおり見送った。
-  検証: Rust側新規テスト(大気・水域の設定/解除の往復)、cargo test
-  --workspace全緑、fmt/clippyクリーン。Playwrightで実UI経由(Settings→
+
+  **レビュー指摘(「見送らず対応すること」)を受けて、重力ベクトル化
+  (任意方向の重力場)も完遂した:**
+  - 影響範囲を精査した結果、`MechanicsSolver::gravity: f64`を丸ごとベクトル型
+    へ置き換える(全呼び出し規約変更・シーンJSONスキーマ破壊的変更)必要は
+    無いと判明——`gravity`(大きさ)はそのまま残し、新設`gravity_direction:
+    Vec3`(既定`(0,-1,0)`)を追加する**加算的な**変更で済んだ。自由体への
+    重力積分・ポテンシャルエネルギー計算は`gravity * gravity_direction`
+    (ベクトル)を使うよう更新、`MechanicsSolver::new`のシグネチャは不変
+    (全既存呼び出し元・644テストとも無改修で動く)。
+  - **正直な適用範囲**: 浮力(`sim_fluid::buoyancy_force`)・大気抗力は
+    重力の向きに依存しない——`StaticWaterRegion`の水面がワールドy座標の
+    水平面として定義されるモデル(本増分より前からの`sim-fluid`crateの
+    設計上の制約)のため。重力の向きを変えても浮力は`+y`のまま働く。
+    これは新たに導入した縮約ではなく、既存の設計上の境界を正直に記録した
+    もの。
+  - `EnvironmentDesc`に`gravity_direction`を追加(Task#6が元々想定していた
+    位置)、`WasmWorld::set_gravity_direction`/`gravity_direction`を新設し
+    Settingsパネルへ3軸入力を追加。シーンJSON(`WorldScenarioOptions::
+    gravity_direction: Option<[f64;3]>`)にも追加——`#[serde(default)]`で
+    未指定時は既定の下向きになり、既存の全シーンファイルと完全後方互換。
+    Replayタブの決定論記録(`CommandLogEntry::SetGravityDirection`)にも
+    `SetGravity`と同じ理由で対応(記録しても再生しないと最も気づきにくい
+    バグになる、既存の`SetGravity`のdoc参照)。
+  - 検証: Rust側新規テスト(`+x`向きの重力下で自由落下がm1と同じ解析解に
+    軸を入れ替えて従うこと、シーンJSONの後方互換・明示指定の両方、
+    `EnvironmentDesc`往復)、Playwrightで実UI経由(Settings→重力の向きを
+    x=1,y=0,z=0へ変更→`world.gravity_direction()`に反映)を確認。
+    cargo test --workspace全緑、fmt/clippyクリーン、QA16/16・スモーク26/26維持。
+  検証(大気・水域分): Rust側新規テスト(大気・水域の設定/解除の往復)、
+  cargo test --workspace全緑、fmt/clippyクリーン。Playwrightで実UI経由(Settings→
   大気有効化→密度/動粘性/風入力→ISA密度ボタン→水域有効化)の一連の
   操作が`atmosphere_density`等へ正しく反映されることを確認、
   QA16/16・スモーク24/24とも維持。

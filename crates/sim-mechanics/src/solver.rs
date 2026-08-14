@@ -15,13 +15,30 @@ use sim_core::{
     StateHasher,
 };
 use sim_fluid::{Atmosphere, StaticWaterRegion};
+use sim_math::Vec3;
 use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct MechanicsSolver {
     pub bodies: RigidBodySet,
-    /// 重力加速度(下向き、m/s^2)。既定 9.80665(docs/00-foundation/03-units-conventions.md)。
+    /// 重力加速度の大きさ(m/s^2)。既定 9.80665(docs/00-foundation/03-units-conventions.md)。
+    /// `gravity_direction`と組み合わせた`gravity * gravity_direction`が実際の
+    /// 加速度ベクトル(自由体の力積分・ポテンシャルエネルギーが使う)。
     pub gravity: f64,
+    /// 重力加速度の向き(単位ベクトル、既定は下向き`(0,-1,0)`)。**残タスク完遂
+    /// 増分で追加**(レビュー指摘「見送らず対応すること」への対応——それまでは
+    /// 大きさのみが可変で、向きは`-y`固定だった)。`set_gravity_direction`で
+    /// 変更する(常に正規化して保持する)。
+    ///
+    /// **正直な適用範囲**: 影響するのは自由体(Dynamic)への直接の重力積分
+    /// (`apply_forces`)とポテンシャルエネルギー計算のみ。`water`(浮力、
+    /// `sim_fluid::StaticWaterRegion`)は水面をワールドy座標の水平面として
+    /// 定義するモデルのため、重力の向きを変えても浮力の向き自体は`+y`のまま
+    /// (`buoyancy_force`の既存実装、本増分より前からの`sim-fluid`crateの
+    /// 設計上の制約——水面が重力と独立に常に水平だという簡略化は、重力の
+    /// 向きを可変にする前から存在した)。同様に大気の抗力(`drag_force_sphere`)も
+    /// 重力の向きに依存しない。
+    pub gravity_direction: Vec3,
     /// 反発を無視する接近速度の閾値(設計 §4.3・§9、既定 0.5 m/s)。ジッタ防止用の
     /// ヒューリスティクスであり、理想化された弾性衝突の検証(M5 等)では 0 に下げてよい。
     pub restitution_velocity_threshold: f64,
@@ -101,6 +118,7 @@ impl MechanicsSolver {
         MechanicsSolver {
             bodies: RigidBodySet::new(),
             gravity,
+            gravity_direction: Vec3::new(0.0, -1.0, 0.0),
             restitution_velocity_threshold: contact::DEFAULT_RESTITUTION_VELOCITY_THRESHOLD,
             atmosphere: None,
             water: None,
@@ -177,6 +195,23 @@ impl MechanicsSolver {
         self.hinge_motors.push(motor);
     }
 
+    /// 重力の向きを設定する(`gravity_direction`のdoc参照)。ゼロベクトルは
+    /// 正規化できないため既定の下向きへフォールバックする(壊れた入力で
+    /// 重力が消えたり発散したりしないための安全側の縮退)。
+    pub fn set_gravity_direction(&mut self, direction: Vec3) {
+        let normalized = direction.normalize_or_zero();
+        self.gravity_direction = if normalized.length() > 0.0 {
+            normalized
+        } else {
+            Vec3::new(0.0, -1.0, 0.0)
+        };
+    }
+
+    /// 実際の重力加速度ベクトル(`gravity * gravity_direction`)。
+    pub fn gravity_vector(&self) -> Vec3 {
+        self.gravity_direction.scale(self.gravity)
+    }
+
     /// 設計 §4 パイプラインの `apply_forces`。P1 スコープ: 重力 + 球の抗力
     /// (docs/11-fluid/05-aero-hydrodynamics.md §2.1)+ 直立直方体の浮力
     /// (docs/11-fluid/04-free-surface-buoyancy.md §2.1)。結合力は後続増分。
@@ -185,7 +220,8 @@ impl MechanicsSolver {
         for i in 0..n {
             if self.bodies.body_type[i] == BodyType::Dynamic && !self.bodies.asleep[i] {
                 let mass = self.bodies.mass(i);
-                self.bodies.force_accum[i].y -= mass * self.gravity;
+                self.bodies.force_accum[i] =
+                    self.bodies.force_accum[i] + self.gravity_vector().scale(mass);
 
                 if let (Some(atm), DragModel::Sphere { radius }) =
                     (&self.atmosphere, self.bodies.drag[i])
@@ -408,7 +444,7 @@ impl Solver for MechanicsSolver {
                 let omega = self.bodies.angular_velocity[i];
                 kinetic += 0.5 * omega.dot(inertia_world.mul_vec(omega));
             }
-            potential += mass * self.gravity * self.bodies.position[i].y;
+            potential -= mass * self.gravity_vector().dot(self.bodies.position[i]);
         }
         EnergyBreakdown {
             kinetic,
@@ -503,6 +539,48 @@ mod tests {
         assert!(
             (t - analytic).abs() / analytic < 0.005,
             "t={t} analytic={analytic}"
+        );
+    }
+
+    /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
+    /// `set_gravity_direction`で重力を`+x`向きへ変えると、m1
+    /// (`m1_free_fall_matches_analytic_time_to_ground`)と全く同じ形の解析解
+    /// (`t=sqrt(2d/g)`、軸を`y`から`x`へ入れ替えただけ)に従い、`y`は不変の
+    /// ままであること——「大きさのみ可変・向きは`-y`固定」だった制約が
+    /// 実際に解消されたことの直接的な検証。m1と同じ判定方法(同じ許容誤差)を
+    /// 使う——数値積分(semi-implicit Euler)には既知の系統誤差があるため、
+    /// 独自の許容誤差を発明せず、既にこのソルバで検証済みの手法をそのまま
+    /// 軸だけ変えて再利用する。
+    #[test]
+    fn gravity_direction_can_be_changed_and_free_fall_follows_the_new_axis() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        solver.set_gravity_direction(Vec3::new(1.0, 0.0, 0.0));
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        desc.transform.position = Vec3::new(0.0, 10.0, 0.0);
+        let idx = solver.create_body(desc, &materials);
+
+        let dt = 1.0 / 120.0;
+        let mut t = 0.0;
+        while solver.bodies.position[idx].x < 10.0 {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            t += dt;
+        }
+
+        let analytic = (2.0 * 10.0 / 9.80665_f64).sqrt();
+        assert!(
+            (t - analytic).abs() / analytic < 0.005,
+            "t={t} analytic={analytic}"
+        );
+        assert!(
+            (solver.bodies.position[idx].y - 10.0).abs() < 1e-9,
+            "gravity along +x must not move the body along y: pos.y={}",
+            solver.bodies.position[idx].y
         );
     }
 

@@ -90,6 +90,7 @@ fn export_world_options(world: &World) -> WorldScenarioOptions {
     let mechanics = world.mechanics();
     WorldScenarioOptions {
         gravity: mechanics.gravity,
+        gravity_direction: Some(vec3_to_array(mechanics.gravity_direction)),
         dt: world.dt(),
         restitution_velocity_threshold: Some(mechanics.restitution_velocity_threshold),
         atmosphere: mechanics.atmosphere.as_ref().map(|a| AtmosphereJson {

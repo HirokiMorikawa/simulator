@@ -182,6 +182,11 @@ impl Scenario {
 #[derive(Deserialize, Serialize)]
 pub struct WorldScenarioOptions {
     pub gravity: f64,
+    /// 重力の向き(`[x,y,z]`、正規化される)。未指定なら既定の下向き
+    /// `(0,-1,0)`——既存のシーンJSONすべてと後方互換(**残タスク完遂増分**、
+    /// レビュー指摘「見送らず対応すること」への対応で追加)。
+    #[serde(default)]
+    pub gravity_direction: Option<[f64; 3]>,
     pub dt: f64,
     /// 反発を適用しない法線方向相対速度のしきい値(`sim_mechanics::MechanicsSolver::
     /// restitution_velocity_threshold`、数値安定化のための既定値がある)。未指定なら
@@ -1550,6 +1555,11 @@ impl World {
         if let Some(atm) = &scenario.world.atmosphere {
             world.mechanics_mut().atmosphere =
                 Some(sim_fluid::Atmosphere::still(atm.density, atm.viscosity));
+        }
+        if let Some(direction) = scenario.world.gravity_direction {
+            world
+                .mechanics_mut()
+                .set_gravity_direction(array_to_vec3(direction));
         }
         let ids = world.append_scenario_bodies(scenario)?;
 
@@ -5052,5 +5062,46 @@ mod tests {
         );
         let round_tripped: ShapeJson = serde_json::from_str(&json).unwrap();
         assert!(matches!(round_tripped, ShapeJson::ConvexMesh { .. }));
+    }
+
+    /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
+    /// `world.gravity_direction`を省略した既存形式のシーンJSON(この
+    /// テストファイル内の他の全テストが使っている形式そのもの)が、
+    /// `#[serde(default)]`により従来どおり既定の下向き`(0,-1,0)`を
+    /// 意味することを確認する——後方互換の直接的な証明。
+    #[test]
+    fn scene_json_without_gravity_direction_defaults_to_straight_down() {
+        let json = r#"
+        {
+          "name": "no-gravity-direction",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": []
+        }
+        "#;
+        let scenario = Scenario::from_json(json).unwrap();
+        let world = World::from_scenario(&scenario).unwrap();
+        assert_eq!(
+            world.mechanics().gravity_direction,
+            sim_math::Vec3::new(0.0, -1.0, 0.0)
+        );
+    }
+
+    /// 明示的な`gravity_direction`(この場合は`+x`)がシーンJSONから実際に
+    /// `MechanicsSolver`へ反映されること。
+    #[test]
+    fn scene_json_with_explicit_gravity_direction_is_applied() {
+        let json = r#"
+        {
+          "name": "custom-gravity-direction",
+          "world": { "gravity": 9.80665, "dt": 0.008333333, "gravity_direction": [1.0, 0.0, 0.0] },
+          "bodies": []
+        }
+        "#;
+        let scenario = Scenario::from_json(json).unwrap();
+        let world = World::from_scenario(&scenario).unwrap();
+        assert_eq!(
+            world.mechanics().gravity_direction,
+            sim_math::Vec3::new(1.0, 0.0, 0.0)
+        );
     }
 }

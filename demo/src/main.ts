@@ -90,6 +90,26 @@ const SPAWN_BOX_HALF_EXTENT = 0.4;
 const PENDULUM_PIVOT_HEIGHT = 6.0;
 const PENDULUM_ARM_LENGTH = 2.0;
 
+// **「新規シーン」ボタン**が読み込む固定シーンJSON(レビュー指摘対応、
+// `docs/22-roadmap/03-editor-todo.md`参照)。既定の起動シーン(回路・熱
+// ドメインの実演セットアップ込み)を消して、床の静的Planeボディ1個だけの
+// まっさらな状態から始めたい時に使う。gravity/dtは既定シーンと同じ値
+// (`GRAVITY`/`DT`)。
+const NEW_SCENE_JSON = JSON.stringify({
+  name: "new-scene",
+  world: { gravity: GRAVITY, dt: DT },
+  bodies: [
+    {
+      name: "ground",
+      shape: { plane: { normal: [0, 1, 0], d: 0.0 } },
+      material: "コンクリート",
+      type: "static",
+      collision_group: 1,
+      collision_mask: 4294967295,
+    },
+  ],
+});
+
 function setUpLayoutPresetSwitcher() {
   const app = document.getElementById("app")!;
   const select = document.getElementById("select-layout") as HTMLSelectElement;
@@ -1300,6 +1320,36 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
             axisZ,
           );
           break;
+        case "phase_change_morph":
+          world.add_phase_change_morph_coupling(
+            body,
+            Math.trunc(p1),
+            p2,
+            p3,
+            p4,
+          );
+          break;
+        case "sph_rigid":
+          world.add_sph_rigid_coupling(body, p1, Math.trunc(p2));
+          break;
+        case "grid_fluid_rigid":
+          world.add_grid_fluid_rigid_coupling(body, p1, p2);
+          break;
+        case "boussinesq_buoyancy":
+          world.add_boussinesq_buoyancy_coupling(Math.trunc(p1), p2, p3);
+          break;
+        case "convection_link":
+          world.add_convection_link_coupling(
+            Math.trunc(p1),
+            Math.trunc(p2),
+            p3,
+            p4,
+            Math.trunc(p5),
+          );
+          break;
+        case "piston_gas":
+          world.add_piston_gas_coupling(body, axisX, axisY, axisZ, p1, p2);
+          break;
       }
     } catch (err) {
       window.alert(`Coupling の追加に失敗しました: ${String(err)}`);
@@ -1745,16 +1795,22 @@ function renderInspectorExtraComponents(
           <option value="brownian_force">BrownianForce(ブラウン運動、要熱ドメイン)</option>
           <option value="motor_coupling">MotorCoupling(モーター、要回路ドメイン)</option>
           <option value="induction_coupling">InductionCoupling(電磁誘導、要回路ドメイン)</option>
+          <option value="phase_change_morph">PhaseChangeMorph(相変化、要熱ドメイン)</option>
+          <option value="sph_rigid">SphRigid(SPH流体との相互作用、要SPHドメイン)</option>
+          <option value="grid_fluid_rigid">GridFluidRigid(格子流体との相互作用、要格子流体ドメイン)</option>
+          <option value="boussinesq_buoyancy">BoussinesqBuoyancy(温度差浮力、要熱・格子流体ドメイン)</option>
+          <option value="convection_link">ConvectionLink(対流熱伝達、要熱ドメイン)</option>
+          <option value="piston_gas">PistonGas(ピストン気体、要気体ドメイン)</option>
         </select>
       </div>
       <div class="inspector-field">
         <span>Body</span>
-        <input type="number" id="add-coupling-body" step="1" value="${index}" title="対象ボディのindex(DissipationToHeat/JouleHeatは未使用)" />
+        <input type="number" id="add-coupling-body" step="1" value="${index}" title="対象ボディのindex(DissipationToHeat/JouleHeat/BoussinesqBuoyancy/ConvectionLinkは未使用)" />
       </div>
       <div class="inspector-field">
         <span>Axis</span>
         <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-axis-x" step="0.1" value="0" title="回転軸/レール方向x(MotorCoupling/InductionCouplingのみ)" />
+          <input type="number" id="add-coupling-axis-x" step="0.1" value="0" title="回転軸/レール方向x(MotorCoupling/InductionCoupling/PistonGasのみ)" />
           <input type="number" id="add-coupling-axis-y" step="0.1" value="1" title="軸y" />
           <input type="number" id="add-coupling-axis-z" step="0.1" value="0" title="軸z" />
         </span>
@@ -1762,21 +1818,21 @@ function renderInspectorExtraComponents(
       <div class="inspector-field">
         <span>Param 1〜3</span>
         <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-p1" step="0.1" value="1e-6" title="charge[C](ImageChargeForce/LorentzForce)/water_level[m](BuoyancyDrag)/thermal_node index(DissipationToHeat/JouleHeat)/radius[m](BrownianForce)/voltage_source index(MotorCoupling/InductionCoupling)" />
-          <input type="number" id="add-coupling-p2" step="0.1" value="1" title="plane_normal.x(ImageChargeForce)/water_density(BuoyancyDrag)/viscosity(BrownianForce)/torque_constant(MotorCoupling)/length[m](InductionCoupling)" />
-          <input type="number" id="add-coupling-p3" step="0.1" value="0" title="plane_normal.y(ImageChargeForce)/thermal_node index(BrownianForce)/magnetic_field[T](InductionCoupling)" />
+          <input type="number" id="add-coupling-p1" step="0.1" value="1e-6" title="charge[C](ImageChargeForce/LorentzForce)/water_level[m](BuoyancyDrag)/thermal_node index(DissipationToHeat/JouleHeat)/radius[m](BrownianForce/SphRigid)/voltage_source index(MotorCoupling/InductionCoupling)/thermal_node index(PhaseChangeMorph)/half_width[m](GridFluidRigid)/thermal_node index=fluid_node(BoussinesqBuoyancy/ConvectionLinkのfluid_node)/area[m^2](PistonGas)" />
+          <input type="number" id="add-coupling-p2" step="0.1" value="1" title="plane_normal.x(ImageChargeForce)/water_density(BuoyancyDrag)/viscosity(BrownianForce)/torque_constant(MotorCoupling)/length[m](InductionCoupling)/initial_mass[kg](PhaseChangeMorph)/boundary_points(SphRigid)/half_height[m](GridFluidRigid)/ambient_temperature[K](BoussinesqBuoyancy)/thermal_node index=surface_node(ConvectionLink)/initial_volume[m^3](PistonGas)" />
+          <input type="number" id="add-coupling-p3" step="0.1" value="0" title="plane_normal.y(ImageChargeForce)/thermal_node index(BrownianForce)/magnetic_field[T](InductionCoupling)/conductance[W/K](PhaseChangeMorph)/thermal_expansion_coefficient[1/K](BoussinesqBuoyancy)/area[m^2](ConvectionLink)" />
         </span>
       </div>
       <div class="inspector-field">
         <span>Param 4〜6</span>
         <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-p4" step="0.1" value="0" title="plane_normal.z(ImageChargeForce)/seed(BrownianForce)" />
-          <input type="number" id="add-coupling-p5" step="0.1" value="0" title="plane_d(ImageChargeForce)/stream(BrownianForce)" />
+          <input type="number" id="add-coupling-p4" step="0.1" value="0" title="plane_normal.z(ImageChargeForce)/seed(BrownianForce)/initial_enthalpy[J](PhaseChangeMorph、負なら融点未満の固相から開始)/characteristic_length[m](ConvectionLink)" />
+          <input type="number" id="add-coupling-p5" step="0.1" value="0" title="plane_d(ImageChargeForce)/stream(BrownianForce)/mode 0-3(ConvectionLink: 0=自然対流(垂直面)/1=自然対流(球)/2=強制対流(球)/3=強制対流(平板))" />
           <input type="number" id="add-coupling-p6" step="0.1" value="0" title="未使用(将来の拡張用)" />
         </span>
       </div>
       <button id="add-coupling-button">Coupling を追加</button>
-      <p class="inspector-note">使うフィールドは種別により異なる(各入力のツールチップ参照)。熱ノード・電圧源を参照する5種は、対応ドメインが有効なシーン(既定の起動シーンはどちらもindex 0を1つ持つ)でのみ成功する。残り6種(熱ノード自体を作る/SPH・格子流体を要するもの)は対応ドメインがUIから作れるようになってから追加する。</p>
+      <p class="inspector-note">使うフィールドは種別により異なる(各入力のツールチップ参照)。熱ノード・電圧源を参照する5種は、対応ドメインが有効なシーン(既定の起動シーンはどちらもindex 0を1つ持つ)でのみ成功する。残り6種は対応ドメイン(熱ノード・SPH流体・格子流体・気体区画)が必要——Settingsの「ドメイン」パネル(または「＋ 流体」)で先に有効化すること。</p>
     </div>
   `);
 
@@ -1898,6 +1954,14 @@ type CommandLogEntry =
   // 「入力」なので、Grab や SetSwitch と同じく記録しないとリプレイが
   // 再現しない(とくに dt はステップ幅そのものを変える)。
   | { t: number; step: number; kind: "SetGravity"; gravity: number }
+  | {
+      t: number;
+      step: number;
+      kind: "SetGravityDirection";
+      x: number;
+      y: number;
+      z: number;
+    }
   | { t: number; step: number; kind: "SetDt"; dt: number }
   // **Inspector の編集(群2)**。これらは `World` 側でも `Command` として
   // `command_log` に載るが、フロント側の記録は「ユーザーの操作」単位で
@@ -1961,6 +2025,8 @@ function formatCommandLogDetail(entry: CommandLogEntry): string {
       return `toggled ${entry.on ? "on" : "off"} (${entry.watts}W)`;
     case "SetGravity":
       return `gravity = ${entry.gravity} m/s²`;
+    case "SetGravityDirection":
+      return `gravity direction = (${entry.x.toFixed(3)},${entry.y.toFixed(3)},${entry.z.toFixed(3)})`;
     case "SetDt":
       return `dt = ${entry.dt} s`;
     case "SetBodyMass":
@@ -3237,18 +3303,31 @@ async function setUpSceneView(
   // 差し替え前の古いインスタンスを掴んだままになる。
   Object.defineProperty(window, "__world", { get: () => world, configurable: true });
   Object.defineProperty(window, "__scene", { get: () => scene, configurable: true });
-  // テスト専用フック(**残タスク完遂の縦串①増分**): シーンギャラリーの
-  // 「ワールドを差し替えて読み込み」(`sceneGalleryRef.current`)を任意のJSON
-  // 文字列で直接呼べるようにする。UI上に「新規シーン」ボタンは無いが、
-  // 縦串①の受け入れテスト(D24相当をUIのみで組み立てる)が「回路・熱を
-  // 含まない、床だけのワールド」から始める必要があり、それを作る手段が
-  // シーンギャラリー(常に完全な差し替え)以外に無いため、既存の差し替え
-  // ロジックをテストから直接呼べる形で露出した(実行時の挙動には影響しない、
-  // `__camera`/`__world`/`__scene`と同じテスト専用露出)。
+  // テスト専用フック: シーンギャラリーの「ワールドを差し替えて読み込み」
+  // (`sceneGalleryRef.current`)を任意のJSON文字列で直接呼べるようにする
+  // (`__camera`/`__world`/`__scene`と同じテスト専用露出、実行時の挙動には
+  // 影響しない)。**「新規シーン」ボタン(`btn-new-scene`、このすぐ下)は
+  // 実UIから到達できる経路として別途ある**——レビュー指摘(「出来るように
+  // して欲しい」)を受けて追加した。このフックは「新規シーン」の固定JSON
+  // 以外の任意シーン(例: D24相当の組み立て開始点)をテストから注入する
+  // 目的でなお使う。
   (window as unknown as { __loadSceneJson?: (json: string) => void }).__loadSceneJson =
     (json: string) => {
       sceneGalleryRef.current?.(json);
     };
+
+  // **「新規シーン」ボタン**(レビュー指摘対応、`docs/22-roadmap/03-editor-todo.md`
+  // 「縦串①の受け入れテストを緑にする」の項参照)。既定の起動シーンは回路・熱
+  // ドメインの実演セットアップを最初から積んでおり、それを消して「床だけ」から
+  // 始める手段がUIに無かった(受け入れテストがテスト専用フックに頼らざるを
+  // 得なかった理由そのもの)。シーンギャラリーの差し替え経路
+  // (`sceneGalleryRef.current`)を、床の静的Planeボディ1個だけを持つ固定
+  // シーンJSONで呼ぶだけの薄い実装——ギャラリーからシーンを選ぶのと全く同じ
+  // 「ワールド全体を差し替える」処理を再利用するため、新しい差し替えロジックは
+  // 増やさない。
+  document.getElementById("btn-new-scene")!.addEventListener("click", () => {
+    sceneGalleryRef.current?.(NEW_SCENE_JSON);
+  });
 
   // **ツール状態(群2)**。設計 §1.2 の W/E/R/Q に対応する。
   type GizmoTool = "translate" | "rotate" | "scale" | "none";
@@ -3335,6 +3414,12 @@ async function setUpSceneView(
     if (gravityInput && document.activeElement !== gravityInput) {
       gravityInput.value = world.gravity().toFixed(3);
     }
+    const gravityDirection = world.gravity_direction();
+    gravityDirectionInputs.forEach((input, i) => {
+      if (input && document.activeElement !== input) {
+        input.value = gravityDirection[i].toFixed(3);
+      }
+    });
     if (dtInput && document.activeElement !== dtInput) {
       dtInput.value = world.dt().toFixed(6);
     }
@@ -3378,6 +3463,40 @@ async function setUpSceneView(
     world.set_gravity(value);
     pushCommandLog(world, { kind: "SetGravity", gravity: value });
   });
+
+  // **重力の向き(残タスク完遂増分、レビュー指摘「見送らず対応すること」への
+  // 対応)**。3欄(x,y,z)を1つの`set_gravity_direction`呼び出しへ組み立てる
+  // ——他の3欄フォーム(風、collision group/mask)と同じ「変更された欄自身の
+  // 値だけをローカル変数へ確定し、他の欄はDOMから読み直さない」規約に従う
+  // (`pushFilter`のdocが説明する、Playwrightの逐次`.fill()`とレース
+  // する既知のバグパターンを踏まないため)。
+  const gravityDirectionInputs = (["x", "y", "z"] as const).map(
+    (axis) =>
+      document.getElementById(`input-gravity-direction-${axis}`) as HTMLInputElement | null,
+  );
+  const pendingGravityDirection = gravityDirectionInputs.map((input, i) =>
+    Number(input?.value ?? (i === 1 ? -1 : 0)),
+  ) as [number, number, number];
+  gravityDirectionInputs.forEach((input, i) =>
+    input?.addEventListener("change", () => {
+      pendingGravityDirection[i] = Number(input.value);
+      world.set_gravity_direction(
+        pendingGravityDirection[0],
+        pendingGravityDirection[1],
+        pendingGravityDirection[2],
+      );
+      // **決定論の観点では重力の向きの変更も「入力」**——`SetGravity`と同じ
+      // 理由でReplayタブへ記録する(記録し忘れるとリプレイのstate_hashが
+      // 一致しなくなる、直下の`SetGravity`のdoc参照)。
+      pushCommandLog(world, {
+        kind: "SetGravityDirection",
+        x: pendingGravityDirection[0],
+        y: pendingGravityDirection[1],
+        z: pendingGravityDirection[2],
+      });
+    }),
+  );
+
   dtInput?.addEventListener("change", () => {
     const value = Number(dtInput.value);
     if (!Number.isFinite(value) || value <= 0) return;
@@ -3514,6 +3633,44 @@ async function setUpSceneView(
   waterDensityInput?.addEventListener("change", () => {
     pendingWater.density = Number(waterDensityInput.value);
     applyWater();
+  });
+
+  // **ドメイン作成(残タスク完遂: 結合14種の残り6種を解禁する増分)**。
+  // レビュー指摘(「やり遂げて欲しい」「対応できていますか？出来ていなければ
+  // 対応して」)への対応——PhaseChangeMorph/SphRigid/GridFluidRigid/
+  // BoussinesqBuoyancy/ConvectionLink/PistonGasは、参照する熱ノード・
+  // SPH流体・格子流体・気体区画をUIから作る手段が無く追加できなかった
+  // (`docs/22-roadmap/03-editor-todo.md`に明記していた既知の欠落)。
+  const thermalNodeCountDisplay = document.getElementById(
+    "thermal-node-count-display",
+  );
+  function refreshThermalNodeCountDisplay() {
+    if (thermalNodeCountDisplay) {
+      thermalNodeCountDisplay.textContent = `(現在 ${world.thermal_node_count()} 個)`;
+    }
+  }
+  refreshThermalNodeCountDisplay();
+  document.getElementById("btn-add-thermal-node")?.addEventListener("click", () => {
+    const temperature = Number(
+      (document.getElementById("input-new-thermal-node-temperature") as HTMLInputElement | null)
+        ?.value ?? 293.15,
+    );
+    const heatCapacity = Number(
+      (document.getElementById("input-new-thermal-node-heat-capacity") as HTMLInputElement | null)
+        ?.value ?? 100,
+    );
+    if (!Number.isFinite(temperature) || !Number.isFinite(heatCapacity) || heatCapacity <= 0) {
+      window.alert("温度・熱容量には正しい数値を入力してください(熱容量は正の値)。");
+      return;
+    }
+    world.add_thermal_node(temperature, heatCapacity);
+    refreshThermalNodeCountDisplay();
+  });
+  document.getElementById("btn-enable-grid-fluid")?.addEventListener("click", () => {
+    world.enable_grid_fluid_2d_domain();
+  });
+  document.getElementById("btn-enable-gas")?.addEventListener("click", () => {
+    world.enable_gas_compartment();
   });
 
   /// グリッドスナップ幅 [m](設計 §1.2「グリッド・スナップ(既定 10 cm、変更可)」)。
@@ -5552,6 +5709,9 @@ async function setUpSceneView(
         // 一致しなくなる(記録しているのに再生しないのが一番たちが悪い)。
         case "SetGravity":
           replayWorld.set_gravity(entry.gravity);
+          break;
+        case "SetGravityDirection":
+          replayWorld.set_gravity_direction(entry.x, entry.y, entry.z);
           break;
         case "SetDt":
           replayWorld.set_dt(entry.dt);
