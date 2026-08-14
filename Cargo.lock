@@ -538,6 +538,8 @@ name = "sim-wasm"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "serde",
+ "serde_json",
  "sim-core",
  "sim-coupling",
  "sim-em",

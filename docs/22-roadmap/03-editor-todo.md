@@ -165,7 +165,36 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   大気有効化→密度/動粘性/風入力→ISA密度ボタン→水域有効化)の一連の
   操作が`atmosphere_density`等へ正しく反映されることを確認、
   QA16/16・スモーク24/24とも維持。
-- [ ] 検証機能(合格基準・掃引・差分)を縦串④として実装する
+- [x] 検証機能(合格基準・掃引・差分)を縦串④として実装する
+  Project ドロワーに「Validation」タブを追加。`sim_world::run_headless_scenario`
+  をwasm境界へ`run_headless_scenario_json`として公開(自由関数——呼ぶたびに
+  独立した新しい`World`を構築するため`WasmWorld`のメソッドではない)。
+  現在のシーンをベースJSONとして読み込み、パラメータのJSONパス(ドット区切り、
+  例`world.gravity`)+値のリストを指定してN回ヘッドレス実行、結果を
+  テーブル(パラメータ値・final_time・final_state_hash・probe最終値・
+  合格基準の可否)と、probe履歴を実行ごとに重ね書きしたcanvasグラフで表示する。
+  **縮約**: 「合格基準」をシーンJSONスキーマの一部にはしていない
+  (`Scenario`のスキーマ拡張は別途判断が要るため対象外)——probe index・
+  比較演算子・しきい値をタブのUI状態として持ち、ヘッドレス実行結果に対して
+  フロントエンド側で評価する形で代替した。
+
+  **副次的に発見・修正した実バグ**(このタブの実装中に発覚): `WasmWorld::
+  export_scene_json`/`bookmark_export_scene_json`が、Task#4で`sim_world::
+  to_scenario`を実装した後も手書きの旧実装(`world`/`bodies`の位置・姿勢・
+  速度のみを素朴な文字列整形で書き出す)のまま残っており、**probes・joints・
+  couplings・thermal・circuit・astro・gasが常に欠落**していた——Task#4の
+  TODO本文に「手書きのexport_scene_jsonを置き換える」と残タスクとして
+  明記されていたが、着手されていなかった。検証タブでprobeが1本も出ない
+  ことから発覚し、`to_scenario`経由に置き換えて修正した(単一ファイル
+  Export・ブックマークExport等、既存のシーン保存機能全体の欠落も同時に
+  解消される)。
+  検証: Rust側新規テスト(`export_scene_json`が既定シーンの2本のprobeを
+  含めて書き出し、読み戻せることを確認/`run_headless_scenario_json`が
+  D1自由落下を正しく実行することを確認)、cargo test --workspace全緑、
+  fmt/clippyクリーン。Playwrightで実UI経由(Validationタブ→パス+値+step数
+  入力→スイープ実行)にテーブル・グラフが実データで表示されることを確認、
+  QA16/16・スモーク24/24とも維持(単一ファイルExportのスモークテストが
+  `export_scene_json`書き換えの回帰検知として機能することも確認)。
 - [ ] 飛行機の物理を縦串⑤として実装する
   `BuoyancyDrag::apply_pre` の力積分方式変更、推力Coupling、操縦面Command。
   着陸装置は既存の `WheelJoint` + Pacejka を流用。

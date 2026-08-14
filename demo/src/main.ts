@@ -1,6 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import init, { WasmWorld } from "../pkg/sim_wasm.js";
+import init, {
+  WasmWorld,
+  run_headless_scenario_json,
+} from "../pkg/sim_wasm.js";
 import "./style.css";
 
 // 統合エディタ(docs/23-frontend/01-editor.md)の骨格増分。
@@ -278,6 +281,11 @@ type SceneBodyExport = {
 };
 type SceneExportRef = { current: (() => SceneBodyExport[]) | null };
 type SceneImportRef = { current: ((json: string) => number) | null };
+/// 検証タブ(**残タスク完遂の縦串④増分**)が、現在のワールドを
+/// `sim_world::Scenario`形式のJSON文字列として読むための口
+/// (`world.export_scene_json()`の薄い写像、`SceneExportRef`と同じ理由で
+/// refを介す——`setUpProjectDrawer`は`world`を直接持たない)。
+type ValidationBaseJsonRef = { current: (() => string) | null };
 
 /// **単一ファイル Export(群2)**。設計 docs/23-frontend/01-editor.md §1.6 は
 /// Scenes / Replays / Bookmarks をそれぞれ別々に扱うが、**実際に他人へ渡したり
@@ -1871,6 +1879,7 @@ function setUpProjectDrawer(
   prefabSaveRef: PrefabSaveRef,
   sceneGalleryRef: SceneGalleryRef,
   circuitElementsRef: CircuitElementsRef,
+  validationBaseJsonRef: ValidationBaseJsonRef,
 ) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
@@ -2471,6 +2480,299 @@ function setUpProjectDrawer(
     body.appendChild(list);
   }
 
+  /// 検証タブ(**残タスク完遂の縦串④増分**、設計docs/reviews/
+  /// 2026-08-14-editor-implementation-plan.md「シーンに合格基準を書けるように
+  /// し、パラメータを振って`run_headless_scenario`をN回実行、結果を重ねて
+  /// グラフ・差分表示する」)。
+  ///
+  /// **縮約**: 「合格基準」をシーンJSONスキーマの一部として書ける形には
+  /// していない(`Scenario`のスキーマ拡張は別の"物理コアへの変更"に準じる
+  /// 判断が要るため対象外とした、`docs/22-roadmap/03-editor-todo.md`参照)。
+  /// 代わりに、基準(probe index・比較演算子・しきい値)はこのタブのUI状態
+  /// として持ち、`run_headless_scenario_json`が返すprobe履歴の最終値に対して
+  /// フロントエンド側で評価する——「シーンに書ける」を「このタブで組める」で
+  /// 代替した。
+  function renderValidationTab() {
+    body.innerHTML = "";
+
+    const baseJsonArea = document.createElement("textarea");
+    baseJsonArea.id = "validation-base-json";
+    baseJsonArea.rows = 6;
+    baseJsonArea.style.width = "100%";
+    baseJsonArea.style.fontFamily = "monospace";
+    baseJsonArea.style.fontSize = "11px";
+    try {
+      baseJsonArea.value = validationBaseJsonRef.current?.() ?? "";
+    } catch {
+      baseJsonArea.value = "";
+    }
+    const reloadButton = document.createElement("button");
+    reloadButton.textContent = "現在のシーンを読み込む";
+    reloadButton.addEventListener("click", () => {
+      try {
+        baseJsonArea.value = validationBaseJsonRef.current?.() ?? "";
+      } catch (err) {
+        window.alert(`シーンの読み込みに失敗しました: ${String(err)}`);
+      }
+    });
+    body.append("Base scene JSON: ", reloadButton, baseJsonArea);
+
+    const form = document.createElement("div");
+    const pathInput = document.createElement("input");
+    pathInput.type = "text";
+    pathInput.placeholder = "例: world.gravity";
+    pathInput.title =
+      "スイープするフィールドのドット区切りパス(配列は数値indexを使う、例: bodies.0.position.1)";
+    const valuesInput = document.createElement("input");
+    valuesInput.type = "text";
+    valuesInput.placeholder = "例: 5,10,15,20";
+    valuesInput.title = "パラメータの値(カンマ区切り)。この個数ぶん実行する。";
+    const stepsInput = document.createElement("input");
+    stepsInput.type = "number";
+    stepsInput.min = "1";
+    stepsInput.step = "1";
+    stepsInput.value = "300";
+    stepsInput.title = "各実行のstep数";
+    form.append(
+      "パス: ",
+      pathInput,
+      " 値: ",
+      valuesInput,
+      " step数: ",
+      stepsInput,
+    );
+    body.appendChild(form);
+
+    const criteriaForm = document.createElement("div");
+    const probeIndexInput = document.createElement("input");
+    probeIndexInput.type = "number";
+    probeIndexInput.min = "0";
+    probeIndexInput.step = "1";
+    probeIndexInput.value = "0";
+    probeIndexInput.title = "合格基準・グラフ化の対象にするprobe index(シーンのprobes配列の順)";
+    const operatorSelect = document.createElement("select");
+    for (const [value, label] of [
+      [">=", "以上(>=)"],
+      ["<=", "以下(<=)"],
+      ["~=", "近似一致(|差|<0.01)"],
+    ] as const) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      operatorSelect.appendChild(option);
+    }
+    const thresholdInput = document.createElement("input");
+    thresholdInput.type = "number";
+    thresholdInput.step = "0.01";
+    thresholdInput.value = "0";
+    thresholdInput.title = "合格基準のしきい値(probeの最終値と比較する)";
+    criteriaForm.append(
+      "合格基準: probe ",
+      probeIndexInput,
+      " の最終値 ",
+      operatorSelect,
+      " ",
+      thresholdInput,
+    );
+    body.appendChild(criteriaForm);
+
+    const runButton = document.createElement("button");
+    runButton.textContent = "スイープを実行";
+    body.appendChild(runButton);
+
+    const resultsContainer = document.createElement("div");
+    body.appendChild(resultsContainer);
+
+    /// ドット区切りパスの末端へ数値を書き込む(配列要素は数値文字列のキーで
+    /// 到達する、`JSON.parse`直後のプレーンオブジェクト/配列に対して動く)。
+    function setJsonPath(root: unknown, path: string, value: number): void {
+      const parts = path.split(".").filter((p) => p.length > 0);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let cur: any = root;
+      for (let i = 0; i < parts.length - 1; i++) {
+        cur = cur[parts[i]];
+        if (cur === undefined) {
+          throw new Error(`パス "${path}" の "${parts[i]}" がシーンJSONに無い`);
+        }
+      }
+      const lastKey = parts[parts.length - 1];
+      if (cur[lastKey] === undefined) {
+        throw new Error(`パス "${path}" の "${lastKey}" がシーンJSONに無い`);
+      }
+      cur[lastKey] = value;
+    }
+
+    function evaluateCriterion(finalValue: number): boolean {
+      const threshold = Number(thresholdInput.value);
+      switch (operatorSelect.value) {
+        case ">=":
+          return finalValue >= threshold;
+        case "<=":
+          return finalValue <= threshold;
+        case "~=":
+          return Math.abs(finalValue - threshold) < 0.01;
+        default:
+          return false;
+      }
+    }
+
+    runButton.addEventListener("click", () => {
+      resultsContainer.innerHTML = "";
+      let baseObj: unknown;
+      try {
+        baseObj = JSON.parse(baseJsonArea.value);
+      } catch (err) {
+        window.alert(`Base scene JSONが不正です: ${String(err)}`);
+        return;
+      }
+      const path = pathInput.value.trim();
+      const values = valuesInput.value
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isFinite(n));
+      const steps = Math.max(1, Math.trunc(Number(stepsInput.value) || 1));
+      const probeIndex = Math.max(0, Math.trunc(Number(probeIndexInput.value) || 0));
+      if (values.length === 0) {
+        window.alert("値を1つ以上指定してください(カンマ区切り)。");
+        return;
+      }
+
+      type RunResult = {
+        value: number;
+        finalTime: number;
+        finalStateHash: string;
+        probeFinal: number | null;
+        probeHistory: number[];
+        pass: boolean | null;
+        error: string | null;
+      };
+      const runs: RunResult[] = [];
+      for (const value of values) {
+        try {
+          const variant = JSON.parse(JSON.stringify(baseObj));
+          if (path.length > 0) setJsonPath(variant, path, value);
+          const resultJson = run_headless_scenario_json(
+            JSON.stringify(variant),
+            steps,
+          );
+          const result = JSON.parse(resultJson) as {
+            final_state_hash: string;
+            final_time: number;
+            probe_histories: number[][];
+          };
+          const history = result.probe_histories[probeIndex] ?? [];
+          const probeFinal = history.length > 0 ? history[history.length - 1] : null;
+          runs.push({
+            value,
+            finalTime: result.final_time,
+            finalStateHash: result.final_state_hash,
+            probeFinal,
+            probeHistory: history,
+            pass: probeFinal === null ? null : evaluateCriterion(probeFinal),
+            error: null,
+          });
+        } catch (err) {
+          runs.push({
+            value,
+            finalTime: NaN,
+            finalStateHash: "",
+            probeFinal: null,
+            probeHistory: [],
+            pass: null,
+            error: String(err),
+          });
+        }
+      }
+
+      // 結果テーブル(差分表示)。
+      const table = document.createElement("table");
+      table.className = "validation-results-table";
+      const headerRow = table.insertRow();
+      for (const label of [
+        "パラメータ値",
+        "final_time",
+        "final_state_hash",
+        `probe[${probeIndex}]最終値`,
+        "合格基準",
+      ]) {
+        const th = document.createElement("th");
+        th.textContent = label;
+        headerRow.appendChild(th);
+      }
+      for (const run of runs) {
+        const row = table.insertRow();
+        row.insertCell().textContent = String(run.value);
+        row.insertCell().textContent = run.error
+          ? `エラー: ${run.error}`
+          : run.finalTime.toFixed(4);
+        row.insertCell().textContent = run.finalStateHash;
+        row.insertCell().textContent =
+          run.probeFinal === null ? "—" : run.probeFinal.toFixed(6);
+        row.insertCell().textContent =
+          run.pass === null ? "—" : run.pass ? "✓ PASS" : "✗ FAIL";
+      }
+      resultsContainer.appendChild(table);
+
+      // probe履歴の重ね書きグラフ(実行ごとに色を変える)。
+      const canvas = document.createElement("canvas");
+      canvas.width = 480;
+      canvas.height = 200;
+      canvas.className = "validation-chart";
+      resultsContainer.appendChild(canvas);
+      const ctx = canvas.getContext("2d");
+      const historiesWithData = runs.filter((r) => r.probeHistory.length > 1);
+      if (ctx && historiesWithData.length > 0) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let min = Infinity;
+        let max = -Infinity;
+        for (const run of historiesWithData) {
+          for (const v of run.probeHistory) {
+            if (v < min) min = v;
+            if (v > max) max = v;
+          }
+        }
+        if (min === max) {
+          min -= 1;
+          max += 1;
+        }
+        const colors = [
+          "#6cf",
+          "#f96",
+          "#9f6",
+          "#f6c",
+          "#fc6",
+          "#c9f",
+          "#6fc",
+          "#f66",
+        ];
+        historiesWithData.forEach((run, runIndex) => {
+          ctx.strokeStyle = colors[runIndex % colors.length];
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          run.probeHistory.forEach((v, i) => {
+            const x = (i / (run.probeHistory.length - 1)) * canvas.width;
+            const y =
+              canvas.height - ((v - min) / (max - min)) * canvas.height;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        });
+        const legend = document.createElement("div");
+        legend.className = "validation-chart-legend";
+        historiesWithData.forEach((run, runIndex) => {
+          const swatch = document.createElement("span");
+          swatch.className = "validation-chart-swatch";
+          swatch.style.background = colors[runIndex % colors.length];
+          const label = document.createElement("span");
+          label.textContent = ` ${path || "run"}=${run.value}`;
+          legend.append(swatch, label);
+        });
+        resultsContainer.appendChild(legend);
+      }
+    });
+  }
+
   function show(tab: string) {
     tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
     if (tab !== "circuit" && circuitTabRefreshIntervalId !== null) {
@@ -2495,6 +2797,10 @@ function setUpProjectDrawer(
     }
     if (tab === "prefabs") {
       renderPrefabsTab();
+      return;
+    }
+    if (tab === "validation") {
+      renderValidationTab();
       return;
     }
     body.textContent = staticContentByTab[tab] ?? "";
@@ -2700,6 +3006,7 @@ async function setUpSceneView(
   selectBodyRef: SelectBodyRef,
   circuitElementsRef: CircuitElementsRef,
   consoleDiagnosticsRef: ConsoleDiagnosticsRef,
+  validationBaseJsonRef: ValidationBaseJsonRef,
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -2778,6 +3085,7 @@ async function setUpSceneView(
     }
     return bodies;
   };
+  validationBaseJsonRef.current = () => world.export_scene_json();
 
   const host = document.getElementById("scene-view-canvas-host")!;
 
@@ -6285,6 +6593,7 @@ function main() {
   const prefabSaveRef: PrefabSaveRef = { current: null };
   const sceneGalleryRef: SceneGalleryRef = { current: null };
   const circuitElementsRef: CircuitElementsRef = { current: null };
+  const validationBaseJsonRef: ValidationBaseJsonRef = { current: null };
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
@@ -6300,6 +6609,7 @@ function main() {
     prefabSaveRef,
     sceneGalleryRef,
     circuitElementsRef,
+    validationBaseJsonRef,
   );
   setUpSceneView(
     updateProbeGraph,
@@ -6322,6 +6632,7 @@ function main() {
     selectBodyRef,
     circuitElementsRef,
     consoleDiagnosticsRef,
+    validationBaseJsonRef,
   ).catch((err) => {
     const hud = document.getElementById("hud");
     if (hud) hud.textContent = `エラー: ${String(err)}`;

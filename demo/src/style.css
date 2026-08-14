@@ -730,3 +730,38 @@ body {
   background: #3a4a6a;
   color: #cde;
 }
+
+/* 検証タブ(残タスク完遂の縦串④増分)。パラメータ掃引の結果テーブル・
+   probe履歴の重ね書きグラフ。 */
+.validation-results-table {
+  border-collapse: collapse;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.validation-results-table th,
+.validation-results-table td {
+  border: 1px solid #3a3a3a;
+  padding: 2px 6px;
+  text-align: right;
+}
+.validation-chart {
+  margin-top: 8px;
+  background: #14141a;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+}
+.validation-chart-legend {
+  margin-top: 4px;
+  font-size: 11px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.validation-chart-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 2px;
+  border-radius: 2px;
+  vertical-align: middle;
+}

@@ -80,11 +80,6 @@ struct SpawnedBodyMeta {
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
-    /// コンストラクタに渡された重力・dt(`bookmark_export_scene_json`が
-    /// エクスポートするシーンJSONの`world`ブロックに使う——`World`自体はこれらを
-    /// 読み出す公開APIを持たないため、構築時の値をここへ複製して保持する)。
-    gravity: f64,
-    dt: f64,
     /// 全ボディの記録(**2026-07-27の残タスク完遂セッションで統合**:
     /// 以前は固定2体(`ground_body`/`box_body`)を専用フィールド、それ以降を
     /// `spawned: Vec<SpawnedBodyMeta>`という別々の表現にしていたが、シーン
@@ -213,8 +208,6 @@ impl WasmWorld {
         ];
         WasmWorld {
             inner,
-            gravity,
-            dt,
             bodies,
             y_probe,
             speed_probe,
@@ -318,8 +311,6 @@ impl WasmWorld {
 
         let snapshot_interval_steps = (1.0 / scenario.world.dt).round().max(1.0) as u64;
         Ok(WasmWorld {
-            gravity: scenario.world.gravity,
-            dt: scenario.world.dt,
             inner,
             bodies,
             y_probe,
@@ -2736,101 +2727,28 @@ impl WasmWorld {
 
     /// ブックマークのエクスポート(設計docs/23-frontend/01-editor.md §6
     /// 「保存・共有: シーンJSON+Replay+ブックマークを単一ファイルとして
-    /// エクスポート」の縮約実装)。`World`自体は`Serialize`を持たない
-    /// (`sim-wasm`は`serde_json`にも依存しない)ため、内部状態のバイト単位の
-    /// 保存ではなく、シーンJSON Import(`import_scene_json`)へそのまま
-    /// 読み込める`sim_world::Scenario`互換のJSON文字列として剛体の観測可能な
-    /// 状態(位置・姿勢・速度)を書き出す——流体/熱/回路ドメインの状態や
-    /// イベントログ・接触履歴は対象外(縮約実装、既知の限定)。
-    ///
-    /// ボディの形状/材質は現在のワールド(スケールGizmo等で変わりうる)ではなく
-    /// ブックマーク取得時点の値を使うべきだが、`SpawnedBodyMeta`はスポーン時の
-    /// 基準形状のみ保持し履歴を持たないため、現在の形状/材質ラベルをそのまま
-    /// 使う(通常は変化しないため実用上問題にならない、既知の簡略化)。
-    /// ブックマーク時点にまだ存在しなかったボディ(`body_position`が`None`を
-    /// 返す)はスキップする。
+    /// エクスポート」)。`sim_world::to_scenario`(**残タスク完遂の縦串④
+    /// 増分で手書き実装を置き換えた**——Task#4当時「手書きの
+    /// `export_scene_json` を置き換える」が残タスクとして明記されていた。
+    /// 検証タブでprobeが1本も出ない実バグ(旧実装は`world`/`bodies`しか
+    /// 書き出さず、probes/joints/couplings/thermal/circuit/astro/gas は
+    /// 常に欠落していた)を追う過程で発覚した)。
     pub fn bookmark_export_scene_json(&self, index: usize) -> Result<String, JsValue> {
         let (label, snapshot) = self.try_bookmark_at(index)?;
-        self.export_scene_json_from(&format!("bookmark-{label}"), snapshot)
+        let scenario = sim_world::to_scenario(snapshot, &format!("bookmark-{label}"));
+        serde_json::to_string(&scenario)
+            .map_err(|e| JsValue::from_str(&format!("failed to serialize scenario: {e}")))
     }
 
     /// **現在の状態をシーンJSONとして書き出す(群2)**。単一ファイルExport
     /// (設計 §6「シーンJSON+Replay+ブックマークを単一ファイルとして
-    /// エクスポート」)が使う。
-    ///
-    /// **これが無かったせいでフロント側は「一時ブックマークを1件打って
-    /// それを書き出す」という回り道をしており、ブックマーク一覧に
-    /// `__export__` というゴミが残っていた**(実装検証中に発見)。
-    /// `bookmark_export_scene_json` と本体を共有する。
+    /// エクスポート」)が使う。`bookmark_export_scene_json`と同じく
+    /// `sim_world::to_scenario`を経由する(旧実装は`world`/`bodies`だけの
+    /// 手書きシリアライズだった、上のdoc参照)。
     pub fn export_scene_json(&self) -> Result<String, JsValue> {
-        // `World: Clone` なので現在状態のスナップショットをその場で取る。
-        let snapshot = self.inner.snapshot();
-        self.export_scene_json_from("current", &snapshot)
-    }
-
-    fn export_scene_json_from(&self, name: &str, snapshot: &World) -> Result<String, JsValue> {
-        let mut bodies_json = Vec::new();
-        for i in 0..self.body_count() {
-            // `try_body_id_at`は範囲チェックに加えて`self.inner`での生存確認も行う
-            // (`try_body_id_at`のdoc参照)。削除済み・Timeline巻き戻しで
-            // まだ存在しない世代のボディは`Err`になるので、下の
-            // `body_position`等の`None`ガードと同じ「このスナップショットには
-            // まだ/もう存在しない」としてスキップする。
-            let Ok(id) = self.try_body_id_at(i) else {
-                continue;
-            };
-            let (Some(position), Some(rotation), Some(velocity)) = (
-                snapshot.body_position(id),
-                snapshot.body_rotation(id),
-                snapshot.body_velocity(id),
-            ) else {
-                continue; // ブックマーク時点にまだ存在しなかったボディ。
-            };
-            // シーンJSONの`ShapeJson`が対応する3形状のみ書き出せる(`Capsule`等は
-            // `ShapeJson`自体が対象外、`scenario.rs`のdoc参照)。それ以外の形状の
-            // ボディはこのエクスポートでは省略する(既知の限定)。
-            let Some(shape_json) = (match self.inner.mechanics().bodies.shape_of(id.index as usize)
-            {
-                Shape::Sphere { radius } => Some(format!(r#"{{"sphere":{{"radius":{radius}}}}}"#)),
-                Shape::Box { half_extents } => Some(format!(
-                    r#"{{"box":{{"half":[{},{},{}]}}}}"#,
-                    half_extents.x, half_extents.y, half_extents.z
-                )),
-                Shape::Plane { normal, d } => Some(format!(
-                    r#"{{"plane":{{"normal":[{},{},{}],"d":{d}}}}}"#,
-                    normal.x, normal.y, normal.z
-                )),
-                _ => None,
-            }) else {
-                continue;
-            };
-            let type_json = if self.body_is_static_at(i)? {
-                r#","type":"static""#
-            } else {
-                ""
-            };
-            bodies_json.push(format!(
-                r#"{{"shape":{shape_json},"material":"{material}","position":[{px},{py},{pz}],"rotation":[{qx},{qy},{qz},{qw}],"linear_velocity":[{vx},{vy},{vz}],"name":"{name}"{type_json}}}"#,
-                material = self.body_material_label_at(i)?,
-                px = position.x,
-                py = position.y,
-                pz = position.z,
-                qx = rotation.x,
-                qy = rotation.y,
-                qz = rotation.z,
-                qw = rotation.w,
-                vx = velocity.x,
-                vy = velocity.y,
-                vz = velocity.z,
-                name = self.body_label_at(i)?,
-            ));
-        }
-        Ok(format!(
-            r#"{{"name":"{name}","world":{{"gravity":{gravity},"dt":{dt}}},"bodies":[{bodies}]}}"#,
-            gravity = self.gravity,
-            dt = self.dt,
-            bodies = bodies_json.join(",")
-        ))
+        let scenario = sim_world::to_scenario(&self.inner, "current");
+        serde_json::to_string(&scenario)
+            .map_err(|e| JsValue::from_str(&format!("failed to serialize scenario: {e}")))
     }
 
     /// ブックマークへ巻き戻す。`restore_snapshot`と異なり、ブックマーク自体は
@@ -3138,6 +3056,34 @@ impl WasmWorld {
     }
 }
 
+/// 検証パネル(**残タスク完遂の縦串④増分**、`sim_world::run_headless_scenario`の
+/// 薄い写像)——シーンJSONを`steps`回実行し、結果をJSON文字列で返す
+/// (`WasmWorld`のメソッドではなく自由関数——`run_headless_scenario`自身が
+/// 呼び出しのたびに独立した新しい`World`を構築するため、既存の`self.inner`
+/// とは無関係)。
+///
+/// `final_state_hash`は`u64`のままJSONへ出すとJSの`Number`精度(2^53)を
+/// 超えて壊れる(`WasmWorld::state_hash`が16進文字列を返すのと同じ理由)ため、
+/// ここでも16進文字列に変換して返す。
+#[wasm_bindgen]
+pub fn run_headless_scenario_json(json: &str, steps: u32) -> Result<String, JsValue> {
+    #[derive(serde::Serialize)]
+    struct HeadlessRunResultJson {
+        final_state_hash: String,
+        final_time: f64,
+        probe_histories: Vec<Vec<f64>>,
+    }
+    let result = sim_world::run_headless_scenario(json, steps)
+        .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+    let json_result = HeadlessRunResultJson {
+        final_state_hash: format!("{:016x}", result.final_state_hash),
+        final_time: result.final_time,
+        probe_histories: result.probe_histories,
+    };
+    serde_json::to_string(&json_result)
+        .map_err(|e| JsValue::from_str(&format!("failed to serialize result: {e}")))
+}
+
 /// **2026-07-27の監査で追加**: このcrate(JS/WASM境界、1280行)にテストが
 /// 1本も無かった(Rustワークスペース最大の未テスト面)ため、Q5(wasm境界の
 /// パニック除去)の作業とあわせて最小限のユニットテストを追加する。
@@ -3164,6 +3110,32 @@ mod tests {
 
     fn new_world() -> WasmWorld {
         WasmWorld::new(-9.80665, 1.0 / 60.0, 5.0)
+    }
+
+    /// 検証パネル(**残タスク完遂の縦串④増分**)——`run_headless_scenario_json`が
+    /// D1(自由落下)を60step実行し、`final_state_hash`(16進文字列)・`final_time`・
+    /// probe履歴(自由落下なので単調に下がるはず)を含むJSONを返すこと。
+    #[test]
+    fn run_headless_scenario_json_reports_free_fall_probe_history() {
+        let json = include_str!("../../../scenes/d1-free-fall.json");
+        let result_json = run_headless_scenario_json(json, 60).expect("D1 must run headlessly");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result_json).expect("result must be valid JSON");
+        let hash = parsed["final_state_hash"]
+            .as_str()
+            .expect("final_state_hash must be a hex string");
+        assert_eq!(hash.len(), 16, "expected 16 hex digits, got {hash}");
+        assert!(parsed["final_time"].as_f64().unwrap() > 0.0);
+        let history = parsed["probe_histories"][0]
+            .as_array()
+            .expect("D1 has exactly one probe (body_pos_y)");
+        assert_eq!(history.len(), 60);
+        let first = history[0].as_f64().unwrap();
+        let last = history[59].as_f64().unwrap();
+        assert!(
+            last < first,
+            "a body in free fall must have a lower y at the end than at the start"
+        );
     }
 
     /// 固定2体(床・箱)のラベル・材質・静的判定が期待どおりであること。
@@ -3374,6 +3346,36 @@ mod tests {
         // 範囲外indexで`Err`になることの実行時確認は、本テストモジュール
         // 冒頭のdoc comment(Errパスの検証にはwasm-bindgen-testが要る、
         // `add_joint_methods_succeed...`と同じ理由)が示すとおり対象外。
+    }
+
+    /// `export_scene_json`が`sim_world::to_scenario`経由に置き換わったこと
+    /// (**残タスク完遂の縦串④増分**)の回帰テスト——旧実装は`world`/`bodies`
+    /// しか書き出さず、既定シーンが持つ2本のprobe(`y_probe`/`speed_probe`、
+    /// `WasmWorld::new`のdoc参照)もWheelJointのような結合も一切
+    /// エクスポートされなかった(検証タブでprobeが1本も出ない実バグとして
+    /// 発覚)。ここではprobesが正しく2本、既定シーンのボディ名(Ground/Box_1)
+    /// で書き出され、`Scenario::from_json`で読み戻せることを確認する。
+    #[test]
+    fn export_scene_json_round_trips_the_default_scenes_two_probes() {
+        let world = new_world();
+        let json = world
+            .export_scene_json()
+            .expect("export_scene_json must succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("export_scene_json must produce valid JSON");
+        let probes = parsed["probes"]
+            .as_array()
+            .expect("exported scene must have a probes array");
+        assert_eq!(
+            probes.len(),
+            2,
+            "expected the default scene's y_probe/speed_probe, got: {json}"
+        );
+        // 読み戻せること自体も確認する(往復可能でなければ検証タブの
+        // スイープ実行に使えない)。
+        let reloaded = sim_world::Scenario::from_json(&json)
+            .expect("exported scene JSON must be re-parseable as a Scenario");
+        assert_eq!(reloaded.probes.len(), 2);
     }
 
     /// `spawn_sphere`/`spawn_box`が正しい材質名で成功し、`body_count`が
