@@ -138,6 +138,11 @@ type InspectorEditHandlers = {
   /// 軸別スケール(群2、設計 §1.2 の Gizmo は Transform を編集する)。
   /// Box 以外では効かないので、適用できたかを返す。
   setScaleXyz(bodyIndex: number, sx: number, sy: number, sz: number): boolean;
+  /// Position の直接編集(**残タスク完遂の縦串①増分**)。Gizmo ドラッグと同じく
+  /// `set_body_position_at`を直接呼ぶ(Commandを経由しない、構築時の位置決め
+  /// なので次stepまで待たせる理由が無い——設計docs/20-integration/
+  /// 04-world-api.md §1「シーン構築時のcreate系」に相当)。
+  setPosition(bodyIndex: number, x: number, y: number, z: number): void;
 };
 type InspectorEditRef = { current: InspectorEditHandlers | null };
 const inspectorEditRef: InspectorEditRef = { current: null };
@@ -1017,6 +1022,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   const staticBadge = world.body_is_static_at(index)
     ? ' <span class="badge">Static</span>'
     : "";
+  const initialPosition = world.body_position_at_f32(index);
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
@@ -1024,7 +1030,14 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     </div>
     <div class="inspector-component">
       <h3>Transform</h3>
-      <div class="inspector-field"><span>Position</span><span id="inspector-position">—</span></div>
+      <div class="inspector-field">
+        <span>Position (x,y,z)</span>
+        <span class="inspector-scale-fields">
+          <input type="number" id="inspector-position-x" step="0.05" value="${initialPosition[0]}" />
+          <input type="number" id="inspector-position-y" step="0.05" value="${initialPosition[1]}" />
+          <input type="number" id="inspector-position-z" step="0.05" value="${initialPosition[2]}" />
+        </span>
+      </div>
       <div class="inspector-field"><span>Rotation</span><span id="inspector-rotation">—</span></div>
       <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
       <div class="inspector-field">
@@ -1182,6 +1195,24 @@ function wireInspectorEditFields(index: number): void {
     if (!Number.isFinite(value) || value <= 0) return;
     handlers.setMass(index, value);
   });
+
+  // Position の直接編集(**残タスク完遂の縦串①増分**)。Gizmo と同じく
+  // Command を経由しない。
+  const positionInputs = (["x", "y", "z"] as const).map(
+    (axis) =>
+      document.getElementById(
+        `inspector-position-${axis}`,
+      ) as HTMLInputElement | null,
+  );
+  const pushPosition = () => {
+    const [px, py, pz] = positionInputs.map((input) => Number(input?.value));
+    if (![px, py, pz].every((p) => Number.isFinite(p))) return;
+    handlers.setPosition(index, px, py, pz);
+  };
+  positionInputs.forEach((input) =>
+    input?.addEventListener("change", pushPosition),
+  );
+
   const typeSelect = document.getElementById(
     "inspector-body-type",
   ) as HTMLSelectElement | null;
@@ -1500,14 +1531,24 @@ function updateInspectorTransformFields(
   rotation: THREE.Euler,
   velocity: THREE.Vector3,
 ): void {
-  const positionField = document.getElementById("inspector-position");
   const rotationField = document.getElementById("inspector-rotation");
   const velocityField = document.getElementById("inspector-velocity");
-  if (!positionField || !rotationField || !velocityField) return; // 選択切替の再描画中は一時的に無い。
-  positionField.textContent = `${position.x.toFixed(3)}, ${position.y.toFixed(3)}, ${position.z.toFixed(3)}`;
+  if (!rotationField || !velocityField) return; // 選択切替の再描画中は一時的に無い。
   const toDeg = (rad: number) => THREE.MathUtils.radToDeg(rad).toFixed(1);
   rotationField.textContent = `${toDeg(rotation.x)}°, ${toDeg(rotation.y)}°, ${toDeg(rotation.z)}°`;
   velocityField.textContent = `${velocity.x.toFixed(3)}, ${velocity.y.toFixed(3)}, ${velocity.z.toFixed(3)}`;
+
+  // Position は編集可能な `<input>` になったので(残タスク完遂の縦串①増分)、
+  // `updateInspectorRigidBodyFields`の`setIfIdle`と同じく、フォーカス中の欄は
+  // 書き換えない(打っている最中に値が戻ると入力できなくなる)。
+  (["x", "y", "z"] as const).forEach((axis, i) => {
+    const input = document.getElementById(
+      `inspector-position-${axis}`,
+    ) as HTMLInputElement | null;
+    if (!input || document.activeElement === input) return;
+    const value = [position.x, position.y, position.z][i].toFixed(3);
+    if (input.value !== value) input.value = value;
+  });
 }
 
 // 入力列記録(設計docs/23-frontend/01-editor.md §1.6「Replays」、Command系の
@@ -3684,6 +3725,10 @@ async function setUpSceneView(
         currentScaleXyz.set(bodyIndex, [sx, sy, sz]);
       }
       return applied;
+    },
+    setPosition(bodyIndex, x, y, z) {
+      if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
+      world.set_body_position_at(bodyIndex, x, y, z);
     },
   };
   renderInspectorFor(world, selectedBodyIndex);
