@@ -16,4 +16,9 @@ sim-coupling = { path = "../sim-coupling" }
 sim-quantum = { path = "../sim-quantum" }
 sim-statistical = { path = "../sim-statistical" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip`: 生状態スナップショット(`scenario::raw_state`)が要求する。
+# serde_json の既定のfloatパーサはbest-effortで、**1 ULP ずれることがある**
+# (実測: 0.9063106498627463 が bits ...aa01 → ...aa02 になる)。速度と引き換えに
+# f64 をビット単位で往復させるこの機能が無いと、時間発展したシーンを
+# エクスポート→JSON文字列→再インポートしたときに `state_hash` が一致しない。
+serde_json = { version = "1", features = ["float_roundtrip"] }

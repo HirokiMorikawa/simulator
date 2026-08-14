@@ -229,6 +229,52 @@ impl FdtdSim2D {
         }
     }
 
+    /// $E_z$ の生配列(長さ`nx*ny`、`i + nx*j`)。
+    /// **生状態スナップショット(`sim_world`の`raw_state`)のために公開する**——
+    /// `ez(i,j)`は1点ずつしか読めず、`state_hash`が含む`hx`/`hy`(半ステップずれた
+    /// 磁場、leapfrogの片割れ)には読み書きの口すら無かった。**Ezだけ戻しても
+    /// 磁場が全ゼロでは次のstepから波形が変わる**ため、3配列すべてが要る。
+    pub fn ez_raw(&self) -> &[f64] {
+        &self.ez
+    }
+
+    /// $H_x$ の生配列(長さ`nx*(ny-1)`)。`ez_raw`のdoc参照。
+    pub fn hx_raw(&self) -> &[f64] {
+        &self.hx
+    }
+
+    /// $H_y$ の生配列(長さ`(nx-1)*ny`)。`ez_raw`のdoc参照。
+    pub fn hy_raw(&self) -> &[f64] {
+        &self.hy
+    }
+
+    /// 場を生値のまま丸ごと入れ替える(**生状態スナップショットのために追加**、
+    /// `ez_raw`のdoc参照)。長さが合わない配列は無視する(防御)。
+    ///
+    /// PML有効時は`set_ez`と同じく分離成分を半分ずつに同期させる
+    /// (`ez = ezx + ezy` の不変条件を保てばよい)。ただし**PMLの分離成分そのものは
+    /// 復元されない**——シーンJSONにPMLを構成する口が無く(`FdtdScenarioJson`に
+    /// 対応するフィールドが無い)、`from_scenario`が作る`World`のFDTDは常に
+    /// `pml: None`のため、この経路では起こらない(既知の制限として
+    /// `sim_world::export`のモジュールdocに記録した)。
+    pub fn set_raw_fields(&mut self, ez: Vec<f64>, hx: Vec<f64>, hy: Vec<f64>) {
+        if ez.len() == self.nx * self.ny {
+            if let Some(pml) = &mut self.pml {
+                for (idx, &value) in ez.iter().enumerate() {
+                    pml.ezx[idx] = 0.5 * value;
+                    pml.ezy[idx] = 0.5 * value;
+                }
+            }
+            self.ez = ez;
+        }
+        if hx.len() == self.nx * (self.ny - 1) {
+            self.hx = hx;
+        }
+        if hy.len() == (self.nx - 1) * self.ny {
+            self.hy = hy;
+        }
+    }
+
     /// 1ステップ進める(leapfrog、設計§3.2)。境界のEzは更新しない(PEC、接線E=0固定)。
     /// 構築時に決めた Courant 数由来の `self.dt` で進める。
     pub fn step(&mut self) {
