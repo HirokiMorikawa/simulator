@@ -63,8 +63,8 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (頂点列のみ)ため、体積/慣性/AABBはAABB近似で対応、接触生成(実際に
   衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
-- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第四弾完了**、
-  元165本→91本)
+- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第五弾完了**、
+  元165本→73本)
   **残タスク完遂増分**(レビュー「Full collapse now」指示への対応、着手前は
   本文書のTODO群の中で唯一の未着手項目だった)。第一弾でJoint(5種の追加)・
   Coupling(14種の追加+操縦面舵角の実行時変更)・熱ノード追加/流体・気体
@@ -164,6 +164,32 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   fmt/clippyクリーン、Playwrightスモーク28/28(縦串①受け入れテスト
   ——`body_count`を最も多く使う経路——含む)・QA(defects16/16・
   physics19/19・coupling29/37——前回と同じ既存の物理的既知事項のみ)とも維持。
+
+  **第五弾**: 自由配線回路エディタ12個(`circuit_editor_reset`/
+  `circuit_editor_add_resistor`/`circuit_editor_add_voltage_source`/
+  `circuit_editor_add_switch`/`circuit_editor_set_switch_closed`/
+  `circuit_editor_add_capacitor`/`circuit_editor_add_inductor`/
+  `circuit_editor_add_diode`/`circuit_editor_add_dc_motor`/
+  `circuit_editor_set_motor_speed`の「適用」系10個+固定デモ回路の
+  `set_circuit_switch_closed`/`push_heat_source`)と、その内省6個
+  (`circuit_element_count`/`circuit_element_label_at`/
+  `circuit_divider_voltage`/`circuit_editor_motor_current`/
+  `circuit_node_voltage`/`heater_node_temperature`)、計18個を同じ
+  2メソッドへ追加で畳んだ(第一〜五弾で計96個、元165本→73本)。
+  `bool`型引数(`closed`)を渡す必要が初めて出たため、`apply_component`の
+  JSONペイロード抽出クロージャに`b(key)`(`as_bool`)を追加し、フロント側
+  `applyComponent`ヘルパーの引数型も`number | string`から
+  `number | string | boolean`へ拡張した(数値0/1へエンコードするより、
+  実際のJSON真偽値をそのまま渡す方が素直で誤りにくいため)。
+
+  検証: Rust側新規テスト(固定デモ回路のスイッチ・ヒーター+自由配線回路
+  エディタで電圧源・抵抗・スイッチ・コンデンサ・インダクタ・ダイオード・
+  DCモーターを一通り組み、内省に反映されることをJSON経由で確認)、
+  cargo test -p sim-wasm 28/28全緑。cargo test --workspace全緑、
+  fmt/clippyクリーン、Playwrightスモーク28/28(D19電気工作台テスト
+  ——Circuit要素の列挙を直接使う経路——含む)・QA(defects16/16
+  ——HUDの回路電圧/ヒーター表示を経由・physics19/19・coupling29/37
+  ——ヒーター/Circuitタブ関連のY2-1・Y4-1・Y4-2も含め結果不変)とも維持。
 
   検証: Rust側新規テスト(`apply_component`/`read_component`をJSON経由で
   実際に呼び、Joint/Coupling/熱ノードの追加・内省が代替できることを確認、

@@ -190,7 +190,7 @@ await enterPlayPaused(page);
   await stepN(page, 10000); // dt=2 ms → 20 s(融解の潜熱を通すのにこれだけ要る)
   const after = await page.evaluate(() => ({
     particles: window.__world.fluid_particle_count(),
-    temp: window.__world.heater_node_temperature(),
+    temp: Number(window.__world.read_component("heater_node_temperature", "")),
     t: window.__world.time(),
   }));
   r.check("X6-1", "熱 → 相変化 → 流体: 融けた質量が SPH 粒子として湧く",
@@ -332,12 +332,12 @@ await loadScene(page, "d19-electric-workbench");
 await enterPlayPaused(page);
 {
   await stepN(page, 120);
-  const base = await page.evaluate(() => window.__world.heater_node_temperature());
+  const base = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
   await page.locator("#btn-settings").click();
   await page.locator("#toggle-heater").check();
   await page.waitForTimeout(100);
   await stepN(page, 120);
-  const heated = await page.evaluate(() => window.__world.heater_node_temperature());
+  const heated = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
   const dt = await page.evaluate(() => Number(window.__world.read_component("dt", "")));
   // ヒーターは 2000 W を毎 step 注ぐ(HEATER_WATTS)。C = 1000 J/K。
   const analytic = (2000.0 * 120 * dt) / 1000.0;
@@ -389,9 +389,9 @@ await loadScene(page, "d19-electric-workbench");
   await addElement(1, 0, "voltage_source", 10);
   await addElement(1, 0, "resistor", 100);
   await enterPlayPaused(page);
-  const t0 = await page.evaluate(() => window.__world.heater_node_temperature());
+  const t0 = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
   await stepN(page, 240);
-  const t1 = await page.evaluate(() => window.__world.heater_node_temperature());
+  const t1 = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
   const dt = await page.evaluate(() => Number(window.__world.read_component("dt", "")));
   const nodeText = await page.locator("#circuit-editor-voltages").textContent();
   const analytic = (10.0 ** 2 / 100.0) * 240 * dt / 1000.0;
@@ -457,14 +457,14 @@ await boot(page);
 await run("d19-electric-workbench", 600);
 {
   const history = (await probes(page)).find((p) => p.label.includes("NodeTemp")).h;
-  const hot = await page.evaluate(() => window.__world.heater_node_temperature());
+  const hot = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
   await page.locator("#timeline-scrubber").fill("1"); // fill は input イベントを出す
   await page.waitForTimeout(300);
   const rewound = await page.evaluate(() => ({
     t: window.__world.time(),
     step: Number(window.__world.step_count()),
-    temp: window.__world.heater_node_temperature(),
-    v: window.__world.circuit_node_voltage(3), // RC 放電の途中電圧
+    temp: Number(window.__world.read_component("heater_node_temperature", "")),
+    v: Number(window.__world.read_component("circuit_node_voltage", "3")), // RC 放電の途中電圧
   }));
   const expected = history[rewound.step - 1];
   r.check("Y7-1", "Timeline のスクラブで熱ドメインの状態も一緒に巻き戻る",

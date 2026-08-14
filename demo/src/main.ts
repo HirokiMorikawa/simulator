@@ -974,13 +974,13 @@ function setUpHierarchy(
   // `circuit_element_count`/`circuit_element_label_at`経由で列挙する。
   // **縮約**: Probesと同じ理由で個々の素子は選択対象にしない
   // (Inspectorに回路素子用のComponent表示が無い)。
-  const circuitElementCount = world.circuit_element_count();
+  const circuitElementCount = readNumber(world, "circuit_element_count");
   if (circuitElementCount > 0) {
     const circuitList = document.createElement("ul");
     circuitList.className = "tree-nested";
     for (let i = 0; i < circuitElementCount; i++) {
       const item = document.createElement("li");
-      item.textContent = world.circuit_element_label_at(i);
+      item.textContent = world.read_component("circuit_element_label_at", String(i));
       circuitList.appendChild(item);
     }
     bodies.appendChild(makeGroup("circuits", "Circuits", circuitList));
@@ -1139,7 +1139,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
 function applyComponent(
   world: WasmWorld,
   kind: string,
-  payload: Record<string, number | string>,
+  payload: Record<string, number | string | boolean>,
 ): { index?: number; applied?: boolean } {
   return JSON.parse(world.apply_component(kind, JSON.stringify(payload))) as {
     index?: number;
@@ -1703,13 +1703,13 @@ function renderInspectorExtraComponents(
   }
 
   // Circuit: ワールドに載っている回路素子(ボディ単位ではなくシーン単位)。
-  const circuitCount = world.circuit_element_count();
+  const circuitCount = readNumber(world, "circuit_element_count");
   if (circuitCount > 0) {
     const rows: string[] = [];
     for (let k = 0; k < circuitCount; k += 1) {
       rows.push(
         `<div class="inspector-field"><span>#${k}</span><span>` +
-          `${escape(world.circuit_element_label_at(k))}</span></div>`,
+          `${escape(world.read_component("circuit_element_label_at", String(k)))}</span></div>`,
       );
     }
     sections.push(
@@ -3394,32 +3394,53 @@ async function setUpSceneView(
   // UI(リロード以外)は現状無いため、falseへ戻す経路は無い(正直な制約)。
   let isGalleryScene = false;
   circuitEditorRef.current = {
-    reset: (numNodes: number) => world.circuit_editor_reset(numNodes),
+    reset: (numNodes: number) =>
+      applyComponent(world, "circuit_editor_reset", { num_nodes: numNodes }),
     addResistor: (a, b, resistance) =>
-      world.circuit_editor_add_resistor(a, b, resistance),
+      applyComponent(world, "circuit_editor_add_resistor", { a, b, resistance }),
     addVoltageSource: (a, b, voltage) =>
-      world.circuit_editor_add_voltage_source(a, b, voltage),
-    addSwitch: (a, b, closed) => world.circuit_editor_add_switch(a, b, closed),
+      applyComponent(world, "circuit_editor_add_voltage_source", { a, b, voltage }),
+    addSwitch: (a, b, closed) =>
+      applyComponent(world, "circuit_editor_add_switch", { a, b, closed }).index as number,
     setSwitchClosed: (index, closed) =>
-      world.circuit_editor_set_switch_closed(index, closed),
-    nodeVoltage: (node) => world.circuit_node_voltage(node),
+      applyComponent(world, "circuit_editor_set_switch_closed", { index, closed }),
+    nodeVoltage: (node) => readNumber(world, "circuit_node_voltage", String(node)),
     addCapacitor: (a, b, capacitance, initialVoltage) =>
-      world.circuit_editor_add_capacitor(a, b, capacitance, initialVoltage),
-    addInductor: (a, b, inductance, initialCurrent) =>
-      world.circuit_editor_add_inductor(a, b, inductance, initialCurrent),
-    addDiode: (anode, cathode, saturationCurrent, nVt) =>
-      world.circuit_editor_add_diode(anode, cathode, saturationCurrent, nVt),
-    addDcMotor: (a, b, windingResistance, windingInductance, backEmfConstant) =>
-      world.circuit_editor_add_dc_motor(
+      applyComponent(world, "circuit_editor_add_capacitor", {
         a,
         b,
-        windingResistance,
-        windingInductance,
-        backEmfConstant,
-      ),
+        capacitance,
+        initial_voltage: initialVoltage,
+      }),
+    addInductor: (a, b, inductance, initialCurrent) =>
+      applyComponent(world, "circuit_editor_add_inductor", {
+        a,
+        b,
+        inductance,
+        initial_current: initialCurrent,
+      }),
+    addDiode: (anode, cathode, saturationCurrent, nVt) =>
+      applyComponent(world, "circuit_editor_add_diode", {
+        anode,
+        cathode,
+        saturation_current: saturationCurrent,
+        n_vt: nVt,
+      }),
+    addDcMotor: (a, b, windingResistance, windingInductance, backEmfConstant) =>
+      applyComponent(world, "circuit_editor_add_dc_motor", {
+        a,
+        b,
+        winding_resistance: windingResistance,
+        winding_inductance: windingInductance,
+        back_emf_constant: backEmfConstant,
+      }).index as number,
     setMotorSpeed: (index, angularVelocity) =>
-      world.circuit_editor_set_motor_speed(index, angularVelocity),
-    motorCurrent: (index) => world.circuit_editor_motor_current(index),
+      applyComponent(world, "circuit_editor_set_motor_speed", {
+        index,
+        angular_velocity: angularVelocity,
+      }),
+    motorCurrent: (index) =>
+      readNumber(world, "circuit_editor_motor_current", String(index)),
   };
   materialsRef.current = () =>
     SPAWN_MATERIALS.map((name) => {
@@ -3435,15 +3456,15 @@ async function setUpSceneView(
         conductivity,
       };
     });
-  circuitRef.current = () => world.circuit_divider_voltage();
+  circuitRef.current = () => readNumber(world, "circuit_divider_voltage");
   // Circuitタブ・Hierarchyの「Circuits」が実際の素子を読むための配線
   // (**増分G2**、`CircuitElementsRef`のdoc参照)。`world`はギャラリーからの
   // シーン読み込みで再束縛されるため、クロージャで毎回現在のものを見る。
   circuitElementsRef.current = () => {
-    const count = world.circuit_element_count();
+    const count = readNumber(world, "circuit_element_count");
     const labels: string[] = [];
     for (let i = 0; i < count; i += 1)
-      labels.push(world.circuit_element_label_at(i));
+      labels.push(world.read_component("circuit_element_label_at", String(i)));
     return labels;
   };
   sceneExportRef.current = () => {
@@ -5920,7 +5941,7 @@ async function setUpSceneView(
           }
           break;
         case "SetSwitch":
-          replayWorld.set_circuit_switch_closed(entry.closed);
+          applyComponent(replayWorld, "set_circuit_switch_closed", { closed: entry.closed });
           break;
         case "SetHeatSource":
           heater.on = entry.on;
@@ -5979,7 +6000,7 @@ async function setUpSceneView(
     const heater: ReplayHeaterState = { on: false, watts: 0 };
     for (let s = 0; s < totalSteps; s++) {
       applyReplayCommands(replayWorld, commandsByStep.get(s) ?? [], heater);
-      if (heater.on) replayWorld.push_heat_source(heater.watts);
+      if (heater.on) applyComponent(replayWorld, "push_heat_source", { watts: heater.watts });
       replayWorld.step();
     }
 
@@ -6073,7 +6094,10 @@ async function setUpSceneView(
         playback.commandsByStep.get(playback.step) ?? [],
         playback.heater,
       );
-      if (playback.heater.on) playback.replayWorld.push_heat_source(playback.heater.watts);
+      if (playback.heater.on)
+        applyComponent(playback.replayWorld, "push_heat_source", {
+          watts: playback.heater.watts,
+        });
       playback.replayWorld.step();
       playback.accumulator -= dt;
       playback.step += 1;
@@ -6655,7 +6679,7 @@ async function setUpSceneView(
       for (let i = 0; i < count; i += 1) {
         // Play ループと同じくヒーターは毎 step 再送する(「1step分だけ効く」
         // 縮約セマンティクス、`HEATER_WATTS` のdoc参照)。
-        if (heaterToggle.checked) world.push_heat_source(HEATER_WATTS);
+        if (heaterToggle.checked) applyComponent(world, "push_heat_source", { watts: HEATER_WATTS });
         applyThrustForStep();
         world.step();
       }
@@ -6889,7 +6913,7 @@ async function setUpSceneView(
     // 無効化する(`circuitFreeWiringState`のdoc参照、チェックボックス自体も
     // リセット時に`disabled`にする)。
     if (circuitFreeWiringState.active) return;
-    world.set_circuit_switch_closed(circuitSwitchToggle.checked);
+    applyComponent(world, "set_circuit_switch_closed", { closed: circuitSwitchToggle.checked });
     pushCommandLog(world, {
       kind: "SetSwitch",
       closed: circuitSwitchToggle.checked,
@@ -7147,13 +7171,13 @@ async function setUpSceneView(
     // 付かなかった。熱ドメインの無は`heater_node_temperature()`が返すNaNを
     // そのまま検出できる。回路は`circuit_element_count() === 0`(=回路
     // ドメインが無効、または素子ゼロの意味を持たない状態)を「無」の判定に使う。
-    const heaterTemperature = world.heater_node_temperature();
-    const hasCircuit = world.circuit_element_count() > 0;
+    const heaterTemperature = readNumber(world, "heater_node_temperature");
+    const hasCircuit = readNumber(world, "circuit_element_count") > 0;
     hud.textContent = [
       `t = ${world.time().toFixed(3)} s`,
       `step = ${world.step_count().toString()}`,
       `y = ${selectedBodyValid ? selectedPosition[1].toFixed(4) : "—"} m`,
-      `circuit V = ${hasCircuit ? world.circuit_divider_voltage().toFixed(3) + " V" : "—"}`,
+      `circuit V = ${hasCircuit ? readNumber(world, "circuit_divider_voltage").toFixed(3) + " V" : "—"}`,
       `heater T = ${Number.isNaN(heaterTemperature) ? "—" : heaterTemperature.toFixed(2) + " K"}`,
     ].join("\n");
     timelineTime.textContent = `t = ${world.time().toFixed(3)} s`;
@@ -7196,7 +7220,7 @@ async function setUpSceneView(
       // 時間が倍速で進む」という嘘の挙動になっていた(実装検証中に発見)。
       const dt = readNumber(world, "dt");
       while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
-        if (heaterToggle.checked) world.push_heat_source(HEATER_WATTS);
+        if (heaterToggle.checked) applyComponent(world, "push_heat_source", { watts: HEATER_WATTS });
         applyThrustForStep();
         world.step();
         accumulator -= dt;

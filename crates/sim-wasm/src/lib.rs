@@ -1268,7 +1268,7 @@ impl WasmWorld {
     /// **その図が残って実際とは違う値を表示し続けていた**(D19を読み込んでも
     /// 「10V 電源 / 100Ω / 200Ω」のまま。実際は9V / 1kΩ / 2kΩ + コンデンサ +
     /// スイッチ + ダイオード)。実際の素子を列挙する手段が無かったのが原因。
-    pub fn circuit_element_count(&self) -> usize {
+    fn circuit_element_count_impl(&self) -> usize {
         self.inner.circuit().map_or(0, |c| {
             c.voltage_sources().len()
                 + c.resistors().len()
@@ -1284,7 +1284,7 @@ impl WasmWorld {
     /// (`circuit_element_count`の加算順と同じ)。スイッチは現在の開閉状態も出す
     /// ——`Command::SetSwitch`で実行中に変わる唯一の素子であり、
     /// 表示が実態と乖離しないことがこのAPIを足した動機そのものだから。
-    pub fn circuit_element_label_at(&self, index: usize) -> Result<String, JsValue> {
+    fn circuit_element_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
         let circuit = self.inner.circuit().ok_or_else(|| {
             JsValue::from_str("circuit domain is not enabled in the current world")
         })?;
@@ -1335,7 +1335,7 @@ impl WasmWorld {
         }
         Err(JsValue::from_str(&format!(
             "circuit element index {index} out of range (circuit_element_count={})",
-            self.circuit_element_count()
+            self.circuit_element_count_impl()
         )))
     }
 
@@ -1807,7 +1807,7 @@ impl WasmWorld {
 
     /// 分圧回路(`WasmWorld::new`参照)の分圧点電圧[V]。`Command::SetSwitch`の
     /// 効果をUIから確認するための読み取り専用クエリ。
-    pub fn circuit_divider_voltage(&self) -> f64 {
+    fn circuit_divider_voltage_impl(&self) -> f64 {
         self.inner
             .circuit_probe(CIRCUIT_DIVIDER_NODE)
             .unwrap_or(0.0)
@@ -1815,7 +1815,7 @@ impl WasmWorld {
 
     /// `Command::SetSwitch`——分圧回路のスイッチの開閉を変更する。閉じると
     /// 分圧点がGNDへ短絡され`circuit_divider_voltage`がほぼ0になる。
-    pub fn set_circuit_switch_closed(&mut self, closed: bool) {
+    fn set_circuit_switch_closed_impl(&mut self, closed: bool) {
         self.inner.push_command(Command::SetSwitch {
             switch_index: self.circuit_switch_index,
             closed,
@@ -1832,13 +1832,13 @@ impl WasmWorld {
     /// 呼び出し側(`main.ts`)は既存の「回路スイッチ(閉)」チェックボックスを
     /// 無効化する責任を負う(`set_circuit_switch_closed`をこの後に呼ぶと
     /// パニックし得る)。
-    pub fn circuit_editor_reset(&mut self, num_nodes: usize) {
+    fn circuit_editor_reset_impl(&mut self, num_nodes: usize) {
         self.inner.enable_circuit(sim_em::Circuit::new(num_nodes));
     }
 
     /// 自由配線回路エディタ——ノード`a`・`b`間に抵抗`resistance`[Ω]を追加する。
     /// `circuit_editor_reset`より前に呼ぶと(回路が未有効化)何もしない。
-    pub fn circuit_editor_add_resistor(&mut self, a: usize, b: usize, resistance: f64) {
+    fn circuit_editor_add_resistor_impl(&mut self, a: usize, b: usize, resistance: f64) {
         if let Some(circuit) = self.inner.circuit_mut() {
             circuit.add_resistor(a, b, resistance);
         }
@@ -1846,7 +1846,7 @@ impl WasmWorld {
 
     /// 自由配線回路エディタ——ノード`a`(正極)・`b`(負極)間に独立電圧源
     /// `voltage`[V]を追加する。
-    pub fn circuit_editor_add_voltage_source(&mut self, a: usize, b: usize, voltage: f64) {
+    fn circuit_editor_add_voltage_source_impl(&mut self, a: usize, b: usize, voltage: f64) {
         if let Some(circuit) = self.inner.circuit_mut() {
             circuit.add_voltage_source(a, b, voltage);
         }
@@ -1856,7 +1856,7 @@ impl WasmWorld {
     /// このスイッチのindex(`circuit_editor_set_switch_closed`用)。回路が
     /// 未有効化なら0を返す(縮約実装、呼び出し側は`circuit_editor_reset`を
     /// 先に呼ぶ前提)。
-    pub fn circuit_editor_add_switch(&mut self, a: usize, b: usize, closed: bool) -> usize {
+    fn circuit_editor_add_switch_impl(&mut self, a: usize, b: usize, closed: bool) -> usize {
         self.inner
             .circuit_mut()
             .map_or(0, |circuit| circuit.add_switch(a, b, closed))
@@ -1866,7 +1866,7 @@ impl WasmWorld {
     /// 開閉状態を変更する(既存の`set_circuit_switch_closed`と異なりCommandキューを
     /// 経由しない即時変更——自由配線回路の構築/操作全体がEditモード的な直接操作
     /// として設計されているため、`spawn_sphere`等と同じ即時反映の扱いとした)。
-    pub fn circuit_editor_set_switch_closed(&mut self, index: usize, closed: bool) {
+    fn circuit_editor_set_switch_closed_impl(&mut self, index: usize, closed: bool) {
         if let Some(circuit) = self.inner.circuit_mut() {
             circuit.set_switch_closed(index, closed);
         }
@@ -1875,7 +1875,7 @@ impl WasmWorld {
     /// 自由配線回路エディタ——ノード`a`・`b`間にコンデンサ`capacitance`[F]を
     /// 追加する。`initial_voltage`[V]は充電済みの状態から始めたい場合に使う
     /// (`sim_em::Circuit::add_capacitor`のdoc参照)。
-    pub fn circuit_editor_add_capacitor(
+    fn circuit_editor_add_capacitor_impl(
         &mut self,
         a: usize,
         b: usize,
@@ -1889,7 +1889,7 @@ impl WasmWorld {
 
     /// 自由配線回路エディタ——ノード`a`・`b`間にインダクタ`inductance`[H]を
     /// 追加する。
-    pub fn circuit_editor_add_inductor(
+    fn circuit_editor_add_inductor_impl(
         &mut self,
         a: usize,
         b: usize,
@@ -1904,7 +1904,7 @@ impl WasmWorld {
     /// 自由配線回路エディタ——アノード`anode`・カソード`cathode`間にダイオードを
     /// 追加する(Shockleyダイオード式、`saturation_current`・`n_vt`は
     /// `sim_em::Circuit::add_diode`のdoc参照)。
-    pub fn circuit_editor_add_diode(
+    fn circuit_editor_add_diode_impl(
         &mut self,
         anode: usize,
         cathode: usize,
@@ -1925,7 +1925,7 @@ impl WasmWorld {
     /// `circuit_editor_motor_current`用のindex。回路が未有効化なら0を返す
     /// (`circuit_editor_add_switch`と同じ縮約——ただしモーターも登録しないため
     /// 以後の速度設定/電流読み出しは無害な無視になる)。
-    pub fn circuit_editor_add_dc_motor(
+    fn circuit_editor_add_dc_motor_impl(
         &mut self,
         a: usize,
         b: usize,
@@ -1952,7 +1952,7 @@ impl WasmWorld {
 
     /// 自由配線回路エディタ——`circuit_editor_add_dc_motor`が返したindexの
     /// モーターの角速度[rad/s]を設定する(逆起電力を反映)。
-    pub fn circuit_editor_set_motor_speed(&mut self, index: usize, angular_velocity: f64) {
+    fn circuit_editor_set_motor_speed_impl(&mut self, index: usize, angular_velocity: f64) {
         let Some(handle) = self.circuit_editor_motors.get(index).copied() else {
             return;
         };
@@ -1963,7 +1963,7 @@ impl WasmWorld {
 
     /// 自由配線回路エディタ——`circuit_editor_add_dc_motor`が返したindexの
     /// モーターを流れる電流[A](符号は`a`から`b`へ流れる向きが正)。
-    pub fn circuit_editor_motor_current(&self, index: usize) -> f64 {
+    fn circuit_editor_motor_current_impl(&self, index: usize) -> f64 {
         let Some(handle) = self.circuit_editor_motors.get(index).copied() else {
             return 0.0;
         };
@@ -1974,7 +1974,7 @@ impl WasmWorld {
 
     /// 自由配線回路エディタ——任意ノードの電圧(既存の固定デモ専用
     /// `circuit_divider_voltage`の一般化、`World::circuit_probe`をそのまま使う)。
-    pub fn circuit_node_voltage(&self, node: usize) -> f64 {
+    fn circuit_node_voltage_impl(&self, node: usize) -> f64 {
         self.inner.circuit_probe(node).unwrap_or(0.0)
     }
 
@@ -1993,7 +1993,7 @@ impl WasmWorld {
     /// (`push_heat_source`)はD9を読み込んだ状態でPlay中に操作すると、D9の
     /// コーヒーノードへ実際に追加の熱を加える(既定シーン専用に作られたUIが
     /// ギャラリーシーンの実ドメインへ意図せず干渉し得るという、既知の限定)。
-    pub fn heater_node_temperature(&self) -> f64 {
+    fn heater_node_temperature_impl(&self) -> f64 {
         self.inner
             .thermal()
             .map(|thermal| thermal.nodes[THERMAL_HEATER_NODE].temperature)
@@ -2004,7 +2004,7 @@ impl WasmWorld {
     /// 与える(モジュールdoc「1step分だけ効く」縮約セマンティクス参照)。
     /// 継続加熱するには呼び出し側が毎stepの直前に再度呼ぶ必要がある
     /// (`main.ts`の`frame()`ループ参照)。
-    pub fn push_heat_source(&mut self, watts: f64) {
+    fn push_heat_source_impl(&mut self, watts: f64) {
         self.inner.push_command(Command::SetHeatSource {
             node: THERMAL_HEATER_NODE,
             watts,
@@ -2066,6 +2066,7 @@ impl WasmWorld {
                 .unwrap_or("")
                 .to_string()
         };
+        let b = |key: &str| -> bool { v.get(key).and_then(|x| x.as_bool()).unwrap_or(false) };
         match kind {
             "add_distance_joint" => {
                 let index = self.add_distance_joint_impl(
@@ -2452,6 +2453,75 @@ impl WasmWorld {
                 self.derive_material_impl(s("base_name"), s("new_name"), f("density"))?;
                 Ok("{}".to_string())
             }
+            "set_circuit_switch_closed" => {
+                self.set_circuit_switch_closed_impl(b("closed"));
+                Ok("{}".to_string())
+            }
+            "circuit_editor_reset" => {
+                self.circuit_editor_reset_impl(u("num_nodes"));
+                Ok("{}".to_string())
+            }
+            "circuit_editor_add_resistor" => {
+                self.circuit_editor_add_resistor_impl(u("a"), u("b"), f("resistance"));
+                Ok("{}".to_string())
+            }
+            "circuit_editor_add_voltage_source" => {
+                self.circuit_editor_add_voltage_source_impl(u("a"), u("b"), f("voltage"));
+                Ok("{}".to_string())
+            }
+            "circuit_editor_add_switch" => {
+                let index = self.circuit_editor_add_switch_impl(u("a"), u("b"), b("closed"));
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "circuit_editor_set_switch_closed" => {
+                self.circuit_editor_set_switch_closed_impl(u("index"), b("closed"));
+                Ok("{}".to_string())
+            }
+            "circuit_editor_add_capacitor" => {
+                self.circuit_editor_add_capacitor_impl(
+                    u("a"),
+                    u("b"),
+                    f("capacitance"),
+                    f("initial_voltage"),
+                );
+                Ok("{}".to_string())
+            }
+            "circuit_editor_add_inductor" => {
+                self.circuit_editor_add_inductor_impl(
+                    u("a"),
+                    u("b"),
+                    f("inductance"),
+                    f("initial_current"),
+                );
+                Ok("{}".to_string())
+            }
+            "circuit_editor_add_diode" => {
+                self.circuit_editor_add_diode_impl(
+                    u("anode"),
+                    u("cathode"),
+                    f("saturation_current"),
+                    f("n_vt"),
+                );
+                Ok("{}".to_string())
+            }
+            "circuit_editor_add_dc_motor" => {
+                let index = self.circuit_editor_add_dc_motor_impl(
+                    u("a"),
+                    u("b"),
+                    f("winding_resistance"),
+                    f("winding_inductance"),
+                    f("back_emf_constant"),
+                );
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "circuit_editor_set_motor_speed" => {
+                self.circuit_editor_set_motor_speed_impl(u("index"), f("angular_velocity"));
+                Ok("{}".to_string())
+            }
+            "push_heat_source" => {
+                self.push_heat_source_impl(f("watts"));
+                Ok("{}".to_string())
+            }
             _ => Err(JsValue::from_str(&format!(
                 "apply_component: unknown kind \"{kind}\""
             ))),
@@ -2544,6 +2614,21 @@ impl WasmWorld {
                 .material_properties_f64_impl(arg.to_string())?
                 .to_vec())
             .to_string()),
+            "circuit_element_count" => Ok(self.circuit_element_count_impl().to_string()),
+            "circuit_element_label_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.circuit_element_label_at_impl(index)
+            }
+            "circuit_divider_voltage" => Ok(self.circuit_divider_voltage_impl().to_string()),
+            "circuit_editor_motor_current" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.circuit_editor_motor_current_impl(index).to_string())
+            }
+            "circuit_node_voltage" => {
+                let node: usize = arg.parse().unwrap_or(0);
+                Ok(self.circuit_node_voltage_impl(node).to_string())
+            }
+            "heater_node_temperature" => Ok(self.heater_node_temperature_impl().to_string()),
             _ => Err(JsValue::from_str(&format!(
                 "read_component: unknown kind \"{kind}\""
             ))),
@@ -2579,7 +2664,13 @@ impl WasmWorld {
                 "push_move_grab", "push_release",
                 "spawn_sphere", "spawn_capsule", "spawn_compound_l_shape",
                 "spawn_convex_mesh_cube", "spawn_box", "remove_body_at",
-                "duplicate_body_at", "derive_material"
+                "duplicate_body_at", "derive_material",
+                "set_circuit_switch_closed", "circuit_editor_reset",
+                "circuit_editor_add_resistor", "circuit_editor_add_voltage_source",
+                "circuit_editor_add_switch", "circuit_editor_set_switch_closed",
+                "circuit_editor_add_capacitor", "circuit_editor_add_inductor",
+                "circuit_editor_add_diode", "circuit_editor_add_dc_motor",
+                "circuit_editor_set_motor_speed", "push_heat_source"
             ],
             "read": [
                 "coupling_count", "coupling_info_text", "coupling_kind_summary",
@@ -2592,7 +2683,10 @@ impl WasmWorld {
                 "body_count", "body_label_at", "body_is_static_at",
                 "body_shape_label_at", "body_shape_kind_at", "body_shape_json_at",
                 "body_material_label_at", "body_is_removed_at",
-                "body_shape_params_f64_at", "material_properties_f64"
+                "body_shape_params_f64_at", "material_properties_f64",
+                "circuit_element_count", "circuit_element_label_at",
+                "circuit_divider_voltage", "circuit_editor_motor_current",
+                "circuit_node_voltage", "heater_node_temperature"
             ]
         })
         .to_string()
@@ -4177,25 +4271,25 @@ mod tests {
     #[test]
     fn circuit_editor_add_capacitor_inductor_diode_and_dc_motor_succeed() {
         let mut world = new_world();
-        world.circuit_editor_reset(3);
+        world.circuit_editor_reset_impl(3);
         // ノード1-2間にコンデンサ(初期電圧5V)。
-        world.circuit_editor_add_capacitor(1, 2, 1e-3, 5.0);
+        world.circuit_editor_add_capacitor_impl(1, 2, 1e-3, 5.0);
         // ノード2-0間にインダクタ。
-        world.circuit_editor_add_inductor(2, 0, 1e-3, 0.0);
+        world.circuit_editor_add_inductor_impl(2, 0, 1e-3, 0.0);
         // ノード1-0間にダイオード。
-        world.circuit_editor_add_diode(1, 0, 1e-12, 0.026);
+        world.circuit_editor_add_diode_impl(1, 0, 1e-12, 0.026);
 
         // DCモーターは内部ノードを2つ自動確保するので、num_nodesが3→5に伸びる。
-        let motor_index = world.circuit_editor_add_dc_motor(1, 0, 2.0, 1e-3, 0.1);
+        let motor_index = world.circuit_editor_add_dc_motor_impl(1, 0, 2.0, 1e-3, 0.1);
         assert_eq!(motor_index, 0);
-        world.circuit_editor_set_motor_speed(motor_index, 10.0);
+        world.circuit_editor_set_motor_speed_impl(motor_index, 10.0);
         // 速度設定直後、逆起電力による電流は有限値のはず(NaN/panicしない)。
-        let current = world.circuit_editor_motor_current(motor_index);
+        let current = world.circuit_editor_motor_current_impl(motor_index);
         assert!(current.is_finite());
 
         // 未知indexへの操作は無害に無視される(パニックしない)。
-        world.circuit_editor_set_motor_speed(999, 1.0);
-        assert_eq!(world.circuit_editor_motor_current(999), 0.0);
+        world.circuit_editor_set_motor_speed_impl(999, 1.0);
+        assert_eq!(world.circuit_editor_motor_current_impl(999), 0.0);
     }
 
     /// Inspectorの Add Component(**残タスク完遂の縦串①増分**)——5種の
@@ -4551,6 +4645,131 @@ mod tests {
                 r#"{"base_name":"アルミニウム","new_name":"軽量アルミニウム(Task8第四弾テスト)","density":1500.0}"#,
             )
             .expect("derive_material via apply_component must succeed");
+    }
+
+    /// **Task#8第五弾の回帰テスト**: 自由配線回路エディタ12個(適用系)と、
+    /// 固定デモ回路のスイッチ・ヒーター、その内省6個も`apply_component`/
+    /// `read_component`経由で操作できることを確認する。
+    #[test]
+    fn apply_component_and_read_component_wire_a_circuit_via_generic_dispatch() {
+        let mut world = new_world();
+
+        // 固定デモ回路のスイッチ(WasmWorld::newが積む分圧回路)。
+        world
+            .apply_component("set_circuit_switch_closed", r#"{"closed":true}"#)
+            .expect("set_circuit_switch_closed via apply_component must succeed");
+        world.step();
+        let divider_voltage: f64 = world
+            .read_component("circuit_divider_voltage", "")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(divider_voltage.abs() < 1e-6, "actual: {divider_voltage}");
+
+        // ヒーター。
+        world
+            .apply_component("push_heat_source", r#"{"watts":2000.0}"#)
+            .expect("push_heat_source via apply_component must succeed");
+        world.step();
+        assert!(
+            world
+                .read_component("heater_node_temperature", "")
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+                > 293.15
+        );
+
+        // 自由配線回路エディタ: 既定回路数を0にリセットしてから3ノードの
+        // 単純な回路(電圧源+抵抗+スイッチ+コンデンサ+インダクタ+ダイオード+
+        // DCモーター)を組む。
+        world
+            .apply_component("circuit_editor_reset", r#"{"num_nodes":3}"#)
+            .expect("circuit_editor_reset via apply_component must succeed");
+        assert_eq!(
+            world.read_component("circuit_element_count", "").unwrap(),
+            "0"
+        );
+
+        world
+            .apply_component(
+                "circuit_editor_add_voltage_source",
+                r#"{"a":1,"b":0,"voltage":10.0}"#,
+            )
+            .expect("circuit_editor_add_voltage_source via apply_component must succeed");
+        world
+            .apply_component(
+                "circuit_editor_add_resistor",
+                r#"{"a":1,"b":2,"resistance":100.0}"#,
+            )
+            .expect("circuit_editor_add_resistor via apply_component must succeed");
+        assert_eq!(
+            world.read_component("circuit_element_count", "").unwrap(),
+            "2"
+        );
+        let label = world
+            .read_component("circuit_element_label_at", "0")
+            .unwrap();
+        assert!(label.contains("10"), "actual: {label}");
+
+        let result = world
+            .apply_component(
+                "circuit_editor_add_switch",
+                r#"{"a":2,"b":0,"closed":false}"#,
+            )
+            .expect("circuit_editor_add_switch via apply_component must succeed");
+        assert_eq!(result, "{\"index\":0}");
+        world
+            .apply_component(
+                "circuit_editor_set_switch_closed",
+                r#"{"index":0,"closed":true}"#,
+            )
+            .expect("circuit_editor_set_switch_closed via apply_component must succeed");
+
+        world
+            .apply_component(
+                "circuit_editor_add_capacitor",
+                r#"{"a":1,"b":2,"capacitance":1e-3,"initial_voltage":0.0}"#,
+            )
+            .expect("circuit_editor_add_capacitor via apply_component must succeed");
+        world
+            .apply_component(
+                "circuit_editor_add_inductor",
+                r#"{"a":1,"b":2,"inductance":1e-3,"initial_current":0.0}"#,
+            )
+            .expect("circuit_editor_add_inductor via apply_component must succeed");
+        world
+            .apply_component(
+                "circuit_editor_add_diode",
+                r#"{"anode":1,"cathode":2,"saturation_current":1e-12,"n_vt":0.026}"#,
+            )
+            .expect("circuit_editor_add_diode via apply_component must succeed");
+
+        let result = world
+            .apply_component(
+                "circuit_editor_add_dc_motor",
+                r#"{"a":1,"b":2,"winding_resistance":1.0,"winding_inductance":1e-3,"back_emf_constant":0.05}"#,
+            )
+            .expect("circuit_editor_add_dc_motor via apply_component must succeed");
+        assert_eq!(result, "{\"index\":0}");
+        world
+            .apply_component(
+                "circuit_editor_set_motor_speed",
+                r#"{"index":0,"angular_velocity":10.0}"#,
+            )
+            .expect("circuit_editor_set_motor_speed via apply_component must succeed");
+        world.step();
+        // モーター電流の内省(値そのものは検証しない、往復できることのみ確認)。
+        let _ = world
+            .read_component("circuit_editor_motor_current", "0")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        let _ = world
+            .read_component("circuit_node_voltage", "1")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
     }
 
     /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
