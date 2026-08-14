@@ -25,9 +25,16 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
 - [ ] 縮約監査スクリプトを作る
   コード中に自己申告された「縮約」(crates側262箇所、docs側114箇所)を機械集計する。
 - [x] `Scenario` に `Serialize` を実装する(55構造体すべて)
-- [ ] `World → Scenario` の逆写像を実装する
+- [ ] `World → Scenario` の逆写像を実装する(**一部完了**)
   bodies/joints/couplings/fluids/thermal/circuit/probes を全ドメイン無損失で書き戻し、
-  手書きの `export_scene_json` を置き換える。
+  手書きの `export_scene_json` を置き換える。`sim-world::export::to_scenario` として
+  world options・materials・bodies・joints(Distance/Ball/Slider/Wheel/HingeMotor)・
+  couplings(14種)・probes・thermal・circuit・astro・gas を実装済み(state_hashが
+  reload直後・stepping後の両方で一致することをテストで確認)。
+  残: `grid_fluid`/`soft_body`/`sph`/`quantum_1d`/`quantum_2d`/`brownian`/
+  `kinetic_gas`/`ising`/`fdtd` ——シーンJSON側が「構築レシピ」形式(波束の中心・
+  分散、SPH粒子を敷き詰める直方体ブロック等)で状態スナップショットを表現できない
+  ため、生値スナップショット形式のスキーマ拡張が別途要る。
 - [ ] 安定ID(世代付き)をwasm境界まで通す(52本の `index: usize` 署名を置き換え)
 - [ ] World APIに部品作成メソッドを実装する
   `create_joint` / `add_coupling` / `add_fluid_region` / `add_probe`。
