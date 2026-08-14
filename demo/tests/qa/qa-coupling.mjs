@@ -48,7 +48,7 @@ async function run(frag, steps) {
 const couplings = () =>
   page.evaluate(() =>
     window.__world
-      .coupling_info_text(-1)
+      .read_component("coupling_info_text", "-1")
       .split("\n")
       .filter((l) => l.length > 0)
       .map((l) => {
@@ -431,7 +431,7 @@ await boot(page);
   await page.locator('.project-tab[data-tab="scenes"]').click();
   await page.waitForTimeout(200);
   const before = await page.evaluate(() => ({
-    couplings: window.__world.coupling_count(),
+    couplings: Number(window.__world.read_component("coupling_count", "")),
     bodies: window.__world.body_count(),
   }));
   await page.locator("#project-body input[type=file]").setInputFiles(
@@ -439,7 +439,7 @@ await boot(page);
   );
   await page.waitForTimeout(600);
   const after = await page.evaluate(() => ({
-    couplings: window.__world.coupling_count(),
+    couplings: Number(window.__world.read_component("coupling_count", "")),
     bodies: window.__world.body_count(),
   }));
   r.check("Y6-1", "シーン JSON の Import で剛体は増える",

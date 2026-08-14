@@ -190,7 +190,7 @@ test("縦串①: D24車をUIのみで組み立てるとD24シーンJSONの実行
     });
   }
   const jointText = await page.evaluate(() =>
-    (window as unknown as { __world: any }).__world.joint_info_text(-1),
+    (window as unknown as { __world: any }).__world.read_component("joint_info_text", "-1"),
   );
   expect(jointText.split("\n").filter((l: string) => l.includes("WheelJoint")))
     .toHaveLength(4);

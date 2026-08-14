@@ -1136,7 +1136,7 @@ impl WasmWorld {
     }
 
     /// 登録済み結合の件数。
-    pub fn coupling_count(&self) -> usize {
+    fn coupling_count_impl(&self) -> usize {
         self.inner.coupling_count()
     }
 
@@ -1152,7 +1152,7 @@ impl WasmWorld {
     /// **なぜJSONではなくタブ区切りか**: `sim-wasm`は`serde_json`を依存に
     /// 持たない(バイナリサイズを抑える既存の方針)。行・列の区切りだけで
     /// 表現できる平坦なデータなので、自前のJSON組み立てより素直である。
-    pub fn coupling_info_text(&self, body_index: i32) -> String {
+    fn coupling_info_text_impl(&self, body_index: i32) -> String {
         let infos = if body_index < 0 {
             self.inner.couplings()
         } else {
@@ -1184,7 +1184,7 @@ impl WasmWorld {
     }
 
     /// `CouplingKind`の1行説明(Inspectorのツールチップ用、**群1で追加**)。
-    pub fn coupling_kind_summary(&self, kind_name: String) -> String {
+    fn coupling_kind_summary_impl(&self, kind_name: String) -> String {
         self.inner
             .couplings()
             .iter()
@@ -1199,7 +1199,7 @@ impl WasmWorld {
     ///
     /// **これが無かった間の縮約**: フロントエンドは`constraint_anchor_points_at`で
     /// アンカー2点しか取れず、**種別も接続先も軸もモータ設定も見えなかった**。
-    pub fn joint_info_text(&self, body_index: i32) -> String {
+    fn joint_info_text_impl(&self, body_index: i32) -> String {
         let joints = if body_index < 0 {
             self.inner.joints()
         } else {
@@ -2031,13 +2031,341 @@ impl WasmWorld {
         ))
     }
 
+    /// wasm境界を`schema`/`read`/`apply`の3メソッドへ畳む取り組み
+    /// (**残タスク完遂増分**、Task#8)の第一弾。Joint(5種)・Coupling
+    /// (14種の追加+操縦面舵角の実行時変更)・熱ノード追加/流体・気体ドメイン
+    /// 有効化(3種)、計25個の「追加/設定」系メソッドをこの1メソッドへ畳んだ
+    /// (対になる内省系5個は`read_component`、利用可能kind一覧は
+    /// `component_schema`)。実装そのものは変えていない——各`pub fn ○○`を
+    /// `fn ○○_impl`(非公開ヘルパー)へ改名し、ここから`match kind`で
+    /// 呼ぶだけ(ロジックの一字一句は不変、wasm-bindgenが生成するJS向け
+    /// シグネチャの本数だけが減る)。
+    ///
+    /// `payload`はJSONオブジェクト文字列(フィールド名は元のメソッドの引数名と
+    /// 一致、例: `add_distance_joint`なら`{"body_a":0,"ax":0,...}`)。戻り値は
+    /// JSONオブジェクト文字列——作成系は`{"index":N}`、それ以外は`{}`。
+    ///
+    /// **正直な適用範囲**: 毎フレーム呼ばれる型付き配列の読み出し系
+    /// (`body_position_at_f32`等、レンダリングループのホットパス)はこの
+    /// 取り組みの対象外のまま残す——JSON文字列への都度変換は60fpsの
+    /// レンダリングループでは明白な性能後退であり、`schema/read/apply`化の
+    /// そもそもの目的(重複ボイラープレートの削減)とは無関係な代償を
+    /// 払うことになるため。残る「追加/設定/内省」系メソッド(body系・
+    /// environment系・circuit editor系等)は今後の増分で同じ2メソッドへ
+    /// 引き続き畳んでいく。
+    pub fn apply_component(&mut self, kind: &str, payload: &str) -> Result<String, JsValue> {
+        let v: serde_json::Value = serde_json::from_str(payload).map_err(|e| {
+            JsValue::from_str(&format!("apply_component: invalid JSON payload: {e}"))
+        })?;
+        let f = |key: &str| -> f64 { v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0) };
+        let u = |key: &str| -> usize { v.get(key).and_then(|x| x.as_u64()).unwrap_or(0) as usize };
+        let i = |key: &str| -> i32 { v.get(key).and_then(|x| x.as_i64()).unwrap_or(0) as i32 };
+        match kind {
+            "add_distance_joint" => {
+                let index = self.add_distance_joint_impl(
+                    u("body_a"),
+                    f("ax"),
+                    f("ay"),
+                    f("az"),
+                    i("body_b"),
+                    f("bx"),
+                    f("by"),
+                    f("bz"),
+                    f("length"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "add_ball_joint" => {
+                let index = self.add_ball_joint_impl(
+                    u("body_a"),
+                    f("ax"),
+                    f("ay"),
+                    f("az"),
+                    i("body_b"),
+                    f("bx"),
+                    f("by"),
+                    f("bz"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "add_slider_joint" => {
+                let index = self.add_slider_joint_impl(
+                    u("body_a"),
+                    f("ax"),
+                    f("ay"),
+                    f("az"),
+                    f("axis_x"),
+                    f("axis_y"),
+                    f("axis_z"),
+                    i("body_b"),
+                    f("bx"),
+                    f("by"),
+                    f("bz"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "add_wheel_joint" => {
+                let index = self.add_wheel_joint_impl(
+                    u("chassis"),
+                    u("wheel"),
+                    f("acx"),
+                    f("acy"),
+                    f("acz"),
+                    f("rest_length"),
+                    f("frequency"),
+                    f("damping_ratio"),
+                    f("steer_angle"),
+                    f("motor_speed"),
+                    f("motor_max_torque"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "add_hinge_motor_joint" => {
+                let index = self.add_hinge_motor_joint_impl(
+                    u("body"),
+                    f("axis_x"),
+                    f("axis_y"),
+                    f("axis_z"),
+                    f("theta_target"),
+                    f("kp"),
+                    f("kd"),
+                    f("torque_max"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "add_image_charge_force_coupling" => {
+                self.add_image_charge_force_coupling_impl(
+                    u("body"),
+                    f("charge"),
+                    f("plane_normal_x"),
+                    f("plane_normal_y"),
+                    f("plane_normal_z"),
+                    f("plane_d"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_lorentz_force_coupling" => {
+                self.add_lorentz_force_coupling_impl(u("body"), f("charge"))?;
+                Ok("{}".to_string())
+            }
+            "add_buoyancy_drag_coupling" => {
+                self.add_buoyancy_drag_coupling_impl(
+                    u("body"),
+                    f("water_level"),
+                    f("water_density"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_dissipation_to_heat_coupling" => {
+                self.add_dissipation_to_heat_coupling_impl(u("thermal_node"))?;
+                Ok("{}".to_string())
+            }
+            "add_joule_heat_coupling" => {
+                self.add_joule_heat_coupling_impl(u("thermal_node"))?;
+                Ok("{}".to_string())
+            }
+            "add_brownian_force_coupling" => {
+                self.add_brownian_force_coupling_impl(
+                    u("body"),
+                    f("radius"),
+                    f("viscosity"),
+                    u("thermal_node"),
+                    v.get("seed").and_then(|x| x.as_u64()).unwrap_or(0),
+                    v.get("stream").and_then(|x| x.as_u64()).unwrap_or(0),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_motor_coupling" => {
+                self.add_motor_coupling_impl(
+                    u("body"),
+                    f("axis_x"),
+                    f("axis_y"),
+                    f("axis_z"),
+                    u("voltage_source_index"),
+                    f("torque_constant"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_induction_coupling" => {
+                self.add_induction_coupling_impl(
+                    u("body"),
+                    u("voltage_source_index"),
+                    f("length"),
+                    f("magnetic_field"),
+                    f("axis_x"),
+                    f("axis_y"),
+                    f("axis_z"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_thermal_node" => {
+                let index = self.add_thermal_node_impl(f("temperature"), f("heat_capacity"));
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "enable_grid_fluid_2d_domain" => {
+                self.enable_grid_fluid_2d_domain_impl();
+                Ok("{}".to_string())
+            }
+            "enable_gas_compartment" => {
+                self.enable_gas_compartment_impl();
+                Ok("{}".to_string())
+            }
+            "add_sph_rigid_coupling" => {
+                self.add_sph_rigid_coupling_impl(u("body"), f("radius"), u("boundary_points"))?;
+                Ok("{}".to_string())
+            }
+            "add_grid_fluid_rigid_coupling" => {
+                self.add_grid_fluid_rigid_coupling_impl(
+                    u("body"),
+                    f("half_width"),
+                    f("half_height"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_piston_gas_coupling" => {
+                self.add_piston_gas_coupling_impl(
+                    u("body"),
+                    f("axis_x"),
+                    f("axis_y"),
+                    f("axis_z"),
+                    f("area"),
+                    f("initial_volume"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_wing_lift_coupling" => {
+                let index = self.add_wing_lift_coupling_impl(
+                    u("body"),
+                    f("wing_area"),
+                    f("chord_x"),
+                    f("chord_y"),
+                    f("chord_z"),
+                    f("span_x"),
+                    f("span_y"),
+                    f("span_z"),
+                    f("atmosphere_density"),
+                    f("atmosphere_viscosity"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "add_magnus_lift_coupling" => {
+                let index = self.add_magnus_lift_coupling_impl(
+                    u("body"),
+                    f("radius"),
+                    f("atmosphere_density"),
+                    f("atmosphere_viscosity"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "push_set_coupling_control_surface_deflection" => {
+                self.push_set_coupling_control_surface_deflection_impl(
+                    u("coupling_index"),
+                    f("deflection_radians"),
+                );
+                Ok("{}".to_string())
+            }
+            "add_boussinesq_buoyancy_coupling" => {
+                self.add_boussinesq_buoyancy_coupling_impl(
+                    u("thermal_node"),
+                    f("ambient_temperature"),
+                    f("thermal_expansion_coefficient"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_convection_link_coupling" => {
+                self.add_convection_link_coupling_impl(
+                    u("fluid_node"),
+                    u("surface_node"),
+                    f("area"),
+                    f("characteristic_length"),
+                    v.get("mode").and_then(|x| x.as_u64()).unwrap_or(3) as u32,
+                    f("fluid_thermal_conductivity"),
+                    f("kinematic_viscosity"),
+                    f("prandtl_number"),
+                    f("thermal_expansion_coefficient"),
+                )?;
+                Ok("{}".to_string())
+            }
+            "add_phase_change_morph_coupling" => {
+                self.add_phase_change_morph_coupling_impl(
+                    u("body"),
+                    u("thermal_node"),
+                    f("melting_temperature"),
+                    f("latent_heat_fusion"),
+                    f("specific_heat_solid"),
+                    f("specific_heat_liquid"),
+                    f("initial_mass"),
+                    f("conductance"),
+                    f("initial_enthalpy"),
+                )?;
+                Ok("{}".to_string())
+            }
+            _ => Err(JsValue::from_str(&format!(
+                "apply_component: unknown kind \"{kind}\""
+            ))),
+        }
+    }
+
+    /// `apply_component`と対になる汎用の内省(読み取り専用)メソッド
+    /// (Task#8第一弾)。`arg`はkindごとに意味が異なる単純な文字列
+    /// (JSONではない——数値ならその文字列表現、不要なら空文字列)。
+    /// 戻り値は元のメソッドが返していたのと同じ文字列(数値系は
+    /// `to_string()`、テキスト系はそのまま)——呼び出し側の解釈は変えていない。
+    pub fn read_component(&self, kind: &str, arg: &str) -> Result<String, JsValue> {
+        match kind {
+            "coupling_count" => Ok(self.coupling_count_impl().to_string()),
+            "coupling_info_text" => {
+                let body_index: i32 = arg.parse().unwrap_or(-1);
+                Ok(self.coupling_info_text_impl(body_index))
+            }
+            "coupling_kind_summary" => Ok(self.coupling_kind_summary_impl(arg.to_string())),
+            "joint_info_text" => {
+                let body_index: i32 = arg.parse().unwrap_or(-1);
+                Ok(self.joint_info_text_impl(body_index))
+            }
+            "thermal_node_count" => Ok(self.thermal_node_count_impl().to_string()),
+            _ => Err(JsValue::from_str(&format!(
+                "read_component: unknown kind \"{kind}\""
+            ))),
+        }
+    }
+
+    /// `apply_component`/`read_component`が受け付けるkind名の一覧
+    /// (JSON文字列、Task#8第一弾)。フロントエンドが動的に把握できるように
+    /// する3つ目のメソッド——現時点ではkind名の列挙のみ(パラメータの
+    /// スキーマ自体は元のUIフォーム側にすでにtitleツールチップとして
+    /// 存在するため、二重管理を避けてここでは持たない)。
+    pub fn component_schema(&self) -> String {
+        serde_json::json!({
+            "apply": [
+                "add_distance_joint", "add_ball_joint", "add_slider_joint",
+                "add_wheel_joint", "add_hinge_motor_joint",
+                "add_image_charge_force_coupling", "add_lorentz_force_coupling",
+                "add_buoyancy_drag_coupling", "add_dissipation_to_heat_coupling",
+                "add_joule_heat_coupling", "add_brownian_force_coupling",
+                "add_motor_coupling", "add_induction_coupling", "add_thermal_node",
+                "enable_grid_fluid_2d_domain", "enable_gas_compartment",
+                "add_sph_rigid_coupling", "add_grid_fluid_rigid_coupling",
+                "add_piston_gas_coupling", "add_wing_lift_coupling",
+                "add_magnus_lift_coupling", "push_set_coupling_control_surface_deflection",
+                "add_boussinesq_buoyancy_coupling", "add_convection_link_coupling",
+                "add_phase_change_morph_coupling"
+            ],
+            "read": [
+                "coupling_count", "coupling_info_text", "coupling_kind_summary",
+                "joint_info_text", "thermal_node_count"
+            ]
+        })
+        .to_string()
+    }
+
     /// Inspectorの Add Component(**残タスク完遂の縦串①増分**、
     /// `sim_world::JointDesc::Distance`の薄い写像)——`body_a`(`body_b`が負なら
     /// ワールド固定点)を`length`で結ぶ距離拘束を追加する。返り値は
     /// `joint_info_text`が0始まりで振る種別内indexと同じ体系(種別ごとに別配列
     /// なので、他種別と共有しない)。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_distance_joint(
+    fn add_distance_joint_impl(
         &mut self,
         body_a: usize,
         ax: f64,
@@ -2067,7 +2395,7 @@ impl WasmWorld {
     /// Add Component——`sim_world::JointDesc::Ball`の薄い写像。3自由度の
     /// 球面拘束(ドア蝶番・振り子等)を追加する。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_ball_joint(
+    fn add_ball_joint_impl(
         &mut self,
         body_a: usize,
         ax: f64,
@@ -2095,7 +2423,7 @@ impl WasmWorld {
     /// Add Component——`sim_world::JointDesc::Slider`の薄い写像。`axis`方向の
     /// 並進のみを許す拘束(ピストン等)を追加する。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_slider_joint(
+    fn add_slider_joint_impl(
         &mut self,
         body_a: usize,
         ax: f64,
@@ -2131,7 +2459,7 @@ impl WasmWorld {
     /// 「普通の車」を作れることを優先した縮約。操舵・駆動が要るなら
     /// `motor_speed`/`motor_max_torque`/`steer_angle`で足りる。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_wheel_joint(
+    fn add_wheel_joint_impl(
         &mut self,
         chassis: usize,
         wheel: usize,
@@ -2170,7 +2498,7 @@ impl WasmWorld {
     /// UIフォームでは常に無制限(`None`)——角度制限が要る操作(ドアが
     /// 90°で止まる等)は縦串①の対象外として残す。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_hinge_motor_joint(
+    fn add_hinge_motor_joint_impl(
         &mut self,
         body: usize,
         axis_x: f64,
@@ -2199,7 +2527,7 @@ impl WasmWorld {
     /// 平板(法線・符号付き距離)への鏡像力(D26帯電風船と同じ物理)を追加する。
     /// 剛体参照だけで完結する結合(他ドメインの参照を要らない)なので、
     /// 縦串②で最初に配線した3種の1つ。
-    pub fn add_image_charge_force_coupling(
+    fn add_image_charge_force_coupling_impl(
         &mut self,
         body: usize,
         charge: f64,
@@ -2222,7 +2550,7 @@ impl WasmWorld {
     /// Add Coupling——`sim_coupling::LorentzForce`の薄い写像。対象剛体に電荷を
     /// 持たせ、`em_electrostatics`ドメインの電場からのローレンツ力を注入する
     /// (電場が無い/点電荷が無ければ力はゼロ、パニックはしない)。
-    pub fn add_lorentz_force_coupling(&mut self, body: usize, charge: f64) -> Result<(), JsValue> {
+    fn add_lorentz_force_coupling_impl(&mut self, body: usize, charge: f64) -> Result<(), JsValue> {
         let id = self.try_body_id_at(body)?;
         self.inner
             .add_coupling(Box::new(sim_coupling::LorentzForce {
@@ -2238,7 +2566,7 @@ impl WasmWorld {
     /// `atmosphere`/`lift`(揚力)はUIフォームに出さず`None`のまま——
     /// 大気場は縦串③(環境と大気の場)の対象、揚力は縦串⑤(飛行機の物理)の
     /// 対象として別途配線する。
-    pub fn add_buoyancy_drag_coupling(
+    fn add_buoyancy_drag_coupling_impl(
         &mut self,
         body: usize,
         water_level: f64,
@@ -2294,7 +2622,10 @@ impl WasmWorld {
     /// 既定の起動シーンは熱ノードを1つ(index 0)持つが、Add Componentで
     /// 一から組んだシーンには熱ドメインを追加する手段がまだ無い(縦串③の
     /// 対象外として残した既知の限界、`docs/22-roadmap/03-editor-todo.md`参照)。
-    pub fn add_dissipation_to_heat_coupling(&mut self, thermal_node: usize) -> Result<(), JsValue> {
+    fn add_dissipation_to_heat_coupling_impl(
+        &mut self,
+        thermal_node: usize,
+    ) -> Result<(), JsValue> {
         let node = self.try_thermal_node_index(thermal_node)?;
         self.inner
             .add_coupling(Box::new(sim_coupling::DissipationToHeat {
@@ -2309,7 +2640,7 @@ impl WasmWorld {
     /// `thermal_node`へ)。D19(電気工作台)向け、熱・回路の両ドメインが
     /// 有効なシーンでのみ意味を持つ(`add_dissipation_to_heat_coupling`と
     /// 同じ既知の限界)。
-    pub fn add_joule_heat_coupling(&mut self, thermal_node: usize) -> Result<(), JsValue> {
+    fn add_joule_heat_coupling_impl(&mut self, thermal_node: usize) -> Result<(), JsValue> {
         let node = self.try_thermal_node_index(thermal_node)?;
         self.inner
             .add_coupling(Box::new(sim_coupling::JouleHeat::to_single_node(node)));
@@ -2321,7 +2652,7 @@ impl WasmWorld {
     /// (同上の既知の限界)。`seed`/`stream`はPRNGの乱数系列
     /// (`SimRng::new`、同じ値なら同じ揺らぎが再現される)。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_brownian_force_coupling(
+    fn add_brownian_force_coupling_impl(
         &mut self,
         body: usize,
         radius: f64,
@@ -2348,7 +2679,7 @@ impl WasmWorld {
     /// (モーターと発電)向け、回路ドメインが有効なシーンでのみ意味を持つ
     /// (`add_dissipation_to_heat_coupling`と同じ既知の限界、対象は熱でなく
     /// 回路)。
-    pub fn add_motor_coupling(
+    fn add_motor_coupling_impl(
         &mut self,
         body: usize,
         axis_x: f64,
@@ -2373,7 +2704,7 @@ impl WasmWorld {
     /// (磁石遊び・銅管落下)向け、回路ドメインが有効なシーンでのみ意味を持つ
     /// (同上の既知の限界)。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_induction_coupling(
+    fn add_induction_coupling_impl(
         &mut self,
         body: usize,
         voltage_source_index: usize,
@@ -2404,7 +2735,7 @@ impl WasmWorld {
     /// 追加する手段が無い」という、上の`add_dissipation_to_heat_coupling`の
     /// docに書かれていたギャップそのものを埋める。戻り値は追加したノードの
     /// index(他のCoupling系メソッドが受け取る`thermal_node`引数にそのまま渡せる)。
-    pub fn add_thermal_node(&mut self, temperature: f64, heat_capacity: f64) -> usize {
+    fn add_thermal_node_impl(&mut self, temperature: f64, heat_capacity: f64) -> usize {
         if self.inner.thermal().is_none() {
             self.inner
                 .enable_thermal(sim_thermal::ThermalSolver::new(293.15));
@@ -2416,7 +2747,7 @@ impl WasmWorld {
     }
 
     /// Inspector/Hierarchy向けの熱ノード数(熱ドメイン未有効なら0)。
-    pub fn thermal_node_count(&self) -> usize {
+    fn thermal_node_count_impl(&self) -> usize {
         self.inner.thermal().map(|t| t.nodes.len()).unwrap_or(0)
     }
 
@@ -2425,7 +2756,7 @@ impl WasmWorld {
     /// 参照する`world.grid_fluid`はシーンJSON経由でしか作れず、UIから一から
     /// 組む経路が無かった既知の欠落を埋める。既に有効なら何もしない(冪等、
     /// 複数回押しても壊れない)。
-    pub fn enable_grid_fluid_2d_domain(&mut self) {
+    fn enable_grid_fluid_2d_domain_impl(&mut self) {
         if self.inner.grid_fluid().is_none() {
             self.inner
                 .enable_grid_fluid(sim_fluid::GridFluid2D::new(32, 32, 0.05));
@@ -2435,7 +2766,7 @@ impl WasmWorld {
     /// 気体区画(`PistonGas`が参照する`world.gas`)を既定パラメータ(空気1mol、
     /// 体積1L、常温)で有効化する——`enable_grid_fluid_2d_domain`と同じ理由・
     /// 同じ冪等性。
-    pub fn enable_gas_compartment(&mut self) {
+    fn enable_gas_compartment_impl(&mut self) {
         if self.inner.gas().is_none() {
             self.inner.enable_gas(sim_thermal::GasCompartment {
                 n_moles: 1.0,
@@ -2451,7 +2782,7 @@ impl WasmWorld {
     /// 先に「＋ 流体 (SPH 水塊)」(`spawn_fluid_block`)でSPH流体を有効化して
     /// もらう必要がある——無効なら明示的に`Err`を返す(他のCoupling系
     /// メソッドの「無言で無効化けより失敗として伝わる」方針と同じ)。
-    pub fn add_sph_rigid_coupling(
+    fn add_sph_rigid_coupling_impl(
         &mut self,
         body: usize,
         radius: f64,
@@ -2471,7 +2802,7 @@ impl WasmWorld {
     /// Add Coupling——`sim_coupling::GridFluidRigid`の薄い写像。D14(煙と渦)向け。
     /// 格子流体ドメインが無効なら明示的に`Err`(`enable_grid_fluid_2d_domain`を
     /// 先に呼ぶ必要がある、`add_sph_rigid_coupling`と同じ方針)。
-    pub fn add_grid_fluid_rigid_coupling(
+    fn add_grid_fluid_rigid_coupling_impl(
         &mut self,
         body: usize,
         half_width: f64,
@@ -2497,7 +2828,7 @@ impl WasmWorld {
     /// 必要がある)。基準体積(`initial_volume`)はUIから明示的に渡す
     /// (シーンJSON側の`gas.volume`と同じ値を渡す規約、`CouplingJson::
     /// PistonGas`のdoc参照)。
-    pub fn add_piston_gas_coupling(
+    fn add_piston_gas_coupling_impl(
         &mut self,
         body: usize,
         axis_x: f64,
@@ -2534,7 +2865,7 @@ impl WasmWorld {
     /// 個別に操作する、という使い方を想定している。
     /// 戻り値は`World::couplings()`の`index`(`CouplingInfo::index`と同じ並び)。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_wing_lift_coupling(
+    fn add_wing_lift_coupling_impl(
         &mut self,
         body: usize,
         wing_area: f64,
@@ -2569,7 +2900,7 @@ impl WasmWorld {
 
     /// Add Coupling——回転球のマグヌス効果による揚力を持つ`sim_coupling::
     /// BuoyancyDrag`を追加する(`add_wing_lift_coupling`と同じ理由で解禁)。
-    pub fn add_magnus_lift_coupling(
+    fn add_magnus_lift_coupling_impl(
         &mut self,
         body: usize,
         radius: f64,
@@ -2599,7 +2930,7 @@ impl WasmWorld {
     /// 翼以外のCouplingを指しても(無効な入力として無言で無視される、
     /// `Command`のdoc参照)エラーにはならない——UIから毎フレーム舵角を送っても
     /// 安全なように、あえて`Result`ではなく無条件に成功する設計にした。
-    pub fn push_set_coupling_control_surface_deflection(
+    fn push_set_coupling_control_surface_deflection_impl(
         &mut self,
         coupling_index: usize,
         deflection_radians: f64,
@@ -2614,7 +2945,7 @@ impl WasmWorld {
     /// Add Coupling——`sim_coupling::BoussinesqBuoyancy`の薄い写像。
     /// 格子流体ドメインが無効なら明示的に`Err`(適用対象が無いため、
     /// `add_grid_fluid_rigid_coupling`と同じ方針)。
-    pub fn add_boussinesq_buoyancy_coupling(
+    fn add_boussinesq_buoyancy_coupling_impl(
         &mut self,
         thermal_node: usize,
         ambient_temperature: f64,
@@ -2645,7 +2976,7 @@ impl WasmWorld {
     /// ための素直な符号化とした。`mode`は`0..=3`の整数(NaturalVerticalPlate/
     /// NaturalSphere/ForcedSphere/ForcedFlatPlate、UIのtitleツールチップ参照)。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_convection_link_coupling(
+    fn add_convection_link_coupling_impl(
         &mut self,
         fluid_node: usize,
         surface_node: usize,
@@ -2690,7 +3021,7 @@ impl WasmWorld {
     /// 枠を明確に超えるため、こちらは専用フォームが要る妥当な残作業として
     /// 正直に残す)。
     #[allow(clippy::too_many_arguments)]
-    pub fn add_phase_change_morph_coupling(
+    fn add_phase_change_morph_coupling_impl(
         &mut self,
         body: usize,
         thermal_node: usize,
@@ -3646,24 +3977,24 @@ mod tests {
             .unwrap();
 
         world
-            .add_distance_joint(chassis, 0.0, 0.0, 0.0, anchor as i32, 0.0, 0.0, 0.0, 2.0)
+            .add_distance_joint_impl(chassis, 0.0, 0.0, 0.0, anchor as i32, 0.0, 0.0, 0.0, 2.0)
             .expect("distance joint between two live bodies must succeed");
         world
-            .add_ball_joint(chassis, 0.0, 0.0, 0.0, -1, 0.0, 2.0, 0.0)
+            .add_ball_joint_impl(chassis, 0.0, 0.0, 0.0, -1, 0.0, 2.0, 0.0)
             .expect("ball joint to a world-fixed point must succeed");
         world
-            .add_slider_joint(chassis, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1, 0.0, 3.0, 0.0)
+            .add_slider_joint_impl(chassis, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1, 0.0, 3.0, 0.0)
             .expect("slider joint must succeed");
         world
-            .add_wheel_joint(
+            .add_wheel_joint_impl(
                 chassis, wheel, 1.0, 0.0, 1.0, 0.4, 2.5, 0.7, 0.0, 12.0, 200.0,
             )
             .expect("wheel joint must succeed");
         world
-            .add_hinge_motor_joint(anchor, 0.0, 1.0, 0.0, 1.0, 5.0, 0.5, 10.0)
+            .add_hinge_motor_joint_impl(anchor, 0.0, 1.0, 0.0, 1.0, 5.0, 0.5, 10.0)
             .expect("hinge motor joint must succeed");
 
-        let text = world.joint_info_text(-1);
+        let text = world.joint_info_text_impl(-1);
         for kind in [
             "DistanceJoint",
             "BallJoint",
@@ -3747,17 +4078,17 @@ mod tests {
             .unwrap();
 
         world
-            .add_image_charge_force_coupling(body, 1e-6, 1.0, 0.0, 0.0, 2.0)
+            .add_image_charge_force_coupling_impl(body, 1e-6, 1.0, 0.0, 0.0, 2.0)
             .expect("image charge force coupling must succeed");
         world
-            .add_lorentz_force_coupling(body, 1e-6)
+            .add_lorentz_force_coupling_impl(body, 1e-6)
             .expect("lorentz force coupling must succeed");
         world
-            .add_buoyancy_drag_coupling(body, 0.0, 1000.0)
+            .add_buoyancy_drag_coupling_impl(body, 0.0, 1000.0)
             .expect("buoyancy drag coupling must succeed");
 
-        assert_eq!(world.coupling_count(), 3);
-        let text = world.coupling_info_text(-1);
+        assert_eq!(world.coupling_count_impl(), 3);
+        let text = world.coupling_info_text_impl(-1);
         for kind in ["ImageChargeForce", "LorentzForce", "BuoyancyDrag"] {
             assert!(
                 text.contains(kind),
@@ -3786,23 +4117,23 @@ mod tests {
             .unwrap();
 
         world
-            .add_dissipation_to_heat_coupling(0)
+            .add_dissipation_to_heat_coupling_impl(0)
             .expect("dissipation to heat with valid thermal node must succeed");
         world
-            .add_joule_heat_coupling(0)
+            .add_joule_heat_coupling_impl(0)
             .expect("joule heat with valid thermal node must succeed");
         world
-            .add_brownian_force_coupling(body, 0.05, 1e-3, 0, 1, 2)
+            .add_brownian_force_coupling_impl(body, 0.05, 1e-3, 0, 1, 2)
             .expect("brownian force with valid thermal node must succeed");
         world
-            .add_motor_coupling(body, 0.0, 1.0, 0.0, 0, 0.1)
+            .add_motor_coupling_impl(body, 0.0, 1.0, 0.0, 0, 0.1)
             .expect("motor coupling with valid voltage source must succeed");
         world
-            .add_induction_coupling(body, 0, 0.5, 1.0, 0.0, 1.0, 0.0)
+            .add_induction_coupling_impl(body, 0, 0.5, 1.0, 0.0, 1.0, 0.0)
             .expect("induction coupling with valid voltage source must succeed");
-        assert_eq!(world.coupling_count(), 5);
+        assert_eq!(world.coupling_count_impl(), 5);
 
-        let text = world.coupling_info_text(-1);
+        let text = world.coupling_info_text_impl(-1);
         for kind in [
             "DissipationToHeat",
             "JouleHeat",
@@ -3835,39 +4166,39 @@ mod tests {
             .unwrap();
 
         // 熱ノードをUIから新規作成(index 1、既定シーンのindex 0は別ノード)。
-        let node = world.add_thermal_node(273.15, 100.0);
+        let node = world.add_thermal_node_impl(273.15, 100.0);
         assert_eq!(node, 1);
-        assert_eq!(world.thermal_node_count(), 2);
+        assert_eq!(world.thermal_node_count_impl(), 2);
 
         world
-            .add_phase_change_morph_coupling(
+            .add_phase_change_morph_coupling_impl(
                 body, node, 273.15, 334_000.0, 2100.0, 4186.0, 1.0, 10.0, -50_000.0,
             )
             .expect("phase change morph must succeed once a thermal node exists");
 
         world.spawn_fluid_block(); // SPHドメインを有効化。
         world
-            .add_sph_rigid_coupling(body, 0.2, 12)
+            .add_sph_rigid_coupling_impl(body, 0.2, 12)
             .expect("sph rigid must succeed once the SPH domain exists");
 
-        world.enable_grid_fluid_2d_domain();
+        world.enable_grid_fluid_2d_domain_impl();
         world
-            .add_grid_fluid_rigid_coupling(body, 0.3, 0.3)
+            .add_grid_fluid_rigid_coupling_impl(body, 0.3, 0.3)
             .expect("grid fluid rigid must succeed once the grid fluid domain exists");
         world
-            .add_boussinesq_buoyancy_coupling(node, 293.15, 3.4e-3)
+            .add_boussinesq_buoyancy_coupling_impl(node, 293.15, 3.4e-3)
             .expect("boussinesq buoyancy must succeed once the grid fluid domain exists");
         world
-            .add_convection_link_coupling(0, node, 0.01, 0.05, 3, 0.026, 1.5e-5, 0.71, 0.0)
+            .add_convection_link_coupling_impl(0, node, 0.01, 0.05, 3, 0.026, 1.5e-5, 0.71, 0.0)
             .expect("convection link must succeed with valid thermal node indices");
 
-        world.enable_gas_compartment();
+        world.enable_gas_compartment_impl();
         world
-            .add_piston_gas_coupling(body, 0.0, 1.0, 0.0, 0.01, 0.001)
+            .add_piston_gas_coupling_impl(body, 0.0, 1.0, 0.0, 0.01, 0.001)
             .expect("piston gas must succeed once the gas compartment exists");
 
-        assert_eq!(world.coupling_count(), 6);
-        let text = world.coupling_info_text(-1);
+        assert_eq!(world.coupling_count_impl(), 6);
+        let text = world.coupling_info_text_impl(-1);
         for kind in [
             "PhaseChangeMorph",
             "SphRigid",
@@ -3904,7 +4235,7 @@ mod tests {
             .unwrap();
 
         let wing_index = world
-            .add_wing_lift_coupling(body, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.225, 1.81e-5)
+            .add_wing_lift_coupling_impl(body, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.225, 1.81e-5)
             .expect("wing lift coupling must succeed");
         assert_eq!(wing_index, 0);
 
@@ -3912,12 +4243,12 @@ mod tests {
             .spawn_sphere(3.0, 5.0, 0.0, 0.3, "アルミニウム".to_string())
             .unwrap();
         let magnus_index = world
-            .add_magnus_lift_coupling(magnus_body, 0.3, 1.225, 1.81e-5)
+            .add_magnus_lift_coupling_impl(magnus_body, 0.3, 1.225, 1.81e-5)
             .expect("magnus lift coupling must succeed");
         assert_eq!(magnus_index, 1);
 
-        assert_eq!(world.coupling_count(), 2);
-        let text = world.coupling_info_text(-1);
+        assert_eq!(world.coupling_count_impl(), 2);
+        let text = world.coupling_info_text_impl(-1);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines.len(),
@@ -3928,9 +4259,80 @@ mod tests {
 
         // 操縦面の舵角をCommand経由で設定し、1step進めてもパニックしないこと
         // (無効なindexを渡しても無言で無視される、Commandのdoc参照)。
-        world.push_set_coupling_control_surface_deflection(wing_index, 0.1);
-        world.push_set_coupling_control_surface_deflection(9999, 0.1);
+        world.push_set_coupling_control_surface_deflection_impl(wing_index, 0.1);
+        world.push_set_coupling_control_surface_deflection_impl(9999, 0.1);
         world.step();
+    }
+
+    /// **Task#8第一弾の回帰テスト**: `apply_component`/`read_component`が
+    /// 実際にJoint/Coupling/熱ノードの追加・内省を代替できることを、旧来の
+    /// 専用メソッド(`_impl`版)を直接呼ぶテストとは別に、JSON経由の呼び出し
+    /// 規約そのものを通して確認する——フロントエンドが実際に使うのと同じ
+    /// 呼び出し方(kind文字列+JSONペイロード)。
+    #[test]
+    fn apply_component_and_read_component_add_a_joint_and_a_coupling_via_generic_dispatch() {
+        let mut world = new_world();
+        let body_a = world
+            .spawn_box(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
+            .unwrap();
+        let body_b = world
+            .spawn_box(2.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
+            .unwrap();
+
+        let result = world
+            .apply_component(
+                "add_distance_joint",
+                &format!(
+                    r#"{{"body_a":{body_a},"ax":0,"ay":0,"az":0,"body_b":{body_b},"bx":0,"by":0,"bz":0,"length":2.0}}"#
+                ),
+            )
+            .expect("add_distance_joint via apply_component must succeed");
+        assert_eq!(result, "{\"index\":0}");
+        let joint_text = world
+            .read_component("joint_info_text", "-1")
+            .expect("joint_info_text via read_component must succeed");
+        assert!(
+            joint_text.starts_with("DistanceJoint\t"),
+            "actual: {joint_text}"
+        );
+
+        let result = world
+            .apply_component(
+                "add_lorentz_force_coupling",
+                &format!(r#"{{"body":{body_a},"charge":1e-6}}"#),
+            )
+            .expect("add_lorentz_force_coupling via apply_component must succeed");
+        assert_eq!(result, "{}");
+        let count = world
+            .read_component("coupling_count", "")
+            .expect("coupling_count via read_component must succeed");
+        assert_eq!(count, "1");
+
+        // 熱ノード追加はindexを返す作成系オペレーション。
+        let result = world
+            .apply_component(
+                "add_thermal_node",
+                r#"{"temperature":293.15,"heat_capacity":100.0}"#,
+            )
+            .expect("add_thermal_node via apply_component must succeed");
+        assert_eq!(result, "{\"index\":1}"); // 既定シーンが既にnode 0を持つ
+        let node_count = world
+            .read_component("thermal_node_count", "")
+            .expect("thermal_node_count via read_component must succeed");
+        assert_eq!(node_count, "2");
+
+        // 未知のkindは両メソッドともErrになる(無言で無視しない)——ただし
+        // `Result::Err`側の`JsValue`をネイティブテストで構築するとプロセス
+        // ごとSIGABRTする既知の制約(モジュールdoc参照)があるため、ここでは
+        // 呼ばない。Playwright側(実wasmターゲット)で未知kindのエラー伝播を
+        // 確認している。
+
+        // `component_schema`が新設した25個のapply kind・5個のread kindを
+        // 過不足なく列挙していることを確認する。
+        let schema: serde_json::Value = serde_json::from_str(&world.component_schema())
+            .expect("component_schema must produce valid JSON");
+        assert_eq!(schema["apply"].as_array().unwrap().len(), 25);
+        assert_eq!(schema["read"].as_array().unwrap().len(), 5);
     }
 
     /// `export_scene_json`が`sim_world::to_scenario`経由に置き換わったこと

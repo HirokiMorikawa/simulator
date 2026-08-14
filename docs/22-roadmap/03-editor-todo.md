@@ -63,7 +63,45 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (頂点列のみ)ため、体積/慣性/AABBはAABB近似で対応、接触生成(実際に
   衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
-- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(現状118本・2,798行)
+- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第一弾完了**、
+  元165本→139本)
+  **残タスク完遂増分**(レビュー「Full collapse now」指示への対応、着手前は
+  本文書のTODO群の中で唯一の未着手項目だった)。第一弾でJoint(5種の追加)・
+  Coupling(14種の追加+操縦面舵角の実行時変更)・熱ノード追加/流体・気体
+  ドメイン有効化(3種)、計25個の「追加/設定」系メソッドと、対になる内省系
+  5個(`coupling_count`/`coupling_info_text`/`coupling_kind_summary`/
+  `joint_info_text`/`thermal_node_count`)——計30個——を、新設した
+  `apply_component(kind, payload_json)`/`read_component(kind, arg)`/
+  `component_schema()`の3メソッドへ畳んだ。実装そのものは変えていない
+  (各`pub fn ○○`を非公開の`fn ○○_impl`ヘルパーへ改名し、新メソッドから
+  `match kind`で呼ぶだけ——ロジックの一字一句は不変、wasm-bindgenが生成する
+  JS向けシグネチャの本数だけが減った)。フロントエンド(`main.ts`のAdd
+  Joint/Add Couplingフォーム・Inspectorの内省表示・Settingsのドメイン
+  パネル)は全て新メソッド経由に更新、旧メソッド名への直接呼び出しは
+  (プロダクションコード・Playwright受け入れテスト・QAスクリプトとも)
+  0件であることを確認済み。
+
+  **正直な適用範囲**: 毎フレーム呼ばれる型付き配列の読み出し系
+  (`body_position_at_f32`/`quantum_1d_density_f32`/`fluid_particle_positions_f32`
+  等、レンダリングループのホットパス、約24個)はこの取り組みの対象外のまま
+  残す——JSON文字列への都度変換は60fpsのレンダリングループでは明白な性能
+  後退であり、`schema/read/apply`化のそもそもの目的(重複ボイラープレートの
+  削減、型が合わなくてもコンパイルが通ってしまう表面積の縮小)とは無関係な
+  代償を払うことになるため。`new`/`from_scene_json`/`import_scene_json`/
+  `step`/`run_headless_scenario_json`等のライフサイクル系メソッドも同様に
+  対象外(そもそも「コンポーネントの追加/設定/内省」という枠に当てはまらない)。
+  残る「追加/設定/内省」系メソッド(body系・environment系・circuit editor系・
+  frame系・snapshot/bookmark系等、まだ100本強)は今後の増分で同じ2メソッドへ
+  引き続き畳んでいく。
+
+  検証: Rust側新規テスト(`apply_component`/`read_component`をJSON経由で
+  実際に呼び、Joint/Coupling/熱ノードの追加・内省が代替できることを確認、
+  `component_schema`が新設した25/5個のkindを過不足なく列挙することも確認)、
+  `_impl`化した既存30メソッドのテストは全て`_impl`呼び出しへ書き換えて
+  維持(cargo test -p sim-wasm 24/24全緑)。cargo test --workspace全緑、
+  fmt/clippyクリーン、Playwrightスモーク28/28・QA16/16とも維持
+  (`acceptance-d24.spec.ts`・`qa-coupling.mjs`の直接wasm呼び出し2箇所も
+  新メソッド経由に更新)。
 - [x] Inspectorに Add Component とスキーマ駆動フォームを実装する(**Jointの5種のみ**)
   `World::joints()`/`JointKind`にWheelJointが無く(追加はできても内省層に
   一切出ず、Inspectorから見えなかった既存の欠落)を先に修正。

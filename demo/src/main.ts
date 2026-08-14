@@ -1131,10 +1131,25 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   wireThrustForm(index);
 }
 
+/// wasm境界を`schema`/`read`/`apply`の3メソッドへ畳む取り組み(**残タスク
+/// 完遂増分**、Task#8第一弾)向けの薄いラッパー。`apply_component`は成功時
+/// JSON文字列(作成系は`{"index":N}`、それ以外は`{}`)を返す——呼び出し側は
+/// パース済みの値として受け取る。失敗時は他のwasmメソッドと同じく例外を投げる
+/// (呼び出し元の`try`/`catch`はそのまま使える)。
+function applyComponent(
+  world: WasmWorld,
+  kind: string,
+  payload: Record<string, number>,
+): { index?: number } {
+  return JSON.parse(world.apply_component(kind, JSON.stringify(payload))) as {
+    index?: number;
+  };
+}
+
 /// `couplingRow`が`BuoyancyDrag`の各行に出す「操縦面舵角」欄を配線する
-/// (**残タスク完遂の縦串⑤増分**)。度→ラジアン変換して
-/// `push_set_coupling_control_surface_deflection`へ送るだけの薄い配線——
-/// Wing揚力を持たない結合では`Coupling::set_scalar_param`が無言で無視する
+/// (**残タスク完遂の縦串⑤増分**)。度→ラジアン変換して`apply_component`
+/// (kind="push_set_coupling_control_surface_deflection")へ送るだけの薄い配線
+/// ——Wing揚力を持たない結合では`Coupling::set_scalar_param`が無言で無視する
 /// (`couplingRow`のdoc参照)ので、対象を絞り込む必要が無い。
 function wireCouplingControlSurfaceInputs(world: WasmWorld): void {
   document
@@ -1144,10 +1159,10 @@ function wireCouplingControlSurfaceInputs(world: WasmWorld): void {
       input.addEventListener("change", () => {
         const degrees = Number(input.value);
         if (!Number.isFinite(degrees)) return;
-        world.push_set_coupling_control_surface_deflection(
-          couplingIndex,
-          (degrees * Math.PI) / 180,
-        );
+        applyComponent(world, "push_set_coupling_control_surface_deflection", {
+          coupling_index: couplingIndex,
+          deflection_radians: (degrees * Math.PI) / 180,
+        });
       });
     });
 }
@@ -1222,43 +1237,71 @@ function wireAddJointForm(world: WasmWorld, index: number): void {
     try {
       switch (kindSelect.value) {
         case "distance":
-          world.add_distance_joint(bodyA, ax, ay, az, bodyB, bx, by, bz, p1);
-          break;
-        case "ball":
-          world.add_ball_joint(bodyA, ax, ay, az, bodyB, bx, by, bz);
-          break;
-        case "slider":
-          world.add_slider_joint(
-            bodyA,
+          applyComponent(world, "add_distance_joint", {
+            body_a: bodyA,
             ax,
             ay,
             az,
-            axisX,
-            axisY,
-            axisZ,
-            bodyB,
+            body_b: bodyB,
             bx,
             by,
             bz,
-          );
+            length: p1,
+          });
           break;
-        case "wheel":
-          world.add_wheel_joint(
-            bodyA,
-            bodyB,
+        case "ball":
+          applyComponent(world, "add_ball_joint", {
+            body_a: bodyA,
             ax,
             ay,
             az,
-            p1,
-            p2,
-            p3,
-            p4,
-            p5,
-            p6,
-          );
+            body_b: bodyB,
+            bx,
+            by,
+            bz,
+          });
+          break;
+        case "slider":
+          applyComponent(world, "add_slider_joint", {
+            body_a: bodyA,
+            ax,
+            ay,
+            az,
+            axis_x: axisX,
+            axis_y: axisY,
+            axis_z: axisZ,
+            body_b: bodyB,
+            bx,
+            by,
+            bz,
+          });
+          break;
+        case "wheel":
+          applyComponent(world, "add_wheel_joint", {
+            chassis: bodyA,
+            wheel: bodyB,
+            acx: ax,
+            acy: ay,
+            acz: az,
+            rest_length: p1,
+            frequency: p2,
+            damping_ratio: p3,
+            steer_angle: p4,
+            motor_speed: p5,
+            motor_max_torque: p6,
+          });
           break;
         case "hinge_motor":
-          world.add_hinge_motor_joint(bodyA, axisX, axisY, axisZ, p1, p2, p3, p4);
+          applyComponent(world, "add_hinge_motor_joint", {
+            body: bodyA,
+            axis_x: axisX,
+            axis_y: axisY,
+            axis_z: axisZ,
+            theta_target: p1,
+            kp: p2,
+            kd: p3,
+            torque_max: p4,
+          });
           break;
       }
     } catch (err) {
@@ -1298,109 +1341,148 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
     try {
       switch (kindSelect.value) {
         case "image_charge_force":
-          world.add_image_charge_force_coupling(body, p1, p2, p3, p4, p5);
+          applyComponent(world, "add_image_charge_force_coupling", {
+            body,
+            charge: p1,
+            plane_normal_x: p2,
+            plane_normal_y: p3,
+            plane_normal_z: p4,
+            plane_d: p5,
+          });
           break;
         case "lorentz_force":
-          world.add_lorentz_force_coupling(body, p1);
+          applyComponent(world, "add_lorentz_force_coupling", { body, charge: p1 });
           break;
         case "buoyancy_drag":
-          world.add_buoyancy_drag_coupling(body, p1, p2);
+          applyComponent(world, "add_buoyancy_drag_coupling", {
+            body,
+            water_level: p1,
+            water_density: p2,
+          });
           break;
         case "dissipation_to_heat":
-          world.add_dissipation_to_heat_coupling(Math.trunc(p1));
+          applyComponent(world, "add_dissipation_to_heat_coupling", {
+            thermal_node: Math.trunc(p1),
+          });
           break;
         case "joule_heat":
-          world.add_joule_heat_coupling(Math.trunc(p1));
+          applyComponent(world, "add_joule_heat_coupling", {
+            thermal_node: Math.trunc(p1),
+          });
           break;
         case "brownian_force":
-          world.add_brownian_force_coupling(
+          applyComponent(world, "add_brownian_force_coupling", {
             body,
-            p1,
-            p2,
-            Math.trunc(p3),
-            BigInt(Math.trunc(p4)),
-            BigInt(Math.trunc(p5)),
-          );
+            radius: p1,
+            viscosity: p2,
+            thermal_node: Math.trunc(p3),
+            seed: Math.trunc(p4),
+            stream: Math.trunc(p5),
+          });
           break;
         case "motor_coupling":
-          world.add_motor_coupling(
+          applyComponent(world, "add_motor_coupling", {
             body,
-            axisX,
-            axisY,
-            axisZ,
-            Math.trunc(p1),
-            p2,
-          );
+            axis_x: axisX,
+            axis_y: axisY,
+            axis_z: axisZ,
+            voltage_source_index: Math.trunc(p1),
+            torque_constant: p2,
+          });
           break;
         case "induction_coupling":
-          world.add_induction_coupling(
+          applyComponent(world, "add_induction_coupling", {
             body,
-            Math.trunc(p1),
-            p2,
-            p3,
-            axisX,
-            axisY,
-            axisZ,
-          );
+            voltage_source_index: Math.trunc(p1),
+            length: p2,
+            magnetic_field: p3,
+            axis_x: axisX,
+            axis_y: axisY,
+            axis_z: axisZ,
+          });
           break;
         case "phase_change_morph":
           // 材質(融点・融解潜熱・固相/液相比熱)もUIから明示的に指定する
           // (**残タスク完遂増分**、Axisの3欄を材質の一部として流用)。
-          world.add_phase_change_morph_coupling(
+          applyComponent(world, "add_phase_change_morph_coupling", {
             body,
-            Math.trunc(p1),
-            axisX,
-            axisY,
-            axisZ,
-            p2,
-            p3,
-            p4,
-            p5,
-          );
+            thermal_node: Math.trunc(p1),
+            melting_temperature: axisX,
+            latent_heat_fusion: axisY,
+            specific_heat_solid: axisZ,
+            specific_heat_liquid: p2,
+            initial_mass: p3,
+            conductance: p4,
+            initial_enthalpy: p5,
+          });
           break;
         case "sph_rigid":
-          world.add_sph_rigid_coupling(body, p1, Math.trunc(p2));
+          applyComponent(world, "add_sph_rigid_coupling", {
+            body,
+            radius: p1,
+            boundary_points: Math.trunc(p2),
+          });
           break;
         case "grid_fluid_rigid":
-          world.add_grid_fluid_rigid_coupling(body, p1, p2);
+          applyComponent(world, "add_grid_fluid_rigid_coupling", {
+            body,
+            half_width: p1,
+            half_height: p2,
+          });
           break;
         case "boussinesq_buoyancy":
-          world.add_boussinesq_buoyancy_coupling(Math.trunc(p1), p2, p3);
+          applyComponent(world, "add_boussinesq_buoyancy_coupling", {
+            thermal_node: Math.trunc(p1),
+            ambient_temperature: p2,
+            thermal_expansion_coefficient: p3,
+          });
           break;
         case "convection_link":
           // 流体物性値(熱伝導率・動粘性・プラントル数)もUIから明示的に指定する
           // (**残タスク完遂増分**、Axisの3欄を流体物性値として流用)。
-          world.add_convection_link_coupling(
-            Math.trunc(p1),
-            Math.trunc(p2),
-            p3,
-            p4,
-            Math.trunc(p5),
-            axisX,
-            axisY,
-            axisZ,
-            p6,
-          );
+          applyComponent(world, "add_convection_link_coupling", {
+            fluid_node: Math.trunc(p1),
+            surface_node: Math.trunc(p2),
+            area: p3,
+            characteristic_length: p4,
+            mode: Math.trunc(p5),
+            fluid_thermal_conductivity: axisX,
+            kinematic_viscosity: axisY,
+            prandtl_number: axisZ,
+            thermal_expansion_coefficient: p6,
+          });
           break;
         case "piston_gas":
-          world.add_piston_gas_coupling(body, axisX, axisY, axisZ, p1, p2);
+          applyComponent(world, "add_piston_gas_coupling", {
+            body,
+            axis_x: axisX,
+            axis_y: axisY,
+            axis_z: axisZ,
+            area: p1,
+            initial_volume: p2,
+          });
           break;
         case "wing_lift":
-          world.add_wing_lift_coupling(
+          applyComponent(world, "add_wing_lift_coupling", {
             body,
-            p4,
-            axisX,
-            axisY,
-            axisZ,
-            p1,
-            p2,
-            p3,
-            p5,
-            p6,
-          );
+            wing_area: p4,
+            chord_x: axisX,
+            chord_y: axisY,
+            chord_z: axisZ,
+            span_x: p1,
+            span_y: p2,
+            span_z: p3,
+            atmosphere_density: p5,
+            atmosphere_viscosity: p6,
+          });
           break;
         case "magnus_lift":
-          world.add_magnus_lift_coupling(body, p1, p2, p3);
+          applyComponent(world, "add_magnus_lift_coupling", {
+            body,
+            radius: p1,
+            atmosphere_density: p2,
+            atmosphere_viscosity: p3,
+          });
           break;
       }
     } catch (err) {
@@ -1595,7 +1677,7 @@ function renderInspectorExtraComponents(
   // 設計 §1.3 は「種別(Ball/Hinge/Slider/…)・接続 Body ID・軸・制限・モータ」を
   // 要求している。`joint_info_text`(タブ区切り)から全項目を出す。
   const jointLines = world
-    .joint_info_text(index)
+    .read_component("joint_info_text", String(index))
     .split("\n")
     .filter((l) => l.length > 0);
   if (jointLines.length > 0) {
@@ -1644,7 +1726,7 @@ function renderInspectorExtraComponents(
     return { kind, description, domains, bodies, index: Number(indexStr) };
   };
   const allCouplings = world
-    .coupling_info_text(-1)
+    .read_component("coupling_info_text", "-1")
     .split("\n")
     .filter((l) => l.length > 0)
     .map(parseCoupling);
@@ -1668,7 +1750,7 @@ function renderInspectorExtraComponents(
     domains: string;
     index: number;
   }) =>
-    `<div class="inspector-field" title="${escape(world.coupling_kind_summary(c.kind))}">` +
+    `<div class="inspector-field" title="${escape(world.read_component("coupling_kind_summary", c.kind))}">` +
     `<span>${escape(c.kind)}</span>` +
     `<span>${escape(c.description)} <em>[${escape(c.domains)}]</em></span></div>` +
     (c.kind === "BuoyancyDrag"
@@ -3760,7 +3842,8 @@ async function setUpSceneView(
   );
   function refreshThermalNodeCountDisplay() {
     if (thermalNodeCountDisplay) {
-      thermalNodeCountDisplay.textContent = `(現在 ${world.thermal_node_count()} 個)`;
+      const count = world.read_component("thermal_node_count", "");
+      thermalNodeCountDisplay.textContent = `(現在 ${count} 個)`;
     }
   }
   refreshThermalNodeCountDisplay();
@@ -3777,14 +3860,14 @@ async function setUpSceneView(
       window.alert("温度・熱容量には正しい数値を入力してください(熱容量は正の値)。");
       return;
     }
-    world.add_thermal_node(temperature, heatCapacity);
+    applyComponent(world, "add_thermal_node", { temperature, heat_capacity: heatCapacity });
     refreshThermalNodeCountDisplay();
   });
   document.getElementById("btn-enable-grid-fluid")?.addEventListener("click", () => {
-    world.enable_grid_fluid_2d_domain();
+    applyComponent(world, "enable_grid_fluid_2d_domain", {});
   });
   document.getElementById("btn-enable-gas")?.addEventListener("click", () => {
-    world.enable_gas_compartment();
+    applyComponent(world, "enable_gas_compartment", {});
   });
 
   /// グリッドスナップ幅 [m](設計 §1.2「グリッド・スナップ(既定 10 cm、変更可)」)。
