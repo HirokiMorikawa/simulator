@@ -310,7 +310,7 @@ impl WasmWorld {
     }
 
     /// Hierarchyパネルが列挙するボディ数(モジュールdoc「複数ボディ対応」参照)。
-    pub fn body_count(&self) -> usize {
+    fn body_count_impl(&self) -> usize {
         self.bodies.len()
     }
 
@@ -343,7 +343,7 @@ impl WasmWorld {
         let id = self.bodies.get(index).map(|meta| meta.id).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "body index {index} out of range (body_count={})",
-                self.body_count()
+                self.body_count_impl()
             ))
         })?;
         if !self.inner.is_body_alive(id) {
@@ -365,7 +365,7 @@ impl WasmWorld {
     }
 
     /// Hierarchyパネル表示用のラベル。
-    pub fn body_label_at(&self, index: usize) -> Result<String, JsValue> {
+    fn body_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
         Ok(self.try_body_meta_at(index)?.label.clone())
     }
 
@@ -376,7 +376,7 @@ impl WasmWorld {
     /// (`import_scene_json`)で任意のindexに静的ボディが追加され得るようになった
     /// ため、実際の`BodyType`を見るクエリに置き換えた——`body_shape_label_at`が
     /// 既に辿った同じ理由)。
-    pub fn body_is_static_at(&self, index: usize) -> Result<bool, JsValue> {
+    fn body_is_static_at_impl(&self, index: usize) -> Result<bool, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(matches!(
             self.inner.mechanics().bodies.body_type[id.index as usize],
@@ -389,7 +389,7 @@ impl WasmWorld {
     /// フォーマットする(以前は`SpawnedBodyMeta`にスポーン時の文字列を固定で
     /// 覚えておく縮約実装だったが、Scale Gizmoで寸法が変わりうるようになった
     /// ため、常に最新の値を返す実クエリに置き換えた)。
-    pub fn body_shape_label_at(&self, index: usize) -> Result<String, JsValue> {
+    fn body_shape_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.shape_of(id.index as usize) {
@@ -419,7 +419,7 @@ impl WasmWorld {
     /// "capsule"を返さない実バグがあった(フロント`duplicate()`の
     /// `kind === "capsule"`分岐が到達不能だった)。Compound/ConvexMeshの
     /// UI作成経路を追加するのと合わせ、6種すべてを網羅する完全一致へ修正。
-    pub fn body_shape_kind_at(&self, index: usize) -> Result<String, JsValue> {
+    fn body_shape_kind_at_impl(&self, index: usize) -> Result<String, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.shape_of(id.index as usize) {
@@ -437,7 +437,7 @@ impl WasmWorld {
     /// box→`[hx,hy,hz]`、capsule→`[radius,half_height]`、
     /// plane→`[nx,ny,nz,d]`、compound/convex_mesh→空配列(可変長構造は
     /// 平坦なf64配列で表現できないため——Prefab保存も両形状は対象外のまま)。
-    pub fn body_shape_params_f64_at(&self, index: usize) -> Result<Float64Array, JsValue> {
+    fn body_shape_params_f64_at_impl(&self, index: usize) -> Result<Float64Array, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.shape_of(id.index as usize) {
@@ -465,7 +465,7 @@ impl WasmWorld {
     /// 決め打ちする」縮約をせず、複製後の実際の形状からメッシュを
     /// 再構築できるようにする(シーンJSON importと同じ`meshFromShapeJson`
     /// を再利用できる形で返す)。
-    pub fn body_shape_json_at(&self, index: usize) -> Result<String, JsValue> {
+    fn body_shape_json_at_impl(&self, index: usize) -> Result<String, JsValue> {
         let id = self.try_body_id_at(index)?;
         let shape = self.inner.mechanics().bodies.shape_of(id.index as usize);
         let shape_json = sim_world::shape_to_shape_json(shape);
@@ -474,7 +474,7 @@ impl WasmWorld {
     }
 
     /// Inspector表示用の材質名。
-    pub fn body_material_label_at(&self, index: usize) -> Result<String, JsValue> {
+    fn body_material_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
         Ok(self.try_body_meta_at(index)?.material_label.clone())
     }
 
@@ -484,7 +484,7 @@ impl WasmWorld {
     /// 未知の名前なら`JsValue`エラーを返す(呼び出し側UIが`SPAWN_MATERIALS`等の
     /// 既知の名前だけを渡す前提だが、**2026-07-27の監査で修正**: 以前は
     /// `panic!`していた——`try_body_id_at`のdocと同じ理由でResult化した)。
-    pub fn material_properties_f64(&self, name: String) -> Result<Float64Array, JsValue> {
+    fn material_properties_f64_impl(&self, name: String) -> Result<Float64Array, JsValue> {
         let id = self
             .inner
             .materials()
@@ -507,7 +507,7 @@ impl WasmWorld {
     /// index(`body_count`と同じ体系)を返す。未知の材質名なら`JsValue`エラーを
     /// 返す(呼び出し側UIが既知の名前だけを選択肢にする前提だが、
     /// `material_properties_f64`のdocと同じ理由でResult化した)。
-    pub fn spawn_sphere(
+    fn spawn_sphere_impl(
         &mut self,
         x: f64,
         y: f64,
@@ -523,7 +523,7 @@ impl WasmWorld {
         let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, material);
         desc.transform.position = sim_math::Vec3::new(x, y, z);
         let id = self.inner.create_body(desc);
-        let index = self.body_count();
+        let index = self.body_count_impl();
         let label = format!("Sphere_{index}");
         self.bodies.push(SpawnedBodyMeta {
             id,
@@ -547,7 +547,7 @@ impl WasmWorld {
     /// 下層スロットを詰めないのと同じ「無効化に留める」方針で揃える。
     /// 以後 `body_is_removed_at` が `true` を返し、フロント側が Hierarchy の行と
     /// Scene View のメッシュを隠す。
-    pub fn remove_body_at(&mut self, index: usize) -> Result<(), JsValue> {
+    fn remove_body_at_impl(&mut self, index: usize) -> Result<(), JsValue> {
         let id = self.try_body_id_at(index)?;
         if index == 0 {
             return Err(JsValue::from_str("床は削除できません(シーンの基準面)"));
@@ -558,7 +558,7 @@ impl WasmWorld {
     }
 
     /// `index`番目のボディが `remove_body_at` で削除済みか。
-    pub fn body_is_removed_at(&self, index: usize) -> Result<bool, JsValue> {
+    fn body_is_removed_at_impl(&self, index: usize) -> Result<bool, JsValue> {
         Ok(self.try_body_meta_at(index)?.removed)
     }
 
@@ -569,7 +569,7 @@ impl WasmWorld {
     /// ——Scale Gizmo の倍率は `base_shape × scale` として保持されており、複製後の
     /// ボディも同じ規約(`set_body_scale_at`)に乗せる必要があるため。倍率まで
     /// 引き継ぎたい場合は複製後に改めてスケールを掛ける(既知の限界)。
-    pub fn duplicate_body_at(&mut self, index: usize, offset: f64) -> Result<usize, JsValue> {
+    fn duplicate_body_at_impl(&mut self, index: usize, offset: f64) -> Result<usize, JsValue> {
         let meta = self.try_body_meta_at(index)?;
         let base_shape = meta.base_shape.clone();
         let material_label = meta.material_label.clone();
@@ -586,7 +586,7 @@ impl WasmWorld {
         let mut desc = RigidBodyDesc::dynamic(base_shape.clone(), material);
         desc.transform.position = position + sim_math::Vec3::new(offset, 0.0, 0.0);
         let id = self.inner.create_body(desc);
-        let new_index = self.body_count();
+        let new_index = self.body_count_impl();
         let label = format!("{}_copy_{new_index}", self.bodies[index].label);
         self.bodies.push(SpawnedBodyMeta {
             id,
@@ -605,7 +605,7 @@ impl WasmWorld {
     /// (平面/球/カプセル)を同増分で実装した。
     /// **カプセル×箱の接触は未実装**なので、箱と並べても衝突しない
     /// (パニックはしない、`collision.rs`の該当arm参照)。
-    pub fn spawn_capsule(
+    fn spawn_capsule_impl(
         &mut self,
         x: f64,
         y: f64,
@@ -626,7 +626,7 @@ impl WasmWorld {
         let mut desc = RigidBodyDesc::dynamic(shape.clone(), material);
         desc.transform.position = sim_math::Vec3::new(x, y, z);
         let id = self.inner.create_body(desc);
-        let index = self.body_count();
+        let index = self.body_count_impl();
         let label = format!("Capsule_{index}");
         self.bodies.push(SpawnedBodyMeta {
             id,
@@ -647,7 +647,7 @@ impl WasmWorld {
     /// ——`World::create_body`が実際に呼ばれる`compound_body_can_be_created_
     /// and_settles_on_the_ground_without_panicking`のL字形と同じ構成(既に
     /// 「地面に落ちて静止する」ところまでヘッドレスで検証済みの形)。
-    pub fn spawn_compound_l_shape(
+    fn spawn_compound_l_shape_impl(
         &mut self,
         x: f64,
         y: f64,
@@ -684,7 +684,7 @@ impl WasmWorld {
         let mut desc = RigidBodyDesc::dynamic(shape.clone(), material);
         desc.transform.position = sim_math::Vec3::new(x, y, z);
         let id = self.inner.create_body(desc);
-        let index = self.body_count();
+        let index = self.body_count_impl();
         let label = format!("Compound_{index}");
         self.bodies.push(SpawnedBodyMeta {
             id,
@@ -704,7 +704,7 @@ impl WasmWorld {
     /// (`convex_mesh_of_a_cubes_corners_matches_the_equivalent_box`と同じ)を
     /// 既定として提供する——ConvexMeshは接触生成が`None`(すり抜け、既知の
     /// 限界、モジュールdoc参照)なので、他の形状と重ねると実際にすり抜ける。
-    pub fn spawn_convex_mesh_cube(
+    fn spawn_convex_mesh_cube_impl(
         &mut self,
         x: f64,
         y: f64,
@@ -729,7 +729,7 @@ impl WasmWorld {
         let mut desc = RigidBodyDesc::dynamic(shape.clone(), material);
         desc.transform.position = sim_math::Vec3::new(x, y, z);
         let id = self.inner.create_body(desc);
-        let index = self.body_count();
+        let index = self.body_count_impl();
         let label = format!("ConvexMesh_{index}");
         self.bodies.push(SpawnedBodyMeta {
             id,
@@ -751,7 +751,7 @@ impl WasmWorld {
     /// `MaterialOverride`(シーンJSON側)も密度だけを持つので、そちらと
     /// 揃えた——両者で表現力が食い違うと、エディタで作った材料をシーンJSONへ
     /// 書き出せなくなるため。
-    pub fn derive_material(
+    fn derive_material_impl(
         &mut self,
         base_name: String,
         new_name: String,
@@ -785,7 +785,7 @@ impl WasmWorld {
 
     /// スポーンパレット——箱(半辺長`half_extent`の立方体)を`material_name`で
     /// `(x,y,z)`に配置する。`spawn_sphere`と同じ規約。
-    pub fn spawn_box(
+    fn spawn_box_impl(
         &mut self,
         x: f64,
         y: f64,
@@ -806,7 +806,7 @@ impl WasmWorld {
         );
         desc.transform.position = sim_math::Vec3::new(x, y, z);
         let id = self.inner.create_body(desc);
-        let index = self.body_count();
+        let index = self.body_count_impl();
         let label = format!("Box_{index}");
         self.bodies.push(SpawnedBodyMeta {
             id,
@@ -843,7 +843,7 @@ impl WasmWorld {
             .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
 
         for (body, id) in scenario.bodies.iter().zip(ids.iter()) {
-            let index = self.body_count();
+            let index = self.body_count_impl();
             let label = body
                 .name
                 .clone()
@@ -1707,7 +1707,7 @@ impl WasmWorld {
             pivot,
             arm_length,
         );
-        let index = self.body_count();
+        let index = self.body_count_impl();
         let label = format!("Pendulum_{index}");
         self.bodies.push(SpawnedBodyMeta {
             id,
@@ -1773,7 +1773,7 @@ impl WasmWorld {
             limit: None,
             disabled: false,
         });
-        let index = self.body_count();
+        let index = self.body_count_impl();
         let label = format!("MotorArm_{index}");
         self.bodies.push(SpawnedBodyMeta {
             id,
@@ -2394,6 +2394,64 @@ impl WasmWorld {
                 self.push_release_impl(u("body_index"))?;
                 Ok("{}".to_string())
             }
+            "spawn_sphere" => {
+                let index = self.spawn_sphere_impl(
+                    f("x"),
+                    f("y"),
+                    f("z"),
+                    f("radius"),
+                    s("material_name"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "spawn_capsule" => {
+                let index = self.spawn_capsule_impl(
+                    f("x"),
+                    f("y"),
+                    f("z"),
+                    f("radius"),
+                    f("half_height"),
+                    s("material_name"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "spawn_compound_l_shape" => {
+                let index =
+                    self.spawn_compound_l_shape_impl(f("x"), f("y"), f("z"), s("material_name"))?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "spawn_convex_mesh_cube" => {
+                let index = self.spawn_convex_mesh_cube_impl(
+                    f("x"),
+                    f("y"),
+                    f("z"),
+                    f("half"),
+                    s("material_name"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "spawn_box" => {
+                let index = self.spawn_box_impl(
+                    f("x"),
+                    f("y"),
+                    f("z"),
+                    f("half_extent"),
+                    s("material_name"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "remove_body_at" => {
+                self.remove_body_at_impl(u("index"))?;
+                Ok("{}".to_string())
+            }
+            "duplicate_body_at" => {
+                let index = self.duplicate_body_at_impl(u("index"), f("offset"))?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
+            "derive_material" => {
+                self.derive_material_impl(s("base_name"), s("new_name"), f("density"))?;
+                Ok("{}".to_string())
+            }
             _ => Err(JsValue::from_str(&format!(
                 "apply_component: unknown kind \"{kind}\""
             ))),
@@ -2446,6 +2504,46 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 Ok(self.body_collision_mask_at_impl(index)?.to_string())
             }
+            "body_count" => Ok(self.body_count_impl().to_string()),
+            "body_label_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.body_label_at_impl(index)
+            }
+            "body_is_static_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_is_static_at_impl(index)?.to_string())
+            }
+            "body_shape_label_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.body_shape_label_at_impl(index)
+            }
+            "body_shape_kind_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.body_shape_kind_at_impl(index)
+            }
+            "body_shape_json_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.body_shape_json_at_impl(index)
+            }
+            "body_material_label_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.body_material_label_at_impl(index)
+            }
+            "body_is_removed_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_is_removed_at_impl(index)?.to_string())
+            }
+            "body_shape_params_f64_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(
+                    serde_json::json!(self.body_shape_params_f64_at_impl(index)?.to_vec())
+                        .to_string(),
+                )
+            }
+            "material_properties_f64" => Ok(serde_json::json!(self
+                .material_properties_f64_impl(arg.to_string())?
+                .to_vec())
+            .to_string()),
             _ => Err(JsValue::from_str(&format!(
                 "read_component: unknown kind \"{kind}\""
             ))),
@@ -2478,7 +2576,10 @@ impl WasmWorld {
                 "set_body_position_at", "set_body_rotation_at", "set_body_scale_at",
                 "set_body_scale_xyz_at", "push_apply_force", "push_set_body_mass",
                 "push_set_body_type", "push_set_collision_filter", "push_grab",
-                "push_move_grab", "push_release"
+                "push_move_grab", "push_release",
+                "spawn_sphere", "spawn_capsule", "spawn_compound_l_shape",
+                "spawn_convex_mesh_cube", "spawn_box", "remove_body_at",
+                "duplicate_body_at", "derive_material"
             ],
             "read": [
                 "coupling_count", "coupling_info_text", "coupling_kind_summary",
@@ -2487,7 +2588,11 @@ impl WasmWorld {
                 "atmosphere_density", "atmosphere_viscosity", "atmosphere_wind",
                 "water_level", "water_density",
                 "body_mass_at", "body_type_at", "body_collision_group_at",
-                "body_collision_mask_at"
+                "body_collision_mask_at",
+                "body_count", "body_label_at", "body_is_static_at",
+                "body_shape_label_at", "body_shape_kind_at", "body_shape_json_at",
+                "body_material_label_at", "body_is_removed_at",
+                "body_shape_params_f64_at", "material_properties_f64"
             ]
         })
         .to_string()
@@ -4054,13 +4159,16 @@ mod tests {
     #[test]
     fn fixed_bodies_have_expected_labels_and_materials() {
         let world = new_world();
-        assert_eq!(world.body_count(), 2);
-        assert_eq!(world.body_label_at(0).unwrap(), "Ground");
-        assert_eq!(world.body_label_at(1).unwrap(), "Box_1");
-        assert_eq!(world.body_material_label_at(0).unwrap(), "コンクリート");
-        assert_eq!(world.body_material_label_at(1).unwrap(), "鋼(炭素鋼)");
-        assert!(world.body_is_static_at(0).unwrap());
-        assert!(!world.body_is_static_at(1).unwrap());
+        assert_eq!(world.body_count_impl(), 2);
+        assert_eq!(world.body_label_at_impl(0).unwrap(), "Ground");
+        assert_eq!(world.body_label_at_impl(1).unwrap(), "Box_1");
+        assert_eq!(
+            world.body_material_label_at_impl(0).unwrap(),
+            "コンクリート"
+        );
+        assert_eq!(world.body_material_label_at_impl(1).unwrap(), "鋼(炭素鋼)");
+        assert!(world.body_is_static_at_impl(0).unwrap());
+        assert!(!world.body_is_static_at_impl(1).unwrap());
     }
 
     /// 自由配線回路エディタへ追加したコンデンサ・インダクタ・ダイオード・
@@ -4101,13 +4209,13 @@ mod tests {
     fn add_joint_methods_succeed_and_are_visible_in_joint_info_text() {
         let mut world = new_world();
         let chassis = world
-            .spawn_box(0.0, 1.0, 0.0, 1.0, "鋼(炭素鋼)".to_string())
+            .spawn_box_impl(0.0, 1.0, 0.0, 1.0, "鋼(炭素鋼)".to_string())
             .unwrap();
         let wheel = world
-            .spawn_sphere(1.0, 0.3, 1.0, 0.3, "ゴム(天然)".to_string())
+            .spawn_sphere_impl(1.0, 0.3, 1.0, 0.3, "ゴム(天然)".to_string())
             .unwrap();
         let anchor = world
-            .spawn_sphere(-2.0, 1.0, 0.0, 0.2, "鋼(炭素鋼)".to_string())
+            .spawn_sphere_impl(-2.0, 1.0, 0.0, 0.2, "鋼(炭素鋼)".to_string())
             .unwrap();
 
         world
@@ -4250,7 +4358,7 @@ mod tests {
     fn apply_component_and_read_component_change_body_properties_via_generic_dispatch() {
         let mut world = new_world();
         let body = world
-            .spawn_box(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
+            .spawn_box_impl(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
             .unwrap();
 
         world
@@ -4345,6 +4453,106 @@ mod tests {
         world.step();
     }
 
+    /// **Task#8第四弾の回帰テスト**: ボディのスポーン/削除/複製/材料派生
+    /// 8個と、その内省8個(`body_shape_params_f64_at`/`material_properties_f64`を
+    /// 除く——`Float64Array`を返す旧実装の内部でネイティブSIGABRTする既知の
+    /// 制約、モジュールdoc参照)も`apply_component`/`read_component`経由で
+    /// 操作できることを確認する。
+    #[test]
+    fn apply_component_and_read_component_spawn_and_introspect_bodies_via_generic_dispatch() {
+        let mut world = new_world();
+        assert_eq!(world.read_component("body_count", "").unwrap(), "2");
+
+        let result = world
+            .apply_component(
+                "spawn_sphere",
+                r#"{"x":1.0,"y":2.0,"z":3.0,"radius":0.4,"material_name":"アルミニウム"}"#,
+            )
+            .expect("spawn_sphere via apply_component must succeed");
+        assert_eq!(result, "{\"index\":2}");
+        assert_eq!(world.read_component("body_count", "").unwrap(), "3");
+        assert_eq!(
+            world.read_component("body_shape_kind_at", "2").unwrap(),
+            "sphere"
+        );
+        assert_eq!(
+            world.read_component("body_label_at", "2").unwrap(),
+            "Sphere_2"
+        );
+        assert_eq!(
+            world.read_component("body_material_label_at", "2").unwrap(),
+            "アルミニウム"
+        );
+        assert_eq!(
+            world.read_component("body_is_static_at", "2").unwrap(),
+            "false"
+        );
+        assert_eq!(
+            world.read_component("body_is_removed_at", "2").unwrap(),
+            "false"
+        );
+        assert!(world
+            .read_component("body_shape_label_at", "2")
+            .unwrap()
+            .starts_with("Sphere"));
+        let shape_json = world.read_component("body_shape_json_at", "2").unwrap();
+        assert!(shape_json.contains("sphere"), "actual: {shape_json}");
+
+        let result = world
+            .apply_component(
+                "spawn_box",
+                r#"{"x":0.0,"y":2.0,"z":0.0,"half_extent":0.5,"material_name":"アルミニウム"}"#,
+            )
+            .expect("spawn_box via apply_component must succeed");
+        assert_eq!(result, "{\"index\":3}");
+
+        let result = world
+            .apply_component(
+                "spawn_capsule",
+                r#"{"x":2.0,"y":2.0,"z":0.0,"radius":0.3,"half_height":0.5,"material_name":"アルミニウム"}"#,
+            )
+            .expect("spawn_capsule via apply_component must succeed");
+        assert_eq!(result, "{\"index\":4}");
+
+        let result = world
+            .apply_component(
+                "spawn_compound_l_shape",
+                r#"{"x":3.0,"y":5.0,"z":0.0,"material_name":"アルミニウム"}"#,
+            )
+            .expect("spawn_compound_l_shape via apply_component must succeed");
+        assert_eq!(result, "{\"index\":5}");
+
+        let result = world
+            .apply_component(
+                "spawn_convex_mesh_cube",
+                r#"{"x":4.0,"y":5.0,"z":0.0,"half":0.5,"material_name":"アルミニウム"}"#,
+            )
+            .expect("spawn_convex_mesh_cube via apply_component must succeed");
+        assert_eq!(result, "{\"index\":6}");
+        assert_eq!(world.read_component("body_count", "").unwrap(), "7");
+
+        let result = world
+            .apply_component("duplicate_body_at", r#"{"index":2,"offset":1.0}"#)
+            .expect("duplicate_body_at via apply_component must succeed");
+        assert_eq!(result, "{\"index\":7}");
+        assert_eq!(world.read_component("body_count", "").unwrap(), "8");
+
+        world
+            .apply_component("remove_body_at", r#"{"index":7}"#)
+            .expect("remove_body_at via apply_component must succeed");
+        assert_eq!(
+            world.read_component("body_is_removed_at", "7").unwrap(),
+            "true"
+        );
+
+        world
+            .apply_component(
+                "derive_material",
+                r#"{"base_name":"アルミニウム","new_name":"軽量アルミニウム(Task8第四弾テスト)","density":1500.0}"#,
+            )
+            .expect("derive_material via apply_component must succeed");
+    }
+
     /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
     /// `set_gravity_direction`が既定の下向きから変更でき、正規化されること。
     /// `gravity_direction()`は`Float64Array`を返すためここでは呼ばない
@@ -4379,7 +4587,7 @@ mod tests {
     fn add_coupling_methods_succeed_and_are_visible_in_coupling_info_text() {
         let mut world = new_world();
         let body = world
-            .spawn_sphere(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .spawn_sphere_impl(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
             .unwrap();
 
         world
@@ -4418,7 +4626,7 @@ mod tests {
     {
         let mut world = new_world();
         let body = world
-            .spawn_sphere(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .spawn_sphere_impl(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
             .unwrap();
 
         world
@@ -4467,7 +4675,7 @@ mod tests {
     fn remaining_six_coupling_kinds_succeed_once_their_domains_are_created_via_new_wasm_methods() {
         let mut world = new_world();
         let body = world
-            .spawn_sphere(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .spawn_sphere_impl(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
             .unwrap();
 
         // 熱ノードをUIから新規作成(index 1、既定シーンのindex 0は別ノード)。
@@ -4536,7 +4744,7 @@ mod tests {
     ) {
         let mut world = new_world();
         let body = world
-            .spawn_box(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
+            .spawn_box_impl(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
             .unwrap();
 
         let wing_index = world
@@ -4545,7 +4753,7 @@ mod tests {
         assert_eq!(wing_index, 0);
 
         let magnus_body = world
-            .spawn_sphere(3.0, 5.0, 0.0, 0.3, "アルミニウム".to_string())
+            .spawn_sphere_impl(3.0, 5.0, 0.0, 0.3, "アルミニウム".to_string())
             .unwrap();
         let magnus_index = world
             .add_magnus_lift_coupling_impl(magnus_body, 0.3, 1.225, 1.81e-5)
@@ -4578,10 +4786,10 @@ mod tests {
     fn apply_component_and_read_component_add_a_joint_and_a_coupling_via_generic_dispatch() {
         let mut world = new_world();
         let body_a = world
-            .spawn_box(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
+            .spawn_box_impl(0.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
             .unwrap();
         let body_b = world
-            .spawn_box(2.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
+            .spawn_box_impl(2.0, 5.0, 0.0, 0.5, "アルミニウム".to_string())
             .unwrap();
 
         let result = world
@@ -4709,22 +4917,25 @@ mod tests {
     fn spawn_sphere_and_box_succeed_and_extend_body_count() {
         let mut world = new_world();
         let sphere_index = world
-            .spawn_sphere(1.0, 2.0, 3.0, 0.5, "コンクリート".to_string())
+            .spawn_sphere_impl(1.0, 2.0, 3.0, 0.5, "コンクリート".to_string())
             .expect("known material name must succeed");
         assert_eq!(sphere_index, 2);
-        assert_eq!(world.body_count(), 3);
-        assert_eq!(world.body_shape_kind_at(sphere_index).unwrap(), "sphere");
+        assert_eq!(world.body_count_impl(), 3);
         assert_eq!(
-            world.body_material_label_at(sphere_index).unwrap(),
+            world.body_shape_kind_at_impl(sphere_index).unwrap(),
+            "sphere"
+        );
+        assert_eq!(
+            world.body_material_label_at_impl(sphere_index).unwrap(),
             "コンクリート"
         );
 
         let box_index = world
-            .spawn_box(0.0, 0.0, 0.0, 0.25, "鋼(炭素鋼)".to_string())
+            .spawn_box_impl(0.0, 0.0, 0.0, 0.25, "鋼(炭素鋼)".to_string())
             .expect("known material name must succeed");
         assert_eq!(box_index, 3);
-        assert_eq!(world.body_count(), 4);
-        assert_eq!(world.body_shape_kind_at(box_index).unwrap(), "box");
+        assert_eq!(world.body_count_impl(), 4);
+        assert_eq!(world.body_shape_kind_at_impl(box_index).unwrap(), "box");
     }
 
     /// **残タスク完遂の縦串⑤前後で追加**——`spawn_compound_l_shape`/
@@ -4738,26 +4949,26 @@ mod tests {
     fn spawn_compound_and_convex_mesh_succeed_and_are_introspectable() {
         let mut world = new_world();
         let compound_index = world
-            .spawn_compound_l_shape(1.0, 2.0, 3.0, "コンクリート".to_string())
+            .spawn_compound_l_shape_impl(1.0, 2.0, 3.0, "コンクリート".to_string())
             .expect("known material name must succeed");
         assert_eq!(
-            world.body_shape_kind_at(compound_index).unwrap(),
+            world.body_shape_kind_at_impl(compound_index).unwrap(),
             "compound"
         );
-        let compound_json = world.body_shape_json_at(compound_index).unwrap();
+        let compound_json = world.body_shape_json_at_impl(compound_index).unwrap();
         assert!(compound_json.starts_with(r#"{"compound":"#));
         let parsed: sim_world::ShapeJson =
             serde_json::from_str(&compound_json).expect("must be a valid ShapeJson");
         assert!(matches!(parsed, sim_world::ShapeJson::Compound { .. }));
 
         let convex_index = world
-            .spawn_convex_mesh_cube(0.0, 0.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .spawn_convex_mesh_cube_impl(0.0, 0.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
             .expect("known material name must succeed");
         assert_eq!(
-            world.body_shape_kind_at(convex_index).unwrap(),
+            world.body_shape_kind_at_impl(convex_index).unwrap(),
             "convex_mesh"
         );
-        let convex_json = world.body_shape_json_at(convex_index).unwrap();
+        let convex_json = world.body_shape_json_at_impl(convex_index).unwrap();
         assert!(convex_json.starts_with(r#"{"convex_mesh":"#));
         let parsed: sim_world::ShapeJson =
             serde_json::from_str(&convex_json).expect("must be a valid ShapeJson");
@@ -4817,10 +5028,13 @@ mod tests {
     fn set_body_scale_at_succeeds_for_a_spawned_body() {
         let mut world = new_world();
         let sphere_index = world
-            .spawn_sphere(0.0, 0.0, 0.0, 0.5, "コンクリート".to_string())
+            .spawn_sphere_impl(0.0, 0.0, 0.0, 0.5, "コンクリート".to_string())
             .expect("known material name must succeed");
         world.set_body_scale_at_impl(sphere_index, 2.0).unwrap();
-        assert_eq!(world.body_shape_kind_at(sphere_index).unwrap(), "sphere");
+        assert_eq!(
+            world.body_shape_kind_at_impl(sphere_index).unwrap(),
+            "sphere"
+        );
     }
 
     /// **残タスク完遂のシーンギャラリー増分**: `WasmWorld::from_scene_json`が
@@ -4834,15 +5048,15 @@ mod tests {
         let json = include_str!("../../../scenes/d4-box-stack.json");
         let mut world = WasmWorld::from_scene_json(json.to_string())
             .expect("scenes/d4-box-stack.json must be a valid scene");
-        assert_eq!(world.body_count(), 4); // 地面+3段の箱。
-                                           // 地面(JSON側に"name"フィールドが無い)は`format!("Body_{index}")`の
-                                           // フォールバックラベルになる。
-        assert_eq!(world.body_label_at(0).unwrap(), "Body_0");
+        assert_eq!(world.body_count_impl(), 4); // 地面+3段の箱。
+                                                // 地面(JSON側に"name"フィールドが無い)は`format!("Body_{index}")`の
+                                                // フォールバックラベルになる。
+        assert_eq!(world.body_label_at_impl(0).unwrap(), "Body_0");
         for _ in 0..1200 {
             world.step();
         }
         for index in 1..4 {
-            let label = world.body_label_at(index).unwrap();
+            let label = world.body_label_at_impl(index).unwrap();
             assert!(
                 label.starts_with("box"),
                 "body {index} should be named box1/box2/box3, got {label:?}"
@@ -4924,7 +5138,11 @@ mod tests {
         fn check_bodyless_scene(path: &str, json: &str, expected_imported_probes: usize) {
             let mut world = WasmWorld::from_scene_json(json.to_string())
                 .unwrap_or_else(|e| panic!("{path} must be a valid (bodyless) scene: {e:?}"));
-            assert_eq!(world.body_count(), 0, "{path} should define zero bodies");
+            assert_eq!(
+                world.body_count_impl(),
+                0,
+                "{path} should define zero bodies"
+            );
             assert_eq!(
                 world.imported_probe_count(),
                 expected_imported_probes,

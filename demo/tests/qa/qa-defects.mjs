@@ -73,8 +73,12 @@ const occupancy = await page.evaluate(() => {
   const V = s.children.find((o) => o.isMesh).position.constructor;
   let minY = 9;
   let maxY = -9;
-  for (let i = 0; i < w.body_count(); i += 1) {
-    if (w.body_is_removed_at(i) || w.body_is_static_at(i)) continue;
+  for (let i = 0; i < Number(w.read_component("body_count", "")); i += 1) {
+    if (
+      w.read_component("body_is_removed_at", String(i)) === "true" ||
+      w.read_component("body_is_static_at", String(i)) === "true"
+    )
+      continue;
     const p = w.body_position_at_f32(i);
     const v = new V(p[0], p[1], p[2]).project(c);
     minY = Math.min(minY, v.y);
@@ -115,7 +119,7 @@ await stepN(page, 300);
 const consoleState = await page.evaluate(() => ({
   contactLines: Array.from(document.querySelectorAll("#console-log li"))
     .filter((li) => /bodies=\d+,\d+/.test(li.textContent)).length,
-  bodyCount: window.__world.body_count(),
+  bodyCount: Number(window.__world.read_component("body_count", "")),
 }));
 r.check("F4-1", "シーン切替で Console が引き継がれない", consoleState.contactLines === 0,
   `接触が起きえないシーン(body_count=${consoleState.bodyCount})に残る接触ログ ${consoleState.contactLines} 件`);

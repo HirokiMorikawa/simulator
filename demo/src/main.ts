@@ -800,7 +800,7 @@ function setUpHierarchy(
   const list = document.createElement("ul");
   list.className = "tree-nested";
 
-  const count = world.body_count();
+  const count = readNumber(world, "body_count");
   const items: (HTMLLIElement | null)[] = [];
 
   function refreshSelectionClasses(primary: number) {
@@ -820,12 +820,12 @@ function setUpHierarchy(
   for (let i = 0; i < count; i++) {
     // **削除済みは並べない(群2)**。`remove_body_at` は index のずれを避けるため
     // スロットを残すので、UI 側で隠す必要がある。
-    if (world.body_is_removed_at(i)) {
+    if ((world.read_component("body_is_removed_at", String(i)) === "true")) {
       items.push(null);
       continue;
     }
     const item = document.createElement("li");
-    item.textContent = world.body_label_at(i);
+    item.textContent = world.read_component("body_label_at", String(i));
     // `tree-body` は **Bodies サブツリーの実体行**だけに付く(群2)。
     // Materials(参照)や Joints の行も `tree-selectable` なので、
     // 「ボディが何体あるか」を数えるにはこちらを使う。
@@ -905,7 +905,7 @@ function setUpHierarchy(
     if (world.constraint_anchor_points_at(i).length < 6) continue;
     jointCount += 1;
     const item = document.createElement("li");
-    item.textContent = `DistanceJoint (${world.body_label_at(i)})`;
+    item.textContent = `DistanceJoint (${world.read_component("body_label_at", String(i))})`;
     item.classList.add("tree-selectable");
     item.addEventListener("click", () => {
       highlight(i);
@@ -1017,8 +1017,8 @@ function setUpHierarchy(
   // それを使っているボディを並べる——これが設計の言う「参照」。
   const materialUsers = new Map<string, number[]>();
   for (let i = 0; i < count; i++) {
-    if (world.body_is_removed_at(i)) continue;
-    const name = world.body_material_label_at(i);
+    if ((world.read_component("body_is_removed_at", String(i)) === "true")) continue;
+    const name = world.read_component("body_material_label_at", String(i));
     const users = materialUsers.get(name);
     if (users) users.push(i);
     else materialUsers.set(name, [i]);
@@ -1043,7 +1043,7 @@ function setUpHierarchy(
         // 2つ現れると、見た目にどちらが実体でどちらが参照か分からないうえ、
         // ラベルでの選択(テスト・自動化)も曖昧になる(実際に Playwright の
         // strict モードが 8 本まとめて落ちて気付いた)。
-        userItem.textContent = `↳ ${world.body_label_at(bodyIndex)}`;
+        userItem.textContent = `↳ ${world.read_component("body_label_at", String(bodyIndex))}`;
         userItem.classList.add("tree-selectable");
         userItem.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -1070,7 +1070,7 @@ function setUpHierarchy(
 // スポーンパレットで追加したボディも含めて実際にクエリできる)+ Transform
 // (毎フレーム実データで更新、`updateInspectorTransformFields`)を表示する。
 //
-// **2026-07-28のD9/D34/D35増分で追加したガード**: `index`が`world.body_count()`
+// **2026-07-28のD9/D34/D35増分で追加したガード**: `index`が`readNumber(world, "body_count")`
 // の範囲外(D9=熱のみ・D34/D35=天体のみのように力学ボディを1つも持たない
 // ギャラリーシーンを読み込んだ直後、`index`に渡り得る`0`を含む)なら
 // `world.body_label_at`等(いずれも`Result`化済みでボディが無ければ`Err`を
@@ -1081,7 +1081,7 @@ function setUpHierarchy(
 // このプレースホルダ表示と両立する。
 function renderInspectorFor(world: WasmWorld, index: number): void {
   const body = document.getElementById("inspector-body")!;
-  if (index < 0 || index >= world.body_count()) {
+  if (index < 0 || index >= readNumber(world, "body_count")) {
     body.innerHTML = `
       <div class="inspector-component">
         <p>選択中のボディはありません(このシーンには力学ボディがありません——Probe Graphsパネルで観測してください)。</p>
@@ -1089,15 +1089,15 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     `;
     return;
   }
-  const label = world.body_label_at(index);
-  const staticBadge = world.body_is_static_at(index)
+  const label = world.read_component("body_label_at", String(index));
+  const staticBadge = (world.read_component("body_is_static_at", String(index)) === "true")
     ? ' <span class="badge">Static</span>'
     : "";
   const initialPosition = world.body_position_at_f32(index);
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
-      <div class="inspector-field"><span>Shape</span><span>${world.body_shape_label_at(index)}</span></div>
+      <div class="inspector-field"><span>Shape</span><span>${world.read_component("body_shape_label_at", String(index))}</span></div>
     </div>
     <div class="inspector-component">
       <h3>Transform</h3>
@@ -1521,7 +1521,7 @@ function renderRigidBodyComponent(world: WasmWorld, index: number): string {
   return `
     <div class="inspector-component">
       <h3>RigidBody</h3>
-      <div class="inspector-field"><span>Material</span><span>${world.body_material_label_at(index)}</span></div>
+      <div class="inspector-field"><span>Material</span><span>${world.read_component("body_material_label_at", String(index))}</span></div>
       <div class="inspector-field">
         <span>Mass [kg]</span>
         <input type="number" id="inspector-mass" min="0" step="0.1"
@@ -3423,8 +3423,9 @@ async function setUpSceneView(
   };
   materialsRef.current = () =>
     SPAWN_MATERIALS.map((name) => {
-      const [density, friction, restitution, specificHeat, conductivity] =
-        world.material_properties_f64(name);
+      const [density, friction, restitution, specificHeat, conductivity] = JSON.parse(
+        world.read_component("material_properties_f64", name),
+      ) as number[];
       return {
         name,
         density,
@@ -3446,17 +3447,17 @@ async function setUpSceneView(
     return labels;
   };
   sceneExportRef.current = () => {
-    const count = world.body_count();
+    const count = readNumber(world, "body_count");
     const bodies: SceneBodyExport[] = [];
     for (let i = 0; i < count; i++) {
       const pos = world.body_position_at_f32(i);
       bodies.push({
         index: i,
-        label: world.body_label_at(i),
-        shape: world.body_shape_label_at(i),
-        material: world.body_material_label_at(i),
+        label: world.read_component("body_label_at", String(i)),
+        shape: world.read_component("body_shape_label_at", String(i)),
+        material: world.read_component("body_material_label_at", String(i)),
         position: [pos[0], pos[1], pos[2]],
-        isStatic: world.body_is_static_at(i),
+        isStatic: (world.read_component("body_is_static_at", String(i)) === "true"),
       });
     }
     return bodies;
@@ -4544,7 +4545,7 @@ async function setUpSceneView(
     // 何も見えなくなっていた。動的ボディだけを対象にする——静的な床・壁は
     // 「シーンの一部」ではあっても「観察対象」ではないため。
     for (const [bodyIndex, mesh] of bodyMeshes) {
-      if (world.body_is_static_at(bodyIndex)) continue;
+      if ((world.read_component("body_is_static_at", String(bodyIndex)) === "true")) continue;
       expand(mesh);
     }
     expand(softBodyPoints);
@@ -4771,7 +4772,7 @@ async function setUpSceneView(
   // しないのが唯一の無害な選択肢(`try_body_id_at`のResult化と同じ理由で
   // 「呼べば例外」なので、呼ぶ前に弾く)。
   function hasSelectedBody(): boolean {
-    return selectedBodyIndex >= 0 && selectedBodyIndex < world.body_count();
+    return selectedBodyIndex >= 0 && selectedBodyIndex < readNumber(world, "body_count");
   }
   function selectBody(index: number) {
     selectedBodyIndex = index;
@@ -4817,7 +4818,7 @@ async function setUpSceneView(
   // ボディ数の少ないワールドへ差し替えると古いイベントのindexが範囲外になり得る
   // (`body_position_at_f32`等がErrをthrowしてrender()ループが壊れるのを防ぐ)。
   selectBodyRef.current = (index: number) => {
-    if (index < 0 || index >= world.body_count()) return;
+    if (index < 0 || index >= readNumber(world, "body_count")) return;
     selectBody(index);
   };
   // **Inspector の編集を Command キューへ配線する(群2、`InspectorEditRef`のdoc参照)**。
@@ -4828,17 +4829,17 @@ async function setUpSceneView(
   // これは「次step先頭で適用」という設計そのものが目に見えている状態)。
   inspectorEditRef.current = {
     setMass(bodyIndex, mass) {
-      if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
+      if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
       applyComponent(world, "push_set_body_mass", { body_index: bodyIndex, mass });
       pushCommandLog(world, { kind: "SetBodyMass", bodyIndex, mass });
     },
     setBodyType(bodyIndex, kind) {
-      if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
+      if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
       applyComponent(world, "push_set_body_type", { body_index: bodyIndex, kind });
       pushCommandLog(world, { kind: "SetBodyType", bodyIndex, bodyType: kind });
     },
     setCollisionFilter(bodyIndex, group, mask) {
-      if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
+      if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
       applyComponent(world, "push_set_collision_filter", { body_index: bodyIndex, group, mask });
       pushCommandLog(world, {
         kind: "SetCollisionFilter",
@@ -4848,7 +4849,7 @@ async function setUpSceneView(
       });
     },
     setScaleXyz(bodyIndex, sx, sy, sz) {
-      if (bodyIndex <= 0 || bodyIndex >= world.body_count()) return false;
+      if (bodyIndex <= 0 || bodyIndex >= readNumber(world, "body_count")) return false;
       const { applied } = applyComponent(world, "set_body_scale_xyz_at", {
         index: bodyIndex,
         sx,
@@ -4863,7 +4864,7 @@ async function setUpSceneView(
       return applied ?? false;
     },
     setScale(bodyIndex, scale) {
-      if (bodyIndex <= 0 || bodyIndex >= world.body_count()) return false;
+      if (bodyIndex <= 0 || bodyIndex >= readNumber(world, "body_count")) return false;
       try {
         applyComponent(world, "set_body_scale_at", { index: bodyIndex, scale });
         currentScale.set(bodyIndex, scale);
@@ -4874,7 +4875,7 @@ async function setUpSceneView(
       }
     },
     setPosition(bodyIndex, x, y, z) {
-      if (bodyIndex < 0 || bodyIndex >= world.body_count()) return;
+      if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
       applyComponent(world, "set_body_position_at", { index: bodyIndex, x, y, z });
     },
   };
@@ -5312,7 +5313,7 @@ async function setUpSceneView(
   function applyThrustForStep(): void {
     for (const [bodyIndex, state] of thrustByBody) {
       if (!state.enabled || state.throttle <= 0) continue;
-      if (bodyIndex >= world.body_count() || world.body_is_removed_at(bodyIndex))
+      if (bodyIndex >= readNumber(world, "body_count") || (world.read_component("body_is_removed_at", String(bodyIndex)) === "true"))
         continue;
       const rot = world.body_rotation_at_f32(bodyIndex);
       thrustQuat.set(rot[0], rot[1], rot[2], rot[3]);
@@ -5490,7 +5491,7 @@ async function setUpSceneView(
     hasUnsavedChanges = true;
   }
   function nextSpawnPosition(): { x: number; z: number } {
-    const n = world.body_count() - sceneBaseBodyCount; // これまでのスポーン数
+    const n = readNumber(world, "body_count") - sceneBaseBodyCount; // これまでのスポーン数
     const angle = n * 2.4; // 黄金角に近い値、重ならないようばらけさせる
     const radius = 1.5 + n * 0.3;
     return { x: Math.cos(angle) * radius, z: Math.sin(angle) * radius };
@@ -5701,7 +5702,7 @@ async function setUpSceneView(
     const bodies = parsed.bodies ?? [];
     currentPredictionPrompts = parsed.prediction_prompts ?? [];
     renderPredictionPanel();
-    const total = world.body_count();
+    const total = readNumber(world, "body_count");
     const startIndex = total - count;
 
     for (let i = 0; i < count; i++) {
@@ -5844,7 +5845,7 @@ async function setUpSceneView(
     // `body_label_at`等)・毎フレームの`render()`(`body_position_at_f32`等)
     // へ渡り、いずれもJS例外を投げてUIが壊れる(HUD更新も止まる)——
     // ボディが無ければHierarchyだけ空の状態へ更新し、選択は行わない。
-    if (world.body_count() > 0) {
+    if (readNumber(world, "body_count") > 0) {
       selectBody(0);
     } else {
       selectedBodyIndex = -1; // 有効なボディ無し(`hasSelectedBody`参照)。
@@ -5889,7 +5890,7 @@ async function setUpSceneView(
     for (const entry of entries) {
       switch (entry.kind) {
         case "Grab":
-          if (entry.bodyIndex < replayWorld.body_count()) {
+          if (entry.bodyIndex < readNumber(replayWorld, "body_count")) {
             applyComponent(replayWorld, "push_grab", {
               body_index: entry.bodyIndex,
               target_x: entry.targetX,
@@ -5899,12 +5900,12 @@ async function setUpSceneView(
           }
           break;
         case "Release":
-          if (entry.bodyIndex < replayWorld.body_count()) {
+          if (entry.bodyIndex < readNumber(replayWorld, "body_count")) {
             applyComponent(replayWorld, "push_release", { body_index: entry.bodyIndex });
           }
           break;
         case "ApplyForce":
-          if (entry.bodyIndex < replayWorld.body_count()) {
+          if (entry.bodyIndex < readNumber(replayWorld, "body_count")) {
             applyComponent(replayWorld, "push_apply_force", {
               body_index: entry.bodyIndex,
               fx: entry.fx,
@@ -5914,7 +5915,7 @@ async function setUpSceneView(
           }
           break;
         case "SetMotorTarget":
-          if (entry.bodyIndex < replayWorld.body_count()) {
+          if (entry.bodyIndex < readNumber(replayWorld, "body_count")) {
             replayWorld.set_motor_target_at(entry.bodyIndex, entry.targetAngle);
           }
           break;
@@ -5942,7 +5943,7 @@ async function setUpSceneView(
           applyComponent(replayWorld, "set_dt", { dt: entry.dt });
           break;
         case "SetBodyMass":
-          if (entry.bodyIndex < replayWorld.body_count()) {
+          if (entry.bodyIndex < readNumber(replayWorld, "body_count")) {
             applyComponent(replayWorld, "push_set_body_mass", {
               body_index: entry.bodyIndex,
               mass: entry.mass,
@@ -5950,7 +5951,7 @@ async function setUpSceneView(
           }
           break;
         case "SetBodyType":
-          if (entry.bodyIndex < replayWorld.body_count()) {
+          if (entry.bodyIndex < readNumber(replayWorld, "body_count")) {
             applyComponent(replayWorld, "push_set_body_type", {
               body_index: entry.bodyIndex,
               kind: entry.bodyType,
@@ -5958,7 +5959,7 @@ async function setUpSceneView(
           }
           break;
         case "SetCollisionFilter":
-          if (entry.bodyIndex < replayWorld.body_count()) {
+          if (entry.bodyIndex < readNumber(replayWorld, "body_count")) {
             applyComponent(replayWorld, "push_set_collision_filter", {
               body_index: entry.bodyIndex,
               group: entry.group,
@@ -5973,7 +5974,7 @@ async function setUpSceneView(
   replayVerifyRef.current = () => {
     const replayWorld = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
     const totalSteps = Number(world.step_count());
-    const sceneChanged = world.body_count() !== 2;
+    const sceneChanged = readNumber(world, "body_count") !== 2;
     const commandsByStep = groupCommandsByStep();
     const heater: ReplayHeaterState = { on: false, watts: 0 };
     for (let s = 0; s < totalSteps; s++) {
@@ -6030,7 +6031,7 @@ async function setUpSceneView(
 
   replayPlaybackRef.current = {
     start: () => {
-      if (world.body_count() !== 2) {
+      if (readNumber(world, "body_count") !== 2) {
         return { started: false, reason: "既定シーン(床+箱)でのみライブ再生できます。" };
       }
       const totalSteps = Number(world.step_count());
@@ -6081,8 +6082,8 @@ async function setUpSceneView(
     // 再生用ワールドのボディ位置をメッシュへ流し込む(床は Plane なので除く、
     // `render()` の同期と同じ理由)。
     for (const [bodyIndex, mesh] of bodyMeshes) {
-      if (bodyIndex >= playback.replayWorld.body_count()) continue;
-      if (playback.replayWorld.body_shape_kind_at(bodyIndex) === "plane") continue;
+      if (bodyIndex >= readNumber(playback.replayWorld, "body_count")) continue;
+      if (playback.replayWorld.read_component("body_shape_kind_at", String(bodyIndex)) === "plane") continue;
       const p = playback.replayWorld.body_position_at_f32(bodyIndex);
       mesh.position.set(p[0], p[1], p[2]);
       const r = playback.replayWorld.body_rotation_at_f32(bodyIndex);
@@ -6105,24 +6106,24 @@ async function setUpSceneView(
       return prefabRef.current!.captureBody(selectedBodyIndex);
     },
     captureBody: (index) => {
-      if (index < 0 || index >= world.body_count()) return null;
-      const kind = world.body_shape_kind_at(index);
+      if (index < 0 || index >= readNumber(world, "body_count")) return null;
+      const kind = world.read_component("body_shape_kind_at", String(index));
       if (kind !== "sphere" && kind !== "box") return null;
-      const params = Array.from(world.body_shape_params_f64_at(index));
-      const material = world.body_material_label_at(index);
+      const params = (JSON.parse(world.read_component("body_shape_params_f64_at", String(index))) as number[]);
+      const material = world.read_component("body_material_label_at", String(index));
       return { kind, params, material };
     },
     spawn: (prefab) => {
       const { x, z } = nextSpawnPosition();
       if (prefab.kind === "sphere") {
         const radius = prefab.params[0] ?? SPAWN_SPHERE_RADIUS;
-        const bodyIndex = world.spawn_sphere(
+        const bodyIndex = applyComponent(world, "spawn_sphere", {
           x,
-          SPAWN_HEIGHT,
+          y: SPAWN_HEIGHT,
           z,
           radius,
-          prefab.material,
-        );
+          material_name: prefab.material,
+        }).index as number;
         const mesh = new THREE.Mesh(
           new THREE.SphereGeometry(radius, 16, 12),
           new THREE.MeshStandardMaterial({ color: 0x6699ff }),
@@ -6130,13 +6131,13 @@ async function setUpSceneView(
         addSpawnedMesh(bodyIndex, mesh);
       } else if (prefab.kind === "box") {
         const halfExtent = prefab.params[0] ?? SPAWN_BOX_HALF_EXTENT;
-        const bodyIndex = world.spawn_box(
+        const bodyIndex = applyComponent(world, "spawn_box", {
           x,
-          SPAWN_HEIGHT,
+          y: SPAWN_HEIGHT,
           z,
-          halfExtent,
-          prefab.material,
-        );
+          half_extent: halfExtent,
+          material_name: prefab.material,
+        }).index as number;
         const mesh = new THREE.Mesh(
           new THREE.BoxGeometry(halfExtent * 2, halfExtent * 2, halfExtent * 2),
           new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
@@ -6210,14 +6211,26 @@ async function setUpSceneView(
     let mesh: THREE.Mesh;
     switch (kind) {
       case "sphere":
-        bodyIndex = world.spawn_sphere(x, y, z, SPAWN_SPHERE_RADIUS, material);
+        bodyIndex = applyComponent(world, "spawn_sphere", {
+          x,
+          y,
+          z,
+          radius: SPAWN_SPHERE_RADIUS,
+          material_name: material,
+        }).index as number;
         mesh = new THREE.Mesh(
           new THREE.SphereGeometry(SPAWN_SPHERE_RADIUS, 16, 12),
           new THREE.MeshStandardMaterial({ color: 0x6699ff }),
         );
         break;
       case "box":
-        bodyIndex = world.spawn_box(x, y, z, SPAWN_BOX_HALF_EXTENT, material);
+        bodyIndex = applyComponent(world, "spawn_box", {
+          x,
+          y,
+          z,
+          half_extent: SPAWN_BOX_HALF_EXTENT,
+          material_name: material,
+        }).index as number;
         mesh = new THREE.Mesh(
           new THREE.BoxGeometry(
             SPAWN_BOX_HALF_EXTENT * 2,
@@ -6228,14 +6241,14 @@ async function setUpSceneView(
         );
         break;
       case "capsule":
-        bodyIndex = world.spawn_capsule(
+        bodyIndex = applyComponent(world, "spawn_capsule", {
           x,
           y,
           z,
-          SPAWN_CAPSULE_RADIUS,
-          SPAWN_CAPSULE_HALF_HEIGHT,
-          material,
-        );
+          radius: SPAWN_CAPSULE_RADIUS,
+          half_height: SPAWN_CAPSULE_HALF_HEIGHT,
+          material_name: material,
+        }).index as number;
         // THREE.CapsuleGeometry の length は「円柱部の長さ」= 2*half_height。
         mesh = new THREE.Mesh(
           new THREE.CapsuleGeometry(
@@ -6248,17 +6261,22 @@ async function setUpSceneView(
         );
         break;
       case "compound":
-        bodyIndex = world.spawn_compound_l_shape(x, y, z, material);
-        mesh = meshFromShapeJson(SPAWN_COMPOUND_L_SHAPE_JSON).mesh;
-        break;
-      case "convex_mesh":
-        bodyIndex = world.spawn_convex_mesh_cube(
+        bodyIndex = applyComponent(world, "spawn_compound_l_shape", {
           x,
           y,
           z,
-          SPAWN_CONVEX_MESH_HALF,
-          material,
-        );
+          material_name: material,
+        }).index as number;
+        mesh = meshFromShapeJson(SPAWN_COMPOUND_L_SHAPE_JSON).mesh;
+        break;
+      case "convex_mesh":
+        bodyIndex = applyComponent(world, "spawn_convex_mesh_cube", {
+          x,
+          y,
+          z,
+          half: SPAWN_CONVEX_MESH_HALF,
+          material_name: material,
+        }).index as number;
         mesh = meshFromShapeJson(
           convexMeshCubeShapeJson(SPAWN_CONVEX_MESH_HALF),
         ).mesh;
@@ -6286,18 +6304,21 @@ async function setUpSceneView(
   let isolatedBodyIndex: number | null = null;
   hierarchyActionsRef.current = {
     duplicate(index) {
-      if (index < 0 || index >= world.body_count()) return;
+      if (index < 0 || index >= readNumber(world, "body_count")) return;
       // 無限平面(床)は複製しない——2枚重ねても物理的に意味が無く、
       // 対応するメッシュも作れない(Plane の見た目は `normal`/`d` から
       // 別経路で作っている)。
-      if (world.body_shape_kind_at(index) === "plane") return;
+      if (world.read_component("body_shape_kind_at", String(index)) === "plane") return;
       // Rust 側が形状・材質・位置を複製する(`duplicate_body_at`)。
       // フロント側は対応するメッシュを作るだけ——**形状の種類は Rust から
       // 読み直す**(元メッシュを `clone()` すると、Scale Gizmo で寸法を
       // 変えたボディで見た目と物理がずれる)。
-      const newIndex = world.duplicate_body_at(index, DUPLICATE_OFFSET_M);
-      const kind = world.body_shape_kind_at(newIndex);
-      const params = Array.from(world.body_shape_params_f64_at(newIndex));
+      const newIndex = applyComponent(world, "duplicate_body_at", {
+        index,
+        offset: DUPLICATE_OFFSET_M,
+      }).index as number;
+      const kind = world.read_component("body_shape_kind_at", String(newIndex));
+      const params = (JSON.parse(world.read_component("body_shape_params_f64_at", String(newIndex))) as number[]);
       let mesh: THREE.Mesh | null = null;
       if (kind === "sphere") {
         mesh = new THREE.Mesh(
@@ -6321,7 +6342,7 @@ async function setUpSceneView(
         // `body_shape_json_at`で複製後の実際の形状を読み直し、シーンJSON
         // importと同じ`meshFromShapeJson`でメッシュを再構築する。
         const shapeJson = JSON.parse(
-          world.body_shape_json_at(newIndex),
+          world.read_component("body_shape_json_at", String(newIndex)),
         ) as ImportedShapeJson;
         mesh = meshFromShapeJson(shapeJson).mesh;
       }
@@ -6330,7 +6351,7 @@ async function setUpSceneView(
       if (mesh) addSpawnedMesh(newIndex, mesh);
     },
     remove(index) {
-      world.remove_body_at(index);
+      applyComponent(world, "remove_body_at", { index });
       // メッシュ・ピック対象・オーバーレイから外す(残すと y=-1e9 の
       // 退避先へ飛んだメッシュが毎フレーム同期され続ける)。
       const mesh = bodyMeshes.get(index);
@@ -6351,8 +6372,8 @@ async function setUpSceneView(
         // へ落とす。
         const boxAlive =
           index !== BODY_INDEX_BOX &&
-          BODY_INDEX_BOX < world.body_count() &&
-          !world.body_is_removed_at(BODY_INDEX_BOX);
+          BODY_INDEX_BOX < readNumber(world, "body_count") &&
+          !(world.read_component("body_is_removed_at", String(BODY_INDEX_BOX)) === "true");
         selectBody(boxAlive ? BODY_INDEX_BOX : BODY_INDEX_GROUND);
       }
       highlightHierarchy = rebuildHierarchy();
@@ -6373,7 +6394,7 @@ async function setUpSceneView(
         return;
       }
       prefabSaveRef.current?.({
-        name: `${world.body_label_at(index)}_prefab`,
+        name: `${world.read_component("body_label_at", String(index))}_prefab`,
         ...captured,
       });
     },
@@ -6520,7 +6541,11 @@ async function setUpSceneView(
       if (!densityText) return;
       const density = Number(densityText);
       try {
-        world.derive_material(base, name, density);
+        applyComponent(world, "derive_material", {
+          base_name: base,
+          new_name: name,
+          density,
+        });
         const option = document.createElement("option");
         option.value = name;
         option.textContent = name;
@@ -6853,7 +6878,7 @@ async function setUpSceneView(
     pushCommandLog(world, {
       kind: "SetMotorTarget",
       bodyIndex: selectedBodyIndex,
-      bodyLabel: world.body_label_at(selectedBodyIndex),
+      bodyLabel: world.read_component("body_label_at", String(selectedBodyIndex)),
       targetAngle: next,
     });
   });
@@ -6907,7 +6932,7 @@ async function setUpSceneView(
     // 上書きされてしまう——統合の際に発見し、床メッシュの見た目が壊れる前に
     // 気付いて対処した)。Planeは静的なので同期しなくても正しい。
     for (const [bodyIndex, mesh] of bodyMeshes) {
-      if (world.body_shape_kind_at(bodyIndex) === "plane") continue;
+      if (world.read_component("body_shape_kind_at", String(bodyIndex)) === "plane") continue;
       const sp = world.body_position_at_f32(bodyIndex);
       mesh.position.set(sp[0], sp[1], sp[2]);
       const sr = world.body_rotation_at_f32(bodyIndex);
@@ -7095,7 +7120,7 @@ async function setUpSceneView(
     const showGizmo =
       selectedBodyValid &&
       mode === "edit" &&
-      !world.body_is_static_at(selectedBodyIndex);
+      !(world.read_component("body_is_static_at", String(selectedBodyIndex)) === "true");
     gizmoGroup.visible = showGizmo && gizmoTool === "translate";
     rotationGizmoGroup.visible = showGizmo && gizmoTool === "rotate";
     scaleGizmoGroup.visible = showGizmo && gizmoTool === "scale";

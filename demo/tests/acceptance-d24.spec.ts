@@ -154,7 +154,10 @@ test("縦串①: D24車をUIのみで組み立てるとD24シーンJSONの実行
   for (const key of ["fl", "fr", "rl", "rr"] as const) {
     await addViaMenu(page, "＋ 球");
     const index: number = await page.evaluate(
-      () => (window as unknown as { __world: any }).__world.body_count() - 1,
+      () =>
+        Number(
+          (window as unknown as { __world: any }).__world.read_component("body_count", ""),
+        ) - 1,
     );
     wheelIndex[key] = index;
     await setTransformAndBody(page, {

@@ -63,8 +63,8 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (頂点列のみ)ため、体積/慣性/AABBはAABB近似で対応、接触生成(実際に
   衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
-- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第三弾完了**、
-  元165本→109本)
+- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第四弾完了**、
+  元165本→91本)
   **残タスク完遂増分**(レビュー「Full collapse now」指示への対応、着手前は
   本文書のTODO群の中で唯一の未着手項目だった)。第一弾でJoint(5種の追加)・
   Coupling(14種の追加+操縦面舵角の実行時変更)・熱ノード追加/流体・気体
@@ -138,6 +138,32 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   ——Undo/Redo・ドラッグ・grab・質量編集を経由して回帰検知・qa-coupling
   29/37——前回と同じ既存の物理的既知事項のみ、`body_mass_at`を使う
   X2-2/X2-3も含め結果不変)とも維持。
+
+  **第四弾**: ボディのスポーン/削除/複製/材料派生8個(`spawn_sphere`/
+  `spawn_capsule`/`spawn_compound_l_shape`/`spawn_convex_mesh_cube`/
+  `spawn_box`/`remove_body_at`/`duplicate_body_at`/`derive_material`)と、
+  その内省10個(`body_count`/`body_label_at`/`body_is_static_at`/
+  `body_shape_label_at`/`body_shape_kind_at`/`body_shape_json_at`/
+  `body_material_label_at`/`body_is_removed_at`/`body_shape_params_f64_at`/
+  `material_properties_f64`)を同じ2メソッドへ追加で畳んだ(第一〜四弾で
+  計78個、元165本→91本)。`body_count`は内部的にも`try_body_id_at`や
+  各`spawn_*`メソッド自身から10箇所参照されており(新規ボディのindex採番に
+  使う)、フロント向けの外部呼び出し規約だけでなくRust内部の呼び出し名も
+  含めて機械的に置き換えた——他のTask#8スライスには無かった横断的な
+  リネームが必要だった。`body_shape_params_f64_at`/`material_properties_f64`
+  (元`Float64Array`返り値)はJSON配列文字列へ変換——`gravity_direction`/
+  `atmosphere_wind`と同じく小さな固定長配列なので、ホットパス除外の判断
+  基準(大きな型付き配列のみ)には抵触しない。フロント(スポーンパレット・
+  右クリックメニュー・Hierarchy複製・材料派生ダイアログ・Materialsタブ・
+  Prefab機能)・Playwright(縦串①受け入れテストの`body_count`直接呼び出し
+  含む)・3本のQAスクリプトとも新メソッド経由に更新。
+
+  検証: Rust側新規テスト(スポーン8種すべて+複製+削除+材料派生をJSON経由で
+  実際に操作し、`body_count`/各種内省に反映されることを確認)、
+  cargo test -p sim-wasm 27/27全緑。cargo test --workspace全緑、
+  fmt/clippyクリーン、Playwrightスモーク28/28(縦串①受け入れテスト
+  ——`body_count`を最も多く使う経路——含む)・QA(defects16/16・
+  physics19/19・coupling29/37——前回と同じ既存の物理的既知事項のみ)とも維持。
 
   検証: Rust側新規テスト(`apply_component`/`read_component`をJSON経由で
   実際に呼び、Joint/Coupling/熱ノードの追加・内省が代替できることを確認、

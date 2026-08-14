@@ -225,7 +225,7 @@ await loadScene(page, "d25-brownian");
     page.evaluate(() => {
       const w = window.__world;
       const out = [];
-      for (let i = 0; i < w.body_count(); i += 1) out.push(Array.from(w.body_position_at_f32(i)));
+      for (let i = 0; i < Number(w.read_component("body_count", "")); i += 1) out.push(Array.from(w.body_position_at_f32(i)));
       return out;
     });
   const p0 = await positions();
@@ -238,11 +238,11 @@ await loadScene(page, "d25-brownian");
   const v2 = await page.evaluate(() => {
     const w = window.__world;
     let sum = 0;
-    for (let i = 0; i < w.body_count(); i += 1) {
+    for (let i = 0; i < Number(w.read_component("body_count", "")); i += 1) {
       const v = w.body_velocity_at_f32(i);
       sum += v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     }
-    return sum / w.body_count();
+    return sum / Number(w.read_component("body_count", ""));
   });
   const mass = 4.3982297150257095e-15; // シーンの mass_override(ポリスチレン球 1 µm)
   const kT = 1.380649e-23 * 293.15;
@@ -432,7 +432,7 @@ await boot(page);
   await page.waitForTimeout(200);
   const before = await page.evaluate(() => ({
     couplings: Number(window.__world.read_component("coupling_count", "")),
-    bodies: window.__world.body_count(),
+    bodies: Number(window.__world.read_component("body_count", "")),
   }));
   await page.locator("#project-body input[type=file]").setInputFiles(
     new URL("../../../scenes/d10-brake-heat.json", import.meta.url).pathname,
@@ -440,7 +440,7 @@ await boot(page);
   await page.waitForTimeout(600);
   const after = await page.evaluate(() => ({
     couplings: Number(window.__world.read_component("coupling_count", "")),
-    bodies: window.__world.body_count(),
+    bodies: Number(window.__world.read_component("body_count", "")),
   }));
   r.check("Y6-1", "シーン JSON の Import で剛体は増える",
     after.bodies === before.bodies + 2,
