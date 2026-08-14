@@ -264,8 +264,17 @@ pub struct BodyScenarioDesc {
     pub collision_mask: Option<u32>,
 }
 
-/// 設計§3の例示に現れる3形状のみ(`Capsule`/`Compound`/`ConvexMesh`は`raycast`/
-/// `overlap`モジュール同様、narrowphase未実装のため対象外)。
+/// 設計§3の例示に現れる3形状 + `Capsule`(増分Lで追加)に加え、
+/// `Compound`/`ConvexMesh`(**残タスク完遂の縦串⑤前後で追加**、
+/// `sim_mechanics::Shape`の`todo!()`4箇所を埋めたTask#7の続き)。
+///
+/// **Compound**はnarrowphase(接触生成)まで含めてフル実装済み
+/// (`sim_mechanics::collision`のCompound対応)なので、シーンJSONへ
+/// そのまま載せられる。**ConvexMesh**は面情報を持たない(頂点列のみ)ため
+/// 体積/慣性/AABBはAABB近似、接触生成は`None`(すり抜け)のまま
+/// ——「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り範囲外という
+/// 既知の限界はTask#7当時から変わっていない(シーンJSONに載せられる
+/// ようにはしたが、それ自体が接触判定を追加するわけではない)。
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ShapeJson {
@@ -286,6 +295,38 @@ pub enum ShapeJson {
         normal: [f64; 3],
         d: f64,
     },
+    /// 部品ごとのローカル変換(位置+回転、`half`が無ければ子はスケールを
+    /// 持たない)と子`ShapeJson`の組。
+    Compound {
+        children: Vec<CompoundChildJson>,
+    },
+    /// 頂点列のみ(面情報なし、モジュールdoc参照)。
+    /// **`rename`必須**: 列挙型全体の`rename_all = "lowercase"`は単語区切りを
+    /// 挿入しないため、無指定だと`"convexmesh"`という読みにくいタグになる
+    /// (実際に`serde_json::to_string`で確認済みの実バグだった——フロント側
+    /// `demo/src/main.ts`の`ImportedShapeJson`は最初から`"convex_mesh"`
+    /// キーを前提にしており、無指定のままだと実際のエクスポートJSON/
+    /// 複製後の形状読み直しの両方で一致せず、常にフォールバック(0.3mの球)
+    /// へ落ちて凸包メッシュが描画されない状態だった)。
+    #[serde(rename = "convex_mesh")]
+    ConvexMesh {
+        vertices: Vec<[f64; 3]>,
+    },
+}
+
+/// `ShapeJson::Compound`の子1つ(ローカル位置・回転+形状)。
+#[derive(Deserialize, Serialize)]
+pub struct CompoundChildJson {
+    #[serde(default)]
+    pub position: [f64; 3],
+    /// `[x,y,z,w]`。省略時は単位回転。
+    #[serde(default = "identity_quat")]
+    pub rotation: [f64; 4],
+    pub shape: Box<ShapeJson>,
+}
+
+fn identity_quat() -> [f64; 4] {
+    [0.0, 0.0, 0.0, 1.0]
 }
 
 /// モジュールdoc「縮約実装の理由」参照 — 設計例示のAABBではなく`water_level`+
@@ -1334,6 +1375,44 @@ fn array_to_quat(q: [f64; 4]) -> sim_math::Quat {
     }
 }
 
+/// `ShapeJson` → `sim_mechanics::Shape`(**残タスク完遂の縦串⑤前後で
+/// Compound/ConvexMeshを追加**、`ShapeJson`のdoc参照)。`Compound`は子を
+/// 再帰的に変換する。
+pub fn shape_json_to_shape(json: &ShapeJson) -> Shape {
+    match json {
+        ShapeJson::Box { half } => Shape::Box {
+            half_extents: array_to_vec3(*half),
+        },
+        ShapeJson::Sphere { radius } => Shape::Sphere { radius: *radius },
+        ShapeJson::Capsule {
+            radius,
+            half_height,
+        } => Shape::Capsule {
+            radius: *radius,
+            half_height: *half_height,
+        },
+        ShapeJson::Plane { normal, d } => Shape::Plane {
+            normal: array_to_vec3(*normal),
+            d: *d,
+        },
+        ShapeJson::Compound { children } => Shape::Compound {
+            children: children
+                .iter()
+                .map(|c| {
+                    let transform = sim_math::Transform {
+                        position: array_to_vec3(c.position),
+                        rotation: array_to_quat(c.rotation),
+                    };
+                    (transform, shape_json_to_shape(&c.shape))
+                })
+                .collect(),
+        },
+        ShapeJson::ConvexMesh { vertices } => Shape::ConvexMesh {
+            vertices: vertices.iter().map(|v| array_to_vec3(*v)).collect(),
+        },
+    }
+}
+
 impl World {
     /// シーンJSONの`materials`/`bodies`セクションを現在の`World`へ追加する
     /// (`from_scenario`と、実行中のワールドへシーンJSONを取り込むシーンJSON
@@ -1374,23 +1453,7 @@ impl World {
                 .materials()
                 .find_by_name(&body.material)
                 .ok_or_else(|| SceneError::UnknownMaterial(body.material.clone()))?;
-            let shape = match body.shape {
-                ShapeJson::Box { half } => Shape::Box {
-                    half_extents: array_to_vec3(half),
-                },
-                ShapeJson::Sphere { radius } => Shape::Sphere { radius },
-                ShapeJson::Capsule {
-                    radius,
-                    half_height,
-                } => Shape::Capsule {
-                    radius,
-                    half_height,
-                },
-                ShapeJson::Plane { normal, d } => Shape::Plane {
-                    normal: array_to_vec3(normal),
-                    d,
-                },
-            };
+            let shape = shape_json_to_shape(&body.shape);
             let drag = match (body.drag, &body.shape) {
                 (true, ShapeJson::Sphere { radius }) => DragModel::Sphere { radius: *radius },
                 _ => DragModel::None,
@@ -4968,5 +5031,26 @@ mod tests {
                 world.step();
             }
         }
+    }
+
+    /// **回帰テスト**: `ShapeJson::ConvexMesh`のJSONタグは`"convex_mesh"`
+    /// (アンダースコア区切り)でなければならない。列挙型全体の
+    /// `rename_all = "lowercase"`だけに頼ると単語区切りが消えて
+    /// `"convexmesh"`になり、`demo/src/main.ts`の`ImportedShapeJson`
+    /// (`"convex_mesh"`キー前提)と食い違って凸包メッシュの描画が
+    /// 常にフォールバックへ落ちる実バグを再発させる(一度発生させて
+    /// 発見・修正した)。
+    #[test]
+    fn convex_mesh_shape_json_tag_is_snake_case() {
+        let json = serde_json::to_string(&ShapeJson::ConvexMesh {
+            vertices: vec![[0.0, 0.0, 0.0]],
+        })
+        .unwrap();
+        assert!(
+            json.starts_with(r#"{"convex_mesh":"#),
+            "actual json: {json}"
+        );
+        let round_tripped: ShapeJson = serde_json::from_str(&json).unwrap();
+        assert!(matches!(round_tripped, ShapeJson::ConvexMesh { .. }));
     }
 }

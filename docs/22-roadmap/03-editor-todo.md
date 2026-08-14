@@ -77,16 +77,56 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   FluidRegion/Environment(縦串③)は対象外——スキーマ駆動フォームの
   汎用化(wasm境界のschema/read/apply化)と一体に進める方が手戻りが少ない
   ため、Jointだけを先行させた。
-- [x] 形状描画をShape記述に一本化する(**一部完了**)
+- [x] 形状描画をShape記述に一本化する(**全部完了**)
   `demo/src/main.ts` の `sceneImportRef.current`/`sceneGalleryRef.current` に
   2箇所コピーされていた形状パーサを `meshFromShapeJson()` 1関数に集約。
   副次的に実バグを発見・修正: `ImportedShapeJson` がCapsuleを型に持たず、
   カプセル形状のボディが常に0.3mの球として描かれていた(計画書指摘の不具合)
   ——capsule variantを追加し`CapsuleGeometry`で正しく描画。未知形状は
-  黙って球を出さずconsole.warnで警告するよう変更。Compound/ConvexMeshの
-  メッシュ生成は対象外——シーンJSONスキーマ・`body_shape_kind_at`とも
-  これらの形状を表現できず、UIから作る経路も無いため現状到達不能・
-  テスト不能(縮約として明記)。
+  黙って球を出さずconsole.warnで警告するよう変更。
+
+  **レビュー指摘(「一部完了ではなく全部完了となるよう」「UIから作る経路が
+  ないから〜について、出来るようにする前提で開発を推進してください」
+  「縮約させないよう、あるべき姿を検討し実装すること」)を受けて、
+  Compound/ConvexMeshも含めて完遂した:**
+  - シーンJSONスキーマ(`ShapeJson`)に`Compound`/`ConvexMesh`を追加し、
+    JSON⇄`Shape`の変換を`shape_json_to_shape`/`shape_to_shape_json`として
+    共有関数化(`sim-world`)。これに伴い、`sim-wasm`の`import_scene_json`/
+    `from_scene_json`に**元から存在していた非exhaustive match(Compound/
+    ConvexMeshのアーム欠落、コンパイラが指摘する実バグ)**と、
+    `export.rs`の`export_bodies`にあった`unreachable!()`(Task#7完了後も
+    残っていた古い前提の実バグ)を副次的に発見・修正。
+  - `WasmWorld::spawn_compound_l_shape`/`spawn_convex_mesh_cube`を新設し、
+    ツールバー「＋ 追加」メニューとScene View右クリックメニューの両方に
+    「＋ 複合形状 (L字)」「＋ 凸包メッシュ」を追加——UIから実際に作れる
+    経路がこれで存在する(以前は無く、シーンJSON importでしか到達
+    できなかった既知の欠落だった)。
+  - `meshFromShapeJson()`にCompound(空ジオメトリの入れ物へ子メッシュを
+    再帰的に載せる「carrier mesh」)とConvexMesh(`three/examples/jsm`の
+    `ConvexGeometry`で頂点群から見た目上の凸包を計算)の描画分岐を追加。
+    ConvexMeshの接触判定が`None`(すり抜け)なのは`sim-mechanics`側の
+    既知の限界(Task#58参照、レビューで指摘されていない)のままだが、
+    描画は本物の凸包として正しく出る。
+  - `body_shape_kind_at`が`Shape::Capsule`を`_ => "other"`に落として
+    いた**副次的に発見した実バグ**(フロント`duplicate()`の
+    `kind === "capsule"`分岐が到達不能だった)も合わせて修正し、
+    sphere/box/capsule/plane/compound/convex_meshの6種を網羅する
+    完全一致にした。
+  - 複製(`duplicate()`)がCompound/ConvexMeshでも動くよう、新設した
+    `body_shape_json_at`(実際の形状をシーンJSON形式で読み直す、
+    `shape_to_shape_json`を再利用)経由でメッシュを再構築——スポーン時の
+    既定形状だと決め打ちしない。
+  - **副次的に発見・修正した実バグ**: `ShapeJson::ConvexMesh`のJSONタグが
+    列挙型全体の`#[serde(rename_all = "lowercase")]`だけでは単語区切りが
+    消えて`"convexmesh"`になり、フロント側が前提としていた`"convex_mesh"`
+    キーと食い違って**エクスポートJSON経由の凸包メッシュ描画が常に
+    フォールバック(0.3mの球)へ落ちる**状態だった。`#[serde(rename =
+    "convex_mesh")]`を明示して修正し、タグを固定する回帰テストも追加。
+  - Playwrightで実UI経由(ツールバー/右クリック双方のメニューからの
+    スポーン→Hierarchy反映確認→N step実行でクラッシュしないこと→
+    複製してもクラッシュしないこと)を検証する受け入れテストを追加
+    (「テスト不能」への直接の反証)。Rust側もスポーン成功パス・
+    `body_shape_kind_at`/`body_shape_json_at`の往復を単体テストで確認。
 - [x] 縦串①(ジョイント)の受け入れテストを緑にする
   `demo/tests/acceptance-d24.spec.ts`。D24相当の車(シャシー+車輪4個+
   WheelJoint4本)をScene View/Inspectorの**UI操作だけ**(スポーンパレット・

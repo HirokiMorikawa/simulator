@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { ConvexGeometry } from "three/examples/jsm/geometries/ConvexGeometry.js";
 import init, {
   WasmWorld,
   run_headless_scenario_json,
@@ -155,6 +156,32 @@ type InspectorEditHandlers = {
 };
 type InspectorEditRef = { current: InspectorEditHandlers | null };
 const inspectorEditRef: InspectorEditRef = { current: null };
+
+/// 推力(**残タスク完遂の縦串⑤増分**、飛行機の物理の一部)。設計は
+/// 「推力Coupling」を挙げているが、`Command::ApplyForce`(ワールド座標の力を
+/// 剛体へ加える、既存の`push_apply_force`)が既にあり、ヒーターの
+/// 「1step分だけ効く力を毎フレーム再送する」(`push_heat_source`と同じ
+/// パターン)と同じやり方で組めるため、**新しいCoupling/Commandを物理コアへ
+/// 足さずに**実装できる——ローカル軸をそのstepのボディ姿勢でワールドへ回し、
+/// スロットル×最大推力を`push_apply_force`で送るだけ。物理コア変更の
+/// リスクを避けつつ「エンジン」を実現する縮約(Inspectorの状態はここに
+/// per-body保持、`renderInspectorFor`の再描画をまたいで生き残る必要が
+/// あるため`inspectorEditRef`と同じくモジュールスコープ)。
+type ThrustState = {
+  enabled: boolean;
+  axis: [number, number, number];
+  maxThrust: number;
+  throttle: number;
+};
+const thrustByBody = new Map<number, ThrustState>();
+function thrustStateFor(bodyIndex: number): ThrustState {
+  let state = thrustByBody.get(bodyIndex);
+  if (!state) {
+    state = { enabled: false, axis: [0, 0, 1], maxThrust: 1000, throttle: 0 };
+    thrustByBody.set(bodyIndex, state);
+  }
+  return state;
+}
 
 /// **右クリックコンテキストメニュー(群2)**。設計 docs/23-frontend/01-editor.md は
 /// Hierarchy(§1.1「右クリックでコンテキストメニュー(複製・削除・親付け・
@@ -447,7 +474,17 @@ type ImportedShapeJson =
   | { box: { half: [number, number, number] } }
   | { sphere: { radius: number } }
   | { capsule: { radius: number; half_height: number } }
-  | { plane: { normal: [number, number, number]; d: number } };
+  | { plane: { normal: [number, number, number]; d: number } }
+  | {
+      compound: {
+        children: {
+          position?: [number, number, number];
+          rotation?: [number, number, number, number];
+          shape: ImportedShapeJson;
+        }[];
+      };
+    }
+  | { convex_mesh: { vertices: [number, number, number][] } };
 type ImportedBodyJson = { shape: ImportedShapeJson };
 // 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5)向け。
 // `sim_world::scenario::PredictionPromptJson`のJSON表現と同じ形(物理には
@@ -1070,6 +1107,45 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   wireInspectorEditFields(index);
   wireAddJointForm(world, index);
   wireAddCouplingForm(world, index);
+  wireThrustForm(index);
+}
+
+/// `renderInspectorExtraComponents`が生成した Thrust フォームを配線する
+/// (**残タスク完遂の縦串⑤増分**)。値は`thrustByBody`(モジュールスコープ)
+/// へ直接書き込むだけ——実際の`ApplyForce`送信は`setUpSceneView`のPlay
+/// ループが毎step行う。
+function wireThrustForm(index: number): void {
+  if (index <= 0) return;
+  const state = thrustStateFor(index);
+  const enabledInput = document.getElementById(
+    "thrust-enabled",
+  ) as HTMLInputElement | null;
+  enabledInput?.addEventListener("change", () => {
+    state.enabled = enabledInput.checked;
+  });
+  (["x", "y", "z"] as const).forEach((axis, i) => {
+    const input = document.getElementById(
+      `thrust-axis-${axis}`,
+    ) as HTMLInputElement | null;
+    input?.addEventListener("change", () => {
+      state.axis[i] = Number(input.value) || 0;
+    });
+  });
+  const maxThrustInput = document.getElementById(
+    "thrust-max",
+  ) as HTMLInputElement | null;
+  maxThrustInput?.addEventListener("change", () => {
+    state.maxThrust = Math.max(0, Number(maxThrustInput.value) || 0);
+  });
+  const throttleInput = document.getElementById(
+    "thrust-throttle",
+  ) as HTMLInputElement | null;
+  throttleInput?.addEventListener("change", () => {
+    const value = Number(throttleInput.value);
+    state.throttle = Number.isFinite(value)
+      ? Math.min(1, Math.max(0, value))
+      : 0;
+  });
 }
 
 /// `renderInspectorExtraComponents`が生成した Add Joint フォームのボタンを配線する
@@ -1539,6 +1615,38 @@ function renderInspectorExtraComponents(
       `<div class="inspector-component"><h3>近似</h3>` +
         `<div class="approximation-badges">${badges}</div></div>`,
     );
+  }
+
+  // Thrust(**残タスク完遂の縦串⑤増分**、モジュール冒頭の`ThrustState`のdoc
+  // 参照)。Ground(index 0)は対象外(静的剛体に推力は意味を持たない、
+  // 軸別スケールと同じ理由でindex 0を除外)。
+  if (index > 0) {
+    const thrust = thrustStateFor(index);
+    sections.push(`
+      <div class="inspector-component" data-stacked>
+        <h3>Thrust(推力)</h3>
+        <div class="inspector-field">
+          <label><input type="checkbox" id="thrust-enabled" ${thrust.enabled ? "checked" : ""} /> エンジン有効</label>
+        </div>
+        <div class="inspector-field">
+          <span>Axis(ローカル)</span>
+          <span class="inspector-joint-row">
+            <input type="number" id="thrust-axis-x" step="0.1" value="${thrust.axis[0]}" />
+            <input type="number" id="thrust-axis-y" step="0.1" value="${thrust.axis[1]}" />
+            <input type="number" id="thrust-axis-z" step="0.1" value="${thrust.axis[2]}" />
+          </span>
+        </div>
+        <div class="inspector-field">
+          <span>最大推力 [N]</span>
+          <input type="number" id="thrust-max" step="10" min="0" value="${thrust.maxThrust}" />
+        </div>
+        <div class="inspector-field">
+          <span>スロットル [0-1]</span>
+          <input type="number" id="thrust-throttle" step="0.05" min="0" max="1" value="${thrust.throttle}" />
+        </div>
+        <p class="inspector-note">Playモード中、毎stepローカル軸をボディの姿勢でワールドへ回し、スロットル×最大推力を<code>ApplyForce</code>で送る(新しいCoupling/Commandを物理コアへ足さない縮約、モジュール冒頭の<code>ThrustState</code>のdoc参照)。着陸装置は既存のWheelJoint(Add Jointフォームの"Wheel"種別)をそのまま流用できる。</p>
+      </div>
+    `);
   }
 
   // Add Component(**残タスク完遂の縦串①増分**、`WasmWorld::add_*_joint`
@@ -4819,6 +4927,33 @@ async function setUpSceneView(
   const heaterToggle = document.getElementById(
     "toggle-heater",
   ) as HTMLInputElement;
+
+  /// Thrust(**残タスク完遂の縦串⑤増分**、`ThrustState`のdocコメント参照)。
+  /// ヒーターと同じ「1step分だけ効く力を毎stepの直前に再送する」パターンで、
+  /// エンジン有効な各ボディについてローカル軸をそのstepの姿勢でワールドへ
+  /// 回し、スロットル×最大推力を`push_apply_force`で送る。
+  const thrustQuat = new THREE.Quaternion();
+  const thrustAxis = new THREE.Vector3();
+  function applyThrustForStep(): void {
+    for (const [bodyIndex, state] of thrustByBody) {
+      if (!state.enabled || state.throttle <= 0) continue;
+      if (bodyIndex >= world.body_count() || world.body_is_removed_at(bodyIndex))
+        continue;
+      const rot = world.body_rotation_at_f32(bodyIndex);
+      thrustQuat.set(rot[0], rot[1], rot[2], rot[3]);
+      thrustAxis
+        .set(state.axis[0], state.axis[1], state.axis[2])
+        .applyQuaternion(thrustQuat);
+      const magnitude = state.throttle * state.maxThrust;
+      world.push_apply_force(
+        bodyIndex,
+        thrustAxis.x * magnitude,
+        thrustAxis.y * magnitude,
+        thrustAxis.z * magnitude,
+      );
+    }
+  }
+
   const undoButton = document.getElementById("btn-undo") as HTMLButtonElement;
   const redoButton = document.getElementById("btn-redo") as HTMLButtonElement;
 
@@ -5119,6 +5254,56 @@ async function setUpSceneView(
         ),
         isPlane: false,
       };
+    }
+    if (shape && "compound" in shape) {
+      // **残タスク完遂の縦串⑤前後で追加**。`THREE.Mesh`型のまま複数の子
+      // メッシュを`.add()`で載せる「空ジオメトリの入れ物」トリック
+      // ——`addSpawnedMesh`/`bodyMeshes`が`THREE.Mesh`型を前提にしている
+      // ため(`Object3D`へ緩めるより、Meshのままの方が既存コードへの
+      // 影響が小さい)。各子はローカルのposition/rotationで`carrier`の
+      // 子として配置し、`carrier`自体の位置/姿勢を毎フレーム同期すれば
+      // 全体が追従する(通常のメッシュ同期経路と同じ)。
+      const carrier = new THREE.Mesh(new THREE.BufferGeometry());
+      for (const child of shape.compound.children) {
+        const { mesh: childMesh, isPlane: childIsPlane } = meshFromShapeJson(
+          child.shape,
+        );
+        if (childIsPlane) {
+          console.warn("Compoundの子にPlaneは対象外——無視します。");
+          continue;
+        }
+        const [px, py, pz] = child.position ?? [0, 0, 0];
+        childMesh.position.set(px, py, pz);
+        if (child.rotation) {
+          const [qx, qy, qz, qw] = child.rotation;
+          childMesh.quaternion.set(qx, qy, qz, qw);
+        }
+        carrier.add(childMesh);
+      }
+      return { mesh: carrier, isPlane: false };
+    }
+    if (shape && "convex_mesh" in shape) {
+      // **残タスク完遂の縦串⑤前後で追加**。物理側(`sim_mechanics::Shape::
+      // ConvexMesh`)は面情報を持たず接触判定も`None`(すり抜け、既知の
+      // 限界)のままだが、描画は`ConvexGeometry`(3点以上の点群から凸包を
+      // 計算する、`three/examples/jsm`)で頂点の見た目上の凸包を描ける
+      // ——Rust側の物理コアには触れない、フロントエンドの描画専用の対応。
+      const points = shape.convex_mesh.vertices.map(
+        ([x, y, z]) => new THREE.Vector3(x, y, z),
+      );
+      if (points.length < 4) {
+        console.warn(
+          `ConvexMesh: 頂点が${points.length}個(凸包の計算には4個以上が要る)——0.3mの球で代用します。`,
+        );
+      } else {
+        return {
+          mesh: new THREE.Mesh(
+            new ConvexGeometry(points),
+            new THREE.MeshStandardMaterial({ color: 0x88ccff }),
+          ),
+          isPlane: false,
+        };
+      }
     }
     console.warn(
       `未知の形状(${shape ? Object.keys(shape).join(",") : "undefined"})を検出——0.3mの球で代用します。`,
@@ -5577,11 +5762,52 @@ async function setUpSceneView(
   const SPAWN_CAPSULE_RADIUS = 0.2;
   const SPAWN_CAPSULE_HALF_HEIGHT = 0.35;
 
+  // **複合形状(L字)・凸包メッシュ(立方体)のスポーン**。`spawn_compound_l_shape`/
+  // `spawn_convex_mesh_cube`(Rust側)が返す既定形状と寸法を合わせる
+  // ——見た目(`meshFromShapeJson`が受け取る`ImportedShapeJson`)と物理の
+  // 形状記述を二重管理しないよう、ここでも同じ`ImportedShapeJson`を組み立てて
+  // `meshFromShapeJson`を再利用する(独自のTHREE.Geometry組み立てを増やさない)。
+  const SPAWN_COMPOUND_L_SHAPE_JSON: ImportedShapeJson = {
+    compound: {
+      children: [
+        {
+          position: [0, 0.75, 0],
+          shape: { box: { half: [0.25, 1.0, 0.25] } },
+        },
+        {
+          position: [0.25, -0.25, 0],
+          shape: { box: { half: [0.5, 0.25, 0.25] } },
+        },
+      ],
+    },
+  };
+  // L字の最下点(横棒の下端): y=-0.25の中心からhalf_extents.y=0.25分下。
+  const SPAWN_COMPOUND_L_SHAPE_REST_OFFSET = 0.5;
+  const SPAWN_CONVEX_MESH_HALF = 0.3;
+  function convexMeshCubeShapeJson(half: number): ImportedShapeJson {
+    const vertices: [number, number, number][] = [];
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        for (const sz of [-1, 1]) {
+          vertices.push([sx * half, sy * half, sz * half]);
+        }
+      }
+    }
+    return { convex_mesh: { vertices } };
+  }
+
   /// スポーンパレットが扱う形状(設計 §1.2「右クリックでコンテキストメニュー…
   /// スポーンパレット(形状×材質を選んで**クリック位置に配置**)」)。
   /// ツールバーのボタンも右クリックメニューも**この1関数を共有する**ので、
   /// 「ボタンからだと動くがメニューからだと動かない」という乖離が起きない。
-  type SpawnShapeKind = "sphere" | "box" | "capsule";
+  /// **`compound`/`convex_mesh`は残タスク完遂の縦串⑤前後で追加**——レビュー
+  /// 指摘(「UIから作る経路がないから」を許容せず作る前提で進める)への対応。
+  type SpawnShapeKind =
+    | "sphere"
+    | "box"
+    | "capsule"
+    | "compound"
+    | "convex_mesh";
   function spawnShapeAt(
     kind: SpawnShapeKind,
     x: number,
@@ -5630,6 +5856,22 @@ async function setUpSceneView(
           new THREE.MeshStandardMaterial({ color: 0xcc88ff }),
         );
         break;
+      case "compound":
+        bodyIndex = world.spawn_compound_l_shape(x, y, z, material);
+        mesh = meshFromShapeJson(SPAWN_COMPOUND_L_SHAPE_JSON).mesh;
+        break;
+      case "convex_mesh":
+        bodyIndex = world.spawn_convex_mesh_cube(
+          x,
+          y,
+          z,
+          SPAWN_CONVEX_MESH_HALF,
+          material,
+        );
+        mesh = meshFromShapeJson(
+          convexMeshCubeShapeJson(SPAWN_CONVEX_MESH_HALF),
+        ).mesh;
+        break;
     }
     addSpawnedMesh(bodyIndex, mesh);
     return bodyIndex;
@@ -5639,6 +5881,8 @@ async function setUpSceneView(
     ["btn-spawn-sphere", "sphere"],
     ["btn-spawn-box", "box"],
     ["btn-spawn-capsule", "capsule"],
+    ["btn-spawn-compound", "compound"],
+    ["btn-spawn-convex-mesh", "convex_mesh"],
   ] as [string, SpawnShapeKind][]) {
     document.getElementById(id)!.addEventListener("click", () => {
       const { x, z } = nextSpawnPosition();
@@ -5679,6 +5923,16 @@ async function setUpSceneView(
           new THREE.CapsuleGeometry(params[0], params[1] * 2, 8, 16),
           new THREE.MeshStandardMaterial({ color: 0xcc88ff }),
         );
+      } else if (kind === "compound" || kind === "convex_mesh") {
+        // `body_shape_params_f64_at`は可変長の入れ子構造(Compound)や頂点群
+        // (ConvexMesh)を平坦なf64配列で表現できないため空配列を返す
+        // ——スポーン時の既定形状(L字/立方体)だと決め打ちせず、
+        // `body_shape_json_at`で複製後の実際の形状を読み直し、シーンJSON
+        // importと同じ`meshFromShapeJson`でメッシュを再構築する。
+        const shapeJson = JSON.parse(
+          world.body_shape_json_at(newIndex),
+        ) as ImportedShapeJson;
+        mesh = meshFromShapeJson(shapeJson).mesh;
       }
       // Plane(床)は複製対象外——`duplicate_body_at` は作ってしまうが、
       // 無限平面を2枚重ねても意味が無いのでメッシュは作らない。
@@ -5751,6 +6005,16 @@ async function setUpSceneView(
         label: "＋ カプセル",
         onSelect: clickHidden("btn-spawn-capsule"),
         title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
+      },
+      {
+        label: "＋ 複合形状 (L字)",
+        onSelect: clickHidden("btn-spawn-compound"),
+        title: "Shape::Compound(Box×2の子)",
+      },
+      {
+        label: "＋ 凸包メッシュ",
+        onSelect: clickHidden("btn-spawn-convex-mesh"),
+        title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
       },
       { separator: true },
       { label: "＋ 振り子 (DistanceJoint)", onSelect: clickHidden("btn-spawn-pendulum") },
@@ -5827,6 +6091,16 @@ async function setUpSceneView(
           SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
         ),
         title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
+      },
+      {
+        label: "ここに複合形状(L字)を配置",
+        onSelect: place("compound", SPAWN_COMPOUND_L_SHAPE_REST_OFFSET),
+        title: "Shape::Compound(Box×2の子)",
+      },
+      {
+        label: "ここに凸包メッシュを配置",
+        onSelect: place("convex_mesh", SPAWN_CONVEX_MESH_HALF),
+        title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
       },
       { separator: true },
       {
@@ -5966,6 +6240,7 @@ async function setUpSceneView(
         // Play ループと同じくヒーターは毎 step 再送する(「1step分だけ効く」
         // 縮約セマンティクス、`HEATER_WATTS` のdoc参照)。
         if (heaterToggle.checked) world.push_heat_source(HEATER_WATTS);
+        applyThrustForStep();
         world.step();
       }
       appendConsoleEntries(world.drain_events_text());
@@ -6501,6 +6776,7 @@ async function setUpSceneView(
       const dt = world.dt();
       while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
         if (heaterToggle.checked) world.push_heat_source(HEATER_WATTS);
+        applyThrustForStep();
         world.step();
         accumulator -= dt;
         steps += 1;

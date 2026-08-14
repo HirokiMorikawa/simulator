@@ -280,23 +280,7 @@ impl WasmWorld {
             .enumerate()
             .map(|(index, (body, &id))| {
                 let label = body.name.clone().unwrap_or_else(|| format!("Body_{index}"));
-                let shape = match body.shape {
-                    sim_world::ShapeJson::Box { half } => Shape::Box {
-                        half_extents: Vec3::new(half[0], half[1], half[2]),
-                    },
-                    sim_world::ShapeJson::Sphere { radius } => Shape::Sphere { radius },
-                    sim_world::ShapeJson::Capsule {
-                        radius,
-                        half_height,
-                    } => Shape::Capsule {
-                        radius,
-                        half_height,
-                    },
-                    sim_world::ShapeJson::Plane { normal, d } => Shape::Plane {
-                        normal: Vec3::new(normal[0], normal[1], normal[2]),
-                        d,
-                    },
-                };
+                let shape = sim_world::shape_json_to_shape(&body.shape);
                 SpawnedBodyMeta {
                     id,
                     label,
@@ -429,21 +413,30 @@ impl WasmWorld {
     /// Body/Joint/Circuit組(自作シーンから...「Prefabとして保存」)。他シーンへ
     /// ドラッグで再利用」の縮約実装——Bodyの形状/材質のみ対象、Joint/Circuit組は
     /// 対象外)向けに、`index`番目のボディの形状の種類を返す
-    /// ("sphere"/"box"/"plane"/"other")。`body_shape_params_f64_at`と対で使う。
+    /// ("sphere"/"box"/"capsule"/"plane"/"compound"/"convex_mesh")。
+    /// `body_shape_params_f64_at`と対で使う。
+    /// **2026-08-14修正**: `Shape::Capsule`が`_ => "other"`に落ちて
+    /// "capsule"を返さない実バグがあった(フロント`duplicate()`の
+    /// `kind === "capsule"`分岐が到達不能だった)。Compound/ConvexMeshの
+    /// UI作成経路を追加するのと合わせ、6種すべてを網羅する完全一致へ修正。
     pub fn body_shape_kind_at(&self, index: usize) -> Result<String, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.shape_of(id.index as usize) {
                 Shape::Sphere { .. } => "sphere".to_string(),
                 Shape::Box { .. } => "box".to_string(),
+                Shape::Capsule { .. } => "capsule".to_string(),
                 Shape::Plane { .. } => "plane".to_string(),
-                _ => "other".to_string(),
+                Shape::Compound { .. } => "compound".to_string(),
+                Shape::ConvexMesh { .. } => "convex_mesh".to_string(),
             },
         )
     }
 
     /// `body_shape_kind_at`と対応する数値パラメータ: sphere→`[radius]`、
-    /// box→`[hx,hy,hz]`、plane→`[nx,ny,nz,d]`、other→空配列(Prefab保存用)。
+    /// box→`[hx,hy,hz]`、capsule→`[radius,half_height]`、
+    /// plane→`[nx,ny,nz,d]`、compound/convex_mesh→空配列(可変長構造は
+    /// 平坦なf64配列で表現できないため——Prefab保存も両形状は対象外のまま)。
     pub fn body_shape_params_f64_at(&self, index: usize) -> Result<Float64Array, JsValue> {
         let id = self.try_body_id_at(index)?;
         Ok(
@@ -452,12 +445,32 @@ impl WasmWorld {
                 Shape::Box { half_extents } => {
                     Float64Array::from(&[half_extents.x, half_extents.y, half_extents.z][..])
                 }
+                Shape::Capsule {
+                    radius,
+                    half_height,
+                } => Float64Array::from(&[*radius, *half_height][..]),
                 Shape::Plane { normal, d } => {
                     Float64Array::from(&[normal.x, normal.y, normal.z, *d][..])
                 }
-                _ => Float64Array::from(&[][..]),
+                Shape::Compound { .. } | Shape::ConvexMesh { .. } => Float64Array::from(&[][..]),
             },
         )
+    }
+
+    /// `body_shape_kind_at`が`"compound"`/`"convex_mesh"`を返すボディの、
+    /// 入れ子構造も含めた完全な形状記述をシーンJSON形式(`ShapeJson`を
+    /// `serde_json`でシリアライズした文字列)で返す。`body_shape_params_f64_at`
+    /// が平坦なf64配列で表現できない両形状向けの専用経路——
+    /// フロント側の`duplicate()`が「スポーン時の既定形状(L字/立方体)だと
+    /// 決め打ちする」縮約をせず、複製後の実際の形状からメッシュを
+    /// 再構築できるようにする(シーンJSON importと同じ`meshFromShapeJson`
+    /// を再利用できる形で返す)。
+    pub fn body_shape_json_at(&self, index: usize) -> Result<String, JsValue> {
+        let id = self.try_body_id_at(index)?;
+        let shape = self.inner.mechanics().bodies.shape_of(id.index as usize);
+        let shape_json = sim_world::shape_to_shape_json(shape);
+        serde_json::to_string(&shape_json)
+            .map_err(|e| JsValue::from_str(&format!("failed to serialize shape: {e}")))
     }
 
     /// Inspector表示用の材質名。
@@ -627,6 +640,109 @@ impl WasmWorld {
         Ok(index)
     }
 
+    /// **残タスク完遂の縦串⑤前後で追加**——`Shape::Compound`をUIから作る経路
+    /// (Task#7で`todo!()`を埋めた後もスポーンパレットに無く、シーンJSON
+    /// import経由でしか到達できなかった既知の欠落)。L字形(縦棒0.5×2.0×0.5+
+    /// 横棒1.0×0.5×0.5、縦棒下端に接続)を既定の複合形状として提供する
+    /// ——`World::create_body`が実際に呼ばれる`compound_body_can_be_created_
+    /// and_settles_on_the_ground_without_panicking`のL字形と同じ構成(既に
+    /// 「地面に落ちて静止する」ところまでヘッドレスで検証済みの形)。
+    pub fn spawn_compound_l_shape(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        material_name: String,
+    ) -> Result<usize, JsValue> {
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(&material_name)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+        let shape = Shape::Compound {
+            children: vec![
+                (
+                    sim_math::Transform {
+                        position: sim_math::Vec3::new(0.0, 0.75, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: sim_math::Vec3::new(0.25, 1.0, 0.25),
+                    },
+                ),
+                (
+                    sim_math::Transform {
+                        position: sim_math::Vec3::new(0.25, -0.25, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: sim_math::Vec3::new(0.5, 0.25, 0.25),
+                    },
+                ),
+            ],
+        };
+        let mut desc = RigidBodyDesc::dynamic(shape.clone(), material);
+        desc.transform.position = sim_math::Vec3::new(x, y, z);
+        let id = self.inner.create_body(desc);
+        let index = self.body_count();
+        let label = format!("Compound_{index}");
+        self.bodies.push(SpawnedBodyMeta {
+            id,
+            label,
+            material_label: material_name,
+            base_shape: shape,
+            constraint_joint_index: None,
+            hinge_motor_index: None,
+            removed: false,
+        });
+        Ok(index)
+    }
+
+    /// **残タスク完遂の縦串⑤前後で追加**——`Shape::ConvexMesh`をUIから作る
+    /// 経路(`spawn_compound_l_shape`と同じ理由)。頂点が立方体の8隅そのもの
+    /// (`half`半辺)という、`Shape::Box`と体積・慣性が完全一致する構成
+    /// (`convex_mesh_of_a_cubes_corners_matches_the_equivalent_box`と同じ)を
+    /// 既定として提供する——ConvexMeshは接触生成が`None`(すり抜け、既知の
+    /// 限界、モジュールdoc参照)なので、他の形状と重ねると実際にすり抜ける。
+    pub fn spawn_convex_mesh_cube(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        half: f64,
+        material_name: String,
+    ) -> Result<usize, JsValue> {
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(&material_name)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+        let mut vertices = Vec::with_capacity(8);
+        for &sx in &[-1.0, 1.0] {
+            for &sy in &[-1.0, 1.0] {
+                for &sz in &[-1.0, 1.0] {
+                    vertices.push(sim_math::Vec3::new(sx * half, sy * half, sz * half));
+                }
+            }
+        }
+        let shape = Shape::ConvexMesh { vertices };
+        let mut desc = RigidBodyDesc::dynamic(shape.clone(), material);
+        desc.transform.position = sim_math::Vec3::new(x, y, z);
+        let id = self.inner.create_body(desc);
+        let index = self.body_count();
+        let label = format!("ConvexMesh_{index}");
+        self.bodies.push(SpawnedBodyMeta {
+            id,
+            label,
+            material_label: material_name,
+            base_shape: shape,
+            constraint_joint_index: None,
+            hinge_motor_index: None,
+            removed: false,
+        });
+        Ok(index)
+    }
+
     /// 材料派生(**増分Lで追加**)。既存材料`base_name`を基に、密度だけを
     /// 差し替えた新しい材料`new_name`を`MaterialDb`へ追加する
     /// (シーンJSONの`materials[].extends`と同じ仕組みを実行時に開く)。
@@ -732,23 +848,7 @@ impl WasmWorld {
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("Imported_{index}"));
-            let shape = match body.shape {
-                sim_world::ShapeJson::Box { half } => Shape::Box {
-                    half_extents: Vec3::new(half[0], half[1], half[2]),
-                },
-                sim_world::ShapeJson::Sphere { radius } => Shape::Sphere { radius },
-                sim_world::ShapeJson::Capsule {
-                    radius,
-                    half_height,
-                } => Shape::Capsule {
-                    radius,
-                    half_height,
-                },
-                sim_world::ShapeJson::Plane { normal, d } => Shape::Plane {
-                    normal: Vec3::new(normal[0], normal[1], normal[2]),
-                    d,
-                },
-            };
+            let shape = sim_world::shape_json_to_shape(&body.shape);
             self.bodies.push(SpawnedBodyMeta {
                 id: *id,
                 label,
@@ -3401,6 +3501,43 @@ mod tests {
         assert_eq!(box_index, 3);
         assert_eq!(world.body_count(), 4);
         assert_eq!(world.body_shape_kind_at(box_index).unwrap(), "box");
+    }
+
+    /// **残タスク完遂の縦串⑤前後で追加**——`spawn_compound_l_shape`/
+    /// `spawn_convex_mesh_cube`(Compound/ConvexMeshをUIから作る経路)が
+    /// 成功し、`body_shape_kind_at`が正しい種別文字列を返し、
+    /// `body_shape_json_at`が有効なシーンJSON形状(`convex_mesh`タグを
+    /// 含む)を返すこと。**`body_shape_params_f64_at`はここでは呼ばない**
+    /// ——`Float64Array`はネイティブターゲットでは構築自体がパニックする
+    /// (このテストモジュールのdoc冒頭の「正直な制約」参照)。
+    #[test]
+    fn spawn_compound_and_convex_mesh_succeed_and_are_introspectable() {
+        let mut world = new_world();
+        let compound_index = world
+            .spawn_compound_l_shape(1.0, 2.0, 3.0, "コンクリート".to_string())
+            .expect("known material name must succeed");
+        assert_eq!(
+            world.body_shape_kind_at(compound_index).unwrap(),
+            "compound"
+        );
+        let compound_json = world.body_shape_json_at(compound_index).unwrap();
+        assert!(compound_json.starts_with(r#"{"compound":"#));
+        let parsed: sim_world::ShapeJson =
+            serde_json::from_str(&compound_json).expect("must be a valid ShapeJson");
+        assert!(matches!(parsed, sim_world::ShapeJson::Compound { .. }));
+
+        let convex_index = world
+            .spawn_convex_mesh_cube(0.0, 0.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .expect("known material name must succeed");
+        assert_eq!(
+            world.body_shape_kind_at(convex_index).unwrap(),
+            "convex_mesh"
+        );
+        let convex_json = world.body_shape_json_at(convex_index).unwrap();
+        assert!(convex_json.starts_with(r#"{"convex_mesh":"#));
+        let parsed: sim_world::ShapeJson =
+            serde_json::from_str(&convex_json).expect("must be a valid ShapeJson");
+        assert!(matches!(parsed, sim_world::ShapeJson::ConvexMesh { .. }));
     }
 
     /// フレーム階層: ROOTの子フレームを追加でき、親indexが正しく読めること。

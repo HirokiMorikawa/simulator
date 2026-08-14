@@ -33,8 +33,8 @@ use std::collections::HashMap;
 
 use crate::scenario::{
     AstroBodyJson, AstroScenarioJson, AtmosphereJson, AtmosphericDragJson, BodyScenarioDesc,
-    BodyThermalLinkJson, CapacitorJson, CircuitScenarioJson, ConvectionModeJson, CouplingJson,
-    DiodeJson, FluidJson, GasScenarioJson, InductorJson, JointJson, LiftModelJson,
+    BodyThermalLinkJson, CapacitorJson, CircuitScenarioJson, CompoundChildJson, ConvectionModeJson,
+    CouplingJson, DiodeJson, FluidJson, GasScenarioJson, InductorJson, JointJson, LiftModelJson,
     MaterialOverride, ProbeJson, RelativisticCorrectionJson, ResistorJson, Scenario, ShapeJson,
     SwitchJson, ThermalLinkJson, ThermalNodeJson, ThermalScenarioJson, VoltageSourceJson,
     WorldScenarioOptions,
@@ -201,29 +201,7 @@ fn export_bodies(
         .iter()
         .map(|id| {
             let idx = id.index as usize;
-            let shape = bodies.shape_of(idx);
-            let shape_json = match shape {
-                Shape::Box { half_extents } => ShapeJson::Box {
-                    half: vec3_to_array(*half_extents),
-                },
-                Shape::Sphere { radius } => ShapeJson::Sphere { radius: *radius },
-                Shape::Capsule {
-                    radius,
-                    half_height,
-                } => ShapeJson::Capsule {
-                    radius: *radius,
-                    half_height: *half_height,
-                },
-                Shape::Plane { normal, d } => ShapeJson::Plane {
-                    normal: vec3_to_array(*normal),
-                    d: *d,
-                },
-                Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
-                    // 到達しない: これらの形状は質量・慣性計算が `todo!()` で
-                    // パニックする(task #7)ため、生きたボディとして存在し得ない。
-                    unreachable!("Compound/ConvexMesh cannot exist on a live body yet (task #7)")
-                }
-            };
+            let shape_json = shape_to_shape_json(bodies.shape_of(idx));
             let drag = matches!(bodies.drag[idx], DragModel::Sphere { .. });
             let body_type = match bodies.body_type[idx] {
                 BodyType::Static => Some("static".to_string()),
@@ -814,6 +792,44 @@ fn vec3_to_array(v: Vec3) -> [f64; 3] {
 
 fn quat_to_array(q: sim_math::Quat) -> [f64; 4] {
     [q.x, q.y, q.z, q.w]
+}
+
+/// `Shape` → `ShapeJson`(**残タスク完遂の縦串⑤前後でCompound/ConvexMeshを
+/// 追加**)。`Compound`は子を再帰的に変換する——`scenario::shape_json_to_shape`
+/// (逆方向の変換)と対になる。
+/// Body の実際の `Shape`(Compound/ConvexMesh の入れ子構造も含む)を、
+/// シーンJSON向けの`ShapeJson`へ変換する。`shape_json_to_shape`の逆写像。
+pub fn shape_to_shape_json(shape: &Shape) -> ShapeJson {
+    match shape {
+        Shape::Box { half_extents } => ShapeJson::Box {
+            half: vec3_to_array(*half_extents),
+        },
+        Shape::Sphere { radius } => ShapeJson::Sphere { radius: *radius },
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => ShapeJson::Capsule {
+            radius: *radius,
+            half_height: *half_height,
+        },
+        Shape::Plane { normal, d } => ShapeJson::Plane {
+            normal: vec3_to_array(*normal),
+            d: *d,
+        },
+        Shape::Compound { children } => ShapeJson::Compound {
+            children: children
+                .iter()
+                .map(|(transform, child_shape)| CompoundChildJson {
+                    position: vec3_to_array(transform.position),
+                    rotation: quat_to_array(transform.rotation),
+                    shape: Box::new(shape_to_shape_json(child_shape)),
+                })
+                .collect(),
+        },
+        Shape::ConvexMesh { vertices } => ShapeJson::ConvexMesh {
+            vertices: vertices.iter().map(|v| vec3_to_array(*v)).collect(),
+        },
+    }
 }
 
 #[cfg(test)]

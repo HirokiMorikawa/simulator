@@ -863,3 +863,74 @@ test("Console のイベント行クリックで発生源ボディが選択され
 
   expect(errors).toEqual([]);
 });
+
+test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシュがUIから作れ、走らせても複製してもクラッシュしない", async ({
+  page,
+}) => {
+  // レビュー指摘(「UIから作る経路がないから」を許容せず作る前提で進める、
+  // 「テスト不能」を縮約とせずあるべき姿を実装する)への対応。`spawn_compound_l_shape`/
+  // `spawn_convex_mesh_cube`(Rust側)を「＋ 追加」メニュー経由で実際にUIから
+  // 呼び、Hierarchy に現れること・N step 送りでクラッシュしないこと(=描画・
+  // 物理の両方が実際に動くこと)・複製でも壊れないことまで確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const rowCount = () => page.locator("#hierarchy-tree .tree-body").count();
+
+  // ① ツールバー「＋ 追加」メニューから複合形状(L字)を追加。
+  const before = await rowCount();
+  await addViaMenu(page, "＋ 複合形状 (L字)");
+  await page.waitForTimeout(100);
+  expect(await rowCount()).toBe(before + 1);
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("Compound_");
+
+  // ② 同じく凸包メッシュを追加。
+  await addViaMenu(page, "＋ 凸包メッシュ");
+  await page.waitForTimeout(100);
+  expect(await rowCount()).toBe(before + 2);
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("ConvexMesh_");
+
+  // ③ Scene View の右クリックメニューからも同じ2形状を配置できる
+  // (ツールバーのボタンとメニューの両方が同じ `spawnShapeAt` を共有する設計、
+  // 「群2」の既存パターンと同じ)。
+  const canvas = page.locator("canvas").first();
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.3, { button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  await page
+    .locator("#context-menu button", { hasText: "ここに複合形状(L字)を配置" })
+    .click();
+  await page.waitForTimeout(100);
+  expect(await rowCount()).toBe(before + 3);
+
+  await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.3, { button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  await page.locator("#context-menu button", { hasText: "ここに凸包メッシュを配置" }).click();
+  await page.waitForTimeout(100);
+  expect(await rowCount()).toBe(before + 4);
+
+  // ④ N step 送りでシミュレーションを実際に進める——描画(carrier mesh /
+  // ConvexGeometry)と物理(Compoundの衝突・ConvexMeshのAABB近似)の両方が
+  // 例外を出さずに動くこと(「テスト不能」への直接の反証)。
+  // `⏭`はEditモード or 再生中は無効(Unity の Step と同じ意味論)——
+  // Playへ入ってから一時停止する(既存の「増分G2」テストと同じ手順)。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.fill("#input-step-count", "60");
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
+
+  // ⑤ Hierarchy 右クリックで複合形状を複製できる(`body_shape_json_at`
+  // 経由で実際の形状を読み直してメッシュを再構築する経路、スポーン時の
+  // 既定形状だと決め打ちしない)。
+  const compoundRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Compound_" }).first();
+  await compoundRow.click({ button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  const beforeDuplicate = await rowCount();
+  await page.locator("#context-menu button", { hasText: "複製" }).first().click();
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBeGreaterThan(beforeDuplicate);
+
+  expect(errors).toEqual([]);
+});
