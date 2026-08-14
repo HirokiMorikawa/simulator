@@ -19,9 +19,15 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
 
 ## TODO
 
-- [ ] 失敗するE2Eテストを2本置く
-  ①「編集→保存→読込→実行→state_hashが一致する」をジョイント・結合を含むシーン
-  (D24車)で。②「scenes/の43本がDesc APIだけで構築できる」(特権アクセスの不在の証明)。
+- [x] 物差しとなるE2Eテストを2本置く(**執筆時点で両方グリーン**)
+  `crates/sim-world/tests/editor_acceptance.rs`(crate境界の外側=統合テストとして
+  新設。単体テストと違い非公開項目に触れられないため「特権アクセス不在」の証明に
+  なる)。①D24車(WheelJoint・操舵駆動モータあり)をsave→load→60step実行した
+  state_hashが元の実行と一致することを確認。②`scenes/index.json`列挙の全シーンを
+  `Scenario::from_json`+`World::from_scenario`(公開API)のみで構築・60step実行
+  できることを確認。当初「今は必ず落ちる」想定だったが、先行タスク
+  (`World→Scenario`逆写像・安定ID・部品作成メソッド)が既に土台を作っていたため
+  書いた時点で両方PASS——以後の退行検知として維持する。
 - [x] 縮約監査スクリプトを作る(`scripts/audit_reductions.py`)
   コード中に自己申告された「縮約」を機械集計する。実行結果: 385件
   (crates 267・docs 118)。
