@@ -600,6 +600,79 @@ fn run_domain_substeps<S: Solver>(
     capped
 }
 
+/// UIのAdd Component(設計docs/23-frontend/01-editor.md §1.3)や
+/// `sim-wasm`のschema/read/apply(統合エディタ実装計画、縦串①)が任意の
+/// ジョイントを追加するための記述(設計 docs/20-integration/04-world-api.md
+/// §2 `create_joint(desc: JointDesc) -> JointId`)。`scenario::JointJson`と
+/// 同じ5種だが、名前解決を経ず`BodyId`を直接使う点が違う——シーンJSON読み込み
+/// (`from_scenario`)は文字列名からボディを引く必要があるが、実行中の
+/// Inspector・wasm境界は既に`BodyId`を持っているため、名前解決を経由させる
+/// 必要が無い。
+#[derive(Clone, Debug)]
+pub enum JointDesc {
+    Distance {
+        body_a: BodyId,
+        anchor_a: Vec3,
+        body_b: Option<BodyId>,
+        anchor_b: Vec3,
+        length: f64,
+    },
+    Ball {
+        body_a: BodyId,
+        anchor_a: Vec3,
+        body_b: Option<BodyId>,
+        anchor_b: Vec3,
+    },
+    Slider {
+        body_a: BodyId,
+        anchor_a: Vec3,
+        axis: Vec3,
+        body_b: Option<BodyId>,
+        anchor_b: Vec3,
+    },
+    Wheel {
+        chassis: BodyId,
+        wheel: BodyId,
+        anchor_chassis: Vec3,
+        rest_length: f64,
+        suspension_axis: Vec3,
+        axle_axis: Vec3,
+        frequency: f64,
+        damping_ratio: f64,
+        steer_angle: f64,
+        motor_speed: f64,
+        motor_max_torque: f64,
+    },
+    HingeMotor {
+        body: BodyId,
+        axis: Vec3,
+        /// `None`なら現在の`body`の姿勢を基準に取る(`HingeMotorPd::new`と同じ)。
+        reference_rotation: Option<sim_math::Quat>,
+        theta_target: f64,
+        kp: f64,
+        kd: f64,
+        torque_max: f64,
+        limit: Option<(f64, f64)>,
+    },
+}
+
+/// 環境(重力・大気・水域・周囲温度)をまとめて記述する(設計
+/// docs/20-integration/04-world-api.md §2「重力ベクトル・大気・水域・
+/// 周囲温度を`EnvironmentDesc`として第一級にする」)。
+///
+/// **縮約**: `gravity`は現状`sim_mechanics::MechanicsSolver::gravity`と同じ
+/// スカラー(下向き固定)——ベクトル化(任意方向の重力場)は縦串③
+/// (環境と大気の場)の対象。
+#[derive(Clone, Copy, Debug)]
+pub struct EnvironmentDesc {
+    pub gravity: f64,
+    pub atmosphere: Option<sim_fluid::Atmosphere>,
+    pub water: Option<sim_fluid::StaticWaterRegion>,
+    /// `None`なら熱ドメインが無効(`enable_thermal`未呼び出し)、または
+    /// 変更しない。
+    pub ambient_temperature: Option<f64>,
+}
+
 impl World {
     pub fn new(options: WorldOptions) -> World {
         World {
@@ -2218,6 +2291,164 @@ impl World {
         Some((anchor_a_world, anchor_b_world))
     }
 
+    /// `JointDesc`からジョイントを1本作り、対応する種別のVec内でのindexを返す
+    /// (`JointInfo::index`・`joints_for_body`と同じ体系。種別が違えば同じ数値の
+    /// indexが重複しうるので、識別には種別と組で使うこと)。
+    ///
+    /// `add_distance_joint_to_world_point`と同じ理由で`body`の生存確認はしない
+    /// (呼び出し側——`sim-wasm`の場合は生存確認済みの`BodyId`を渡す前提、
+    /// `try_body_id_at`のdoc参照)。
+    pub fn create_joint(&mut self, desc: JointDesc) -> usize {
+        match desc {
+            JointDesc::Distance {
+                body_a,
+                anchor_a,
+                body_b,
+                anchor_b,
+                length,
+            } => {
+                let index = self.mechanics.joints.len();
+                self.mechanics
+                    .add_distance_joint(sim_mechanics::DistanceJoint {
+                        body_a: body_a.index as usize,
+                        anchor_a,
+                        body_b: body_b.map(|id| id.index as usize),
+                        anchor_b,
+                        length,
+                        disabled: false,
+                    });
+                index
+            }
+            JointDesc::Ball {
+                body_a,
+                anchor_a,
+                body_b,
+                anchor_b,
+            } => {
+                let index = self.mechanics.ball_joints.len();
+                self.mechanics.add_ball_joint(sim_mechanics::BallJoint {
+                    body_a: body_a.index as usize,
+                    anchor_a,
+                    body_b: body_b.map(|id| id.index as usize),
+                    anchor_b,
+                    disabled: false,
+                });
+                index
+            }
+            JointDesc::Slider {
+                body_a,
+                anchor_a,
+                axis,
+                body_b,
+                anchor_b,
+            } => {
+                let index = self.mechanics.slider_joints.len();
+                let joint = sim_mechanics::SliderJoint::new(
+                    &self.mechanics.bodies,
+                    body_a.index as usize,
+                    anchor_a,
+                    axis,
+                    body_b.map(|id| id.index as usize),
+                    anchor_b,
+                );
+                self.mechanics.add_slider_joint(joint);
+                index
+            }
+            JointDesc::Wheel {
+                chassis,
+                wheel,
+                anchor_chassis,
+                rest_length,
+                suspension_axis,
+                axle_axis,
+                frequency,
+                damping_ratio,
+                steer_angle,
+                motor_speed,
+                motor_max_torque,
+            } => {
+                let index = self.mechanics.wheel_joints.len();
+                let mut joint = sim_mechanics::WheelJoint::new(
+                    chassis.index as usize,
+                    wheel.index as usize,
+                    anchor_chassis,
+                    rest_length,
+                );
+                joint.suspension_axis = suspension_axis;
+                joint.axle_axis = axle_axis;
+                joint.soft.frequency = frequency;
+                joint.soft.damping_ratio = damping_ratio;
+                joint.steer_angle = steer_angle;
+                joint.motor_speed = motor_speed;
+                joint.motor_max_torque = motor_max_torque;
+                self.mechanics.wheel_joints.push(joint);
+                index
+            }
+            JointDesc::HingeMotor {
+                body,
+                axis,
+                reference_rotation,
+                theta_target,
+                kp,
+                kd,
+                torque_max,
+                limit,
+            } => {
+                let index = self.mechanics.hinge_motors.len();
+                let reference_rotation = reference_rotation
+                    .unwrap_or(self.mechanics.bodies.rotation[body.index as usize]);
+                self.mechanics.add_hinge_motor(sim_mechanics::HingeMotorPd {
+                    body: body.index as usize,
+                    axis,
+                    reference_rotation,
+                    theta_target,
+                    kp,
+                    kd,
+                    torque_max,
+                    limit,
+                    disabled: false,
+                });
+                index
+            }
+        }
+    }
+
+    /// 静的水域(設計 docs/20-integration/04-world-api.md §2
+    /// `add_fluid_region(desc: FluidDesc) -> FluidId`の縮約——現時点で「領域」
+    /// として追加できる流体は`sim_fluid::StaticWaterRegion`(単一の水位面)のみ
+    /// (SPH・格子流体は`enable_sph`/`enable_grid_fluid`が別に受け持つ、
+    /// モジュールdoc参照)。既存の水域があれば置き換える(`World`は水域を
+    /// 高々1つしか持てない、`MechanicsSolver::water`のdoc参照)。
+    pub fn add_fluid_region(&mut self, region: sim_fluid::StaticWaterRegion) {
+        self.mechanics.water = Some(region);
+    }
+
+    /// 現在の環境設定を`EnvironmentDesc`として読む(Inspectorの環境パネルが
+    /// 表示・編集フォームの初期値に使う)。
+    pub fn environment(&self) -> EnvironmentDesc {
+        EnvironmentDesc {
+            gravity: self.mechanics.gravity,
+            atmosphere: self.mechanics.atmosphere,
+            water: self.mechanics.water,
+            ambient_temperature: self.thermal.as_ref().map(|t| t.ambient_temperature),
+        }
+    }
+
+    /// `EnvironmentDesc`をまとめて適用する(Inspectorの環境パネルの確定操作)。
+    /// `ambient_temperature`は熱ドメインが有効な場合のみ反映する(`None`のままの
+    /// 熱ドメインを勝手に`enable_thermal`しない——ドメインの有効化は
+    /// シーン構築の責務であり、環境設定の責務ではないため)。
+    pub fn set_environment(&mut self, desc: EnvironmentDesc) {
+        self.mechanics.gravity = desc.gravity;
+        self.mechanics.atmosphere = desc.atmosphere;
+        self.mechanics.water = desc.water;
+        if let Some(t) = desc.ambient_temperature {
+            if let Some(thermal) = self.thermal.as_mut() {
+                thermal.ambient_temperature = t;
+            }
+        }
+    }
+
     /// 直近stepで検出された接触点のワールド座標一覧(設計docs/23-frontend/
     /// 01-editor.md §1.2 Scene View オーバーレイ「接触点」向け)。法線・貫入量は
     /// このオーバーレイの用途(接触位置のマーカー表示)には不要なため座標のみ返す
@@ -2604,6 +2835,102 @@ mod tests {
             b.index as usize >= world.mechanics().bodies.position.len(),
             "the restored World's RigidBodySet must be shorter than the removed body's index"
         );
+    }
+
+    /// `create_joint`が`JointDesc`の5種すべてを正しい種別のVecへ積むこと
+    /// (`World::joints()`の内省で種別・パラメータを確認する)。
+    #[test]
+    fn create_joint_adds_each_joint_desc_variant_to_its_kind() {
+        let mut world = World::new(WorldOptions::default());
+        let a = create_falling_box(&mut world);
+        let b = create_falling_box(&mut world);
+
+        world.create_joint(JointDesc::Distance {
+            body_a: a,
+            anchor_a: Vec3::ZERO,
+            body_b: Some(b),
+            anchor_b: Vec3::ZERO,
+            length: 2.0,
+        });
+        world.create_joint(JointDesc::Ball {
+            body_a: a,
+            anchor_a: Vec3::ZERO,
+            body_b: None,
+            anchor_b: Vec3::new(0.0, 5.0, 0.0),
+        });
+        world.create_joint(JointDesc::Slider {
+            body_a: a,
+            anchor_a: Vec3::ZERO,
+            axis: Vec3::new(0.0, 0.0, 1.0),
+            body_b: None,
+            anchor_b: Vec3::ZERO,
+        });
+        world.create_joint(JointDesc::Wheel {
+            chassis: a,
+            wheel: b,
+            anchor_chassis: Vec3::new(0.0, -0.3, 0.0),
+            rest_length: 0.4,
+            suspension_axis: Vec3::new(0.0, -1.0, 0.0),
+            axle_axis: Vec3::new(1.0, 0.0, 0.0),
+            frequency: 2.0,
+            damping_ratio: 0.3,
+            steer_angle: 0.1,
+            motor_speed: 1.0,
+            motor_max_torque: 10.0,
+        });
+        world.create_joint(JointDesc::HingeMotor {
+            body: a,
+            axis: Vec3::new(0.0, 1.0, 0.0),
+            reference_rotation: None,
+            theta_target: 0.5,
+            kp: 1.0,
+            kd: 0.1,
+            torque_max: 5.0,
+            limit: None,
+        });
+
+        let kinds: Vec<JointKind> = world.joints().iter().map(|j| j.kind).collect();
+        assert!(kinds.contains(&JointKind::Distance));
+        assert!(kinds.contains(&JointKind::Ball));
+        assert!(kinds.contains(&JointKind::Slider));
+        assert!(kinds.contains(&JointKind::HingeMotor));
+        assert_eq!(world.mechanics().wheel_joints.len(), 1);
+        assert_eq!(world.mechanics().wheel_joints[0].motor_speed, 1.0);
+    }
+
+    /// `add_fluid_region`が`MechanicsSolver::water`を設定し、既存の水域を
+    /// 置き換えること。
+    #[test]
+    fn add_fluid_region_sets_and_replaces_the_static_water_region() {
+        let mut world = World::new(WorldOptions::default());
+        world.add_fluid_region(sim_fluid::StaticWaterRegion::new(1.0, 1000.0));
+        assert_eq!(world.mechanics().water.unwrap().water_level, 1.0);
+
+        world.add_fluid_region(sim_fluid::StaticWaterRegion::new(2.0, 1000.0));
+        assert_eq!(world.mechanics().water.unwrap().water_level, 2.0);
+    }
+
+    /// `environment`/`set_environment`が重力・大気・水域・周囲温度を
+    /// 往復できること。
+    #[test]
+    fn environment_desc_round_trips_gravity_atmosphere_water_and_ambient_temperature() {
+        let mut world = World::new(WorldOptions::default());
+        world.enable_thermal(sim_thermal::ThermalSolver::new(293.15));
+
+        let desc = EnvironmentDesc {
+            gravity: 3.71, // 火星の重力
+            atmosphere: Some(sim_fluid::Atmosphere::still(0.02, 1.1e-5)),
+            water: Some(sim_fluid::StaticWaterRegion::new(-1.0, 1000.0)),
+            ambient_temperature: Some(210.0),
+        };
+        world.set_environment(desc);
+
+        let read_back = world.environment();
+        assert_eq!(read_back.gravity, 3.71);
+        assert_eq!(read_back.atmosphere.unwrap().density, 0.02);
+        assert_eq!(read_back.water.unwrap().water_level, -1.0);
+        assert_eq!(read_back.ambient_temperature, Some(210.0));
+        assert_eq!(world.thermal().unwrap().ambient_temperature, 210.0);
     }
 
     /// 未知(存在しない index)の`BodyId`も`None`(パニックしない)。
