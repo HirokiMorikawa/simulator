@@ -59,10 +59,16 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
 - [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(現状118本・2,798行)
 - [ ] Inspectorに Add Component とスキーマ駆動フォームを実装する
-- [ ] 形状描画をShape記述に一本化する
-  `demo/src/main.ts` に2箇所コピーされている形状パーサを1関数に集約。
-  Capsuleを任意寸法で描画、Compound/ConvexMeshのメッシュ生成を追加。
-  未知形状は黙って球を出さず警告を出す。
+- [x] 形状描画をShape記述に一本化する(**一部完了**)
+  `demo/src/main.ts` の `sceneImportRef.current`/`sceneGalleryRef.current` に
+  2箇所コピーされていた形状パーサを `meshFromShapeJson()` 1関数に集約。
+  副次的に実バグを発見・修正: `ImportedShapeJson` がCapsuleを型に持たず、
+  カプセル形状のボディが常に0.3mの球として描かれていた(計画書指摘の不具合)
+  ——capsule variantを追加し`CapsuleGeometry`で正しく描画。未知形状は
+  黙って球を出さずconsole.warnで警告するよう変更。Compound/ConvexMeshの
+  メッシュ生成は対象外——シーンJSONスキーマ・`body_shape_kind_at`とも
+  これらの形状を表現できず、UIから作る経路も無いため現状到達不能・
+  テスト不能(縮約として明記)。
 - [ ] 縦串①(ジョイント)の受け入れテストを緑にする
   D24相当の車をUIのみで組み立て、保存し、読み直して実行し、`state_hash` が
   既存のD24シーンJSON実行結果と一致することを確認する。
