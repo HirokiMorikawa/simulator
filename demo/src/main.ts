@@ -1041,6 +1041,86 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     ${renderInspectorExtraComponents(world, index)}
   `;
   wireInspectorEditFields(index);
+  wireAddJointForm(world, index);
+}
+
+/// `renderInspectorExtraComponents`が生成した Add Joint フォームのボタンを配線する
+/// (`renderInspectorFor`が`innerHTML`を張り替えるたび、フォームごと作り直されるので
+/// 毎回呼び直す——回路エディタの`renderCircuitTab`と同じ設計)。
+function wireAddJointForm(world: WasmWorld, index: number): void {
+  const kindSelect = document.getElementById(
+    "add-joint-kind",
+  ) as HTMLSelectElement | null;
+  const button = document.getElementById("add-joint-button");
+  if (!kindSelect || !button) return;
+  const num = (id: string) => Number((document.getElementById(id) as HTMLInputElement | null)?.value ?? 0);
+  const int = (id: string) => Math.trunc(num(id));
+  button.addEventListener("click", () => {
+    const bodyA = int("add-joint-body-a");
+    const [ax, ay, az] = [num("add-joint-ax"), num("add-joint-ay"), num("add-joint-az")];
+    const bodyB = int("add-joint-body-b");
+    const [bx, by, bz] = [num("add-joint-bx"), num("add-joint-by"), num("add-joint-bz")];
+    const [axisX, axisY, axisZ] = [
+      num("add-joint-axis-x"),
+      num("add-joint-axis-y"),
+      num("add-joint-axis-z"),
+    ];
+    const [p1, p2, p3, p4, p5, p6] = [
+      num("add-joint-p1"),
+      num("add-joint-p2"),
+      num("add-joint-p3"),
+      num("add-joint-p4"),
+      num("add-joint-p5"),
+      num("add-joint-p6"),
+    ];
+    try {
+      switch (kindSelect.value) {
+        case "distance":
+          world.add_distance_joint(bodyA, ax, ay, az, bodyB, bx, by, bz, p1);
+          break;
+        case "ball":
+          world.add_ball_joint(bodyA, ax, ay, az, bodyB, bx, by, bz);
+          break;
+        case "slider":
+          world.add_slider_joint(
+            bodyA,
+            ax,
+            ay,
+            az,
+            axisX,
+            axisY,
+            axisZ,
+            bodyB,
+            bx,
+            by,
+            bz,
+          );
+          break;
+        case "wheel":
+          world.add_wheel_joint(
+            bodyA,
+            bodyB,
+            ax,
+            ay,
+            az,
+            p1,
+            p2,
+            p3,
+            p4,
+            p5,
+            p6,
+          );
+          break;
+        case "hinge_motor":
+          world.add_hinge_motor_joint(bodyA, axisX, axisY, axisZ, p1, p2, p3, p4);
+          break;
+      }
+    } catch (err) {
+      window.alert(`Joint の追加に失敗しました: ${String(err)}`);
+      return;
+    }
+    renderInspectorFor(world, index);
+  });
 }
 
 /// **編集可能な RigidBody Component(群2)**。設計 §1.3 の表は RigidBody に
@@ -1306,6 +1386,73 @@ function renderInspectorExtraComponents(
         `<div class="approximation-badges">${badges}</div></div>`,
     );
   }
+
+  // Add Component(**残タスク完遂の縦串①増分**、`WasmWorld::add_*_joint`
+  // 5種の薄いフォーム)。Unity風の「型ごとの専用フォーム」ではなく、
+  // 回路エディタ(`kind`セレクト+`値/値2/値3`の汎用欄)と同じ縮約——
+  // Body A/B・Anchor A/B・Axis・Param1〜6 の汎用欄をどの種別でも共通で出し、
+  // 実際に使うフィールドは`title`属性のツールチップで示す(種別ごとの
+  // 表示切替はJSの追加コストに見合わないと判断)。Body Aは選択中ボディを
+  // 既定値にする。
+  sections.push(`
+    <div class="inspector-component" data-stacked>
+      <h3>Add Joint</h3>
+      <div class="inspector-field">
+        <span>種別</span>
+        <select id="add-joint-kind">
+          <option value="distance">Distance(距離拘束)</option>
+          <option value="ball">Ball(球面拘束)</option>
+          <option value="slider">Slider(1軸並進)</option>
+          <option value="wheel">Wheel(車輪、Aがシャシー・Bが車輪)</option>
+          <option value="hinge_motor">HingeMotor(1軸ヒンジ、Bは未使用)</option>
+        </select>
+      </div>
+      <div class="inspector-field">
+        <span>Body A / Anchor A</span>
+        <span class="inspector-joint-row">
+          <input type="number" id="add-joint-body-a" step="1" value="${index}" title="Body A(ボディindex)" />
+          <input type="number" id="add-joint-ax" step="0.1" value="0" title="Anchor A x" />
+          <input type="number" id="add-joint-ay" step="0.1" value="0" title="Anchor A y" />
+          <input type="number" id="add-joint-az" step="0.1" value="0" title="Anchor A z" />
+        </span>
+      </div>
+      <div class="inspector-field">
+        <span>Body B / Anchor B</span>
+        <span class="inspector-joint-row">
+          <input type="number" id="add-joint-body-b" step="1" value="-1" title="Body B(ボディindex。-1=ワールド固定点。Wheelは車輪ボディ必須、HingeMotorは未使用)" />
+          <input type="number" id="add-joint-bx" step="0.1" value="0" title="Anchor B x(HingeMotor/Wheelでは未使用)" />
+          <input type="number" id="add-joint-by" step="0.1" value="0" title="Anchor B y" />
+          <input type="number" id="add-joint-bz" step="0.1" value="0" title="Anchor B z" />
+        </span>
+      </div>
+      <div class="inspector-field">
+        <span>Axis</span>
+        <span class="inspector-joint-row">
+          <input type="number" id="add-joint-axis-x" step="0.1" value="0" title="軸x(Slider/Wheel/HingeMotorのみ)" />
+          <input type="number" id="add-joint-axis-y" step="0.1" value="1" title="軸y" />
+          <input type="number" id="add-joint-axis-z" step="0.1" value="0" title="軸z" />
+        </span>
+      </div>
+      <div class="inspector-field">
+        <span>Param 1〜3</span>
+        <span class="inspector-joint-row">
+          <input type="number" id="add-joint-p1" step="0.1" value="1" title="length(Distance)/rest_length(Wheel)/theta_target[rad](HingeMotor)" />
+          <input type="number" id="add-joint-p2" step="0.1" value="2.5" title="frequency[Hz](Wheel)/kp(HingeMotor)" />
+          <input type="number" id="add-joint-p3" step="0.1" value="0.7" title="damping_ratio(Wheel)/kd(HingeMotor)" />
+        </span>
+      </div>
+      <div class="inspector-field">
+        <span>Param 4〜6</span>
+        <span class="inspector-joint-row">
+          <input type="number" id="add-joint-p4" step="0.1" value="0" title="steer_angle[rad](Wheel)/torque_max(HingeMotor)" />
+          <input type="number" id="add-joint-p5" step="0.1" value="0" title="motor_speed[rad/s](Wheelのみ)" />
+          <input type="number" id="add-joint-p6" step="0.1" value="0" title="motor_max_torque(Wheelのみ、0なら駆動なし)" />
+        </span>
+      </div>
+      <button id="add-joint-button">Joint を追加</button>
+      <p class="inspector-note">使うフィールドは種別により異なる(各入力のツールチップ参照)。追加は即座に反映され、Command化されない(シーン構築操作のため——設計 docs/20-integration/04-world-api.md §1)。</p>
+    </div>
+  `);
 
   return sections.join("");
 }

@@ -704,6 +704,27 @@ body {
   text-align: right;
 }
 
+/* Add Joint フォーム(残タスク完遂の縦串①増分)。Body/Anchor/Axis/Param の
+   数値入力を1行に収める、軸別スケール入力と同じ見た目。 */
+.inspector-joint-row {
+  display: flex;
+  gap: 3px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.inspector-joint-row > input {
+  width: 44px;
+  min-width: 0;
+  background: #1b1b1b;
+  color: #ddd;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 1px 3px;
+  font-size: 11px;
+  font-family: inherit;
+  text-align: right;
+}
+
 /* Gizmo 座標系トグル(群2)。Local のとき色を変えて状態を見せる。 */
 #btn-gizmo-space[data-space="local"] {
   background: #3a4a6a;

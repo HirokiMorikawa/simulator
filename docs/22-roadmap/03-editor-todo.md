@@ -64,7 +64,19 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
 - [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(現状118本・2,798行)
-- [ ] Inspectorに Add Component とスキーマ駆動フォームを実装する
+- [x] Inspectorに Add Component とスキーマ駆動フォームを実装する(**Jointの5種のみ**)
+  `World::joints()`/`JointKind`にWheelJointが無く(追加はできても内省層に
+  一切出ず、Inspectorから見えなかった既存の欠落)を先に修正。
+  `WasmWorld::add_distance_joint`/`add_ball_joint`/`add_slider_joint`/
+  `add_wheel_joint`/`add_hinge_motor_joint`(`JointDesc`5種の薄い写像)を
+  新設し、InspectorにAdd Jointフォームを追加(種別ごとの専用フォームでは
+  なく、自由配線回路エディタと同じ「種別セレクト+汎用Body/Anchor/Axis/
+  Param欄、使うフィールドはtitleツールチップで示す」縮約)。Rust側テスト・
+  Playwrightでの実UI経由操作(Ball/Wheel追加→`joint_info_text`に反映)の
+  両方で確認、QA16/16・スモーク23/23維持。Coupling(14種、縦串②)・
+  FluidRegion/Environment(縦串③)は対象外——スキーマ駆動フォームの
+  汎用化(wasm境界のschema/read/apply化)と一体に進める方が手戻りが少ない
+  ため、Jointだけを先行させた。
 - [x] 形状描画をShape記述に一本化する(**一部完了**)
   `demo/src/main.ts` の `sceneImportRef.current`/`sceneGalleryRef.current` に
   2箇所コピーされていた形状パーサを `meshFromShapeJson()` 1関数に集約。

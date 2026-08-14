@@ -1828,6 +1828,169 @@ impl WasmWorld {
         ))
     }
 
+    /// Inspectorの Add Component(**残タスク完遂の縦串①増分**、
+    /// `sim_world::JointDesc::Distance`の薄い写像)——`body_a`(`body_b`が負なら
+    /// ワールド固定点)を`length`で結ぶ距離拘束を追加する。返り値は
+    /// `joint_info_text`が0始まりで振る種別内indexと同じ体系(種別ごとに別配列
+    /// なので、他種別と共有しない)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_distance_joint(
+        &mut self,
+        body_a: usize,
+        ax: f64,
+        ay: f64,
+        az: f64,
+        body_b: i32,
+        bx: f64,
+        by: f64,
+        bz: f64,
+        length: f64,
+    ) -> Result<usize, JsValue> {
+        let body_a_id = self.try_body_id_at(body_a)?;
+        let body_b_id = if body_b < 0 {
+            None
+        } else {
+            Some(self.try_body_id_at(body_b as usize)?)
+        };
+        Ok(self.inner.create_joint(sim_world::JointDesc::Distance {
+            body_a: body_a_id,
+            anchor_a: Vec3::new(ax, ay, az),
+            body_b: body_b_id,
+            anchor_b: Vec3::new(bx, by, bz),
+            length,
+        }))
+    }
+
+    /// Add Component——`sim_world::JointDesc::Ball`の薄い写像。3自由度の
+    /// 球面拘束(ドア蝶番・振り子等)を追加する。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_ball_joint(
+        &mut self,
+        body_a: usize,
+        ax: f64,
+        ay: f64,
+        az: f64,
+        body_b: i32,
+        bx: f64,
+        by: f64,
+        bz: f64,
+    ) -> Result<usize, JsValue> {
+        let body_a_id = self.try_body_id_at(body_a)?;
+        let body_b_id = if body_b < 0 {
+            None
+        } else {
+            Some(self.try_body_id_at(body_b as usize)?)
+        };
+        Ok(self.inner.create_joint(sim_world::JointDesc::Ball {
+            body_a: body_a_id,
+            anchor_a: Vec3::new(ax, ay, az),
+            body_b: body_b_id,
+            anchor_b: Vec3::new(bx, by, bz),
+        }))
+    }
+
+    /// Add Component——`sim_world::JointDesc::Slider`の薄い写像。`axis`方向の
+    /// 並進のみを許す拘束(ピストン等)を追加する。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_slider_joint(
+        &mut self,
+        body_a: usize,
+        ax: f64,
+        ay: f64,
+        az: f64,
+        axis_x: f64,
+        axis_y: f64,
+        axis_z: f64,
+        body_b: i32,
+        bx: f64,
+        by: f64,
+        bz: f64,
+    ) -> Result<usize, JsValue> {
+        let body_a_id = self.try_body_id_at(body_a)?;
+        let body_b_id = if body_b < 0 {
+            None
+        } else {
+            Some(self.try_body_id_at(body_b as usize)?)
+        };
+        Ok(self.inner.create_joint(sim_world::JointDesc::Slider {
+            body_a: body_a_id,
+            anchor_a: Vec3::new(ax, ay, az),
+            axis: Vec3::new(axis_x, axis_y, axis_z),
+            body_b: body_b_id,
+            anchor_b: Vec3::new(bx, by, bz),
+        }))
+    }
+
+    /// Add Component——`sim_world::JointDesc::Wheel`の薄い写像(D24車と同じ
+    /// 車輪拘束)。`suspension_axis`/`axle_axis`はUIフォームに出さず
+    /// `WheelJoint::new`と同じ既定値(下向きサスペンション・横向き車軸、
+    /// 乗用車として最も普通の配置)を使う——2本のVec3を追加でUIに出すより、
+    /// 「普通の車」を作れることを優先した縮約。操舵・駆動が要るなら
+    /// `motor_speed`/`motor_max_torque`/`steer_angle`で足りる。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_wheel_joint(
+        &mut self,
+        chassis: usize,
+        wheel: usize,
+        acx: f64,
+        acy: f64,
+        acz: f64,
+        rest_length: f64,
+        frequency: f64,
+        damping_ratio: f64,
+        steer_angle: f64,
+        motor_speed: f64,
+        motor_max_torque: f64,
+    ) -> Result<usize, JsValue> {
+        let chassis_id = self.try_body_id_at(chassis)?;
+        let wheel_id = self.try_body_id_at(wheel)?;
+        let default = sim_mechanics::WheelJoint::new(0, 0, Vec3::ZERO, rest_length);
+        Ok(self.inner.create_joint(sim_world::JointDesc::Wheel {
+            chassis: chassis_id,
+            wheel: wheel_id,
+            anchor_chassis: Vec3::new(acx, acy, acz),
+            rest_length,
+            suspension_axis: default.suspension_axis,
+            axle_axis: default.axle_axis,
+            frequency,
+            damping_ratio,
+            steer_angle,
+            motor_speed,
+            motor_max_torque,
+        }))
+    }
+
+    /// Add Component——`sim_world::JointDesc::HingeMotor`の薄い写像
+    /// (ドア・回転ハッチ等、PD制御で目標角へ駆動する1軸ヒンジ)。
+    /// `reference_rotation`は追加時点の`body`の姿勢を基準に取る
+    /// (`JointDesc::HingeMotor`のdoc参照、`None`と同じ挙動)。`limit`は
+    /// UIフォームでは常に無制限(`None`)——角度制限が要る操作(ドアが
+    /// 90°で止まる等)は縦串①の対象外として残す。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_hinge_motor_joint(
+        &mut self,
+        body: usize,
+        axis_x: f64,
+        axis_y: f64,
+        axis_z: f64,
+        theta_target: f64,
+        kp: f64,
+        kd: f64,
+        torque_max: f64,
+    ) -> Result<usize, JsValue> {
+        let body_id = self.try_body_id_at(body)?;
+        Ok(self.inner.create_joint(sim_world::JointDesc::HingeMotor {
+            body: body_id,
+            axis: Vec3::new(axis_x, axis_y, axis_z),
+            reference_rotation: None,
+            theta_target,
+            kp,
+            kd,
+            torque_max,
+            limit: None,
+        }))
+    }
+
     /// フレーム軸オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「フレーム
     /// サブモード」の土台)向けに、ROOTの子として指定角速度(z軸まわり)で自転する
     /// フレームを追加する(`World::add_frame`+`sim_core::FrameTree::step`が毎step
@@ -2748,6 +2911,71 @@ mod tests {
         // 未知indexへの操作は無害に無視される(パニックしない)。
         world.circuit_editor_set_motor_speed(999, 1.0);
         assert_eq!(world.circuit_editor_motor_current(999), 0.0);
+    }
+
+    /// Inspectorの Add Component(**残タスク完遂の縦串①増分**)——5種の
+    /// `add_*_joint`がスポーンしたボディを相手にパニックせず成功し、
+    /// `joint_info_text`(Inspectorの読み取り側)にそれぞれ現れること。
+    /// Wheel は D24 車と同じ「駆動あり」パラメータで追加し、
+    /// `JointKind::Wheel`が`World::joints()`に無かった既存の欠落
+    /// (追加はできても内省層に出ず Inspector から見えなかった)も
+    /// あわせて解消したことを確認する。
+    #[test]
+    fn add_joint_methods_succeed_and_are_visible_in_joint_info_text() {
+        let mut world = new_world();
+        let chassis = world
+            .spawn_box(0.0, 1.0, 0.0, 1.0, "鋼(炭素鋼)".to_string())
+            .unwrap();
+        let wheel = world
+            .spawn_sphere(1.0, 0.3, 1.0, 0.3, "ゴム(天然)".to_string())
+            .unwrap();
+        let anchor = world
+            .spawn_sphere(-2.0, 1.0, 0.0, 0.2, "鋼(炭素鋼)".to_string())
+            .unwrap();
+
+        world
+            .add_distance_joint(chassis, 0.0, 0.0, 0.0, anchor as i32, 0.0, 0.0, 0.0, 2.0)
+            .expect("distance joint between two live bodies must succeed");
+        world
+            .add_ball_joint(chassis, 0.0, 0.0, 0.0, -1, 0.0, 2.0, 0.0)
+            .expect("ball joint to a world-fixed point must succeed");
+        world
+            .add_slider_joint(chassis, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1, 0.0, 3.0, 0.0)
+            .expect("slider joint must succeed");
+        world
+            .add_wheel_joint(
+                chassis as usize,
+                wheel,
+                1.0,
+                0.0,
+                1.0,
+                0.4,
+                2.5,
+                0.7,
+                0.0,
+                12.0,
+                200.0,
+            )
+            .expect("wheel joint must succeed");
+        world
+            .add_hinge_motor_joint(anchor, 0.0, 1.0, 0.0, 1.0, 5.0, 0.5, 10.0)
+            .expect("hinge motor joint must succeed");
+
+        let text = world.joint_info_text(-1);
+        for kind in [
+            "DistanceJoint",
+            "BallJoint",
+            "SliderJoint",
+            "WheelJoint",
+            "HingeMotorPd",
+        ] {
+            assert!(
+                text.contains(kind),
+                "joint_info_text must report a {kind} line, got:\n{text}"
+            );
+        }
+        // 存在しないボディを指すとErrになる実行時の確認は、本テストモジュール冒頭の
+        // doc comment(Errパスの検証にはwasm-bindgen-testが要る)が示すとおり対象外。
     }
 
     /// `spawn_sphere`/`spawn_box`が正しい材質名で成功し、`body_count`が

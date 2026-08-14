@@ -320,6 +320,7 @@ pub enum JointKind {
     Distance,
     Ball,
     Slider,
+    Wheel,
     HingeMotor,
 }
 
@@ -329,6 +330,7 @@ impl JointKind {
             JointKind::Distance => "DistanceJoint",
             JointKind::Ball => "BallJoint",
             JointKind::Slider => "SliderJoint",
+            JointKind::Wheel => "WheelJoint",
             JointKind::HingeMotor => "HingeMotorPd",
         }
     }
@@ -353,11 +355,13 @@ pub struct JointInfo {
     pub body_b: Option<usize>,
     pub anchor_a: Vec3,
     pub anchor_b: Vec3,
-    /// 軸を持つ種別(Slider/HingeMotor)のみ`Some`。
+    /// 軸を持つ種別(Slider/HingeMotor/Wheel、Wheelは操舵反映前の`axle_axis`)
+    /// のみ`Some`。
     pub axis: Option<Vec3>,
-    /// `DistanceJoint`の拘束長。
+    /// `DistanceJoint`の拘束長、または`WheelJoint`のサスペンション自然長。
     pub length: Option<f64>,
-    /// モータの目標角(`HingeMotorPd`のみ)。
+    /// モータの目標角(`HingeMotorPd`)、または`WheelJoint`のモータ角速度
+    /// (`motor_max_torque > 0`の時のみ`Some`、駆動なしの車輪では`None`)。
     pub motor_target: Option<f64>,
     /// 無効化されているか(`BallJoint::disabled`)。
     pub disabled: bool,
@@ -1979,6 +1983,20 @@ impl World {
                 length: None,
                 motor_target: None,
                 disabled: false,
+            });
+        }
+        for (index, j) in m.wheel_joints.iter().enumerate() {
+            out.push(JointInfo {
+                index,
+                kind: JointKind::Wheel,
+                body_a: j.chassis,
+                body_b: Some(j.wheel),
+                anchor_a: j.anchor_chassis,
+                anchor_b: Vec3::ZERO,
+                axis: Some(j.axle_axis),
+                length: Some(j.rest_length),
+                motor_target: (j.motor_max_torque > 0.0).then_some(j.motor_speed),
+                disabled: j.disabled,
             });
         }
         for (index, j) in m.hinge_motors.iter().enumerate() {
