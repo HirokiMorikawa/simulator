@@ -2944,17 +2944,7 @@ mod tests {
             .expect("slider joint must succeed");
         world
             .add_wheel_joint(
-                chassis as usize,
-                wheel,
-                1.0,
-                0.0,
-                1.0,
-                0.4,
-                2.5,
-                0.7,
-                0.0,
-                12.0,
-                200.0,
+                chassis, wheel, 1.0, 0.0, 1.0, 0.4, 2.5, 0.7, 0.0, 12.0, 200.0,
             )
             .expect("wheel joint must succeed");
         world
