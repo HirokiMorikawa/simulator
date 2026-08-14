@@ -63,8 +63,8 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (頂点列のみ)ため、体積/慣性/AABBはAABB近似で対応、接触生成(実際に
   衝突する)は「外部クレート実質ゼロ」の方針で3D凸包の自前実装が要り
   範囲外——`None`(すり抜け)を返す既知の限界として明記。
-- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第一弾完了**、
-  元165本→139本)
+- [ ] wasm境界を `schema`/`read`/`apply` の3メソッドへ畳む(**着手・第二弾完了**、
+  元165本→124本)
   **残タスク完遂増分**(レビュー「Full collapse now」指示への対応、着手前は
   本文書のTODO群の中で唯一の未着手項目だった)。第一弾でJoint(5種の追加)・
   Coupling(14種の追加+操縦面舵角の実行時変更)・熱ノード追加/流体・気体
@@ -90,9 +90,30 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   代償を払うことになるため。`new`/`from_scene_json`/`import_scene_json`/
   `step`/`run_headless_scenario_json`等のライフサイクル系メソッドも同様に
   対象外(そもそも「コンポーネントの追加/設定/内省」という枠に当てはまらない)。
-  残る「追加/設定/内省」系メソッド(body系・environment系・circuit editor系・
-  frame系・snapshot/bookmark系等、まだ100本強)は今後の増分で同じ2メソッドへ
-  引き続き畳んでいく。
+  残る「追加/設定/内省」系メソッド(body系・circuit editor系・frame系・
+  snapshot/bookmark系等)は今後の増分で同じ2メソッドへ引き続き畳んでいく。
+
+  **第二弾**: 環境系15個(`set_gravity`/`set_gravity_direction`/`set_dt`/
+  `set_atmosphere`/`clear_atmosphere`/`set_water_region`/`clear_water_region`の
+  「設定」系7個、`gravity`/`gravity_direction`/`dt`/`atmosphere_density`/
+  `atmosphere_viscosity`/`atmosphere_wind`/`water_level`/`water_density`の
+  「内省」系8個)を同じ2メソッドへ追加で畳んだ(第一弾と合わせ計45個)。
+  `gravity_direction`/`atmosphere_wind`(`Float64Array`を返していた3要素の
+  配列)はJSON配列文字列(`[x,y,z]`)へ、他はJSON数値文字列へ変換した——
+  3要素の小さな配列・スカラー1個の変換コストは、レンダリングループから
+  毎フレーム呼ばれるとしても(`dt`は実際そう呼ばれる)無視できる規模であり、
+  上記の「ホットパスは対象外」という判断基準(大きな型付き配列のみ)には
+  抵触しない。フロントエンド(`main.ts`のSettings環境パネル・Replayタブの
+  リプレイ再構築・Probe Graphsのdt参照)・Playwright・3本のQAスクリプト
+  (`qa-lib.mjs`/`qa-physics.mjs`/`qa-coupling.mjs`)とも新メソッド経由に
+  更新、旧メソッド名への直接呼び出しは0件であることを確認済み。
+
+  検証: Rust側新規テスト(環境系をJSON経由で実際に操作し、大気・水域の
+  設定/解除・重力/dtの変更が反映されることを確認)、cargo test -p sim-wasm
+  25/25全緑。cargo test --workspace全緑、fmt/clippyクリーン、Playwright
+  スモーク28/28・QA(qa-defects 16/16・qa-physics 19/19・qa-coupling
+  29/37——後者はこの増分と無関係な既存の物理的既知事項、`qa-coupling.mjs`
+  冒頭が参照する`docs/reviews/2026-08-04-coupling-qa.md`参照)とも維持。
 
   検証: Rust側新規テスト(`apply_component`/`read_component`をJSON経由で
   実際に呼び、Joint/Coupling/熱ノードの追加・内省が代替できることを確認、

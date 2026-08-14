@@ -130,7 +130,7 @@ export function worldState(page) {
   return page.evaluate(() => ({
     t: window.__world.time(),
     step: Number(window.__world.step_count()),
-    dt: window.__world.dt(),
+    dt: Number(window.__world.read_component("dt", "")),
     hash: window.__world.state_hash(),
     residual: window.__world.energy_residual(),
   }));

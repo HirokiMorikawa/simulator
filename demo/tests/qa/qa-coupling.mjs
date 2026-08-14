@@ -338,7 +338,7 @@ await enterPlayPaused(page);
   await page.waitForTimeout(100);
   await stepN(page, 120);
   const heated = await page.evaluate(() => window.__world.heater_node_temperature());
-  const dt = await page.evaluate(() => window.__world.dt());
+  const dt = await page.evaluate(() => Number(window.__world.read_component("dt", "")));
   // ヒーターは 2000 W を毎 step 注ぐ(HEATER_WATTS)。C = 1000 J/K。
   const analytic = (2000.0 * 120 * dt) / 1000.0;
   r.check("Y2-1", "Settings のヒーターが、シーン側の結合が使っている熱ノードを実際に温める",
@@ -392,7 +392,7 @@ await loadScene(page, "d19-electric-workbench");
   const t0 = await page.evaluate(() => window.__world.heater_node_temperature());
   await stepN(page, 240);
   const t1 = await page.evaluate(() => window.__world.heater_node_temperature());
-  const dt = await page.evaluate(() => window.__world.dt());
+  const dt = await page.evaluate(() => Number(window.__world.read_component("dt", "")));
   const nodeText = await page.locator("#circuit-editor-voltages").textContent();
   const analytic = (10.0 ** 2 / 100.0) * 240 * dt / 1000.0;
   r.check("Y4-1", "Circuit タブで組んだ回路の電圧が UI に出る", /Node1: 10\.000V/.test(nodeText ?? ""), `"${(nodeText ?? "").trim()}"`);

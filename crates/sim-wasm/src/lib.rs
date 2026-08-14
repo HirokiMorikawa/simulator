@@ -987,12 +987,12 @@ impl WasmWorld {
     /// `MechanicsSolver.gravity`は元々公開フィールドで実行時に変更可能だったが、
     /// **wasm側にsetterが無かったためフロントエンドから触れなかった**
     /// (`WorldOptions`はコンストラクタでしか受け取らない、と誤解していた)。
-    pub fn set_gravity(&mut self, gravity: f64) {
+    fn set_gravity_impl(&mut self, gravity: f64) {
         self.inner.mechanics_mut().gravity = gravity;
     }
 
     /// 現在の重力加速度の大きさ [m/s^2]。
-    pub fn gravity(&self) -> f64 {
+    fn gravity_impl(&self) -> f64 {
         self.inner.mechanics().gravity
     }
 
@@ -1000,14 +1000,14 @@ impl WasmWorld {
     /// 「見送らず対応すること」への対応)。ゼロベクトルは
     /// `MechanicsSolver::set_gravity_direction`が既定の下向きへ安全に
     /// フォールバックする(壊れた入力で重力が消えない)。
-    pub fn set_gravity_direction(&mut self, x: f64, y: f64, z: f64) {
+    fn set_gravity_direction_impl(&mut self, x: f64, y: f64, z: f64) {
         self.inner
             .mechanics_mut()
             .set_gravity_direction(Vec3::new(x, y, z));
     }
 
     /// 現在の重力の向き(正規化済み単位ベクトル)を`[x, y, z]`で返す。
-    pub fn gravity_direction(&self) -> Float64Array {
+    fn gravity_direction_impl(&self) -> Float64Array {
         let d = self.inner.mechanics().gravity_direction;
         Float64Array::from(&[d.x, d.y, d.z][..])
     }
@@ -1016,7 +1016,7 @@ impl WasmWorld {
     ///
     /// **決定論を壊しうる操作**なので、フロントエンドはEditモードでのみ
     /// 呼び、変更を`commandLog`へ記録する(`SimClock::set_dt`のdoc参照)。
-    pub fn set_dt(&mut self, dt: f64) -> Result<(), JsValue> {
+    fn set_dt_impl(&mut self, dt: f64) -> Result<(), JsValue> {
         if !(dt.is_finite() && dt > 0.0) {
             return Err(JsValue::from_str("dt must be a positive finite number"));
         }
@@ -1025,7 +1025,7 @@ impl WasmWorld {
     }
 
     /// 現在のタイムステップ [s]。
-    pub fn dt(&self) -> f64 {
+    fn dt_impl(&self) -> f64 {
         self.inner.dt()
     }
 
@@ -1033,7 +1033,7 @@ impl WasmWorld {
     /// 動粘性・風)を設定する。`sim_fluid::Atmosphere`は既に`wind: Vec3`を
     /// 持っていた(P1スケッチどおり)が、UIから設定する手段が無かった。
     /// `World::set_environment`経由なので重力・水域・周囲温度は変えない。
-    pub fn set_atmosphere(
+    fn set_atmosphere_impl(
         &mut self,
         density: f64,
         viscosity: f64,
@@ -1052,7 +1052,7 @@ impl WasmWorld {
 
     /// 大気を無効化する(密度0の真空という意味ではなく「大気ドメイン自体を
     /// 評価しない」——`BuoyancyDrag`等の抗力・浮力の大気項が効かなくなる)。
-    pub fn clear_atmosphere(&mut self) {
+    fn clear_atmosphere_impl(&mut self) {
         let mut env = self.inner.environment();
         env.atmosphere = None;
         self.inner.set_environment(env);
@@ -1060,7 +1060,7 @@ impl WasmWorld {
 
     /// 大気密度[kg/m^3]。大気ドメインが無効なら`NaN`(`heater_node_temperature`
     /// と同じ「無ければNaN」規約)。
-    pub fn atmosphere_density(&self) -> f64 {
+    fn atmosphere_density_impl(&self) -> f64 {
         self.inner
             .environment()
             .atmosphere
@@ -1069,7 +1069,7 @@ impl WasmWorld {
     }
 
     /// 大気の動粘性係数[m^2/s]。大気ドメインが無効なら`NaN`。
-    pub fn atmosphere_viscosity(&self) -> f64 {
+    fn atmosphere_viscosity_impl(&self) -> f64 {
         self.inner
             .environment()
             .atmosphere
@@ -1078,7 +1078,7 @@ impl WasmWorld {
     }
 
     /// 風速ベクトル`[x,y,z]`。大気ドメインが無効なら`[NaN,NaN,NaN]`。
-    pub fn atmosphere_wind(&self) -> Float64Array {
+    fn atmosphere_wind_impl(&self) -> Float64Array {
         let wind = match self.inner.environment().atmosphere {
             Some(a) => [a.wind.x, a.wind.y, a.wind.z],
             None => [f64::NAN, f64::NAN, f64::NAN],
@@ -1089,21 +1089,21 @@ impl WasmWorld {
     /// Settingsの環境パネル——静的水域(水位・密度)を設定する
     /// (`World::add_fluid_region`の薄い写像、`set_environment`経由なので
     /// 重力・大気・周囲温度は変えない)。
-    pub fn set_water_region(&mut self, water_level: f64, density: f64) {
+    fn set_water_region_impl(&mut self, water_level: f64, density: f64) {
         let mut env = self.inner.environment();
         env.water = Some(sim_fluid::StaticWaterRegion::new(water_level, density));
         self.inner.set_environment(env);
     }
 
     /// 静的水域を無効化する。
-    pub fn clear_water_region(&mut self) {
+    fn clear_water_region_impl(&mut self) {
         let mut env = self.inner.environment();
         env.water = None;
         self.inner.set_environment(env);
     }
 
     /// 静的水域の水位[m]。無効なら`NaN`。
-    pub fn water_level(&self) -> f64 {
+    fn water_level_impl(&self) -> f64 {
         self.inner
             .environment()
             .water
@@ -1112,7 +1112,7 @@ impl WasmWorld {
     }
 
     /// 静的水域の密度[kg/m^3]。無効なら`NaN`。
-    pub fn water_density(&self) -> f64 {
+    fn water_density_impl(&self) -> f64 {
         self.inner
             .environment()
             .water
@@ -2300,6 +2300,40 @@ impl WasmWorld {
                 )?;
                 Ok("{}".to_string())
             }
+            "set_gravity" => {
+                self.set_gravity_impl(f("gravity"));
+                Ok("{}".to_string())
+            }
+            "set_gravity_direction" => {
+                self.set_gravity_direction_impl(f("x"), f("y"), f("z"));
+                Ok("{}".to_string())
+            }
+            "set_dt" => {
+                self.set_dt_impl(f("dt"))?;
+                Ok("{}".to_string())
+            }
+            "set_atmosphere" => {
+                self.set_atmosphere_impl(
+                    f("density"),
+                    f("viscosity"),
+                    f("wind_x"),
+                    f("wind_y"),
+                    f("wind_z"),
+                );
+                Ok("{}".to_string())
+            }
+            "clear_atmosphere" => {
+                self.clear_atmosphere_impl();
+                Ok("{}".to_string())
+            }
+            "set_water_region" => {
+                self.set_water_region_impl(f("water_level"), f("density"));
+                Ok("{}".to_string())
+            }
+            "clear_water_region" => {
+                self.clear_water_region_impl();
+                Ok("{}".to_string())
+            }
             _ => Err(JsValue::from_str(&format!(
                 "apply_component: unknown kind \"{kind}\""
             ))),
@@ -2324,6 +2358,18 @@ impl WasmWorld {
                 Ok(self.joint_info_text_impl(body_index))
             }
             "thermal_node_count" => Ok(self.thermal_node_count_impl().to_string()),
+            "gravity" => Ok(self.gravity_impl().to_string()),
+            "gravity_direction" => {
+                Ok(serde_json::json!(self.gravity_direction_impl().to_vec()).to_string())
+            }
+            "dt" => Ok(self.dt_impl().to_string()),
+            "atmosphere_density" => Ok(self.atmosphere_density_impl().to_string()),
+            "atmosphere_viscosity" => Ok(self.atmosphere_viscosity_impl().to_string()),
+            "atmosphere_wind" => {
+                Ok(serde_json::json!(self.atmosphere_wind_impl().to_vec()).to_string())
+            }
+            "water_level" => Ok(self.water_level_impl().to_string()),
+            "water_density" => Ok(self.water_density_impl().to_string()),
             _ => Err(JsValue::from_str(&format!(
                 "read_component: unknown kind \"{kind}\""
             ))),
@@ -2349,11 +2395,17 @@ impl WasmWorld {
                 "add_piston_gas_coupling", "add_wing_lift_coupling",
                 "add_magnus_lift_coupling", "push_set_coupling_control_surface_deflection",
                 "add_boussinesq_buoyancy_coupling", "add_convection_link_coupling",
-                "add_phase_change_morph_coupling"
+                "add_phase_change_morph_coupling",
+                "set_gravity", "set_gravity_direction", "set_dt",
+                "set_atmosphere", "clear_atmosphere",
+                "set_water_region", "clear_water_region"
             ],
             "read": [
                 "coupling_count", "coupling_info_text", "coupling_kind_summary",
-                "joint_info_text", "thermal_node_count"
+                "joint_info_text", "thermal_node_count",
+                "gravity", "gravity_direction", "dt",
+                "atmosphere_density", "atmosphere_viscosity", "atmosphere_wind",
+                "water_level", "water_density"
             ]
         })
         .to_string()
@@ -4016,28 +4068,97 @@ mod tests {
     #[test]
     fn set_and_clear_atmosphere_and_water_region_round_trip() {
         let mut world = new_world();
-        assert!(world.atmosphere_density().is_nan());
-        assert!(world.water_level().is_nan());
+        assert!(world.atmosphere_density_impl().is_nan());
+        assert!(world.water_level_impl().is_nan());
 
-        world.set_atmosphere(1.225, 1.5e-5, 2.0, 0.0, -1.0);
-        assert_eq!(world.atmosphere_density(), 1.225);
-        assert_eq!(world.atmosphere_viscosity(), 1.5e-5);
+        world.set_atmosphere_impl(1.225, 1.5e-5, 2.0, 0.0, -1.0);
+        assert_eq!(world.atmosphere_density_impl(), 1.225);
+        assert_eq!(world.atmosphere_viscosity_impl(), 1.5e-5);
         // `atmosphere_wind`は`Float64Array`を返すため、このテストモジュール
         // 冒頭のdoc comment(`Float32Array`/`Float64Array`はネイティブでは
         // 構築できない)どおり、ここでは呼ばない。
 
-        world.set_water_region(0.0, 1000.0);
-        assert_eq!(world.water_level(), 0.0);
-        assert_eq!(world.water_density(), 1000.0);
+        world.set_water_region_impl(0.0, 1000.0);
+        assert_eq!(world.water_level_impl(), 0.0);
+        assert_eq!(world.water_density_impl(), 1000.0);
 
-        world.clear_atmosphere();
-        assert!(world.atmosphere_density().is_nan());
+        world.clear_atmosphere_impl();
+        assert!(world.atmosphere_density_impl().is_nan());
         // 大気を消しても水域は無事(`set_environment`が両方を毎回まとめて
         // 書き直すため、片方だけ変えるつもりが他方を巻き込まないことの確認)。
-        assert_eq!(world.water_level(), 0.0);
+        assert_eq!(world.water_level_impl(), 0.0);
 
-        world.clear_water_region();
-        assert!(world.water_level().is_nan());
+        world.clear_water_region_impl();
+        assert!(world.water_level_impl().is_nan());
+    }
+
+    /// **Task#8第二弾の回帰テスト**: 環境系(重力・dt・大気・水域)15個も
+    /// `apply_component`/`read_component`経由で操作できることを確認する。
+    /// `gravity_direction`/`atmosphere_wind`は`Float64Array`を返すため
+    /// (このテストモジュール冒頭のdoc comment参照)、ここでは呼ばない
+    /// ——スカラーを返すkindのみで往復を確認する。
+    #[test]
+    fn apply_component_and_read_component_change_environment_via_generic_dispatch() {
+        let mut world = new_world();
+
+        world
+            .apply_component("set_gravity", r#"{"gravity":1.62}"#)
+            .expect("set_gravity via apply_component must succeed");
+        assert_eq!(
+            world.read_component("gravity", "").unwrap(),
+            1.62_f64.to_string()
+        );
+
+        world
+            .apply_component("set_dt", r#"{"dt":0.02}"#)
+            .expect("set_dt via apply_component must succeed");
+        assert_eq!(
+            world.read_component("dt", "").unwrap(),
+            0.02_f64.to_string()
+        );
+        // `set_dt`に不正な値(0以下)を渡すと`Err`になる経路は、`JsValue::Err`の
+        // ネイティブ構築がSIGABRTする既知の制約(モジュールdoc参照)により
+        // ここでは検証しない——Playwright側(実wasmターゲット)で確認する。
+
+        world
+            .apply_component(
+                "set_atmosphere",
+                r#"{"density":1.225,"viscosity":1.5e-5,"wind_x":2.0,"wind_y":0.0,"wind_z":-1.0}"#,
+            )
+            .expect("set_atmosphere via apply_component must succeed");
+        assert_eq!(
+            world.read_component("atmosphere_density", "").unwrap(),
+            "1.225"
+        );
+
+        world
+            .apply_component(
+                "set_water_region",
+                r#"{"water_level":0.0,"density":1000.0}"#,
+            )
+            .expect("set_water_region via apply_component must succeed");
+        assert_eq!(world.read_component("water_level", "").unwrap(), "0");
+        assert_eq!(world.read_component("water_density", "").unwrap(), "1000");
+
+        world
+            .apply_component("clear_atmosphere", "{}")
+            .expect("clear_atmosphere via apply_component must succeed");
+        assert!(world
+            .read_component("atmosphere_density", "")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            .is_nan());
+
+        world
+            .apply_component("clear_water_region", "{}")
+            .expect("clear_water_region via apply_component must succeed");
+        assert!(world
+            .read_component("water_level", "")
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            .is_nan());
     }
 
     /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
@@ -4053,13 +4174,13 @@ mod tests {
             sim_math::Vec3::new(0.0, -1.0, 0.0)
         );
 
-        world.set_gravity_direction(3.0, 0.0, 0.0);
+        world.set_gravity_direction_impl(3.0, 0.0, 0.0);
         let direction = world.inner.mechanics().gravity_direction;
         assert!((direction.length() - 1.0).abs() < 1e-12);
         assert!((direction.x - 1.0).abs() < 1e-12);
 
         // ゼロベクトルは既定の下向きへ安全にフォールバックする。
-        world.set_gravity_direction(0.0, 0.0, 0.0);
+        world.set_gravity_direction_impl(0.0, 0.0, 0.0);
         assert_eq!(
             world.inner.mechanics().gravity_direction,
             sim_math::Vec3::new(0.0, -1.0, 0.0)
@@ -4327,12 +4448,44 @@ mod tests {
         // 呼ばない。Playwright側(実wasmターゲット)で未知kindのエラー伝播を
         // 確認している。
 
-        // `component_schema`が新設した25個のapply kind・5個のread kindを
-        // 過不足なく列挙していることを確認する。
+        // `component_schema`が畳んだ代表的なkind(このテストで実際に使った
+        // ものと、他の増分で畳んだ環境系)を過不足なく列挙していることを
+        // 確認する——増分ごとに畳む本数が増えるため、正確な総数ではなく
+        // 「畳んだはずのkindが必ず入っている」ことだけを検証する。
         let schema: serde_json::Value = serde_json::from_str(&world.component_schema())
             .expect("component_schema must produce valid JSON");
-        assert_eq!(schema["apply"].as_array().unwrap().len(), 25);
-        assert_eq!(schema["read"].as_array().unwrap().len(), 5);
+        let apply_kinds: Vec<&str> = schema["apply"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let read_kinds: Vec<&str> = schema["read"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for kind in [
+            "add_distance_joint",
+            "add_lorentz_force_coupling",
+            "add_thermal_node",
+            "set_gravity",
+            "set_atmosphere",
+            "set_water_region",
+        ] {
+            assert!(apply_kinds.contains(&kind), "missing apply kind: {kind}");
+        }
+        for kind in [
+            "coupling_count",
+            "joint_info_text",
+            "thermal_node_count",
+            "gravity",
+            "atmosphere_density",
+            "water_level",
+        ] {
+            assert!(read_kinds.contains(&kind), "missing read kind: {kind}");
+        }
     }
 
     /// `export_scene_json`が`sim_world::to_scenario`経由に置き換わったこと

@@ -509,9 +509,9 @@ test("群2: カメラ操作・ツール切替ショートカット・Settings �
   await page.locator("#input-gravity-direction-y").blur();
   await page.waitForTimeout(200);
   const direction = await page.evaluate(() => {
-    const w = (window as unknown as { __world: { gravity_direction: () => Float64Array } })
+    const w = (window as unknown as { __world: { read_component: (kind: string, arg: string) => string } })
       .__world;
-    return Array.from(w.gravity_direction());
+    return JSON.parse(w.read_component("gravity_direction", "")) as number[];
   });
   expect(direction[0]).toBeCloseTo(1.0, 3);
   expect(direction[1]).toBeCloseTo(0.0, 3);

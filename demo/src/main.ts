@@ -1146,6 +1146,11 @@ function applyComponent(
   };
 }
 
+/// `read_component`で数値スカラーを読む薄いラッパー(Task#8第二弾)。
+function readNumber(world: WasmWorld, kind: string, arg = ""): number {
+  return Number(world.read_component(kind, arg));
+}
+
 /// `couplingRow`が`BuoyancyDrag`の各行に出す「操縦面舵角」欄を配線する
 /// (**残タスク完遂の縦串⑤増分**)。度→ラジアン変換して`apply_component`
 /// (kind="push_set_coupling_control_surface_deflection")へ送るだけの薄い配線
@@ -3608,16 +3613,18 @@ async function setUpSceneView(
   ) as HTMLInputElement | null;
   function syncSettingsInputs() {
     if (gravityInput && document.activeElement !== gravityInput) {
-      gravityInput.value = world.gravity().toFixed(3);
+      gravityInput.value = Number(world.read_component("gravity", "")).toFixed(3);
     }
-    const gravityDirection = world.gravity_direction();
+    const gravityDirection = JSON.parse(
+      world.read_component("gravity_direction", ""),
+    ) as number[];
     gravityDirectionInputs.forEach((input, i) => {
       if (input && document.activeElement !== input) {
         input.value = gravityDirection[i].toFixed(3);
       }
     });
     if (dtInput && document.activeElement !== dtInput) {
-      dtInput.value = world.dt().toFixed(6);
+      dtInput.value = Number(world.read_component("dt", "")).toFixed(6);
     }
     if (dtInput) dtInput.disabled = mode !== "edit";
 
@@ -3626,29 +3633,29 @@ async function setUpSceneView(
     // `World::environment()`が読む同じフィールドを毎フレーム反映する
     // (フォーカス中の欄は書き換えない、`updateInspectorRigidBodyFields`と
     // 同じ理由)。
-    const density = world.atmosphere_density();
+    const density = Number(world.read_component("atmosphere_density", ""));
     if (atmosphereToggle) atmosphereToggle.checked = !Number.isNaN(density);
     if (atmosphereDensityInput && document.activeElement !== atmosphereDensityInput && !Number.isNaN(density)) {
       atmosphereDensityInput.value = density.toFixed(4);
     }
-    const viscosity = world.atmosphere_viscosity();
+    const viscosity = Number(world.read_component("atmosphere_viscosity", ""));
     if (atmosphereViscosityInput && document.activeElement !== atmosphereViscosityInput && !Number.isNaN(viscosity)) {
       atmosphereViscosityInput.value = viscosity.toFixed(8);
     }
     if (!Number.isNaN(density)) {
-      const wind = world.atmosphere_wind();
+      const wind = JSON.parse(world.read_component("atmosphere_wind", "")) as number[];
       windInputs.forEach((input, i) => {
         if (input && document.activeElement !== input) {
           input.value = wind[i].toFixed(3);
         }
       });
     }
-    const level = world.water_level();
+    const level = Number(world.read_component("water_level", ""));
     if (waterToggle) waterToggle.checked = !Number.isNaN(level);
     if (waterLevelInput && document.activeElement !== waterLevelInput && !Number.isNaN(level)) {
       waterLevelInput.value = level.toFixed(3);
     }
-    const waterDensity = world.water_density();
+    const waterDensity = Number(world.read_component("water_density", ""));
     if (waterDensityInput && document.activeElement !== waterDensityInput && !Number.isNaN(waterDensity)) {
       waterDensityInput.value = waterDensity.toFixed(1);
     }
@@ -3656,7 +3663,7 @@ async function setUpSceneView(
   gravityInput?.addEventListener("change", () => {
     const value = Number(gravityInput.value);
     if (!Number.isFinite(value)) return;
-    world.set_gravity(value);
+    applyComponent(world, "set_gravity", { gravity: value });
     pushCommandLog(world, { kind: "SetGravity", gravity: value });
   });
 
@@ -3676,11 +3683,11 @@ async function setUpSceneView(
   gravityDirectionInputs.forEach((input, i) =>
     input?.addEventListener("change", () => {
       pendingGravityDirection[i] = Number(input.value);
-      world.set_gravity_direction(
-        pendingGravityDirection[0],
-        pendingGravityDirection[1],
-        pendingGravityDirection[2],
-      );
+      applyComponent(world, "set_gravity_direction", {
+        x: pendingGravityDirection[0],
+        y: pendingGravityDirection[1],
+        z: pendingGravityDirection[2],
+      });
       // **決定論の観点では重力の向きの変更も「入力」**——`SetGravity`と同じ
       // 理由でReplayタブへ記録する(記録し忘れるとリプレイのstate_hashが
       // 一致しなくなる、直下の`SetGravity`のdoc参照)。
@@ -3697,7 +3704,7 @@ async function setUpSceneView(
     const value = Number(dtInput.value);
     if (!Number.isFinite(value) || value <= 0) return;
     try {
-      world.set_dt(value);
+      applyComponent(world, "set_dt", { dt: value });
       pushCommandLog(world, { kind: "SetDt", dt: value });
     } catch (err) {
       window.alert(`dt の変更に失敗しました: ${String(err)}`);
@@ -3738,17 +3745,17 @@ async function setUpSceneView(
   };
   function applyAtmosphere() {
     if (!atmosphereToggle?.checked) return;
-    world.set_atmosphere(
-      pendingAtmosphere.density,
-      pendingAtmosphere.viscosity,
-      pendingAtmosphere.wind[0],
-      pendingAtmosphere.wind[1],
-      pendingAtmosphere.wind[2],
-    );
+    applyComponent(world, "set_atmosphere", {
+      density: pendingAtmosphere.density,
+      viscosity: pendingAtmosphere.viscosity,
+      wind_x: pendingAtmosphere.wind[0],
+      wind_y: pendingAtmosphere.wind[1],
+      wind_z: pendingAtmosphere.wind[2],
+    });
   }
   atmosphereToggle?.addEventListener("change", () => {
     if (atmosphereToggle.checked) applyAtmosphere();
-    else world.clear_atmosphere();
+    else applyComponent(world, "clear_atmosphere", {});
   });
   atmosphereDensityInput?.addEventListener("change", () => {
     pendingAtmosphere.density = Number(atmosphereDensityInput.value);
@@ -3816,11 +3823,14 @@ async function setUpSceneView(
   };
   function applyWater() {
     if (!waterToggle?.checked) return;
-    world.set_water_region(pendingWater.level, pendingWater.density);
+    applyComponent(world, "set_water_region", {
+      water_level: pendingWater.level,
+      density: pendingWater.density,
+    });
   }
   waterToggle?.addEventListener("change", () => {
     if (waterToggle.checked) applyWater();
-    else world.clear_water_region();
+    else applyComponent(world, "clear_water_region", {});
   });
   waterLevelInput?.addEventListener("change", () => {
     pendingWater.level = Number(waterLevelInput.value);
@@ -5905,13 +5915,17 @@ async function setUpSceneView(
         // 変えた実行のリプレイが「重力9.807のまま」進んで state_hash が
         // 一致しなくなる(記録しているのに再生しないのが一番たちが悪い)。
         case "SetGravity":
-          replayWorld.set_gravity(entry.gravity);
+          applyComponent(replayWorld, "set_gravity", { gravity: entry.gravity });
           break;
         case "SetGravityDirection":
-          replayWorld.set_gravity_direction(entry.x, entry.y, entry.z);
+          applyComponent(replayWorld, "set_gravity_direction", {
+            x: entry.x,
+            y: entry.y,
+            z: entry.z,
+          });
           break;
         case "SetDt":
-          replayWorld.set_dt(entry.dt);
+          applyComponent(replayWorld, "set_dt", { dt: entry.dt });
           break;
         case "SetBodyMass":
           if (entry.bodyIndex < replayWorld.body_count()) {
@@ -6025,7 +6039,7 @@ async function setUpSceneView(
   function advanceLivePlayback(frameSeconds: number): boolean {
     const playback = livePlayback;
     if (!playback) return false;
-    const dt = playback.replayWorld.dt();
+    const dt = readNumber(playback.replayWorld, "dt");
     playback.accumulator += frameSeconds * timeScale;
     let steps = 0;
     while (
@@ -6606,7 +6620,7 @@ async function setUpSceneView(
         consoleDiagnosticsRef.current(
           world.energy_residual(),
           world.max_body_speed(),
-          world.dt(),
+          readNumber(world, "dt"),
         );
       }
       render();
@@ -6989,7 +7003,7 @@ async function setUpSceneView(
           history: world.imported_probe_history_f64(i),
         });
       }
-      updateProbeGraph(series, world.dt(), world.time());
+      updateProbeGraph(series, readNumber(world, "dt"), world.time());
     } else {
       updateProbeGraph(
         [
@@ -7004,7 +7018,7 @@ async function setUpSceneView(
             history: world.speed_probe_history_f64(),
           },
         ],
-        world.dt(),
+        readNumber(world, "dt"),
         world.time(),
       );
     }
@@ -7130,7 +7144,7 @@ async function setUpSceneView(
       // **`DT` 定数ではなく `world.dt()` を読む(群2)**。Settings で dt を
       // 変更できるようにした結果、固定の `DT` で積算すると「dt を半分にすると
       // 時間が倍速で進む」という嘘の挙動になっていた(実装検証中に発見)。
-      const dt = world.dt();
+      const dt = readNumber(world, "dt");
       while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
         if (heaterToggle.checked) world.push_heat_source(HEATER_WATTS);
         applyThrustForStep();

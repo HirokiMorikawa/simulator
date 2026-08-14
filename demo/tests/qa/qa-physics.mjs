@@ -168,7 +168,7 @@ await page.locator("#input-gravity").fill("1.62"); // 月面
 await page.locator("#input-gravity").dispatchEvent("change");
 await page.waitForTimeout(200);
 await page.locator("#btn-settings").click();
-const gravity = await page.evaluate(() => window.__world.gravity());
+const gravity = await page.evaluate(() => Number(window.__world.read_component("gravity", "")));
 await enterPlayPaused(page);
 await stepN(page, 240);
 s = await worldState(page);
