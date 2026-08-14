@@ -537,7 +537,13 @@ pub struct SliderJoint {
     /// `body_b` が `Some` ならそのローカル座標、`None` ならワールド座標(固定点)。
     pub anchor_b: Vec3,
     /// 生成時点の相対回転(角度0の基準)。`SliderJoint::new`で自動算出する。
-    reference_relative_rotation: Quat,
+    ///
+    /// **`pub`である理由**: この値は`body_a`/`body_b`の"現在の"回転からは復元できない
+    /// (生成後にどちらかが回転していれば基準がずれる)。`World → Scenario`逆写像
+    /// (`sim-world::export`)が実行中のジョイントをそのまま書き戻すには、この基準を
+    /// 明示的に読み出して`JointJson::Slider::reference_relative_rotation`として
+    /// 保存する必要がある(`from_raw`のdoc参照)。
+    pub reference_relative_rotation: Quat,
     /// `true`なら解決対象から除外する(`BallJoint::disabled`と同じ理由)。
     pub disabled: bool,
 }
@@ -556,13 +562,34 @@ impl SliderJoint {
     ) -> SliderJoint {
         let rot_a = bodies.rotation[body_a];
         let rot_b = body_b.map(|b| bodies.rotation[b]).unwrap_or(Quat::IDENTITY);
+        SliderJoint::from_raw(
+            body_a,
+            anchor_a,
+            axis_a,
+            body_b,
+            anchor_b,
+            rot_b.mul(rot_a.conjugate()),
+        )
+    }
+
+    /// `reference_relative_rotation`を明示指定して`SliderJoint`を組み立てる
+    /// (`World → Scenario`逆写像が、生成時点の姿勢ではなく**保存されていた基準**を
+    /// そのまま復元するために使う。`new`はこの関数の薄いラッパー)。
+    pub fn from_raw(
+        body_a: usize,
+        anchor_a: Vec3,
+        axis_a: Vec3,
+        body_b: Option<usize>,
+        anchor_b: Vec3,
+        reference_relative_rotation: Quat,
+    ) -> SliderJoint {
         SliderJoint {
             body_a,
             anchor_a,
             axis_a,
             body_b,
             anchor_b,
-            reference_relative_rotation: rot_b.mul(rot_a.conjugate()),
+            reference_relative_rotation,
             disabled: false,
         }
     }

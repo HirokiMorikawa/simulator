@@ -100,6 +100,16 @@ impl MaterialDb {
         &self.materials[id.0 as usize]
     }
 
+    /// 全材料の列挙(`World → Scenario`逆写像が、ボディが使う`Material`が標準DBの
+    /// どれかの密度違い派生か(`extends`)を突き止めるために使う——`find_by_name`は
+    /// 名前を知っている前提なので、名前が分からない側からの逆引きには使えない)。
+    pub fn iter(&self) -> impl Iterator<Item = (MaterialId, &Material)> {
+        self.materials
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (MaterialId(i as u32), m))
+    }
+
     pub fn find_by_name(&self, name: &str) -> Option<MaterialId> {
         self.materials
             .iter()

@@ -420,6 +420,13 @@ pub enum JointJson {
         body_b: Option<String>,
         #[serde(default)]
         anchor_b: [f64; 3],
+        /// 生成時点の相対回転(`sim_mechanics::SliderJoint::reference_relative_rotation`、
+        /// クォータニオン`[x,y,z,w]`)。未指定なら`body_a`/`body_b`の**現在の**姿勢から
+        /// 算出する(`SliderJoint::new`と同じ、手書きシーンJSONの既存の挙動)。
+        /// `World → Scenario`のエクスポート(`export`モジュール)は常にこれを明示するため、
+        /// 生成後に body が回転していても基準がずれずに往復できる。
+        #[serde(default)]
+        reference_relative_rotation: Option<[f64; 4]>,
     },
     Distance {
         body_a: String,
@@ -480,6 +487,28 @@ pub enum JointJson {
         /// 駆動モーターのトルク上限 [N·m](0 なら空転)。
         #[serde(default)]
         motor_max_torque: Option<f64>,
+    },
+    /// PD位置サーボ付きヒンジモーター(`sim_mechanics::HingeMotorPd`)。単独の関節
+    /// (肘・膝・ドアなど)。`Wheel`に埋め込まれた駆動モーターとは別物——
+    /// `Wheel`は「車輪を回す」専用複合拘束で、こちらは任意の1体を対象にした
+    /// 汎用ヒンジ。**`World → Scenario`のエクスポート(`export`モジュール)で
+    /// このジョイントを持つシーンを書き戻すために追加した(元は書き出す先が
+    /// 無かった)**。
+    HingeMotor {
+        body: String,
+        /// ヒンジ軸(ワールド座標、固定、単位ベクトル)。
+        axis: [f64; 3],
+        /// 生成時点の`body`の姿勢(角度0の基準、クォータニオン`[x,y,z,w]`)。
+        /// 未指定なら現在の`body`の姿勢を基準に取る(`HingeMotorPd::new`と同じ)。
+        #[serde(default)]
+        reference_rotation: Option<[f64; 4]>,
+        theta_target: f64,
+        kp: f64,
+        kd: f64,
+        torque_max: f64,
+        /// 角度制限 $[\theta_{min}, \theta_{max}]$ [rad]。未指定なら無制限。
+        #[serde(default)]
+        limit: Option<(f64, f64)>,
     },
 }
 
@@ -1292,6 +1321,15 @@ fn array_to_vec3(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
 
+fn array_to_quat(q: [f64; 4]) -> sim_math::Quat {
+    sim_math::Quat {
+        x: q[0],
+        y: q[1],
+        z: q[2],
+        w: q[3],
+    }
+}
+
 impl World {
     /// シーンJSONの`materials`/`bodies`セクションを現在の`World`へ追加する
     /// (`from_scenario`と、実行中のワールドへシーンJSONを取り込むシーンJSON
@@ -1937,6 +1975,7 @@ impl World {
                     axis,
                     body_b,
                     anchor_b,
+                    reference_relative_rotation,
                 } => {
                     let a_id = *body_ids_by_name
                         .get(body_a)
@@ -1949,14 +1988,24 @@ impl World {
                         ),
                         None => None,
                     };
-                    let joint = sim_mechanics::SliderJoint::new(
-                        &world.mechanics_mut().bodies,
-                        a_id.index as usize,
-                        array_to_vec3(*anchor_a),
-                        array_to_vec3(*axis),
-                        b_id.map(|id| id.index as usize),
-                        array_to_vec3(*anchor_b),
-                    );
+                    let joint = match reference_relative_rotation {
+                        Some(q) => sim_mechanics::SliderJoint::from_raw(
+                            a_id.index as usize,
+                            array_to_vec3(*anchor_a),
+                            array_to_vec3(*axis),
+                            b_id.map(|id| id.index as usize),
+                            array_to_vec3(*anchor_b),
+                            array_to_quat(*q),
+                        ),
+                        None => sim_mechanics::SliderJoint::new(
+                            &world.mechanics_mut().bodies,
+                            a_id.index as usize,
+                            array_to_vec3(*anchor_a),
+                            array_to_vec3(*axis),
+                            b_id.map(|id| id.index as usize),
+                            array_to_vec3(*anchor_b),
+                        ),
+                    };
                     world.mechanics_mut().add_slider_joint(joint);
                 }
                 JointJson::Distance {
@@ -2064,6 +2113,38 @@ impl World {
                         joint.motor_max_torque = *t;
                     }
                     world.mechanics_mut().wheel_joints.push(joint);
+                }
+                JointJson::HingeMotor {
+                    body,
+                    axis,
+                    reference_rotation,
+                    theta_target,
+                    kp,
+                    kd,
+                    torque_max,
+                    limit,
+                } => {
+                    let body_id = body_ids_by_name
+                        .get(body)
+                        .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
+                    let idx = body_id.index as usize;
+                    let reference_rotation = match reference_rotation {
+                        Some(q) => array_to_quat(*q),
+                        None => world.mechanics_mut().bodies.rotation[idx],
+                    };
+                    world
+                        .mechanics_mut()
+                        .add_hinge_motor(sim_mechanics::HingeMotorPd {
+                            body: idx,
+                            axis: array_to_vec3(*axis),
+                            reference_rotation,
+                            theta_target: *theta_target,
+                            kp: *kp,
+                            kd: *kd,
+                            torque_max: *torque_max,
+                            limit: *limit,
+                            disabled: false,
+                        });
                 }
             }
         }

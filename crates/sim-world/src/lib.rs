@@ -53,12 +53,14 @@
 //! `apply_coupling`/`conduction_rod_mut().step(dt)`を明示的に呼んで状態を進める。
 
 mod demos;
+mod export;
 mod integration_scenarios;
 mod orchestrator;
 mod overlap;
 mod raycast;
 mod scenario;
 
+pub use export::to_scenario;
 pub use scenario::{
     run_headless_scenario, BodyScenarioDesc, HeadlessRunResult, MaterialOverride,
     PredictionPromptJson, Scenario, SceneError, ShapeJson, WorldScenarioOptions,
@@ -483,6 +485,12 @@ pub struct World {
     ledger: Option<EnergyLedger>,
     /// `BodyId` の世代管理(`RigidBodySet` のインデックスに対応、モジュールdoc参照)。
     generations: Vec<u32>,
+    /// `remove_body`で削除済みのスロットか(`generations`と対、`body_ids()`が
+    /// 生存ボディだけを列挙するのに使う)。`RigidBodySet`のスロット自体は
+    /// `remove_body`のdoc参照の通り解放されない(`BodyType::Static`化+遠方退避)ため、
+    /// 座標だけからは削除済みかどうかを判別できない——`World → Scenario`逆写像
+    /// (`export`モジュール)が削除済みの亡霊ボディを書き出さないために追加した。
+    removed: Vec<bool>,
     /// `push_command`で積まれ、次`step()`の先頭で適用されるコマンドの待ち行列
     /// (`Command`のdoc参照)。
     pending_commands: Vec<Command>,
@@ -619,6 +627,7 @@ impl World {
             events: EventQueue::new(),
             ledger: None,
             generations: Vec::new(),
+            removed: Vec::new(),
             pending_commands: Vec::new(),
             command_log: Vec::new(),
             probes: Vec::new(),
@@ -1302,6 +1311,7 @@ impl World {
             "RigidBodySet is expected to only grow (no slot reuse yet, module doc)"
         );
         self.generations.push(0);
+        self.removed.push(false);
         BodyId {
             index: index as u32,
             generation: 0,
@@ -1346,6 +1356,7 @@ impl World {
         }
         let idx = id.index as usize;
         self.generations[idx] += 1;
+        self.removed[idx] = true;
         self.mechanics.bodies.body_type[idx] = BodyType::Static;
         self.mechanics.bodies.position[idx] = Vec3::new(0.0, -1.0e9, 0.0);
         self.mechanics.bodies.linear_velocity[idx] = Vec3::ZERO;
@@ -1828,6 +1839,13 @@ impl World {
             .collect()
     }
 
+    /// `Coupling`の生の登録列(`World → Scenario`逆写像がパラメータ込みで
+    /// 各`Coupling`を読み戻すために使う。`couplings()`が返す`CouplingInfo`は
+    /// `describe()`の人間可読文字列しか持たないため、そこからは再構成できない)。
+    pub fn couplings_raw(&self) -> &[Box<dyn sim_coupling::Coupling>] {
+        &self.couplings
+    }
+
     /// 全ジョイントを種別タグ付きで列挙する(**群1で追加**、`JointInfo`のdoc参照)。
     pub fn joints(&self) -> Vec<JointInfo> {
         let m = &self.mechanics;
@@ -2107,6 +2125,32 @@ impl World {
             return None;
         }
         Some(self.mechanics.bodies.rotation[id.index as usize])
+    }
+
+    /// `body_position`と同じ不変条件の角速度版(`export`モジュールの
+    /// `World → Scenario`逆写像が`BodyScenarioDesc::angular_velocity`を
+    /// 読み戻すのに使う)。
+    pub fn body_angular_velocity(&self, id: BodyId) -> Option<Vec3> {
+        if !self.is_valid(id) {
+            return None;
+        }
+        Some(self.mechanics.bodies.angular_velocity[id.index as usize])
+    }
+
+    /// 現在生存している(`remove_body`されていない)全`BodyId`をindex昇順で返す
+    /// (`export`モジュールの`World → Scenario`逆写像向け。`RigidBodySet`のスロットは
+    /// 削除後も解放されない(`remove_body`のdoc参照)ため、`generations`/`removed`を
+    /// 経由しないと削除済みの亡霊ボディまで書き出してしまう)。
+    pub fn body_ids(&self) -> Vec<BodyId> {
+        self.generations
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !self.removed[*idx])
+            .map(|(idx, gen)| BodyId {
+                index: idx as u32,
+                generation: *gen,
+            })
+            .collect()
     }
 
     /// `body`のローカル座標`anchor_local`をワールド固定点`anchor_world`から

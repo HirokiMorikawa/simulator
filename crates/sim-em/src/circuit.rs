@@ -274,6 +274,20 @@ impl Circuit {
         &self.switches
     }
 
+    /// コンデンサの現在の端子間電圧(後退Eulerコンパニオンモデルの履歴項、
+    /// `add_capacitor`の`initial_voltage`と同じ量)。`World → Scenario`逆写像が
+    /// 「今の充電状態」を`CapacitorJson::initial_voltage`として書き戻すのに使う
+    /// ——これが無いと保存のたびにコンデンサが放電済み(0V)にリセットされる。
+    pub fn capacitor_voltage(&self, index: usize) -> f64 {
+        self.capacitor_voltage[index]
+    }
+
+    /// インダクタの現在の枝電流(`inductor_current`版、`add_inductor`の
+    /// `initial_current`と同じ量)。
+    pub fn inductor_current(&self, index: usize) -> f64 {
+        self.inductor_current[index]
+    }
+
     /// `node`が現在の回路のノード数を超える場合は0を返す(パニックしない)。
     ///
     /// **修正の経緯(シーンギャラリー増分B2で発見)**: 以前は

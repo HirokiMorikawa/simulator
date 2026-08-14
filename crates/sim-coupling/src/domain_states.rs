@@ -117,7 +117,7 @@ impl CouplingKind {
 /// ドメイン間結合(設計 docs/00-foundation/04-architecture.md §1.3「保存量の橋」)。
 /// 2つ(以上)のソルバの状態を読み、互いに作用を書き込む。取り出した量と注入した量が
 /// 一致することを実装側がデバッグビルドで検算する(設計の要求、§1.1.2(2))。
-pub trait Coupling: CouplingClone {
+pub trait Coupling: CouplingClone + AsAnyCoupling {
     /// この結合の種別(**内省層、群1で追加**。`CouplingKind`のdoc参照)。
     fn kind(&self) -> CouplingKind;
 
@@ -201,6 +201,23 @@ where
 {
     fn clone_box(&self) -> Box<dyn Coupling> {
         Box::new(self.clone())
+    }
+}
+
+/// 具象型へのdowncastを`dyn Coupling`越しに可能にする(`CouplingClone`と同じ
+/// blanket implパターン)。`World → Scenario`逆写像がパラメータ込みで各`Coupling`を
+/// 読み戻すために使う——`describe()`は人間可読の文字列であって構造化データでは
+/// ないため、これが無いと「保存すると結合のパラメータが消える」ことになる。
+pub trait AsAnyCoupling {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T> AsAnyCoupling for T
+where
+    T: 'static + Coupling,
+{
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
