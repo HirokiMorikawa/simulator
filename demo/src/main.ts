@@ -349,6 +349,36 @@ type CircuitEditorRef = {
     addSwitch: (a: number, b: number, closed: boolean) => number;
     setSwitchClosed: (index: number, closed: boolean) => void;
     nodeVoltage: (node: number) => number;
+    // **回路素子4種をUIエディタに追加(縦串①の独立項目)**。ソルバ
+    // (`sim_em::Circuit`)側は既に7種そろっており、ここまでUIから作れたのは
+    // 抵抗・電圧源・スイッチの3種のみだった。
+    addCapacitor: (
+      a: number,
+      b: number,
+      capacitance: number,
+      initialVoltage: number,
+    ) => void;
+    addInductor: (
+      a: number,
+      b: number,
+      inductance: number,
+      initialCurrent: number,
+    ) => void;
+    addDiode: (
+      anode: number,
+      cathode: number,
+      saturationCurrent: number,
+      nVt: number,
+    ) => void;
+    addDcMotor: (
+      a: number,
+      b: number,
+      windingResistance: number,
+      windingInductance: number,
+      backEmfConstant: number,
+    ) => number;
+    setMotorSpeed: (index: number, angularVelocity: number) => void;
+    motorCurrent: (index: number) => number;
   } | null;
 };
 
@@ -1474,7 +1504,11 @@ function setUpProjectDrawer(
   type FreeWiringComponent =
     | { kind: "resistor"; a: number; b: number; resistance: number }
     | { kind: "voltage_source"; a: number; b: number; voltage: number }
-    | { kind: "switch"; a: number; b: number; index: number; closed: boolean };
+    | { kind: "switch"; a: number; b: number; index: number; closed: boolean }
+    | { kind: "capacitor"; a: number; b: number; capacitance: number }
+    | { kind: "inductor"; a: number; b: number; inductance: number }
+    | { kind: "diode"; a: number; b: number }
+    | { kind: "dc_motor"; a: number; b: number; index: number };
   let freeWiringNumNodes = 0;
   const freeWiringComponents: FreeWiringComponent[] = [];
 
@@ -1697,6 +1731,10 @@ function setUpProjectDrawer(
         ["resistor", "抵抗 [Ω]"],
         ["voltage_source", "電圧源 [V] (A=正極)"],
         ["switch", "スイッチ"],
+        ["capacitor", "コンデンサ [F]"],
+        ["inductor", "インダクタ [H]"],
+        ["diode", "ダイオード (A=アノード)"],
+        ["dc_motor", "DCモーター [Ω] (逆起電力定数は別欄)"],
       ]) {
         const option = document.createElement("option");
         option.value = value;
@@ -1707,6 +1745,22 @@ function setUpProjectDrawer(
       valueInput.type = "number";
       valueInput.value = "100";
       valueInput.id = "circuit-editor-value";
+      valueInput.title =
+        "抵抗[Ω]/電圧[V]/コンデンサ[F]/インダクタ[H]/ダイオード飽和電流[A]/DCモーター巻線抵抗[Ω]";
+      // コンデンサの初期電圧・インダクタの初期電流・ダイオードのnVt・
+      // DCモーターの巻線インダクタンスに使う第2値(未使用の種別では無視される)。
+      const value2Input = document.createElement("input");
+      value2Input.type = "number";
+      value2Input.value = "0";
+      value2Input.id = "circuit-editor-value2";
+      value2Input.title =
+        "コンデンサ初期電圧[V]/インダクタ初期電流[A]/ダイオードnVt[V]/DCモーター巻線インダクタンス[H]";
+      // DCモーターの逆起電力定数のみに使う第3値。
+      const value3Input = document.createElement("input");
+      value3Input.type = "number";
+      value3Input.value = "0.1";
+      value3Input.id = "circuit-editor-value3";
+      value3Input.title = "DCモーター逆起電力定数[V·s/rad]";
       const addButton = document.createElement("button");
       addButton.textContent = "素子を追加";
       addButton.addEventListener("click", () => {
@@ -1714,6 +1768,8 @@ function setUpProjectDrawer(
         const a = Math.trunc(Number(aInput.value) || 0);
         const b = Math.trunc(Number(bInput.value) || 0);
         const value = Number(valueInput.value) || 0;
+        const value2 = Number(value2Input.value) || 0;
+        const value3 = Number(value3Input.value) || 0;
         if (kindSelect.value === "resistor") {
           circuitEditorRef.current.addResistor(a, b, value);
           freeWiringComponents.push({
@@ -1730,6 +1786,39 @@ function setUpProjectDrawer(
             b,
             voltage: value,
           });
+        } else if (kindSelect.value === "capacitor") {
+          circuitEditorRef.current.addCapacitor(a, b, value, value2);
+          freeWiringComponents.push({
+            kind: "capacitor",
+            a,
+            b,
+            capacitance: value,
+          });
+        } else if (kindSelect.value === "inductor") {
+          circuitEditorRef.current.addInductor(a, b, value, value2);
+          freeWiringComponents.push({
+            kind: "inductor",
+            a,
+            b,
+            inductance: value,
+          });
+        } else if (kindSelect.value === "diode") {
+          circuitEditorRef.current.addDiode(
+            a,
+            b,
+            value,
+            value2 || 0.026,
+          );
+          freeWiringComponents.push({ kind: "diode", a, b });
+        } else if (kindSelect.value === "dc_motor") {
+          const index = circuitEditorRef.current.addDcMotor(
+            a,
+            b,
+            value,
+            value2,
+            value3,
+          );
+          freeWiringComponents.push({ kind: "dc_motor", a, b, index });
         } else {
           const index = circuitEditorRef.current.addSwitch(a, b, false);
           freeWiringComponents.push({
@@ -1751,6 +1840,10 @@ function setUpProjectDrawer(
         kindSelect,
         " 値: ",
         valueInput,
+        " 値2: ",
+        value2Input,
+        " 値3(DCモーターのみ): ",
+        value3Input,
         addButton,
       );
       body.appendChild(addForm);
@@ -1762,7 +1855,7 @@ function setUpProjectDrawer(
           item.textContent = `抵抗 ${c.a}-${c.b}: ${c.resistance}Ω`;
         } else if (c.kind === "voltage_source") {
           item.textContent = `電圧源 ${c.a}(+)-${c.b}(-): ${c.voltage}V`;
-        } else {
+        } else if (c.kind === "switch") {
           const switchCheckboxItem = document.createElement("input");
           switchCheckboxItem.type = "checkbox";
           switchCheckboxItem.checked = c.closed;
@@ -1772,6 +1865,28 @@ function setUpProjectDrawer(
           });
           item.textContent = `スイッチ ${c.a}-${c.b}: `;
           item.appendChild(switchCheckboxItem);
+        } else if (c.kind === "capacitor") {
+          item.textContent = `コンデンサ ${c.a}-${c.b}: ${c.capacitance}F`;
+        } else if (c.kind === "inductor") {
+          item.textContent = `インダクタ ${c.a}-${c.b}: ${c.inductance}H`;
+        } else if (c.kind === "diode") {
+          item.textContent = `ダイオード ${c.a}(anode)-${c.b}(cathode)`;
+        } else {
+          const speedInput = document.createElement("input");
+          speedInput.type = "number";
+          speedInput.value = "0";
+          speedInput.title = "角速度 [rad/s]";
+          speedInput.addEventListener("change", () => {
+            circuitEditorRef.current?.setMotorSpeed(
+              c.index,
+              Number(speedInput.value) || 0,
+            );
+          });
+          item.textContent = `DCモーター ${c.a}-${c.b}: 速度[rad/s] `;
+          item.appendChild(speedInput);
+          const currentSpan = document.createElement("span");
+          currentSpan.textContent = ` 電流: ${(circuitEditorRef.current?.motorCurrent(c.index) ?? 0).toFixed(3)}A`;
+          item.appendChild(currentSpan);
         }
         componentList.appendChild(item);
       }
@@ -2196,6 +2311,23 @@ async function setUpSceneView(
     setSwitchClosed: (index, closed) =>
       world.circuit_editor_set_switch_closed(index, closed),
     nodeVoltage: (node) => world.circuit_node_voltage(node),
+    addCapacitor: (a, b, capacitance, initialVoltage) =>
+      world.circuit_editor_add_capacitor(a, b, capacitance, initialVoltage),
+    addInductor: (a, b, inductance, initialCurrent) =>
+      world.circuit_editor_add_inductor(a, b, inductance, initialCurrent),
+    addDiode: (anode, cathode, saturationCurrent, nVt) =>
+      world.circuit_editor_add_diode(anode, cathode, saturationCurrent, nVt),
+    addDcMotor: (a, b, windingResistance, windingInductance, backEmfConstant) =>
+      world.circuit_editor_add_dc_motor(
+        a,
+        b,
+        windingResistance,
+        windingInductance,
+        backEmfConstant,
+      ),
+    setMotorSpeed: (index, angularVelocity) =>
+      world.circuit_editor_set_motor_speed(index, angularVelocity),
+    motorCurrent: (index) => world.circuit_editor_motor_current(index),
   };
   materialsRef.current = () =>
     SPAWN_MATERIALS.map((name) => {

@@ -98,6 +98,11 @@ pub struct WasmWorld {
     /// 分圧回路のスイッチ(`sim_em::Circuit::add_switch`が返すindex、
     /// `set_circuit_switch_closed`参照)。
     circuit_switch_index: usize,
+    /// 自由配線回路エディタが`circuit_editor_add_dc_motor`で追加したDCモーターの
+    /// ハンドル(登録順、`circuit_editor_set_motor_speed`/
+    /// `circuit_editor_motor_current`のindexに使う)。固定デモ回路はモーターを
+    /// 持たないため、`WasmWorld::new`の時点では空。
+    circuit_editor_motors: Vec<sim_em::MotorHandle>,
     snapshot_interval_steps: u64,
     snapshots: VecDeque<World>,
     bookmarks: Vec<(String, World)>,
@@ -209,6 +214,7 @@ impl WasmWorld {
             y_probe,
             speed_probe,
             circuit_switch_index,
+            circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             bookmarks: Vec::new(),
@@ -314,6 +320,7 @@ impl WasmWorld {
             y_probe,
             speed_probe,
             circuit_switch_index: 0,
+            circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             bookmarks: Vec::new(),
@@ -1657,6 +1664,106 @@ impl WasmWorld {
         }
     }
 
+    /// 自由配線回路エディタ——ノード`a`・`b`間にコンデンサ`capacitance`[F]を
+    /// 追加する。`initial_voltage`[V]は充電済みの状態から始めたい場合に使う
+    /// (`sim_em::Circuit::add_capacitor`のdoc参照)。
+    pub fn circuit_editor_add_capacitor(
+        &mut self,
+        a: usize,
+        b: usize,
+        capacitance: f64,
+        initial_voltage: f64,
+    ) {
+        if let Some(circuit) = self.inner.circuit_mut() {
+            circuit.add_capacitor(a, b, capacitance, initial_voltage);
+        }
+    }
+
+    /// 自由配線回路エディタ——ノード`a`・`b`間にインダクタ`inductance`[H]を
+    /// 追加する。
+    pub fn circuit_editor_add_inductor(
+        &mut self,
+        a: usize,
+        b: usize,
+        inductance: f64,
+        initial_current: f64,
+    ) {
+        if let Some(circuit) = self.inner.circuit_mut() {
+            circuit.add_inductor(a, b, inductance, initial_current);
+        }
+    }
+
+    /// 自由配線回路エディタ——アノード`anode`・カソード`cathode`間にダイオードを
+    /// 追加する(Shockleyダイオード式、`saturation_current`・`n_vt`は
+    /// `sim_em::Circuit::add_diode`のdoc参照)。
+    pub fn circuit_editor_add_diode(
+        &mut self,
+        anode: usize,
+        cathode: usize,
+        saturation_current: f64,
+        n_vt: f64,
+    ) {
+        if let Some(circuit) = self.inner.circuit_mut() {
+            circuit.add_diode(anode, cathode, saturation_current, n_vt);
+        }
+    }
+
+    /// 自由配線回路エディタ——ノード`a`・`b`間にDCモーター(巻線抵抗+
+    /// 巻線インダクタンス+逆起電力源の直列等価回路、`sim_em::Circuit::
+    /// add_dc_motor`のdoc参照)を追加する。内部ノードは自動的に2つ確保して
+    /// `num_nodes`を伸ばす(呼び出し側が内部ノード番号を管理する必要が無いように
+    /// するため——他の`circuit_editor_add_*`と違い、モーターは単純な2端子素子
+    /// ではなく内部状態を持つため)。返り値は`circuit_editor_set_motor_speed`/
+    /// `circuit_editor_motor_current`用のindex。回路が未有効化なら0を返す
+    /// (`circuit_editor_add_switch`と同じ縮約——ただしモーターも登録しないため
+    /// 以後の速度設定/電流読み出しは無害な無視になる)。
+    pub fn circuit_editor_add_dc_motor(
+        &mut self,
+        a: usize,
+        b: usize,
+        winding_resistance: f64,
+        winding_inductance: f64,
+        back_emf_constant: f64,
+    ) -> usize {
+        let Some(circuit) = self.inner.circuit_mut() else {
+            return 0;
+        };
+        let n1 = circuit.add_nodes(2);
+        let n2 = n1 + 1;
+        let handle = circuit.add_dc_motor(
+            a,
+            b,
+            (n1, n2),
+            winding_resistance,
+            winding_inductance,
+            back_emf_constant,
+        );
+        self.circuit_editor_motors.push(handle);
+        self.circuit_editor_motors.len() - 1
+    }
+
+    /// 自由配線回路エディタ——`circuit_editor_add_dc_motor`が返したindexの
+    /// モーターの角速度[rad/s]を設定する(逆起電力を反映)。
+    pub fn circuit_editor_set_motor_speed(&mut self, index: usize, angular_velocity: f64) {
+        let Some(handle) = self.circuit_editor_motors.get(index).copied() else {
+            return;
+        };
+        if let Some(circuit) = self.inner.circuit_mut() {
+            circuit.set_motor_speed(handle, angular_velocity);
+        }
+    }
+
+    /// 自由配線回路エディタ——`circuit_editor_add_dc_motor`が返したindexの
+    /// モーターを流れる電流[A](符号は`a`から`b`へ流れる向きが正)。
+    pub fn circuit_editor_motor_current(&self, index: usize) -> f64 {
+        let Some(handle) = self.circuit_editor_motors.get(index).copied() else {
+            return 0.0;
+        };
+        self.inner
+            .circuit()
+            .map_or(0.0, |circuit| circuit.motor_current(handle))
+    }
+
     /// 自由配線回路エディタ——任意ノードの電圧(既存の固定デモ専用
     /// `circuit_divider_voltage`の一般化、`World::circuit_probe`をそのまま使う)。
     pub fn circuit_node_voltage(&self, node: usize) -> f64 {
@@ -2609,6 +2716,33 @@ mod tests {
         assert_eq!(world.body_material_label_at(1).unwrap(), "鋼(炭素鋼)");
         assert!(world.body_is_static_at(0).unwrap());
         assert!(!world.body_is_static_at(1).unwrap());
+    }
+
+    /// 自由配線回路エディタへ追加したコンデンサ・インダクタ・ダイオード・
+    /// DCモーターの4種(回路素子4種をUIエディタに追加、モジュールdoc参照)が
+    /// パニックせず追加でき、`num_nodes`・電流読み出しが期待どおり動くこと。
+    #[test]
+    fn circuit_editor_add_capacitor_inductor_diode_and_dc_motor_succeed() {
+        let mut world = new_world();
+        world.circuit_editor_reset(3);
+        // ノード1-2間にコンデンサ(初期電圧5V)。
+        world.circuit_editor_add_capacitor(1, 2, 1e-3, 5.0);
+        // ノード2-0間にインダクタ。
+        world.circuit_editor_add_inductor(2, 0, 1e-3, 0.0);
+        // ノード1-0間にダイオード。
+        world.circuit_editor_add_diode(1, 0, 1e-12, 0.026);
+
+        // DCモーターは内部ノードを2つ自動確保するので、num_nodesが3→5に伸びる。
+        let motor_index = world.circuit_editor_add_dc_motor(1, 0, 2.0, 1e-3, 0.1);
+        assert_eq!(motor_index, 0);
+        world.circuit_editor_set_motor_speed(motor_index, 10.0);
+        // 速度設定直後、逆起電力による電流は有限値のはず(NaN/panicしない)。
+        let current = world.circuit_editor_motor_current(motor_index);
+        assert!(current.is_finite());
+
+        // 未知indexへの操作は無害に無視される(パニックしない)。
+        world.circuit_editor_set_motor_speed(999, 1.0);
+        assert_eq!(world.circuit_editor_motor_current(999), 0.0);
     }
 
     /// `spawn_sphere`/`spawn_box`が正しい材質名で成功し、`body_count`が
