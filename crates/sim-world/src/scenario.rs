@@ -24,7 +24,7 @@
 //! `fluids`/`probes`セクションは対象外、`append_scenario_bodies`のdoc参照)。
 
 use crate::{BodyId, ProbeTarget, World, WorldOptions};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sim_fluid::StaticWaterRegion;
 use sim_math::Vec3;
 use sim_mechanics::{BodyType, DragModel, RigidBodyDesc, Shape};
@@ -63,7 +63,7 @@ pub enum SceneError {
     InvalidValue(String),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Scenario {
     pub name: String,
     #[serde(default)]
@@ -161,7 +161,7 @@ pub struct Scenario {
 }
 
 /// `Scenario::prediction_prompts`の1件(モジュールdoc参照)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct PredictionPromptJson {
     pub question: String,
     /// `probes`配列内でのインデックス(0起点)。この予測が対応するプローブ。
@@ -175,7 +175,7 @@ impl Scenario {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct WorldScenarioOptions {
     pub gravity: f64,
     pub dt: f64,
@@ -196,7 +196,7 @@ pub struct WorldScenarioOptions {
 }
 
 /// `WorldScenarioOptions::atmosphere`(モジュールdoc参照)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AtmosphereJson {
     pub density: f64,
     pub viscosity: f64,
@@ -204,7 +204,7 @@ pub struct AtmosphereJson {
 
 /// 既存材料からの派生(設計§3「`extends`による材料派生」— 「密度だけ変えた木」等)。
 /// 現時点では`density`のみ上書き可能(他の物性の上書きは後続増分)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct MaterialOverride {
     pub extends: String,
     pub name: String,
@@ -212,7 +212,7 @@ pub struct MaterialOverride {
     pub density: Option<f64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct BodyScenarioDesc {
     pub shape: ShapeJson,
     pub material: String,
@@ -262,7 +262,7 @@ pub struct BodyScenarioDesc {
 
 /// 設計§3の例示に現れる3形状のみ(`Capsule`/`Compound`/`ConvexMesh`は`raycast`/
 /// `overlap`モジュール同様、narrowphase未実装のため対象外)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ShapeJson {
     Box {
@@ -286,14 +286,14 @@ pub enum ShapeJson {
 
 /// モジュールdoc「縮約実装の理由」参照 — 設計例示のAABBではなく`water_level`+
 /// `density`の縮約表現。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FluidJson {
     StaticWater { water_level: f64, density: f64 },
 }
 
 /// `Scenario::thermal`(モジュールdoc「縮約実装の理由」参照)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ThermalScenarioJson {
     pub ambient_temperature: f64,
     #[serde(default)]
@@ -312,7 +312,7 @@ pub struct ThermalScenarioJson {
 
 /// `ThermalScenarioJson::links`の1件(`sim_thermal::ThermalLink`、**増分Hで追加**)。
 /// `a`/`b`は`thermal.nodes`配列のインデックス。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ThermalLinkJson {
     pub a: usize,
     pub b: usize,
@@ -322,7 +322,7 @@ pub struct ThermalLinkJson {
 /// `ThermalScenarioJson::nodes`の1件(`sim_thermal::ThermalNode`の縮約表現、
 /// `heat_accum`は毎step`Solver::step`前にゼロクリアされる中間値のため
 /// シーンJSONの対象外)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ThermalNodeJson {
     pub temperature: f64,
     pub heat_capacity: f64,
@@ -340,7 +340,7 @@ pub struct ThermalNodeJson {
 /// `bodies[].name`による名前解決、`node_temp`は`thermal.nodes`配列の
 /// インデックス(0起点、名前解決を経ない——D9のような単一ノードのシナリオでは
 /// 名前付けの手間自体が不要なため)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeJson {
     BodyPosY(String),
@@ -405,7 +405,7 @@ pub enum ProbeJson {
 /// うち、D11(振り子と時計)が要る`DistanceJoint`(ワールド固定点、または
 /// 剛体間の一定長ピン拘束)のみ対応する(`BallJoint`/`SliderJoint`/
 /// `HingeMotorPd`は後続増分)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JointJson {
     /// 直線スライダ拘束(`sim_mechanics::SliderJoint`、**増分H3で追加**)。
@@ -485,7 +485,7 @@ pub enum JointJson {
 
 /// `ConvectionLink`の相関式選択(`sim_coupling::ConvectionMode`のシーンJSON表現、
 /// **群5で追加**)。省略時は移行前と同じ強制対流(平板)。
-#[derive(Deserialize, Default, Clone, Copy)]
+#[derive(Deserialize, Serialize, Default, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum ConvectionModeJson {
     NaturalVerticalPlate,
@@ -510,7 +510,7 @@ impl ConvectionModeJson {
 
 /// `Scenario::couplings`の1件(モジュールdoc「縮約実装の理由」参照 — 現時点で
 /// `ImageChargeForce`のみ対応)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CouplingJson {
     ImageChargeForce {
@@ -670,7 +670,7 @@ pub enum CouplingJson {
 /// `DissipationToHeat::body_links`の1件(**群5で追加**)。`effusivity`を省略すると
 /// その剛体の材料から $e_t=\sqrt{k\rho c_p}$ を自動計算する(材料DBが手元にある
 /// シーン読み込み時だけ可能な便宜であり、`sim_coupling`側は常に明示値を要求する)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct BodyThermalLinkJson {
     pub body: String,
     pub thermal_node: usize,
@@ -680,7 +680,7 @@ pub struct BodyThermalLinkJson {
 
 /// `BuoyancyDrag::lift`(`sim_coupling::LiftModel`のシーンJSON表現、**群5で追加**)。
 /// 設計 docs/11-fluid/05-aero-hydrodynamics.md §2.2。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiftModelJson {
     /// 翼(薄翼理論)。`chord_local`・`span_local`は剛体ローカル座標の単位ベクトル。
@@ -713,7 +713,7 @@ impl LiftModelJson {
 }
 
 /// `Scenario::circuit`(モジュールdoc「縮約実装の理由」参照)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CircuitScenarioJson {
     pub num_nodes: usize,
     #[serde(default)]
@@ -740,7 +740,7 @@ pub struct CircuitScenarioJson {
 /// `CircuitScenarioJson::capacitors`の1件(`sim_em::Circuit::add_capacitor`)。
 /// `initial_voltage`は「予め充電された状態」を書くために要る——D19のRC放電は
 /// これが無いと初期電圧0から始まってしまい、指数減衰そのものが起きない。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CapacitorJson {
     pub a: usize,
     pub b: usize,
@@ -750,7 +750,7 @@ pub struct CapacitorJson {
 }
 
 /// `CircuitScenarioJson::inductors`の1件(`sim_em::Circuit::add_inductor`)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct InductorJson {
     pub a: usize,
     pub b: usize,
@@ -761,7 +761,7 @@ pub struct InductorJson {
 
 /// `CircuitScenarioJson::diodes`の1件(`sim_em::Circuit::add_diode`)。
 /// `saturation_current`/`n_vt`はShockleyダイオード式のパラメータ。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct DiodeJson {
     pub anode: usize,
     pub cathode: usize,
@@ -770,7 +770,7 @@ pub struct DiodeJson {
 }
 
 /// `CircuitScenarioJson::switches`の1件(`sim_em::Circuit::add_switch`)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SwitchJson {
     pub a: usize,
     pub b: usize,
@@ -779,7 +779,7 @@ pub struct SwitchJson {
 }
 
 /// `CircuitScenarioJson::resistors`の1件。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ResistorJson {
     pub a: usize,
     pub b: usize,
@@ -789,7 +789,7 @@ pub struct ResistorJson {
 /// `CircuitScenarioJson::voltage_sources`の1件(`sim_em::Circuit::
 /// add_voltage_source`の順序どおり登録されるため、`couplings`側の
 /// `voltage_source_index`はこの配列のインデックスと一致する)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct VoltageSourceJson {
     pub a: usize,
     pub b: usize,
@@ -797,7 +797,7 @@ pub struct VoltageSourceJson {
 }
 
 /// `Scenario::astro`(モジュールdoc「縮約実装の理由」参照)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AstroScenarioJson {
     #[serde(default)]
     pub softening: f64,
@@ -814,7 +814,7 @@ pub struct AstroScenarioJson {
 
 /// `AstroScenarioJson::atmospheric_drag`(**増分H2で追加**)。
 /// `ballistic_coefficients`は`(bodies配列のindex, 弾道係数)`の対。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AtmosphericDragJson {
     pub central_body: usize,
     pub surface_density: f64,
@@ -825,7 +825,7 @@ pub struct AtmosphericDragJson {
 }
 
 /// `AstroScenarioJson::relativistic_correction`(**増分H2で追加**)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct RelativisticCorrectionJson {
     pub central_body: usize,
     pub speed_of_light: f64,
@@ -834,7 +834,7 @@ pub struct RelativisticCorrectionJson {
 /// `AstroScenarioJson::bodies`の1件(`sim_astro::NBodySystem::add_body`の
 /// 縮約表現、`position`配列のインデックス(0起点)が`ProbeJson::AstroPosX`等の
 /// 参照先——`mechanics`の`bodies`とは名前空間が別なので名前解決を経ない)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct AstroBodyJson {
     pub position: [f64; 3],
     pub velocity: [f64; 3],
@@ -847,7 +847,7 @@ pub struct AstroBodyJson {
 /// `rope`ヘルパ相当の生成を`rope`フィールドで書ける近道を用意する
 /// (20分割のロープを粒子21個+拘束20本として手で書くのは現実的でないため)。
 /// `rope`と`particles`は排他ではなく、`rope`を展開した後に`particles`を足す。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SoftBodyScenarioJson {
     /// 直線ロープの生成(`sim_mechanics::rope`と同じ引数)。
     #[serde(default)]
@@ -871,7 +871,7 @@ pub struct SoftBodyScenarioJson {
 }
 
 /// `SoftBodyScenarioJson::rope`(`sim_mechanics::rope`ヘルパの引数)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct RopeJson {
     pub from: [f64; 3],
     pub to: [f64; 3],
@@ -884,14 +884,14 @@ pub struct RopeJson {
 
 /// `SoftBodyScenarioJson::particles`の1件。`mass`が0以下ならピン留め
 /// (`SoftBody::add_particle`の規約そのまま)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SoftParticleJson {
     pub position: [f64; 3],
     pub mass: f64,
 }
 
 /// `SoftBodyScenarioJson::constraints`の1件。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SoftConstraintJson {
     pub i: usize,
     pub j: usize,
@@ -902,7 +902,7 @@ pub struct SoftConstraintJson {
 
 /// `CouplingJson::PhaseChangeMorph::melt_spawn`(**群9で追加**、
 /// `sim_coupling::MeltSpawn`)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct MeltSpawnJson {
     /// 生成位置のばらつき半径 [m](剛体中心まわりの球内に一様分布)。
     pub spawn_radius: f64,
@@ -912,7 +912,7 @@ pub struct MeltSpawnJson {
 }
 
 /// `Scenario::grid_fluid`(`sim_fluid::GridFluid2D`、**増分Hで追加**)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct GridFluidScenarioJson {
     pub nx: usize,
     pub ny: usize,
@@ -952,7 +952,7 @@ pub struct GridFluidScenarioJson {
 /// **解像度に注意**: 3Dはマルチグリッド前処理PCG(群10)でも 64³ で1ステップ約 207 ms
 /// かかる(`sim-fluid/examples/grid_fluid3d_bench.rs` の実測)。ギャラリーのシーンは
 /// 全件が検証テストで60ステップ回されるため、**小さめ(24×16×16 程度まで)**に置くこと。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct GridFluid3DScenarioJson {
     pub nx: usize,
     pub ny: usize,
@@ -977,7 +977,7 @@ pub struct GridFluid3DScenarioJson {
 }
 
 /// `GridFluid3DScenarioJson::solids` の1要素(**群9で追加**)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GridSolid3DJson {
     Box {
@@ -1011,7 +1011,7 @@ impl GridSolid3DJson {
 
 /// `GridFluid3DScenarioJson::smoke_blocks` の1要素(**群9で追加**)。
 /// `min`(セル添字)から各軸`counts`個ぶんのセルへ `density` を書き込む。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SmokeBlockJson {
     pub min: [usize; 3],
     pub counts: [usize; 3],
@@ -1024,7 +1024,7 @@ fn one() -> f64 {
 }
 
 /// `GridFluidScenarioJson::boundary`(**群9で追加**)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GridBoundaryJson {
     Periodic,
@@ -1034,7 +1034,7 @@ pub enum GridBoundaryJson {
 /// `GridFluidScenarioJson::solids` の1要素(**群9で追加**)。
 /// `GridFluid2D::set_solid_cells` はどんな形でも受けられるので、ここは
 /// シーンJSONで書きたい代表的な形だけを列挙する(必要になったら足せばよい)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GridSolidJson {
     Box {
@@ -1068,7 +1068,7 @@ impl GridSolidJson {
 /// 書けば`MaterialDb`から $\alpha = k/(\rho c_p)$ を計算する。D16(熱伝導レース)は
 /// 「銅・鋼・木材の $\alpha$ の比が立ち上がり順を決める」デモなので、
 /// 材質名で書けることがそのままデモの主旨になる。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ConductionRodScenarioJson {
     pub node_count: usize,
     pub length: f64,
@@ -1088,7 +1088,7 @@ pub struct ConductionRodScenarioJson {
 ///
 /// **縮約**: 粒子を1つずつ並べるのは非現実的なので、直方体ブロックを格子状に
 /// 敷き詰める`blocks`と、境界粒子を敷く`boundary_blocks`で書く。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SphScenarioJson {
     /// 平滑化長。
     pub h: f64,
@@ -1109,7 +1109,7 @@ pub struct SphScenarioJson {
 
 /// `SphScenarioJson::blocks`の1件。`min`から`spacing`刻みで各軸`counts`個の
 /// 粒子を格子状に置く。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct SphBlockJson {
     pub min: [f64; 3],
     pub counts: [usize; 3],
@@ -1126,7 +1126,7 @@ pub struct SphBlockJson {
 /// 気体単独では時間発展しない——これは`SoftBody`/`ConductionRod1D`の
 /// 「回されていなかった」問題とは違い、**気体区画に固有の時間発展が無い**
 /// (準静的モデル)という物理側の性質である。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct GasScenarioJson {
     pub n_moles: f64,
     pub volume: f64,
@@ -1144,7 +1144,7 @@ pub struct GasScenarioJson {
 /// **ポテンシャルは「よく使う3形」を列挙する**——任意関数を JSON で表現する仕組み
 /// (数式パーサ)を作るのは大がかりで、D27(矩形障壁のトンネル)・D29(調和振動子)が
 /// 要るのはこの3形で足りる。足りなくなったら形を足す。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Quantum1dScenarioJson {
     /// 格子点数(2の冪、`sim_math::fft`の制約)。
     pub n: usize,
@@ -1155,14 +1155,14 @@ pub struct Quantum1dScenarioJson {
     pub potential: Option<Potential1dJson>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct GaussianPacketJson {
     pub x0: f64,
     pub sigma: f64,
     pub k0: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Potential1dJson {
     /// 矩形障壁(D27 トンネル効果)。`[x_min, x_max]` の区間で高さ `height`。
@@ -1174,7 +1174,7 @@ pub enum Potential1dJson {
 }
 
 /// `Scenario::quantum_2d`(**群3で追加**)。D28(二重スリット)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Quantum2dScenarioJson {
     pub nx: usize,
     pub ny: usize,
@@ -1186,7 +1186,7 @@ pub struct Quantum2dScenarioJson {
     pub double_slit: Option<DoubleSlitJson>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct GaussianPacket2dJson {
     pub x0: f64,
     pub y0: f64,
@@ -1197,7 +1197,7 @@ pub struct GaussianPacket2dJson {
 
 /// 二重スリット壁(x=`wall_x` に厚み `thickness` の高いポテンシャル壁を立て、
 /// `slit_centers` の各位置に幅 `slit_width` の開口を空ける)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct DoubleSlitJson {
     pub wall_x: f64,
     pub thickness: f64,
@@ -1212,7 +1212,7 @@ pub struct DoubleSlitJson {
 /// インラインシーンだった**(静的ファイル化に不向きとして `scenes/` へ
 /// 切り出さずインラインのまま残していた)。粒子集合を「個数+分布」として
 /// 宣言できるようにすれば静的ファイルで書けるので、その形にする。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct BrownianScenarioJson {
     pub particle_count: usize,
     /// 粒子質量 [kg]。
@@ -1230,7 +1230,7 @@ pub struct BrownianScenarioJson {
 }
 
 /// `Scenario::kinetic_gas`(**群3で追加**)。D30(気体分子の箱)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct KineticGasScenarioJson {
     pub particle_count: usize,
     /// 分子質量 [kg]。
@@ -1243,7 +1243,7 @@ pub struct KineticGasScenarioJson {
 }
 
 /// `Scenario::ising`(**群3で追加**)。D31(イジング模型の相転移)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct IsingScenarioJson {
     /// 格子の一辺 L(全 L×L スピン)。
     pub l: usize,
@@ -1260,7 +1260,7 @@ pub struct IsingScenarioJson {
 }
 
 /// `Scenario::fdtd`(**群3で追加**)。D32(電磁波の伝播)。
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct FdtdScenarioJson {
     pub nx: usize,
     pub ny: usize,
@@ -1274,7 +1274,7 @@ pub struct FdtdScenarioJson {
     pub initial: Option<FdtdInitialJson>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FdtdInitialJson {
     /// 矩形空洞の固有モード $E_z = \sin(m\pi x/a)\sin(n\pi y/b)$(設計§7の検証設定)。

@@ -24,7 +24,7 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (D24車)で。②「scenes/の43本がDesc APIだけで構築できる」(特権アクセスの不在の証明)。
 - [ ] 縮約監査スクリプトを作る
   コード中に自己申告された「縮約」(crates側262箇所、docs側114箇所)を機械集計する。
-- [ ] `Scenario` に `Serialize` を実装する(55構造体すべて)
+- [x] `Scenario` に `Serialize` を実装する(55構造体すべて)
 - [ ] `World → Scenario` の逆写像を実装する
   bodies/joints/couplings/fluids/thermal/circuit/probes を全ドメイン無損失で書き戻し、
   手書きの `export_scene_json` を置き換える。
