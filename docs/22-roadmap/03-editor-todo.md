@@ -70,8 +70,10 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   (`circuit_editor_*`)へUI+wasm境界の配線を追加。DCモーターは内部ノードを
   自動確保する`Circuit::add_nodes`を新設。wasm実ビルド+`tsc`+Playwright
   スモーク23件で検証済み。
-- [ ] QA報告の不具合9件を修正する
-  ([2026-08-04-editor-qa.md](../reviews/2026-08-04-editor-qa.md) の既知不具合)
+- [x] QA報告の不具合9件を修正する
+  ([2026-08-04-editor-qa.md](../reviews/2026-08-04-editor-qa.md) の既知不具合)。
+  再現スクリプト(`demo/tests/qa/qa-defects.mjs`)が0/16→16/16 PASSへ転じたことを
+  確認済み。Playwrightスモーク23件・Rust側テストも無傷。
 - [ ] 結合14種を縦串②として配線する
 - [ ] 環境と大気の場を縦串③として実装する
   重力ベクトル化、ISA標準大気(高度依存密度)、風の場
