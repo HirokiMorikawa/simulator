@@ -1657,6 +1657,147 @@ mod tests {
         );
     }
 
+    /// **複合剛体の静止支持**(接触マニフォールドを部品ごとに分ける将来の変更に
+    /// 備えた回帰ハーネス)。地面に並んで接する2つの箱からなる`Compound`は、
+    /// 全部品の接触法線が`+y`で一致する——モジュールdocが「**厳密に正しい**」と
+    /// 述べる典型例そのもの。したがって「貫入最大の部品の法線を代表として全接触点を
+    /// 束ねる」現行の近似でも、支持力は解析解と一致しなければならない。
+    ///
+    /// 検証する解析量は**総支持力 = 重量 $mg$**。各ステップで
+    /// 「重力以外に速度へ入った力積」 $m\,(\Delta v_y + g\,\Delta t)/\Delta t$ を
+    /// 測ると、これは接触ソルバが実際に返した垂直抗力そのものになる。静止して
+    /// いるなら Newton の第3法則から厳密に $mg$ に等しい。
+    ///
+    /// 許容誤差の根拠: 落下させず解析的な接触位置に静置するので、過渡は
+    /// 数ステップで消える。測定窓は $t\in[0.1,0.42]$ s(初期過渡の後、かつ
+    /// `sleep`が島を眠らせる 0.5 s より前——眠ると積分も接触解決も止まり、
+    /// 支持力の測定自体が意味を失うため)。この窓での実測は各ステップとも
+    /// 相対誤差 1e-9 未満なので、Baumgarte 補正の揺らぎを見込んで
+    /// 各ステップ 1e-3、窓平均 1e-6 を上限とする。
+    #[test]
+    fn compound_of_two_boxes_rests_on_a_plane_with_the_correct_total_support_force() {
+        use crate::body::RigidBodyDesc;
+        use crate::solver::MechanicsSolver;
+        use sim_core::{EventQueue, MaterialDb, Solver, SolverContext};
+        use sim_math::SimRng;
+
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = materials.find_by_name("コンクリート").unwrap();
+        let gravity = 9.80665;
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+        let mut solver = MechanicsSolver::new(gravity);
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground.body_type = BodyType::Static;
+        solver.create_body(ground, &materials);
+
+        // 一辺1mの箱2つを x=±0.6 に横並びで置く(隙間0.2m、どちらも地面に接する)。
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Compound {
+                children: vec![
+                    (
+                        identity_xf(Vec3::new(0.6, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                    (
+                        identity_xf(Vec3::new(-0.6, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                ],
+            },
+            steel,
+        );
+        // 底面がちょうど y=0 に接する高さ。
+        desc.transform.position = Vec3::new(0.0, half.y, 0.0);
+        let body = solver.create_body(desc, &materials);
+        let mass = solver.bodies.mass(body);
+        let weight = mass * gravity;
+
+        let dt = 1.0 / 240.0;
+        let measure_from = 24; // 0.1 s: 初期過渡の後
+        let measure_to = 100; // 0.42 s: sleep(0.5 s)より前
+        let mut support_samples: Vec<f64> = Vec::new();
+        for step in 0..measure_to {
+            let v_before = solver.bodies.linear_velocity[body].y;
+            let mut ctx = SolverContext {
+                materials: &materials,
+                rng: &mut rng,
+                events: &mut events,
+            };
+            solver.step(dt, &mut ctx);
+            let _ = events.drain_sorted();
+            let v_after = solver.bodies.linear_velocity[body].y;
+            if step >= measure_from {
+                assert!(
+                    !solver.bodies.asleep[body],
+                    "measurement window must end before the island falls asleep"
+                );
+                support_samples.push(mass * ((v_after - v_before) + gravity * dt) / dt);
+            }
+        }
+
+        for support in &support_samples {
+            assert!(
+                (support - weight).abs() / weight < 1e-3,
+                "per-step support force must equal the weight: support={support} weight={weight}"
+            );
+        }
+        let mean = support_samples.iter().sum::<f64>() / support_samples.len() as f64;
+        assert!(
+            (mean - weight).abs() / weight < 1e-6,
+            "mean support force must equal the weight: mean={mean} weight={weight}"
+        );
+
+        // 静止していること(鉛直速度・傾き・貫入)。
+        assert!(
+            solver.bodies.linear_velocity[body].length() < 1e-9,
+            "the compound must come to rest: v={:?}",
+            solver.bodies.linear_velocity[body]
+        );
+        let tilt = 2.0 * solver.bodies.rotation[body].w.abs().min(1.0).acos();
+        assert!(
+            tilt < 1e-4,
+            "symmetric support must not tip the compound: tilt={tilt:.3e} rad"
+        );
+        let penetration = half.y - solver.bodies.position[body].y;
+        // `contact`モジュールの許容貫入(SLOP=0.005、Baumgarteが押し戻さない残量)。
+        assert!(
+            (0.0..0.005).contains(&penetration),
+            "resting penetration must stay within the contact slop: {penetration:.3e}"
+        );
+
+        // 両方の部品が実際に支えていること(片側だけの接触で釣り合っていない)。
+        let manifold = solver
+            .last_manifolds
+            .iter()
+            .find(|m| m.body_a == body || m.body_b == body)
+            .expect("the compound must keep touching the ground");
+        assert!(
+            (manifold.normal.length() - 1.0).abs() < 1e-12 && manifold.normal.y.abs() > 1.0 - 1e-12,
+            "all children share the same +y normal here (the exact case): {:?}",
+            manifold.normal
+        );
+        assert!(
+            manifold.points.iter().any(|p| p.world_point.x > 0.0)
+                && manifold.points.iter().any(|p| p.world_point.x < 0.0),
+            "both children must contribute contact points: {:?}",
+            manifold
+                .points
+                .iter()
+                .map(|p| p.world_point.x)
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// `ConvexMesh`はまだ何とも衝突しない(すり抜ける、既知の限界)ことを
     /// パニックしないことも含めて確認する。
     #[test]

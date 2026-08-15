@@ -559,4 +559,255 @@ mod tests {
         };
         assert!(!plain.set_scalar_param(CouplingParam::ControlSurfaceDeflection, alpha));
     }
+
+    // ------------------------------------------------------------------
+    // 解析解による足場(**`apply_pre`の力積分方式を書き換える将来の変更に備えた
+    // 回帰ハーネス**)。既存の`buoyancy_drag_applies_known_buoyancy_force_*`群は
+    // 「1stepぶんの速度変化が`sim_fluid`の式と一致する」ことしか見ておらず、
+    // **多数step回したときの振る舞い**(平衡位置・エネルギー保存)は無検証だった。
+    // 力積分の方式を変えれば1stepの式が同じでも長時間の挙動は壊れうる。
+    // ------------------------------------------------------------------
+
+    /// 浮体の実験用材料(摩擦・反発ゼロ、密度は水の`ratio`倍)。
+    fn floating_material(materials: &mut MaterialDb, density: f64) -> sim_core::MaterialId {
+        materials.push(sim_core::Material {
+            name: "test-floating-box-for-buoyancy-analytics",
+            density,
+            friction: 0.0,
+            restitution: 0.0,
+            youngs_modulus: None,
+            specific_heat: 1000.0,
+            conductivity: 1.0,
+            emissivity: 0.5,
+            melting: None,
+            resistivity: None,
+            relative_permittivity: 1.0,
+            refractive_index: None,
+            source: "test fixture",
+            uncertainty: 0.0,
+        })
+    }
+
+    /// 直立直方体を水面に浮かべ、`BuoyancyDrag`(pre相)→`MechanicsSolver::step`の
+    /// 順で`steps`ステップ回す(`World`のpre相と同じ順序)。各ステップ後の
+    /// `(y, v_y)`を返す。抗力は`atmosphere: None`で完全に切ってあるので、
+    /// 働く力は重力と浮力だけ(散逸ゼロ)。テスト専用フィクスチャで呼び出し元は
+    /// 本ファイル内の2テストのみのため、引数を構造体へまとめる必要は薄いと判断。
+    #[allow(clippy::too_many_arguments)]
+    fn simulate_floating_box(
+        half_extents: Vec3,
+        mass: f64,
+        density: f64,
+        water: StaticWaterRegion,
+        gravity: f64,
+        start_y: f64,
+        dt: f64,
+        steps: usize,
+    ) -> Vec<(f64, f64)> {
+        let mut materials = MaterialDb::standard();
+        let material = floating_material(&mut materials, density);
+        let mut rng = sim_math::SimRng::new(1, 1);
+        let mut events = sim_core::EventQueue::new();
+
+        // 埋め込み経路(`MechanicsSolver::water`)は使わない——二重計上を避け、
+        // 検証対象を`BuoyancyDrag`の力積分だけに絞る(モジュールdoc §二重計上)。
+        let mut mechanics = MechanicsSolver::new(gravity);
+        let mut desc = RigidBodyDesc::dynamic(Shape::Box { half_extents }, material);
+        desc.mass_override = Some(mass);
+        desc.transform.position = Vec3::new(0.0, start_y, 0.0);
+        let body = mechanics.create_body(desc, &materials);
+        let mut coupling = BuoyancyDrag {
+            body_index: body,
+            water: Some(water),
+            atmosphere: None,
+            lift: None,
+        };
+
+        let mut trajectory = Vec::with_capacity(steps);
+        for _ in 0..steps {
+            coupling.apply_pre(&mut states(&mut mechanics), dt);
+            let mut ctx = sim_core::SolverContext {
+                materials: &materials,
+                rng: &mut rng,
+                events: &mut events,
+            };
+            sim_core::Solver::step(&mut mechanics, dt, &mut ctx);
+            let _ = events.drain_sorted();
+            trajectory.push((
+                mechanics.bodies.position[body].y,
+                mechanics.bodies.linear_velocity[body].y,
+            ));
+        }
+        trajectory
+    }
+
+    /// **アルキメデスの原理による釣り合い喫水**。質量 $m$・水線面積 $A$ の
+    /// 直立直方体は $\rho_f\,g\,A\,d = m\,g$ すなわち $d = m/(\rho_f A)$ の
+    /// 深さまで沈む(`sim_fluid::buoyancy`の`equilibrium_draft_matches_archimedes_closed_form`
+    /// が同じ式を代数で固定している)。
+    ///
+    /// **このモデルには水中抗力が無い**(`sim_fluid::buoyancy`冒頭注記「水中抗力は
+    /// Phase 3」)ので、平衡点から外して離した浮体は減衰せず単振動を続け、
+    /// 文字通り「静止」はしない。復元力が喫水に厳密に比例する線形域
+    /// (全没も完全露出もしない振幅)に留めれば運動は正確な単振動になるので、
+    /// **上下の転回点の中点**が平衡位置そのものになる——これを「静止喫水」として
+    /// 解析解と比較する。
+    ///
+    /// 許容誤差の根拠: dt=1/240・6周期(約2237step)の実測で中点のずれは
+    /// 1.5e-6 m(辺長1mの 1.5e-6)。転回点をstep単位でしか拾えないことによる
+    /// 量子化(振幅0.1m・周期0.37sなので 1step で最大 ~2e-5 m)が主因なので、
+    /// その数倍の 1e-4 m を上限とする。振幅が保存する(数値減衰も励起も無い)
+    /// ことも併せて確認する。
+    ///
+    /// **前提の明示**: 水面がワールドyの水平面で浮力が`+y`固定という現行モデル
+    /// (`sim_fluid::buoyancy`のdoc)に依存する。浮力が重力場の局所的な向きへ
+    /// 追従するようになったら「ワールドyが下向き」という前提は保証されなくなり、
+    /// 本テストにも重力方向の注記が要る。
+    #[test]
+    fn floating_box_settles_at_the_archimedes_equilibrium_draft() {
+        let gravity = 9.80665;
+        let water_density = 998.2;
+        let ratio = 0.6;
+        let half_extents = Vec3::new(0.5, 0.5, 0.5);
+        let side = 1.0_f64;
+        let waterline_area = side * side;
+        let mass = ratio * water_density * side.powi(3);
+        let water = StaticWaterRegion::new(0.0, water_density);
+
+        // 解析解: d = m/(ρ_f A)、箱中心はそこから半分の高さだけ上。
+        let draft = mass / (water_density * waterline_area);
+        assert!(
+            (draft - ratio * side).abs() < 1e-12,
+            "一様密度の直方体では喫水=密度比×辺長になる: {draft}"
+        );
+        let equilibrium_y = -draft + half_extents.y;
+
+        // 復元力の角振動数 ω=√(ρ_f g A / m) から周期を出し、6周期ぶん回す。
+        let omega = (water_density * gravity * waterline_area / mass).sqrt();
+        let period = 2.0 * std::f64::consts::PI / omega;
+        let dt = 1.0 / 240.0;
+        let amplitude = 0.1; // 全没(0.4m)にも完全露出(0.6m)にも届かない線形域
+        let steps = ((6.0 * period) / dt) as usize;
+        let trajectory = simulate_floating_box(
+            half_extents,
+            mass,
+            ratio * water_density,
+            water,
+            gravity,
+            equilibrium_y + amplitude,
+            dt,
+            steps,
+        );
+
+        let y_min = trajectory.iter().map(|(y, _)| *y).fold(f64::MAX, f64::min);
+        let y_max = trajectory.iter().map(|(y, _)| *y).fold(f64::MIN, f64::max);
+        let midpoint = 0.5 * (y_min + y_max);
+        assert!(
+            (midpoint - equilibrium_y).abs() < 1e-4,
+            "the mean floating depth must match Archimedes' equilibrium draft: \
+             midpoint={midpoint} equilibrium_y={equilibrium_y} (draft={draft})"
+        );
+        // 線形域に留まっている(全没・完全露出していない)ことの確認。
+        assert!(
+            y_min > -half_extents.y && y_max + half_extents.y < 2.0 * half_extents.y,
+            "the box must stay partially submerged: y_min={y_min} y_max={y_max}"
+        );
+        // 数値減衰も励起も無い(振幅が保存する)。
+        let measured_amplitude = 0.5 * (y_max - y_min);
+        assert!(
+            (measured_amplitude - amplitude).abs() / amplitude < 1e-3,
+            "there is no hydrodynamic damping in this model, so the amplitude must be \
+             preserved: measured={measured_amplitude} initial={amplitude}"
+        );
+    }
+
+    /// **力学的エネルギー保存**(`apply_pre`の力積分方式を直接速度キックへ
+    /// 書き換える将来の変更が越えてはならない基準線)。抗力ゼロ・静水では
+    /// 散逸源が存在しないので、
+    /// $E = \frac12 m v^2 + m g y + U_b$ は保存量でなければならない。
+    /// 浮力ポテンシャル $U_b$ は水面下体積が喫水の一次関数になる線形域でも
+    /// 閉形式を書き下す代わりに、軌道に沿って浮力の仕事
+    /// $W=\int F_b\,\mathrm{d}y$ を台形則で積算して $U_b=-W$ とする
+    /// (積分誤差を抗力の散逸が隠してしまう心配が無いのがこの設定の要点)。
+    ///
+    /// 許容誤差の根拠: `apply_pre`(速度更新)→`step`(位置更新)の順序は
+    /// symplectic Euler と同型なので、エネルギー誤差は $O(\Delta t)$ で**有界に
+    /// 振動する**(単調増加しない)。運動エネルギーのスケール
+    /// $\frac12 m(\omega A)^2$ に対する実測の最大偏差は dt=1/120 で 1.7e-2、
+    /// dt=1/240 で 8.5e-3 と刻みに比例する。dt=1/120 を基準に 3e-2 を上限とし、
+    /// **さらに前半20周期と後半20周期で最大偏差が変わらない**(=系統的な増大が
+    /// 無い)ことを要求する。単調に発散する陽的スキームへ差し替えられたら
+    /// この後半の条件が破れる。
+    #[test]
+    fn buoyancy_force_integration_conserves_mechanical_energy_without_drag() {
+        let gravity = 9.80665;
+        let water_density = 998.2;
+        let ratio = 0.6;
+        let half_extents = Vec3::new(0.5, 0.5, 0.5);
+        let side = 1.0_f64;
+        let waterline_area = side * side;
+        let mass = ratio * water_density * side.powi(3);
+        let water = StaticWaterRegion::new(0.0, water_density);
+        let equilibrium_y = -(mass / (water_density * waterline_area)) + half_extents.y;
+
+        let omega = (water_density * gravity * waterline_area / mass).sqrt();
+        let period = 2.0 * std::f64::consts::PI / omega;
+        let dt = 1.0 / 120.0;
+        let amplitude = 0.1;
+        let periods = 40.0;
+        let steps = ((periods * period) / dt) as usize;
+        let start_y = equilibrium_y + amplitude;
+        let trajectory = simulate_floating_box(
+            half_extents,
+            mass,
+            ratio * water_density,
+            water,
+            gravity,
+            start_y,
+            dt,
+            steps,
+        );
+
+        // 高さ y のときに働く浮力(鉛直成分)。
+        let buoyancy_at = |y: f64| -> f64 {
+            let (v_sub, _) = sim_fluid::submerged_box_axis_aligned(
+                Vec3::new(0.0, y, 0.0),
+                half_extents,
+                water.water_level,
+            );
+            sim_fluid::buoyancy_force(v_sub, water.density, gravity).y
+        };
+        let energy = |y: f64, vy: f64, work: f64| 0.5 * mass * vy * vy + mass * gravity * y - work;
+
+        // 誤差の基準スケール: この振動の運動エネルギー振幅。
+        let kinetic_scale = 0.5 * mass * (omega * amplitude).powi(2);
+        let initial_energy = energy(start_y, 0.0, 0.0);
+        let mut work = 0.0;
+        let mut previous_y = start_y;
+        let mut max_drift_first_half: f64 = 0.0;
+        let mut max_drift_second_half: f64 = 0.0;
+        for (index, &(y, vy)) in trajectory.iter().enumerate() {
+            // 浮力の仕事を台形則で積算する(浮力は y のみの関数)。
+            work += 0.5 * (buoyancy_at(previous_y) + buoyancy_at(y)) * (y - previous_y);
+            previous_y = y;
+            let drift = (energy(y, vy, work) - initial_energy).abs() / kinetic_scale;
+            if index < trajectory.len() / 2 {
+                max_drift_first_half = max_drift_first_half.max(drift);
+            } else {
+                max_drift_second_half = max_drift_second_half.max(drift);
+            }
+        }
+
+        assert!(
+            max_drift_first_half < 3e-2 && max_drift_second_half < 3e-2,
+            "mechanical energy must stay bounded without drag: \
+             first={max_drift_first_half:.3e} second={max_drift_second_half:.3e}"
+        );
+        // 後半で誤差が増えていない = 有界振動であって系統的なドリフトではない。
+        assert!(
+            max_drift_second_half <= max_drift_first_half * 1.05,
+            "energy error must not grow secularly over {periods} periods: \
+             first={max_drift_first_half:.3e} second={max_drift_second_half:.3e}"
+        );
+    }
 }

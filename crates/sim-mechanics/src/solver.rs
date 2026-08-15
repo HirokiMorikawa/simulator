@@ -884,4 +884,320 @@ mod tests {
             "should observe at least one ContactEnded when the ball bounces back up"
         );
     }
+
+    // ------------------------------------------------------------------
+    // 解析解による足場(**物理コア変更の前提となる回帰ハーネス**)。
+    //
+    // `state_hash`の一致は決定性しか示さない——「毎回同じように間違える」
+    // 実装でもハッシュは一致する。以下の群は、閉形式の解析解(トルクフリー
+    // 剛体のEuler方程式・単振り子の微小振幅周期)をテスト内で独立に計算し、
+    // シミュレーション結果と数値的に突き合わせることで**正しさ**を固定する。
+    // ------------------------------------------------------------------
+
+    fn child_at(position: Vec3, half: f64) -> (sim_math::Transform, Shape) {
+        (
+            sim_math::Transform {
+                position,
+                rotation: Quat::IDENTITY,
+            },
+            Shape::Box {
+                half_extents: Vec3::new(half, half, half),
+            },
+        )
+    }
+
+    /// ローカル原点まわりに**対称配置**した4つの立方体からなる複合剛体。
+    /// x軸上 ±0.4 と y軸上 ±0.2 に等しい部品を置くので、部品配置の重心は厳密に
+    /// ローカル原点と一致する——`Shape::Compound`の慣性計算が置く「ローカル原点
+    /// =重心」という仮定(`unit_mass_inertia_diagonal`のdoc「簡略化(既知の限界)」)
+    /// が**この配置では厳密に正しい**。重心オフセットを`RigidBodySet`へ持ち込む
+    /// 将来の変更でも、この対称配置の挙動だけは一切変わってはならない。
+    ///
+    /// 部品はすべて無回転なので、対角テンソルの非対角成分切り捨て近似も
+    /// 誤差ゼロ(同doc)。つまり本剛体の慣性は**近似ではなく厳密**であり、
+    /// 完全な`Mat3`慣性テンソルへ移行しても値は変わらない。
+    fn symmetric_compound() -> Shape {
+        let half = 0.05;
+        Shape::Compound {
+            children: vec![
+                child_at(Vec3::new(0.4, 0.0, 0.0), half),
+                child_at(Vec3::new(-0.4, 0.0, 0.0), half),
+                child_at(Vec3::new(0.0, 0.2, 0.0), half),
+                child_at(Vec3::new(0.0, -0.2, 0.0), half),
+            ],
+        }
+    }
+
+    /// ワールド系の角運動量 $L = I_{world}\,\omega$。
+    fn angular_momentum(solver: &MechanicsSolver, idx: usize) -> Vec3 {
+        solver.bodies.inv_inertia_world[idx]
+            .inverse()
+            .expect("dynamic body must have an invertible inertia tensor")
+            .mul_vec(solver.bodies.angular_velocity[idx])
+    }
+
+    /// トルクフリーの自由回転を`steps`ステップ回し、
+    /// `(|ΔL|/|L₀| の最大値, |ΔT|/T₀ の最大値)`を返す。
+    fn torque_free_tumble_drift(omega0: Vec3, dt: f64, steps: usize) -> (f64, f64) {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        // 重力0・接触相手なし・抗力なし → 外力・外トルクは厳密にゼロ。
+        let mut solver = MechanicsSolver::new(0.0);
+        let mut desc = RigidBodyDesc::dynamic(symmetric_compound(), steel);
+        desc.angular_velocity = omega0;
+        let idx = solver.create_body(desc, &materials);
+
+        let l0 = angular_momentum(&solver, idx);
+        let ke0 = solver.total_energy().kinetic;
+        let mut max_l_drift: f64 = 0.0;
+        let mut max_ke_drift: f64 = 0.0;
+        for _ in 0..steps {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            let _: Vec<Event> = events.drain_sorted();
+            max_l_drift =
+                max_l_drift.max((angular_momentum(&solver, idx) - l0).length() / l0.length());
+            max_ke_drift = max_ke_drift.max((solver.total_energy().kinetic - ke0).abs() / ke0);
+        }
+        (max_l_drift, max_ke_drift)
+    }
+
+    /// **トルクフリー剛体の保存則**(Euler方程式)。外力・外トルクが厳密にゼロなら
+    /// ワールド系の角運動量ベクトル $L=I_{world}\omega$ と回転運動エネルギー
+    /// $T=\frac12\omega\cdot I_{world}\omega$ はどちらも**厳密な保存量**である。
+    ///
+    /// 主軸に一致しない初期角速度を与えて実際に歳差(tumbling)させる——主軸に
+    /// 沿った回転はジャイロ項 $\omega\times I\omega$ が恒等的に0になる離散スキームの
+    /// 不動点で、機械精度で保存してしまい積分器の検証にならないため。
+    ///
+    /// 許容誤差の根拠: ジャイロ項は陽的(explicit)に評価される
+    /// (`integrate_velocities`のdoc「ジャイロ項は既定で陽的」)ので、保存量の
+    /// 誤差は $O(\Delta t)$ で蓄積する。dt=1/1000・4000ステップ(4秒、|ω|≈4.3 rad/s で
+    /// 約17回転)の実測は |ΔL|/|L₀| ≈ 3.7e-3、|ΔT|/T₀ ≈ 4.5e-3 なので、
+    /// 3割ほどの余裕を見て 5e-3 / 6e-3 を上限とする。
+    ///
+    /// さらに **dt を半分にすると誤差もほぼ半分になる**(1次収束)ことを併せて
+    /// 確認する——これにより残差が「積分器の刻み誤差」であって「慣性テンソルや
+    /// ジャイロ項の式の誤り」ではないことまで固定できる(定数倍ずれた慣性を
+    /// 使っていれば誤差は dt に依らず残る)。
+    #[test]
+    fn torque_free_compound_conserves_angular_momentum_and_kinetic_energy() {
+        // 主軸(ローカルx/y/z)のいずれとも一致しない初期角速度。
+        let omega0 = Vec3::new(1.5, 0.5, 4.0);
+        let (l_drift, ke_drift) = torque_free_tumble_drift(omega0, 1.0 / 1000.0, 4000);
+        assert!(
+            l_drift < 5e-3,
+            "angular momentum must be conserved under zero torque: |dL|/|L0|={l_drift:.3e}"
+        );
+        assert!(
+            ke_drift < 6e-3,
+            "rotational kinetic energy must be conserved under zero torque: |dT|/T0={ke_drift:.3e}"
+        );
+
+        // 刻みを半分にすれば誤差も半分になる(陽的ジャイロ項の1次収束)。
+        let (l_half, ke_half) = torque_free_tumble_drift(omega0, 1.0 / 2000.0, 8000);
+        assert!(
+            l_half < l_drift / 1.7 && ke_half < ke_drift / 1.7,
+            "halving dt should roughly halve the drift (first order): \
+             l={l_drift:.3e}->{l_half:.3e} ke={ke_drift:.3e}->{ke_half:.3e}"
+        );
+    }
+
+    /// **テニスラケット定理(中間軸定理)**。主慣性モーメントが $I_1<I_2<I_3$ と
+    /// すべて異なる剛体では、最小軸・最大軸まわりの自由回転は安定だが、
+    /// **中間軸**まわりの回転は不安定で、微小な擾乱が指数的に成長して回転軸が
+    /// 反転する。線形化したEuler方程式から成長率は
+    /// $\sigma=\omega_2\sqrt{\frac{(I_2-I_1)(I_3-I_2)}{I_1 I_3}}$、
+    /// 相対擾乱 $\varepsilon$ が $O(1)$ まで育つ時刻は $t\approx\ln(1/\varepsilon)/\sigma$。
+    ///
+    /// これは「慣性テンソルとジャイロ項が正しく組めているか」に対する非常に強い
+    /// 定性的シグナルで、たとえば主軸の取り違えや慣性の定数倍ずれがあれば
+    /// 反転は起きない(あるいは起きるべきでない軸で起きる)。
+    ///
+    /// 許容誤差の根拠: 成長率の式は線形近似なので反転時刻の予測も概算にとどまる
+    /// (実測 0.75s に対し予測 0.60s)。定数倍の安全域を見て
+    /// 「予測時刻の 0.5〜2.5 倍の窓で反転する」ことのみを要求する。安定軸側は
+    /// 5秒間(反転予測時刻の約8倍)まったく符号が変わらないことを要求する。
+    #[test]
+    fn tennis_racket_theorem_flips_only_around_the_intermediate_axis() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let shape = symmetric_compound();
+        let inertia = shape.unit_mass_inertia_diagonal();
+        // ローカルx=最小、y=中間、z=最大(対称配置の設計どおり)。
+        assert!(
+            inertia.x < inertia.y && inertia.y < inertia.z,
+            "test fixture must have three distinct principal moments: {inertia:?}"
+        );
+
+        let spin = 12.0;
+        let epsilon = 0.005_f64; // 主軸からの相対擾乱
+        let growth_rate = spin
+            * (((inertia.y - inertia.x) * (inertia.z - inertia.y)) / (inertia.x * inertia.z))
+                .sqrt();
+        let predicted_flip_time = (1.0 / epsilon).ln() / growth_rate;
+
+        let dt = 1.0 / 2000.0;
+        let steps = (5.0 / dt) as usize;
+        // 与えた主軸まわりの(剛体ローカル系での)角速度成分が符号を変えた時刻を返す。
+        let first_sign_flip = |omega0: Vec3, component: fn(Vec3) -> f64| -> Option<f64> {
+            let mut rng = SimRng::new(1, 1);
+            let mut events = EventQueue::new();
+            let mut solver = MechanicsSolver::new(0.0);
+            let mut desc = RigidBodyDesc::dynamic(shape.clone(), steel);
+            desc.angular_velocity = omega0;
+            let idx = solver.create_body(desc, &materials);
+            for s in 0..steps {
+                let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+                solver.step(dt, &mut ctx);
+                let _: Vec<Event> = events.drain_sorted();
+                // ローカル系の角速度(姿勢の共役で世界→ローカルへ戻す)。
+                let omega_local = solver.bodies.rotation[idx]
+                    .conjugate()
+                    .rotate(solver.bodies.angular_velocity[idx]);
+                if component(omega_local) < 0.0 {
+                    return Some(s as f64 * dt);
+                }
+            }
+            None
+        };
+
+        // 中間軸(y)まわり: 反転する。
+        let flip = first_sign_flip(Vec3::new(epsilon * spin, spin, 0.0), |w| w.y)
+            .expect("spin about the intermediate axis must flip within the simulated window");
+        assert!(
+            flip > 0.5 * predicted_flip_time && flip < 2.5 * predicted_flip_time,
+            "flip time should be near the analytic estimate ln(1/eps)/sigma: \
+             flip={flip:.3} predicted={predicted_flip_time:.3}"
+        );
+
+        // 最小軸(x)・最大軸(z)まわり: 同じ大きさの擾乱を与えても反転しない。
+        assert!(
+            first_sign_flip(Vec3::new(spin, epsilon * spin, 0.0), |w| w.x).is_none(),
+            "spin about the minimum-inertia axis must stay stable"
+        );
+        assert!(
+            first_sign_flip(Vec3::new(epsilon * spin, 0.0, spin), |w| w.z).is_none(),
+            "spin about the maximum-inertia axis must stay stable"
+        );
+    }
+
+    /// **重力の「向き」と「大きさ」の分離**(単振り子)。
+    /// `gravity_direction_can_be_changed_and_free_fall_follows_the_new_axis`は
+    /// 軸に平行な自由落下しか見ていない。ここでは
+    /// **軸に平行でない向き(鉛直から30°)**の重力下で、ワールド固定点に
+    /// `DistanceJoint`で吊るした質点振り子を振らせ、微小振幅の周期が
+    /// $T=2\pi\sqrt{L/g}$ ——**$g$ は大きさだけで、向きには一切依存しない**——に
+    /// 一致することを確認する。これは重力を`GravityField`抽象へ置き換える将来の
+    /// 変更が壊してはならない不変量そのもの。
+    ///
+    /// 許容誤差の根拠: 初期振幅 $\theta_0=5°$ の有限振幅補正が
+    /// $T\simeq T_0(1+\theta_0^2/16)$ = +4.76e-4(相対)で、実測の偏差
+    /// (dt=1/1000・10半周期)4.76e-4 とほぼ完全に一致する。つまり残差は
+    /// **物理的に正しい非線形補正**であって数値誤差ではない。よって
+    /// (1) 微小振幅の式 $T_0$ に対しては補正ぶんを飲み込む 1e-3、
+    /// (2) 補正込みの式に対しては 5e-5(実測 5e-7)を要求する。
+    #[test]
+    fn pendulum_period_under_tilted_gravity_matches_two_pi_sqrt_l_over_g() {
+        let g = 9.80665;
+        let length = 1.0;
+        let theta0 = 5.0_f64.to_radians();
+        let dt = 1.0 / 1000.0;
+
+        // 与えた重力方向で振り子を10半周期ぶん振らせ、平均半周期の2倍を返す。
+        let measure_period = |gravity_direction: Vec3| -> f64 {
+            let materials = MaterialDb::standard();
+            let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+            let mut rng = SimRng::new(1, 1);
+            let mut events = EventQueue::new();
+            let mut solver = MechanicsSolver::new(g);
+            solver.set_gravity_direction(gravity_direction);
+            let down = solver.gravity_direction;
+            // 揺動面は「重力方向」と「それに直交する perp」が張る平面。
+            let perp = Vec3::new(0.0, 0.0, 1.0).cross(down).normalize_or_zero();
+            assert!(perp.length() > 0.5, "swing plane is degenerate: {down:?}");
+
+            let anchor = Vec3::ZERO;
+            let start_dir = down.scale(theta0.cos()) + perp.scale(theta0.sin());
+            // アンカーを重心(ボディ原点)に置くので、ジョイント力はトルクを生まず
+            // 質点振り子になる(球の自転は運動から完全に切り離される)。
+            let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.02 }, steel);
+            desc.transform.position = anchor + start_dir.scale(length);
+            let bob = solver.create_body(desc, &materials);
+            solver.add_distance_joint(DistanceJoint {
+                body_a: bob,
+                anchor_a: Vec3::ZERO,
+                body_b: None,
+                anchor_b: anchor,
+                length,
+                disabled: false,
+            });
+
+            // 揺動座標 s = (位置−アンカー)·perp のゼロ交差(=平衡点通過)を数える。
+            // 交差時刻は線形補間で求める(dt の量子化誤差を周期測定へ持ち込まない)。
+            let mut previous = (solver.bodies.position[bob] - anchor).dot(perp);
+            let mut crossings: Vec<f64> = Vec::new();
+            let mut t = 0.0;
+            let mut max_length_error: f64 = 0.0;
+            let mut max_out_of_plane: f64 = 0.0;
+            while crossings.len() < 11 {
+                let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+                solver.step(dt, &mut ctx);
+                let _: Vec<Event> = events.drain_sorted();
+                t += dt;
+                assert!(t < 60.0, "pendulum did not complete enough half periods");
+                let relative = solver.bodies.position[bob] - anchor;
+                max_length_error = max_length_error.max((relative.length() - length).abs());
+                max_out_of_plane =
+                    max_out_of_plane.max(relative.dot(down.cross(perp).normalize_or_zero()).abs());
+                let s = relative.dot(perp);
+                if previous > 0.0 && s <= 0.0 {
+                    crossings.push(t - dt + dt * previous / (previous - s));
+                }
+                previous = s;
+            }
+            // 距離拘束が保たれていること・運動が揺動面内に留まること(円錐振り子に
+            // なっていないこと)を確認してから周期を返す。
+            assert!(
+                max_length_error < 1e-5,
+                "distance joint must hold the rod length: {max_length_error:.3e}"
+            );
+            assert!(
+                max_out_of_plane < 1e-9,
+                "motion must stay planar: {max_out_of_plane:.3e}"
+            );
+            let last = crossings.len() - 1;
+            (crossings[last] - crossings[0]) / last as f64
+        };
+
+        // 鉛直から30°傾けた重力(x成分とy成分の両方を持つ)。
+        let tilt = 30.0_f64.to_radians();
+        let measured = measure_period(Vec3::new(tilt.sin(), -tilt.cos(), 0.0));
+
+        let analytic = 2.0 * std::f64::consts::PI * (length / g).sqrt();
+        assert!(
+            (measured - analytic).abs() / analytic < 1e-3,
+            "small-angle period must match 2π√(L/g) regardless of gravity direction: \
+             measured={measured} analytic={analytic}"
+        );
+        // 残差の正体が有限振幅補正であることまで固定する。
+        let with_amplitude_correction = analytic * (1.0 + theta0 * theta0 / 16.0);
+        assert!(
+            (measured - with_amplitude_correction).abs() / with_amplitude_correction < 5e-5,
+            "the residual must be the analytic finite-amplitude correction T0(1+θ0²/16): \
+             measured={measured} corrected={with_amplitude_correction}"
+        );
+
+        // 真下向き(既定)の重力でも同じ周期になる——周期は g の**大きさ**だけで
+        // 決まり、向きには依存しないという不変量の直接確認。
+        let straight_down = measure_period(Vec3::new(0.0, -1.0, 0.0));
+        assert!(
+            (measured - straight_down).abs() / straight_down < 1e-9,
+            "the period must depend only on |g|, not on its direction: \
+             tilted={measured} down={straight_down}"
+        );
+    }
 }

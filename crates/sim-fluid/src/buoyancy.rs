@@ -92,6 +92,58 @@ mod tests {
         assert_eq!(v, 0.0);
     }
 
+    /// **アルキメデスの原理の閉形式解**(浮力が任意の重力場に追従するようになる
+    /// 将来の変更に備えた基準点)。質量 $m$・水線面積 $A$ の直立直方体の釣り合い
+    /// 喫水は $\rho_f\,g\,A\,d = m\,g$ を $d$ について解いた
+    /// $d = m/(\rho_f A)$ で、**$g$ には依存しない**(両辺から消える)。
+    ///
+    /// ここでは `submerged_box_axis_aligned` が返す水面下体積と `buoyancy_force` が
+    /// この閉形式の喫水で厳密に重量と釣り合うことを、代数計算だけで確認する
+    /// (数値積分を挟まないので許容誤差は倍精度の丸め誤差ぶんの 1e-12(相対))。
+    /// あわせて $g$ を変えても釣り合い喫水が動かないことも見る。
+    ///
+    /// **前提の明示**: このモデルは水面を「ワールドy座標の水平面」として定義し、
+    /// 浮力を常に`+y`向きに出す(モジュール冒頭注記・`buoyancy_force`の実装)。
+    /// つまり「重力の向き=ワールド-y」が暗黙の前提であり、浮力が重力場の局所的な
+    /// 向きへ追従するようになったら、この前提は保証されなくなる——その時点で
+    /// 本テストには「重力が-y向きの場合に限る」旨の注記を足す必要がある。
+    #[test]
+    fn equilibrium_draft_matches_archimedes_closed_form() {
+        let water_density = 998.2;
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let waterline_area = 4.0 * half.x * half.z;
+        let water_level = 0.0;
+
+        for &ratio in &[0.3, 0.6, 0.9] {
+            let mass = ratio * water_density * 8.0 * half.x * half.y * half.z;
+            // ρ_f g A d = m g  ⇔  d = m / (ρ_f A)。
+            let draft = mass / (water_density * waterline_area);
+            let center_y = water_level - draft + half.y;
+
+            for &gravity in &[9.80665, 1.62, 24.79] {
+                let (v_sub, centroid) =
+                    submerged_box_axis_aligned(Vec3::new(0.0, center_y, 0.0), half, water_level);
+                assert!(
+                    (v_sub - waterline_area * draft).abs() / v_sub < 1e-12,
+                    "V_sub = A·d のはず: v_sub={v_sub} A·d={}",
+                    waterline_area * draft
+                );
+                // 浮心は水面下部分の中心(重量との釣り合いには効かないが、
+                // 姿勢に効くので位置も固定しておく)。
+                let expected_centroid_y = center_y - half.y + 0.5 * draft;
+                assert!((centroid.y - expected_centroid_y).abs() < 1e-12);
+
+                let buoyancy = buoyancy_force(v_sub, water_density, gravity).y;
+                let weight = mass * gravity;
+                assert!(
+                    (buoyancy - weight).abs() / weight < 1e-12,
+                    "釣り合い喫水では浮力と重量が厳密に一致する(gには依存しない): \
+                     ratio={ratio} gravity={gravity} buoyancy={buoyancy} weight={weight}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn partial_submersion_volume_is_base_area_times_depth() {
         let half = Vec3::new(0.5, 0.5, 0.5);

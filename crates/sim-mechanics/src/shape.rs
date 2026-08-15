@@ -325,4 +325,131 @@ mod tests {
         assert_eq!(mesh.volume(), None);
         assert_eq!(mesh.unit_mass_inertia_diagonal(), Vec3::ZERO);
     }
+
+    /// **解析解の足場**(慣性テンソルを対角`Vec3`から完全な`Mat3`へ拡張する
+    /// 予定変更に備えた基準点)。辺長 $w\times h\times d$ の一様直方体の主慣性
+    /// モーメントは閉形式で
+    /// $I=\frac{m}{12}\mathrm{diag}(h^2+d^2,\;w^2+d^2,\;w^2+h^2)$。
+    /// `unit_mass_inertia_diagonal`は単位質量あたりを返すので $m=1$ とおいて比較する。
+    ///
+    /// 既存の`cube_inertia_diagonal_is_isotropic`は立方体(3軸が等価)しか見て
+    /// おらず、軸の取り違え(x/y/zの入れ替え)を検出できない。ここでは
+    /// **3辺すべてを異なる長さ**にして、どの軸にどの項が乗るかまで固定する。
+    /// 許容誤差は閉形式どうしの比較(数値積分を挟まない)なので倍精度の
+    /// 丸め誤差だけを見込んだ 1e-15(相対)。
+    #[test]
+    fn box_inertia_diagonal_matches_the_closed_form_formula() {
+        let half_extents = Vec3::new(0.3, 0.7, 1.1);
+        let (w, h, d) = (
+            2.0 * half_extents.x,
+            2.0 * half_extents.y,
+            2.0 * half_extents.z,
+        );
+        let expected = Vec3::new(
+            (h * h + d * d) / 12.0,
+            (w * w + d * d) / 12.0,
+            (w * w + h * h) / 12.0,
+        );
+        let actual = Shape::Box { half_extents }.unit_mass_inertia_diagonal();
+        for (a, e) in [
+            (actual.x, expected.x),
+            (actual.y, expected.y),
+            (actual.z, expected.z),
+        ] {
+            assert!(
+                (a - e).abs() / e < 1e-15,
+                "actual={actual:?} expected={expected:?}"
+            );
+        }
+        // 3辺が異なるので主慣性モーメントも3つとも異なる(軸の取り違え検出用)。
+        // 最も短い辺(x)まわりの慣性が最大、最も長い辺(z)まわりが最小。
+        assert!(actual.x > actual.y && actual.y > actual.z, "{actual:?}");
+    }
+
+    /// **AABB近似の「カナリア」**(正しさの証明ではない、現状の**誤り方**を固定する
+    /// テスト)。`ConvexMesh`は面情報を持たず、体積・慣性を頂点群のAABBで代用する
+    /// (`volume()`のdoc「既知の限界」参照)。既存の
+    /// `convex_mesh_of_a_cubes_corners_matches_the_equivalent_box`は、AABBが
+    /// たまたま厳密になる立方体の8隅しか見ていない。
+    ///
+    /// ここでは**AABB近似が確実に外れる**正多面体を2つ使い、真の解析的体積との
+    /// 比を固定する:
+    /// - 正四面体 $(\pm1,\pm1,\pm1)$ の交互4頂点。辺長 $a=2\sqrt2$、
+    ///   $V=a^3/(6\sqrt2)=8/3$。AABB は一辺2の立方体なので $V_{AABB}=8$ ——
+    ///   **ちょうど3倍**の過大評価。
+    /// - 正八面体 $(\pm1,0,0),(0,\pm1,0),(0,0,\pm1)$。$V=4/3$ に対し
+    ///   $V_{AABB}=8$ ——**ちょうど6倍**。
+    ///
+    /// 慣性も同様に過大評価になる(どちらの多面体も対称性から慣性テンソルは
+    /// 等方で、正四面体は $I/m=a^2/20=0.4$、正八面体は $I/m=a^2/10=0.2$。
+    /// AABB近似はどちらも一辺2の立方体の $2/3$)。
+    ///
+    /// **将来の3D凸包(quickhull)実装が入ったらこのテストは落ちる**——その時は
+    /// 比が 1.0 になったことを確認する形へ意図的に書き換える(落ちること自体が
+    /// 「近似が実装に置き換わった」という通知になる)。倍数はすべて有理数で
+    /// 厳密に表せるので許容誤差は丸め誤差ぶんの 1e-12(相対)。
+    #[test]
+    fn convex_mesh_aabb_approximation_overestimates_regular_polyhedra() {
+        // 正四面体: 立方体の隅を1つおきに取ると正四面体になる。
+        let edge = 2.0 * std::f64::consts::SQRT_2;
+        let tetrahedron = Shape::ConvexMesh {
+            vertices: vec![
+                Vec3::new(1.0, 1.0, 1.0),
+                Vec3::new(1.0, -1.0, -1.0),
+                Vec3::new(-1.0, 1.0, -1.0),
+                Vec3::new(-1.0, -1.0, 1.0),
+            ],
+        };
+        let tetra_true_volume = edge.powi(3) / (6.0 * std::f64::consts::SQRT_2);
+        assert!(
+            (tetra_true_volume - 8.0 / 3.0).abs() < 1e-12,
+            "解析式 a^3/(6√2) は 8/3 になるはず: {tetra_true_volume}"
+        );
+        let tetra_approx = tetrahedron.volume().unwrap();
+        assert!(
+            (tetra_approx / tetra_true_volume - 3.0).abs() < 1e-12,
+            "現状のAABB近似は正四面体の体積をちょうど3倍に過大評価する: \
+             approx={tetra_approx} true={tetra_true_volume}"
+        );
+
+        // 正八面体。
+        let octahedron = Shape::ConvexMesh {
+            vertices: vec![
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.0, 0.0, -1.0),
+            ],
+        };
+        let octa_true_volume = 4.0 / 3.0;
+        let octa_approx = octahedron.volume().unwrap();
+        assert!(
+            (octa_approx / octa_true_volume - 6.0).abs() < 1e-12,
+            "現状のAABB近似は正八面体の体積をちょうど6倍に過大評価する: \
+             approx={octa_approx} true={octa_true_volume}"
+        );
+
+        // 慣性も過大評価(どちらも真の値は等方、AABB近似は一辺2の立方体の 2/3)。
+        let cube_unit_inertia = 2.0 / 3.0;
+        let tetra_true_inertia = edge * edge / 20.0; // = 0.4
+        let octa_true_inertia = 2.0 / 10.0; // 辺長 a=√2 の正八面体、a²/10
+        for (shape, true_inertia, label) in [
+            (&tetrahedron, tetra_true_inertia, "正四面体"),
+            (&octahedron, octa_true_inertia, "正八面体"),
+        ] {
+            let i = shape.unit_mass_inertia_diagonal();
+            assert!(
+                (i.x - cube_unit_inertia).abs() < 1e-12
+                    && (i.y - cube_unit_inertia).abs() < 1e-12
+                    && (i.z - cube_unit_inertia).abs() < 1e-12,
+                "{label}: 現状は外接立方体の慣性そのもの: {i:?}"
+            );
+            assert!(
+                i.x > true_inertia,
+                "{label}: AABB近似は真の慣性 {true_inertia} を過大評価する: {i:?}"
+            );
+        }
+    }
 }
