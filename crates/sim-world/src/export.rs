@@ -17,14 +17,27 @@
 //!   エクスポートすると、再インポート後は「今の状態を新たな基準」として
 //!   再スタートする(基準そのものではなく現在値を保存するため、以後の相対変位は
 //!   ゼロから再カウントされる)。
-//! - `grid_fluid`/`grid_fluid_3d`/`sph`/`soft_body`/`quantum_1d`/`quantum_2d`/
-//!   `brownian`/`kinetic_gas`/`ising`/`fdtd`: シーンJSON側のスキーマが「構築レシピ」
-//!   (例: 波束の中心・分散、SPH粒子を敷き詰める直方体ブロック)であって「状態の
-//!   スナップショット」ではないため、時間発展した後の実行中`World`から正確に
-//!   逆算することができない——**構造的にこのスキーマでは表現不能**であり、
-//!   生値スナップショット形式のスキーマ拡張が別途要る(後続増分)。
-//!   このエクスポートは現時点でこれらのドメインを`None`のまま出力する
-//!   (存在ごと落ちるのではなく、実装漏れとして明示する)。
+//! - `kinetic_gas`: 圧力測定用の壁運動量アキュムレータ(`sim_statistical::GasSim`の
+//!   `wall_impulse_accum`/`wall_impulse_time`)が非公開のため書き出せない。
+//!   `GasSim`の`state_hash`はこの2つを含まない(位置・速度・`collision_count`のみ)
+//!   ので決定論replayには影響せず、**影響するのは`pressure()`の時間平均窓が
+//!   復元時点から引き直されること**だけである(`reset_pressure_accumulator`を
+//!   呼んだのと同じ状態になる)。窓を取り直せば同じ圧力へ収束する。
+//! - `fdtd`のPML: `sim_em::FdtdSim2D::with_pml`の分離場成分は書き出せない。
+//!   ただし`FdtdScenarioJson`にPMLを構成するフィールドが無く、`from_scenario`が
+//!   作る`World`のFDTDは常にPEC境界のみ(`pml: None`)なので、
+//!   エクスポート→再インポートの往復ではこの制限に到達しない。
+//!
+//! **解消済みの制限(**生状態スナップショット**、`scenario`モジュールdoc参照)**:
+//! `grid_fluid`/`grid_fluid_3d`/`sph`/`soft_body`/`quantum_1d`/`quantum_2d`/
+//! `brownian`/`kinetic_gas`/`ising`/`fdtd`/`conduction_rod`の11ドメインは、
+//! シーンJSON側のスキーマが「構築レシピ」(例: 波束の中心・分散、SPH粒子を
+//! 敷き詰める直方体ブロック)であって「状態のスナップショット」ではないため、
+//! 時間発展した後の実行中`World`から正確に逆算できず、長らく`None`のまま
+//! 落としていた。各`*ScenarioJson`へ`raw_state`(生状態スナップショット)を
+//! 足したことで**時間発展後でも`state_hash`一致で往復できるようになった**。
+//! レシピ側のフィールド(格子寸法・粒子数等)にも現在値を書くが、それは人が
+//! 読むためのメタデータで、復元に使われるのは`raw_state`である。
 
 use crate::{BodyId, ProbeTarget, World};
 use sim_math::Vec3;
@@ -33,11 +46,18 @@ use std::collections::HashMap;
 
 use crate::scenario::{
     AstroBodyJson, AstroScenarioJson, AtmosphereJson, AtmosphericDragJson, BodyScenarioDesc,
-    BodyThermalLinkJson, CapacitorJson, CircuitScenarioJson, CompoundChildJson, ConvectionModeJson,
-    CouplingJson, DiodeJson, FluidJson, GasScenarioJson, InductorJson, JointJson, LiftModelJson,
-    MaterialOverride, ProbeJson, RelativisticCorrectionJson, ResistorJson, Scenario, ShapeJson,
-    SwitchJson, ThermalLinkJson, ThermalNodeJson, ThermalScenarioJson, VoltageSourceJson,
-    WorldScenarioOptions,
+    BodyThermalLinkJson, BrownianRawStateJson, BrownianScenarioJson, CapacitorJson,
+    CircuitScenarioJson, CompoundChildJson, ConductionRodRawStateJson, ConductionRodScenarioJson,
+    ConvectionModeJson, CouplingJson, DiodeJson, FdtdRawStateJson, FdtdScenarioJson, FluidJson,
+    GasScenarioJson, GaussianPacket2dJson, GaussianPacketJson, GridBoundaryJson,
+    GridFluid3DRawStateJson, GridFluid3DScenarioJson, GridFluidRawStateJson, GridFluidScenarioJson,
+    GridSolidBoxJson, InductorJson, IsingRawStateJson, IsingScenarioJson, JointJson,
+    KineticGasRawStateJson, KineticGasScenarioJson, LiftModelJson, MaterialOverride, ProbeJson,
+    Quantum1dRawStateJson, Quantum1dScenarioJson, Quantum2dRawStateJson, Quantum2dScenarioJson,
+    RelativisticCorrectionJson, ResistorJson, Scenario, ShapeJson, SoftBendingConstraintJson,
+    SoftBodyRawStateJson, SoftBodyScenarioJson, SoftConstraintJson, SoftVolumeConstraintJson,
+    SphRawStateJson, SphScenarioJson, SwitchJson, ThermalLinkJson, ThermalNodeJson,
+    ThermalScenarioJson, VoltageSourceJson, WorldScenarioOptions,
 };
 
 /// この export セッション内で使う、生存ボディの決定的な名前
@@ -60,6 +80,10 @@ pub fn to_scenario(world: &World, name: &str) -> Scenario {
         name: name.to_string(),
         // 既知の制限(モジュールdoc参照): World は元のシードを保持しない。
         seed: 0,
+        // 経過ステップ数(`Scenario::elapsed_steps`のdoc参照)。`state_hash`は
+        // 先頭で時刻を混ぜるので、これを書かないと時間発展後のシーンは
+        // 復元しても必ずハッシュがずれる。
+        elapsed_steps: world.step_count(),
         world: export_world_options(world),
         materials,
         bodies: export_bodies(world, &live_bodies, &names, &material_name_of),
@@ -69,18 +93,18 @@ pub fn to_scenario(world: &World, name: &str) -> Scenario {
         couplings: export_couplings(world, &names),
         circuit: export_circuit(world),
         astro: export_astro(world),
-        soft_body: None,
-        grid_fluid: None,
-        grid_fluid_3d: None,
-        conduction_rod: None,
-        sph: None,
+        soft_body: export_soft_body(world),
+        grid_fluid: export_grid_fluid(world),
+        grid_fluid_3d: export_grid_fluid_3d(world),
+        conduction_rod: export_conduction_rod(world),
+        sph: export_sph(world),
         gas: export_gas(world),
-        quantum_1d: None,
-        quantum_2d: None,
-        brownian: None,
-        kinetic_gas: None,
-        ising: None,
-        fdtd: None,
+        quantum_1d: export_quantum_1d(world),
+        quantum_2d: export_quantum_2d(world),
+        brownian: export_brownian(world),
+        kinetic_gas: export_kinetic_gas(world),
+        ising: export_ising(world),
+        fdtd: export_fdtd(world),
         probes: export_probes(world, &names),
         prediction_prompts: Vec::new(),
         // `prediction_prompts`と同じ理由(モジュールdocの`Scenario::
@@ -385,6 +409,356 @@ fn export_gas(world: &World) -> Option<GasScenarioJson> {
         temperature: g.temperature,
         degrees_of_freedom: Some(g.gas.degrees_of_freedom),
         molar_mass: Some(g.gas.molar_mass),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// **生状態スナップショット(`raw_state`)を使う11ドメインのエクスポート**。
+// 構築レシピでは時間発展後の状態を表せないドメイン群(モジュールdoc「解消済みの
+// 制限」・`crate::scenario`モジュールdoc参照)。どれも同じ形をしている:
+// レシピ側のフィールドには**現在値**を(人が読むためのメタデータとして)書き、
+// `raw_state`に復元用の生状態を入れる。
+// ---------------------------------------------------------------------------
+
+fn export_soft_body(world: &World) -> Option<SoftBodyScenarioJson> {
+    let body = world.soft_body()?;
+    Some(SoftBodyScenarioJson {
+        // レシピ側は空にする(`rope`ヘルパの引数は`SoftBody`から逆算できない——
+        // 分割数もレスト長も拘束の集合へ潰れてしまっている)。`raw_state`が真。
+        rope: None,
+        particles: Vec::new(),
+        constraints: Vec::new(),
+        pinned: Vec::new(),
+        gravity: Some(vec3_to_array(body.gravity)),
+        substeps: Some(body.substeps),
+        iterations: Some(body.iterations),
+        damping: Some(body.damping),
+        raw_state: Some(SoftBodyRawStateJson {
+            position: body.position.iter().copied().map(vec3_to_array).collect(),
+            prev_position: body
+                .prev_position
+                .iter()
+                .copied()
+                .map(vec3_to_array)
+                .collect(),
+            velocity: body.velocity.iter().copied().map(vec3_to_array).collect(),
+            inv_mass: body.inv_mass.clone(),
+            constraints: body
+                .constraints
+                .iter()
+                .map(|c| SoftConstraintJson {
+                    i: c.i,
+                    j: c.j,
+                    rest: c.rest,
+                    compliance: c.compliance,
+                })
+                .collect(),
+            bending_constraints: body
+                .bending_constraints
+                .iter()
+                .map(|c| SoftBendingConstraintJson {
+                    i: c.i,
+                    j: c.j,
+                    k: c.k,
+                    rest: c.rest,
+                    compliance: c.compliance,
+                })
+                .collect(),
+            volume_constraints: body
+                .volume_constraints
+                .iter()
+                .map(|c| SoftVolumeConstraintJson {
+                    particles: c.particles,
+                    rest_volume: c.rest_volume,
+                    compliance: c.compliance,
+                })
+                .collect(),
+            gravity: vec3_to_array(body.gravity),
+            substeps: body.substeps,
+            iterations: body.iterations,
+            damping: body.damping,
+        }),
+    })
+}
+
+fn export_grid_fluid(world: &World) -> Option<GridFluidScenarioJson> {
+    let fluid = world.grid_fluid()?;
+    let boundary = grid_boundary_to_json(fluid.boundary());
+    Some(GridFluidScenarioJson {
+        nx: fluid.nx,
+        ny: fluid.ny,
+        h: fluid.h,
+        density: Some(fluid.density),
+        kinematic_viscosity: Some(fluid.kinematic_viscosity),
+        // 一様初期速度・解析形の固体は`raw_state`の格子で完全に置き換わる
+        // (任意形状の固体は矩形/円の列挙では表せない)。
+        initial_velocity: None,
+        boundary: Some(boundary),
+        vorticity_confinement_epsilon: Some(fluid.vorticity_confinement_epsilon),
+        solids: Vec::new(),
+        raw_state: Some(GridFluidRawStateJson {
+            u: fluid.u.clone(),
+            v: fluid.v.clone(),
+            solid_cells: fluid
+                .cell_type()
+                .iter()
+                .map(|c| *c == sim_fluid::CellType::Solid)
+                .collect(),
+            solid_velocity: fluid
+                .solid_velocity()
+                .iter()
+                .copied()
+                .map(vec3_to_array)
+                .collect(),
+            solid_box: fluid.solid_box().map(|b| GridSolidBoxJson {
+                center: [b.center.0, b.center.1],
+                half_width: b.half_width,
+                half_height: b.half_height,
+                velocity: vec3_to_array(b.velocity),
+            }),
+            density: fluid.density,
+            kinematic_viscosity: fluid.kinematic_viscosity,
+            vorticity_confinement_epsilon: fluid.vorticity_confinement_epsilon,
+            boundary: Some(grid_boundary_to_json(fluid.boundary())),
+        }),
+    })
+}
+
+fn export_grid_fluid_3d(world: &World) -> Option<GridFluid3DScenarioJson> {
+    let fluid = world.grid_fluid_3d()?;
+    Some(GridFluid3DScenarioJson {
+        nx: fluid.nx,
+        ny: fluid.ny,
+        nz: fluid.nz,
+        h: fluid.h,
+        density: Some(fluid.density),
+        kinematic_viscosity: Some(fluid.kinematic_viscosity),
+        boundary: Some(grid_boundary_3d_to_json(fluid.boundary())),
+        vorticity_confinement_epsilon: Some(fluid.vorticity_confinement_epsilon),
+        solids: Vec::new(),
+        smoke_blocks: Vec::new(),
+        raw_state: Some(GridFluid3DRawStateJson {
+            u: fluid.u.clone(),
+            v: fluid.v.clone(),
+            w: fluid.w.clone(),
+            smoke_density: fluid.smoke_density.clone(),
+            solid_cells: fluid
+                .cell_type()
+                .iter()
+                .map(|c| *c == sim_fluid::CellType::Solid)
+                .collect(),
+            solid_velocity: fluid
+                .solid_velocity()
+                .iter()
+                .copied()
+                .map(vec3_to_array)
+                .collect(),
+            density: fluid.density,
+            kinematic_viscosity: fluid.kinematic_viscosity,
+            vorticity_confinement_epsilon: fluid.vorticity_confinement_epsilon,
+            boundary: Some(grid_boundary_3d_to_json(fluid.boundary())),
+        }),
+    })
+}
+
+fn grid_boundary_to_json(boundary: sim_fluid::GridBoundary) -> GridBoundaryJson {
+    match boundary {
+        sim_fluid::GridBoundary::Periodic => GridBoundaryJson::Periodic,
+        sim_fluid::GridBoundary::Channel { inflow_speed } => {
+            GridBoundaryJson::Channel { inflow_speed }
+        }
+    }
+}
+
+fn grid_boundary_3d_to_json(boundary: sim_fluid::GridBoundary3D) -> GridBoundaryJson {
+    match boundary {
+        sim_fluid::GridBoundary3D::Periodic => GridBoundaryJson::Periodic,
+        sim_fluid::GridBoundary3D::Channel { inflow_speed } => {
+            GridBoundaryJson::Channel { inflow_speed }
+        }
+    }
+}
+
+fn export_conduction_rod(world: &World) -> Option<ConductionRodScenarioJson> {
+    let rod = world.conduction_rod()?;
+    let node_count = rod.temperature.len();
+    Some(ConductionRodScenarioJson {
+        node_count,
+        length: rod.dx * (node_count.max(1) - 1) as f64,
+        // レシピ側の「一様な初期温度」は時間発展後には存在しない。人が読むときの
+        // 目安として現在の左端温度を書く(復元には使われない)。
+        initial_temperature: rod.temperature.first().copied().unwrap_or(0.0),
+        thermal_diffusivity: Some(rod.thermal_diffusivity),
+        material: None,
+        boundary_left: rod.temperature.first().copied(),
+        boundary_right: rod.temperature.last().copied(),
+        raw_state: Some(ConductionRodRawStateJson {
+            temperature: rod.temperature.clone(),
+            dx: rod.dx,
+            thermal_diffusivity: rod.thermal_diffusivity,
+            volumetric_heat_capacity: rod.volumetric_heat_capacity,
+            conductivity: rod.conductivity.clone(),
+            cross_section_area: rod.cross_section_area,
+        }),
+    })
+}
+
+fn export_sph(world: &World) -> Option<SphScenarioJson> {
+    let fluid = world.sph()?;
+    Some(SphScenarioJson {
+        h: fluid.h,
+        rest_density: fluid.rho0,
+        sound_speed: fluid.c_s,
+        particle_mass: Some(fluid.mass),
+        blocks: Vec::new(),
+        boundary_blocks: Vec::new(),
+        raw_state: Some(SphRawStateJson {
+            position: fluid.position.iter().copied().map(vec3_to_array).collect(),
+            velocity: fluid.velocity.iter().copied().map(vec3_to_array).collect(),
+            density: fluid.density.clone(),
+            pressure: fluid.pressure.clone(),
+            mass: fluid.mass,
+            h: fluid.h,
+            rho0: fluid.rho0,
+            c_s: fluid.c_s,
+            viscosity_alpha: fluid.viscosity_alpha,
+            gravity: fluid.gravity,
+            boundary_position: fluid
+                .boundary_position
+                .iter()
+                .copied()
+                .map(vec3_to_array)
+                .collect(),
+        }),
+    })
+}
+
+fn export_quantum_1d(world: &World) -> Option<Quantum1dScenarioJson> {
+    let wave = world.quantum_1d()?;
+    Some(Quantum1dScenarioJson {
+        n: wave.psi.len(),
+        dx: wave.dx,
+        // レシピ側の波束パラメータは時間発展後の`psi`から逆算できない
+        // (分散したガウス波束はもはやガウス型とは限らない)。ゼロで埋める。
+        packet: GaussianPacketJson {
+            x0: 0.0,
+            sigma: 0.0,
+            k0: 0.0,
+        },
+        potential: None,
+        raw_state: Some(Quantum1dRawStateJson {
+            psi_re: wave.psi.iter().map(|c| c.re).collect(),
+            psi_im: wave.psi.iter().map(|c| c.im).collect(),
+            v: wave.v.clone(),
+            dx: wave.dx,
+        }),
+    })
+}
+
+fn export_quantum_2d(world: &World) -> Option<Quantum2dScenarioJson> {
+    let wave = world.quantum_2d()?;
+    Some(Quantum2dScenarioJson {
+        nx: wave.nx,
+        ny: wave.ny,
+        dx: wave.dx,
+        dy: wave.dy,
+        // 1D版と同じ理由でレシピ側の波束パラメータは逆算できない。
+        packet: GaussianPacket2dJson {
+            x0: 0.0,
+            y0: 0.0,
+            sigma_x: 0.0,
+            sigma_y: 0.0,
+            k0: 0.0,
+        },
+        double_slit: None,
+        raw_state: Some(Quantum2dRawStateJson {
+            psi_re: wave.psi.iter().map(|c| c.re).collect(),
+            psi_im: wave.psi.iter().map(|c| c.im).collect(),
+            v: wave.v.clone(),
+            nx: wave.nx,
+            ny: wave.ny,
+            dx: wave.dx,
+            dy: wave.dy,
+        }),
+    })
+}
+
+fn export_brownian(world: &World) -> Option<BrownianScenarioJson> {
+    let set = world.brownian()?;
+    Some(BrownianScenarioJson {
+        particle_count: set.position.len(),
+        mass: set.mass,
+        gamma: set.gamma,
+        kb_t: set.kb_t,
+        external_force: Some(vec3_to_array(set.external_force)),
+        // 拡散後の粒子群に「共通の初期位置」は存在しない。`raw_state`が真。
+        initial_position: None,
+        raw_state: Some(BrownianRawStateJson {
+            position: set.position.iter().copied().map(vec3_to_array).collect(),
+            velocity: set.velocity.iter().copied().map(vec3_to_array).collect(),
+            mass: set.mass,
+            gamma: set.gamma,
+            kb_t: set.kb_t,
+            external_force: vec3_to_array(set.external_force),
+        }),
+    })
+}
+
+fn export_kinetic_gas(world: &World) -> Option<KineticGasScenarioJson> {
+    let gas = world.kinetic_gas()?;
+    Some(KineticGasScenarioJson {
+        particle_count: gas.position.len(),
+        mass: gas.mass,
+        radius: gas.radius,
+        box_size: vec3_to_array(gas.box_size),
+        // レシピ側の`temperature`はマクスウェル分布のサンプリング温度。現在の
+        // 実測温度を書いておく(人が読むためのメタデータ、復元には使われない)。
+        temperature: gas.temperature(),
+        raw_state: Some(KineticGasRawStateJson {
+            position: gas.position.iter().copied().map(vec3_to_array).collect(),
+            velocity: gas.velocity.iter().copied().map(vec3_to_array).collect(),
+            mass: gas.mass,
+            radius: gas.radius,
+            box_size: vec3_to_array(gas.box_size),
+            collision_count: gas.collision_count,
+        }),
+    })
+}
+
+fn export_ising(world: &World) -> Option<IsingScenarioJson> {
+    let sim = world.ising()?;
+    Some(IsingScenarioJson {
+        l: sim.l,
+        j_coupling: sim.j_coupling,
+        temperature: sim.temperature,
+        updates_per_step: Some(sim.updates_per_step),
+        use_wolff: Some(sim.use_wolff),
+        raw_state: Some(IsingRawStateJson {
+            spins: sim.spins.clone(),
+            l: sim.l,
+            j_coupling: sim.j_coupling,
+            temperature: sim.temperature,
+            updates_per_step: sim.updates_per_step,
+            use_wolff: sim.use_wolff,
+        }),
+    })
+}
+
+fn export_fdtd(world: &World) -> Option<FdtdScenarioJson> {
+    let sim = world.fdtd()?;
+    Some(FdtdScenarioJson {
+        nx: sim.nx(),
+        ny: sim.ny(),
+        h: sim.h(),
+        courant: Some(sim.dt / sim.h()),
+        // レシピ側の`initial`は $E_z$ しか書けない(磁場が落ちる)。`raw_state`が真。
+        initial: None,
+        raw_state: Some(FdtdRawStateJson {
+            ez: sim.ez_raw().to_vec(),
+            hx: sim.hx_raw().to_vec(),
+            hy: sim.hy_raw().to_vec(),
+            dt: sim.dt,
+        }),
     })
 }
 
@@ -1039,5 +1413,393 @@ mod tests {
         let scenario = to_scenario(&world, "domains");
         let reloaded = World::from_scenario(&scenario).expect("round trip must parse back");
         assert_eq!(world.state_hash(), reloaded.state_hash());
+    }
+
+    // -----------------------------------------------------------------------
+    // **生状態スナップショット(`raw_state`)の往復テスト**(11ドメイン)。
+    //
+    // どのテストも「作った直後」ではなく **数十step回して時間発展させてから**
+    // エクスポートする——これがこの増分の要点で、$t=0$ の状態なら構築レシピでも
+    // 往復できてしまうため、レシピでは表せない状態になっていることを確かめないと
+    // 何もテストしていないことになる。
+    // -----------------------------------------------------------------------
+
+    fn empty_world() -> World {
+        World::new(WorldOptions {
+            gravity: 9.8,
+            dt: 1.0 / 120.0,
+            seed: 0,
+        })
+    }
+
+    /// 時間発展 → エクスポート → 再インポートで`state_hash`が
+    /// 「復元直後」と「双方をさらに`extra_steps`回したあと」の両方で一致することを
+    /// 確かめる共通手順。`steps`は事前に回す回数(時間発展させるため)。
+    fn assert_round_trip(mut world: World, steps: usize, extra_steps: usize, label: &str) {
+        for _ in 0..steps {
+            world.step();
+        }
+        let scenario = to_scenario(&world, label);
+        let mut reloaded = World::from_scenario(&scenario).expect("round trip must parse back");
+        assert_eq!(
+            world.state_hash(),
+            reloaded.state_hash(),
+            "{label}: state_hash must match immediately after reload"
+        );
+        for _ in 0..extra_steps {
+            world.step();
+            reloaded.step();
+        }
+        assert_eq!(
+            world.state_hash(),
+            reloaded.state_hash(),
+            "{label}: state_hash must still match after stepping both forward"
+        );
+    }
+
+    /// 乱数を消費するドメイン(ブラウン運動・イジング)用。`Scenario::seed`が常に0で
+    /// 書き出される既知の制限(モジュールdoc参照)により、**元の`World`は既にRNGを
+    /// 消費済み・復元後の`World`はストリーム先頭**という差が残るため、
+    /// 「復元直後の一致」と「復元経路自体の決定論(2回復元して同じだけ回したら一致)」
+    /// に分けて確かめる。
+    fn assert_round_trip_rng_domain(
+        mut world: World,
+        steps: usize,
+        extra_steps: usize,
+        label: &str,
+    ) {
+        for _ in 0..steps {
+            world.step();
+        }
+        let scenario = to_scenario(&world, label);
+        let mut a = World::from_scenario(&scenario).expect("round trip must parse back");
+        let mut b = World::from_scenario(&scenario).expect("round trip must parse back");
+        assert_eq!(
+            world.state_hash(),
+            a.state_hash(),
+            "{label}: state_hash must match immediately after reload"
+        );
+        for _ in 0..extra_steps {
+            a.step();
+            b.step();
+        }
+        assert_eq!(
+            a.state_hash(),
+            b.state_hash(),
+            "{label}: reload path must be deterministic when stepped forward"
+        );
+    }
+
+    #[test]
+    fn soft_body_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        // たるんだロープ(端点ピン留め)+ 曲げ拘束 + 体積拘束を持つ非自明な構成。
+        let mut body = sim_mechanics::rope(
+            Vec3::new(0.0, 5.0, 0.0),
+            Vec3::new(4.0, 5.0, 0.0),
+            8,
+            0.1,
+            5.0,
+            1e-8,
+        );
+        body.pin(0);
+        body.add_bending_constraint(0, 1, 2, 1e-4);
+        body.add_bending_constraint(3, 4, 5, 1e-4);
+        body.add_volume_constraint([0, 1, 2, 3], 1e-5);
+        body.damping = 0.7;
+        body.substeps = 3;
+        body.iterations = 4;
+        world.enable_soft_body(body);
+        assert_round_trip(world, 25, 20, "soft_body");
+    }
+
+    #[test]
+    fn grid_fluid_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let mut fluid = sim_fluid::GridFluid2D::new(16, 12, 0.05)
+            .with_boundary(sim_fluid::GridBoundary::Channel { inflow_speed: 1.0 });
+        fluid.kinematic_viscosity = 1e-4;
+        fluid.vorticity_confinement_epsilon = 0.3;
+        // 円柱障害物: `solids`(矩形/円の列挙)では書けても、時間発展後の
+        // セル種別配列を戻せるのは`raw_state`だけ。
+        fluid.set_solid_cells(|x, y| {
+            let (dx, dy) = (x - 0.2, y - 0.3);
+            (dx * dx + dy * dy < 0.06 * 0.06).then_some(Vec3::ZERO)
+        });
+        world.enable_grid_fluid(fluid);
+        assert_round_trip(world, 20, 15, "grid_fluid");
+    }
+
+    #[test]
+    fn grid_fluid_3d_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        // 3Dは1stepが重いので小さく取る(`GridFluid3DScenarioJson`のdoc参照)。
+        let mut fluid = sim_fluid::GridFluid3D::new(10, 8, 8, 0.1);
+        fluid.kinematic_viscosity = 1e-4;
+        for k in 0..8 {
+            for j in 0..8 {
+                for i in 0..10 {
+                    let idx = i + 10 * (j + 8 * k);
+                    fluid.u[idx] = 0.5 + 0.1 * (j as f64);
+                    fluid.v[idx] = 0.05 * (i as f64 - 5.0);
+                    if (2..5).contains(&i) && (2..5).contains(&j) {
+                        fluid.smoke_density[idx] = 1.0;
+                    }
+                }
+            }
+        }
+        fluid.set_solid_cells(|x, y, z| {
+            ((x - 0.5).abs() < 0.1 && (y - 0.4).abs() < 0.1 && (z - 0.4).abs() < 0.1)
+                .then_some(Vec3::ZERO)
+        });
+        world.enable_grid_fluid_3d(fluid);
+        assert_round_trip(world, 6, 5, "grid_fluid_3d");
+    }
+
+    #[test]
+    fn conduction_rod_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        // 材質プロファイル(群7の $k_i$ 可変・$\rho c_p$ つき)を与えた棒。
+        let mut rod = sim_thermal::ConductionRod1D::new(24, 0.5, 300.0, 1.1e-4);
+        rod.set_boundary_temperatures(500.0, 280.0);
+        let conductivity: Vec<f64> = (0..24).map(|i| 40.0 + 3.0 * i as f64).collect();
+        let rod = rod.with_material_profile(conductivity, 3.5e6, 2.5e-4);
+        world.enable_conduction_rod(rod);
+        assert_round_trip(world, 30, 20, "conduction_rod");
+    }
+
+    #[test]
+    fn sph_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let spacing = 0.05;
+        let mut fluid = sim_fluid::SphFluid::new(2.0 * spacing, 1000.0, 30.0);
+        fluid.mass = 1000.0 * spacing * spacing * spacing;
+        fluid.viscosity_alpha = 0.1;
+        for ix in 0..4 {
+            for iy in 0..4 {
+                for iz in 0..3 {
+                    fluid.add_particle(
+                        Vec3::new(
+                            0.1 + ix as f64 * spacing,
+                            0.3 + iy as f64 * spacing,
+                            0.1 + iz as f64 * spacing,
+                        ),
+                        Vec3::new(0.2, 0.0, 0.0),
+                    );
+                }
+            }
+        }
+        for ix in 0..8 {
+            for iz in 0..6 {
+                fluid.add_boundary_particle(Vec3::new(
+                    ix as f64 * spacing,
+                    0.0,
+                    iz as f64 * spacing,
+                ));
+            }
+        }
+        world.enable_sph(fluid);
+        assert_round_trip(world, 20, 15, "sph");
+    }
+
+    #[test]
+    fn quantum_1d_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let mut wave = sim_quantum::WaveFunction1D::new(128, 0.1);
+        wave.set_gaussian_wave_packet(4.0, 0.6, 5.0);
+        // 矩形障壁(D27相当)。
+        for i in 0..128 {
+            let x = i as f64 * 0.1;
+            if (7.0..7.6).contains(&x) {
+                wave.v[i] = 12.0;
+            }
+        }
+        world.enable_quantum_1d(wave);
+        assert_round_trip(world, 25, 20, "quantum_1d");
+    }
+
+    #[test]
+    fn quantum_2d_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let mut wave = sim_quantum::WaveFunction2D::new(32, 32, 0.2, 0.2);
+        wave.set_gaussian_wave_packet(1.5, 3.2, 0.5, 0.8, 4.0);
+        for iy in 0..32 {
+            let y = iy as f64 * 0.2;
+            if (y - 2.6).abs() <= 0.25 || (y - 3.8).abs() <= 0.25 {
+                continue;
+            }
+            for ix in 0..32 {
+                let x = ix as f64 * 0.2;
+                if (x - 3.0).abs() <= 0.2 {
+                    wave.v[iy * 32 + ix] = 60.0;
+                }
+            }
+        }
+        world.enable_quantum_2d(wave);
+        assert_round_trip(world, 15, 10, "quantum_2d");
+    }
+
+    #[test]
+    fn brownian_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let mut set = sim_statistical::BrownianParticleSet::new(1e-15, 1e-8, 4.11e-21);
+        set.external_force = Vec3::new(0.0, -1e-14, 0.0);
+        for i in 0..40 {
+            set.add_particle(Vec3::new(i as f64 * 1e-7, 0.0, 0.0), Vec3::ZERO);
+        }
+        world.enable_brownian(set);
+        assert_round_trip_rng_domain(world, 25, 20, "brownian");
+    }
+
+    #[test]
+    fn kinetic_gas_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let box_size = Vec3::new(1e-7, 1e-7, 1e-7);
+        let mut gas = sim_statistical::GasSim::new(4.65e-26, 1e-10, box_size);
+        let mut rng = sim_math::SimRng::new(7, 0x67617300);
+        for _ in 0..60 {
+            let position = Vec3::new(
+                1e-10 + rng.next_f64() * (1e-7 - 2e-10),
+                1e-10 + rng.next_f64() * (1e-7 - 2e-10),
+                1e-10 + rng.next_f64() * (1e-7 - 2e-10),
+            );
+            let sigma = (sim_statistical::BOLTZMANN_CONSTANT * 300.0 / 4.65e-26).sqrt();
+            gas.add_particle(position, rng.maxwell_boltzmann_velocity(sigma));
+        }
+        world.enable_kinetic_gas(gas);
+        assert_round_trip(world, 30, 20, "kinetic_gas");
+    }
+
+    #[test]
+    fn ising_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let mut rng = sim_math::SimRng::new(3, 0x6973696e);
+        let mut sim = sim_statistical::IsingSim::new(12, 1.0, 2.1, &mut rng);
+        sim.updates_per_step = 3;
+        world.enable_ising(sim);
+        assert_round_trip_rng_domain(world, 25, 20, "ising");
+    }
+
+    #[test]
+    fn fdtd_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let mut sim = sim_em::FdtdSim2D::new(24, 20, 0.02, 0.5);
+        for j in 1..19 {
+            for i in 1..23 {
+                let sx = (std::f64::consts::PI * i as f64 / 23.0).sin();
+                let sy = (2.0 * std::f64::consts::PI * j as f64 / 19.0).sin();
+                sim.set_ez(i, j, 1.5 * sx * sy);
+            }
+        }
+        world.enable_fdtd(sim);
+        // **磁場が復元されていることを実際に効かせるための30step**。`initial`
+        // (Ezしか書けない)経路だと、ここで必ずハッシュがずれる。
+        assert_round_trip(world, 30, 25, "fdtd");
+    }
+
+    /// FDTDの`raw_state`から磁場を落とすと往復が壊れることを、対照として固定する
+    /// (「Ezだけでは足りない」という`FdtdRawStateJson`のdocの主張の裏取り)。
+    #[test]
+    fn fdtd_round_trip_breaks_without_magnetic_field() {
+        let mut world = empty_world();
+        let mut sim = sim_em::FdtdSim2D::new(16, 16, 0.02, 0.5);
+        sim.set_ez(8, 8, 1.0);
+        world.enable_fdtd(sim);
+        for _ in 0..12 {
+            world.step();
+        }
+        let mut scenario = to_scenario(&world, "fdtd-no-h");
+        let raw = scenario.fdtd.as_mut().unwrap().raw_state.as_mut().unwrap();
+        let (hx_len, hy_len) = (raw.hx.len(), raw.hy.len());
+        raw.hx = vec![0.0; hx_len];
+        raw.hy = vec![0.0; hy_len];
+        let mut reloaded = World::from_scenario(&scenario).expect("must still parse");
+        let mut world = world;
+        world.step();
+        reloaded.step();
+        assert_ne!(
+            world.state_hash(),
+            reloaded.state_hash(),
+            "磁場を落とせば次のstepでずれるはず(落としていないから一致している、という\
+             取り違えを防ぐための対照)"
+        );
+    }
+
+    /// serde 往復(JSON文字列を経由)。**`psi`の実部・虚部の平行配列**と
+    /// **`solid_cells`のbool配列**という、`raw_state`で新たに入った2つの表現が
+    /// 文字列を通しても壊れないことを確かめる。
+    #[test]
+    fn json_round_trip_via_serde_preserves_raw_state_domains() {
+        let mut world = empty_world();
+        let mut wave = sim_quantum::WaveFunction1D::new(64, 0.15);
+        wave.set_gaussian_wave_packet(3.0, 0.7, 4.0);
+        world.enable_quantum_1d(wave);
+
+        let mut fluid = sim_fluid::GridFluid2D::new(12, 10, 0.05);
+        fluid.u.iter_mut().for_each(|x| *x = 0.8);
+        fluid.set_solid_cells(|x, y| {
+            ((x - 0.2).abs() < 0.06 && (y - 0.25).abs() < 0.06).then_some(Vec3::ZERO)
+        });
+        world.enable_grid_fluid(fluid);
+
+        let mut sim = sim_em::FdtdSim2D::new(16, 16, 0.02, 0.5);
+        sim.set_ez(8, 8, 1.0);
+        world.enable_fdtd(sim);
+
+        for _ in 0..15 {
+            world.step();
+        }
+        let scenario = to_scenario(&world, "serde-raw-state");
+        let json = serde_json::to_string(&scenario).expect("Scenario must serialize");
+        let parsed: Scenario = serde_json::from_str(&json).expect("Scenario must deserialize");
+        let mut reloaded = World::from_scenario(&parsed).expect("round trip must parse back");
+        assert_eq!(world.state_hash(), reloaded.state_hash());
+
+        let mut world = world;
+        for _ in 0..15 {
+            world.step();
+            reloaded.step();
+        }
+        assert_eq!(world.state_hash(), reloaded.state_hash());
+    }
+
+    /// **後方互換の担保**: `raw_state`を持たないシーンJSON(=既存の`scenes/*.json`と
+    /// 同じ形)が、これまでどおり構築レシピ経路で読めること。`#[serde(default)]`が
+    /// 効いていることの直接の確認でもある。
+    #[test]
+    fn scenes_without_raw_state_still_load_via_construction_recipe() {
+        let json = r#"{
+            "name": "recipe-only",
+            "world": { "gravity": 9.8, "dt": 0.008333333333333333 },
+            "sph": {
+                "h": 0.1, "rest_density": 1000.0, "sound_speed": 30.0,
+                "particle_mass": 0.125,
+                "blocks": [{ "min": [0.0, 0.0, 0.0], "counts": [2, 2, 2], "spacing": 0.05 }]
+            },
+            "ising": { "l": 4, "j_coupling": 1.0, "temperature": 2.0 },
+            "fdtd": {
+                "nx": 8, "ny": 8, "h": 0.02,
+                "initial": { "pulse": { "i": 4, "j": 4, "amplitude": 1.0, "width": 0.05 } }
+            },
+            "conduction_rod": {
+                "node_count": 8, "length": 0.4, "initial_temperature": 300.0,
+                "thermal_diffusivity": 1.0e-4
+            }
+        }"#;
+        let scenario: Scenario = serde_json::from_str(json).expect("既存形のJSONが読めること");
+        assert!(scenario.sph.as_ref().unwrap().raw_state.is_none());
+        assert!(scenario.ising.as_ref().unwrap().raw_state.is_none());
+        assert!(scenario.fdtd.as_ref().unwrap().raw_state.is_none());
+        assert!(scenario
+            .conduction_rod
+            .as_ref()
+            .unwrap()
+            .raw_state
+            .is_none());
+        let world = World::from_scenario(&scenario).expect("レシピ経路で構築できること");
+        assert_eq!(world.sph().unwrap().position.len(), 8);
+        assert_eq!(world.ising().unwrap().spins.len(), 16);
+        assert!(world.fdtd().unwrap().ez(4, 4) > 0.0);
+        assert_eq!(world.conduction_rod().unwrap().temperature.len(), 8);
     }
 }

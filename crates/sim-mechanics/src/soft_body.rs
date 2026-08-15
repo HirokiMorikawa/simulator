@@ -19,6 +19,22 @@ pub struct DistanceConstraint {
     lambda: f64,
 }
 
+impl DistanceConstraint {
+    /// 生値から拘束を1本組み立てる(**生状態スナップショット(`raw_state`)で追加**、
+    /// `sim_world::export::to_scenario`のdoc参照)。`lambda`は各サブステップ冒頭で
+    /// 0に戻される作業変数なので復元対象ではなく、常に0から始めてよい
+    /// (`SoftBody::step`の「`c.lambda = 0.0`」参照)。
+    pub fn new(i: usize, j: usize, rest: f64, compliance: f64) -> DistanceConstraint {
+        DistanceConstraint {
+            i,
+            j,
+            rest,
+            compliance,
+            lambda: 0.0,
+        }
+    }
+}
+
 /// **曲げ拘束(設計「曲げ拘束(布・ゼリー)」、群4で追加)**。
 ///
 /// 3粒子 `i`-`j`-`k` が作る角度を保つ。`j` が中央(蝶番)。
@@ -44,6 +60,23 @@ pub struct BendingConstraint {
     lambda: f64,
 }
 
+impl BendingConstraint {
+    /// 生値から曲げ拘束を組み立てる(`DistanceConstraint::new`と同じ理由、
+    /// **生状態スナップショット(`raw_state`)で追加**)。`add_bending_constraint`は
+    /// `rest`を現在の配置から採ってしまうため、時間発展後のスナップショットを
+    /// 復元する用途では使えない(基準長が今の形に書き換わってしまう)。
+    pub fn new(i: usize, j: usize, k: usize, rest: f64, compliance: f64) -> BendingConstraint {
+        BendingConstraint {
+            i,
+            j,
+            k,
+            rest,
+            compliance,
+            lambda: 0.0,
+        }
+    }
+}
+
 /// **体積拘束(設計「体積拘束(布・ゼリー)」、群4で追加)**。
 ///
 /// 4粒子が作る四面体の符号付き体積を保つ。ゼリーのような「押しても体積が
@@ -57,6 +90,20 @@ pub struct VolumeConstraint {
     pub rest_volume: f64,
     pub compliance: f64,
     lambda: f64,
+}
+
+impl VolumeConstraint {
+    /// 生値から体積拘束を組み立てる(`BendingConstraint::new`と同じ理由、
+    /// **生状態スナップショット(`raw_state`)で追加**)。`add_volume_constraint`は
+    /// `rest_volume`を現在の配置から採るため、復元用途では使えない。
+    pub fn new(particles: [usize; 4], rest_volume: f64, compliance: f64) -> VolumeConstraint {
+        VolumeConstraint {
+            particles,
+            rest_volume,
+            compliance,
+            lambda: 0.0,
+        }
+    }
 }
 
 /// 設計 §9 既定値(サブステップ優先: 反復より分割が精度に効く、Macklin et al. 2019)。

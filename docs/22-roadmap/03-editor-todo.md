@@ -32,16 +32,38 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   コード中に自己申告された「縮約」を機械集計する。実行結果: 385件
   (crates 267・docs 118)。
 - [x] `Scenario` に `Serialize` を実装する(55構造体すべて)
-- [ ] `World → Scenario` の逆写像を実装する(**一部完了**)
-  bodies/joints/couplings/fluids/thermal/circuit/probes を全ドメイン無損失で書き戻し、
-  手書きの `export_scene_json` を置き換える。`sim-world::export::to_scenario` として
-  world options・materials・bodies・joints(Distance/Ball/Slider/Wheel/HingeMotor)・
-  couplings(14種)・probes・thermal・circuit・astro・gas を実装済み(state_hashが
-  reload直後・stepping後の両方で一致することをテストで確認)。
-  残: `grid_fluid`/`soft_body`/`sph`/`quantum_1d`/`quantum_2d`/`brownian`/
-  `kinetic_gas`/`ising`/`fdtd` ——シーンJSON側が「構築レシピ」形式(波束の中心・
-  分散、SPH粒子を敷き詰める直方体ブロック等)で状態スナップショットを表現できない
-  ため、生値スナップショット形式のスキーマ拡張が別途要る。
+- [x] `World → Scenario` の逆写像を実装する(全ドメイン完了)
+  `sim-world::export::to_scenario` として world options・materials・bodies・
+  joints(Distance/Ball/Slider/Wheel/HingeMotor)・couplings(14種)・probes・
+  thermal・circuit・astro・gas を実装済み。**残っていた11ドメインを
+  「生状態スナップショット(`raw_state`)」で解消した**:
+  `soft_body`/`grid_fluid`/`grid_fluid_3d`/`conduction_rod`/`sph`/`quantum_1d`/
+  `quantum_2d`/`brownian`/`kinetic_gas`/`ising`/`fdtd`。
+  これらはシーンJSON側が「構築レシピ」形式(波束の中心・分散、SPH粒子を敷き詰める
+  直方体ブロック等)で、時間発展後の状態を表現できないのが原因だった。各
+  `*ScenarioJson` へ `#[serde(default)] raw_state: Option<...>` を1つ足し、
+  `Some`のときだけレシピを迂回して生値からドメインを直接組み立てる形にした——
+  **純粋に加算的**で、`raw_state`が無い既存の `scenes/*.json` はこれまでどおり
+  レシピ経路で読める(後方互換テスト
+  `scenes_without_raw_state_still_load_via_construction_recipe` で固定)。
+  併せて必要になった3点も入れた: ①物理コア側の最小の口
+  (`GridFluid2D`/`GridFluid3D` のセル種別・固体速度の getter と生値setter、
+  `FdtdSim2D` の `ez`/`hx`/`hy` の getter と生値setter、
+  XPBD拘束3種の生値コンストラクタ)②`Scenario::elapsed_steps`
+  (`state_hash` は先頭で時刻を混ぜるため、これが無いと時間発展後のシーンは
+  復元しても必ずハッシュがずれる。既定0なので既存シーンの挙動は不変)
+  ③`serde_json` の `float_roundtrip` 機能(既定のfloatパーサは best-effort で
+  **1 ULP ずれる**ことを実測。JSON文字列を経由する往復に必須)。
+  11ドメインそれぞれについて「数十step回して時間発展させてから」
+  export→reload して `state_hash` が復元直後・追加stepping後の両方で一致する
+  往復テストを追加(`crates/sim-world/src/export.rs`)。
+  残る正直な制限は3つで、いずれもモジュールdocに明記した:
+  `Scenario::seed` が常に0(既存)・`kinetic_gas` の圧力測定窓が復元時に
+  引き直される(`state_hash` には影響しない)・`fdtd` のPML分離場は復元されない
+  (シーンJSONにPMLを構成する口が無いためこの経路では到達しない)。
+  乱数を消費する `brownian`/`ising` は seed 制限の帰結として復元後に
+  乱数列が変わるため、往復テストは「復元直後の一致」と「復元経路自体の決定論」に
+  分けて検証している。
 - [x] 安定ID(世代付き)をwasm境界まで通す
   監査の結果、JS向けのindex自体(`self.bodies: Vec<SpawnedBodyMeta>`の位置)は
   削除でもシフトしないため署名としては既に安定していた。実際の欠陥は

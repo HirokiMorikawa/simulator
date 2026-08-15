@@ -160,6 +160,46 @@ impl GridFluid2D {
         }
     }
 
+    /// セル種別の生配列(長さ`nx*ny`、行優先 `i + nx*j`)。
+    /// **生状態スナップショット(`sim_world`の`raw_state`)のために公開する**——
+    /// `set_solid_cells`はセル中心を引数に取る閉包でしか固体を書けず、
+    /// 時間発展後の任意形状マスクを後から再現する手段が無かった
+    /// (閉包を「復元」することはできない)。`state_hash`はこの配列を含むため、
+    /// 読み書きの両方が要る。
+    pub fn cell_type(&self) -> &[CellType] {
+        &self.cell_type
+    }
+
+    /// Solidセルの速度の生配列(長さ`nx*ny`)。`cell_type`と対で使う。
+    pub fn solid_velocity(&self) -> &[Vec3] {
+        &self.solid_velocity
+    }
+
+    /// 固体境界の状態(単一矩形マスク・セル種別・固体速度)を生値のまま丸ごと入れ替える
+    /// (**生状態スナップショットのために追加**、`cell_type`のdoc参照)。
+    ///
+    /// `set_solid_box`は`solid`からセル種別を再ラスタライズしてしまうため、
+    /// 「`set_solid_cells`で任意形状を敷いた後の状態」をそのまま戻すことができない。
+    /// ここでは3つを独立に受け取り、一切の再計算をせずに書き込む。
+    ///
+    /// 長さが`nx*ny`と異なる配列は無視する(壊れたスナップショットで格子を
+    /// 壊さないための防御——呼び出し側の`sim_world::scenario`が長さを検証する)。
+    pub fn set_raw_solid_state(
+        &mut self,
+        solid: Option<GridSolidBox>,
+        cell_type: Vec<CellType>,
+        solid_velocity: Vec<Vec3>,
+    ) {
+        let n = self.nx * self.ny;
+        self.solid = solid;
+        if cell_type.len() == n {
+            self.cell_type = cell_type;
+        }
+        if solid_velocity.len() == n {
+            self.solid_velocity = solid_velocity;
+        }
+    }
+
     /// セル種別(読み取り)。範囲外は `Fluid` 扱い(周期境界では`wrap`される)。
     pub fn cell_type_at(&self, i: i64, j: i64) -> CellType {
         self.cell_type[self.idx(i, j)]
