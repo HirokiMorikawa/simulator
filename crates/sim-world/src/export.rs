@@ -52,12 +52,12 @@ use crate::scenario::{
     GasScenarioJson, GaussianPacket2dJson, GaussianPacketJson, GridBoundaryJson,
     GridFluid3DRawStateJson, GridFluid3DScenarioJson, GridFluidRawStateJson, GridFluidScenarioJson,
     GridSolidBoxJson, InductorJson, IsingRawStateJson, IsingScenarioJson, JointJson,
-    KineticGasRawStateJson, KineticGasScenarioJson, LiftModelJson, MaterialOverride, ProbeJson,
-    Quantum1dRawStateJson, Quantum1dScenarioJson, Quantum2dRawStateJson, Quantum2dScenarioJson,
-    RelativisticCorrectionJson, ResistorJson, Scenario, ShapeJson, SoftBendingConstraintJson,
-    SoftBodyRawStateJson, SoftBodyScenarioJson, SoftConstraintJson, SoftVolumeConstraintJson,
-    SphRawStateJson, SphScenarioJson, SwitchJson, ThermalLinkJson, ThermalNodeJson,
-    ThermalScenarioJson, VoltageSourceJson, WorldScenarioOptions,
+    KineticGasRawStateJson, KineticGasScenarioJson, LiftModelJson, MaterialOverride,
+    PhaseChangeOverrideJson, ProbeJson, Quantum1dRawStateJson, Quantum1dScenarioJson,
+    Quantum2dRawStateJson, Quantum2dScenarioJson, RelativisticCorrectionJson, ResistorJson,
+    Scenario, ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson, SoftBodyScenarioJson,
+    SoftConstraintJson, SoftVolumeConstraintJson, SphRawStateJson, SphScenarioJson, SwitchJson,
+    ThermalLinkJson, ThermalNodeJson, ThermalScenarioJson, VoltageSourceJson, WorldScenarioOptions,
 };
 
 /// この export セッション内で使う、生存ボディの決定的な名前
@@ -128,8 +128,21 @@ fn export_world_options(world: &World) -> WorldScenarioOptions {
     }
 }
 
-/// 生存ボディが使う材料を集め、標準DBの密度違い派生(`extends`)なら
-/// `MaterialOverride`として書き出す。戻り値は`(materials, MaterialId → 名前)`。
+/// 生存ボディが使う材料を集め、標準DBそのものでなければ`MaterialOverride`として
+/// 書き出す。戻り値は`(materials, MaterialId → 名前)`。
+///
+/// 書き出しは3通り: (1) 標準DBの材料そのもの → `materials`には出さず名前で参照、
+/// (2) 標準DBの密度違い派生 → `extends`+`density`(従来通りの簡潔な形)、
+/// (3) それ以外 → `extends`無しの全物性指定(**増分C9**)。
+/// (3)は以前は表現手段が無く名前だけを書き出していたため、読み直すと
+/// `SceneError::UnknownMaterial`になった。`MaterialOverride::extends`が
+/// `Option`になったことでこの穴が塞がり、往復が無損失になっている。
+///
+/// **既知の限界**: 標準DBと同名だが物性の異なる材料((2)(3)いずれの形でも
+/// `name`は元の名前のまま出る)を読み直すと、`MaterialDb::find_by_name`が
+/// 先に登録された標準材料のほうを引くため、ボディが標準材料に化ける。
+/// 名前の一意性はシーンJSONを書く側の責務であり、ここで勝手に改名すると
+/// `bodies[].material`の参照とプローブ名の対応が壊れるため踏み込まない。
 fn export_materials(
     world: &World,
     live_bodies: &[BodyId],
@@ -163,23 +176,72 @@ fn export_materials(
             .find(|(_, base)| materials_equal_except_density(base, m));
         match parent {
             Some((_, base)) => {
-                overrides.push(MaterialOverride {
-                    extends: base.name.to_string(),
-                    name: m.name.to_string(),
-                    density: Some(m.density),
-                });
+                overrides.push(density_derived_override(base, m));
             }
             None => {
-                // 標準DBのどれの派生でもない材料(理論上到達しない——
-                // `append_scenario_bodies`は`extends`経由でしか材料を追加しない)。
-                // フォールバックとして最初の標準材料からの全属性上書きは表現できないため、
-                // 名前だけそのまま書き出す(次のfrom_scenarioで`UnknownMaterial`に
-                // なりうるが、この状況自体が既存の縮約が破れていることを示す)。
+                // 標準DBのどれの派生でもない材料。**増分C9**で`materials[].extends`が
+                // 省略可能になったこと、および`MaterialDb::push`直叩きの経路により、
+                // これは実際に存在しうる状態になった。`extends`無しの全物性指定として
+                // 書き出す——`Material::blank()`の上へ全フィールドを載せ直す形なので、
+                // 標準表のどれにも似ていない材料でも往復で値が失われない
+                // (以前はここで名前だけを書き出し、次の`from_scenario`が
+                // `UnknownMaterial`になっていた)。
+                overrides.push(full_material_override(m));
             }
         }
         name_of.insert(mat_id, m.name.to_string());
     }
     (overrides, name_of)
+}
+
+/// 標準材料`base`の密度違い派生を、従来通りの簡潔な`extends`+`density`形で書き出す。
+///
+/// `source`/`uncertainty`は物理計算に効かないので`materials_equal_except_density`の
+/// 比較対象外だが、基底と食い違う場合だけは書き出す——`sim-wasm`の
+/// `derive_material`は派生材料に`source = "editor derived"`を立てるので、
+/// これを落とすとエディタで作った材料の出所が往復で消える。
+fn density_derived_override(base: &sim_core::Material, m: &sim_core::Material) -> MaterialOverride {
+    MaterialOverride {
+        extends: Some(base.name.to_string()),
+        name: m.name.to_string(),
+        density: Some(m.density),
+        source: (m.source != base.source).then(|| m.source.to_string()),
+        uncertainty: (m.uncertainty != base.uncertainty).then_some(m.uncertainty),
+        // 残る物性は基底と一致しているので上書きしない(`Default` = 全て未指定)。
+        ..MaterialOverride::default()
+    }
+}
+
+/// 標準DBのどれとも(密度以外でも)一致しない材料を、`extends`無しの全物性指定で
+/// 書き出す。読み直す側(`append_scenario_bodies`)の土台は`Material::blank()`だが、
+/// `Option`物性も含めて全フィールドを明示するので基底の値は一切透けない。
+///
+/// `youngs_modulus`/`resistivity`/`refractive_index`が`None`の材料は、そのまま
+/// `None`(JSONでは`null`)として書き出す——`blank()`側も同じく`None`なので、
+/// 「上書きしない」がそのまま「値を持たない」として復元される。
+fn full_material_override(m: &sim_core::Material) -> MaterialOverride {
+    MaterialOverride {
+        extends: None,
+        name: m.name.to_string(),
+        density: Some(m.density),
+        friction: Some(m.friction),
+        restitution: Some(m.restitution),
+        youngs_modulus: m.youngs_modulus,
+        specific_heat: Some(m.specific_heat),
+        conductivity: Some(m.conductivity),
+        emissivity: Some(m.emissivity),
+        melting: m.melting.map(|p| PhaseChangeOverrideJson {
+            melting_point: p.melting_point,
+            latent_heat_fusion: p.latent_heat_fusion,
+            boiling_point: p.boiling_point,
+            latent_heat_vaporization: p.latent_heat_vaporization,
+        }),
+        resistivity: m.resistivity,
+        relative_permittivity: Some(m.relative_permittivity),
+        refractive_index: m.refractive_index,
+        source: Some(m.source.to_string()),
+        uncertainty: Some(m.uncertainty),
+    }
 }
 
 fn db_material_of(world: &World, id: BodyId) -> sim_core::MaterialId {
@@ -1349,6 +1411,144 @@ mod tests {
             reloaded.state_hash(),
             "state_hash must still match after stepping (joint reference state preserved)"
         );
+    }
+
+    /// **増分C9の要**: 標準表のどれとも密度以外で異なる材料を持つ`World`が
+    /// 往復しても物性が失われないこと。以前は`export_materials`がこの材料を
+    /// 名前だけで書き出し、読み直すと`SceneError::UnknownMaterial`になっていた
+    /// (`export_materials`のdocが自ら挙げていた穴)。`extends`が省略可能に
+    /// なったことで`extends`無し+全物性指定として書き出せるようになった。
+    #[test]
+    fn material_unrelated_to_standard_db_round_trips_with_all_properties() {
+        let mut world = World::new(WorldOptions {
+            gravity: 9.8,
+            dt: 1.0 / 120.0,
+            seed: 0,
+        });
+        // 標準表のどれとも「密度以外が一致」しない材料を直接積む。
+        let exotic = sim_core::Material {
+            name: "架空合金",
+            density: 4321.0,
+            friction: 0.123,
+            restitution: 0.456,
+            youngs_modulus: Some(1.5e11),
+            specific_heat: 654.0,
+            conductivity: 77.7,
+            emissivity: 0.33,
+            melting: Some(sim_core::PhaseChangeProps {
+                melting_point: 1234.0,
+                latent_heat_fusion: 2.5e5,
+                boiling_point: 3210.0,
+                latent_heat_vaporization: 6.1e6,
+            }),
+            resistivity: Some(3.3e-7),
+            relative_permittivity: 4.25,
+            refractive_index: Some(2.75),
+            source: "架空(テスト専用)",
+            uncertainty: 0.42,
+        };
+        let mat = world.materials_mut().push(exotic.clone());
+        let mut desc = RigidBodyDesc::dynamic(sim_mechanics::Shape::Sphere { radius: 0.3 }, mat);
+        desc.transform.position = Vec3::new(0.0, 5.0, 0.0);
+        world.create_body(desc);
+
+        let scenario = to_scenario(&world, "exotic-material");
+        // 名前だけの書き逃げではなく、`extends`無しの全物性指定が出ていること。
+        assert_eq!(scenario.materials.len(), 1);
+        assert_eq!(scenario.materials[0].extends, None);
+        assert_eq!(scenario.materials[0].name, "架空合金");
+
+        // JSONを一度経由しても(serdeの`Option`の往復も含めて)復元できること。
+        let json = serde_json::to_string(&scenario).expect("Scenario must serialize");
+        let parsed: Scenario = serde_json::from_str(&json).expect("Scenario must deserialize");
+        let reloaded = World::from_scenario(&parsed).expect("round trip must parse back");
+
+        let id = reloaded
+            .materials()
+            .find_by_name("架空合金")
+            .expect("exotic material must be reconstructible from the scene JSON");
+        let back = reloaded.materials().get(id);
+        assert!(
+            materials_equal(&exotic, back),
+            "reloaded material must match the original exactly, got {back:?}"
+        );
+        // メタ(物理計算には効かないが往復の忠実性のために持つ)も一致すること。
+        assert_eq!(back.source, exotic.source);
+        assert_eq!(back.uncertainty, exotic.uncertainty);
+    }
+
+    /// 標準表の密度違い派生は従来通り簡潔な`extends`+`density`で書き出す
+    /// (増分C9で全物性を書けるようになっても、表現できるからといって常に
+    /// 全部書くわけではない——差分が密度だけならその形が最も読みやすい)。
+    #[test]
+    fn density_only_derivative_still_exports_as_extends_plus_density() {
+        let mut world = World::new(WorldOptions {
+            gravity: 9.8,
+            dt: 1.0 / 120.0,
+            seed: 0,
+        });
+        let pine = world.materials().find_by_name("木材(松)").unwrap();
+        let mut derived = world.materials().get(pine).clone();
+        derived.name = "light-wood";
+        derived.density = 400.0;
+        let mat = world.materials_mut().push(derived);
+        world.create_body(RigidBodyDesc::dynamic(
+            sim_mechanics::Shape::Sphere { radius: 0.3 },
+            mat,
+        ));
+
+        let scenario = to_scenario(&world, "derived-material");
+        assert_eq!(scenario.materials.len(), 1);
+        let over = &scenario.materials[0];
+        assert_eq!(over.extends.as_deref(), Some("木材(松)"));
+        assert_eq!(over.name, "light-wood");
+        assert_eq!(over.density, Some(400.0));
+        // 密度以外は基底と一致するので、上書きは書かれない。
+        assert_eq!(over.friction, None);
+        assert_eq!(over.conductivity, None);
+        assert_eq!(over.source, None);
+        assert_eq!(over.uncertainty, None);
+
+        let reloaded = World::from_scenario(&scenario).expect("round trip must parse back");
+        let id = reloaded.materials().find_by_name("light-wood").unwrap();
+        assert_eq!(reloaded.materials().get(id).density, 400.0);
+        assert_eq!(
+            reloaded.materials().get(id).conductivity,
+            world.materials().get(pine).conductivity
+        );
+    }
+
+    /// `sim-wasm`の`derive_material`が立てる`source = "editor derived"`のように、
+    /// 物理物性は基底と密度しか違わないがメタだけ食い違う材料でも、出所が
+    /// 往復で消えないこと(`density_derived_override`のdoc参照)。
+    #[test]
+    fn density_derivative_with_differing_source_keeps_it_through_the_round_trip() {
+        let mut world = World::new(WorldOptions {
+            gravity: 9.8,
+            dt: 1.0 / 120.0,
+            seed: 0,
+        });
+        let pine = world.materials().find_by_name("木材(松)").unwrap();
+        let mut derived = world.materials().get(pine).clone();
+        derived.name = "editor-wood";
+        derived.density = 333.0;
+        derived.source = "editor derived";
+        let mat = world.materials_mut().push(derived);
+        world.create_body(RigidBodyDesc::dynamic(
+            sim_mechanics::Shape::Sphere { radius: 0.3 },
+            mat,
+        ));
+
+        let scenario = to_scenario(&world, "editor-derived-material");
+        assert_eq!(
+            scenario.materials[0].source.as_deref(),
+            Some("editor derived")
+        );
+
+        let reloaded = World::from_scenario(&scenario).expect("round trip must parse back");
+        let id = reloaded.materials().find_by_name("editor-wood").unwrap();
+        assert_eq!(reloaded.materials().get(id).source, "editor derived");
+        assert_eq!(reloaded.materials().get(id).density, 333.0);
     }
 
     #[test]

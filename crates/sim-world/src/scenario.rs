@@ -290,14 +290,85 @@ pub struct AtmosphereJson {
     pub viscosity: f64,
 }
 
-/// 既存材料からの派生(設計§3「`extends`による材料派生」— 「密度だけ変えた木」等)。
-/// 現時点では`density`のみ上書き可能(他の物性の上書きは後続増分)。
-#[derive(Deserialize, Serialize)]
+/// シーンJSONの材料定義(設計§3「`extends`による材料派生」— 「密度だけ変えた木」等)。
+///
+/// **増分C9**: `extends`を`Option`に、上書き可能な物性を`density`だけから
+/// `Material`の全フィールドへ広げた。
+///
+/// **なぜ要ったか**: それ以前は`extends`が必須かつ`density`しか上書きできず、
+/// シーンJSONで書ける材料は「標準表のどれか、せいぜい密度違い」に限られていた。
+/// 結果として`World → Scenario`の逆写像(`export::export_materials`)には、
+/// 標準表のどの密度違い派生でもない材料を書き出せない穴が残り、そこへ落ちると
+/// 名前だけが出力されて次の`from_scenario`が`UnknownMaterial`になった。
+/// `extends`が省略可能になったこと**が**この穴を塞ぐ鍵で、標準表と無関係な
+/// 材料を`extends`無し+全物性指定として往復させられるようになった。
+///
+/// - `extends`あり: その材料を複製し、`Some`の物性だけを上書きする(従来通り)。
+/// - `extends`なし: `sim_core::Material::blank()`(中立な基底、そのdoc参照)の上へ
+///   `Some`の物性を載せる。**そのボディが使うドメインに効く物性は明示的に
+///   指定する必要がある**——`youngs_modulus`/`melting`/`resistivity`/
+///   `refractive_index`は`Material`側でも`Option`であり、未設定の物性を要する
+///   ドメインにはそのボディが参加しないだけ、という既存の規約に従う。
+///
+/// **既知の限界**: 上書きは「値を与える」方向のみで、基底が持つ`Option`物性を
+/// `None`へ戻すことはできない(JSONの`null`は「未指定」と区別されない)。
+/// 基底の値を消したい場合は`extends`を省いて全物性を書き下す。
+///
+/// `Default`(= 全フィールド未指定)は`export`側が「密度だけ違う派生」を組み立てる
+/// ときの土台に使う。
+#[derive(Default, Deserialize, Serialize)]
 pub struct MaterialOverride {
-    pub extends: String,
+    /// 派生元の材料名。省略すると`Material::blank()`が土台になる(型doc参照)。
+    #[serde(default)]
+    pub extends: Option<String>,
     pub name: String,
+    // 力学
     #[serde(default)]
     pub density: Option<f64>,
+    #[serde(default)]
+    pub friction: Option<f64>,
+    #[serde(default)]
+    pub restitution: Option<f64>,
+    #[serde(default)]
+    pub youngs_modulus: Option<f64>,
+    // 熱
+    #[serde(default)]
+    pub specific_heat: Option<f64>,
+    #[serde(default)]
+    pub conductivity: Option<f64>,
+    #[serde(default)]
+    pub emissivity: Option<f64>,
+    #[serde(default)]
+    pub melting: Option<PhaseChangeOverrideJson>,
+    // 電磁気
+    #[serde(default)]
+    pub resistivity: Option<f64>,
+    #[serde(default)]
+    pub relative_permittivity: Option<f64>,
+    #[serde(default)]
+    pub refractive_index: Option<f64>,
+    // メタ(物理計算には効かないが、出典・不確かさはUI表示と往復の忠実性のために持つ)
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub uncertainty: Option<f64>,
+}
+
+/// `MaterialOverride::melting`(`sim_core::PhaseChangeProps`の縮約表現、
+/// **増分C9で追加**)。`AtmosphereJson`等と同じく入れ子の`Option<構造体>`とし、
+/// 中の4値は必須にする——相変化は融点・凝固潜熱・沸点・気化潜熱が揃って
+/// 初めて意味を持ち、一部だけ指定して残りを0で埋めると**潜熱ゼロの相変化**という
+/// 物理的に無意味な状態が黙って作られるため。
+///
+/// **既知の限界**: よって`melting`は4値まとめての置き換えで、基底が持つ
+/// 相変化パラメータの一部だけを差し替えることはできない(標準表に
+/// `melting`を持つ材料は現状無いので実害は無い)。
+#[derive(Deserialize, Serialize)]
+pub struct PhaseChangeOverrideJson {
+    pub melting_point: f64,
+    pub latent_heat_fusion: f64,
+    pub boiling_point: f64,
+    pub latent_heat_vaporization: f64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1876,19 +1947,67 @@ impl World {
         scenario: &Scenario,
     ) -> Result<Vec<BodyId>, SceneError> {
         for over in &scenario.materials {
-            let base_id = self
-                .materials()
-                .find_by_name(&over.extends)
-                .ok_or_else(|| SceneError::UnknownBaseMaterial(over.extends.clone()))?;
-            let mut derived = self.materials().get(base_id).clone();
-            // `Material::name`は`&'static str`(既存の`MaterialDb::standard()`の
-            // コンパイル時定数群と型を揃えるため)。シーンJSON由来の動的な名前は
+            // `extends`があれば従来通りその材料の複製が土台、無ければ標準表から
+            // 独立した中立の基底(**増分C9**、`MaterialOverride`のdoc参照)。
+            let mut derived = match &over.extends {
+                Some(base_name) => {
+                    let base_id = self
+                        .materials()
+                        .find_by_name(base_name)
+                        .ok_or_else(|| SceneError::UnknownBaseMaterial(base_name.clone()))?;
+                    self.materials().get(base_id).clone()
+                }
+                None => sim_core::Material::blank(),
+            };
+            // `Material::name`/`source`は`&'static str`(既存の`MaterialDb::standard()`の
+            // コンパイル時定数群と型を揃えるため)。シーンJSON由来の動的な文字列は
             // `Box::leak`で`'static`化する — シーンロードは頻度の低い操作であり、
-            // リークするメモリは派生材料1件あたり名前文字列のみで無視できる規模
+            // リークするメモリは派生材料1件あたり名前(と出典)文字列のみで無視できる規模
             // (ホットパスでの繰り返し呼び出しは想定していない)。
             derived.name = Box::leak(over.name.clone().into_boxed_str());
             if let Some(density) = over.density {
                 derived.density = density;
+            }
+            if let Some(friction) = over.friction {
+                derived.friction = friction;
+            }
+            if let Some(restitution) = over.restitution {
+                derived.restitution = restitution;
+            }
+            if let Some(youngs_modulus) = over.youngs_modulus {
+                derived.youngs_modulus = Some(youngs_modulus);
+            }
+            if let Some(specific_heat) = over.specific_heat {
+                derived.specific_heat = specific_heat;
+            }
+            if let Some(conductivity) = over.conductivity {
+                derived.conductivity = conductivity;
+            }
+            if let Some(emissivity) = over.emissivity {
+                derived.emissivity = emissivity;
+            }
+            if let Some(melting) = &over.melting {
+                derived.melting = Some(sim_core::PhaseChangeProps {
+                    melting_point: melting.melting_point,
+                    latent_heat_fusion: melting.latent_heat_fusion,
+                    boiling_point: melting.boiling_point,
+                    latent_heat_vaporization: melting.latent_heat_vaporization,
+                });
+            }
+            if let Some(resistivity) = over.resistivity {
+                derived.resistivity = Some(resistivity);
+            }
+            if let Some(relative_permittivity) = over.relative_permittivity {
+                derived.relative_permittivity = relative_permittivity;
+            }
+            if let Some(refractive_index) = over.refractive_index {
+                derived.refractive_index = Some(refractive_index);
+            }
+            if let Some(source) = &over.source {
+                derived.source = Box::leak(source.clone().into_boxed_str());
+            }
+            if let Some(uncertainty) = over.uncertainty {
+                derived.uncertainty = uncertainty;
             }
             self.materials_mut().push(derived);
         }
@@ -3476,6 +3595,186 @@ mod tests {
         assert!(world.body_position(crate_id).unwrap().y < y0);
     }
 
+    /// **増分C9**: `extends`を省いた材料定義が、標準表から独立した材料として
+    /// 構築できること。指定した物性がそのまま入り、`Material::blank()`の既定値が
+    /// 透けないことを確認する(密度だけを変えた「標準材料の亜種」しか書けなかった
+    /// 従来の限界を外した本体)。
+    #[test]
+    fn material_without_extends_is_built_from_the_blank_baseline_with_every_field_applied() {
+        let json = r#"
+        {
+          "name": "standalone-material",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "materials": [
+            {
+              "name": "架空セラミック",
+              "density": 3210.0,
+              "friction": 0.37,
+              "restitution": 0.11,
+              "youngs_modulus": 3.5e11,
+              "specific_heat": 780.0,
+              "conductivity": 25.0,
+              "emissivity": 0.85,
+              "melting": {
+                "melting_point": 2100.0,
+                "latent_heat_fusion": 4.2e5,
+                "boiling_point": 3800.0,
+                "latent_heat_vaporization": 7.7e6
+              },
+              "resistivity": 1.0e9,
+              "relative_permittivity": 9.5,
+              "refractive_index": 1.76,
+              "source": "架空(テスト専用)",
+              "uncertainty": 0.42
+            }
+          ],
+          "bodies": [
+            { "shape": { "sphere": { "radius": 0.2 } }, "material": "架空セラミック",
+              "position": [0, 1, 0], "name": "ball" }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).expect("valid scene JSON");
+        let world = World::from_scenario(&scenario).expect("should build without a base material");
+
+        let id = world.materials().find_by_name("架空セラミック").unwrap();
+        let m = world.materials().get(id);
+        assert_eq!(m.density, 3210.0);
+        assert_eq!(m.friction, 0.37);
+        assert_eq!(m.restitution, 0.11);
+        assert_eq!(m.youngs_modulus, Some(3.5e11));
+        assert_eq!(m.specific_heat, 780.0);
+        assert_eq!(m.conductivity, 25.0);
+        assert_eq!(m.emissivity, 0.85);
+        assert_eq!(m.resistivity, Some(1.0e9));
+        assert_eq!(m.relative_permittivity, 9.5);
+        assert_eq!(m.refractive_index, Some(1.76));
+        assert_eq!(m.source, "架空(テスト専用)");
+        assert_eq!(m.uncertainty, 0.42);
+        let melting = m.melting.expect("nested melting override must be applied");
+        assert_eq!(melting.melting_point, 2100.0);
+        assert_eq!(melting.latent_heat_fusion, 4.2e5);
+        assert_eq!(melting.boiling_point, 3800.0);
+        assert_eq!(melting.latent_heat_vaporization, 7.7e6);
+
+        // 基底(`blank`)の既定値がどれも透けていないこと。
+        let blank = sim_core::Material::blank();
+        assert_ne!(m.density, blank.density);
+        assert_ne!(m.friction, blank.friction);
+        assert_ne!(m.emissivity, blank.emissivity);
+    }
+
+    /// `extends`を省いて一部の物性だけを指定した場合、残りは`Material::blank()`の
+    /// 中立値になること(**設定しなければそのドメインに参加しないだけ**という
+    /// `Material`既存の規約——`youngs_modulus`等が`None`のまま残る)。
+    #[test]
+    fn material_without_extends_falls_back_to_blank_for_unspecified_fields() {
+        let json = r#"
+        {
+          "name": "sparse-material",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "materials": [ { "name": "軽い何か", "density": 120.0 } ],
+          "bodies": [
+            { "shape": { "sphere": { "radius": 0.2 } }, "material": "軽い何か" }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).expect("valid scene JSON");
+        let world = World::from_scenario(&scenario).expect("should build");
+        let m = world
+            .materials()
+            .get(world.materials().find_by_name("軽い何か").unwrap());
+        let blank = sim_core::Material::blank();
+        assert_eq!(m.density, 120.0);
+        assert_eq!(m.friction, blank.friction);
+        assert_eq!(m.restitution, blank.restitution);
+        assert_eq!(m.specific_heat, blank.specific_heat);
+        assert_eq!(m.conductivity, blank.conductivity);
+        assert_eq!(m.emissivity, blank.emissivity);
+        assert_eq!(m.relative_permittivity, blank.relative_permittivity);
+        // 未指定の`Option`物性は`None`のまま——弾性/相変化/電磁気に黙って
+        // 参加させないための規約。
+        assert_eq!(m.youngs_modulus, None);
+        assert!(m.melting.is_none());
+        assert_eq!(m.resistivity, None);
+        assert_eq!(m.refractive_index, None);
+    }
+
+    /// `extends`があるときは従来通り、指定した物性だけが基底から差し替わること
+    /// (増分C9で密度以外も上書きできるようになったが、未指定の物性は基底のまま)。
+    #[test]
+    fn material_with_extends_overrides_only_the_specified_properties() {
+        let json = r#"
+        {
+          "name": "partial-override",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "materials": [
+            { "extends": "鋼(炭素鋼)", "name": "つるつる鋼",
+              "friction": 0.02, "emissivity": 0.15 }
+          ],
+          "bodies": [
+            { "shape": { "sphere": { "radius": 0.2 } }, "material": "つるつる鋼" }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).expect("valid scene JSON");
+        let world = World::from_scenario(&scenario).expect("should build");
+        let steel = world
+            .materials()
+            .get(world.materials().find_by_name("鋼(炭素鋼)").unwrap());
+        let steel_density = steel.density;
+        let steel_youngs = steel.youngs_modulus;
+        let m = world
+            .materials()
+            .get(world.materials().find_by_name("つるつる鋼").unwrap());
+        assert_eq!(m.friction, 0.02);
+        assert_eq!(m.emissivity, 0.15);
+        assert_eq!(m.density, steel_density);
+        assert_eq!(m.youngs_modulus, steel_youngs);
+    }
+
+    /// 後方互換のピン留め: 増分C9より前の形(`extends`+`density`だけ)の
+    /// シーンJSONが、`#[serde(default)]`だけで従来と同一に解釈され続けること。
+    /// `scenes/d6-floating-box-f4.json`が実際に使っている形をそのまま使う。
+    #[test]
+    fn pre_c9_extends_plus_density_only_material_json_still_parses_identically() {
+        let json = r#"
+        {
+          "name": "d6-floating-box-f4",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "materials": [ { "extends": "木材(松)", "name": "d6-density", "density": 598.92 } ],
+          "bodies": [
+            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "d6-density",
+              "position": [0, -0.1, 0], "name": "box" }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).expect("pre-C9 scene JSON must still parse");
+        assert_eq!(scenario.materials[0].extends.as_deref(), Some("木材(松)"));
+        assert_eq!(scenario.materials[0].density, Some(598.92));
+        assert_eq!(scenario.materials[0].friction, None);
+        assert!(scenario.materials[0].melting.is_none());
+
+        let world = World::from_scenario(&scenario).expect("should build");
+        let pine = world
+            .materials()
+            .get(world.materials().find_by_name("木材(松)").unwrap())
+            .clone();
+        let m = world
+            .materials()
+            .get(world.materials().find_by_name("d6-density").unwrap());
+        // 密度だけが差し替わり、他は基底(松)のまま = 増分C9以前と同じ挙動。
+        assert_eq!(m.density, 598.92);
+        assert_eq!(m.friction, pine.friction);
+        assert_eq!(m.restitution, pine.restitution);
+        assert_eq!(m.youngs_modulus, pine.youngs_modulus);
+        assert_eq!(m.specific_heat, pine.specific_heat);
+        assert_eq!(m.conductivity, pine.conductivity);
+        assert_eq!(m.emissivity, pine.emissivity);
+        assert_eq!(m.source, pine.source);
+        assert_eq!(m.uncertainty, pine.uncertainty);
+    }
+
     /// `World::append_scenario_bodies`(シーンJSON Importの土台、モジュールdoc参照)は
     /// 新規`World`を作らず、既に稼働中のワールド(既存ボディ・既存の重力/dt設定を
     /// 持つ)へシーンJSONの`bodies`を追加できることを確認する。既存ボディの位置は
@@ -3574,6 +3873,8 @@ mod tests {
     }
 
     /// `materials[].extends`が未知の材料名を指す場合は`SceneError::UnknownBaseMaterial`。
+    /// **増分C9で`extends`が`Option`になった後もこれは変わらない**——省略は
+    /// 「標準表から独立した材料」の意思表示だが、書いてあるのに引けないのは誤り。
     #[test]
     fn from_scenario_rejects_unknown_base_material() {
         let json = r#"

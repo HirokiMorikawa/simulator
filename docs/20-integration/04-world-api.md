@@ -100,6 +100,12 @@ pub struct Probe { pub target: ProbeTarget, pub history: RingBuffer<f64> }
 - validator: 参照整合(名前解決)、排他結合検査([01-coupling-matrix.md](01-coupling-matrix.md) §2.2)、
   単位・範囲の妥当性(負の質量等)をロード時に拒否し、位置つきエラーを返す。
 - `extends` による材料派生 = 「密度だけ変えた木」など検証遊びの基本操作。
+- **増分C9**: `extends` は省略可能で、上書きできるのは密度だけではない。
+  `materials[]` は `Material` の全物性(摩擦・反発・ヤング率・比熱・熱伝導率・
+  放射率・相変化 `melting`・電気抵抗率・比誘電率・屈折率、および出典/不確かさ)を
+  それぞれ独立に指定でき、`extends` を省くと標準物性表から完全に独立した材料になる
+  (土台は `sim_core::Material::blank()`)。これにより `World → Scenario` の逆写像も
+  標準表と無関係な材料を無損失に書き出せる(以前は名前だけが出て読み直せなかった)。
 
 ## 4. バージョニング
 

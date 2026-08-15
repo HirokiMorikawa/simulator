@@ -42,6 +42,47 @@ pub struct Material {
     pub uncertainty: f64,
 }
 
+impl Material {
+    /// 標準物性表(`MaterialDb::standard`)のどれにも依存しない中立な基底
+    /// (**増分C9で追加**)。
+    ///
+    /// **なぜ要ったか**: シーンJSONの`materials[]`は`extends`(標準表のどれかからの
+    /// 派生)を必須にしていたため、標準表のどれとも密度以外で異なる材料を
+    /// シーンJSONで表現する手段が無かった——書けるのは常に「どれかの標準材料、
+    /// せいぜい密度違い」だけだった。`extends`省略時の土台としてこの中立値を
+    /// 使うことで、標準表から完全に独立した材料を記述できるようになる。
+    ///
+    /// **値の根拠**: 特定の物質を指さない「無難な既定値」であり、文献値ではない。
+    /// 密度1000 kg/m³(水相当、桁を外さない基準)、摩擦0.5・反発0.3(硬すぎず
+    /// 柔らかすぎない中庸)、比熱1000 J/(kg·K)・熱伝導率1.0 W/(m·K)・放射率0.9
+    /// (いずれも身近な非金属固体の代表的な桁)。ヤング率・相変化・電気抵抗率・
+    /// 屈折率は`Option`のまま`None`にする——**物性を設定しなければそのドメインに
+    /// 参加しないだけ**という`Material`既存の規約に従うもので、勝手な既定値を
+    /// 与えて弾性/相変化/電磁気の計算へ黙って混ざるほうが危険なため。
+    /// 比誘電率だけは`Option`でないので真空相当の1.0とする。
+    ///
+    /// `uncertainty`は1.0(=100%)。文献に裏付けの無い値であることを、
+    /// 標準表の0.05〜0.3とはっきり区別できる大きさで表明する。
+    pub fn blank() -> Material {
+        Material {
+            name: "(blank)",
+            density: 1000.0,
+            friction: 0.5,
+            restitution: 0.3,
+            youngs_modulus: None,
+            specific_heat: 1000.0,
+            conductivity: 1.0,
+            emissivity: 0.9,
+            melting: None,
+            resistivity: None,
+            relative_permittivity: 1.0,
+            refractive_index: None,
+            source: "blank baseline (no literature source)",
+            uncertainty: 1.0,
+        }
+    }
+}
+
 /// 摩擦・反発のペア別上書き。実測値が知られる組(ゴム-アスファルト等)用
 /// (docs/10-mechanics/04-friction.md)。
 #[derive(Clone, Copy, Debug)]
