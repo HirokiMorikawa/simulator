@@ -49,6 +49,271 @@ const CIRCUIT_DIVIDER_NODE: usize = 2;
 /// (単一ノードのみのため常に0)。
 const THERMAL_HEATER_NODE: usize = 0;
 
+/// この境界crateの内部エラー型。**`JsValue`の構築を最外周(wasm-bindgenが
+/// exportする`pub fn`)1点だけに閉じ込めるために導入した**。
+///
+/// **なぜ要ったか(テスト不能性という実害)**: 以前は各`*_impl`が
+/// `Result<T, JsValue>`を直接返し、エラーは`JsValue::from_str(...)`で
+/// 組み立てていた。ところが`wasm_bindgen::JsValue`はネイティブ
+/// (非wasm32)ターゲットでは**値を構築した時点でプロセスごとabort(SIGABRT)
+/// する**——unwindするパニックではないため`#[should_panic]`でも
+/// `std::panic::catch_unwind`でも捕捉できず、`Result::is_err()`で受けても
+/// 手遅れ(`Err`の中身を作る段階で既に落ちている)。このcrateのテストは
+/// ほぼ全てネイティブの`#[cfg(test)] mod tests`で動くため、結果として
+/// **147か所あるエラー構築のどれ一つとして`Err`パスを検証できなかった**
+/// (本モジュール末尾のテストに「Errパスの検証にはwasm-bindgen-testが要る、
+/// よって対象外」という趣旨のコメントが繰り返し現れていたのはこのため)。
+///
+/// `WasmError`は素のRust型なのでネイティブで自由に構築・比較でき、
+/// `assert!(matches!(err, WasmError::BodyIndexOutOfRange { .. }))`のように
+/// **エラーの種別そのもの**を検証できる。文字列を両側で組み立てて
+/// 突き合わせる(同じ`format!`式が同じ文字列を作ることしか示さない)形を
+/// 避けるため、意図的に判別可能なenumにした。
+///
+/// **JS側から見た挙動は一切変わらない**: `Display`が出す文字列は、以前
+/// `JsValue::from_str`へ渡していたメッセージと1バイトも違わない。最外周の
+/// `pub fn`が`impl From<WasmError> for JsValue`(下記)を通して同じ
+/// `JsValue`文字列へ変換するため、wasm-bindgenがthrowするJS例外の中身も同じ。
+#[derive(Clone, Debug, PartialEq)]
+pub enum WasmError {
+    // --- シーンJSON経路(`sim_world::SceneError`をそのまま保持する) ---
+    // 以前はいずれも`format!("{e:?}")`で文字列へ潰していた。`SceneError`は
+    // `Clone + Debug + PartialEq`なので、そのまま持てば
+    // `matches!(err, WasmError::ScenarioParse(SceneError::UnknownMaterial(_)))`
+    // のような一段深い検証まで書ける(`Display`は従来どおり`{e:?}`を出す)。
+    /// `sim_world::Scenario::from_json`の失敗。
+    ScenarioParse(sim_world::SceneError),
+    /// `World::from_scenario_with_body_ids`の失敗。
+    WorldBuild(sim_world::SceneError),
+    /// `World::append_scenario_bodies`の失敗(`import_scene_json`経路)。
+    AppendScenarioBodies(sim_world::SceneError),
+    /// `World::add_scenario_probes`の失敗。
+    ScenarioProbes(sim_world::SceneError),
+    /// `sim_world::run_headless_scenario`の失敗(検証パネル経路)。
+    HeadlessRun(sim_world::SceneError),
+
+    // --- serde_jsonのシリアライズ失敗(`serde_json::Error`は`PartialEq`を
+    // 持たないため、`Display`済みの文字列で保持する) ---
+    /// `body_shape_json_at`のシリアライズ失敗。
+    ShapeSerializeFailed(String),
+    /// `export_scene_json`/`bookmark_export_scene_json`のシリアライズ失敗。
+    ScenarioSerializeFailed(String),
+    /// `run_headless_scenario_json`の結果シリアライズ失敗。
+    HeadlessResultSerializeFailed(String),
+
+    // --- index範囲外(いずれも「JS側から渡ってくる値」であり、生indexアクセスに
+    // 使う前に必ずここで弾く。`try_body_id_at`のdoc参照) ---
+    /// `try_body_id_at`——`self.bodies`の範囲外。
+    BodyIndexOutOfRange { index: usize, count: usize },
+    /// `try_body_meta_at`——同じく範囲外だが、**メッセージに件数を含めない**
+    /// 従来の文面をそのまま保つため`BodyIndexOutOfRange`とは別変種にした。
+    BodyMetaIndexOutOfRange { index: usize },
+    /// 範囲内だが`World`側で既に死んでいる(削除済み、または巻き戻した
+    /// スナップショットより後に作られた)`BodyId`を指している。
+    BodyNoLongerExists { index: usize },
+    /// `try_imported_probe_handle_at`——`imported_probe_handles`の範囲外。
+    ImportedProbeIndexOutOfRange { index: usize, count: usize },
+    /// `try_imported_probe_at`——handleに対応する`World::probe`が無い
+    /// (World側にprobe削除経路が無いため、実際には到達しない想定)。
+    ImportedProbeHandleMissing { handle: usize },
+    /// `circuit_element_label_at`——回路素子の通し番号が範囲外。
+    CircuitElementIndexOutOfRange { index: usize, count: usize },
+    /// `try_thermal_node_index`——熱ノードindexが範囲外(熱ドメイン自体が
+    /// 無効なら`count==0`になり、同じ変種で表される)。
+    ThermalNodeIndexOutOfRange { index: usize, count: usize },
+    /// `try_voltage_source_index`——電圧源indexが範囲外(回路ドメインが
+    /// 無効なら`count==0`)。
+    VoltageSourceIndexOutOfRange { index: usize, count: usize },
+    /// `check_frame_index`——フレームindexが範囲外。
+    FrameIndexOutOfRange { index: usize, count: usize },
+    /// `try_snapshot_at`/`restore_snapshot`——スナップショットindexが範囲外。
+    SnapshotIndexOutOfRange { index: usize, count: usize },
+    /// `try_bookmark_at`/`restore_bookmark`——ブックマークindexが範囲外。
+    BookmarkIndexOutOfRange { index: usize, count: usize },
+
+    // --- 材質 ---
+    /// `MaterialDb::find_by_name`が引けなかった材質名。
+    UnknownMaterial(String),
+    /// `derive_material`——派生先の名前が既に存在する。
+    MaterialAlreadyExists(String),
+
+    // --- ドメインが有効でない(適用対象が無い) ---
+    /// 回路ドメインが無効(`circuit_element_label_at`)。
+    CircuitDomainNotEnabled,
+    /// SPH流体ドメインが無効(`add_sph_rigid_coupling`)。
+    SphDomainNotEnabled,
+    /// 格子流体ドメインが無効(`add_grid_fluid_rigid_coupling`/
+    /// `add_boussinesq_buoyancy_coupling`)。
+    GridFluidDomainNotEnabled,
+    /// 気体区画が無効(`add_piston_gas_coupling`)。
+    GasCompartmentNotEnabled,
+
+    // --- 値そのものが不正 ---
+    /// `set_dt`——dtが正の有限値でない。
+    InvalidDt,
+    /// `derive_material`——密度が正の有限値でない。
+    InvalidDensity,
+    /// `push_set_body_mass`——質量が正の有限値でない。
+    InvalidMass,
+    /// `set_body_scale_xyz_at`——スケール成分が正の有限値でない。
+    InvalidScaleComponent,
+    /// `push_set_body_type`——Dynamic/Static/Kinematic以外の名前。
+    UnknownBodyType(String),
+
+    // --- 対象に対してその操作が成り立たない ---
+    /// 床(index 0)は削除できない。
+    CannotRemoveFloor,
+    /// 削除済みボディは複製できない(位置が引けない)。
+    CannotDuplicateRemovedBody,
+    /// `set_motor_target_at`——そのボディはヒンジモーターを持たない。
+    BodyHasNoHingeMotor { index: usize },
+    /// 床(index 0)にスケールハンドルは無い(`set_body_scale_at`系)。
+    GroundHasNoScaleHandle,
+
+    // --- `apply_component`/`read_component`のディスパッチ ---
+    /// `apply_component`のpayloadがJSONとして読めない。
+    ApplyComponentInvalidJson(String),
+    /// `apply_component`が知らないkind名。
+    UnknownApplyComponentKind(String),
+    /// `read_component`が知らないkind名。
+    UnknownReadComponentKind(String),
+}
+
+/// **ここで出す文字列は、以前`JsValue::from_str`へ渡していたものと
+/// 1バイトも違わない**(`WasmError`のdoc「JS側から見た挙動は一切変わらない」)。
+/// 文面を整えたくなっても変えてはいけない——フロントエンドがメッセージを
+/// そのままConsoleパネルへ出しており、リファクタで表示が変わるのは
+/// 「振る舞いを変えない」という本改修の前提に反する。
+impl std::fmt::Display for WasmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // シーンJSON経路は従来どおり`SceneError`のDebug表現をそのまま出す
+            // (`format!("{e:?}")`を`JsValue::from_str`へ渡していた形と同じ)。
+            WasmError::ScenarioParse(e)
+            | WasmError::WorldBuild(e)
+            | WasmError::AppendScenarioBodies(e)
+            | WasmError::ScenarioProbes(e)
+            | WasmError::HeadlessRun(e) => write!(f, "{e:?}"),
+
+            WasmError::ShapeSerializeFailed(e) => write!(f, "failed to serialize shape: {e}"),
+            WasmError::ScenarioSerializeFailed(e) => write!(f, "failed to serialize scenario: {e}"),
+            WasmError::HeadlessResultSerializeFailed(e) => {
+                write!(f, "failed to serialize result: {e}")
+            }
+
+            WasmError::BodyIndexOutOfRange { index, count } => {
+                write!(f, "body index {index} out of range (body_count={count})")
+            }
+            WasmError::BodyMetaIndexOutOfRange { index } => {
+                write!(f, "body index {index} out of range")
+            }
+            WasmError::BodyNoLongerExists { index } => write!(
+                f,
+                "body index {index} no longer exists in the current World state \
+                 (removed, or created after the currently restored Timeline snapshot)"
+            ),
+            WasmError::ImportedProbeIndexOutOfRange { index, count } => write!(
+                f,
+                "imported probe index {index} out of range (imported_probe_count={count})"
+            ),
+            WasmError::ImportedProbeHandleMissing { handle } => write!(
+                f,
+                "imported probe handle {handle} has no matching World::probe (World-side removal is not implemented, this should not happen)"
+            ),
+            WasmError::CircuitElementIndexOutOfRange { index, count } => write!(
+                f,
+                "circuit element index {index} out of range (circuit_element_count={count})"
+            ),
+            WasmError::ThermalNodeIndexOutOfRange { index, count } => write!(
+                f,
+                "thermal node index {index} out of range (thermal node count={count}, \
+                 is the thermal domain enabled in this scene?)"
+            ),
+            WasmError::VoltageSourceIndexOutOfRange { index, count } => write!(
+                f,
+                "voltage source index {index} out of range (voltage source count={count}, \
+                 is the circuit domain enabled in this scene?)"
+            ),
+            WasmError::FrameIndexOutOfRange { index, count } => {
+                write!(f, "frame index {index} out of range (frame_count={count})")
+            }
+            WasmError::SnapshotIndexOutOfRange { index, count } => write!(
+                f,
+                "snapshot index {index} out of range (snapshot_count={count})"
+            ),
+            WasmError::BookmarkIndexOutOfRange { index, count } => write!(
+                f,
+                "bookmark index {index} out of range (bookmark_count={count})"
+            ),
+
+            WasmError::UnknownMaterial(name) => write!(f, "unknown material: {name}"),
+            WasmError::MaterialAlreadyExists(name) => write!(f, "material already exists: {name}"),
+
+            WasmError::CircuitDomainNotEnabled => {
+                write!(f, "circuit domain is not enabled in the current world")
+            }
+            WasmError::SphDomainNotEnabled => write!(
+                f,
+                "SPH fluid domain is not enabled (spawn a fluid block first via \"+ 流体\")"
+            ),
+            WasmError::GridFluidDomainNotEnabled => write!(
+                f,
+                "grid fluid domain is not enabled (call enable_grid_fluid_2d_domain first)"
+            ),
+            WasmError::GasCompartmentNotEnabled => write!(
+                f,
+                "gas compartment is not enabled (call enable_gas_compartment first)"
+            ),
+
+            WasmError::InvalidDt => write!(f, "dt must be a positive finite number"),
+            WasmError::InvalidDensity => write!(f, "density must be a positive finite number"),
+            WasmError::InvalidMass => write!(f, "mass must be a positive finite number"),
+            WasmError::InvalidScaleComponent => write!(f, "scale components must be positive"),
+            // `{kind:?}`(引用符付き)は旧実装の`{other:?}`——`other`は`&str`
+            // だった——と同じ出力になる(`String`のDebugは`str`のDebugと同一)。
+            WasmError::UnknownBodyType(kind) => write!(
+                f,
+                "unknown body type {kind:?} (expected Dynamic/Static/Kinematic)"
+            ),
+
+            WasmError::CannotRemoveFloor => write!(f, "床は削除できません(シーンの基準面)"),
+            WasmError::CannotDuplicateRemovedBody => write!(f, "cannot duplicate a removed body"),
+            WasmError::BodyHasNoHingeMotor { index } => {
+                write!(f, "body index {index} has no hinge motor")
+            }
+            WasmError::GroundHasNoScaleHandle => {
+                write!(f, "Ground is static and has no scale handle")
+            }
+
+            WasmError::ApplyComponentInvalidJson(e) => {
+                write!(f, "apply_component: invalid JSON payload: {e}")
+            }
+            WasmError::UnknownApplyComponentKind(kind) => {
+                write!(f, "apply_component: unknown kind \"{kind}\"")
+            }
+            WasmError::UnknownReadComponentKind(kind) => {
+                write!(f, "read_component: unknown kind \"{kind}\"")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WasmError {}
+
+/// **`JsValue`を作ってよい唯一の場所**。wasm-bindgenがexportする`pub fn`が
+/// `?`もしくは`.map_err(JsValue::from)`でこれを通す——それ以外の場所で
+/// `JsValue::from_str`を呼ぶと、`WasmError`のdocが述べたネイティブテスト
+/// 不能性が再発する。
+///
+/// 変換後の`JsValue`は従来と同じ「メッセージ文字列そのもの」で、
+/// wasm-bindgenはこれを通常の(捕捉可能な)JS例外としてthrowする
+/// ——TypeScript側の呼び出し規約は`try_body_id_at`のdocが述べたまま変わらない。
+impl From<WasmError> for JsValue {
+    fn from(e: WasmError) -> JsValue {
+        JsValue::from_str(&e.to_string())
+    }
+}
+
 /// スポーンパレット(設計docs/23-frontend/01-editor.md §6「形状×材質を選んで
 /// クリック配置」)で追加したボディの記録。Shapeは`World::mechanics().bodies.
 /// shape_of`で実クエリできるが(`body_shape_label_at`参照)、Materialは`World`が
@@ -250,11 +515,18 @@ impl WasmWorld {
     /// 無くても何も失われない。したがって「先頭ボディが無ければ登録しない」
     /// (`Option::None`)という設計にした——既定シーン(`WasmWorld::new`)は
     /// 常に箱を持つため挙動は変わらない。
+    ///
+    /// wasm-bindgenへ露出する薄い殻——実体は`from_scene_json_impl`側にあり、
+    /// ここは`WasmError`を`JsValue`へ移すだけ(`WasmError`のdoc参照)。
     pub fn from_scene_json(json: String) -> Result<WasmWorld, JsValue> {
-        let scenario = sim_world::Scenario::from_json(&json)
-            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
-        let (mut inner, ids) = World::from_scenario_with_body_ids(&scenario)
-            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+        Self::from_scene_json_impl(&json).map_err(JsValue::from)
+    }
+
+    /// `from_scene_json`の実体(ネイティブテスト可能な`Result<_, WasmError>`版)。
+    fn from_scene_json_impl(json: &str) -> Result<WasmWorld, WasmError> {
+        let scenario = sim_world::Scenario::from_json(json).map_err(WasmError::ScenarioParse)?;
+        let (mut inner, ids) =
+            World::from_scenario_with_body_ids(&scenario).map_err(WasmError::WorldBuild)?;
         let (y_probe, speed_probe) = match ids.first() {
             Some(&first_id) => (
                 Some(inner.add_probe(ProbeTarget::BodyPosY(first_id), PROBE_HISTORY_CAPACITY)),
@@ -271,7 +543,7 @@ impl WasmWorld {
         }
         let imported_probe_handles = inner
             .add_scenario_probes(&scenario, &body_ids_by_name)
-            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+            .map_err(WasmError::ScenarioProbes)?;
 
         let bodies = scenario
             .bodies
@@ -314,13 +586,14 @@ impl WasmWorld {
         self.bodies.len()
     }
 
-    /// `index`をボディIDへ解決する。範囲外なら`JsValue`(メッセージ文字列)を返す
+    /// `index`をボディIDへ解決する。範囲外なら`WasmError`を返す
     /// (**2026-07-27の監査で修正**: 以前は`panic!`していたが、この`index`は
     /// JS側から渡される値でありシーン再読み込み後の古い参照や単純な入力ミスで
     /// 容易に範囲外になり得る。wasmの`panic`はモジュール全体を使用不能にする
     /// ため——`console_error_panic_hook`を導入していない現状では捕捉不能な
     /// wasmトラップとしてJSに伝わり、以後同じ`WasmWorld`インスタンスへの呼び出しが
-    /// 全て失敗し得る——`Result`によるエラー返却へ置き換えた。wasm-bindgenは
+    /// 全て失敗し得る——`Result`によるエラー返却へ置き換えた。最外周の`pub fn`が
+    /// `WasmError`を`JsValue`へ変換し、wasm-bindgenは
     /// `Result<T, JsValue>`を返すexport関数を、成功時は`T`をそのまま返し失敗時は
     /// 通常の(捕捉可能な)JS例外をthrowする形にバインドするため、TypeScript側の
     /// 呼び出し規約は変わらない)。
@@ -339,33 +612,30 @@ impl WasmWorld {
     /// 同じ理由でここに引っかかる——`removed`フラグと意味的に一致する)。
     /// `World::is_body_alive`(`is_valid`の公開版)で確認し、生存していなければ
     /// このまま範囲外と同じ`Err`にする。
-    fn try_body_id_at(&self, index: usize) -> Result<BodyId, JsValue> {
+    fn try_body_id_at(&self, index: usize) -> Result<BodyId, WasmError> {
         let id = self.bodies.get(index).map(|meta| meta.id).ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "body index {index} out of range (body_count={})",
-                self.body_count_impl()
-            ))
+            WasmError::BodyIndexOutOfRange {
+                index,
+                count: self.body_count_impl(),
+            }
         })?;
         if !self.inner.is_body_alive(id) {
-            return Err(JsValue::from_str(&format!(
-                "body index {index} no longer exists in the current World state \
-                 (removed, or created after the currently restored Timeline snapshot)"
-            )));
+            return Err(WasmError::BodyNoLongerExists { index });
         }
         Ok(id)
     }
 
-    /// `index`が範囲外なら`JsValue`エラーを返す`self.bodies[index]`の
+    /// `index`が範囲外なら`WasmError`を返す`self.bodies[index]`の
     /// フォールブル版(`try_body_id_at`と同じ理由でResult化、共通ヘルパとして
     /// 切り出した)。
-    fn try_body_meta_at(&self, index: usize) -> Result<&SpawnedBodyMeta, JsValue> {
+    fn try_body_meta_at(&self, index: usize) -> Result<&SpawnedBodyMeta, WasmError> {
         self.bodies
             .get(index)
-            .ok_or_else(|| JsValue::from_str(&format!("body index {index} out of range")))
+            .ok_or(WasmError::BodyMetaIndexOutOfRange { index })
     }
 
     /// Hierarchyパネル表示用のラベル。
-    fn body_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn body_label_at_impl(&self, index: usize) -> Result<String, WasmError> {
         Ok(self.try_body_meta_at(index)?.label.clone())
     }
 
@@ -376,7 +646,7 @@ impl WasmWorld {
     /// (`import_scene_json`)で任意のindexに静的ボディが追加され得るようになった
     /// ため、実際の`BodyType`を見るクエリに置き換えた——`body_shape_label_at`が
     /// 既に辿った同じ理由)。
-    fn body_is_static_at_impl(&self, index: usize) -> Result<bool, JsValue> {
+    fn body_is_static_at_impl(&self, index: usize) -> Result<bool, WasmError> {
         let id = self.try_body_id_at(index)?;
         Ok(matches!(
             self.inner.mechanics().bodies.body_type[id.index as usize],
@@ -389,7 +659,7 @@ impl WasmWorld {
     /// フォーマットする(以前は`SpawnedBodyMeta`にスポーン時の文字列を固定で
     /// 覚えておく縮約実装だったが、Scale Gizmoで寸法が変わりうるようになった
     /// ため、常に最新の値を返す実クエリに置き換えた)。
-    fn body_shape_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn body_shape_label_at_impl(&self, index: usize) -> Result<String, WasmError> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.shape_of(id.index as usize) {
@@ -419,7 +689,7 @@ impl WasmWorld {
     /// "capsule"を返さない実バグがあった(フロント`duplicate()`の
     /// `kind === "capsule"`分岐が到達不能だった)。Compound/ConvexMeshの
     /// UI作成経路を追加するのと合わせ、6種すべてを網羅する完全一致へ修正。
-    fn body_shape_kind_at_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn body_shape_kind_at_impl(&self, index: usize) -> Result<String, WasmError> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.shape_of(id.index as usize) {
@@ -437,22 +707,28 @@ impl WasmWorld {
     /// box→`[hx,hy,hz]`、capsule→`[radius,half_height]`、
     /// plane→`[nx,ny,nz,d]`、compound/convex_mesh→空配列(可変長構造は
     /// 平坦なf64配列で表現できないため——Prefab保存も両形状は対象外のまま)。
-    fn body_shape_params_f64_at_impl(&self, index: usize) -> Result<Float64Array, JsValue> {
+    ///
+    /// **`Vec<f64>`を返す(以前は`Float64Array`だった)**: 唯一の呼び出し元である
+    /// `read_component`は受け取った`Float64Array`を直後に`.to_vec()`で戻して
+    /// JSONへ流し込んでいた——JS側へ型付き配列として渡る経路はどこにも無く、
+    /// 往復は純粋な無駄だった。加えて`Float64Array`はネイティブターゲットで
+    /// 構築できないため、この往復が`read_component`の成功パスまで
+    /// ネイティブテスト不能にしていた(`WasmError`のdoc参照)。JSから見た
+    /// `read_component`の戻り値(JSON配列文字列)は変わらない。
+    fn body_shape_params_f64_at_impl(&self, index: usize) -> Result<Vec<f64>, WasmError> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.shape_of(id.index as usize) {
-                Shape::Sphere { radius } => Float64Array::from(&[*radius][..]),
+                Shape::Sphere { radius } => vec![*radius],
                 Shape::Box { half_extents } => {
-                    Float64Array::from(&[half_extents.x, half_extents.y, half_extents.z][..])
+                    vec![half_extents.x, half_extents.y, half_extents.z]
                 }
                 Shape::Capsule {
                     radius,
                     half_height,
-                } => Float64Array::from(&[*radius, *half_height][..]),
-                Shape::Plane { normal, d } => {
-                    Float64Array::from(&[normal.x, normal.y, normal.z, *d][..])
-                }
-                Shape::Compound { .. } | Shape::ConvexMesh { .. } => Float64Array::from(&[][..]),
+                } => vec![*radius, *half_height],
+                Shape::Plane { normal, d } => vec![normal.x, normal.y, normal.z, *d],
+                Shape::Compound { .. } | Shape::ConvexMesh { .. } => Vec::new(),
             },
         )
     }
@@ -465,47 +741,48 @@ impl WasmWorld {
     /// 決め打ちする」縮約をせず、複製後の実際の形状からメッシュを
     /// 再構築できるようにする(シーンJSON importと同じ`meshFromShapeJson`
     /// を再利用できる形で返す)。
-    fn body_shape_json_at_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn body_shape_json_at_impl(&self, index: usize) -> Result<String, WasmError> {
         let id = self.try_body_id_at(index)?;
         let shape = self.inner.mechanics().bodies.shape_of(id.index as usize);
         let shape_json = sim_world::shape_to_shape_json(shape);
         serde_json::to_string(&shape_json)
-            .map_err(|e| JsValue::from_str(&format!("failed to serialize shape: {e}")))
+            .map_err(|e| WasmError::ShapeSerializeFailed(e.to_string()))
     }
 
     /// Inspector表示用の材質名。
-    fn body_material_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn body_material_label_at_impl(&self, index: usize) -> Result<String, WasmError> {
         Ok(self.try_body_meta_at(index)?.material_label.clone())
     }
 
     /// Projectドロワー Materials タブ(設計docs/23-frontend/01-editor.md §1.6
     /// 「Materials: MaterialDbプリセット一覧」)向けに、指定した材質名の主要物性値を
     /// `[density, friction, restitution, specific_heat, conductivity]`の順で返す。
-    /// 未知の名前なら`JsValue`エラーを返す(呼び出し側UIが`SPAWN_MATERIALS`等の
-    /// 既知の名前だけを渡す前提だが、**2026-07-27の監査で修正**: 以前は
-    /// `panic!`していた——`try_body_id_at`のdocと同じ理由でResult化した)。
-    fn material_properties_f64_impl(&self, name: String) -> Result<Float64Array, JsValue> {
+    /// 未知の名前なら`WasmError::UnknownMaterial`を返す(呼び出し側UIが
+    /// `SPAWN_MATERIALS`等の既知の名前だけを渡す前提だが、**2026-07-27の監査で
+    /// 修正**: 以前は`panic!`していた——`try_body_id_at`のdocと同じ理由で
+    /// Result化した)。戻り値が`Vec<f64>`である理由は
+    /// `body_shape_params_f64_at_impl`のdocと同じ。
+    fn material_properties_f64_impl(&self, name: &str) -> Result<Vec<f64>, WasmError> {
         let id = self
             .inner
             .materials()
-            .find_by_name(&name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {name}")))?;
+            .find_by_name(name)
+            .ok_or_else(|| WasmError::UnknownMaterial(name.to_string()))?;
         let m = self.inner.materials().get(id);
-        Ok(Float64Array::from(
-            &[
-                m.density,
-                m.friction,
-                m.restitution,
-                m.specific_heat,
-                m.conductivity,
-            ][..],
-        ))
+        Ok(vec![
+            m.density,
+            m.friction,
+            m.restitution,
+            m.specific_heat,
+            m.conductivity,
+        ])
     }
 
     /// スポーンパレット(設計docs/23-frontend/01-editor.md §6)——球を`material_name`
     /// (`MaterialDb::standard`が持つ名前)で`(x,y,z)`に配置する。新しいボディの
-    /// index(`body_count`と同じ体系)を返す。未知の材質名なら`JsValue`エラーを
-    /// 返す(呼び出し側UIが既知の名前だけを選択肢にする前提だが、
+    /// index(`body_count`と同じ体系)を返す。未知の材質名なら
+    /// `WasmError::UnknownMaterial`を返す(呼び出し側UIが既知の名前だけを
+    /// 選択肢にする前提だが、
     /// `material_properties_f64`のdocと同じ理由でResult化した)。
     fn spawn_sphere_impl(
         &mut self,
@@ -514,12 +791,12 @@ impl WasmWorld {
         z: f64,
         radius: f64,
         material_name: String,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(material_name.clone()))?;
         let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius }, material);
         desc.transform.position = sim_math::Vec3::new(x, y, z);
         let id = self.inner.create_body(desc);
@@ -547,10 +824,10 @@ impl WasmWorld {
     /// 下層スロットを詰めないのと同じ「無効化に留める」方針で揃える。
     /// 以後 `body_is_removed_at` が `true` を返し、フロント側が Hierarchy の行と
     /// Scene View のメッシュを隠す。
-    fn remove_body_at_impl(&mut self, index: usize) -> Result<(), JsValue> {
+    fn remove_body_at_impl(&mut self, index: usize) -> Result<(), WasmError> {
         let id = self.try_body_id_at(index)?;
         if index == 0 {
-            return Err(JsValue::from_str("床は削除できません(シーンの基準面)"));
+            return Err(WasmError::CannotRemoveFloor);
         }
         self.inner.remove_body(id);
         self.bodies[index].removed = true;
@@ -558,7 +835,7 @@ impl WasmWorld {
     }
 
     /// `index`番目のボディが `remove_body_at` で削除済みか。
-    fn body_is_removed_at_impl(&self, index: usize) -> Result<bool, JsValue> {
+    fn body_is_removed_at_impl(&self, index: usize) -> Result<bool, WasmError> {
         Ok(self.try_body_meta_at(index)?.removed)
     }
 
@@ -569,7 +846,7 @@ impl WasmWorld {
     /// ——Scale Gizmo の倍率は `base_shape × scale` として保持されており、複製後の
     /// ボディも同じ規約(`set_body_scale_at`)に乗せる必要があるため。倍率まで
     /// 引き継ぎたい場合は複製後に改めてスケールを掛ける(既知の限界)。
-    fn duplicate_body_at_impl(&mut self, index: usize, offset: f64) -> Result<usize, JsValue> {
+    fn duplicate_body_at_impl(&mut self, index: usize, offset: f64) -> Result<usize, WasmError> {
         let meta = self.try_body_meta_at(index)?;
         let base_shape = meta.base_shape.clone();
         let material_label = meta.material_label.clone();
@@ -578,11 +855,11 @@ impl WasmWorld {
             .inner
             .materials()
             .find_by_name(&material_label)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_label}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(material_label.clone()))?;
         let position = self
             .inner
             .body_position(source_id)
-            .ok_or_else(|| JsValue::from_str("cannot duplicate a removed body"))?;
+            .ok_or(WasmError::CannotDuplicateRemovedBody)?;
         let mut desc = RigidBodyDesc::dynamic(base_shape.clone(), material);
         desc.transform.position = position + sim_math::Vec3::new(offset, 0.0, 0.0);
         let id = self.inner.create_body(desc);
@@ -613,12 +890,12 @@ impl WasmWorld {
         radius: f64,
         half_height: f64,
         material_name: String,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(material_name.clone()))?;
         let shape = Shape::Capsule {
             radius,
             half_height,
@@ -653,12 +930,12 @@ impl WasmWorld {
         y: f64,
         z: f64,
         material_name: String,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(material_name.clone()))?;
         let shape = Shape::Compound {
             children: vec![
                 (
@@ -711,12 +988,12 @@ impl WasmWorld {
         z: f64,
         half: f64,
         material_name: String,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(material_name.clone()))?;
         let mut vertices = Vec::with_capacity(8);
         for &sx in &[-1.0, 1.0] {
             for &sy in &[-1.0, 1.0] {
@@ -756,21 +1033,17 @@ impl WasmWorld {
         base_name: String,
         new_name: String,
         density: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let base_id = self
             .inner
             .materials()
             .find_by_name(&base_name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {base_name}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(base_name.clone()))?;
         if self.inner.materials().find_by_name(&new_name).is_some() {
-            return Err(JsValue::from_str(&format!(
-                "material already exists: {new_name}"
-            )));
+            return Err(WasmError::MaterialAlreadyExists(new_name.clone()));
         }
         if !(density.is_finite() && density > 0.0) {
-            return Err(JsValue::from_str(
-                "density must be a positive finite number",
-            ));
+            return Err(WasmError::InvalidDensity);
         }
         let mut derived = self.inner.materials().get(base_id).clone();
         // `Material::name`は`&'static str`なので、実行時に作った文字列を入れるには
@@ -792,12 +1065,12 @@ impl WasmWorld {
         z: f64,
         half_extent: f64,
         material_name: String,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(material_name.clone()))?;
         let mut desc = RigidBodyDesc::dynamic(
             Shape::Box {
                 half_extents: sim_math::Vec3::new(half_extent, half_extent, half_extent),
@@ -832,15 +1105,21 @@ impl WasmWorld {
     /// `spawn_box`と同じ`SpawnedBodyMeta`として登録するため、Hierarchy/Inspector/
     /// Scene Viewから見てスポーンパレットで追加したボディと区別が付かない。
     /// 返り値は追加したボディ数(呼び出し側はこの数だけ`body_count()`の末尾から
-    /// メッシュを生成すればよい)。パース/検証エラーは`JsValue`(メッセージ文字列)
-    /// として返す。
+    /// メッシュを生成すればよい)。パース/検証エラーは`WasmError`として返す
+    /// (最外周の`pub fn`が`JsValue`のメッセージ文字列へ変換する)。
+    ///
+    /// wasm-bindgenへ露出する薄い殻——実体は`import_scene_json_impl`側。
     pub fn import_scene_json(&mut self, json: String) -> Result<usize, JsValue> {
-        let scenario = sim_world::Scenario::from_json(&json)
-            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+        self.import_scene_json_impl(&json).map_err(JsValue::from)
+    }
+
+    /// `import_scene_json`の実体(ネイティブテスト可能な`Result<_, WasmError>`版)。
+    fn import_scene_json_impl(&mut self, json: &str) -> Result<usize, WasmError> {
+        let scenario = sim_world::Scenario::from_json(json).map_err(WasmError::ScenarioParse)?;
         let ids = self
             .inner
             .append_scenario_bodies(&scenario)
-            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+            .map_err(WasmError::AppendScenarioBodies)?;
 
         for (body, id) in scenario.bodies.iter().zip(ids.iter()) {
             let index = self.body_count_impl();
@@ -873,7 +1152,7 @@ impl WasmWorld {
         self.imported_probe_handles = self
             .inner
             .add_scenario_probes(&scenario, &body_ids_by_name)
-            .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+            .map_err(WasmError::ScenarioProbes)?;
 
         Ok(scenario.bodies.len())
     }
@@ -892,16 +1171,14 @@ impl WasmWorld {
     }
 
     /// `index`を`imported_probe_handles`内の`World::probe`ハンドルへ解決する。
-    /// 範囲外なら`JsValue`エラー(`try_body_id_at`のdocと同じ理由でResult化)。
-    fn try_imported_probe_handle_at(&self, index: usize) -> Result<usize, JsValue> {
+    /// 範囲外なら`WasmError`(`try_body_id_at`のdocと同じ理由でResult化)。
+    fn try_imported_probe_handle_at(&self, index: usize) -> Result<usize, WasmError> {
         self.imported_probe_handles
             .get(index)
             .copied()
-            .ok_or_else(|| {
-                JsValue::from_str(&format!(
-                    "imported probe index {index} out of range (imported_probe_count={})",
-                    self.imported_probe_count_impl()
-                ))
+            .ok_or_else(|| WasmError::ImportedProbeIndexOutOfRange {
+                index,
+                count: self.imported_probe_count_impl(),
             })
     }
 
@@ -911,12 +1188,10 @@ impl WasmWorld {
     /// 削除される経路が現状無いため、この解決が失敗することは実際には
     /// 想定していない(それでも`Result`化するのはQ5の全面Result化方針を
     /// 一貫させるため——`try_body_id_at`のdoc参照)。
-    fn try_imported_probe_at(&self, handle: usize) -> Result<&sim_world::Probe, JsValue> {
-        self.inner.probe(handle).ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "imported probe handle {handle} has no matching World::probe (World-side removal is not implemented, this should not happen)"
-            ))
-        })
+    fn try_imported_probe_at(&self, handle: usize) -> Result<&sim_world::Probe, WasmError> {
+        self.inner
+            .probe(handle)
+            .ok_or(WasmError::ImportedProbeHandleMissing { handle })
     }
 
     /// Probe Graphsパネル(設計docs/23-frontend/01-editor.md §1.4、docs/
@@ -1016,9 +1291,9 @@ impl WasmWorld {
     ///
     /// **決定論を壊しうる操作**なので、フロントエンドはEditモードでのみ
     /// 呼び、変更を`commandLog`へ記録する(`SimClock::set_dt`のdoc参照)。
-    fn set_dt_impl(&mut self, dt: f64) -> Result<(), JsValue> {
+    fn set_dt_impl(&mut self, dt: f64) -> Result<(), WasmError> {
         if !(dt.is_finite() && dt > 0.0) {
-            return Err(JsValue::from_str("dt must be a positive finite number"));
+            return Err(WasmError::InvalidDt);
         }
         self.inner.clock_mut().set_dt(dt);
         Ok(())
@@ -1284,10 +1559,11 @@ impl WasmWorld {
     /// (`circuit_element_count`の加算順と同じ)。スイッチは現在の開閉状態も出す
     /// ——`Command::SetSwitch`で実行中に変わる唯一の素子であり、
     /// 表示が実態と乖離しないことがこのAPIを足した動機そのものだから。
-    fn circuit_element_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
-        let circuit = self.inner.circuit().ok_or_else(|| {
-            JsValue::from_str("circuit domain is not enabled in the current world")
-        })?;
+    fn circuit_element_label_at_impl(&self, index: usize) -> Result<String, WasmError> {
+        let circuit = self
+            .inner
+            .circuit()
+            .ok_or(WasmError::CircuitDomainNotEnabled)?;
         let node = |n: usize| {
             if n == sim_em::GROUND {
                 "GND".to_string()
@@ -1333,15 +1609,15 @@ impl WasmWorld {
             }
             i -= 1;
         }
-        Err(JsValue::from_str(&format!(
-            "circuit element index {index} out of range (circuit_element_count={})",
-            self.circuit_element_count_impl()
-        )))
+        Err(WasmError::CircuitElementIndexOutOfRange {
+            index,
+            count: self.circuit_element_count_impl(),
+        })
     }
 
     /// `index`番目のインポート済みプローブの人間可読ラベル(Probe Graphsパネルの
     /// 凡例表示用)。`probe_target_label`のdoc参照。
-    fn imported_probe_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn imported_probe_label_at_impl(&self, index: usize) -> Result<String, WasmError> {
         let handle = self.try_imported_probe_handle_at(index)?;
         let probe = self.try_imported_probe_at(handle)?;
         Ok(self.probe_target_label(probe.target))
@@ -1352,11 +1628,21 @@ impl WasmWorld {
     /// `speed_probe_history_f64`とは独立に、シーンJSONが宣言した任意本数の
     /// プローブをProbe Graphsパネルへ配線するために追加した
     /// (docs/22-roadmap/02-feature-checklist.md 増分B1)。
+    ///
+    /// `Float64Array`の構築はネイティブターゲットでは行えない(モジュール末尾の
+    /// テストdoc参照)ため、**index検証と値の取り出しだけを
+    /// `imported_probe_history_impl`へ切り出した**——`Err`パスをネイティブで
+    /// 検証できるようにするためで、JS側から見た戻り値は従来と同一。
     pub fn imported_probe_history_f64(&self, index: usize) -> Result<Float64Array, JsValue> {
+        let values = self.imported_probe_history_impl(index)?;
+        Ok(Float64Array::from(values.as_slice()))
+    }
+
+    /// `imported_probe_history_f64`の実体(`Float64Array`化する前の生の履歴)。
+    fn imported_probe_history_impl(&self, index: usize) -> Result<Vec<f64>, WasmError> {
         let handle = self.try_imported_probe_handle_at(index)?;
         let probe = self.try_imported_probe_at(handle)?;
-        let values: Vec<f64> = probe.history().copied().collect();
-        Ok(Float64Array::from(values.as_slice()))
+        Ok(probe.history().copied().collect())
     }
 
     /// `ProbeTarget`の11変種をProbe Graphsパネル表示用の人間可読ラベルへ変換する
@@ -1684,13 +1970,13 @@ impl WasmWorld {
         pivot_z: f64,
         arm_length: f64,
         material_name: String,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         const BOB_RADIUS: f64 = 0.3;
         let material = self
             .inner
             .materials()
             .find_by_name(&material_name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(material_name.clone()))?;
         let pivot = sim_math::Vec3::new(pivot_x, pivot_y, pivot_z);
         let initial_angle_from_vertical = std::f64::consts::PI / 6.0; // 30度
         let initial_offset = sim_math::Vec3::new(
@@ -1731,7 +2017,7 @@ impl WasmWorld {
         pivot_y: f64,
         pivot_z: f64,
         material_name: String,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         const HALF_EXTENTS: sim_math::Vec3 = sim_math::Vec3 {
             x: 0.1,
             y: 0.6,
@@ -1741,7 +2027,7 @@ impl WasmWorld {
             .inner
             .materials()
             .find_by_name(&material_name)
-            .ok_or_else(|| JsValue::from_str(&format!("unknown material: {material_name}")))?;
+            .ok_or_else(|| WasmError::UnknownMaterial(material_name.clone()))?;
         let pivot = sim_math::Vec3::new(pivot_x, pivot_y, pivot_z);
         let anchor_local_top = sim_math::Vec3::new(0.0, HALF_EXTENTS.y, 0.0);
         let mut desc = RigidBodyDesc::dynamic(
@@ -1791,13 +2077,17 @@ impl WasmWorld {
 
     /// `Command::SetMotorTarget`(モジュールdoc参照、`theta_target`は
     /// ラジアン)を、`index`番目のボディが持つヒンジモーターへ送る。
-    /// モーターを持たないボディに呼ぶと`JsValue`エラーを返す(呼び出し側UIが
+    /// モーターを持たないボディに呼ぶと`WasmError`を返す(呼び出し側UIが
     /// モーターを持つボディだけに対して呼ぶ前提だが、`try_body_id_at`のdocと
     /// 同じ理由でResult化した)。
-    fn set_motor_target_at_impl(&mut self, index: usize, theta_target: f64) -> Result<(), JsValue> {
+    fn set_motor_target_at_impl(
+        &mut self,
+        index: usize,
+        theta_target: f64,
+    ) -> Result<(), WasmError> {
         let hinge_motor_index = self.try_body_meta_at(index)?.hinge_motor_index;
-        let hinge_motor_index = hinge_motor_index
-            .ok_or_else(|| JsValue::from_str(&format!("body index {index} has no hinge motor")))?;
+        let hinge_motor_index =
+            hinge_motor_index.ok_or(WasmError::BodyHasNoHingeMotor { index })?;
         self.inner.push_command(Command::SetMotorTarget {
             hinge_motor_index,
             theta_target,
@@ -2015,20 +2305,30 @@ impl WasmWorld {
     /// 「拘束」)向けに、`index`番目のボディが持つ拘束(DistanceJoint)の
     /// アンカー点2点を`[ax,ay,az,bx,by,bz]`(f32)で返す。拘束を持たない
     /// ボディ(床・箱・スポーンした球/箱)なら空配列を返す。
+    ///
+    /// `imported_probe_history_f64`と同じ理由で、実体(index検証+アンカー点の
+    /// 取り出し)を`constraint_anchor_points_impl`へ切り出してある。
+    /// 拘束を持たないボディは`None`——従来どおり長さ0の`Float32Array`になる。
     pub fn constraint_anchor_points_at(&self, index: usize) -> Result<Float32Array, JsValue> {
+        match self.constraint_anchor_points_impl(index)? {
+            None => Ok(Float32Array::new_with_length(0)),
+            Some(points) => Ok(Float32Array::from(&points[..])),
+        }
+    }
+
+    /// `constraint_anchor_points_at`の実体。拘束を持たないボディなら`None`。
+    fn constraint_anchor_points_impl(&self, index: usize) -> Result<Option<[f32; 6]>, WasmError> {
         let joint_index = self.try_body_meta_at(index)?.constraint_joint_index;
         let Some(joint_index) = joint_index else {
-            return Ok(Float32Array::new_with_length(0));
+            return Ok(None);
         };
         let (a, b) = self
             .inner
             .distance_joint_anchor_points(joint_index)
             .expect("constraint_joint_index recorded at spawn time must stay valid");
-        Ok(Float32Array::from(
-            &[
-                a.x as f32, a.y as f32, a.z as f32, b.x as f32, b.y as f32, b.z as f32,
-            ][..],
-        ))
+        Ok(Some([
+            a.x as f32, a.y as f32, a.z as f32, b.x as f32, b.y as f32, b.z as f32,
+        ]))
     }
 
     /// wasm境界を`schema`/`read`/`apply`の3メソッドへ畳む取り組み
@@ -2053,10 +2353,20 @@ impl WasmWorld {
     /// 払うことになるため。残る「追加/設定/内省」系メソッド(body系・
     /// environment系・circuit editor系等)は今後の増分で同じ2メソッドへ
     /// 引き続き畳んでいく。
+    ///
+    /// wasm-bindgenへ露出する薄い殻——`match kind`のディスパッチ本体は
+    /// `apply_component_impl`側にある。**25個の`_impl`が返す`WasmError`が
+    /// そのまま`?`で通り抜けてここまで来る**ため、それぞれの失敗条件を
+    /// ネイティブテストから`apply_component_impl`経由で叩ける。
     pub fn apply_component(&mut self, kind: &str, payload: &str) -> Result<String, JsValue> {
-        let v: serde_json::Value = serde_json::from_str(payload).map_err(|e| {
-            JsValue::from_str(&format!("apply_component: invalid JSON payload: {e}"))
-        })?;
+        self.apply_component_impl(kind, payload)
+            .map_err(JsValue::from)
+    }
+
+    /// `apply_component`の実体(ネイティブテスト可能な`Result<_, WasmError>`版)。
+    fn apply_component_impl(&mut self, kind: &str, payload: &str) -> Result<String, WasmError> {
+        let v: serde_json::Value = serde_json::from_str(payload)
+            .map_err(|e| WasmError::ApplyComponentInvalidJson(e.to_string()))?;
         let f = |key: &str| -> f64 { v.get(key).and_then(|x| x.as_f64()).unwrap_or(0.0) };
         let u = |key: &str| -> usize { v.get(key).and_then(|x| x.as_u64()).unwrap_or(0) as usize };
         let i = |key: &str| -> i32 { v.get(key).and_then(|x| x.as_i64()).unwrap_or(0) as i32 };
@@ -2575,9 +2885,7 @@ impl WasmWorld {
                 self.restore_bookmark_impl(u("index"))?;
                 Ok("{}".to_string())
             }
-            _ => Err(JsValue::from_str(&format!(
-                "apply_component: unknown kind \"{kind}\""
-            ))),
+            _ => Err(WasmError::UnknownApplyComponentKind(kind.to_string())),
         }
     }
 
@@ -2586,7 +2894,14 @@ impl WasmWorld {
     /// (JSONではない——数値ならその文字列表現、不要なら空文字列)。
     /// 戻り値は元のメソッドが返していたのと同じ文字列(数値系は
     /// `to_string()`、テキスト系はそのまま)——呼び出し側の解釈は変えていない。
+    ///
+    /// `apply_component`と同じく、実体は`read_component_impl`側。
     pub fn read_component(&self, kind: &str, arg: &str) -> Result<String, JsValue> {
+        self.read_component_impl(kind, arg).map_err(JsValue::from)
+    }
+
+    /// `read_component`の実体(ネイティブテスト可能な`Result<_, WasmError>`版)。
+    fn read_component_impl(&self, kind: &str, arg: &str) -> Result<String, WasmError> {
         match kind {
             "coupling_count" => Ok(self.coupling_count_impl().to_string()),
             "coupling_info_text" => {
@@ -2658,15 +2973,11 @@ impl WasmWorld {
             }
             "body_shape_params_f64_at" => {
                 let index: usize = arg.parse().unwrap_or(0);
-                Ok(
-                    serde_json::json!(self.body_shape_params_f64_at_impl(index)?.to_vec())
-                        .to_string(),
-                )
+                Ok(serde_json::json!(self.body_shape_params_f64_at_impl(index)?).to_string())
             }
-            "material_properties_f64" => Ok(serde_json::json!(self
-                .material_properties_f64_impl(arg.to_string())?
-                .to_vec())
-            .to_string()),
+            "material_properties_f64" => {
+                Ok(serde_json::json!(self.material_properties_f64_impl(arg)?).to_string())
+            }
             "circuit_element_count" => Ok(self.circuit_element_count_impl().to_string()),
             "circuit_element_label_at" => {
                 let index: usize = arg.parse().unwrap_or(0);
@@ -2725,9 +3036,7 @@ impl WasmWorld {
                 self.bookmark_export_scene_json_impl(index)
             }
             "export_scene_json" => self.export_scene_json_impl(),
-            _ => Err(JsValue::from_str(&format!(
-                "read_component: unknown kind \"{kind}\""
-            ))),
+            _ => Err(WasmError::UnknownReadComponentKind(kind.to_string())),
         }
     }
 
@@ -2817,7 +3126,7 @@ impl WasmWorld {
         by: f64,
         bz: f64,
         length: f64,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let body_a_id = self.try_body_id_at(body_a)?;
         let body_b_id = if body_b < 0 {
             None
@@ -2846,7 +3155,7 @@ impl WasmWorld {
         bx: f64,
         by: f64,
         bz: f64,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let body_a_id = self.try_body_id_at(body_a)?;
         let body_b_id = if body_b < 0 {
             None
@@ -2877,7 +3186,7 @@ impl WasmWorld {
         bx: f64,
         by: f64,
         bz: f64,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let body_a_id = self.try_body_id_at(body_a)?;
         let body_b_id = if body_b < 0 {
             None
@@ -2913,7 +3222,7 @@ impl WasmWorld {
         steer_angle: f64,
         motor_speed: f64,
         motor_max_torque: f64,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let chassis_id = self.try_body_id_at(chassis)?;
         let wheel_id = self.try_body_id_at(wheel)?;
         let default = sim_mechanics::WheelJoint::new(0, 0, Vec3::ZERO, rest_length);
@@ -2949,7 +3258,7 @@ impl WasmWorld {
         kp: f64,
         kd: f64,
         torque_max: f64,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let body_id = self.try_body_id_at(body)?;
         Ok(self.inner.create_joint(sim_world::JointDesc::HingeMotor {
             body: body_id,
@@ -2976,7 +3285,7 @@ impl WasmWorld {
         plane_normal_y: f64,
         plane_normal_z: f64,
         plane_d: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         self.inner
             .add_coupling(Box::new(sim_coupling::ImageChargeForce {
@@ -2991,7 +3300,11 @@ impl WasmWorld {
     /// Add Coupling——`sim_coupling::LorentzForce`の薄い写像。対象剛体に電荷を
     /// 持たせ、`em_electrostatics`ドメインの電場からのローレンツ力を注入する
     /// (電場が無い/点電荷が無ければ力はゼロ、パニックはしない)。
-    fn add_lorentz_force_coupling_impl(&mut self, body: usize, charge: f64) -> Result<(), JsValue> {
+    fn add_lorentz_force_coupling_impl(
+        &mut self,
+        body: usize,
+        charge: f64,
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         self.inner
             .add_coupling(Box::new(sim_coupling::LorentzForce {
@@ -3012,7 +3325,7 @@ impl WasmWorld {
         body: usize,
         water_level: f64,
         water_density: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         self.inner
             .add_coupling(Box::new(sim_coupling::BuoyancyDrag {
@@ -3029,30 +3342,24 @@ impl WasmWorld {
 
     /// 熱ノードindexが有効(熱ドメインが有効、かつ範囲内)かを確認する
     /// (残り5種のAdd Couplingが参照する`thermal_node`向け共通ガード)。
-    fn try_thermal_node_index(&self, index: usize) -> Result<usize, JsValue> {
+    fn try_thermal_node_index(&self, index: usize) -> Result<usize, WasmError> {
         let count = self.inner.thermal().map(|t| t.nodes.len()).unwrap_or(0);
         if index >= count {
-            return Err(JsValue::from_str(&format!(
-                "thermal node index {index} out of range (thermal node count={count}, \
-                 is the thermal domain enabled in this scene?)"
-            )));
+            return Err(WasmError::ThermalNodeIndexOutOfRange { index, count });
         }
         Ok(index)
     }
 
     /// 電圧源indexが有効(回路ドメインが有効、かつ範囲内)かを確認する
     /// (MotorCoupling/InductionCouplingが参照する`voltage_source_index`向け)。
-    fn try_voltage_source_index(&self, index: usize) -> Result<usize, JsValue> {
+    fn try_voltage_source_index(&self, index: usize) -> Result<usize, WasmError> {
         let count = self
             .inner
             .circuit()
             .map(|c| c.voltage_sources().len())
             .unwrap_or(0);
         if index >= count {
-            return Err(JsValue::from_str(&format!(
-                "voltage source index {index} out of range (voltage source count={count}, \
-                 is the circuit domain enabled in this scene?)"
-            )));
+            return Err(WasmError::VoltageSourceIndexOutOfRange { index, count });
         }
         Ok(index)
     }
@@ -3066,7 +3373,7 @@ impl WasmWorld {
     fn add_dissipation_to_heat_coupling_impl(
         &mut self,
         thermal_node: usize,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let node = self.try_thermal_node_index(thermal_node)?;
         self.inner
             .add_coupling(Box::new(sim_coupling::DissipationToHeat {
@@ -3081,7 +3388,7 @@ impl WasmWorld {
     /// `thermal_node`へ)。D19(電気工作台)向け、熱・回路の両ドメインが
     /// 有効なシーンでのみ意味を持つ(`add_dissipation_to_heat_coupling`と
     /// 同じ既知の限界)。
-    fn add_joule_heat_coupling_impl(&mut self, thermal_node: usize) -> Result<(), JsValue> {
+    fn add_joule_heat_coupling_impl(&mut self, thermal_node: usize) -> Result<(), WasmError> {
         let node = self.try_thermal_node_index(thermal_node)?;
         self.inner
             .add_coupling(Box::new(sim_coupling::JouleHeat::to_single_node(node)));
@@ -3101,7 +3408,7 @@ impl WasmWorld {
         thermal_node: usize,
         seed: u64,
         stream: u64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         let node = self.try_thermal_node_index(thermal_node)?;
         self.inner
@@ -3128,7 +3435,7 @@ impl WasmWorld {
         axis_z: f64,
         voltage_source_index: usize,
         torque_constant: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         let source = self.try_voltage_source_index(voltage_source_index)?;
         self.inner
@@ -3154,7 +3461,7 @@ impl WasmWorld {
         axis_x: f64,
         axis_y: f64,
         axis_z: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         let source = self.try_voltage_source_index(voltage_source_index)?;
         self.inner
@@ -3228,13 +3535,9 @@ impl WasmWorld {
         body: usize,
         radius: f64,
         boundary_points: usize,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
-        let sph = self.inner.sph_mut().ok_or_else(|| {
-            JsValue::from_str(
-                "SPH fluid domain is not enabled (spawn a fluid block first via \"+ 流体\")",
-            )
-        })?;
+        let sph = self.inner.sph_mut().ok_or(WasmError::SphDomainNotEnabled)?;
         let coupling = sim_coupling::SphRigid::new(sph, id.index as usize, radius, boundary_points);
         self.inner.add_coupling(Box::new(coupling));
         Ok(())
@@ -3248,12 +3551,10 @@ impl WasmWorld {
         body: usize,
         half_width: f64,
         half_height: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         if self.inner.grid_fluid().is_none() {
-            return Err(JsValue::from_str(
-                "grid fluid domain is not enabled (call enable_grid_fluid_2d_domain first)",
-            ));
+            return Err(WasmError::GridFluidDomainNotEnabled);
         }
         self.inner
             .add_coupling(Box::new(sim_coupling::GridFluidRigid::new(
@@ -3277,12 +3578,10 @@ impl WasmWorld {
         axis_z: f64,
         area: f64,
         initial_volume: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         if self.inner.gas().is_none() {
-            return Err(JsValue::from_str(
-                "gas compartment is not enabled (call enable_gas_compartment first)",
-            ));
+            return Err(WasmError::GasCompartmentNotEnabled);
         }
         let axis = Vec3::new(axis_x, axis_y, axis_z);
         let coupling = sim_coupling::PistonGas::new(
@@ -3318,7 +3617,7 @@ impl WasmWorld {
         span_z: f64,
         atmosphere_density: f64,
         atmosphere_viscosity: f64,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let id = self.try_body_id_at(body)?;
         let index = self
             .inner
@@ -3347,7 +3646,7 @@ impl WasmWorld {
         radius: f64,
         atmosphere_density: f64,
         atmosphere_viscosity: f64,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         let id = self.try_body_id_at(body)?;
         let index = self
             .inner
@@ -3391,12 +3690,10 @@ impl WasmWorld {
         thermal_node: usize,
         ambient_temperature: f64,
         thermal_expansion_coefficient: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let node = self.try_thermal_node_index(thermal_node)?;
         if self.inner.grid_fluid().is_none() {
-            return Err(JsValue::from_str(
-                "grid fluid domain is not enabled (call enable_grid_fluid_2d_domain first)",
-            ));
+            return Err(WasmError::GridFluidDomainNotEnabled);
         }
         self.inner
             .add_coupling(Box::new(sim_coupling::BoussinesqBuoyancy {
@@ -3428,7 +3725,7 @@ impl WasmWorld {
         kinematic_viscosity: f64,
         prandtl_number: f64,
         thermal_expansion_coefficient: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let fluid_node = self.try_thermal_node_index(fluid_node)?;
         let surface_node = self.try_thermal_node_index(surface_node)?;
         let mode = match mode {
@@ -3473,7 +3770,7 @@ impl WasmWorld {
         initial_mass: f64,
         conductance: f64,
         initial_enthalpy: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(body)?;
         let node = self.try_thermal_node_index(thermal_node)?;
         let material = sim_thermal::PhaseMaterial {
@@ -3516,34 +3813,40 @@ impl WasmWorld {
     /// 各wasm公開メソッドの入口でここを通す)。フレームは`add_frame`/
     /// `add_child_frame`で単調増加するのみ(削除が無い)ため、
     /// `frame_index < frame_count()`が有効性の必要十分条件になる。
-    fn check_frame_index(&self, frame_index: usize) -> Result<(), JsValue> {
+    fn check_frame_index(&self, frame_index: usize) -> Result<(), WasmError> {
         if frame_index < self.frame_count_impl() {
             Ok(())
         } else {
-            Err(JsValue::from_str(&format!(
-                "frame index {frame_index} out of range (frame_count={})",
-                self.frame_count_impl()
-            )))
+            Err(WasmError::FrameIndexOutOfRange {
+                index: frame_index,
+                count: self.frame_count_impl(),
+            })
         }
     }
 
     /// `frame_index`番目のフレームの現在の姿勢(親フレームからの相対回転)を
     /// クォータニオン`[x, y, z, w]`(f32)で返す。
+    /// `imported_probe_history_f64`と同じ理由で、index検証と値の取り出しは
+    /// `frame_rotation_at_impl`側(ネイティブテスト可能)。
     pub fn frame_rotation_at_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+        let rotation = self.frame_rotation_at_impl(frame_index)?;
+        Ok(Float32Array::from(&rotation[..]))
+    }
+
+    /// `frame_rotation_at_f32`の実体。
+    fn frame_rotation_at_impl(&self, frame_index: usize) -> Result<[f32; 4], WasmError> {
         self.check_frame_index(frame_index)?;
         let rotation = self
             .inner
             .frames()
             .frame(FrameId(frame_index as u32))
             .rotation_in_parent;
-        Ok(Float32Array::from(
-            &[
-                rotation.x as f32,
-                rotation.y as f32,
-                rotation.z as f32,
-                rotation.w as f32,
-            ][..],
-        ))
+        Ok([
+            rotation.x as f32,
+            rotation.y as f32,
+            rotation.z as f32,
+            rotation.w as f32,
+        ])
     }
 
     /// 全フレーム数(ROOT含む、`sim_core::FrameTree::frame_count`の素通し)。
@@ -3556,7 +3859,7 @@ impl WasmWorld {
     /// `frame_index`番目のフレームの親のindex。ROOT自身(index 0)は親を
     /// 持たないため`-1`を返す(フレーム階層ドリルインUIがツリー構造を
     /// 組み立てるための情報)。
-    fn frame_parent_index_impl(&self, frame_index: usize) -> Result<i32, JsValue> {
+    fn frame_parent_index_impl(&self, frame_index: usize) -> Result<i32, WasmError> {
         self.check_frame_index(frame_index)?;
         Ok(
             match self
@@ -3577,34 +3880,42 @@ impl WasmWorld {
     /// 旧API)と異なり、複数フレームが親子関係を持つ場合(フレーム階層
     /// ドリルインUI)でも階層を遡って合成した実際のワールド位置を返す。
     pub fn frame_world_position_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+        let position = self.frame_world_position_impl(frame_index)?;
+        Ok(Float32Array::from(&position[..]))
+    }
+
+    /// `frame_world_position_f32`の実体(`frame_rotation_at_impl`と同じ規約)。
+    fn frame_world_position_impl(&self, frame_index: usize) -> Result<[f32; 3], WasmError> {
         self.check_frame_index(frame_index)?;
         let position = self
             .inner
             .frames()
             .transform_to_root(FrameId(frame_index as u32))
             .position;
-        Ok(Float32Array::from(
-            &[position.x as f32, position.y as f32, position.z as f32][..],
-        ))
+        Ok([position.x as f32, position.y as f32, position.z as f32])
     }
 
     /// `frame_index`番目のフレームのROOT(ワールド)座標系での姿勢
     /// (`frame_world_position_f32`と同じ理由で`transform_to_root`を使う)。
     pub fn frame_world_rotation_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+        let rotation = self.frame_world_rotation_impl(frame_index)?;
+        Ok(Float32Array::from(&rotation[..]))
+    }
+
+    /// `frame_world_rotation_f32`の実体(`frame_rotation_at_impl`と同じ規約)。
+    fn frame_world_rotation_impl(&self, frame_index: usize) -> Result<[f32; 4], WasmError> {
         self.check_frame_index(frame_index)?;
         let rotation = self
             .inner
             .frames()
             .transform_to_root(FrameId(frame_index as u32))
             .rotation;
-        Ok(Float32Array::from(
-            &[
-                rotation.x as f32,
-                rotation.y as f32,
-                rotation.z as f32,
-                rotation.w as f32,
-            ][..],
-        ))
+        Ok([
+            rotation.x as f32,
+            rotation.y as f32,
+            rotation.z as f32,
+            rotation.w as f32,
+        ])
     }
 
     /// フレーム階層ドリルインUI(設計docs/23-frontend/01-editor.md §1.3
@@ -3621,7 +3932,7 @@ impl WasmWorld {
         origin_offset_y: f64,
         origin_offset_z: f64,
         angular_velocity_z: f64,
-    ) -> Result<usize, JsValue> {
+    ) -> Result<usize, WasmError> {
         // `World::add_frame`は範囲外の親`FrameId`に対し`assert!`でパニックする
         // (`sim_core::FrameTree::add_frame`)ため、`try_body_id_at`のdocと同じ
         // 理由でここも事前に検証する。
@@ -3723,46 +4034,67 @@ impl WasmWorld {
     }
 
     /// `index`番目のボディの位置 [x, y, z](f32)。
+    /// `imported_probe_history_f64`と同じ理由で、index検証と値の取り出しは
+    /// `body_position_at_impl`側(ネイティブテスト可能)。`Float32Array`の
+    /// 組み立て方(`new_with_length`+`set_index`)は従来のまま変えていない。
     pub fn body_position_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+        let p = self.body_position_at_impl(index)?;
+        let out = Float32Array::new_with_length(3);
+        out.set_index(0, p[0]);
+        out.set_index(1, p[1]);
+        out.set_index(2, p[2]);
+        Ok(out)
+    }
+
+    /// `body_position_at_f32`の実体。
+    fn body_position_at_impl(&self, index: usize) -> Result<[f32; 3], WasmError> {
         let id = self.try_body_id_at(index)?;
         let p = self
             .inner
             .body_position(id)
             .expect("body is created in new() and never removed");
-        let out = Float32Array::new_with_length(3);
-        out.set_index(0, p.x as f32);
-        out.set_index(1, p.y as f32);
-        out.set_index(2, p.z as f32);
-        Ok(out)
+        Ok([p.x as f32, p.y as f32, p.z as f32])
     }
 
     /// `index`番目のボディの速度 [vx, vy, vz](f32)。
     pub fn body_velocity_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+        let v = self.body_velocity_at_impl(index)?;
+        let out = Float32Array::new_with_length(3);
+        out.set_index(0, v[0]);
+        out.set_index(1, v[1]);
+        out.set_index(2, v[2]);
+        Ok(out)
+    }
+
+    /// `body_velocity_at_f32`の実体(`body_position_at_impl`と同じ規約)。
+    fn body_velocity_at_impl(&self, index: usize) -> Result<[f32; 3], WasmError> {
         let id = self.try_body_id_at(index)?;
         let v = self
             .inner
             .body_velocity(id)
             .expect("body is created in new() and never removed");
-        let out = Float32Array::new_with_length(3);
-        out.set_index(0, v.x as f32);
-        out.set_index(1, v.y as f32);
-        out.set_index(2, v.z as f32);
-        Ok(out)
+        Ok([v.x as f32, v.y as f32, v.z as f32])
     }
 
     /// `index`番目のボディの姿勢クォータニオン [x, y, z, w](f32)。
     pub fn body_rotation_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+        let q = self.body_rotation_at_impl(index)?;
+        let out = Float32Array::new_with_length(4);
+        out.set_index(0, q[0]);
+        out.set_index(1, q[1]);
+        out.set_index(2, q[2]);
+        out.set_index(3, q[3]);
+        Ok(out)
+    }
+
+    /// `body_rotation_at_f32`の実体(`body_position_at_impl`と同じ規約)。
+    fn body_rotation_at_impl(&self, index: usize) -> Result<[f32; 4], WasmError> {
         let id = self.try_body_id_at(index)?;
         let q = self
             .inner
             .body_rotation(id)
             .expect("body is created in new() and never removed");
-        let out = Float32Array::new_with_length(4);
-        out.set_index(0, q.x as f32);
-        out.set_index(1, q.y as f32);
-        out.set_index(2, q.z as f32);
-        out.set_index(3, q.w as f32);
-        Ok(out)
+        Ok([q.x as f32, q.y as f32, q.z as f32, q.w as f32])
     }
 
     /// Editモードの回転Gizmo向けの直接編集(`set_body_position_at`の姿勢版、
@@ -3774,7 +4106,7 @@ impl WasmWorld {
         y: f64,
         z: f64,
         w: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(index)?;
         self.inner.mechanics_mut().bodies.rotation[id.index as usize] =
             sim_math::Quat { x, y, z, w };
@@ -3787,12 +4119,10 @@ impl WasmWorld {
     /// 相対値ではなく、常に基準形状からの絶対倍率(Translate/Rotate Gizmoの
     /// 「ドラッグ開始値+差分」ではなく「基準値×絶対倍率」という設計、複数回の
     /// ドラッグを重ねても誤差が蓄積しない)。
-    fn set_body_scale_at_impl(&mut self, index: usize, scale: f64) -> Result<(), JsValue> {
+    fn set_body_scale_at_impl(&mut self, index: usize, scale: f64) -> Result<(), WasmError> {
         let id = self.try_body_id_at(index)?;
         if index == 0 {
-            return Err(JsValue::from_str(
-                "Ground is static and has no scale handle",
-            ));
+            return Err(WasmError::GroundHasNoScaleHandle);
         }
         let base_shape = self.try_body_meta_at(index)?.base_shape.clone();
         let scaled_shape = match base_shape {
@@ -3824,16 +4154,14 @@ impl WasmWorld {
         sx: f64,
         sy: f64,
         sz: f64,
-    ) -> Result<bool, JsValue> {
+    ) -> Result<bool, WasmError> {
         let id = self.try_body_id_at(index)?;
         if index == 0 {
-            return Err(JsValue::from_str(
-                "Ground is static and has no scale handle",
-            ));
+            return Err(WasmError::GroundHasNoScaleHandle);
         }
         for s in [sx, sy, sz] {
             if !s.is_finite() || s <= 0.0 {
-                return Err(JsValue::from_str("scale components must be positive"));
+                return Err(WasmError::InvalidScaleComponent);
             }
         }
         let base_shape = self.try_body_meta_at(index)?.base_shape.clone();
@@ -3877,17 +4205,17 @@ impl WasmWorld {
     /// `index`が有効なスナップショットindexかを検証する(**2026-07-27の監査で
     /// 追加**: `VecDeque`の生indexアクセスは範囲外でパニックする、
     /// `try_body_id_at`のdocと同じ理由)。
-    fn try_snapshot_at(&self, index: usize) -> Result<&World, JsValue> {
-        self.snapshots.get(index).ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "snapshot index {index} out of range (snapshot_count={})",
-                self.snapshots.len()
-            ))
-        })
+    fn try_snapshot_at(&self, index: usize) -> Result<&World, WasmError> {
+        self.snapshots
+            .get(index)
+            .ok_or(WasmError::SnapshotIndexOutOfRange {
+                index,
+                count: self.snapshots.len(),
+            })
     }
 
     /// `index`番目のスナップショットの記録時刻(秒、古い順)。
-    fn snapshot_time_at_impl(&self, index: usize) -> Result<f64, JsValue> {
+    fn snapshot_time_at_impl(&self, index: usize) -> Result<f64, WasmError> {
         Ok(self.try_snapshot_at(index)?.time())
     }
 
@@ -3895,17 +4223,18 @@ impl WasmWorld {
     /// `World::restore`をそのまま使う)。巻き戻した時点より後のスナップショットは
     /// もはや実際の未来を表さないため破棄する(新しいタイムラインがそこから
     /// 再開する、設計の「直前スナップショットへの巻き戻し」と同じ発想)。
-    fn restore_snapshot_impl(&mut self, index: usize) -> Result<(), JsValue> {
+    fn restore_snapshot_impl(&mut self, index: usize) -> Result<(), WasmError> {
         // `try_snapshot_at`は`&self`(disjointでない全体借用)を取るため、
         // その戻り値を保持したまま`&mut self.inner`は取れない。フィールドへ
         // 直接アクセスして借用チェッカに`snapshots`と`inner`が別フィールド
         // であることを見せる。
-        let snapshot = self.snapshots.get(index).ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "snapshot index {index} out of range (snapshot_count={})",
-                self.snapshots.len()
-            ))
-        })?;
+        let snapshot = self
+            .snapshots
+            .get(index)
+            .ok_or(WasmError::SnapshotIndexOutOfRange {
+                index,
+                count: self.snapshots.len(),
+            })?;
         self.inner.restore(snapshot);
         self.snapshots.truncate(index + 1);
         Ok(())
@@ -3927,20 +4256,20 @@ impl WasmWorld {
     /// `index`が有効なブックマークindexかを検証する(**2026-07-27の監査で
     /// 追加**: `Vec`の生indexアクセスは範囲外でパニックする、
     /// `try_body_id_at`のdocと同じ理由)。
-    fn try_bookmark_at(&self, index: usize) -> Result<&(String, World), JsValue> {
-        self.bookmarks.get(index).ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "bookmark index {index} out of range (bookmark_count={})",
-                self.bookmarks.len()
-            ))
-        })
+    fn try_bookmark_at(&self, index: usize) -> Result<&(String, World), WasmError> {
+        self.bookmarks
+            .get(index)
+            .ok_or(WasmError::BookmarkIndexOutOfRange {
+                index,
+                count: self.bookmarks.len(),
+            })
     }
 
-    fn bookmark_label_at_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn bookmark_label_at_impl(&self, index: usize) -> Result<String, WasmError> {
         Ok(self.try_bookmark_at(index)?.0.clone())
     }
 
-    fn bookmark_time_at_impl(&self, index: usize) -> Result<f64, JsValue> {
+    fn bookmark_time_at_impl(&self, index: usize) -> Result<f64, WasmError> {
         Ok(self.try_bookmark_at(index)?.1.time())
     }
 
@@ -3952,11 +4281,11 @@ impl WasmWorld {
     /// 検証タブでprobeが1本も出ない実バグ(旧実装は`world`/`bodies`しか
     /// 書き出さず、probes/joints/couplings/thermal/circuit/astro/gas は
     /// 常に欠落していた)を追う過程で発覚した)。
-    fn bookmark_export_scene_json_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn bookmark_export_scene_json_impl(&self, index: usize) -> Result<String, WasmError> {
         let (label, snapshot) = self.try_bookmark_at(index)?;
         let scenario = sim_world::to_scenario(snapshot, &format!("bookmark-{label}"));
         serde_json::to_string(&scenario)
-            .map_err(|e| JsValue::from_str(&format!("failed to serialize scenario: {e}")))
+            .map_err(|e| WasmError::ScenarioSerializeFailed(e.to_string()))
     }
 
     /// **現在の状態をシーンJSONとして書き出す(群2)**。単一ファイルExport
@@ -3964,25 +4293,26 @@ impl WasmWorld {
     /// エクスポート」)が使う。`bookmark_export_scene_json`と同じく
     /// `sim_world::to_scenario`を経由する(旧実装は`world`/`bodies`だけの
     /// 手書きシリアライズだった、上のdoc参照)。
-    fn export_scene_json_impl(&self) -> Result<String, JsValue> {
+    fn export_scene_json_impl(&self) -> Result<String, WasmError> {
         let scenario = sim_world::to_scenario(&self.inner, "current");
         serde_json::to_string(&scenario)
-            .map_err(|e| JsValue::from_str(&format!("failed to serialize scenario: {e}")))
+            .map_err(|e| WasmError::ScenarioSerializeFailed(e.to_string()))
     }
 
     /// ブックマークへ巻き戻す。`restore_snapshot`と異なり、ブックマーク自体は
     /// 巻き戻し後も残す(いつでも同じブックマークへ再度戻れるように)。ただし
     /// リングバッファ側のスナップショットは、もはや実際の未来を表さないため
     /// 全て破棄する(新しいタイムラインがそこから再開する)。
-    fn restore_bookmark_impl(&mut self, index: usize) -> Result<(), JsValue> {
+    fn restore_bookmark_impl(&mut self, index: usize) -> Result<(), WasmError> {
         // `restore_snapshot`と同じ理由でフィールドへ直接アクセスする
         // (借用チェッカに`bookmarks`と`inner`が別フィールドであることを見せる)。
-        let (_, snapshot) = self.bookmarks.get(index).ok_or_else(|| {
-            JsValue::from_str(&format!(
-                "bookmark index {index} out of range (bookmark_count={})",
-                self.bookmarks.len()
-            ))
-        })?;
+        let (_, snapshot) =
+            self.bookmarks
+                .get(index)
+                .ok_or(WasmError::BookmarkIndexOutOfRange {
+                    index,
+                    count: self.bookmarks.len(),
+                })?;
         self.inner.restore(snapshot);
         self.snapshots.clear();
         Ok(())
@@ -4048,7 +4378,7 @@ impl WasmWorld {
         fx: f64,
         fy: f64,
         fz: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::ApplyForce {
             body,
@@ -4067,13 +4397,13 @@ impl WasmWorld {
     ///
     /// いずれも`Command`経由なので、**Playモード中でも決定論とリプレイ再現性を
     /// 保ったまま**編集できる(Gizmoドラッグのような直接書き換えとは違う)。
-    fn body_mass_at_impl(&self, index: usize) -> Result<f64, JsValue> {
+    fn body_mass_at_impl(&self, index: usize) -> Result<f64, WasmError> {
         let id = self.try_body_id_at(index)?;
         Ok(self.inner.mechanics().bodies.mass(id.index as usize))
     }
 
     /// Body type を表す文字列(`"Dynamic"`/`"Static"`/`"Kinematic"`)。
-    fn body_type_at_impl(&self, index: usize) -> Result<String, JsValue> {
+    fn body_type_at_impl(&self, index: usize) -> Result<String, WasmError> {
         let id = self.try_body_id_at(index)?;
         Ok(
             match self.inner.mechanics().bodies.body_type[id.index as usize] {
@@ -4085,19 +4415,19 @@ impl WasmWorld {
         )
     }
 
-    fn body_collision_group_at_impl(&self, index: usize) -> Result<u32, JsValue> {
+    fn body_collision_group_at_impl(&self, index: usize) -> Result<u32, WasmError> {
         let id = self.try_body_id_at(index)?;
         Ok(self.inner.mechanics().bodies.collision_group[id.index as usize])
     }
 
-    fn body_collision_mask_at_impl(&self, index: usize) -> Result<u32, JsValue> {
+    fn body_collision_mask_at_impl(&self, index: usize) -> Result<u32, WasmError> {
         let id = self.try_body_id_at(index)?;
         Ok(self.inner.mechanics().bodies.collision_mask[id.index as usize])
     }
 
-    fn push_set_body_mass_impl(&mut self, body_index: usize, mass: f64) -> Result<(), JsValue> {
+    fn push_set_body_mass_impl(&mut self, body_index: usize, mass: f64) -> Result<(), WasmError> {
         if mass <= 0.0 || !mass.is_finite() {
-            return Err(JsValue::from_str("mass must be a positive finite number"));
+            return Err(WasmError::InvalidMass);
         }
         let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::SetBodyMass { body, mass });
@@ -4109,17 +4439,17 @@ impl WasmWorld {
     /// 復元できないため、切替前の値を読んで `Command` に載せる。
     /// 既に非 Dynamic で質量が 0 になっているボディを Dynamic へ戻す場合は、
     /// 形状と材質密度から `create_body` と同じ式で計算し直す。
-    fn push_set_body_type_impl(&mut self, body_index: usize, kind: String) -> Result<(), JsValue> {
+    fn push_set_body_type_impl(
+        &mut self,
+        body_index: usize,
+        kind: String,
+    ) -> Result<(), WasmError> {
         let body = self.try_body_id_at(body_index)?;
         let body_type = match kind.as_str() {
             "Dynamic" => BodyType::Dynamic,
             "Static" => BodyType::Static,
             "Kinematic" => BodyType::Kinematic,
-            other => {
-                return Err(JsValue::from_str(&format!(
-                    "unknown body type {other:?} (expected Dynamic/Static/Kinematic)"
-                )))
-            }
+            other => return Err(WasmError::UnknownBodyType(other.to_string())),
         };
         let idx = body.index as usize;
         let bodies = &self.inner.mechanics().bodies;
@@ -4141,7 +4471,7 @@ impl WasmWorld {
         body_index: usize,
         group: u32,
         mask: u32,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let body = self.try_body_id_at(body_index)?;
         self.inner
             .push_command(Command::SetCollisionFilter { body, group, mask });
@@ -4158,7 +4488,7 @@ impl WasmWorld {
         target_x: f64,
         target_y: f64,
         target_z: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::Grab {
             body,
@@ -4176,7 +4506,7 @@ impl WasmWorld {
         target_x: f64,
         target_y: f64,
         target_z: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::MoveGrab {
             body,
@@ -4187,7 +4517,7 @@ impl WasmWorld {
 
     /// ドラッグ終了時の`Command::Release`(grabを解除、以後は通常の物理に戻る)。
     /// `push_grab`と同じ`body_index`引数。
-    fn push_release_impl(&mut self, body_index: usize) -> Result<(), JsValue> {
+    fn push_release_impl(&mut self, body_index: usize) -> Result<(), WasmError> {
         let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::Release { body });
         Ok(())
@@ -4209,7 +4539,7 @@ impl WasmWorld {
         x: f64,
         y: f64,
         z: f64,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(index)?;
         self.inner.mechanics_mut().bodies.position[id.index as usize] =
             sim_math::Vec3::new(x, y, z);
@@ -4284,45 +4614,64 @@ impl WasmWorld {
 /// `final_state_hash`は`u64`のままJSONへ出すとJSの`Number`精度(2^53)を
 /// 超えて壊れる(`WasmWorld::state_hash`が16進文字列を返すのと同じ理由)ため、
 /// ここでも16進文字列に変換して返す。
+///
+/// wasm-bindgenへ露出する薄い殻——実体は`run_headless_scenario_json_impl`側
+/// (`WasmError`のdoc参照)。
 #[wasm_bindgen]
 pub fn run_headless_scenario_json(json: &str, steps: u32) -> Result<String, JsValue> {
+    run_headless_scenario_json_impl(json, steps).map_err(JsValue::from)
+}
+
+/// `run_headless_scenario_json`の実体(ネイティブテスト可能な
+/// `Result<_, WasmError>`版)。
+fn run_headless_scenario_json_impl(json: &str, steps: u32) -> Result<String, WasmError> {
     #[derive(serde::Serialize)]
     struct HeadlessRunResultJson {
         final_state_hash: String,
         final_time: f64,
         probe_histories: Vec<Vec<f64>>,
     }
-    let result = sim_world::run_headless_scenario(json, steps)
-        .map_err(|e| JsValue::from_str(&format!("{e:?}")))?;
+    let result = sim_world::run_headless_scenario(json, steps).map_err(WasmError::HeadlessRun)?;
     let json_result = HeadlessRunResultJson {
         final_state_hash: format!("{:016x}", result.final_state_hash),
         final_time: result.final_time,
         probe_histories: result.probe_histories,
     };
     serde_json::to_string(&json_result)
-        .map_err(|e| JsValue::from_str(&format!("failed to serialize result: {e}")))
+        .map_err(|e| WasmError::HeadlessResultSerializeFailed(e.to_string()))
 }
 
 /// **2026-07-27の監査で追加**: このcrate(JS/WASM境界、1280行)にテストが
 /// 1本も無かった(Rustワークスペース最大の未テスト面)ため、Q5(wasm境界の
 /// パニック除去)の作業とあわせて最小限のユニットテストを追加する。
 ///
-/// **正直な制約(実際に検証した結果、当初の想定より厳しいことが判明した)**:
+/// **かつての制約と、それを`WasmError`導入で解いた経緯**:
 /// `js_sys::Float32Array`/`Float64Array`と`wasm_bindgen::JsValue`はいずれも、
 /// 実際のwasmホスト(ブラウザ/Node)無しでは**値を構築すること自体ができない**。
 /// 実験の結果、`Float32Array::new_with_length`はネイティブターゲットで
 /// 「cannot call wasm-bindgen imported functions on non-wasm targets」と
 /// (unwind可能な)パニックを起こす一方、`JsValue::from_str`は**unwindしない
-/// プロセスabort(SIGABRT)** を起こすことを確認した——つまり`Result<_, JsValue>`
-/// の`Err`分岐を`assert!(result.is_err())`のような形で検証しようとするテストは、
-/// `Err`を構築した時点で**テストプロセスごと**abortする(該当テストの
-/// `#[should_panic]`でも捕捉できない)。したがって本テストモジュールは
-/// **成功パスのみ**(`Float32Array`/`Float64Array`を返す関数の戻り値自体も
-/// 検証できないため、そちらは「パニックせず`Ok`を返した」ことの確認に留める)
-/// に限定する。エラーパス・`Float32Array`/`Float64Array`の中身の実行時検証には
-/// `wasm-bindgen-test`(`wasm-pack test --node`等)の導入が要るが、本増分の
-/// スコープ外として正直に記録する(CIにもこのcrateにも現状
-/// `wasm-bindgen-test`は無い、`docs/22-roadmap/02-feature-checklist.md`参照)。
+/// プロセスabort(SIGABRT)** を起こすことを確認していた——各`*_impl`が
+/// `Result<T, JsValue>`を返していた頃は、その`Err`分岐を
+/// `assert!(result.is_err())`のような形で検証しようとするテストが
+/// `Err`を構築した時点で**テストプロセスごと**abortしていた(該当テストの
+/// `#[should_panic]`でも`catch_unwind`でも捕捉できない)。そのため本モジュールは
+/// 長らく**成功パスのみ**に限定され、随所に「Errパスの検証には
+/// wasm-bindgen-testが要るため対象外」というコメントが残っていた。
+///
+/// **`WasmError`(モジュール冒頭)の導入でこの制約は解けた**: `*_impl`が
+/// 返すのは素のRust enumになり、`JsValue`の構築はwasm-bindgenがexportする
+/// `pub fn`——ネイティブテストからは呼ばない最外周——1点だけに寄せた。
+/// エラーパスは`*_impl`を直接呼び、
+/// `assert!(matches!(err, WasmError::BodyIndexOutOfRange { .. }))`のように
+/// **種別で**検証する(メッセージ文字列を両側で組み立てて突き合わせても、
+/// 同じ`format!`式が同じ文字列を作ることしか示さない)。
+///
+/// **今も残る制約**: `Float32Array`/`Float64Array`そのものはネイティブで
+/// 構築できないままなので、それらを返す`pub fn`(`body_position_at_f32`等)の
+/// 戻り値の中身は検証しない——ただしindex検証を担う`*_impl`
+/// (`body_position_at_impl`等)は素のRust配列を返すため、成功値もエラーも
+/// ここで検証できる。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4331,13 +4680,47 @@ mod tests {
         WasmWorld::new(-9.80665, 1.0 / 60.0, 5.0)
     }
 
+    /// エラーパス検証の共通ヘルパ——`Result`が`Err`であることと、その
+    /// **中身が期待した`WasmError`変種そのものであること**を確かめる。
+    /// 変種まで見るのは、たとえば「範囲外index」を期待したテストが実際には
+    /// 別の理由(材質名の誤りなど)で失敗していても素通りしてしまうのを
+    /// 防ぐため。`WasmError`は`PartialEq`なので値まで含めて一致を見る。
+    #[track_caller]
+    fn assert_err_is<T: std::fmt::Debug>(result: Result<T, WasmError>, expected: WasmError) {
+        match result {
+            Ok(v) => panic!("expected Err({expected:?}), got Ok({v:?})"),
+            Err(e) => assert_eq!(e, expected, "wrong WasmError variant"),
+        }
+    }
+
+    /// `assert_err_is`の緩い版——`count`のように将来増減しうる付随情報まで
+    /// 固定したくない場合に、変種だけをパターンで検証する。
+    ///
+    /// `Ok`側の値は表示しない(`T: Debug`を要求しない)——`WasmWorld`自身が
+    /// `Debug`を実装しておらず、`from_scene_json_impl`の`Err`検証にも使いたい
+    /// ため。失敗時に知りたいのは「どの変種が来たか」であって成功値ではない。
+    macro_rules! assert_err_matches {
+        ($result:expr, $pattern:pat) => {
+            match $result {
+                Ok(_) => panic!("expected Err({}), got Ok(..)", stringify!($pattern)),
+                Err(e) => assert!(
+                    matches!(e, $pattern),
+                    "expected {}, got {:?}",
+                    stringify!($pattern),
+                    e
+                ),
+            }
+        };
+    }
+
     /// 検証パネル(**残タスク完遂の縦串④増分**)——`run_headless_scenario_json`が
     /// D1(自由落下)を60step実行し、`final_state_hash`(16進文字列)・`final_time`・
     /// probe履歴(自由落下なので単調に下がるはず)を含むJSONを返すこと。
     #[test]
     fn run_headless_scenario_json_reports_free_fall_probe_history() {
         let json = include_str!("../../../scenes/d1-free-fall.json");
-        let result_json = run_headless_scenario_json(json, 60).expect("D1 must run headlessly");
+        let result_json =
+            run_headless_scenario_json_impl(json, 60).expect("D1 must run headlessly");
         let parsed: serde_json::Value =
             serde_json::from_str(&result_json).expect("result must be valid JSON");
         let hash = parsed["final_state_hash"]
@@ -4451,8 +4834,76 @@ mod tests {
                 "joint_info_text must report a {kind} line, got:\n{text}"
             );
         }
-        // 存在しないボディを指すとErrになる実行時の確認は、本テストモジュール冒頭の
-        // doc comment(Errパスの検証にはwasm-bindgen-testが要る)が示すとおり対象外。
+        // **`WasmError`導入で検証できるようになったErrパス**(以前はここに
+        // 「Errパスの検証にはwasm-bindgen-testが要るため対象外」と書いてあった)。
+        // Joint 5種はいずれも`try_body_id_at`を通るので、範囲外indexで
+        // `BodyIndexOutOfRange`になる。
+        let out_of_range = world.body_count_impl();
+        assert_err_is(
+            world.add_distance_joint_impl(out_of_range, 0.0, 0.0, 0.0, -1, 0.0, 0.0, 0.0, 2.0),
+            WasmError::BodyIndexOutOfRange {
+                index: out_of_range,
+                count: out_of_range,
+            },
+        );
+        assert_err_matches!(
+            world.add_ball_joint_impl(out_of_range, 0.0, 0.0, 0.0, -1, 0.0, 2.0, 0.0),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_slider_joint_impl(
+                out_of_range,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                -1,
+                0.0,
+                3.0,
+                0.0
+            ),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_wheel_joint_impl(
+                out_of_range,
+                wheel,
+                1.0,
+                0.0,
+                1.0,
+                0.4,
+                2.5,
+                0.7,
+                0.0,
+                12.0,
+                200.0
+            ),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_hinge_motor_joint_impl(out_of_range, 0.0, 1.0, 0.0, 1.0, 5.0, 0.5, 10.0),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        // `add_wheel_joint`は2つ目のボディindexも`try_body_id_at`を通る
+        // (片側だけ検証して満足しないための確認)。
+        assert_err_matches!(
+            world.add_wheel_joint_impl(
+                chassis,
+                out_of_range,
+                1.0,
+                0.0,
+                1.0,
+                0.4,
+                2.5,
+                0.7,
+                0.0,
+                12.0,
+                200.0
+            ),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
     }
 
     /// Settingsの環境パネル(**残タスク完遂の縦串③増分**)——大気・水域の
@@ -4494,59 +4945,91 @@ mod tests {
         let mut world = new_world();
 
         world
-            .apply_component("set_gravity", r#"{"gravity":1.62}"#)
+            .apply_component_impl("set_gravity", r#"{"gravity":1.62}"#)
             .expect("set_gravity via apply_component must succeed");
         assert_eq!(
-            world.read_component("gravity", "").unwrap(),
+            world.read_component_impl("gravity", "").unwrap(),
             1.62_f64.to_string()
         );
 
         world
-            .apply_component("set_dt", r#"{"dt":0.02}"#)
+            .apply_component_impl("set_dt", r#"{"dt":0.02}"#)
             .expect("set_dt via apply_component must succeed");
         assert_eq!(
-            world.read_component("dt", "").unwrap(),
+            world.read_component_impl("dt", "").unwrap(),
             0.02_f64.to_string()
         );
-        // `set_dt`に不正な値(0以下)を渡すと`Err`になる経路は、`JsValue::Err`の
-        // ネイティブ構築がSIGABRTする既知の制約(モジュールdoc参照)により
-        // ここでは検証しない——Playwright側(実wasmターゲット)で確認する。
+        // **`WasmError`導入で検証できるようになったErrパス**——`set_dt`は
+        // 「正の有限値」だけを受ける。0・負・非有限のいずれも`InvalidDt`。
+        for bad in ["0.0", "-0.01"] {
+            assert_err_is(
+                world.apply_component_impl("set_dt", &format!(r#"{{"dt":{bad}}}"#)),
+                WasmError::InvalidDt,
+            );
+        }
+        // 非有限値はJSONに書けない(serde_jsonが`Infinity`/`NaN`を受け付けない)
+        // ため、`set_dt_impl`を直接叩いて`is_finite`側のガードも通す。
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_err_is(world.set_dt_impl(bad), WasmError::InvalidDt);
+        }
+        // 弾かれた後もdtは直前の正常値のまま(Errが状態を壊していない)。
+        assert_eq!(
+            world.read_component_impl("dt", "").unwrap(),
+            0.02_f64.to_string()
+        );
+        // ディスパッチ自体の未知kindも同様に検証できる。
+        assert_err_is(
+            world.apply_component_impl("no_such_kind", "{}"),
+            WasmError::UnknownApplyComponentKind("no_such_kind".to_string()),
+        );
+        assert_err_is(
+            world.read_component_impl("no_such_kind", ""),
+            WasmError::UnknownReadComponentKind("no_such_kind".to_string()),
+        );
+        // payloadがJSONとして壊れている場合(kindの解決より手前で弾かれる)。
+        assert_err_matches!(
+            world.apply_component_impl("set_dt", "{not json"),
+            WasmError::ApplyComponentInvalidJson(_)
+        );
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "set_atmosphere",
                 r#"{"density":1.225,"viscosity":1.5e-5,"wind_x":2.0,"wind_y":0.0,"wind_z":-1.0}"#,
             )
             .expect("set_atmosphere via apply_component must succeed");
         assert_eq!(
-            world.read_component("atmosphere_density", "").unwrap(),
+            world.read_component_impl("atmosphere_density", "").unwrap(),
             "1.225"
         );
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "set_water_region",
                 r#"{"water_level":0.0,"density":1000.0}"#,
             )
             .expect("set_water_region via apply_component must succeed");
-        assert_eq!(world.read_component("water_level", "").unwrap(), "0");
-        assert_eq!(world.read_component("water_density", "").unwrap(), "1000");
+        assert_eq!(world.read_component_impl("water_level", "").unwrap(), "0");
+        assert_eq!(
+            world.read_component_impl("water_density", "").unwrap(),
+            "1000"
+        );
 
         world
-            .apply_component("clear_atmosphere", "{}")
+            .apply_component_impl("clear_atmosphere", "{}")
             .expect("clear_atmosphere via apply_component must succeed");
         assert!(world
-            .read_component("atmosphere_density", "")
+            .read_component_impl("atmosphere_density", "")
             .unwrap()
             .parse::<f64>()
             .unwrap()
             .is_nan());
 
         world
-            .apply_component("clear_water_region", "{}")
+            .apply_component_impl("clear_water_region", "{}")
             .expect("clear_water_region via apply_component must succeed");
         assert!(world
-            .read_component("water_level", "")
+            .read_component_impl("water_level", "")
             .unwrap()
             .parse::<f64>()
             .unwrap()
@@ -4564,26 +5047,26 @@ mod tests {
             .unwrap();
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "set_body_position_at",
                 &format!(r#"{{"index":{body},"x":1.0,"y":2.0,"z":3.0}}"#),
             )
             .expect("set_body_position_at via apply_component must succeed");
         world
-            .apply_component(
+            .apply_component_impl(
                 "set_body_rotation_at",
                 &format!(r#"{{"index":{body},"x":0.0,"y":0.0,"z":0.0,"w":1.0}}"#),
             )
             .expect("set_body_rotation_at via apply_component must succeed");
         world
-            .apply_component(
+            .apply_component_impl(
                 "set_body_scale_at",
                 &format!(r#"{{"index":{body},"scale":2.0}}"#),
             )
             .expect("set_body_scale_at via apply_component must succeed");
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "push_set_body_mass",
                 &format!(r#"{{"body_index":{body},"mass":5.0}}"#),
             )
@@ -4592,13 +5075,13 @@ mod tests {
         world.step();
         assert_eq!(
             world
-                .read_component("body_mass_at", &body.to_string())
+                .read_component_impl("body_mass_at", &body.to_string())
                 .unwrap(),
             5.0_f64.to_string()
         );
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "push_set_collision_filter",
                 &format!(r#"{{"body_index":{body},"group":2,"mask":4}}"#),
             )
@@ -4606,19 +5089,19 @@ mod tests {
         world.step();
         assert_eq!(
             world
-                .read_component("body_collision_group_at", &body.to_string())
+                .read_component_impl("body_collision_group_at", &body.to_string())
                 .unwrap(),
             "2"
         );
         assert_eq!(
             world
-                .read_component("body_collision_mask_at", &body.to_string())
+                .read_component_impl("body_collision_mask_at", &body.to_string())
                 .unwrap(),
             "4"
         );
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "push_set_body_type",
                 &format!(r#"{{"body_index":{body},"kind":"Static"}}"#),
             )
@@ -4626,28 +5109,28 @@ mod tests {
         world.step();
         assert_eq!(
             world
-                .read_component("body_type_at", &body.to_string())
+                .read_component_impl("body_type_at", &body.to_string())
                 .unwrap(),
             "Static"
         );
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "push_grab",
                 &format!(r#"{{"body_index":{body},"target_x":1.0,"target_y":1.0,"target_z":1.0}}"#),
             )
             .expect("push_grab via apply_component must succeed");
         world
-            .apply_component(
+            .apply_component_impl(
                 "push_move_grab",
                 &format!(r#"{{"body_index":{body},"target_x":2.0,"target_y":1.0,"target_z":1.0}}"#),
             )
             .expect("push_move_grab via apply_component must succeed");
         world
-            .apply_component("push_release", &format!(r#"{{"body_index":{body}}}"#))
+            .apply_component_impl("push_release", &format!(r#"{{"body_index":{body}}}"#))
             .expect("push_release via apply_component must succeed");
         world
-            .apply_component(
+            .apply_component_impl(
                 "push_apply_force",
                 &format!(r#"{{"body_index":{body},"fx":0.0,"fy":0.0,"fz":0.0}}"#),
             )
@@ -4656,52 +5139,61 @@ mod tests {
     }
 
     /// **Task#8第四弾の回帰テスト**: ボディのスポーン/削除/複製/材料派生
-    /// 8個と、その内省8個(`body_shape_params_f64_at`/`material_properties_f64`を
-    /// 除く——`Float64Array`を返す旧実装の内部でネイティブSIGABRTする既知の
-    /// 制約、モジュールdoc参照)も`apply_component`/`read_component`経由で
-    /// 操作できることを確認する。
+    /// 8個と、その内省10個も`apply_component`/`read_component`経由で操作できる
+    /// ことを確認する。`body_shape_params_f64_at`/`material_properties_f64`は
+    /// 以前「`Float64Array`を返す実装がネイティブでSIGABRTする」ため除外して
+    /// いたが、両`_impl`を`Vec<f64>`返しへ直した(往復は元々無駄だった、
+    /// `body_shape_params_f64_at_impl`のdoc参照)ので今は検証対象に含める。
     #[test]
     fn apply_component_and_read_component_spawn_and_introspect_bodies_via_generic_dispatch() {
         let mut world = new_world();
-        assert_eq!(world.read_component("body_count", "").unwrap(), "2");
+        assert_eq!(world.read_component_impl("body_count", "").unwrap(), "2");
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "spawn_sphere",
                 r#"{"x":1.0,"y":2.0,"z":3.0,"radius":0.4,"material_name":"アルミニウム"}"#,
             )
             .expect("spawn_sphere via apply_component must succeed");
         assert_eq!(result, "{\"index\":2}");
-        assert_eq!(world.read_component("body_count", "").unwrap(), "3");
+        assert_eq!(world.read_component_impl("body_count", "").unwrap(), "3");
         assert_eq!(
-            world.read_component("body_shape_kind_at", "2").unwrap(),
+            world
+                .read_component_impl("body_shape_kind_at", "2")
+                .unwrap(),
             "sphere"
         );
         assert_eq!(
-            world.read_component("body_label_at", "2").unwrap(),
+            world.read_component_impl("body_label_at", "2").unwrap(),
             "Sphere_2"
         );
         assert_eq!(
-            world.read_component("body_material_label_at", "2").unwrap(),
+            world
+                .read_component_impl("body_material_label_at", "2")
+                .unwrap(),
             "アルミニウム"
         );
         assert_eq!(
-            world.read_component("body_is_static_at", "2").unwrap(),
+            world.read_component_impl("body_is_static_at", "2").unwrap(),
             "false"
         );
         assert_eq!(
-            world.read_component("body_is_removed_at", "2").unwrap(),
+            world
+                .read_component_impl("body_is_removed_at", "2")
+                .unwrap(),
             "false"
         );
         assert!(world
-            .read_component("body_shape_label_at", "2")
+            .read_component_impl("body_shape_label_at", "2")
             .unwrap()
             .starts_with("Sphere"));
-        let shape_json = world.read_component("body_shape_json_at", "2").unwrap();
+        let shape_json = world
+            .read_component_impl("body_shape_json_at", "2")
+            .unwrap();
         assert!(shape_json.contains("sphere"), "actual: {shape_json}");
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "spawn_box",
                 r#"{"x":0.0,"y":2.0,"z":0.0,"half_extent":0.5,"material_name":"アルミニウム"}"#,
             )
@@ -4709,7 +5201,7 @@ mod tests {
         assert_eq!(result, "{\"index\":3}");
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "spawn_capsule",
                 r#"{"x":2.0,"y":2.0,"z":0.0,"radius":0.3,"half_height":0.5,"material_name":"アルミニウム"}"#,
             )
@@ -4717,7 +5209,7 @@ mod tests {
         assert_eq!(result, "{\"index\":4}");
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "spawn_compound_l_shape",
                 r#"{"x":3.0,"y":5.0,"z":0.0,"material_name":"アルミニウム"}"#,
             )
@@ -4725,34 +5217,197 @@ mod tests {
         assert_eq!(result, "{\"index\":5}");
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "spawn_convex_mesh_cube",
                 r#"{"x":4.0,"y":5.0,"z":0.0,"half":0.5,"material_name":"アルミニウム"}"#,
             )
             .expect("spawn_convex_mesh_cube via apply_component must succeed");
         assert_eq!(result, "{\"index\":6}");
-        assert_eq!(world.read_component("body_count", "").unwrap(), "7");
+        assert_eq!(world.read_component_impl("body_count", "").unwrap(), "7");
 
         let result = world
-            .apply_component("duplicate_body_at", r#"{"index":2,"offset":1.0}"#)
+            .apply_component_impl("duplicate_body_at", r#"{"index":2,"offset":1.0}"#)
             .expect("duplicate_body_at via apply_component must succeed");
         assert_eq!(result, "{\"index\":7}");
-        assert_eq!(world.read_component("body_count", "").unwrap(), "8");
+        assert_eq!(world.read_component_impl("body_count", "").unwrap(), "8");
 
         world
-            .apply_component("remove_body_at", r#"{"index":7}"#)
+            .apply_component_impl("remove_body_at", r#"{"index":7}"#)
             .expect("remove_body_at via apply_component must succeed");
         assert_eq!(
-            world.read_component("body_is_removed_at", "7").unwrap(),
+            world
+                .read_component_impl("body_is_removed_at", "7")
+                .unwrap(),
             "true"
         );
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "derive_material",
                 r#"{"base_name":"アルミニウム","new_name":"軽量アルミニウム(Task8第四弾テスト)","density":1500.0}"#,
             )
             .expect("derive_material via apply_component must succeed");
+
+        // `Vec<f64>`返しへ直した2つの内省(上のdoc参照)。
+        assert_eq!(
+            world
+                .read_component_impl("body_shape_params_f64_at", "2")
+                .unwrap(),
+            "[0.4]"
+        );
+        let props = world
+            .read_component_impl("material_properties_f64", "アルミニウム")
+            .unwrap();
+        assert!(
+            props.starts_with('[') && props.ends_with(']'),
+            "actual: {props}"
+        );
+
+        // === ここから下は`WasmError`導入で初めて検証できるようになったErrパス ===
+
+        // 未知の材質名: スポーン5種・材料派生・材質物性の内省が同じ
+        // `UnknownMaterial`を返す(材質名は`find_by_name`が引けなかった名前
+        // そのものが載る)。
+        let bogus = "存在しない材質";
+        assert_err_is(
+            world.spawn_sphere_impl(0.0, 1.0, 0.0, 0.3, bogus.to_string()),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        assert_err_is(
+            world.spawn_box_impl(0.0, 1.0, 0.0, 0.3, bogus.to_string()),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        assert_err_is(
+            world.spawn_capsule_impl(0.0, 1.0, 0.0, 0.3, 0.5, bogus.to_string()),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        assert_err_is(
+            world.spawn_compound_l_shape_impl(0.0, 1.0, 0.0, bogus.to_string()),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        assert_err_is(
+            world.spawn_convex_mesh_cube_impl(0.0, 1.0, 0.0, 0.5, bogus.to_string()),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        assert_err_is(
+            world.material_properties_f64_impl(bogus),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        assert_err_is(
+            world.derive_material_impl(bogus.to_string(), "派生先".to_string(), 1500.0),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        // 失敗したスポーンはボディを1つも増やしていない(Errが状態を汚していない)。
+        assert_eq!(world.read_component_impl("body_count", "").unwrap(), "8");
+
+        // 派生先の名前が既存とぶつかる / 密度が正の有限値でない。
+        assert_err_is(
+            world.derive_material_impl(
+                "アルミニウム".to_string(),
+                "軽量アルミニウム(Task8第四弾テスト)".to_string(),
+                1500.0,
+            ),
+            WasmError::MaterialAlreadyExists("軽量アルミニウム(Task8第四弾テスト)".to_string()),
+        );
+        for bad_density in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_err_is(
+                world.derive_material_impl(
+                    "アルミニウム".to_string(),
+                    format!("密度不正{bad_density}"),
+                    bad_density,
+                ),
+                WasmError::InvalidDensity,
+            );
+        }
+
+        // 範囲外index: 内省系は`try_body_id_at`(件数付き)か
+        // `try_body_meta_at`(件数無し)のどちらかを通る——**文面が違うので
+        // 別変種**になっていることまで確かめる(`WasmError`のdoc参照)。
+        let count = world.body_count_impl();
+        assert_err_is(
+            world.body_is_static_at_impl(count),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_err_is(
+            world.body_shape_kind_at_impl(count),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_err_is(
+            world.body_shape_params_f64_at_impl(count),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_err_is(
+            world.body_shape_json_at_impl(count),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_err_is(
+            world.body_shape_label_at_impl(count),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_err_is(
+            world.body_label_at_impl(count),
+            WasmError::BodyMetaIndexOutOfRange { index: count },
+        );
+        assert_err_is(
+            world.body_material_label_at_impl(count),
+            WasmError::BodyMetaIndexOutOfRange { index: count },
+        );
+        assert_err_is(
+            world.body_is_removed_at_impl(count),
+            WasmError::BodyMetaIndexOutOfRange { index: count },
+        );
+        assert_err_is(
+            world.duplicate_body_at_impl(count, 1.0),
+            WasmError::BodyMetaIndexOutOfRange { index: count },
+        );
+        assert_err_is(
+            world.remove_body_at_impl(count),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+
+        // 床(index 0)は削除できない。
+        assert_err_is(world.remove_body_at_impl(0), WasmError::CannotRemoveFloor);
+        assert_eq!(
+            world
+                .read_component_impl("body_is_removed_at", "0")
+                .unwrap(),
+            "false",
+            "拒否された削除が床の状態を変えていないこと"
+        );
+
+        // 削除済みボディ(index 7、上で`remove_body_at`済み)。`World`側の世代が
+        // 進んでいるため`try_body_id_at`は`BodyNoLongerExists`を返す——
+        // 「範囲内だが生きていない」を「範囲外」と取り違えていないことの確認。
+        assert_err_is(
+            world.body_is_static_at_impl(7),
+            WasmError::BodyNoLongerExists { index: 7 },
+        );
+        // 一方`try_body_meta_at`しか通らない内省は、削除済みでも`Ok`のまま
+        // (`self.bodies`の行は残す設計、`remove_body_at`のdoc参照)。
+        assert!(world.body_is_removed_at_impl(7).unwrap());
+        // 複製は`body_position`が引けないため`CannotDuplicateRemovedBody`。
+        assert_err_is(
+            world.duplicate_body_at_impl(7, 1.0),
+            WasmError::CannotDuplicateRemovedBody,
+        );
     }
 
     /// **Task#8第五弾の回帰テスト**: 自由配線回路エディタ12個(適用系)と、
@@ -4764,11 +5419,11 @@ mod tests {
 
         // 固定デモ回路のスイッチ(WasmWorld::newが積む分圧回路)。
         world
-            .apply_component("set_circuit_switch_closed", r#"{"closed":true}"#)
+            .apply_component_impl("set_circuit_switch_closed", r#"{"closed":true}"#)
             .expect("set_circuit_switch_closed via apply_component must succeed");
         world.step();
         let divider_voltage: f64 = world
-            .read_component("circuit_divider_voltage", "")
+            .read_component_impl("circuit_divider_voltage", "")
             .unwrap()
             .parse()
             .unwrap();
@@ -4776,12 +5431,12 @@ mod tests {
 
         // ヒーター。
         world
-            .apply_component("push_heat_source", r#"{"watts":2000.0}"#)
+            .apply_component_impl("push_heat_source", r#"{"watts":2000.0}"#)
             .expect("push_heat_source via apply_component must succeed");
         world.step();
         assert!(
             world
-                .read_component("heater_node_temperature", "")
+                .read_component_impl("heater_node_temperature", "")
                 .unwrap()
                 .parse::<f64>()
                 .unwrap()
@@ -4792,76 +5447,80 @@ mod tests {
         // 単純な回路(電圧源+抵抗+スイッチ+コンデンサ+インダクタ+ダイオード+
         // DCモーター)を組む。
         world
-            .apply_component("circuit_editor_reset", r#"{"num_nodes":3}"#)
+            .apply_component_impl("circuit_editor_reset", r#"{"num_nodes":3}"#)
             .expect("circuit_editor_reset via apply_component must succeed");
         assert_eq!(
-            world.read_component("circuit_element_count", "").unwrap(),
+            world
+                .read_component_impl("circuit_element_count", "")
+                .unwrap(),
             "0"
         );
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_add_voltage_source",
                 r#"{"a":1,"b":0,"voltage":10.0}"#,
             )
             .expect("circuit_editor_add_voltage_source via apply_component must succeed");
         world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_add_resistor",
                 r#"{"a":1,"b":2,"resistance":100.0}"#,
             )
             .expect("circuit_editor_add_resistor via apply_component must succeed");
         assert_eq!(
-            world.read_component("circuit_element_count", "").unwrap(),
+            world
+                .read_component_impl("circuit_element_count", "")
+                .unwrap(),
             "2"
         );
         let label = world
-            .read_component("circuit_element_label_at", "0")
+            .read_component_impl("circuit_element_label_at", "0")
             .unwrap();
         assert!(label.contains("10"), "actual: {label}");
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_add_switch",
                 r#"{"a":2,"b":0,"closed":false}"#,
             )
             .expect("circuit_editor_add_switch via apply_component must succeed");
         assert_eq!(result, "{\"index\":0}");
         world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_set_switch_closed",
                 r#"{"index":0,"closed":true}"#,
             )
             .expect("circuit_editor_set_switch_closed via apply_component must succeed");
 
         world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_add_capacitor",
                 r#"{"a":1,"b":2,"capacitance":1e-3,"initial_voltage":0.0}"#,
             )
             .expect("circuit_editor_add_capacitor via apply_component must succeed");
         world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_add_inductor",
                 r#"{"a":1,"b":2,"inductance":1e-3,"initial_current":0.0}"#,
             )
             .expect("circuit_editor_add_inductor via apply_component must succeed");
         world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_add_diode",
                 r#"{"anode":1,"cathode":2,"saturation_current":1e-12,"n_vt":0.026}"#,
             )
             .expect("circuit_editor_add_diode via apply_component must succeed");
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_add_dc_motor",
                 r#"{"a":1,"b":2,"winding_resistance":1.0,"winding_inductance":1e-3,"back_emf_constant":0.05}"#,
             )
             .expect("circuit_editor_add_dc_motor via apply_component must succeed");
         assert_eq!(result, "{\"index\":0}");
         world
-            .apply_component(
+            .apply_component_impl(
                 "circuit_editor_set_motor_speed",
                 r#"{"index":0,"angular_velocity":10.0}"#,
             )
@@ -4869,12 +5528,12 @@ mod tests {
         world.step();
         // モーター電流の内省(値そのものは検証しない、往復できることのみ確認)。
         let _ = world
-            .read_component("circuit_editor_motor_current", "0")
+            .read_component_impl("circuit_editor_motor_current", "0")
             .unwrap()
             .parse::<f64>()
             .unwrap();
         let _ = world
-            .read_component("circuit_node_voltage", "1")
+            .read_component_impl("circuit_node_voltage", "1")
             .unwrap()
             .parse::<f64>()
             .unwrap();
@@ -4889,67 +5548,117 @@ mod tests {
     fn apply_component_and_read_component_wire_frames_and_read_misc_info_via_generic_dispatch() {
         let mut world = new_world();
 
-        assert_eq!(world.read_component("step_count", "").unwrap(), "0");
-        assert_eq!(world.read_component("time", "").unwrap(), "0");
-        let hash_before = world.read_component("state_hash", "").unwrap();
+        assert_eq!(world.read_component_impl("step_count", "").unwrap(), "0");
+        assert_eq!(world.read_component_impl("time", "").unwrap(), "0");
+        let hash_before = world.read_component_impl("state_hash", "").unwrap();
         assert_eq!(hash_before.len(), 16);
         world.step();
-        assert_eq!(world.read_component("step_count", "").unwrap(), "1");
+        assert_eq!(world.read_component_impl("step_count", "").unwrap(), "1");
         let _ = world
-            .read_component("energy_residual", "")
+            .read_component_impl("energy_residual", "")
             .unwrap()
             .parse::<f64>()
             .unwrap();
         let _ = world
-            .read_component("max_body_speed", "")
+            .read_component_impl("max_body_speed", "")
             .unwrap()
             .parse::<f64>()
             .unwrap();
         // 既定シーンの各ソルバが自己申告する近似・縮約(タブ区切り、複数行)。
         assert!(!world
-            .read_component("active_approximations_text", "")
+            .read_component_impl("active_approximations_text", "")
             .unwrap()
             .is_empty());
         assert_eq!(
-            world.read_component("imported_probe_count", "").unwrap(),
+            world
+                .read_component_impl("imported_probe_count", "")
+                .unwrap(),
             "0"
         );
 
         let result = world
-            .apply_component("add_rotating_frame", r#"{"angular_velocity_z":1.0}"#)
+            .apply_component_impl("add_rotating_frame", r#"{"angular_velocity_z":1.0}"#)
             .expect("add_rotating_frame via apply_component must succeed");
         assert_eq!(result, "{\"index\":1}");
-        assert_eq!(world.read_component("frame_count", "").unwrap(), "2");
+        assert_eq!(world.read_component_impl("frame_count", "").unwrap(), "2");
         assert_eq!(
-            world.read_component("frame_parent_index", "1").unwrap(),
+            world
+                .read_component_impl("frame_parent_index", "1")
+                .unwrap(),
             "0"
         );
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "add_child_frame",
                 r#"{"parent_index":1,"origin_offset_x":0.0,"origin_offset_y":0.0,"origin_offset_z":0.0,"angular_velocity_z":0.5}"#,
             )
             .expect("add_child_frame via apply_component must succeed");
         assert_eq!(result, "{\"index\":2}");
         assert_eq!(
-            world.read_component("frame_parent_index", "2").unwrap(),
+            world
+                .read_component_impl("frame_parent_index", "2")
+                .unwrap(),
             "1"
         );
 
-        // `set_motor_target_at`はヒンジモーターを持たないボディへ呼ぶと`Err`に
-        // なる経路(`JsValue::Err`のネイティブ構築がSIGABRTする既知の制約、
-        // モジュールdoc参照)があるため、成功パスのみ確認する——`spawn_motor_arm`
-        // (Rustのpub fnとして現存、モーターを実際に持つボディを作る)を使う。
+        // `set_motor_target_at`の成功パス——`spawn_motor_arm`(モーターを実際に
+        // 持つボディを作る)を使う。
         let motor_arm = world
             .spawn_motor_arm_impl(0.0, 2.0, 0.0, "アルミニウム".to_string())
             .expect("spawn_motor_arm must succeed");
         world
-            .apply_component(
+            .apply_component_impl(
                 "set_motor_target_at",
                 &format!(r#"{{"index":{motor_arm},"theta_target":0.5}}"#),
             )
             .expect("set_motor_target_at via apply_component must succeed");
+
+        // **`WasmError`導入で検証できるようになったErrパス**(以前はここに
+        // 「SIGABRTするため成功パスのみ確認する」と書いてあった)。
+        // モーターを持たないボディ(index 1 = 既定シーンの箱)へ呼ぶと
+        // `BodyHasNoHingeMotor`——`BodyMetaIndexOutOfRange`ではないことまで見る。
+        assert_err_is(
+            world.set_motor_target_at_impl(1, 0.5),
+            WasmError::BodyHasNoHingeMotor { index: 1 },
+        );
+        // 範囲外indexなら`try_body_meta_at`側で先に弾かれる。
+        let count = world.body_count_impl();
+        assert_err_is(
+            world.set_motor_target_at_impl(count, 0.5),
+            WasmError::BodyMetaIndexOutOfRange { index: count },
+        );
+
+        // フレームindexの範囲外(`check_frame_index`を通る4経路)。
+        let frames = world.frame_count_impl();
+        for result in [
+            world.frame_parent_index_impl(frames).map(|_| ()),
+            world.frame_rotation_at_impl(frames).map(|_| ()),
+            world.frame_world_position_impl(frames).map(|_| ()),
+            world.frame_world_rotation_impl(frames).map(|_| ()),
+        ] {
+            assert_err_is(
+                result,
+                WasmError::FrameIndexOutOfRange {
+                    index: frames,
+                    count: frames,
+                },
+            );
+        }
+        // 親フレームが範囲外なら子フレームも作れない(`World::add_frame`の
+        // `assert!`へ落ちる前にここで弾く、`add_child_frame_impl`のコメント参照)。
+        assert_err_is(
+            world.add_child_frame_impl(frames, 0.0, 0.0, 0.0, 0.5),
+            WasmError::FrameIndexOutOfRange {
+                index: frames,
+                count: frames,
+            },
+        );
+        assert_eq!(
+            world.frame_count_impl(),
+            frames,
+            "拒否された追加がフレーム数を増やしていないこと"
+        );
     }
 
     /// **Task#8第七弾の回帰テスト**: スポーン2種(振り子・モーターアームは
@@ -4963,7 +5672,7 @@ mod tests {
         let mut world = new_world();
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "spawn_pendulum",
                 r#"{"pivot_x":0.0,"pivot_y":5.0,"pivot_z":0.0,"arm_length":1.0,"material_name":"アルミニウム"}"#,
             )
@@ -4971,12 +5680,15 @@ mod tests {
         assert_eq!(result, "{\"index\":2}");
 
         world
-            .apply_component("spawn_fluid_block", "{}")
+            .apply_component_impl("spawn_fluid_block", "{}")
             .expect("spawn_fluid_block via apply_component must succeed");
-        assert_eq!(world.read_component("fluid_spawn_count", "").unwrap(), "1");
+        assert_eq!(
+            world.read_component_impl("fluid_spawn_count", "").unwrap(),
+            "1"
+        );
         assert!(
             world
-                .read_component("fluid_particle_count", "")
+                .read_component_impl("fluid_particle_count", "")
                 .unwrap()
                 .parse::<usize>()
                 .unwrap()
@@ -4984,40 +5696,88 @@ mod tests {
         );
         // 3D格子流体・エネルギー内訳は既定シーンでは無効/空でも、往復できる
         // ことだけを確認する(文字列が返る、パニックしない)。
-        let _ = world.read_component("grid_fluid_3d_summary", "").unwrap();
-        let _ = world.read_component("energy_report_text", "").unwrap();
+        let _ = world
+            .read_component_impl("grid_fluid_3d_summary", "")
+            .unwrap();
+        let _ = world.read_component_impl("energy_report_text", "").unwrap();
 
-        assert_eq!(world.read_component("snapshot_count", "").unwrap(), "0");
+        assert_eq!(
+            world.read_component_impl("snapshot_count", "").unwrap(),
+            "0"
+        );
         world.step();
-        // スナップショットは`snapshot_interval_steps`ごとにしか積まれないため
-        // (`WasmWorld::step`参照)、ここでは`restore_snapshot`を無効indexで
-        // 呼ばず、`snapshot_count`/`snapshot_time_at`の往復だけを確認する
-        // (`JsValue::Err`のネイティブ構築がSIGABRTする既知の制約のため)。
+        // **`WasmError`導入で検証できるようになったErrパス**(以前はここに
+        // 「無効indexで呼ばない、SIGABRTするため」と書いてあった)。
+        // スナップショットは`snapshot_interval_steps`ごとにしか積まれない
+        // (`WasmWorld::step`参照)ので、1step後の`snapshot_count`は0のまま
+        // ——つまりindex 0 が既に範囲外であり、`count: 0`まで検証できる。
+        assert_eq!(world.snapshot_count_impl(), 0);
+        assert_err_is(
+            world.snapshot_time_at_impl(0),
+            WasmError::SnapshotIndexOutOfRange { index: 0, count: 0 },
+        );
+        assert_err_is(
+            world.restore_snapshot_impl(0),
+            WasmError::SnapshotIndexOutOfRange { index: 0, count: 0 },
+        );
+        // ブックマークもまだ1件も無いので同様に範囲外。
+        assert_err_is(
+            world.bookmark_label_at_impl(0),
+            WasmError::BookmarkIndexOutOfRange { index: 0, count: 0 },
+        );
+        assert_err_is(
+            world.bookmark_time_at_impl(0),
+            WasmError::BookmarkIndexOutOfRange { index: 0, count: 0 },
+        );
+        assert_err_is(
+            world.bookmark_export_scene_json_impl(0),
+            WasmError::BookmarkIndexOutOfRange { index: 0, count: 0 },
+        );
+        assert_err_is(
+            world.restore_bookmark_impl(0),
+            WasmError::BookmarkIndexOutOfRange { index: 0, count: 0 },
+        );
 
         world
-            .apply_component("add_bookmark", r#"{"label":"Task8第七弾テスト"}"#)
+            .apply_component_impl("add_bookmark", r#"{"label":"Task8第七弾テスト"}"#)
             .expect("add_bookmark via apply_component must succeed");
-        assert_eq!(world.read_component("bookmark_count", "").unwrap(), "1");
         assert_eq!(
-            world.read_component("bookmark_label_at", "0").unwrap(),
+            world.read_component_impl("bookmark_count", "").unwrap(),
+            "1"
+        );
+        assert_eq!(
+            world.read_component_impl("bookmark_label_at", "0").unwrap(),
             "Task8第七弾テスト"
         );
         let _ = world
-            .read_component("bookmark_time_at", "0")
+            .read_component_impl("bookmark_time_at", "0")
             .unwrap()
             .parse::<f64>()
             .unwrap();
         let exported = world
-            .read_component("bookmark_export_scene_json", "0")
+            .read_component_impl("bookmark_export_scene_json", "0")
             .unwrap();
         assert!(exported.contains("\"bodies\""), "actual: {exported}");
 
         world
-            .apply_component("restore_bookmark", r#"{"index":0}"#)
+            .apply_component_impl("restore_bookmark", r#"{"index":0}"#)
             .expect("restore_bookmark via apply_component must succeed");
 
-        let current = world.read_component("export_scene_json", "").unwrap();
+        let current = world.read_component_impl("export_scene_json", "").unwrap();
         assert!(current.contains("\"bodies\""), "actual: {current}");
+
+        // ブックマークを1件積んだ後の範囲外(境界のindex==countがErrで、
+        // index==count-1がOkであること——off-by-oneを取り違えていない確認)。
+        let bookmarks = world.bookmark_count_impl();
+        assert_eq!(bookmarks, 1);
+        assert!(world.bookmark_label_at_impl(bookmarks - 1).is_ok());
+        assert_err_is(
+            world.bookmark_label_at_impl(bookmarks),
+            WasmError::BookmarkIndexOutOfRange {
+                index: bookmarks,
+                count: bookmarks,
+            },
+        );
     }
 
     /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):
@@ -5076,18 +5836,50 @@ mod tests {
             );
         }
 
-        // 死んだボディを指すと`Err`(パニックしない、成功パスのみのテスト
-        // モジュール方針は`add_joint_methods_succeed...`のdoc参照)。
+        // **`WasmError`導入で検証できるようになったErrパス**(以前はここに
+        // 「死んだボディを指すと`Err`」とだけ書いて確認していなかった)。
+        // 3種とも`try_body_id_at`を通るので、範囲外indexは`BodyIndexOutOfRange`。
+        let count = world.body_count_impl();
+        assert_err_is(
+            world.add_image_charge_force_coupling_impl(count, 1e-6, 1.0, 0.0, 0.0, 2.0),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_err_matches!(
+            world.add_lorentz_force_coupling_impl(count, 1e-6),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_buoyancy_drag_coupling_impl(count, 0.0, 1000.0),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+
+        // 「死んだボディを指すと`Err`」——範囲内だが削除済みのボディは
+        // `BodyNoLongerExists`(範囲外とは別変種)になる。
+        let doomed = world
+            .spawn_sphere_impl(0.0, 6.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .unwrap();
+        world.remove_body_at_impl(doomed).unwrap();
+        assert_err_is(
+            world.add_lorentz_force_coupling_impl(doomed, 1e-6),
+            WasmError::BodyNoLongerExists { index: doomed },
+        );
+        assert_eq!(
+            world.coupling_count_impl(),
+            3,
+            "拒否された追加がcouplingを増やしていないこと"
+        );
     }
 
     /// Add Coupling——熱・回路ドメインを参照する5種
     /// (DissipationToHeat/JouleHeat/BrownianForce/MotorCoupling/
     /// InductionCoupling)。`new_world()`(既定の起動シーンと同じ構成)は
     /// 熱ノード1個(index 0)・電圧源1個(index 0)を最初から持つため、
-    /// それらを参照して成功することを確認する。範囲外indexで`Err`になる
-    /// こと自体は`try_thermal_node_index`/`try_voltage_source_index`の
-    /// 実装(境界チェック)で保証されるが、実行時の確認はErrパスの検証に
-    /// wasm-bindgen-testが要るため対象外(下記コメント参照)。
+    /// それらを参照して成功することを確認する。**範囲外indexで`Err`になること
+    /// も実行時に確認する**(`WasmError`導入前は「wasm-bindgen-testが要るため
+    /// 対象外」としていた箇所、モジュール冒頭のテストdoc参照)。
     #[test]
     fn add_thermal_and_circuit_coupling_methods_succeed_with_valid_indices_and_reject_invalid_ones()
     {
@@ -5127,9 +5919,61 @@ mod tests {
             );
         }
 
-        // 範囲外indexで`Err`になることの実行時確認は、本テストモジュール
-        // 冒頭のdoc comment(Errパスの検証にはwasm-bindgen-testが要る、
-        // `add_joint_methods_succeed...`と同じ理由)が示すとおり対象外。
+        // === Errパス(以前は「wasm-bindgen-testが要るため対象外」だった) ===
+
+        // 熱ノードindexの範囲外(`try_thermal_node_index`)。既定シーンの
+        // 熱ノードは1個なので index 1 が最初の範囲外。`count`まで載ることで
+        // 「熱ドメイン自体が無効(count==0)」と区別できる。
+        let thermal_nodes = world.thermal_node_count_impl();
+        assert_eq!(thermal_nodes, 1);
+        assert_err_is(
+            world.add_dissipation_to_heat_coupling_impl(thermal_nodes),
+            WasmError::ThermalNodeIndexOutOfRange {
+                index: thermal_nodes,
+                count: thermal_nodes,
+            },
+        );
+        assert_err_matches!(
+            world.add_joule_heat_coupling_impl(thermal_nodes),
+            WasmError::ThermalNodeIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_brownian_force_coupling_impl(body, 0.05, 1e-3, thermal_nodes, 1, 2),
+            WasmError::ThermalNodeIndexOutOfRange { .. }
+        );
+
+        // 電圧源indexの範囲外(`try_voltage_source_index`)。熱ノードとは
+        // **別の変種**になることを見る——両者を取り違えると、UIには
+        // 見当違いの「熱ドメインは有効か?」という案内が出てしまう。
+        assert_err_matches!(
+            world.add_motor_coupling_impl(body, 0.0, 1.0, 0.0, 99, 0.1),
+            WasmError::VoltageSourceIndexOutOfRange { index: 99, .. }
+        );
+        assert_err_matches!(
+            world.add_induction_coupling_impl(body, 99, 0.5, 1.0, 0.0, 1.0, 0.0),
+            WasmError::VoltageSourceIndexOutOfRange { index: 99, .. }
+        );
+
+        // 剛体indexの範囲外(熱・回路indexが正しくてもこちらで弾かれる)。
+        let count = world.body_count_impl();
+        assert_err_matches!(
+            world.add_brownian_force_coupling_impl(count, 0.05, 1e-3, 0, 1, 2),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_motor_coupling_impl(count, 0.0, 1.0, 0.0, 0, 0.1),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_induction_coupling_impl(count, 0, 0.5, 1.0, 0.0, 1.0, 0.0),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+
+        assert_eq!(
+            world.coupling_count_impl(),
+            5,
+            "拒否された追加がcouplingを増やしていないこと"
+        );
     }
 
     /// **残タスク完遂の縦串②残り6種を解禁する増分**——レビュー指摘
@@ -5149,6 +5993,53 @@ mod tests {
         let node = world.add_thermal_node_impl(273.15, 100.0);
         assert_eq!(node, 1);
         assert_eq!(world.thermal_node_count_impl(), 2);
+
+        // **ドメイン未有効のErrパス**(以前は「wasm-bindgen-testが要るため
+        // 対象外」としていた箇所、モジュール冒頭のテストdoc参照)。この時点では
+        // SPH・格子流体・気体区画のいずれもまだ有効化していない——**下で
+        // 有効化する前にここで確かめるのが要点**で、3ドメインがそれぞれ
+        // 固有の変種を返す(取り違えるとUIに出る復旧手順の案内が食い違う)。
+        assert_err_is(
+            world.add_sph_rigid_coupling_impl(body, 0.2, 12),
+            WasmError::SphDomainNotEnabled,
+        );
+        assert_err_is(
+            world.add_grid_fluid_rigid_coupling_impl(body, 0.3, 0.3),
+            WasmError::GridFluidDomainNotEnabled,
+        );
+        assert_err_is(
+            world.add_boussinesq_buoyancy_coupling_impl(node, 293.15, 3.4e-3),
+            WasmError::GridFluidDomainNotEnabled,
+        );
+        assert_err_is(
+            world.add_piston_gas_coupling_impl(body, 0.0, 1.0, 0.0, 0.01, 0.001),
+            WasmError::GasCompartmentNotEnabled,
+        );
+        // 剛体indexの検証はドメイン判定より手前で走る(`try_body_id_at`が先)
+        // ——両方不正なときに「ドメインが無い」と誤って案内しないこと。
+        let out_of_range = world.body_count_impl();
+        assert_err_matches!(
+            world.add_sph_rigid_coupling_impl(out_of_range, 0.2, 12),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_grid_fluid_rigid_coupling_impl(out_of_range, 0.3, 0.3),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_piston_gas_coupling_impl(out_of_range, 0.0, 1.0, 0.0, 0.01, 0.001),
+            WasmError::BodyIndexOutOfRange { .. }
+        );
+        // 同じく`add_boussinesq_buoyancy`は熱ノード判定が格子流体判定より先。
+        assert_err_matches!(
+            world.add_boussinesq_buoyancy_coupling_impl(99, 293.15, 3.4e-3),
+            WasmError::ThermalNodeIndexOutOfRange { index: 99, .. }
+        );
+        assert_eq!(
+            world.coupling_count_impl(),
+            0,
+            "拒否された追加がcouplingを1件も増やしていないこと"
+        );
 
         world
             .add_phase_change_morph_coupling_impl(
@@ -5193,11 +6084,32 @@ mod tests {
             );
         }
 
-        // ドメイン未有効な状態で`Err`になることの実行時確認は、本テスト
-        // モジュール冒頭のdoc comment(`JsValue::from_str`はネイティブ
-        // ターゲットでは構築した時点でプロセスごとSIGABRTする、`Result::
-        // is_err()`で受けても回避できない)が示すとおり対象外——
-        // Errパスの検証にはwasm-bindgen-testが要る。
+        // 熱ノードindexの範囲外は、ドメインを全て有効化した後でも
+        // `ThermalNodeIndexOutOfRange`のまま(`PhaseChangeMorph`と
+        // `ConvectionLink`はどちらも`try_thermal_node_index`を通る)。
+        let nodes = world.thermal_node_count_impl();
+        assert_err_is(
+            world.add_phase_change_morph_coupling_impl(
+                body, nodes, 273.15, 334_000.0, 2100.0, 4186.0, 1.0, 10.0, -50_000.0,
+            ),
+            WasmError::ThermalNodeIndexOutOfRange {
+                index: nodes,
+                count: nodes,
+            },
+        );
+        assert_err_matches!(
+            world.add_convection_link_coupling_impl(
+                nodes, node, 0.01, 0.05, 3, 0.026, 1.5e-5, 0.71, 0.0
+            ),
+            WasmError::ThermalNodeIndexOutOfRange { .. }
+        );
+        assert_err_matches!(
+            world.add_convection_link_coupling_impl(
+                0, nodes, 0.01, 0.05, 3, 0.026, 1.5e-5, 0.71, 0.0
+            ),
+            WasmError::ThermalNodeIndexOutOfRange { .. }
+        );
+        assert_eq!(world.coupling_count_impl(), 6);
     }
 
     /// **残タスク完遂の縦串⑤増分**(飛行機の物理: 揚力の配線+操縦面Command)。
@@ -5242,6 +6154,63 @@ mod tests {
         world.push_set_coupling_control_surface_deflection_impl(wing_index, 0.1);
         world.push_set_coupling_control_surface_deflection_impl(9999, 0.1);
         world.step();
+
+        // 揚力2種も`try_body_id_at`を通る(範囲外indexで`Err`)。
+        let count = world.body_count_impl();
+        assert_err_is(
+            world.add_wing_lift_coupling_impl(
+                count, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.225, 1.81e-5,
+            ),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_err_is(
+            world.add_magnus_lift_coupling_impl(count, 0.3, 1.225, 1.81e-5),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_eq!(
+            world.coupling_count_impl(),
+            2,
+            "拒否された追加がcouplingを増やしていないこと"
+        );
+    }
+
+    /// 特殊スポーン2種(振り子・モーターアーム)も未知の材質名を拒否すること。
+    /// どちらも内部でJoint/モーターを組み立てるため、材質解決の失敗が
+    /// **途中まで作った状態を残さない**(ボディ数が増えない)ことまで見る。
+    #[test]
+    fn spawn_pendulum_and_motor_arm_reject_unknown_material_without_leaving_partial_state() {
+        let mut world = new_world();
+        let before = world.body_count_impl();
+        let bogus = "存在しない材質";
+
+        assert_err_is(
+            world.spawn_pendulum_impl(0.0, 5.0, 0.0, 1.0, bogus.to_string()),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        assert_err_is(
+            world.spawn_motor_arm_impl(0.0, 2.0, 0.0, bogus.to_string()),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
+        assert_eq!(world.body_count_impl(), before);
+        assert!(
+            world.joint_info_text_impl(-1).is_empty(),
+            "材質解決に失敗したスポーンがJointだけ作って終わっていないこと"
+        );
+
+        // 既知の材質なら両方成功する(上のErrが材質名以外の理由ではないこと)。
+        world
+            .spawn_pendulum_impl(0.0, 5.0, 0.0, 1.0, "アルミニウム".to_string())
+            .expect("known material must succeed");
+        world
+            .spawn_motor_arm_impl(0.0, 2.0, 0.0, "アルミニウム".to_string())
+            .expect("known material must succeed");
+        assert!(world.body_count_impl() > before);
     }
 
     /// **Task#8第一弾の回帰テスト**: `apply_component`/`read_component`が
@@ -5260,7 +6229,7 @@ mod tests {
             .unwrap();
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "add_distance_joint",
                 &format!(
                     r#"{{"body_a":{body_a},"ax":0,"ay":0,"az":0,"body_b":{body_b},"bx":0,"by":0,"bz":0,"length":2.0}}"#
@@ -5269,7 +6238,7 @@ mod tests {
             .expect("add_distance_joint via apply_component must succeed");
         assert_eq!(result, "{\"index\":0}");
         let joint_text = world
-            .read_component("joint_info_text", "-1")
+            .read_component_impl("joint_info_text", "-1")
             .expect("joint_info_text via read_component must succeed");
         assert!(
             joint_text.starts_with("DistanceJoint\t"),
@@ -5277,35 +6246,57 @@ mod tests {
         );
 
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "add_lorentz_force_coupling",
                 &format!(r#"{{"body":{body_a},"charge":1e-6}}"#),
             )
             .expect("add_lorentz_force_coupling via apply_component must succeed");
         assert_eq!(result, "{}");
         let count = world
-            .read_component("coupling_count", "")
+            .read_component_impl("coupling_count", "")
             .expect("coupling_count via read_component must succeed");
         assert_eq!(count, "1");
 
         // 熱ノード追加はindexを返す作成系オペレーション。
         let result = world
-            .apply_component(
+            .apply_component_impl(
                 "add_thermal_node",
                 r#"{"temperature":293.15,"heat_capacity":100.0}"#,
             )
             .expect("add_thermal_node via apply_component must succeed");
         assert_eq!(result, "{\"index\":1}"); // 既定シーンが既にnode 0を持つ
         let node_count = world
-            .read_component("thermal_node_count", "")
+            .read_component_impl("thermal_node_count", "")
             .expect("thermal_node_count via read_component must succeed");
         assert_eq!(node_count, "2");
 
-        // 未知のkindは両メソッドともErrになる(無言で無視しない)——ただし
-        // `Result::Err`側の`JsValue`をネイティブテストで構築するとプロセス
-        // ごとSIGABRTする既知の制約(モジュールdoc参照)があるため、ここでは
-        // 呼ばない。Playwright側(実wasmターゲット)で未知kindのエラー伝播を
-        // 確認している。
+        // **未知のkindは両メソッドともErrになる(無言で無視しない)**。
+        // 以前は「`JsValue`のネイティブ構築がSIGABRTするため呼ばない」として
+        // Playwright任せにしていたが、`WasmError`導入でここで直接確かめられる
+        // ——`apply`側と`read`側が**別の変種**になる(どちらのディスパッチで
+        // 落ちたのかがエラーだけで分かる)ことまで見る。
+        assert_err_is(
+            world.apply_component_impl("no_such_apply_kind", "{}"),
+            WasmError::UnknownApplyComponentKind("no_such_apply_kind".to_string()),
+        );
+        assert_err_is(
+            world.read_component_impl("no_such_read_kind", ""),
+            WasmError::UnknownReadComponentKind("no_such_read_kind".to_string()),
+        );
+        // `apply`で有効なkindを`read`へ渡しても(その逆も)通らない。
+        assert_err_is(
+            world.read_component_impl("add_thermal_node", ""),
+            WasmError::UnknownReadComponentKind("add_thermal_node".to_string()),
+        );
+        assert_err_is(
+            world.apply_component_impl("coupling_count", "{}"),
+            WasmError::UnknownApplyComponentKind("coupling_count".to_string()),
+        );
+        // payloadがJSONでなければkindの解決より手前で弾かれる。
+        assert_err_matches!(
+            world.apply_component_impl("add_thermal_node", "not json at all"),
+            WasmError::ApplyComponentInvalidJson(_)
+        );
 
         // `component_schema`が畳んだ代表的なkind(このテストで実際に使った
         // ものと、他の増分で畳んだ環境系)を過不足なく列挙していることを
@@ -5478,10 +6469,11 @@ mod tests {
         assert!((world.time_impl() - time_at_bookmark).abs() < 1e-12);
     }
 
-    /// 位置/姿勢の直接編集(Gizmo相当)が成功パスで正しく反映されること
-    /// (`Float32Array`経由の読み出し自体はネイティブターゲットで検証できない
-    /// ため、モジュールdoc「正直な制約」参照のとおりパニックせず成功した
-    /// ことのみを確認する)。
+    /// 位置/姿勢の直接編集(Gizmo相当)が成功パスで正しく反映され、範囲外
+    /// indexでは`Err`になること。**書き込んだ値の読み戻しに`Float32Array`は
+    /// 要らない**——index検証と値の取り出しを担う`body_position_at_impl`/
+    /// `body_rotation_at_impl`は素のRust配列を返すため(モジュール冒頭の
+    /// テストdoc「今も残る制約」参照)、ここで実際に往復を確かめられる。
     #[test]
     fn set_body_position_and_rotation_succeed_for_a_valid_body() {
         let mut world = new_world();
@@ -5489,10 +6481,35 @@ mod tests {
         world
             .set_body_rotation_at_impl(1, 0.0, 0.0, 0.0, 1.0)
             .unwrap();
+        assert_eq!(world.body_position_at_impl(1).unwrap(), [7.0, 8.0, 9.0]);
+        assert_eq!(
+            world.body_rotation_at_impl(1).unwrap(),
+            [0.0, 0.0, 0.0, 1.0]
+        );
+        let _ = world.body_velocity_at_impl(1).unwrap();
+
+        // Errパス: 読み書きどちらも`try_body_id_at`を通る。
+        let count = world.body_count_impl();
+        let out_of_range = WasmError::BodyIndexOutOfRange {
+            index: count,
+            count,
+        };
+        assert_err_is(
+            world.set_body_position_at_impl(count, 7.0, 8.0, 9.0),
+            out_of_range.clone(),
+        );
+        assert_err_is(
+            world.set_body_rotation_at_impl(count, 0.0, 0.0, 0.0, 1.0),
+            out_of_range.clone(),
+        );
+        assert_err_is(world.body_position_at_impl(count), out_of_range.clone());
+        assert_err_is(world.body_velocity_at_impl(count), out_of_range.clone());
+        assert_err_is(world.body_rotation_at_impl(count), out_of_range);
     }
 
-    /// Scale Gizmo(`set_body_scale_at`)がスポーンした球のスケールを
-    /// 成功パスで受理すること。
+    /// Scale Gizmo(`set_body_scale_at`/`set_body_scale_xyz_at`)がスポーンした
+    /// 球のスケールを成功パスで受理し、**床(index 0)と不正なスケール成分を
+    /// 拒否する**こと。後者2つは`WasmError`導入で初めて検証できるようになった。
     #[test]
     fn set_body_scale_at_succeeds_for_a_spawned_body() {
         let mut world = new_world();
@@ -5503,6 +6520,47 @@ mod tests {
         assert_eq!(
             world.body_shape_kind_at_impl(sphere_index).unwrap(),
             "sphere"
+        );
+        // 球に軸別スケールは効かない(`false`を返すが`Err`ではない、
+        // `set_body_scale_xyz_at_impl`のdoc参照)——「効かない」と「失敗」を
+        // 取り違えていないことの確認。
+        assert!(!world
+            .set_body_scale_xyz_at_impl(sphere_index, 1.0, 2.0, 3.0)
+            .unwrap());
+
+        // 床(index 0)にはスケールハンドルが無い(両メソッドとも同じ変種)。
+        assert_err_is(
+            world.set_body_scale_at_impl(0, 2.0),
+            WasmError::GroundHasNoScaleHandle,
+        );
+        assert_err_is(
+            world.set_body_scale_xyz_at_impl(0, 2.0, 2.0, 2.0),
+            WasmError::GroundHasNoScaleHandle,
+        );
+        // 軸別スケールは各成分が正の有限値であることを要求する。
+        for (sx, sy, sz) in [
+            (0.0, 1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, f64::NAN),
+            (f64::INFINITY, 1.0, 1.0),
+        ] {
+            assert_err_is(
+                world.set_body_scale_xyz_at_impl(sphere_index, sx, sy, sz),
+                WasmError::InvalidScaleComponent,
+            );
+        }
+        // 範囲外index(スケール判定より手前の`try_body_id_at`で弾かれる)。
+        let count = world.body_count_impl();
+        assert_err_is(
+            world.set_body_scale_at_impl(count, 2.0),
+            WasmError::BodyIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+        assert_err_matches!(
+            world.set_body_scale_xyz_at_impl(count, 2.0, 2.0, 2.0),
+            WasmError::BodyIndexOutOfRange { .. }
         );
     }
 
@@ -5515,7 +6573,7 @@ mod tests {
     #[test]
     fn from_scene_json_loads_the_d4_box_stack_gallery_asset_and_settles() {
         let json = include_str!("../../../scenes/d4-box-stack.json");
-        let mut world = WasmWorld::from_scene_json(json.to_string())
+        let mut world = WasmWorld::from_scene_json_impl(json)
             .expect("scenes/d4-box-stack.json must be a valid scene");
         assert_eq!(world.body_count_impl(), 4); // 地面+3段の箱。
                                                 // 地面(JSON側に"name"フィールドが無い)は`format!("Body_{index}")`の
@@ -5534,11 +6592,14 @@ mod tests {
     }
 
     /// 範囲外の`body_index`で`push_apply_force`/`push_grab`/`push_move_grab`/
-    /// `push_release`を呼ぶと`Err`を返すこと(**Q5と同じ理由でResult化した
+    /// `push_release`等を呼ぶと`Err`を返すこと(**Q5と同じ理由でResult化した
     /// 対象**、シーンギャラリーで任意のシーンを読み込んだ後にNudge/Grab UIが
-    /// 古い`body_index`を渡しても`panic!`しないことの検証)。ここでの`Err`検証は
-    /// `JsValue`を構築するため、ネイティブターゲットでは**abortする**
-    /// (モジュールdoc「正直な制約」参照)——したがって成功パスのみを確認する。
+    /// 古い`body_index`を渡しても`panic!`しないことの検証)。
+    ///
+    /// **この`Err`検証こそがQ5の主張そのものだったが、`JsValue`を構築した
+    /// 時点でネイティブテストがabortするため長らく書けず、成功パスだけを
+    /// 確認していた**(モジュール冒頭のテストdoc参照)。`WasmError`導入で
+    /// 本来検証したかった側をようやく書けるようになった。
     #[test]
     fn push_commands_accept_an_explicit_body_index_for_a_valid_body() {
         let mut world = new_world();
@@ -5546,6 +6607,89 @@ mod tests {
         world.push_grab_impl(1, 0.0, 1.0, 0.0).unwrap();
         world.push_move_grab_impl(1, 0.0, 1.0, 0.0).unwrap();
         world.push_release_impl(1).unwrap();
+        world.push_set_body_mass_impl(1, 2.5).unwrap();
+        world
+            .push_set_body_type_impl(1, "Static".to_string())
+            .unwrap();
+        world.push_set_collision_filter_impl(1, 0b10, 0b01).unwrap();
+
+        // 範囲外index——Command系7経路すべてが`try_body_id_at`を通る。
+        let count = world.body_count_impl();
+        let out_of_range = WasmError::BodyIndexOutOfRange {
+            index: count,
+            count,
+        };
+        assert_err_is(
+            world.push_apply_force_impl(count, 0.0, 1.0, 0.0),
+            out_of_range.clone(),
+        );
+        assert_err_is(
+            world.push_grab_impl(count, 0.0, 1.0, 0.0),
+            out_of_range.clone(),
+        );
+        assert_err_is(
+            world.push_move_grab_impl(count, 0.0, 1.0, 0.0),
+            out_of_range.clone(),
+        );
+        assert_err_is(world.push_release_impl(count), out_of_range.clone());
+        assert_err_is(
+            world.push_set_body_mass_impl(count, 2.5),
+            out_of_range.clone(),
+        );
+        assert_err_is(
+            world.push_set_body_type_impl(count, "Static".to_string()),
+            out_of_range.clone(),
+        );
+        assert_err_is(
+            world.push_set_collision_filter_impl(count, 0b10, 0b01),
+            out_of_range.clone(),
+        );
+
+        // 内省系4つも同じ経路。
+        assert_err_is(world.body_mass_at_impl(count), out_of_range.clone());
+        assert_err_is(world.body_type_at_impl(count), out_of_range.clone());
+        assert_err_is(
+            world.body_collision_group_at_impl(count),
+            out_of_range.clone(),
+        );
+        assert_err_is(world.body_collision_mask_at_impl(count), out_of_range);
+
+        // **質量の検証はindex検証より手前**(`push_set_body_mass_impl`は
+        // 質量を先に見る)——範囲外indexかつ不正質量なら`InvalidMass`が勝つ。
+        for bad_mass in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_err_is(
+                world.push_set_body_mass_impl(1, bad_mass),
+                WasmError::InvalidMass,
+            );
+            assert_err_is(
+                world.push_set_body_mass_impl(count, bad_mass),
+                WasmError::InvalidMass,
+            );
+        }
+
+        // Dynamic/Static/Kinematic以外のbody type名。メッセージには`{:?}`
+        // (引用符付き)で名前が載る規約なので、変種にも生の名前を保持する。
+        assert_err_is(
+            world.push_set_body_type_impl(1, "Rigid".to_string()),
+            WasmError::UnknownBodyType("Rigid".to_string()),
+        );
+        assert_err_is(
+            world.push_set_body_type_impl(1, String::new()),
+            WasmError::UnknownBodyType(String::new()),
+        );
+        // 大文字小文字は区別する(UIの選択肢と1対1で対応させる規約)。
+        assert_err_is(
+            world.push_set_body_type_impl(1, "static".to_string()),
+            WasmError::UnknownBodyType("static".to_string()),
+        );
+
+        // 拘束アンカーの内省(拘束を持たないボディは`None`、範囲外は
+        // `try_body_meta_at`側の変種)。
+        assert_eq!(world.constraint_anchor_points_impl(1).unwrap(), None);
+        assert_err_is(
+            world.constraint_anchor_points_impl(count),
+            WasmError::BodyMetaIndexOutOfRange { index: count },
+        );
     }
 
     /// **増分B1(シーン定義プローブをProbe Graphsパネルへ配線)**: 既定シーン
@@ -5566,12 +6710,364 @@ mod tests {
     #[test]
     fn imported_probe_label_reflects_the_d6_floating_box_scene_probe() {
         let json = include_str!("../../../scenes/d6-floating-box-f4.json");
-        let world = WasmWorld::from_scene_json(json.to_string())
+        let world = WasmWorld::from_scene_json_impl(json)
             .expect("scenes/d6-floating-box-f4.json must be a valid scene");
         assert_eq!(world.imported_probe_count_impl(), 1);
         assert_eq!(
             world.imported_probe_label_at_impl(0).unwrap(),
             "BodyPosY(box)"
+        );
+    }
+
+    /// **「JS側から見た挙動は一切変わらない」ことの固定テスト**
+    /// (`WasmError`のdoc参照)。`Display`が出す文字列は、リファクタ前に
+    /// `JsValue::from_str`へ渡していたメッセージと1バイトも違ってはならない
+    /// ——フロントエンドはこの文字列をそのままConsoleパネルへ出しており、
+    /// 内部リファクタで表示が変わるのは本改修の前提に反する。
+    ///
+    /// **期待値はリテラルで直書きする**(`Display`と同じ`format!`式を書き直す
+    /// のではなく)。同じ式を両側に書いても「同じ式は同じ文字列を作る」しか
+    /// 言えず、文面が変わってしまったことを検出できないため。
+    ///
+    /// **本テストが全変種を舐めることの副次的な意味(正直な記録)**: 37変種の
+    /// うち5つは、実際に踏ませる呼び出しをネイティブテストから書けない——
+    /// `ShapeSerializeFailed`/`ScenarioSerializeFailed`/
+    /// `HeadlessResultSerializeFailed`は`serde_json::to_string`の失敗だが、
+    /// 対象の型(`ShapeJson`/`Scenario`/内部の結果構造体)はいずれも
+    /// 「mapのキーが文字列でない」等の失敗要因を持たず事実上infallibleであり、
+    /// `ImportedProbeHandleMissing`は`World`側にprobe削除経路が無いため
+    /// 到達しない(その変種のdoc参照)。これら5つについては、本テストの
+    /// 文面固定が唯一の回帰防御になる。
+    #[test]
+    fn display_reproduces_the_exact_messages_that_used_to_reach_jsvalue() {
+        use sim_world::SceneError;
+
+        // シーンJSON経路は`SceneError`のDebug表現をそのまま出す
+        // (旧`format!("{e:?}")`と同じ)。5変種とも同じ規約。
+        assert_eq!(
+            WasmError::ScenarioParse(SceneError::JsonParse("boom".to_string())).to_string(),
+            r#"JsonParse("boom")"#
+        );
+        assert_eq!(
+            WasmError::WorldBuild(SceneError::UnknownMaterial("鋼".to_string())).to_string(),
+            r#"UnknownMaterial("鋼")"#
+        );
+        assert_eq!(
+            WasmError::AppendScenarioBodies(SceneError::UnknownBodyName("b".to_string()))
+                .to_string(),
+            r#"UnknownBodyName("b")"#
+        );
+        assert_eq!(
+            WasmError::ScenarioProbes(SceneError::InvalidValue("v".to_string())).to_string(),
+            r#"InvalidValue("v")"#
+        );
+        assert_eq!(
+            WasmError::HeadlessRun(SceneError::JsonParse("boom".to_string())).to_string(),
+            r#"JsonParse("boom")"#
+        );
+
+        let cases: Vec<(WasmError, &str)> = vec![
+            (
+                WasmError::ShapeSerializeFailed("boom".to_string()),
+                "failed to serialize shape: boom",
+            ),
+            (
+                WasmError::ScenarioSerializeFailed("boom".to_string()),
+                "failed to serialize scenario: boom",
+            ),
+            (
+                WasmError::HeadlessResultSerializeFailed("boom".to_string()),
+                "failed to serialize result: boom",
+            ),
+            (
+                WasmError::BodyIndexOutOfRange { index: 7, count: 3 },
+                "body index 7 out of range (body_count=3)",
+            ),
+            // 件数を含まない文面は`BodyIndexOutOfRange`とは別変種として
+            // 保たれている(`try_body_meta_at`の従来の文面)。
+            (
+                WasmError::BodyMetaIndexOutOfRange { index: 7 },
+                "body index 7 out of range",
+            ),
+            (
+                WasmError::BodyNoLongerExists { index: 7 },
+                "body index 7 no longer exists in the current World state (removed, or created after the currently restored Timeline snapshot)",
+            ),
+            (
+                WasmError::ImportedProbeIndexOutOfRange { index: 7, count: 3 },
+                "imported probe index 7 out of range (imported_probe_count=3)",
+            ),
+            (
+                WasmError::ImportedProbeHandleMissing { handle: 7 },
+                "imported probe handle 7 has no matching World::probe (World-side removal is not implemented, this should not happen)",
+            ),
+            (
+                WasmError::CircuitElementIndexOutOfRange { index: 7, count: 3 },
+                "circuit element index 7 out of range (circuit_element_count=3)",
+            ),
+            (
+                WasmError::ThermalNodeIndexOutOfRange { index: 7, count: 3 },
+                "thermal node index 7 out of range (thermal node count=3, is the thermal domain enabled in this scene?)",
+            ),
+            (
+                WasmError::VoltageSourceIndexOutOfRange { index: 7, count: 3 },
+                "voltage source index 7 out of range (voltage source count=3, is the circuit domain enabled in this scene?)",
+            ),
+            (
+                WasmError::FrameIndexOutOfRange { index: 7, count: 3 },
+                "frame index 7 out of range (frame_count=3)",
+            ),
+            (
+                WasmError::SnapshotIndexOutOfRange { index: 7, count: 3 },
+                "snapshot index 7 out of range (snapshot_count=3)",
+            ),
+            (
+                WasmError::BookmarkIndexOutOfRange { index: 7, count: 3 },
+                "bookmark index 7 out of range (bookmark_count=3)",
+            ),
+            (
+                WasmError::UnknownMaterial("謎".to_string()),
+                "unknown material: 謎",
+            ),
+            (
+                WasmError::MaterialAlreadyExists("謎".to_string()),
+                "material already exists: 謎",
+            ),
+            (
+                WasmError::CircuitDomainNotEnabled,
+                "circuit domain is not enabled in the current world",
+            ),
+            (
+                WasmError::SphDomainNotEnabled,
+                "SPH fluid domain is not enabled (spawn a fluid block first via \"+ 流体\")",
+            ),
+            (
+                WasmError::GridFluidDomainNotEnabled,
+                "grid fluid domain is not enabled (call enable_grid_fluid_2d_domain first)",
+            ),
+            (
+                WasmError::GasCompartmentNotEnabled,
+                "gas compartment is not enabled (call enable_gas_compartment first)",
+            ),
+            (WasmError::InvalidDt, "dt must be a positive finite number"),
+            (
+                WasmError::InvalidDensity,
+                "density must be a positive finite number",
+            ),
+            (
+                WasmError::InvalidMass,
+                "mass must be a positive finite number",
+            ),
+            (
+                WasmError::InvalidScaleComponent,
+                "scale components must be positive",
+            ),
+            // 旧実装の`{other:?}`(`other`は`&str`)と同じ引用符付き表示。
+            (
+                WasmError::UnknownBodyType("Rigid".to_string()),
+                "unknown body type \"Rigid\" (expected Dynamic/Static/Kinematic)",
+            ),
+            (
+                WasmError::CannotRemoveFloor,
+                "床は削除できません(シーンの基準面)",
+            ),
+            (
+                WasmError::CannotDuplicateRemovedBody,
+                "cannot duplicate a removed body",
+            ),
+            (
+                WasmError::BodyHasNoHingeMotor { index: 7 },
+                "body index 7 has no hinge motor",
+            ),
+            (
+                WasmError::GroundHasNoScaleHandle,
+                "Ground is static and has no scale handle",
+            ),
+            (
+                WasmError::ApplyComponentInvalidJson("boom".to_string()),
+                "apply_component: invalid JSON payload: boom",
+            ),
+            (
+                WasmError::UnknownApplyComponentKind("zap".to_string()),
+                "apply_component: unknown kind \"zap\"",
+            ),
+            (
+                WasmError::UnknownReadComponentKind("zap".to_string()),
+                "read_component: unknown kind \"zap\"",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected, "variant {error:?}");
+        }
+    }
+
+    /// **`WasmError`導入の主眼**——シーンJSON経路の`Err`をネイティブで
+    /// 検証する。以前は`JsValue`のネイティブ構築がプロセスごとabortしていた
+    /// ため、「不正なシーンJSONを拒否する」という**このcrateの最も外向きの
+    /// 契約**が1本もテストされていなかった。
+    ///
+    /// `SceneError`をそのまま保持する設計(`WasmError`のdoc)により、
+    /// 「JSONとして壊れている」と「JSONは読めたが材料名が解決できない」を
+    /// **区別して**検証できる——文字列を突き合わせるだけでは区別が付かない。
+    #[test]
+    fn scene_json_paths_reject_broken_and_unresolvable_scenes_with_the_right_error_kind() {
+        use sim_world::SceneError;
+
+        // (1) JSONとして壊れている——`Scenario::from_json`が`JsonParse`を返し、
+        //     `WasmError::ScenarioParse`で包まれる。
+        assert_err_matches!(
+            WasmWorld::from_scene_json_impl("{ this is not json"),
+            WasmError::ScenarioParse(SceneError::JsonParse(_))
+        );
+        assert_err_matches!(
+            run_headless_scenario_json_impl("{ this is not json", 1),
+            WasmError::HeadlessRun(SceneError::JsonParse(_))
+        );
+        let mut world = new_world();
+        assert_err_matches!(
+            world.import_scene_json_impl("{ this is not json"),
+            WasmError::ScenarioParse(SceneError::JsonParse(_))
+        );
+
+        // (2) JSONとしては妥当だが材料名が解決できない——`World`構築側で
+        //     `UnknownMaterial`になる。`from_scene_json`は`WorldBuild`、
+        //     `import_scene_json`は`AppendScenarioBodies`と、**どちらの
+        //     構築経路で落ちたのかが変種で分かる**(同じ`SceneError`を
+        //     別の文脈で受けているため、文字列だけでは区別できない)。
+        let unknown_material = r#"{
+            "name": "unknown-material",
+            "world": { "gravity": 9.80665, "dt": 0.008333333 },
+            "bodies": [
+              { "shape": { "sphere": { "radius": 0.3 } },
+                "material": "存在しない材質",
+                "position": [0.0, 20.0, 0.0],
+                "name": "ball" }
+            ]
+        }"#;
+        assert_err_matches!(
+            WasmWorld::from_scene_json_impl(unknown_material),
+            WasmError::WorldBuild(SceneError::UnknownMaterial(_))
+        );
+        assert_err_matches!(
+            world.import_scene_json_impl(unknown_material),
+            WasmError::AppendScenarioBodies(SceneError::UnknownMaterial(_))
+        );
+        assert_err_matches!(
+            run_headless_scenario_json_impl(unknown_material, 1),
+            WasmError::HeadlessRun(SceneError::UnknownMaterial(_))
+        );
+        // 材料名は`SceneError`側にそのまま載っている(UIがどの名前を直せば
+        // よいか示せる)ことまで確かめる。
+        match WasmWorld::from_scene_json_impl(unknown_material).err() {
+            Some(WasmError::WorldBuild(SceneError::UnknownMaterial(name))) => {
+                assert_eq!(name, "存在しない材質");
+            }
+            other => panic!("expected WorldBuild(UnknownMaterial), got {other:?}"),
+        }
+
+        // (3) ボディは解決できるが`probes`が存在しないボディ名を指す。
+        //     **同じ壊れ方でも2経路で落ちる場所が違う**のがここで見える:
+        //     `from_scene_json`は`World::from_scenario_with_body_ids`が
+        //     probesまで含めて構築するため`WorldBuild`で落ち、
+        //     `import_scene_json`は`append_scenario_bodies`がprobesを対象外と
+        //     する設計(そのdoc参照)なので、後続の`add_scenario_probes`まで
+        //     進んでから`ScenarioProbes`で落ちる。`SceneError`の中身
+        //     (`UnknownBodyName`)は同じなので、**文字列を突き合わせる形の
+        //     検証ではこの差を捉えられない**——変種を分けた甲斐がここに出る。
+        let unknown_probe_body = r#"{
+            "name": "unknown-probe-body",
+            "world": { "gravity": 9.80665, "dt": 0.008333333 },
+            "bodies": [
+              { "shape": { "sphere": { "radius": 0.3 } },
+                "material": "鋼(炭素鋼)",
+                "position": [0.0, 20.0, 0.0],
+                "name": "ball" }
+            ],
+            "probes": [ { "body_pos_y": "そんなボディは無い" } ]
+        }"#;
+        assert_err_matches!(
+            WasmWorld::from_scene_json_impl(unknown_probe_body),
+            WasmError::WorldBuild(SceneError::UnknownBodyName(_))
+        );
+        assert_err_matches!(
+            world.import_scene_json_impl(unknown_probe_body),
+            WasmError::ScenarioProbes(SceneError::UnknownBodyName(_))
+        );
+
+        // 一連の失敗を経ても、`import_scene_json`を呼び続けた`world`は
+        // 依然として使える(Errがワールドを壊していない)。
+        let valid = include_str!("../../../scenes/d1-free-fall.json");
+        let added = world
+            .import_scene_json_impl(valid)
+            .expect("a valid scene must still import after the failures above");
+        assert_eq!(added, 1);
+    }
+
+    /// インポート済みプローブのindex範囲外(`try_imported_probe_handle_at`)。
+    /// 既定シーンはプローブを1本も持たないので index 0 が既に範囲外——
+    /// `count: 0`まで含めて検証できる。
+    #[test]
+    fn imported_probe_accessors_reject_out_of_range_indices() {
+        let world = new_world();
+        assert_eq!(world.imported_probe_count_impl(), 0);
+        assert_err_is(
+            world.imported_probe_label_at_impl(0),
+            WasmError::ImportedProbeIndexOutOfRange { index: 0, count: 0 },
+        );
+        assert_err_is(
+            world.imported_probe_history_impl(0),
+            WasmError::ImportedProbeIndexOutOfRange { index: 0, count: 0 },
+        );
+
+        // プローブを1本持つシーンでは境界がずれる(index 0はOk、1はErr)。
+        let json = include_str!("../../../scenes/d6-floating-box-f4.json");
+        let world = WasmWorld::from_scene_json_impl(json)
+            .expect("scenes/d6-floating-box-f4.json must be a valid scene");
+        assert_eq!(world.imported_probe_count_impl(), 1);
+        assert!(world.imported_probe_label_at_impl(0).is_ok());
+        assert_eq!(
+            world.imported_probe_history_impl(0).unwrap(),
+            Vec::<f64>::new()
+        );
+        assert_err_is(
+            world.imported_probe_label_at_impl(1),
+            WasmError::ImportedProbeIndexOutOfRange { index: 1, count: 1 },
+        );
+        assert_err_is(
+            world.imported_probe_history_impl(1),
+            WasmError::ImportedProbeIndexOutOfRange { index: 1, count: 1 },
+        );
+    }
+
+    /// 回路素子ラベルの2つの失敗(**回路ドメインが無効**と**素子indexが
+    /// 範囲外**)が別々の変種になること。既定シーン(`WasmWorld::new`)は
+    /// 分圧回路を持つので後者を、回路を持たないシーンJSONで前者を確かめる
+    /// ——「回路が無い」と「番号が大きすぎる」はUIの復旧手順が違うため、
+    /// 取り違えると誤った案内になる。
+    #[test]
+    fn circuit_element_label_distinguishes_a_missing_domain_from_an_out_of_range_index() {
+        let world = new_world();
+        let count = world.circuit_element_count_impl();
+        assert!(count > 0, "既定シーンは分圧回路を持つ");
+        assert!(world.circuit_element_label_at_impl(0).is_ok());
+        assert!(world.circuit_element_label_at_impl(count - 1).is_ok());
+        assert_err_is(
+            world.circuit_element_label_at_impl(count),
+            WasmError::CircuitElementIndexOutOfRange {
+                index: count,
+                count,
+            },
+        );
+
+        // 回路ドメインを持たないシーン(D1=自由落下)では、同じ呼び出しが
+        // `CircuitDomainNotEnabled`になる。
+        let json = include_str!("../../../scenes/d1-free-fall.json");
+        let world = WasmWorld::from_scene_json_impl(json)
+            .expect("scenes/d1-free-fall.json must be a valid scene");
+        assert_eq!(world.circuit_element_count_impl(), 0);
+        assert_err_is(
+            world.circuit_element_label_at_impl(0),
+            WasmError::CircuitDomainNotEnabled,
         );
     }
 
@@ -5581,7 +7077,7 @@ mod tests {
     #[test]
     fn imported_probe_labels_reflect_the_d11_pendulum_scene_probes_in_order() {
         let json = include_str!("../../../scenes/d11-pendulum.json");
-        let world = WasmWorld::from_scene_json(json.to_string())
+        let world = WasmWorld::from_scene_json_impl(json)
             .expect("scenes/d11-pendulum.json must be a valid scene");
         assert_eq!(world.imported_probe_count_impl(), 2);
         assert_eq!(
@@ -5614,7 +7110,7 @@ mod tests {
     #[test]
     fn from_scene_json_loads_bodyless_thermal_and_astro_gallery_scenes_without_panicking() {
         fn check_bodyless_scene(path: &str, json: &str, expected_imported_probes: usize) {
-            let mut world = WasmWorld::from_scene_json(json.to_string())
+            let mut world = WasmWorld::from_scene_json_impl(json)
                 .unwrap_or_else(|e| panic!("{path} must be a valid (bodyless) scene: {e:?}"));
             assert_eq!(
                 world.body_count_impl(),
