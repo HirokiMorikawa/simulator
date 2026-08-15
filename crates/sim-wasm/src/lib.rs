@@ -26,6 +26,8 @@ use sim_mechanics::{BallJoint, BodyType, HingeMotorPd, RigidBodyDesc, Shape};
 use sim_world::{BodyId, Command, ProbeTarget, World, WorldOptions};
 use wasm_bindgen::prelude::*;
 
+mod component_schema;
+
 /// `docs/23-frontend/01-editor.md`のProbe Graphsパネル(§1.4「複数系列」)デモ用に、
 /// 箱のy座標を毎step記録するプローブの履歴長。1step=dt秒、`PROBE_HISTORY_CAPACITY`
 /// step分(≈`PROBE_HISTORY_CAPACITY*dt`秒)のスクロールウィンドウになる。
@@ -130,6 +132,8 @@ pub enum WasmError {
     SnapshotIndexOutOfRange { index: usize, count: usize },
     /// `try_bookmark_at`/`restore_bookmark`——ブックマークindexが範囲外。
     BookmarkIndexOutOfRange { index: usize, count: usize },
+    /// `coupling_supported_params`——結合の登録indexが範囲外(**Task#9**)。
+    CouplingIndexOutOfRange { index: usize, count: usize },
 
     // --- 材質 ---
     /// `MaterialDb::find_by_name`が引けなかった材質名。
@@ -244,6 +248,14 @@ impl std::fmt::Display for WasmError {
             WasmError::BookmarkIndexOutOfRange { index, count } => write!(
                 f,
                 "bookmark index {index} out of range (bookmark_count={count})"
+            ),
+            // **Task#9で新設した変種**。上のdocが釘を刺す「文面を変えては
+            // いけない」対象は、以前`JsValue::from_str`へ渡していた既存
+            // メッセージのこと——新設の変種に対応する旧文面は存在しないので、
+            // 既存の範囲外系と同じ書式に揃える。
+            WasmError::CouplingIndexOutOfRange { index, count } => write!(
+                f,
+                "coupling index {index} out of range (coupling_count={count})"
             ),
 
             WasmError::UnknownMaterial(name) => write!(f, "unknown material: {name}"),
@@ -1466,6 +1478,47 @@ impl WasmWorld {
             .find(|c| c.kind.name() == kind_name)
             .map(|c| c.kind.summary().to_string())
             .unwrap_or_default()
+    }
+
+    /// 登録index`coupling_index`の結合が、実行時に変更できるパラメータの
+    /// 名前一覧(JSON配列文字列、**Task#9**)。
+    ///
+    /// **これが無かった間の縮約**: Coupling registryで実行時に書き換えられる
+    /// パラメータは`push_set_coupling_control_surface_deflection`(舵角)ただ
+    /// 一つだが、**それが「どの結合に対して有効か」を知る手段が無かった**。
+    /// `Command::SetCouplingParam`は範囲外indexも翼以外の結合も無言で
+    /// 無視する(あちらのdoc参照——毎フレーム舵角を送っても安全なように、
+    /// あえてそう設計した)ので、フロントエンドから見ると**送っても何も
+    /// 起きないのか、送り先が間違っているのかが区別できない**。結果として
+    /// 舵角スライダーは「翼として追加した結合のindexを利用者が覚えている」
+    /// 前提でしか出せなかった。`Coupling::supported_params`をここへ通すことで、
+    /// 選択中の結合にスライダーを出してよいかが副作用なしで決まる。
+    ///
+    /// `coupling_info_text`/`coupling_kind_summary`と同じく結合index/種別を
+    /// 鍵にした内省の系列だが、**戻り値はタブ区切りではなくJSON配列**にした
+    /// ——`coupling_info_text`のdocが「自前のJSON組み立てより素直」として
+    /// タブ区切りを選んだ理由は「`sim-wasm`が`serde_json`を依存に持たない」
+    /// ことだったが、その前提はシーンJSON Import/Exportの追加で既に失効して
+    /// いる(現在は`serde_json`が依存にある)。可変長の名前リストは配列として
+    /// 表すほうが呼び出し側の解釈が一意になる。
+    ///
+    /// 範囲外indexは`Err`(空配列ではない)——「そんな結合は無い」と
+    /// 「その結合に変更可能なパラメータが無い」は区別されるべき情報であり、
+    /// 空配列に潰すと前者が後者に化けて原因究明を妨げるため。
+    fn coupling_supported_params_impl(&self, coupling_index: usize) -> Result<String, WasmError> {
+        let couplings = self.inner.couplings_raw();
+        let coupling = couplings
+            .get(coupling_index)
+            .ok_or(WasmError::CouplingIndexOutOfRange {
+                index: coupling_index,
+                count: couplings.len(),
+            })?;
+        let names: Vec<&'static str> = coupling
+            .supported_params()
+            .iter()
+            .map(|p| p.name())
+            .collect();
+        Ok(serde_json::json!(names).to_string())
     }
 
     /// ジョイントの内省情報を改行区切りで返す(**群1で追加**)。1行1件で
@@ -2909,6 +2962,10 @@ impl WasmWorld {
                 Ok(self.coupling_info_text_impl(body_index))
             }
             "coupling_kind_summary" => Ok(self.coupling_kind_summary_impl(arg.to_string())),
+            "coupling_supported_params" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.coupling_supported_params_impl(index)
+            }
             "joint_info_text" => {
                 let body_index: i32 = arg.parse().unwrap_or(-1);
                 Ok(self.joint_info_text_impl(body_index))
@@ -3040,48 +3097,34 @@ impl WasmWorld {
         }
     }
 
-    /// `apply_component`/`read_component`が受け付けるkind名の一覧
-    /// (JSON文字列、Task#8第一弾)。フロントエンドが動的に把握できるように
-    /// する3つ目のメソッド——現時点ではkind名の列挙のみ(パラメータの
-    /// スキーマ自体は元のUIフォーム側にすでにtitleツールチップとして
-    /// 存在するため、二重管理を避けてここでは持たない)。
+    /// `apply_component`/`read_component`が受け付けるkindの一覧
+    /// (JSON文字列、Task#8第一弾 → **Task#9で`apply`側を構造化した**)。
+    /// フロントエンドが動的に把握できるようにする3つ目のメソッド。
+    ///
+    /// **形が変わった理由**: Task#8当時のこのメソッドは`apply`/`read`とも
+    /// 単なるkind名の文字列配列で、docには「パラメータのスキーマ自体は元の
+    /// UIフォーム側にすでにtitleツールチップとして存在するため、二重管理を
+    /// 避けてここでは持たない」と書いてあった。ところが**その「元のUIフォーム」
+    /// こそが問題**だった——`demo/src/main.ts`は19種類ほどのフォームを手書きし、
+    /// 入力欄のラベルは「Body」「Anchor」「Axis」「Param」という汎用文字列で、
+    /// 各フィールドが選択中のkindにとって何を意味するのか(単位・既定値・
+    /// 負値の意味)は**titleツールチップにしか存在しなかった**。二重管理の
+    /// 回避ではなく、意味がホバーの中だけに閉じ込められていたのである。
+    ///
+    /// そこで`apply`側は`{ kind, fields: [{ name, type, unit, default,
+    /// nullable, min, max }] }`の配列を返すようにした(`component_schema`
+    /// モジュールのdoc参照)。これはフォームを手書きする代わりにスキーマから
+    /// 生成する後続増分の土台であり、本増分自体はフロントエンドに触れない。
+    ///
+    /// `read`側は従来どおりkind名の文字列配列——あちらの`arg`は
+    /// 「kindごとに意味が異なる単純な文字列」(`read_component`のdoc)で
+    /// あって名前付きフィールドの集合ではないため、同じ構造化が意味を成さない。
     pub fn component_schema(&self) -> String {
         serde_json::json!({
-            "apply": [
-                "add_distance_joint", "add_ball_joint", "add_slider_joint",
-                "add_wheel_joint", "add_hinge_motor_joint",
-                "add_image_charge_force_coupling", "add_lorentz_force_coupling",
-                "add_buoyancy_drag_coupling", "add_dissipation_to_heat_coupling",
-                "add_joule_heat_coupling", "add_brownian_force_coupling",
-                "add_motor_coupling", "add_induction_coupling", "add_thermal_node",
-                "enable_grid_fluid_2d_domain", "enable_gas_compartment",
-                "add_sph_rigid_coupling", "add_grid_fluid_rigid_coupling",
-                "add_piston_gas_coupling", "add_wing_lift_coupling",
-                "add_magnus_lift_coupling", "push_set_coupling_control_surface_deflection",
-                "add_boussinesq_buoyancy_coupling", "add_convection_link_coupling",
-                "add_phase_change_morph_coupling",
-                "set_gravity", "set_gravity_direction", "set_dt",
-                "set_atmosphere", "clear_atmosphere",
-                "set_water_region", "clear_water_region",
-                "set_body_position_at", "set_body_rotation_at", "set_body_scale_at",
-                "set_body_scale_xyz_at", "push_apply_force", "push_set_body_mass",
-                "push_set_body_type", "push_set_collision_filter", "push_grab",
-                "push_move_grab", "push_release",
-                "spawn_sphere", "spawn_capsule", "spawn_compound_l_shape",
-                "spawn_convex_mesh_cube", "spawn_box", "remove_body_at",
-                "duplicate_body_at", "derive_material",
-                "set_circuit_switch_closed", "circuit_editor_reset",
-                "circuit_editor_add_resistor", "circuit_editor_add_voltage_source",
-                "circuit_editor_add_switch", "circuit_editor_set_switch_closed",
-                "circuit_editor_add_capacitor", "circuit_editor_add_inductor",
-                "circuit_editor_add_diode", "circuit_editor_add_dc_motor",
-                "circuit_editor_set_motor_speed", "push_heat_source",
-                "add_rotating_frame", "add_child_frame", "set_motor_target_at",
-                "spawn_pendulum", "spawn_motor_arm", "spawn_fluid_block",
-                "restore_snapshot", "add_bookmark", "restore_bookmark"
-            ],
+            "apply": component_schema::apply_schema(),
             "read": [
                 "coupling_count", "coupling_info_text", "coupling_kind_summary",
+                "coupling_supported_params",
                 "joint_info_text", "thermal_node_count",
                 "gravity", "gravity_direction", "dt",
                 "atmosphere_density", "atmosphere_viscosity", "atmosphere_wind",
@@ -6304,11 +6347,14 @@ mod tests {
         // 「畳んだはずのkindが必ず入っている」ことだけを検証する。
         let schema: serde_json::Value = serde_json::from_str(&world.component_schema())
             .expect("component_schema must produce valid JSON");
+        // **Task#9で`apply`側の要素が文字列からオブジェクトになった**ため、
+        // kind名は`"kind"`キーから取り出す(フィールドスキーマ自体の検証は
+        // `component_schema_*`の各テスト)。
         let apply_kinds: Vec<&str> = schema["apply"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|v| v.as_str().unwrap())
+            .map(|v| v["kind"].as_str().unwrap())
             .collect();
         let read_kinds: Vec<&str> = schema["read"]
             .as_array()
@@ -6336,6 +6382,306 @@ mod tests {
         ] {
             assert!(read_kinds.contains(&kind), "missing read kind: {kind}");
         }
+    }
+
+    /// `component_schema`の`apply`表から、あるkindの`fields`配列を取り出す
+    /// (以下のスキーマ検証テスト共通のヘルパ)。
+    fn apply_fields_of(kind: &str) -> serde_json::Value {
+        let world = new_world();
+        let schema: serde_json::Value = serde_json::from_str(&world.component_schema())
+            .expect("component_schema must produce valid JSON");
+        schema["apply"]
+            .as_array()
+            .expect("apply must be an array")
+            .iter()
+            .find(|entry| entry["kind"] == kind)
+            .unwrap_or_else(|| panic!("component_schema has no apply kind: {kind}"))["fields"]
+            .clone()
+    }
+
+    /// **スキーマとディスパッチの同期を守る要のテスト**(Task#9)。
+    /// `component_schema`が載せるkindは`apply_component_impl`の`match kind`の
+    /// 写像でしかないので、両者がずれると生成されたフォームが
+    /// `UnknownApplyComponentKind`を踏むpayloadを送る。
+    ///
+    /// ①スキーマ上の全kindがディスパッチに実在すること(未知kindのときだけ
+    /// 出る`UnknownApplyComponentKind`が返らないことで見る——空payloadは
+    /// index範囲外などの別の`Err`にはなり得るが、それはkindが存在する証拠に
+    /// なるので構わない)、②件数が一致すること(ディスパッチ側にだけ足された
+    /// kindを検出する)、③kind名に重複が無いこと、を見る。
+    #[test]
+    fn component_schema_covers_every_apply_kind() {
+        let schema: serde_json::Value = serde_json::from_str(&new_world().component_schema())
+            .expect("component_schema must produce valid JSON");
+        let entries = schema["apply"].as_array().expect("apply must be an array");
+
+        for entry in entries {
+            let kind = entry["kind"].as_str().expect("kind must be a string");
+            // **kindごとに新しい`WasmWorld`を使う**——空payloadでの試し打ちは
+            // 実際にその操作を実行する(`circuit_editor_reset`ならノード0個の
+            // 回路で既存回路を置き換える)ので、1つのworldを使い回すと後続の
+            // kindが前のkindの壊した状態を踏む(実際に`circuit_editor_add_
+            // dc_motor`が`内部ノードはGND以外`のassertで落ちた)。
+            let mut world = new_world();
+            let result = world.apply_component_impl(kind, "{}");
+            assert!(
+                !matches!(result, Err(WasmError::UnknownApplyComponentKind(_))),
+                "component_schema lists an apply kind the dispatch does not know: {kind}"
+            );
+            assert!(
+                entry["fields"].is_array(),
+                "apply kind {kind} must carry a fields array"
+            );
+        }
+
+        let mut names: Vec<&str> = entries
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(names.len(), unique, "apply kind名が重複している");
+
+        // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
+        // 足したらこの数と`component_schema`の表の両方を更新すること**——
+        // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
+        const APPLY_KIND_COUNT: usize = 72;
+        assert_eq!(
+            entries.len(),
+            APPLY_KIND_COUNT,
+            "apply kindの件数がディスパッチと食い違っている"
+        );
+    }
+
+    /// 代表的な4系統(Joint・Coupling・スポーン・環境設定)について、
+    /// **`_impl`メソッドの本体を手で読んで書き起こしたフィールド一覧と
+    /// 完全一致する**ことを見る(Task#9)。名前・型・単位・既定値・
+    /// `nullable`・値域まで丸ごと突き合わせるので、引数を1つ足したのに
+    /// 表を直し忘れれば必ず落ちる。
+    #[test]
+    fn component_schema_reports_hand_checked_fields_for_representative_kinds() {
+        // ① Joint——`add_distance_joint_impl`。アンカーは剛体ローカル座標[m]、
+        // `body_b`だけがi32で、負値が「ワールド固定点」を意味する(`nullable`)。
+        assert_eq!(
+            apply_fields_of("add_distance_joint"),
+            serde_json::json!([
+                {"name":"body_a","type":"usize","unit":null,"default":0,"nullable":false,"min":null,"max":null},
+                {"name":"ax","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"ay","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"az","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"body_b","type":"i32","unit":null,"default":0,"nullable":true,"min":null,"max":null},
+                {"name":"bx","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"by","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"bz","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"length","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+            ])
+        );
+
+        // ② Coupling——`add_convection_link_coupling_impl`。この増分で拾えた
+        // 一番きわどい2点が両方入っている: `mode`だけディスパッチの
+        // フォールバックが`unwrap_or(3)`(他の`u(...)`の0ではない)であること、
+        // `thermal_expansion_coefficient`は`<=0`が「理想気体近似」を意味する
+        // センチネル(`nullable`)であること。
+        assert_eq!(
+            apply_fields_of("add_convection_link_coupling"),
+            serde_json::json!([
+                {"name":"fluid_node","type":"usize","unit":null,"default":0,"nullable":false,"min":null,"max":null},
+                {"name":"surface_node","type":"usize","unit":null,"default":0,"nullable":false,"min":null,"max":null},
+                {"name":"area","type":"f64","unit":"m^2","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"characteristic_length","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"mode","type":"usize","unit":null,"default":3,"nullable":false,"min":0.0,"max":3.0},
+                {"name":"fluid_thermal_conductivity","type":"f64","unit":"W/(m·K)","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"kinematic_viscosity","type":"f64","unit":"m^2/s","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"prandtl_number","type":"f64","unit":null,"default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"thermal_expansion_coefficient","type":"f64","unit":"1/K","default":0.0,"nullable":true,"min":null,"max":null},
+            ])
+        );
+
+        // ③ スポーン——`spawn_capsule_impl`。材質は文字列(列挙値を表現できない
+        // 既知の限界は`component_schema`モジュールの`s()`のdoc参照)。
+        assert_eq!(
+            apply_fields_of("spawn_capsule"),
+            serde_json::json!([
+                {"name":"x","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"y","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"z","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"radius","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"half_height","type":"f64","unit":"m","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"material_name","type":"string","unit":null,"default":"","nullable":false,"min":null,"max":null},
+            ])
+        );
+
+        // ④ 環境設定——`set_atmosphere_impl`。`viscosity`は`sim_fluid::
+        // Atmosphere`と同じ**動粘性係数**[m^2/s](力学的粘性[Pa·s]ではない)。
+        assert_eq!(
+            apply_fields_of("set_atmosphere"),
+            serde_json::json!([
+                {"name":"density","type":"f64","unit":"kg/m^3","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"viscosity","type":"f64","unit":"m^2/s","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"wind_x","type":"f64","unit":"m/s","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"wind_y","type":"f64","unit":"m/s","default":0.0,"nullable":false,"min":null,"max":null},
+                {"name":"wind_z","type":"f64","unit":"m/s","default":0.0,"nullable":false,"min":null,"max":null},
+            ])
+        );
+
+        // 引数を取らないkindは空配列(`null`や欠落ではない——フォーム生成側が
+        // 「フィールド0個のフォーム」として一様に扱えるように)。
+        assert_eq!(apply_fields_of("clear_atmosphere"), serde_json::json!([]));
+        assert_eq!(apply_fields_of("spawn_fluid_block"), serde_json::json!([]));
+
+        // 実際に検証される値域だけを載せる方針の確認——`set_dt_impl`は
+        // 「正の有限値」を要求して`WasmError::InvalidDt`で弾く。
+        assert_eq!(
+            apply_fields_of("set_dt"),
+            serde_json::json!([
+                {"name":"dt","type":"f64","unit":"s","default":0.0,"nullable":false,"min":0.0,"max":null},
+            ])
+        );
+        // 一方`set_body_scale_at_impl`は`scale`を検証しない(軸別版だけが
+        // 検証する)ので`min`を載せない。発明した境界を書かない方針の対。
+        assert_eq!(
+            apply_fields_of("set_body_scale_at")[1]["min"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            apply_fields_of("set_body_scale_xyz_at")[1]["min"],
+            serde_json::json!(0.0)
+        );
+    }
+
+    /// **`default`は「意味のある既定値」ではなく「省略時に実際に起きること」**
+    /// (Task#9、`FieldDefault`のdoc)であることを、スキーマの宣言と
+    /// `apply_component_impl`の実挙動を突き合わせて確かめる。
+    ///
+    /// ここを取り違えるのが一番怖い——`body_b`の「意味のある既定」は
+    /// -1(ワールド固定点)だが、**省略すると実際にはボディ0(既定シーンでは床)
+    /// へ繋がる**。スキーマが-1を既定と称すると、生成されたフォームが
+    /// 「未入力なら宙に固定される」つもりで床に繋ぐ拘束を作ってしまう。
+    #[test]
+    fn component_schema_defaults_match_what_omitting_the_field_actually_does() {
+        // `body_b`——スキーマの既定は0、かつ`nullable`(負値がセンチネル)。
+        let body_b_field = apply_fields_of("add_distance_joint")[4].clone();
+        assert_eq!(body_b_field["name"], "body_b");
+        assert_eq!(body_b_field["default"], serde_json::json!(0));
+        assert_eq!(body_b_field["nullable"], serde_json::json!(true));
+
+        // 省略すると宣言どおりボディ0へ繋がる(ワールド固定点にはならない)。
+        let mut world = new_world();
+        let index = world
+            .spawn_sphere_impl(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .expect("spawn_sphere must succeed");
+        world
+            .apply_component_impl(
+                "add_distance_joint",
+                &format!("{{\"body_a\":{index},\"length\":1.0}}"),
+            )
+            .expect("add_distance_joint must succeed");
+        let text = world.joint_info_text_impl(-1);
+        assert!(
+            text.contains(&format!("body#{index} ↔ body#0")),
+            "body_bを省いたらボディ0へ繋がるはず: {text}"
+        );
+
+        // センチネル-1を明示したときだけワールド固定点になる。
+        world
+            .apply_component_impl(
+                "add_distance_joint",
+                &format!("{{\"body_a\":{index},\"body_b\":-1,\"length\":1.0}}"),
+            )
+            .expect("add_distance_joint must succeed");
+        let text = world.joint_info_text_impl(-1);
+        assert!(
+            text.contains("ワールド固定点"),
+            "body_b=-1はワールド固定点になるはず: {text}"
+        );
+
+        // `mode`——スキーマの既定は3(`unwrap_or(3)`)。省略すると
+        // `ConvectionMode::ForcedFlatPlate`になることを`describe`経由で見る。
+        let mut world = new_world();
+        world
+            .apply_component_impl("add_thermal_node", "{\"temperature\":300.0}")
+            .expect("add_thermal_node must succeed");
+        world
+            .apply_component_impl("add_thermal_node", "{\"temperature\":300.0}")
+            .expect("add_thermal_node must succeed");
+        world
+            .apply_component_impl(
+                "add_convection_link_coupling",
+                "{\"fluid_node\":0,\"surface_node\":1,\"area\":1.0}",
+            )
+            .expect("add_convection_link_coupling must succeed");
+        assert!(
+            world
+                .coupling_info_text_impl(-1)
+                .contains("ForcedFlatPlate"),
+            "modeを省いたら既定3=ForcedFlatPlateになるはず"
+        );
+    }
+
+    /// 結合indexを鍵にした`supported_params`の内省(Task#9)。
+    /// **副作用のある`set_scalar_param`を叩いて戻り値を見る**という従来の
+    /// 唯一の手段を置き換えるものなので、①舵角を持つ`BuoyancyDrag`が
+    /// `ControlSurfaceDeflection`を1つだけ挙げること、②持たない結合
+    /// (`LorentzForce`)が空配列を返すこと、③範囲外indexは空配列ではなく
+    /// `Err`になること(「そんな結合は無い」と「変更可能なパラメータが無い」
+    /// を潰さない)を見る。
+    #[test]
+    fn coupling_supported_params_reports_runtime_adjustable_params_per_coupling() {
+        let mut world = new_world();
+        let body = world
+            .spawn_sphere_impl(0.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .expect("spawn_sphere must succeed");
+
+        // index 0: 翼(`LiftModel::Wing`)としての`BuoyancyDrag`。
+        world
+            .apply_component_impl(
+                "add_wing_lift_coupling",
+                &format!(
+                    "{{\"body\":{body},\"wing_area\":2.0,\"chord_x\":1.0,\"span_z\":1.0,\
+                      \"atmosphere_density\":1.225,\"atmosphere_viscosity\":1.5e-5}}"
+                ),
+            )
+            .expect("add_wing_lift_coupling must succeed");
+        // index 1: 実行時に変更できるパラメータを持たない結合。
+        world
+            .apply_component_impl(
+                "add_lorentz_force_coupling",
+                &format!("{{\"body\":{body},\"charge\":1.0}}"),
+            )
+            .expect("add_lorentz_force_coupling must succeed");
+
+        assert_eq!(
+            world
+                .read_component_impl("coupling_supported_params", "0")
+                .expect("coupling_supported_params must succeed"),
+            "[\"ControlSurfaceDeflection\"]"
+        );
+        assert_eq!(
+            world
+                .read_component_impl("coupling_supported_params", "1")
+                .expect("coupling_supported_params must succeed"),
+            "[]"
+        );
+
+        // 範囲外は`Err`(件数まで含めて突き合わせる)。
+        assert_err_is(
+            world.read_component_impl("coupling_supported_params", "2"),
+            WasmError::CouplingIndexOutOfRange { index: 2, count: 2 },
+        );
+
+        // `component_schema`の`read`一覧にも載っている(フロントエンドが
+        // このkindの存在を動的に知れる)。
+        let schema: serde_json::Value = serde_json::from_str(&world.component_schema())
+            .expect("component_schema must produce valid JSON");
+        assert!(
+            schema["read"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "coupling_supported_params"),
+            "read一覧にcoupling_supported_paramsが無い"
+        );
     }
 
     /// `export_scene_json`が`sim_world::to_scenario`経由に置き換わったこと

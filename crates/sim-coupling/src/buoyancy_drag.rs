@@ -184,6 +184,19 @@ impl Coupling for BuoyancyDrag {
             _ => false,
         }
     }
+
+    /// Coupling registryで唯一、実行時に書き換えられるパラメータを持つ結合
+    /// (**Task#9**、`Coupling::supported_params`のdoc参照)。
+    ///
+    /// **`lift`が`LiftModel::Wing`でなくても`ControlSurfaceDeflection`を挙げる**
+    /// ——ここが宣言するのは「`BuoyancyDrag`という種別が受け付け得る
+    /// パラメータ」であって、その瞬間のフィールド値に依存する可否ではない。
+    /// 揚力モデル込みの可否まで見たい呼び出し側は従来どおり
+    /// `set_scalar_param`の戻り値で確かめられる(こちらは`&'static`を返す
+    /// 都合上、`self`の状態で分岐した動的なスライスは返せない)。
+    fn supported_params(&self) -> &'static [CouplingParam] {
+        &[CouplingParam::ControlSurfaceDeflection]
+    }
 }
 
 #[cfg(test)]
@@ -558,6 +571,51 @@ mod tests {
             lift: None,
         };
         assert!(!plain.set_scalar_param(CouplingParam::ControlSurfaceDeflection, alpha));
+    }
+
+    /// `supported_params`が「試しに書き込んでみる」ことなく舵角の可否を
+    /// 答えられる(**Task#9**、`Coupling::supported_params`のdoc参照)。
+    /// **揚力モデルを持たない`BuoyancyDrag`でも挙げる**ことまで見る——
+    /// 種別単位の宣言であって瞬間のフィールド値ではない、という規約の固定。
+    #[test]
+    fn buoyancy_drag_declares_its_runtime_adjustable_param() {
+        let wing = BuoyancyDrag {
+            body_index: 0,
+            water: None,
+            atmosphere: None,
+            lift: Some(LiftModel::Wing {
+                area: 1.0,
+                chord_local: sim_math::Vec3::new(1.0, 0.0, 0.0),
+                span_local: sim_math::Vec3::new(0.0, 0.0, 1.0),
+                control_surface_deflection: 0.0,
+            }),
+        };
+        assert_eq!(
+            wing.supported_params(),
+            &[CouplingParam::ControlSurfaceDeflection]
+        );
+
+        let plain = BuoyancyDrag {
+            body_index: 0,
+            water: None,
+            atmosphere: None,
+            lift: None,
+        };
+        assert_eq!(
+            plain.supported_params(),
+            &[CouplingParam::ControlSurfaceDeflection]
+        );
+
+        // 実行時に変更できるパラメータを持たない結合は空(トレイトの既定実装)。
+        let lorentz = crate::LorentzForce {
+            body_index: 0,
+            charge: 1.0,
+        };
+        assert!(lorentz.supported_params().is_empty());
+        assert_eq!(
+            CouplingParam::ControlSurfaceDeflection.name(),
+            "ControlSurfaceDeflection"
+        );
     }
 
     // ------------------------------------------------------------------

@@ -196,6 +196,27 @@ pub trait Coupling: CouplingClone + AsAnyCoupling {
     fn set_scalar_param(&mut self, _param: CouplingParam, _value: f64) -> bool {
         false
     }
+
+    /// この結合が`set_scalar_param`で受け付けるパラメータの一覧
+    /// (**フォーム自動生成の土台増分**、Task#9)。
+    ///
+    /// **なぜ`set_scalar_param`だけでは足りないのか**: あちらは「設定できたか」を
+    /// `bool`で返すだけなので、フロントエンドが「この結合に舵角スライダーを
+    /// 出してよいか」を知るには**実際に値を書き込んでみて戻り値を見る**しか
+    /// なかった——内省のつもりの呼び出しがシミュレーション状態を書き換える、
+    /// という筋の悪い試行錯誤である。ここで事前に宣言させることで、
+    /// 「結合index Nに対して実行時に変更できるパラメータは何か」が
+    /// 副作用なしで答えられるようになる(`WasmWorld::read_component`の
+    /// `"coupling_supported_params"`が使う)。
+    ///
+    /// 既定は空スライス——`set_scalar_param`の既定が常に`false`を返すことと
+    /// 対応する(実行時に変更できるパラメータを持たない、ほとんどの結合)。
+    /// **`set_scalar_param`を上書きする実装はこちらも必ず上書きすること**
+    /// ——両者が食い違うと、フロントエンドが出したスライダーが無反応になる
+    /// (あるいは出せるはずのスライダーが出ない)。
+    fn supported_params(&self) -> &'static [CouplingParam] {
+        &[]
+    }
 }
 
 /// `Coupling::set_scalar_param`が受け付けるパラメータの種別(**残タスク完遂の
@@ -208,6 +229,17 @@ pub enum CouplingParam {
     /// (エルロン・エレベーター・ラダー)の舵角に相当する。値は毎回**絶対値として
     /// 設定**され(累積しない)、UIのスライダー/入力欄と直感的に対応する。
     ControlSurfaceDeflection,
+}
+
+impl CouplingParam {
+    /// 列挙子名そのもの(`CouplingKind::name`と同じ規約——UIの見出し・
+    /// wasm境界のJSONで使う識別子を、Rust側の名前と一致させる)。
+    /// `Coupling::supported_params`をJSONへ載せるために要る。
+    pub fn name(self) -> &'static str {
+        match self {
+            CouplingParam::ControlSurfaceDeflection => "ControlSurfaceDeflection",
+        }
+    }
 }
 
 /// `Box<dyn Coupling>`をクローン可能にするdyn-safeなヘルパー(`sim_world::World`が
