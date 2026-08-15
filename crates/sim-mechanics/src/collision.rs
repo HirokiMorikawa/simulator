@@ -34,11 +34,13 @@ pub struct ContactManifold {
     pub points: Vec<ContactPoint>,
 }
 
+/// narrowphase・broadphase が使う「**形状の**ワールド変換」。
+/// `bodies.position[i]` は重心であって形状のローカル原点ではないため、
+/// 幾何を扱うここでは必ず `shape_transform` を通す
+/// (`RigidBodySet` の型doc「`position` は「重心」」参照)。
+/// 重心オフセットが 0 の形状では `position[i]` と一致する。
 fn transform_of(bodies: &RigidBodySet, i: usize) -> Transform {
-    Transform {
-        position: bodies.position[i],
-        rotation: bodies.rotation[i],
-    }
+    bodies.shape_transform(i)
 }
 
 /// 形状のワールド AABB。Plane は無限平面のため常に重なる扱い(全域を返す)。

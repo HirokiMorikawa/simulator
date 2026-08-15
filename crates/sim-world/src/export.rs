@@ -312,7 +312,12 @@ fn export_bodies(
             BodyScenarioDesc {
                 shape: shape_json,
                 material,
-                position: vec3_to_array(bodies.position[idx]),
+                // `BodyScenarioDesc::position` は `RigidBodyDesc::transform.position`
+                // と同じ意味、すなわち**形状のローカル原点**。`bodies.position[idx]`
+                // は重心なので、生成→書き出し→再読み込みを恒等にするには
+                // `origin_position` を通す必要がある(群11、`RigidBodySet` 型doc参照)。
+                // 重心オフセットが 0 の形状では両者は一致する。
+                position: vec3_to_array(bodies.origin_position(idx)),
                 rotation: Some(quat_to_array(bodies.rotation[idx])),
                 linear_velocity: vec3_to_array(bodies.linear_velocity[idx]),
                 angular_velocity: vec3_to_array(bodies.angular_velocity[idx]),

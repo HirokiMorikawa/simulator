@@ -4594,8 +4594,12 @@ impl WasmWorld {
         z: f64,
     ) -> Result<(), WasmError> {
         let id = self.try_body_id_at(index)?;
-        self.inner.mechanics_mut().bodies.position[id.index as usize] =
-            sim_math::Vec3::new(x, y, z);
+        // Gizmo が掴んでいるのは**形状**なので、形状のローカル原点が
+        // 指定座標へ来るように置く(群11、`RigidBodySet`型doc参照)。
+        self.inner
+            .mechanics_mut()
+            .bodies
+            .set_origin_position(id.index as usize, sim_math::Vec3::new(x, y, z));
         Ok(())
     }
 

@@ -6,7 +6,7 @@
 //! `Box`との判定は`sim_mechanics::collision::sphere_box`と全く同じ「ローカル空間で
 //! クランプして最近接点を求める」手法を使う(接触解決の narrowphase と同一の幾何)。
 
-use sim_math::{Transform, Vec3};
+use sim_math::Vec3;
 use sim_mechanics::{RigidBodySet, Shape};
 
 /// クエリ球(`center`, `r`)と重なる全剛体の`RigidBodySet`indexを返す(呼び出し側で
@@ -16,14 +16,11 @@ pub fn overlap_sphere(bodies: &RigidBodySet, center: Vec3, r: f64) -> Vec<usize>
     for i in 0..bodies.len() {
         let overlaps = match bodies.shape_of(i) {
             Shape::Sphere { radius } => {
-                let dist_sq = (bodies.position[i] - center).length_sq();
+                let dist_sq = (bodies.shape_transform(i).position - center).length_sq();
                 dist_sq <= (radius + r) * (radius + r)
             }
             Shape::Box { half_extents } => {
-                let xf = Transform {
-                    position: bodies.position[i],
-                    rotation: bodies.rotation[i],
-                };
+                let xf = bodies.shape_transform(i);
                 let local_center = xf.inverse().apply_point(center);
                 let clamped = Vec3::new(
                     local_center.x.clamp(-half_extents.x, half_extents.x),

@@ -807,7 +807,9 @@ impl World {
 
         if self.is_valid(config.local_body) {
             let index = config.local_body.index as usize;
-            self.mechanics.bodies.position[index] = local_position;
+            self.mechanics
+                .bodies
+                .set_origin_position(index, local_position);
             self.mechanics.bodies.linear_velocity[index] = local_velocity;
             self.mechanics.bodies.still_time[index] = 0.0;
             self.mechanics.bodies.asleep[index] = false;
@@ -2242,7 +2244,10 @@ impl World {
         if !self.is_valid(id) {
             return None;
         }
-        Some(self.mechanics.bodies.position[id.index as usize])
+        // 「ボディはどこにあるか」の答えは**形状のローカル原点**
+        // (生成時に指定した`transform.position`と同じ点)。`bodies.position`
+        // は重心なので`origin_position`を通す(群11、`RigidBodySet`型doc参照)。
+        Some(self.mechanics.bodies.origin_position(id.index as usize))
     }
 
     /// `body_position`と同じ不変条件の速度版(`Probe::BodySpeed`が読む)。
@@ -2324,13 +2329,17 @@ impl World {
     pub fn distance_joint_anchor_points(&self, joint_index: usize) -> Option<(Vec3, Vec3)> {
         let joint = self.mechanics.joints.get(joint_index)?;
         let body_a = joint.body_a;
-        let anchor_a_world = self.mechanics.bodies.position[body_a]
-            + self.mechanics.bodies.rotation[body_a].rotate(joint.anchor_a);
+        let anchor_world = |body: usize, anchor_local: Vec3| {
+            // `sim_mechanics::joint::world_anchor` と同じ式。群11でアンカーは
+            // **形状ローカル**、`position`は**重心**になったため、両者の差
+            // (`center_of_mass`)を引いてから回す。
+            let from_com = anchor_local - self.mechanics.bodies.center_of_mass[body];
+            self.mechanics.bodies.position[body]
+                + self.mechanics.bodies.rotation[body].rotate(from_com)
+        };
+        let anchor_a_world = anchor_world(body_a, joint.anchor_a);
         let anchor_b_world = match joint.body_b {
-            Some(body_b) => {
-                self.mechanics.bodies.position[body_b]
-                    + self.mechanics.bodies.rotation[body_b].rotate(joint.anchor_b)
-            }
+            Some(body_b) => anchor_world(body_b, joint.anchor_b),
             None => joint.anchor_b,
         };
         Some((anchor_a_world, anchor_b_world))
@@ -3047,17 +3056,148 @@ mod tests {
             world.step();
         }
 
-        let final_y = world.body_position(body).unwrap().y;
         let final_speed = world.body_velocity(body).unwrap().length();
         assert!(
             final_speed < 0.05,
             "10秒後には静止しているはず(速さ={final_speed})"
         );
-        // 横棒(下端)の底面が y=-0.5 の位置(本体原点から-0.5)で床に接するので、
-        // 静止時の本体原点は概ね y=0.5 のはず。
+
+        // **群11で期待値を意図的に更新**。
+        //
+        // 移行前はここで「静止時の本体原点は概ね y=0.5」(=横棒で直立した
+        // まま)を要求していた。しかしそれは**重心オフセットが未実装だった
+        // ことによる見かけの安定**だった:
+        //   ① 慣性テンソルをローカル原点まわりで計算していたため、真の重心
+        //      まわりの値より大きく(平行軸定理のぶん)、回転しにくかった。
+        //   ② 重力・接触力のトルクをローカル原点まわりに立てていたため、
+        //      重心が x=+0.083 にずれていることによる転倒モーメントが
+        //      そもそも発生しなかった。
+        // 群11で①②を正した結果、**4.5mの自由落下 → 剛なコンクリートでの
+        // バウンド**という高エネルギーな着地では、L字は跳ねたあと横倒しに
+        // なって静止する(実測 tilt≈1.574 rad ≒ 90°)。
+        //
+        // これが「物理が壊れた」のではなく「正しくなった」ことは、静的な
+        // つり合いを別途確認して裏付けた——解析的な静止高さ y=0.5 へそっと
+        // 置くと、L字は tilt≈1e-4 rad で直立したまま静止する
+        // (`compound_l_shape_placed_at_rest_stays_upright`)。重心 x=0.083 は
+        // 横棒の支持多角形 x∈[-0.25,0.75] の内側なので直立は安定であり、
+        // 横倒しはバウンドの動力学の結果であって静的な誤りではない。
+        //
+        // したがってここでは姿勢に依存しない不変量——**形状の最下点が床の
+        // 上に乗っていること**——だけを要求する。
+        let lowest = lowest_world_y_of_compound(&world, body);
         assert!(
-            (final_y - 0.5).abs() < 0.1,
-            "床の上で静止しているはず(y={final_y})"
+            (-0.01..0.05).contains(&lowest),
+            "姿勢によらず形状の最下点が床に接しているはず(最下点y={lowest})"
+        );
+    }
+
+    /// 複合剛体のワールド空間での最下点の y。姿勢に依存しない「床に乗っている」
+    /// 判定に使う(部品はすべて`Box`前提の簡易版、テスト専用)。
+    fn lowest_world_y_of_compound(world: &World, body: BodyId) -> f64 {
+        let bodies = &world.mechanics().bodies;
+        let idx = body.index as usize;
+        let xf = bodies.shape_transform(idx);
+        let Shape::Compound { children } = bodies.shape_of(idx) else {
+            panic!("expected a compound shape");
+        };
+        let mut lowest = f64::INFINITY;
+        for (child_xf, child) in children {
+            let Shape::Box { half_extents } = child else {
+                continue;
+            };
+            let world_child = xf.compose(*child_xf);
+            for sx in [-1.0, 1.0] {
+                for sy in [-1.0, 1.0] {
+                    for sz in [-1.0, 1.0] {
+                        let corner = world_child.apply_point(Vec3::new(
+                            sx * half_extents.x,
+                            sy * half_extents.y,
+                            sz * half_extents.z,
+                        ));
+                        lowest = lowest.min(corner.y);
+                    }
+                }
+            }
+        }
+        lowest
+    }
+
+    /// **複合剛体の静的つり合い**(群11、重心オフセット導入の裏付け)。
+    ///
+    /// L字形の重心は x=+0.0833 にずれるが、これは接地する横棒の支持多角形
+    /// x∈[-0.25,0.75] の**内側**なので、直立姿勢は静的に安定でなければ
+    /// ならない。解析的な静止高さ(横棒の底面 y=-0.5 が床に接する = 原点 y=0.5)
+    /// へ初速ゼロで置き、そのまま直立して静止し続けることを確認する。
+    ///
+    /// これは`compound_body_can_be_created_and_settles_on_the_ground_without_panicking`
+    /// が高所落下で横倒しになることの対照実験——「静的には安定、動的な
+    /// バウンドでのみ転ぶ」ことを示し、転倒が実装の誤りでないことを固定する。
+    #[test]
+    fn compound_l_shape_placed_at_rest_stays_upright() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = world.materials().find_by_name("コンクリート").unwrap();
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground.body_type = BodyType::Static;
+        world.create_body(ground);
+
+        let l_shape = Shape::Compound {
+            children: vec![
+                (
+                    Transform {
+                        position: Vec3::new(0.0, 0.75, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: Vec3::new(0.25, 1.0, 0.25),
+                    },
+                ),
+                (
+                    Transform {
+                        position: Vec3::new(0.25, -0.25, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: Vec3::new(0.5, 0.25, 0.25),
+                    },
+                ),
+            ],
+        };
+        // 重心がローカル原点からずれていること(=このテストが意味を持つこと)。
+        let com = l_shape.center_of_mass();
+        assert!(
+            (com.x - 0.0833333333333333).abs() < 1e-12 && (com.y - 0.4166666666666667).abs() < 1e-9,
+            "L字の重心は解析値 (1/12, 5/12, 0) のはず: {com:?}"
+        );
+
+        let mut desc = RigidBodyDesc::dynamic(l_shape, steel);
+        // 横棒の底面(本体原点から-0.5)がちょうど床に接する高さ。
+        desc.transform.position = Vec3::new(0.0, 0.5, 0.0);
+        let body = world.create_body(desc);
+
+        for _ in 0..600 {
+            world.step();
+        }
+
+        let idx = body.index as usize;
+        let rotation = world.mechanics().bodies.rotation[idx];
+        let tilt = 2.0 * rotation.w.abs().min(1.0).acos();
+        assert!(
+            tilt < 1e-2,
+            "支持多角形の内側に重心があるので直立は安定のはず: tilt={tilt:.3e} rad"
+        );
+        let final_y = world.body_position(body).unwrap().y;
+        assert!(
+            (final_y - 0.5).abs() < 0.01,
+            "解析的な静止高さ y=0.5 のままのはず(y={final_y})"
         );
     }
 

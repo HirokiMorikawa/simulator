@@ -928,6 +928,26 @@ mod tests {
         }
     }
 
+    /// ローカル原点まわりに**非対称**な複合剛体(群11で追加)。
+    ///
+    /// 部品の大きさも位置もばらばらなので、
+    /// ① 重心はローカル原点から明確にずれ、
+    /// ② 部品が座標軸から外れた位置(x,y 同時にオフセット)にあるため
+    ///    慣性テンソルに**慣性乗積(非対角成分)が出る**。
+    ///
+    /// 移行前の実装はこの2点をどちらも表現できなかった(重心=ローカル原点を
+    /// 決め打ちし、慣性は対角`Vec3`しか返せなかった)ので、この剛体は
+    /// 「群11で新たに正しく積分できるようになったもの」そのものである。
+    fn asymmetric_compound() -> Shape {
+        Shape::Compound {
+            children: vec![
+                child_at(Vec3::new(0.5, 0.0, 0.0), 0.09),
+                child_at(Vec3::new(-0.2, 0.3, 0.0), 0.05),
+                child_at(Vec3::new(0.1, -0.35, 0.15), 0.07),
+            ],
+        }
+    }
+
     /// ワールド系の角運動量 $L = I_{world}\,\omega$。
     fn angular_momentum(solver: &MechanicsSolver, idx: usize) -> Vec3 {
         solver.bodies.inv_inertia_world[idx]
@@ -939,6 +959,18 @@ mod tests {
     /// トルクフリーの自由回転を`steps`ステップ回し、
     /// `(|ΔL|/|L₀| の最大値, |ΔT|/T₀ の最大値)`を返す。
     fn torque_free_tumble_drift(omega0: Vec3, dt: f64, steps: usize) -> (f64, f64) {
+        torque_free_tumble_drift_of(symmetric_compound(), omega0, dt, steps)
+    }
+
+    /// `torque_free_tumble_drift`の形状を差し替えられる版(群11で追加——
+    /// 重心がローカル原点からずれた**非対称**な複合剛体でも同じ保存則が
+    /// 成り立つことを確かめるため)。
+    fn torque_free_tumble_drift_of(
+        shape: Shape,
+        omega0: Vec3,
+        dt: f64,
+        steps: usize,
+    ) -> (f64, f64) {
         let materials = MaterialDb::standard();
         let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
         let mut rng = SimRng::new(1, 1);
@@ -946,7 +978,7 @@ mod tests {
 
         // 重力0・接触相手なし・抗力なし → 外力・外トルクは厳密にゼロ。
         let mut solver = MechanicsSolver::new(0.0);
-        let mut desc = RigidBodyDesc::dynamic(symmetric_compound(), steel);
+        let mut desc = RigidBodyDesc::dynamic(shape, steel);
         desc.angular_velocity = omega0;
         let idx = solver.create_body(desc, &materials);
 
@@ -999,6 +1031,66 @@ mod tests {
 
         // 刻みを半分にすれば誤差も半分になる(陽的ジャイロ項の1次収束)。
         let (l_half, ke_half) = torque_free_tumble_drift(omega0, 1.0 / 2000.0, 8000);
+        assert!(
+            l_half < l_drift / 1.7 && ke_half < ke_drift / 1.7,
+            "halving dt should roughly halve the drift (first order): \
+             l={l_drift:.3e}->{l_half:.3e} ke={ke_drift:.3e}->{ke_half:.3e}"
+        );
+    }
+
+    /// **非対称な複合剛体でもトルクフリーの保存則が成り立つ**(群11で追加)。
+    ///
+    /// `torque_free_compound_conserves_angular_momentum_and_kinetic_energy`は
+    /// **対称**な複合剛体しか見ておらず、その配置では「ローカル原点=重心」
+    /// という移行前の仮定がたまたま厳密に成り立つため、重心オフセットの
+    /// 実装が正しいかを一切検証できない。ここでは重心がローカル原点から
+    /// ずれ、かつ慣性乗積(非対角成分)を持つ剛体で同じ保存則を要求する。
+    ///
+    /// 角運動量 $L=I_{world}\omega$ と回転運動エネルギーは、慣性テンソルが
+    /// 非対角であっても外トルクがゼロなら厳密な保存量である。もし
+    /// ① 慣性テンソルを重心まわりではなくローカル原点まわりに組んでいたり、
+    /// ② 非対角成分を捨てていたりすれば、$I_{world}$ の相似変換と
+    /// ジャイロ項 $\omega\times I\omega$ の整合が崩れ、保存量は $O(1)$ で
+    /// 破れる(dtを細かくしても収束しない)。
+    ///
+    /// 許容誤差の根拠は対称版と同じ——陽的ジャイロ項の $O(\Delta t)$ 蓄積。
+    /// dt=1/1000・4000ステップの実測は |ΔL|/|L₀| = 1.22e-3、|ΔT|/T₀ = 2.50e-3
+    /// (対称版より小さい)。対称版と同じ上限 5e-3 / 6e-3 をそのまま使う
+    /// (実測に対して4倍・2.4倍の余裕)。あわせて**dtを半分にすれば誤差も
+    /// ほぼ半分**(1次収束、実測の比は 2.03 / 2.03)を確認する——これにより
+    /// 残差が刻み誤差であって慣性テンソルの誤りではないことまで固定できる。
+    #[test]
+    fn torque_free_asymmetric_compound_also_conserves_angular_momentum_and_energy() {
+        // この剛体が本当に「非対称かつ慣性乗積つき」であることを先に固定する
+        // (退化した設定で保存則だけ通っても意味がないため)。
+        let shape = asymmetric_compound();
+        let com = shape.center_of_mass();
+        assert!(
+            com.length() > 0.05,
+            "重心がローカル原点から有意にずれている必要がある: {com:?}"
+        );
+        let tensor = shape.unit_mass_inertia_tensor();
+        let max_off_diagonal = [tensor.m[0][1], tensor.m[0][2], tensor.m[1][2]]
+            .into_iter()
+            .fold(0.0_f64, |a, b| a.max(b.abs()));
+        assert!(
+            max_off_diagonal > 1e-3,
+            "慣性乗積が有意に出ている必要がある: {tensor:?}"
+        );
+
+        let omega0 = Vec3::new(1.5, 0.5, 4.0);
+        let (l_drift, ke_drift) =
+            torque_free_tumble_drift_of(shape.clone(), omega0, 1.0 / 1000.0, 4000);
+        assert!(
+            l_drift < 5e-3,
+            "angular momentum must be conserved under zero torque: |dL|/|L0|={l_drift:.3e}"
+        );
+        assert!(
+            ke_drift < 6e-3,
+            "rotational kinetic energy must be conserved under zero torque: |dT|/T0={ke_drift:.3e}"
+        );
+
+        let (l_half, ke_half) = torque_free_tumble_drift_of(shape, omega0, 1.0 / 2000.0, 8000);
         assert!(
             l_half < l_drift / 1.7 && ke_half < ke_drift / 1.7,
             "halving dt should roughly halve the drift (first order): \

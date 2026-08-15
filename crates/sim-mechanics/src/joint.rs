@@ -118,8 +118,15 @@ fn apply_impulse(bodies: &mut RigidBodySet, body: usize, impulse: Vec3, r: Vec3,
 }
 
 /// body ローカルのアンカー点をワールド座標へ。`(ワールド座標, 重心からのオフセット r)`。
+///
+/// `anchor_local` は**形状のローカル系**(=作者が図面上で指定する座標系)の点。
+/// 一方 `r` は角運動量の腕なので**重心基準**でなければならない。群11で両者が
+/// 分離されたため、ここで `anchor_local - center_of_mass` の差し引きを行う
+/// (`RigidBodySet` の型doc参照)。重心オフセットが 0 の形状
+/// (Sphere/Box/Capsule)では移行前と完全に一致する。
 fn world_anchor(bodies: &RigidBodySet, body: usize, anchor_local: Vec3) -> (Vec3, Vec3) {
-    let r = bodies.rotation[body].to_mat3().mul_vec(anchor_local);
+    let from_com = anchor_local - bodies.center_of_mass[body];
+    let r = bodies.rotation[body].to_mat3().mul_vec(from_com);
     (bodies.position[body] + r, r)
 }
 

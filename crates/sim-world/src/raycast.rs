@@ -14,7 +14,7 @@
 //! 直接使う(所有剛体のtransformとは独立、`Shape::Plane`のdoc「static専用・無限平面」
 //! 参照)。
 
-use sim_math::{Transform, Vec3};
+use sim_math::Vec3;
 use sim_mechanics::{RigidBodySet, Shape};
 
 /// レイヒット結果。`body_index`は`RigidBodySet`の生インデックス(呼び出し側で`BodyId`へ
@@ -42,12 +42,11 @@ pub fn raycast(
     let mut best: Option<RayHit> = None;
     for i in 0..bodies.len() {
         let hit = match bodies.shape_of(i) {
-            Shape::Sphere { radius } => ray_sphere(origin, dir, bodies.position[i], *radius),
+            Shape::Sphere { radius } => {
+                ray_sphere(origin, dir, bodies.shape_transform(i).position, *radius)
+            }
             Shape::Box { half_extents } => {
-                let xf = Transform {
-                    position: bodies.position[i],
-                    rotation: bodies.rotation[i],
-                };
+                let xf = bodies.shape_transform(i);
                 let inv = xf.inverse();
                 let local_origin = inv.apply_point(origin);
                 let local_dir = inv.apply_dir(dir);
