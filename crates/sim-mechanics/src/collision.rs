@@ -1673,6 +1673,126 @@ fn shape_pair_manifold(
     }
 }
 
+/// `Compound`を(入れ子も含めて)葉の部品へ平坦化する(**群11**)。
+/// 返すのは `(親→部品のワールド変換, 部品形状)`。`feature_id` の名前空間を
+/// 分けるために、列挙順が安定していることが要件(`children` の順を保つ)。
+fn flatten_compound_parts<'a>(
+    children: &'a [(Transform, Shape)],
+    base: Transform,
+    out: &mut Vec<(Transform, &'a Shape)>,
+) {
+    for (child_xf, child_shape) in children {
+        let world = base.compose(*child_xf);
+        match child_shape {
+            Shape::Compound { children: inner } => flatten_compound_parts(inner, world, out),
+            other => out.push((world, other)),
+        }
+    }
+}
+
+/// 「法線が実質同じ」とみなす閾値の余弦(**群11**)。
+///
+/// 15°(cos≈0.966)。根拠は**接触の物理的な意味**:
+/// - 床に並べた2つの箱のように、部品の接触面が同一平面(あるいはごく近い
+///   傾き)なら、1本の法線で表しても物理は厳密に正しく、マニフォールドを
+///   分けると同じ拘束を二重に解くことになって収束が悪くなる。
+/// - 一方、L字の角のように**異なる面が異なる向きで**接している場合は、
+///   1本に束ねた時点で片方の接触方向が消えてしまう(移行前の近似)。
+///
+/// 15°は「数値誤差やBaumgarte補正による法線の揺らぎ(実測で1°未満)では
+/// 分裂せず、意図的に異なる面(実用上は30°以上、多くは90°)は確実に分ける」
+/// という条件から取った。閾値をまたぐ中間的な角度では、束ねても分けても
+/// 誤差は連続的に小さいので、正確な値に敏感ではない。
+const COMPOUND_NORMAL_MERGE_COS: f64 = 0.966;
+
+/// `Compound`が絡む衝突を、**部品ごとの独立したマニフォールド列**として返す
+/// (**群11**)。
+///
+/// ## 何を変えたか
+///
+/// 移行前は `merge_compound_manifolds` が全部品の接触点を
+/// **「貫入が最大の部品ペアの法線」1本**へ束ねていた。全部品の法線が揃う
+/// 典型例(床に置いたシャシー)では厳密だが、**L字を角で接地させる**ような
+/// 「異なる面が異なる向きで同時に当たる」配置では、片方の接触方向が
+/// 丸ごと失われて物理的に誤った応答になっていた。
+///
+/// いまは部品ペアごとにマニフォールドを作り、**法線がほぼ同じもの同士だけ**を
+/// 束ねる(`COMPOUND_NORMAL_MERGE_COS`)。したがって:
+/// - 法線が揃う配置 → これまでどおり1本に束ねる(挙動不変・厳密なまま)
+/// - 法線が食い違う配置 → 独立した複数のマニフォールドを出す(新しく正しい)
+///
+/// `feature_id` は部品indexで名前空間を分けるので、同じボディ対に複数の
+/// マニフォールドが出ても warm starting のキャッシュキー
+/// `(body_a, body_b, feature_id)` は衝突しない。
+///
+/// **既知の限界**: `Compound` × `Compound` では、A側だけを部品へ分解し、
+/// B側は `shape_pair_manifold` の中で従来どおり1本へ束ねられる。
+/// 両側を同時に部品分解すると部品数の積だけマニフォールドが出て、
+/// 接触ソルバの反復コストが跳ね上がるため、本増分では片側のみとした。
+fn compound_pair_manifolds(
+    shape_a: &Shape,
+    xf_a: Transform,
+    shape_b: &Shape,
+    xf_b: Transform,
+) -> Vec<(Vec3, Vec<ContactPoint>)> {
+    // どちら側を部品へ分解するか(A優先)。分解しない側はそのまま相手に渡す。
+    let (parts, a_is_compound) = match (shape_a, shape_b) {
+        (Shape::Compound { children }, _) => {
+            let mut v = Vec::new();
+            flatten_compound_parts(children, xf_a, &mut v);
+            (v, true)
+        }
+        (_, Shape::Compound { children }) => {
+            let mut v = Vec::new();
+            flatten_compound_parts(children, xf_b, &mut v);
+            (v, false)
+        }
+        _ => return Vec::new(),
+    };
+
+    let mut groups: Vec<(Vec3, Vec<ContactPoint>, f64)> = Vec::new();
+    for (part_index, (part_xf, part_shape)) in parts.iter().enumerate() {
+        let result = if a_is_compound {
+            shape_pair_manifold(part_shape, *part_xf, shape_b, xf_b)
+        } else {
+            shape_pair_manifold(shape_a, xf_a, part_shape, *part_xf)
+        };
+        let Some((normal, mut points)) = result else {
+            continue;
+        };
+        // 部品ごとに feature_id の名前空間を分ける(warm start の衝突回避)。
+        let offset = (part_index as u32).wrapping_mul(1_000_003);
+        for p in &mut points {
+            p.feature_id = p.feature_id.wrapping_add(offset);
+        }
+        let max_pen = points
+            .iter()
+            .map(|p| p.penetration)
+            .fold(f64::MIN, f64::max);
+
+        // 既存グループのうち法線がほぼ同じものへ合流、無ければ新規グループ。
+        match groups
+            .iter_mut()
+            .find(|(n, _, _)| n.dot(normal) >= COMPOUND_NORMAL_MERGE_COS)
+        {
+            Some((group_normal, group_points, group_max_pen)) => {
+                // 代表法線は「最も深く刺さっている部品のもの」を採る(従来と同じ規約)。
+                if max_pen > *group_max_pen {
+                    *group_normal = normal;
+                    *group_max_pen = max_pen;
+                }
+                group_points.extend(points);
+            }
+            None => groups.push((normal, points, max_pen)),
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(normal, points, _)| (normal, points))
+        .collect()
+}
+
 /// `shape_pair_manifold`のCompound分解が複数の部品ペアから得た
 /// `(normal, points)`を1つの`ContactManifold`へ束ねる(モジュールdoc
 /// 「複数の部品が同時に接触する場合」参照)。`child_index`は`feature_id`の
@@ -1916,7 +2036,14 @@ pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactM
         let xf_b = transform_of(bodies, b);
         let shape_a = bodies.shape_of(a);
         let shape_b = bodies.shape_of(b);
-        let result = if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
+        // `Compound`が絡むペアは**部品ごとに独立したマニフォールド**を出す
+        // (群11、`compound_pair_manifolds`のdoc参照)。法線が揃う部品は
+        // 1本に束ねられるので、従来どおりの配置では出力も従来と同一。
+        let results: Vec<(Vec3, Vec<ContactPoint>)> = if matches!(shape_a, Shape::Compound { .. })
+            || matches!(shape_b, Shape::Compound { .. })
+        {
+            compound_pair_manifolds(shape_a, xf_a, shape_b, xf_b)
+        } else if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
             (shape_a, shape_b)
         {
             let preferred = axis_cache.get(&(a, b)).copied();
@@ -1929,11 +2056,13 @@ pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactM
                     axis_cache.remove(&(a, b));
                 }
             }
-            r.map(|(n, p, _)| (n, p))
+            r.map(|(n, p, _)| (n, p)).into_iter().collect()
         } else {
             shape_pair_manifold(shape_a, xf_a, shape_b, xf_b)
+                .into_iter()
+                .collect()
         };
-        if let Some((normal, points)) = result {
+        for (normal, points) in results {
             manifolds.push(ContactManifold {
                 body_a: a,
                 body_b: b,
@@ -2235,6 +2364,176 @@ mod tests {
                 .map(|p| p.world_point.x)
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// **法線が食い違う部品は独立したマニフォールドになる**(群11、item4の核心)。
+    ///
+    /// `compound_of_two_boxes_rests_on_a_plane_with_the_correct_total_support_force`
+    /// は全部品の法線が `+y` で揃う配置——移行前の「1本に束ねる」近似でも
+    /// **厳密に正しかった**ケースしか見ていない。
+    ///
+    /// ここでは**単一のボディ対**(コンパウンド × 1つの静的な箱)の中で、
+    /// 2つの部品が**互いに直交する面**に同時に接触する配置を作る。
+    /// ボディ対が1つであることが要点——別々の相手に当たっているだけなら、
+    /// 移行前の実装でも相手ごとにマニフォールドが分かれるので、
+    /// per-part 化の検証にならない。
+    ///
+    /// - 静的な箱: 原点中心・半寸 (2, 1, 2) → 上面 y=1、右面 x=2
+    /// - 部品1: 半寸 0.5 の箱を (0, 1.4, 0) に → **上面**へ 0.1 めり込む(法線 ±y)
+    /// - 部品2: 半寸 0.5 の箱を (2.4, 0, 0) に → **右面**へ 0.1 めり込む(法線 ±x)
+    ///
+    /// 移行前はこの2つが「貫入の深いほうの法線」1本へ束ねられ、もう一方の
+    /// 拘束方向が**完全に消えていた**(2つの貫入量は等しいので、どちらが
+    /// 代表になるかは列挙順次第という不安定さもあった)。いまは法線の
+    /// 食い違いが 90°(`COMPOUND_NORMAL_MERGE_COS` の 15° を大きく超える)
+    /// なので、独立した2本のマニフォールドとして出る。
+    #[test]
+    fn compound_with_non_aligned_part_normals_emits_separate_manifolds() {
+        use crate::body::{BodyType, RigidBodyDesc, RigidBodySet};
+        use sim_core::MaterialDb;
+
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = materials.find_by_name("コンクリート").unwrap();
+        let mut bodies = RigidBodySet::new();
+
+        // 相手は**1つだけ**の静的な箱(ボディ対を1つに保つ)。
+        let mut block = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(2.0, 1.0, 2.0),
+            },
+            concrete,
+        );
+        block.body_type = BodyType::Static;
+        let block_index = bodies.create_body(block, &materials);
+
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Compound {
+                children: vec![
+                    // 上面に乗る部品(最小重なり軸は y)。
+                    (
+                        identity_xf(Vec3::new(0.0, 1.4, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                    // 右面を押す部品(最小重なり軸は x)。
+                    (
+                        identity_xf(Vec3::new(2.4, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                ],
+            },
+            steel,
+        );
+        desc.transform.position = Vec3::ZERO;
+        let body = bodies.create_body(desc, &materials);
+
+        let mut axis_cache = AxisCache::new();
+        let manifolds = detect(&bodies, &mut axis_cache);
+
+        let touching: Vec<&ContactManifold> = manifolds
+            .iter()
+            .filter(|m| {
+                (m.body_a == body && m.body_b == block_index)
+                    || (m.body_a == block_index && m.body_b == body)
+            })
+            .collect();
+        let normals: Vec<Vec3> = touching.iter().map(|m| m.normal).collect();
+        assert_eq!(
+            touching.len(),
+            2,
+            "同一ボディ対から、法線の異なる2本のマニフォールドが出るはず: {normals:?}"
+        );
+
+        let has_vertical = normals.iter().any(|n| n.y.abs() > 0.99);
+        let has_horizontal = normals.iter().any(|n| n.x.abs() > 0.99);
+        assert!(
+            has_vertical && has_horizontal,
+            "鉛直(上面)と水平(右面)の両方の法線が独立して残っているはず: {normals:?}"
+        );
+        // どちらのマニフォールドにも実際の接触点があること。
+        assert!(
+            touching.iter().all(|m| !m.points.is_empty()),
+            "空のマニフォールドを出していない"
+        );
+        // feature_id はボディ対をまたいで一意(warm start のキー衝突回避)。
+        let ids: std::collections::BTreeSet<u32> = touching
+            .iter()
+            .flat_map(|m| m.points.iter().map(|p| p.feature_id))
+            .collect();
+        let total: usize = touching.iter().map(|m| m.points.len()).sum();
+        assert_eq!(
+            ids.len(),
+            total,
+            "部品をまたいで feature_id が重複していない"
+        );
+    }
+
+    /// **同じ向きの部品はこれまでどおり1本に束ねられる**(群11)。
+    /// 法線ごとに無条件でマニフォールドを分けると、床に並べた箱2つが
+    /// 同じ拘束を2本に割ってしまい収束が悪化する。`COMPOUND_NORMAL_MERGE_COS`
+    /// による合流が効いていることを、上のテストと対にして固定する。
+    #[test]
+    fn compound_with_aligned_part_normals_stays_a_single_manifold() {
+        use crate::body::{BodyType, RigidBodyDesc, RigidBodySet};
+        use sim_core::MaterialDb;
+
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = materials.find_by_name("コンクリート").unwrap();
+        let mut bodies = RigidBodySet::new();
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground.body_type = BodyType::Static;
+        bodies.create_body(ground, &materials);
+
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Compound {
+                children: vec![
+                    (
+                        identity_xf(Vec3::new(0.6, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                    (
+                        identity_xf(Vec3::new(-0.6, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                ],
+            },
+            steel,
+        );
+        desc.transform.position = Vec3::new(0.0, 0.45, 0.0);
+        let body = bodies.create_body(desc, &materials);
+
+        let mut axis_cache = AxisCache::new();
+        let manifolds = detect(&bodies, &mut axis_cache);
+        let touching: Vec<&ContactManifold> = manifolds
+            .iter()
+            .filter(|m| m.body_a == body || m.body_b == body)
+            .collect();
+        assert_eq!(
+            touching.len(),
+            1,
+            "法線が揃う部品は1本に束ねられるはず: {:?}",
+            touching.iter().map(|m| m.normal).collect::<Vec<_>>()
+        );
+        // 両方の部品が接触点を出していること(束ねても情報は失っていない)。
+        let m = touching[0];
+        assert!(
+            m.points.iter().any(|p| p.world_point.x > 0.0)
+                && m.points.iter().any(|p| p.world_point.x < 0.0),
+            "両部品が接触点を寄せているはず"
+        );
+        // feature_id が部品ごとに別空間になっていること(warm start の衝突回避)。
+        let ids: std::collections::BTreeSet<u32> = m.points.iter().map(|p| p.feature_id).collect();
+        assert_eq!(ids.len(), m.points.len(), "feature_id が重複していない");
     }
 
     /// **かつて「`ConvexMesh`はまだ何とも衝突しない(すり抜ける)」ことを
