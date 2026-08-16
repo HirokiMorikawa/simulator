@@ -1389,6 +1389,26 @@ impl World {
         &mut self.clock
     }
 
+    /// 中央PRNG(`rng`フィールド)の**現在の内部状態**
+    /// (`sim_math::SimRngState`のdoc参照)。
+    ///
+    /// **なぜ`seed`ではないのか**: `WorldOptions::seed`は`SimRng::new`が状態へ
+    /// 畳み込んだ時点で失われ、`World`はどこにも保持していない。`state_hash`は
+    /// PRNGを含まないので決定論replayの一致には効かないが、**エクスポート→
+    /// 再インポート後も同じ乱数列を続けたい**(ブラウン運動・気体分子運動論の
+    /// 衝突判定など、`SolverContext::rng`を引くドメインを含むシーン)場合は
+    /// 種ではなく**今のストリーム位置**を戻す必要がある。
+    /// `Scenario::rng_state`がこの値を書き出す。
+    pub fn rng_state(&self) -> sim_math::SimRngState {
+        self.rng.raw_state()
+    }
+
+    /// 中央PRNGの内部状態を差し替える(`rng_state`の逆、`Scenario::rng_state`の
+    /// 復元経路が使う)。
+    pub fn set_rng_state(&mut self, state: sim_math::SimRngState) {
+        self.rng.set_raw_state(state);
+    }
+
     /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す
     /// `MaterialId` の解決に使う。
     pub fn materials(&self) -> &MaterialDb {

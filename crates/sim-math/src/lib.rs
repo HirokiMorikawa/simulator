@@ -25,7 +25,7 @@ pub use integrators::{
 };
 pub use particles::{ParticleSet, SpatialHash};
 pub use pcg::{pcg, PcgResult, Preconditioner};
-pub use random::SimRng;
+pub use random::{SimRng, SimRngState};
 pub use ring_buffer::RingBuffer;
 
 use std::ops::{Add, Mul, Neg, Sub};

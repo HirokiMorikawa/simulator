@@ -17,6 +17,29 @@ pub struct SimRng {
     normal_carry: Option<f64>,
 }
 
+/// `SimRng`の**現在の内部状態そのもの**(生成に使った`seed`/`stream`ではなく、
+/// 何回引いた後かを含むストリーム位置)。
+///
+/// **なぜ要ったか**: `SimRng::new(seed, stream)`は seed を状態へ畳み込んだあと
+/// 元の値を捨てるので、**走らせた後の`SimRng`から`seed`は復元できない**。
+/// 一方でスナップショット(`sim_world::export::to_scenario`の`Scenario::rng_state`)が
+/// 戻したいのは seed ではなく**今のストリーム位置**である——乱数依存ドメイン
+/// (ブラウン運動・イジング・相変化の粒子生成)を含むシーンをエクスポート→
+/// 再インポートしたとき、以後の乱数列まで一致させるには「次に出る値」が
+/// 同じでなければならない。`state`/`inc`/`normal_carry`の3つで PCG32 の状態は
+/// 完全に決まる(`step_u32`が読むのはこれだけ)ので、この3つを持てば
+/// **ビット単位で同じ系列が続く**。
+///
+/// serde 派生は付けない——`sim-math`は依存ゼロのcrateであり、シーンJSONの
+/// 表現は`sim_world::scenario::RngStateJson`側が持つ(`sim_em`・`sim_fluid`等の
+/// 生状態と同じ分業)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SimRngState {
+    pub state: u64,
+    pub inc: u64,
+    pub normal_carry: Option<f64>,
+}
+
 impl SimRng {
     /// `seed`(initstate)と `stream`(initseq)から独立系列を導出する。
     /// ドメインごと・粒子ごとに異なる `stream` を渡すことで、単一シードから
@@ -31,6 +54,31 @@ impl SimRng {
         rng.state = rng.state.wrapping_add(seed);
         rng.step_u32();
         rng
+    }
+
+    /// 現在の内部状態を読み出す(`SimRngState`のdoc参照)。
+    pub fn raw_state(&self) -> SimRngState {
+        SimRngState {
+            state: self.state,
+            inc: self.inc,
+            normal_carry: self.normal_carry,
+        }
+    }
+
+    /// `raw_state`で読み出した状態から`SimRng`を復元する。
+    /// **`new`と違い seed/stream の畳み込みを行わない**——渡された状態が
+    /// そのまま次の`step_u32`の入力になる。
+    pub fn from_raw_state(state: SimRngState) -> SimRng {
+        SimRng {
+            state: state.state,
+            inc: state.inc,
+            normal_carry: state.normal_carry,
+        }
+    }
+
+    /// 既存インスタンスの内部状態を差し替える(`from_raw_state`の代入版)。
+    pub fn set_raw_state(&mut self, state: SimRngState) {
+        *self = SimRng::from_raw_state(state);
     }
 
     /// PCG-XSH-RR の 1 ステップ(状態更新 + 出力置換)。
@@ -297,5 +345,49 @@ mod tests {
         // 重み比 1:3 の許容誤差(二項分布の標準誤差の十分な倍数)。
         let ratio = counts[2] as f64 / counts[0] as f64;
         assert!((ratio - 3.0).abs() < 0.5, "ratio was {ratio}");
+    }
+
+    /// `raw_state`/`from_raw_state`が**ストリーム位置ごと**往復すること
+    /// (`SimRngState`のdoc参照)。`SimRng::new(seed, stream)`で作り直しても
+    /// 先頭に戻るだけなので、途中から続きを出せるのはこの経路だけである。
+    #[test]
+    fn raw_state_round_trip_continues_the_same_stream() {
+        let mut rng = SimRng::new(1234, 7);
+        for _ in 0..37 {
+            rng.next_u32();
+        }
+        let snapshot = rng.raw_state();
+        let expected: Vec<u32> = {
+            let mut clone = rng;
+            (0..16).map(|_| clone.next_u32()).collect()
+        };
+
+        let mut restored = SimRng::from_raw_state(snapshot);
+        let actual: Vec<u32> = (0..16).map(|_| restored.next_u32()).collect();
+        assert_eq!(expected, actual);
+
+        // 先頭から作り直した場合は(当然)一致しない——「seedではなく位置を
+        // 戻している」ことの対照。
+        let mut fresh = SimRng::new(1234, 7);
+        let from_start: Vec<u32> = (0..16).map(|_| fresh.next_u32()).collect();
+        assert_ne!(expected, from_start);
+    }
+
+    /// Box-Muller のキャリー(`normal_carry`)も状態の一部であること。
+    /// **奇数回**`normal()`を引いた時点でスナップショットを取るのが要点——
+    /// キャリーを落とすと復元後の1値目がずれる。
+    #[test]
+    fn raw_state_carries_the_box_muller_cache() {
+        let mut rng = SimRng::new(99, 3);
+        for _ in 0..5 {
+            rng.normal();
+        }
+        assert!(rng.raw_state().normal_carry.is_some());
+
+        let mut expected = rng;
+        let mut restored = SimRng::from_raw_state(rng.raw_state());
+        for _ in 0..8 {
+            assert_eq!(expected.normal().to_bits(), restored.normal().to_bits());
+        }
     }
 }

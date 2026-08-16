@@ -119,6 +119,22 @@ pub struct Scenario {
     /// `elapsed_steps * dt` として復元される(`SimClock::time`と同じ定義)。
     #[serde(default)]
     pub elapsed_steps: u64,
+    /// **中央PRNGのストリーム位置の生状態スナップショット**。
+    ///
+    /// **なぜ要ったか**: `seed`は「ストリームの先頭を決める種」であって
+    /// 「今どこまで引いたか」ではない。しかも`SimRng::new`は種を状態へ
+    /// 畳み込んだ時点で元の値を捨てるため、走らせた後の`World`から`seed`を
+    /// 逆算することすらできない(`to_scenario`が長らく`seed: 0`を書いていた
+    /// 理由)。結果として、乱数を消費するドメインを含むシーンは
+    /// エクスポート→再インポートで**以後の乱数列が変わって**いた。
+    /// `World::rng_state`が返す内部状態をそのまま書き戻すことでこれを塞ぐ。
+    ///
+    /// `#[serde(default)]`の`Option`なので純粋に加算的——省略時(既存の
+    /// `scenes/*.json`すべて)は`seed`から新規に初期化する移行前の挙動になる。
+    /// `Some`のときは`seed`より優先される(`seed`は人が読むためのメタデータとして
+    /// 残る、`raw_state`と構築レシピの関係と同じ規約)。
+    #[serde(default)]
+    pub rng_state: Option<RngStateJson>,
     pub world: WorldScenarioOptions,
     #[serde(default)]
     pub materials: Vec<MaterialOverride>,
@@ -219,6 +235,41 @@ pub struct Scenario {
     /// (`prediction_prompts`と全く同じ理由・全く同じ制約)。
     #[serde(default)]
     pub pass_criteria: Vec<PassCriterionJson>,
+}
+
+/// `Scenario::rng_state`(`sim_math::SimRngState`のシーンJSON表現)。
+///
+/// `sim-math`は依存ゼロのcrateでserdeを持たないため、他ドメインの生状態
+/// (`FdtdRawStateJson`等)と同じくこちら側でミラーする。PCG32の状態は
+/// `state`/`inc`と Box-Muller のキャリーで完全に決まる
+/// (`sim_math::SimRngState`のdoc参照)。
+#[derive(Deserialize, Serialize, Clone, Copy)]
+pub struct RngStateJson {
+    pub state: u64,
+    pub inc: u64,
+    /// Box-Muller の2値目のキャッシュ。**奇数回`normal()`を引いた時点で
+    /// スナップショットを取ると`Some`になる**——落とすと復元後の最初の
+    /// 正規乱数がずれるので、状態の一部として持つ。
+    #[serde(default)]
+    pub normal_carry: Option<f64>,
+}
+
+impl RngStateJson {
+    fn to_domain(self) -> sim_math::SimRngState {
+        sim_math::SimRngState {
+            state: self.state,
+            inc: self.inc,
+            normal_carry: self.normal_carry,
+        }
+    }
+
+    pub fn from_domain(state: sim_math::SimRngState) -> RngStateJson {
+        RngStateJson {
+            state: state.state,
+            inc: state.inc,
+            normal_carry: state.normal_carry,
+        }
+    }
 }
 
 /// `Scenario::prediction_prompts`の1件(モジュールdoc参照)。
@@ -3436,6 +3487,13 @@ impl World {
         // 既存のシーンJSONではこのループは1度も回らない(挙動は移行前と同一)。
         for _ in 0..scenario.elapsed_steps {
             world.clock_mut().advance();
+        }
+
+        // 中央PRNGのストリーム位置の復元(`Scenario::rng_state`のdoc参照)。
+        // **構築が全て終わった後**に置く——構築中に乱数を引く経路が将来増えても
+        // 「復元した位置がそのまま次stepの入口になる」不変条件が壊れないため。
+        if let Some(rng_state) = &scenario.rng_state {
+            world.set_rng_state(rng_state.to_domain());
         }
 
         Ok((world, ids))

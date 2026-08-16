@@ -7,9 +7,6 @@
 //! fluids・thermal・circuit・probesは無言で脱落していた。この関数がその置き換え。
 //!
 //! **既知の制限(縮約、正直な記録)**:
-//! - `seed`: `World`はRNGへ消費した後の元の値を保持しないため、常に`0`を書く。
-//!   ブラウン運動・相変化の粒子生成のような乱数依存ドメインを含むシーンを
-//!   エクスポート→再インポートすると、以後の乱数列が変わりうる。
 //! - `PistonGas`・`SphRigid`・`PhaseChangeMorph`・`BrownianForce`:
 //!   基準値(ピストンの変位ゼロ点・境界粒子の確保区間・融解の内部状態・RNGの
 //!   ストリーム位置)が`sim-coupling`側で非公開のため、公開されているパラメータ
@@ -38,6 +35,18 @@
 //! 足したことで**時間発展後でも`state_hash`一致で往復できるようになった**。
 //! レシピ側のフィールド(格子寸法・粒子数等)にも現在値を書くが、それは人が
 //! 読むためのメタデータで、復元に使われるのは`raw_state`である。
+//!
+//! **解消済みの制限(PRNGのストリーム位置、`Scenario::rng_state`)**:
+//! `seed`は今も常に`0`を書く(`SimRng::new`が種を状態へ畳み込んだ時点で元の値が
+//! 失われるため、`World`から逆算できない)が、**種の代わりに今のストリーム位置
+//! そのもの**を`rng_state`へ書くようにした(`sim_math::SimRngState`)。これで
+//! ブラウン運動・気体分子運動論のように`SolverContext::rng`を引くドメインを
+//! 含むシーンでも、エクスポート→再インポート後の乱数列がビット単位で続く。
+//!
+//! この解消に伴い、`brownian`/`ising`の往復テストを分けていた回避策
+//! (「復元直後の一致」と「復元経路自体の決定論」の2本立て)は不要になり、
+//! 他の9ドメインと同じ`assert_round_trip`(復元直後 + 双方をさらに回した後の
+//! `state_hash`一致)へ統合した。
 
 use crate::{BodyId, ProbeTarget, World};
 use sim_math::Vec3;
@@ -55,9 +64,10 @@ use crate::scenario::{
     KineticGasRawStateJson, KineticGasScenarioJson, LiftModelJson, MaterialOverride,
     PhaseChangeOverrideJson, ProbeJson, Quantum1dRawStateJson, Quantum1dScenarioJson,
     Quantum2dRawStateJson, Quantum2dScenarioJson, RelativisticCorrectionJson, ResistorJson,
-    Scenario, ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson, SoftBodyScenarioJson,
-    SoftConstraintJson, SoftVolumeConstraintJson, SphRawStateJson, SphScenarioJson, SwitchJson,
-    ThermalLinkJson, ThermalNodeJson, ThermalScenarioJson, VoltageSourceJson, WorldScenarioOptions,
+    RngStateJson, Scenario, ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson,
+    SoftBodyScenarioJson, SoftConstraintJson, SoftVolumeConstraintJson, SphRawStateJson,
+    SphScenarioJson, SwitchJson, ThermalLinkJson, ThermalNodeJson, ThermalScenarioJson,
+    VoltageSourceJson, WorldScenarioOptions,
 };
 
 /// この export セッション内で使う、生存ボディの決定的な名前
@@ -78,8 +88,11 @@ pub fn to_scenario(world: &World, name: &str) -> Scenario {
 
     Scenario {
         name: name.to_string(),
-        // 既知の制限(モジュールdoc参照): World は元のシードを保持しない。
+        // `World`は`SimRng::new`が畳み込んだ後の元シードを保持しないので、ここは
+        // 常に0のままである。**代わりに`rng_state`(今のストリーム位置)を書く**
+        // ので、乱数列は往復しても途切れない(`Scenario::rng_state`のdoc参照)。
         seed: 0,
+        rng_state: Some(RngStateJson::from_domain(world.rng_state())),
         // 経過ステップ数(`Scenario::elapsed_steps`のdoc参照)。`state_hash`は
         // 先頭で時刻を混ぜるので、これを書かないと時間発展後のシーンは
         // 復元しても必ずハッシュがずれる。
@@ -1662,39 +1675,6 @@ mod tests {
         );
     }
 
-    /// 乱数を消費するドメイン(ブラウン運動・イジング)用。`Scenario::seed`が常に0で
-    /// 書き出される既知の制限(モジュールdoc参照)により、**元の`World`は既にRNGを
-    /// 消費済み・復元後の`World`はストリーム先頭**という差が残るため、
-    /// 「復元直後の一致」と「復元経路自体の決定論(2回復元して同じだけ回したら一致)」
-    /// に分けて確かめる。
-    fn assert_round_trip_rng_domain(
-        mut world: World,
-        steps: usize,
-        extra_steps: usize,
-        label: &str,
-    ) {
-        for _ in 0..steps {
-            world.step();
-        }
-        let scenario = to_scenario(&world, label);
-        let mut a = World::from_scenario(&scenario).expect("round trip must parse back");
-        let mut b = World::from_scenario(&scenario).expect("round trip must parse back");
-        assert_eq!(
-            world.state_hash(),
-            a.state_hash(),
-            "{label}: state_hash must match immediately after reload"
-        );
-        for _ in 0..extra_steps {
-            a.step();
-            b.step();
-        }
-        assert_eq!(
-            a.state_hash(),
-            b.state_hash(),
-            "{label}: reload path must be deterministic when stepped forward"
-        );
-    }
-
     #[test]
     fn soft_body_raw_state_round_trip_after_stepping() {
         let mut world = empty_world();
@@ -1853,7 +1833,7 @@ mod tests {
             set.add_particle(Vec3::new(i as f64 * 1e-7, 0.0, 0.0), Vec3::ZERO);
         }
         world.enable_brownian(set);
-        assert_round_trip_rng_domain(world, 25, 20, "brownian");
+        assert_round_trip(world, 25, 20, "brownian");
     }
 
     #[test]
@@ -1882,7 +1862,7 @@ mod tests {
         let mut sim = sim_statistical::IsingSim::new(12, 1.0, 2.1, &mut rng);
         sim.updates_per_step = 3;
         world.enable_ising(sim);
-        assert_round_trip_rng_domain(world, 25, 20, "ising");
+        assert_round_trip(world, 25, 20, "ising");
     }
 
     #[test]
@@ -1927,6 +1907,61 @@ mod tests {
             reloaded.state_hash(),
             "磁場を落とせば次のstepでずれるはず(落としていないから一致している、という\
              取り違えを防ぐための対照)"
+        );
+    }
+
+    /// **中央PRNGのストリーム位置が往復すること**(`Scenario::rng_state`)。
+    /// `state_hash`はPRNGを含まないので、往復の成否はハッシュではなく
+    /// **復元後に引いた乱数列そのもの**で確かめる必要がある。
+    #[test]
+    fn rng_stream_position_round_trips() {
+        let mut world = empty_world();
+        // 乱数を実際に消費させる(`SolverContext::rng`を引くドメインを載せる)。
+        let mut set = sim_statistical::BrownianParticleSet::new(1e-15, 1e-8, 4.11e-21);
+        for i in 0..8 {
+            set.add_particle(Vec3::new(i as f64 * 1e-7, 0.0, 0.0), Vec3::ZERO);
+        }
+        world.enable_brownian(set);
+        for _ in 0..17 {
+            world.step();
+        }
+
+        let scenario = to_scenario(&world, "rng");
+        let reloaded = World::from_scenario(&scenario).expect("round trip must parse back");
+        assert_eq!(
+            world.rng_state(),
+            reloaded.rng_state(),
+            "ストリーム位置(state/inc/normal_carry)がそのまま戻ること"
+        );
+
+        // 「次に出る値」まで一致していることを、実際に引いて確かめる。
+        let mut a = sim_math::SimRng::from_raw_state(world.rng_state());
+        let mut b = sim_math::SimRng::from_raw_state(reloaded.rng_state());
+        for _ in 0..32 {
+            assert_eq!(a.next_u32(), b.next_u32());
+        }
+    }
+
+    /// `rng_state`を落とすと(=移行前の「`seed`から作り直す」挙動)以後の乱数列が
+    /// 変わることを、対照として固定する。
+    #[test]
+    fn dropping_rng_state_restarts_the_stream_from_the_seed() {
+        let mut world = empty_world();
+        let mut set = sim_statistical::BrownianParticleSet::new(1e-15, 1e-8, 4.11e-21);
+        set.add_particle(Vec3::ZERO, Vec3::ZERO);
+        world.enable_brownian(set);
+        for _ in 0..17 {
+            world.step();
+        }
+
+        let mut scenario = to_scenario(&world, "rng-dropped");
+        scenario.rng_state = None;
+        let reloaded = World::from_scenario(&scenario).expect("must still parse");
+        assert_ne!(
+            world.rng_state(),
+            reloaded.rng_state(),
+            "`rng_state`が唯一の復元経路であること(落としても偶然一致していた、\
+             という取り違えを防ぐための対照)"
         );
     }
 
