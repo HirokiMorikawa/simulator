@@ -652,6 +652,16 @@ pub enum ProbeJson {
     /// FDTD: 格子点 `(i, j)` の Ez、および全電磁エネルギー。
     FdtdEz(usize, usize),
     FdtdEnergy,
+    /// `ProbeTarget::LedgerKinetic`(`mechanics`ドメインの運動エネルギー)。
+    /// unit variant——JSONでは`{"ledger_kinetic": null}`ではなく
+    /// `"ledger_kinetic"`という文字列で書く(他のunit variantと同じ規約)。
+    /// **残タスク完遂増分**(以前は対応する`ProbeJson`が無く、`World → Scenario`
+    /// エクスポート時に無言で脱落していた——`ProbeTarget`のdoc「設計の例示」
+    /// 参照、意図的な除外ではなく単なる後続増分の積み残しだった)。
+    LedgerKinetic,
+    /// `ProbeTarget::StateHashDigest`(`state_hash()`をf64へ変換したダイジェスト)。
+    /// `LedgerKinetic`と同じ理由で追加。
+    StateHashDigest,
 }
 
 /// `Scenario::joints`の1件。設計の例示JSONには無い項目(モジュールdoc
@@ -3836,6 +3846,8 @@ impl World {
                 ProbeJson::BrownianMsd => ProbeTarget::BrownianMsd,
                 ProbeJson::FdtdEz(i, j) => ProbeTarget::FdtdEz(*i, *j),
                 ProbeJson::FdtdEnergy => ProbeTarget::FdtdEnergy,
+                ProbeJson::LedgerKinetic => ProbeTarget::LedgerKinetic,
+                ProbeJson::StateHashDigest => ProbeTarget::StateHashDigest,
             };
             handles.push(self.add_probe(target));
         }

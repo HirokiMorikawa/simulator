@@ -1377,9 +1377,8 @@ fn probe_target_to_json(
         ProbeTarget::BrownianMsd => ProbeJson::BrownianMsd,
         ProbeTarget::FdtdEz(i, j) => ProbeJson::FdtdEz(*i, *j),
         ProbeTarget::FdtdEnergy => ProbeJson::FdtdEnergy,
-        // 既知の制限(モジュールdoc参照): シーンJSON側に対応する`ProbeJson`が
-        // 無い(設計として意図的に除外されている、`ProbeTarget`のdoc参照)。
-        ProbeTarget::LedgerKinetic | ProbeTarget::StateHashDigest => return None,
+        ProbeTarget::LedgerKinetic => ProbeJson::LedgerKinetic,
+        ProbeTarget::StateHashDigest => ProbeJson::StateHashDigest,
     })
 }
 
@@ -2699,5 +2698,44 @@ mod tests {
         assert_eq!(world.ising().unwrap().spins.len(), 16);
         assert!(world.fdtd().unwrap().ez(4, 4) > 0.0);
         assert_eq!(world.conduction_rod().unwrap().temperature.len(), 8);
+    }
+
+    /// `ProbeTarget::LedgerKinetic`/`StateHashDigest`は設計の例示に含まれていた
+    /// にもかかわらず、対応する`ProbeJson`が無く`to_scenario`から無言で脱落
+    /// していた(意図的な除外ではなく後続増分の積み残し、`ProbeTarget`のdoc
+    /// 「設計の例示」参照)。`add_probe`→`to_scenario`→`from_scenario`で
+    /// 両方とも欠落しないことを確認する。
+    #[test]
+    fn ledger_kinetic_and_state_hash_digest_probes_round_trip() {
+        let mut world = World::new(WorldOptions {
+            gravity: 9.8,
+            dt: 1.0 / 120.0,
+            seed: 0,
+        });
+        let mat = steel(&world);
+        let mut desc = RigidBodyDesc::dynamic(sim_mechanics::Shape::Sphere { radius: 0.3 }, mat);
+        desc.transform.position = Vec3::new(0.0, 5.0, 0.0);
+        world.create_body(desc);
+        world.add_probe(ProbeTarget::LedgerKinetic);
+        world.add_probe(ProbeTarget::StateHashDigest);
+
+        for _ in 0..10 {
+            world.step();
+        }
+
+        let scenario = to_scenario(&world, "probe-round-trip");
+        assert!(matches!(scenario.probes[0], ProbeJson::LedgerKinetic));
+        assert!(matches!(scenario.probes[1], ProbeJson::StateHashDigest));
+
+        let reloaded = World::from_scenario(&scenario).expect("round trip must parse back");
+        assert_eq!(world.state_hash(), reloaded.state_hash());
+        assert_eq!(
+            reloaded.probe(0).unwrap().target,
+            ProbeTarget::LedgerKinetic
+        );
+        assert_eq!(
+            reloaded.probe(1).unwrap().target,
+            ProbeTarget::StateHashDigest
+        );
     }
 }
