@@ -3302,12 +3302,14 @@ function setUpProbeGraph(): (
     ctx.clearRect(0, 0, w, h);
     ctx.font = "11px monospace";
 
-    // QA不具合9: グラフのどこが何秒なのか画面から分からず、リングバッファの
-    // 打ち切り(`PROBE_HISTORY_CAPACITY`/`DEFAULT_PROBE_CAPACITY`のdoc参照)と
-    // 相まって「第1バウンドを数回あとの極大と取り違える」ような読み違いが
+    // QA不具合9: グラフのどこが何秒なのか画面から分からず、当時のリングバッファの
+    // 打ち切りと相まって「第1バウンドを数回あとの極大と取り違える」ような読み違いが
     // 実際に起きた。最長の系列を基準に、画面の左端(古い側)〜右端(新しい側、
     // = 現在時刻)の時刻を表示する——`ProbeSeries`自体は絶対時刻を持たない
     // (`probeSeriesToCsv`のdoc参照)ので、`currentTime`と`dt`から逆算する。
+    // **打ち切り自体は解消済み**(`sim_world::Probe`のdoc参照: 履歴は可変長に
+    // なり、古いサンプルが無言で捨てられることは無くなった)なので、この
+    // 逆算は常に「本当の開始時刻」を指す。
     const longest = series.reduce((m, s) => Math.max(m, s.history.length), 0);
     if (longest >= 2 && dt > 0) {
       const oldestTime = currentTime - (longest - 1) * dt;

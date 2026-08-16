@@ -401,18 +401,40 @@ pub struct CouplingInfo {
     pub voltage_sources: Vec<usize>,
 }
 
-/// 任意の観測量を毎stepサンプルして`history`(`RingBuffer`)に積む軽量プローブ
+/// 任意の観測量を毎stepサンプルして`history`に積む軽量プローブ
 /// (設計docs/20-integration/04-world-api.md §2.1「測って遊ぶの中心機能」)。
+///
+/// **履歴は可変長(切り詰めない)**。以前は固定容量の`RingBuffer`
+/// (`DEFAULT_PROBE_CAPACITY`、600 → QA不具合9で6000へ拡大)で、容量を超えると
+/// **無言で先頭が捨てられて**いた。窓を広げてもこれは先延ばしにしかならない
+/// ——長時間走らせれば必ず当たるし、当たったことは呼び出し側に一切通知されず、
+/// 「グラフの左端が実は0秒ではない」という形で静かに誤読を生む。
+/// **測ったデータを黙って捨てない**ほうを不変条件に選び、上限を外した。
+///
+/// 代わりに使用量を問い合わせる口を用意してある(`Probe::len`・
+/// `World::probe_history_bytes_estimate`)。呼び出し側(将来のフロントエンド)は
+/// これを見て自分で決めた軟らかい上限に近づいたら警告を出せる——
+/// **こちら側で勝手に上限を課したり捨てたりはしない**。
 #[derive(Clone)]
 pub struct Probe {
     pub target: ProbeTarget,
-    history: sim_math::RingBuffer<f64>,
+    history: Vec<f64>,
 }
 
 impl Probe {
     /// 古い順(サンプル順)の観測履歴。
     pub fn history(&self) -> impl Iterator<Item = &f64> {
         self.history.iter()
+    }
+
+    /// 蓄積済みサンプル数(= このプローブが登録されてからの`step()`回数)。
+    /// `World::probe_history_bytes_estimate`の内訳を見たい呼び出し側が使う。
+    pub fn len(&self) -> usize {
+        self.history.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.history.is_empty()
     }
 }
 
@@ -583,7 +605,10 @@ pub struct AutoRegimeSwitchConfig {
 }
 
 /// `event_log`の容量(設計は`subscribe`/`drain_events`の容量を規定しないため、
-/// `Probe`の`DEFAULT_PROBE_CAPACITY`(`scenario`モジュール)と同オーダーの値を採用)。
+/// UIが1フレームで捌ける件数の同オーダーの値を採用)。**`Probe`の履歴とは
+/// 事情が違う**——あちらは「測ったデータ」なので切り詰めをやめた(`Probe`の
+/// doc参照)が、こちらは通知であり、消費されなかった古い通知を無限に
+/// 溜め続ける意味は無い。
 const EVENT_LOG_CAPACITY: usize = 1024;
 
 const STREAM_DIAG: u64 = 0;
@@ -899,16 +924,36 @@ impl World {
 
     /// プローブを登録する(`Probe`のdoc参照)。返すハンドルは`probe`/`probe_history`が
     /// 使う(現時点では単なるベクタindex、`Vec`が縮まないため安定)。
-    pub fn add_probe(&mut self, target: ProbeTarget, capacity: usize) -> usize {
+    ///
+    /// **容量引数は取らない**(`Probe`のdoc参照)——履歴は可変長で、
+    /// 切り詰めは起こらない。
+    pub fn add_probe(&mut self, target: ProbeTarget) -> usize {
         self.probes.push(Probe {
             target,
-            history: sim_math::RingBuffer::new(capacity),
+            history: Vec::new(),
         });
         self.probes.len() - 1
     }
 
     pub fn probe(&self, handle: usize) -> Option<&Probe> {
         self.probes.get(handle)
+    }
+
+    /// 指定プローブの蓄積済みサンプル数(`Probe::len`の素通し、
+    /// 未登録ハンドルなら`None`)。
+    pub fn probe_history_len(&self, handle: usize) -> Option<usize> {
+        self.probes.get(handle).map(|p| p.len())
+    }
+
+    /// 全プローブ履歴が占めるメモリの概算[byte](`f64`×総サンプル数)。
+    ///
+    /// **上限を課さない代わりの観測手段**(`Probe`のdoc参照)。
+    /// `Vec`の予約分(容量-長さ)は数えない概算だが、桁を誤らせるほどの差は
+    /// 出ない(`Vec`の伸長は倍々なので最悪2倍)。呼び出し側はこれを見て
+    /// **自分で決めた軟らかい上限**に近づいたら警告できる——
+    /// `World`側が勝手に捨てることは無い。
+    pub fn probe_history_bytes_estimate(&self) -> usize {
+        self.probes.iter().map(|p| p.len()).sum::<usize>() * std::mem::size_of::<f64>()
     }
 
     /// `target`が指す観測量の現在値を読む(`step()`末尾の毎stepサンプルと同じロジック)。
@@ -4966,12 +5011,13 @@ mod tests {
 
     /// `Probe`(設計docs/20-integration/04-world-api.md §2.1「測って遊ぶの中心機能」):
     /// `BodyPosY`が箱の自由落下を毎stepサンプルし、履歴が単調減少することを確認する。
-    /// リングバッファの容量制限(古いサンプルが捨てられること)も併せて検証する。
+    /// **step数ぶんのサンプルが1つも欠けずに残る**ことも併せて見る(履歴は可変長、
+    /// `Probe`のdoc参照)。
     #[test]
-    fn probe_body_pos_y_samples_falling_box_every_step_within_ring_buffer_capacity() {
+    fn probe_body_pos_y_samples_falling_box_every_step() {
         let mut world = World::new(WorldOptions::default());
         let box_id = create_falling_box(&mut world);
-        let handle = world.add_probe(ProbeTarget::BodyPosY(box_id), 10);
+        let handle = world.add_probe(ProbeTarget::BodyPosY(box_id));
 
         for _ in 0..30 {
             world.step();
@@ -4979,8 +5025,7 @@ mod tests {
 
         let probe = world.probe(handle).unwrap();
         let history: Vec<f64> = probe.history().copied().collect();
-        // 容量10なので30step分のうち最新10個だけが残る。
-        assert_eq!(history.len(), 10);
+        assert_eq!(history.len(), 30, "30step分がそのまま残る(切り詰めない)");
         // 単調減少(自由落下、接触前)。
         for pair in history.windows(2) {
             assert!(
@@ -4993,6 +5038,73 @@ mod tests {
         assert!((history.last().unwrap() - final_y).abs() < 1e-12);
     }
 
+    /// **旧・固定容量(`DEFAULT_PROBE_CAPACITY`=6000)を大きく超えても1サンプルも
+    /// 失われないこと**。以前はここで先頭が無言に捨てられ、「グラフの左端が実は
+    /// 0秒ではない」という形で静かに誤読を生んでいた(`Probe`のdoc参照)。
+    ///
+    /// 判定は本数だけでなく**先頭のサンプルが残っているか**まで見る——
+    /// リングバッファに戻ると真っ先に消えるのがそこだからである。
+    #[test]
+    fn probe_history_keeps_every_sample_far_past_the_old_fixed_capacity() {
+        const OLD_FIXED_CAPACITY: usize = 6000;
+        const STEPS: usize = 10_000;
+
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        let handle = world.add_probe(ProbeTarget::BodyPosY(box_id));
+
+        // 1step目のサンプル(切り詰めが起きれば最初に失われる値)を控えておく。
+        world.step();
+        let first_sample = *world.probe(handle).unwrap().history().next().unwrap();
+
+        for _ in 1..STEPS {
+            world.step();
+        }
+
+        // 旧容量を超える長さで走らせていること(この関係が崩れたらこのテストは
+        // 何も検証していない)。定数どうしの比較なのでコンパイル時に見る。
+        const _: () = assert!(STEPS > OLD_FIXED_CAPACITY);
+
+        let probe = world.probe(handle).unwrap();
+        assert_eq!(
+            probe.len(),
+            STEPS,
+            "旧容量({OLD_FIXED_CAPACITY})を超えても切り詰めない"
+        );
+        assert_eq!(probe.history().count(), STEPS);
+        assert_eq!(
+            *probe.history().next().unwrap(),
+            first_sample,
+            "先頭のサンプルが残っていること(リングバッファなら最初に消える値)"
+        );
+
+        // メモリ使用量の問い合わせ口(上限を課さない代わりの観測手段)。
+        assert_eq!(world.probe_history_len(handle), Some(STEPS));
+        assert_eq!(world.probe_history_len(handle + 1), None);
+        assert_eq!(
+            world.probe_history_bytes_estimate(),
+            STEPS * std::mem::size_of::<f64>()
+        );
+    }
+
+    /// `probe_history_bytes_estimate`が**全プローブの合計**であること。
+    #[test]
+    fn probe_history_bytes_estimate_sums_every_probe() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        world.add_probe(ProbeTarget::BodyPosY(box_id));
+        world.add_probe(ProbeTarget::BodySpeed(box_id));
+        assert_eq!(world.probe_history_bytes_estimate(), 0);
+
+        for _ in 0..50 {
+            world.step();
+        }
+        assert_eq!(
+            world.probe_history_bytes_estimate(),
+            2 * 50 * std::mem::size_of::<f64>()
+        );
+    }
+
     /// `ProbeTarget::LedgerKinetic`・`StateHashDigest`が無効なindex/id無しでも
     /// パニックせず妥当な値をサンプルすることを確認する(常時有効なmechanicsドメイン
     /// のみに依存するターゲット)。
@@ -5000,8 +5112,8 @@ mod tests {
     fn probe_ledger_kinetic_and_state_hash_digest_sample_without_panicking() {
         let mut world = World::new(WorldOptions::default());
         create_falling_box(&mut world);
-        let kinetic_handle = world.add_probe(ProbeTarget::LedgerKinetic, 5);
-        let hash_handle = world.add_probe(ProbeTarget::StateHashDigest, 5);
+        let kinetic_handle = world.add_probe(ProbeTarget::LedgerKinetic);
+        let hash_handle = world.add_probe(ProbeTarget::StateHashDigest);
 
         for _ in 0..5 {
             world.step();

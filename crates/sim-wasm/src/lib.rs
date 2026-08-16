@@ -28,16 +28,6 @@ use wasm_bindgen::prelude::*;
 
 mod component_schema;
 
-/// `docs/23-frontend/01-editor.md`のProbe Graphsパネル(§1.4「複数系列」)デモ用に、
-/// 箱のy座標を毎step記録するプローブの履歴長。1step=dt秒、`PROBE_HISTORY_CAPACITY`
-/// step分(≈`PROBE_HISTORY_CAPACITY*dt`秒)のスクロールウィンドウになる。
-/// **QA不具合9(docs/reviews/2026-08-04-editor-qa.md)で600→6000へ拡大**:
-/// 600だと既定dt(1/120)で5秒分しか残らず、900step(7.5秒)実行しただけで
-/// 無言に先頭が切り詰められていた。6000でも1系列あたり48KB(f64×6000)程度で
-/// 無視できる規模——「有限のスクロールウィンドウ」という設計自体は変えず、
-/// 窓を通常の観察セッションで実際に打ち切りに当たらない大きさへ広げる。
-const PROBE_HISTORY_CAPACITY: usize = 6000;
-
 /// Timelineパネルのスナップショットリングバッファ(設計docs/00-foundation/
 /// 04-architecture.md §「巻き戻しのスナップショット予算」: 既定1s間隔・
 /// リングバッファN=8面・直近8s分)。1s間隔は`dt`から算出する
@@ -433,10 +423,8 @@ impl WasmWorld {
         let mut desc = RigidBodyDesc::dynamic(box_shape.clone(), steel);
         desc.transform.position = sim_math::Vec3::new(0.0, initial_height, 0.0);
         let box_body = inner.create_body(desc);
-        let y_probe =
-            Some(inner.add_probe(ProbeTarget::BodyPosY(box_body), PROBE_HISTORY_CAPACITY));
-        let speed_probe =
-            Some(inner.add_probe(ProbeTarget::BodySpeed(box_body), PROBE_HISTORY_CAPACITY));
+        let y_probe = Some(inner.add_probe(ProbeTarget::BodyPosY(box_body)));
+        let speed_probe = Some(inner.add_probe(ProbeTarget::BodySpeed(box_body)));
 
         // 分圧回路(`Command::SetSwitch`の実証用、`sim-world`の
         // `set_switch_command_closes_switch_and_changes_circuit_state`と同じ
@@ -541,8 +529,8 @@ impl WasmWorld {
             World::from_scenario_with_body_ids(&scenario).map_err(WasmError::WorldBuild)?;
         let (y_probe, speed_probe) = match ids.first() {
             Some(&first_id) => (
-                Some(inner.add_probe(ProbeTarget::BodyPosY(first_id), PROBE_HISTORY_CAPACITY)),
-                Some(inner.add_probe(ProbeTarget::BodySpeed(first_id), PROBE_HISTORY_CAPACITY)),
+                Some(inner.add_probe(ProbeTarget::BodyPosY(first_id))),
+                Some(inner.add_probe(ProbeTarget::BodySpeed(first_id))),
             ),
             None => (None, None),
         };
@@ -1706,6 +1694,27 @@ impl WasmWorld {
         let handle = self.try_imported_probe_handle_at(index)?;
         let probe = self.try_imported_probe_at(handle)?;
         Ok(probe.history().copied().collect())
+    }
+
+    /// 全プローブ履歴が占めるメモリの概算[byte]
+    /// (`World::probe_history_bytes_estimate`の素通し、
+    /// `read_component("probe_history_bytes_estimate", "")`から引く)。
+    ///
+    /// **なぜ露出するのか**: プローブ履歴は固定容量のリングバッファをやめて
+    /// 可変長になった(`sim_world::Probe`のdoc参照)。**測ったデータを黙って
+    /// 捨てない**のがその要点なので、コア側は上限を課さない——代わりに
+    /// フロントエンドがこの値を見て、自分で決めた軟らかい上限に近づいたら
+    /// 「長時間実行中です」と警告できるようにする。**警告するかどうか・
+    /// どこを閾値にするかは呼び出し側の判断**であり、ここでは事実だけを返す。
+    fn probe_history_bytes_estimate_impl(&self) -> usize {
+        self.inner.probe_history_bytes_estimate()
+    }
+
+    /// 指定した(インポート済みシーンの)プローブの蓄積済みサンプル数。
+    /// `probe_history_bytes_estimate`の内訳を系列ごとに見たいとき用。
+    fn imported_probe_history_len_impl(&self, index: usize) -> Result<usize, WasmError> {
+        let handle = self.try_imported_probe_handle_at(index)?;
+        Ok(self.try_imported_probe_at(handle)?.len())
     }
 
     /// `ProbeTarget`の11変種をProbe Graphsパネル表示用の人間可読ラベルへ変換する
@@ -3075,6 +3084,16 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 Ok(self.imported_probe_value_at_impl(index).to_string())
             }
+            // **プローブ履歴の使用量**(`probe_history_bytes_estimate_impl`のdoc参照)。
+            // 上限を課さない代わりの観測手段で、警告を出すかどうかは
+            // フロントエンドの判断に委ねる。
+            "probe_history_bytes_estimate" => {
+                Ok(self.probe_history_bytes_estimate_impl().to_string())
+            }
+            "imported_probe_history_len" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.imported_probe_history_len_impl(index)?.to_string())
+            }
             "frame_count" => Ok(self.frame_count_impl().to_string()),
             "frame_parent_index" => {
                 let index: usize = arg.parse().unwrap_or(0);
@@ -3151,7 +3170,8 @@ impl WasmWorld {
                 "time", "step_count", "state_hash", "energy_residual",
                 "max_body_speed", "active_approximations_text",
                 "imported_probe_count", "imported_probe_label_at",
-                "imported_probe_value_at", "frame_count", "frame_parent_index",
+                "imported_probe_value_at", "probe_history_bytes_estimate",
+                "imported_probe_history_len", "frame_count", "frame_parent_index",
                 "grid_fluid_3d_summary", "energy_report_text",
                 "fluid_spawn_count", "fluid_particle_count",
                 "snapshot_count", "snapshot_time_at",
@@ -7061,6 +7081,115 @@ mod tests {
     fn imported_probe_count_is_zero_for_the_default_scene() {
         let world = new_world();
         assert_eq!(world.imported_probe_count_impl(), 0);
+    }
+
+    /// **プローブ履歴が固定容量を超えても切り詰められないこと**を、wasm境界の
+    /// 内省経路(`read_component`)越しに確認する(`sim_world::Probe`のdoc参照)。
+    ///
+    /// 旧・固定容量は6000だった。既定シーンは2本のプローブを持つので、
+    /// 8000step走らせれば両系列とも旧容量を超える。
+    #[test]
+    fn probe_history_grows_past_the_old_fixed_capacity_and_reports_its_size() {
+        const OLD_FIXED_CAPACITY: usize = 6000;
+        const STEPS: usize = 8000;
+        const _: () = assert!(STEPS > OLD_FIXED_CAPACITY);
+
+        let mut world = new_world();
+        assert_eq!(
+            world
+                .read_component_impl("probe_history_bytes_estimate", "")
+                .unwrap(),
+            "0"
+        );
+        for _ in 0..STEPS {
+            world.step();
+        }
+        // 既定シーンのプローブ2本 × STEPSサンプル × f64。
+        assert_eq!(
+            world
+                .read_component_impl("probe_history_bytes_estimate", "")
+                .unwrap(),
+            (2 * STEPS * std::mem::size_of::<f64>()).to_string()
+        );
+
+        // `component_schema`が新しい2つの内省kindを申告していること
+        // (フロントエンドはこの一覧を見て何を読めるか決める)。
+        let schema = world.component_schema();
+        assert!(schema.contains("probe_history_bytes_estimate"));
+        assert!(schema.contains("imported_probe_history_len"));
+    }
+
+    /// `imported_probe_history_len`が系列ごとの内訳を返すこと
+    /// (`probe_history_bytes_estimate`の合計の内訳)。
+    #[test]
+    fn imported_probe_history_len_reports_each_series_length() {
+        let json = include_str!("../../../scenes/d6-floating-box-f4.json");
+        let mut world = WasmWorld::from_scene_json_impl(json)
+            .expect("scenes/d6-floating-box-f4.json must be a valid scene");
+        for _ in 0..7000 {
+            world.step();
+        }
+        assert_eq!(
+            world
+                .read_component_impl("imported_probe_history_len", "0")
+                .unwrap(),
+            "7000"
+        );
+        // 範囲外のindexはエラー(黙って0を返さない)。
+        assert!(world
+            .read_component_impl("imported_probe_history_len", "9")
+            .is_err());
+    }
+
+    /// **エディタでシーンを保存しても合格基準が消えないこと**
+    /// (`sim_world::Scenario::pass_criteria`のdoc参照)。
+    ///
+    /// これが移行前の実害そのものである: 手で`pass_criteria`を書いたシーンを
+    /// 読み込み、`export_scene_json`(=エディタの保存)で書き戻すと、
+    /// 検証タブの合格基準が丸ごと落ちていた——`from_scenario`が読まず
+    /// `to_scenario`が常に空を返していたため。
+    #[test]
+    fn export_scene_json_keeps_the_author_written_pass_criteria_and_prompts() {
+        let json = r#"{
+            "name": "authored",
+            "world": { "gravity": 9.80665, "dt": 0.008333333 },
+            "bodies": [
+                { "name": "ball", "shape": { "sphere": { "radius": 0.2 } },
+                  "material": "鋼(炭素鋼)", "position": [0, 5, 0] }
+            ],
+            "probes": [ { "body_pos_y": "ball" } ],
+            "prediction_prompts": [
+                { "question": "落下1秒後の高さは?", "probe_index": 0,
+                  "expected_value": 0.0967 }
+            ],
+            "pass_criteria": [
+                { "probe_index": 0, "operator": "le", "threshold": 0.25 }
+            ]
+        }"#;
+        let mut world =
+            WasmWorld::from_scene_json_impl(json).expect("authored scene must be valid");
+        for _ in 0..60 {
+            world.step();
+        }
+        let exported = world
+            .export_scene_json_impl()
+            .expect("export_scene_json must succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&exported).expect("must produce valid JSON");
+
+        let criteria = parsed["pass_criteria"]
+            .as_array()
+            .expect("pass_criteria must survive the editor save path");
+        assert_eq!(criteria.len(), 1);
+        assert_eq!(criteria[0]["probe_index"], 0);
+        assert_eq!(criteria[0]["operator"], "le");
+        assert_eq!(criteria[0]["threshold"], 0.25);
+
+        let prompts = parsed["prediction_prompts"]
+            .as_array()
+            .expect("prediction_prompts must survive the editor save path");
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0]["question"], "落下1秒後の高さは?");
     }
 
     /// D6(浮き沈み、`scenes/d6-floating-box-f4.json`)は`probes`に

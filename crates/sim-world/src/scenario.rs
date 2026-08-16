@@ -55,6 +55,14 @@
 //! (`sim-wasm::WasmWorld::import_scene_json`——シーンJSON Import——が
 //! 新規`World`を構築せず既存ワールドへボディを追加できるようにするため、
 //! `fluids`/`probes`セクションは対象外、`append_scenario_bodies`のdoc参照)。
+//! ただし`prediction_prompts`/`pass_criteria`(著者向けメタデータ)はここでも
+//! 取り込む——`Scenario::prediction_prompts`のdoc参照。
+//!
+//! `probes`セクションが作るプローブの**履歴容量はもう指定しない**。以前は
+//! シーンJSONに容量を書く仕組みが無いことを理由に固定容量
+//! (`DEFAULT_PROBE_CAPACITY`)を使っていたが、それは「窓を超えた古いサンプルを
+//! 無言で捨てる」という意味であり、**測ったデータを黙って捨てない**ほうを
+//! 不変条件に選んで上限を外した(`sim_world::Probe`のdoc参照)。
 
 use crate::{BodyId, ProbeTarget, World, WorldOptions};
 use serde::{Deserialize, Serialize};
@@ -62,14 +70,6 @@ use sim_fluid::StaticWaterRegion;
 use sim_math::Vec3;
 use sim_mechanics::{BodyType, DragModel, RigidBodyDesc, Shape};
 use std::collections::HashMap;
-
-/// `probes`セクションで名前解決を経ずにプローブ履歴の容量を指定する仕組みが設計JSONに
-/// 無いため、この縮約実装では固定容量を使う。**QA不具合9
-/// (docs/reviews/2026-08-04-editor-qa.md)で600→6000へ拡大**:
-/// 600(既定dtで5秒相当)だと900step実行しただけで無言に先頭が切り詰められ、
-/// UI上での合格基準の数値読み取りに支障が出ていた。6000サンプル
-/// (既定dtで50秒相当)でも1系列48KB程度で無視できる規模。
-const DEFAULT_PROBE_CAPACITY: usize = 6000;
 
 /// シーンロードの失敗(設計§3「validator: 参照整合(名前解決)…を位置つきエラーで返す」
 /// の縮約版 — 位置情報は持たず、エラー種別と関連する名前のみ)。
@@ -3837,7 +3837,7 @@ impl World {
                 ProbeJson::FdtdEz(i, j) => ProbeTarget::FdtdEz(*i, *j),
                 ProbeJson::FdtdEnergy => ProbeTarget::FdtdEnergy,
             };
-            handles.push(self.add_probe(target, DEFAULT_PROBE_CAPACITY));
+            handles.push(self.add_probe(target));
         }
         Ok(handles)
     }
@@ -4781,10 +4781,11 @@ mod tests {
         // シーンギャラリー増分、`scenes/index.json`マニフェスト参照)。小振幅
         // (θ0=0.05 rad)の初期位置はJSON側に焼き込み済み——このRust側の`length`/
         // `dt`は期待周期(解析解)の計算に使う。
-        // `demos.rs`側はdt=1/2000だが、そのままだと1周期分のstep数(約4800)が
-        // プローブのリングバッファ容量(`DEFAULT_PROBE_CAPACITY`=600)を超え、
-        // ゼロ交差走査に必要な先頭付近のサンプルが上書きされてしまう。
-        // 既定dt(1/120)なら1周期あたり約240stepで容量内に収まる。
+        // `demos.rs`側はdt=1/2000だが、こちらは既定dt(1/120、1周期あたり約240step)
+        // を使う——期待周期(解析解)との突き合わせに要る分解能はこれで足りる。
+        // (プローブ履歴が固定容量だった頃は「1周期分のstep数が容量を超えると
+        // 先頭が上書きされる」という制約も理由に挙げていたが、履歴が可変長に
+        // なった今それは無い、`sim_world::Probe`のdoc参照。)
         let length: f64 = 1.0;
         let theta0: f64 = 0.05; // 小振幅(rad)、JSON側にも同じ値が焼き込まれている。
         let dt: f64 = 0.008333333;
@@ -5507,11 +5508,11 @@ mod tests {
     /// `scenes/d37-reentry.json`経由で確認する。`astro.atmospheric_drag`は
     /// 本増分で追加したスキーマ。
     ///
-    /// **プローブではなくワールドから直接読む**: `HeadlessRunResult`の
-    /// プローブ履歴は容量600のリングバッファなので、4000step走らせると
-    /// 最初の3400stepぶんが落ちて「開始値」が取れない(実際に測ろうとして
-    /// 踏んだ)。降下量・減速量は開始と終了の差なので、ここは`World`を
-    /// 直接進めて両端を読む。
+    /// **プローブではなくワールドから直接読む**: 降下量・減速量は開始と終了の
+    /// 差でしかないので、履歴を丸ごと回収するより両端を読むほうが素直である。
+    /// (プローブ履歴が固定容量だった頃は「4000step走らせると開始値が落ちる」
+    /// のが直接の理由だった——履歴が可変長になった今その制約は無い、
+    /// `sim_world::Probe`のdoc参照。)
     #[test]
     fn run_headless_scenario_reentry_decelerates_the_capsule_in_the_atmosphere() {
         let json = include_str!("../../../scenes/d37-reentry.json");
@@ -6100,9 +6101,9 @@ mod tests {
         // 変わらない)。
         let json = include_str!("../../../scenes/d2-ballistic.json");
 
-        // プローブ履歴はリングバッファ(容量`DEFAULT_PROBE_CAPACITY`=600、`run_headless_scenario`
-        // 参照)なので、着地ステップ(解析値T≈2.885s→step≈346)より前の区間が上書きされて
-        // インデックスと絶対時刻の対応がずれないよう、stepsは容量以下に収める。
+        // 着地ステップ(解析値T≈2.885s→step≈346)を含む窓を取る。プローブ履歴は
+        // 可変長で切り詰めが起こらない(`sim_world::Probe`のdoc参照)ので、
+        // 履歴indexと絶対時刻の対応は最初のstepから最後まで崩れない。
         let steps = 500;
         let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let pos_y = &result.probe_histories[0];
@@ -6213,7 +6214,9 @@ mod tests {
         // 出すため、下の期待値計算と1ビットも変わらない)。
         let json = include_str!("../../../scenes/d3-bounce.json");
 
-        let steps = 500; // リングバッファ容量600以下(D1/D2の増分で確立した配慮)。
+        // 最初のバウンドまでを含む窓(プローブ履歴は可変長なので、これより長く
+        // 走らせても先頭は落ちない、`sim_world::Probe`のdoc参照)。
+        let steps = 500;
         let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let pos_y = &result.probe_histories[0];
         let height: Vec<f64> = pos_y.iter().map(|y| y - radius).collect();
