@@ -552,6 +552,12 @@ pub struct World {
     /// Astroレジーム分岐が毎step終端でこの設定を見て閾値判定する。切替が起きると`None`に
     /// 戻し(1回のみ発火、再トリガ防止)、以後は通常のLocalレジーム挙動に戻る。
     auto_regime_switch: Option<AutoRegimeSwitchConfig>,
+    /// **著者向けメタデータ**(`Scenario::prediction_prompts`/`pass_criteria`、
+    /// `author_metadata`アクセサのdoc参照)。**物理には一切影響しない**——
+    /// `step()`も`state_hash()`もこの2つに触れない。シーンJSONから読み込んだ値を
+    /// そのまま抱えておくためだけの場所である。
+    prediction_prompts: Vec<scenario::PredictionPromptJson>,
+    pass_criteria: Vec<scenario::PassCriterionJson>,
 }
 
 /// `World::configure_auto_regime_switch`が使う自動切替の設定(モジュールdoc「全ドメイン
@@ -732,7 +738,80 @@ impl World {
             time_regime: sim_astro::TimeRegime::Local { steps_per_frame: 1 },
             frames: sim_core::FrameTree::new(),
             auto_regime_switch: None,
+            prediction_prompts: Vec::new(),
+            pass_criteria: Vec::new(),
         }
+    }
+
+    /// 予測→実験ミニパネルのヒント(`Scenario::prediction_prompts`)。
+    ///
+    /// **なぜ`World`が持つのか**: この2つ(と`pass_criteria`)は長らく
+    /// 「`from_scenario`は読まない・`to_scenario`は常に空を返す」だった。
+    /// つまり**エディタでシーンを保存するたびに消えていた**——手で
+    /// `pass_criteria`を書いたシーンを読み込み、`export_scene_json`で書き戻すと
+    /// 検証タブの合格基準が丸ごと落ちる。物理に影響しないことと、
+    /// 実行時状態として保持しなくてよいことは別の話である。
+    ///
+    /// **物理から完全に隔離されている**: `step()`はこのフィールドを読まないし、
+    /// `state_hash()`にも混ざらない(決定論replayに影響しない)。`Clone`
+    /// (=`snapshot`/`restore`)には素直について回る。
+    pub fn prediction_prompts(&self) -> &[scenario::PredictionPromptJson] {
+        &self.prediction_prompts
+    }
+
+    /// 検証タブの合格基準(`Scenario::pass_criteria`)。`prediction_prompts`の
+    /// doc参照(同じ扱い)。
+    pub fn pass_criteria(&self) -> &[scenario::PassCriterionJson] {
+        &self.pass_criteria
+    }
+
+    /// 著者向けメタデータを差し替える(`prediction_prompts`のdoc参照)。
+    /// `World::append_scenario_bodies`がシーンJSONから読んだ値を入れるほか、
+    /// エディタが編集した結果を書き戻す口としても使う。
+    pub fn set_author_metadata(
+        &mut self,
+        prediction_prompts: Vec<scenario::PredictionPromptJson>,
+        pass_criteria: Vec<scenario::PassCriterionJson>,
+    ) {
+        self.prediction_prompts = prediction_prompts;
+        self.pass_criteria = pass_criteria;
+    }
+
+    /// 著者向けメタデータを末尾へ追加する(`append_scenario_bodies`が使う——
+    /// あちらは実行中ワールドへの「追加」なので、既存のシーンのメタデータを
+    /// 消してはならない)。
+    ///
+    /// `probe_index`は**取り込むシーンの`probes`配列内の位置**なので、
+    /// 既に登録済みのプローブ本数(`probe_offset`)ぶんずらしてから積む——
+    /// `add_scenario_probes`が同じオフセットで末尾へ追加するため、これで
+    /// 両者の指す先が一致する。新規構築(`from_scenario`、プローブ0本)なら
+    /// オフセット0で恒等になり、往復は無損失である。
+    pub fn append_author_metadata(
+        &mut self,
+        prediction_prompts: &[scenario::PredictionPromptJson],
+        pass_criteria: &[scenario::PassCriterionJson],
+        probe_offset: usize,
+    ) {
+        for p in prediction_prompts {
+            self.prediction_prompts
+                .push(scenario::PredictionPromptJson {
+                    question: p.question.clone(),
+                    probe_index: p.probe_index + probe_offset,
+                    expected_value: p.expected_value,
+                });
+        }
+        for c in pass_criteria {
+            self.pass_criteria.push(scenario::PassCriterionJson {
+                probe_index: c.probe_index + probe_offset,
+                operator: c.operator,
+                threshold: c.threshold,
+            });
+        }
+    }
+
+    /// 登録済みプローブの本数(`append_author_metadata`の`probe_offset`に使う)。
+    pub fn probe_count(&self) -> usize {
+        self.probes.len()
     }
 
     /// 現在のレジーム(設計docs/20-integration/06-regime-switching.md §2)。

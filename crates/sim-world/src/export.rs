@@ -78,6 +78,16 @@
 //! 係数表8本は`(nx, ny, h, dt, layers, target_reflection)`の決定的関数なので
 //! JSONへは書かない(`PmlJson`のdoc参照)——`from_scenario`は`dt`を戻してから
 //! `with_pml`を呼び、同じ係数を組み直す。
+//!
+//! **解消済みの制限(著者向けメタデータ、`Scenario::pass_criteria`/
+//! `prediction_prompts`)**: 移行前はこの2つを`from_scenario`が読まず
+//! `to_scenario`が常に空を返していた——`World`が実行時状態として持たない、
+//! というのが理由だった。**しかしその結果、エディタでシーンを保存するたびに
+//! 消えていた**(手で合格基準を書いたシーンを読み込み、`export_scene_json`で
+//! 書き戻すと検証タブの基準が丸ごと落ちる)。`World`に置き場所を作り
+//! (`World::prediction_prompts`/`pass_criteria`)、`append_scenario_bodies`が
+//! 読み・`to_scenario`が書き戻すようにした。**物理からは完全に隔離**されている
+//! ——`step()`も`state_hash()`もこの2つに触れない。
 
 use crate::{BodyId, ProbeTarget, World};
 use sim_math::Vec3;
@@ -152,11 +162,10 @@ pub fn to_scenario(world: &World, name: &str) -> Scenario {
         ising: export_ising(world),
         fdtd: export_fdtd(world),
         probes: export_probes(world, &names),
-        prediction_prompts: Vec::new(),
-        // `prediction_prompts`と同じ理由(モジュールdocの`Scenario::
-        // pass_criteria`参照)——著者向けメタデータであり`World`は
-        // 実行時状態として持たない。
-        pass_criteria: Vec::new(),
+        // **著者向けメタデータ**。`World`が保持するようになったのでそのまま
+        // 書き戻す(モジュールdoc「解消済みの制限(著者向けメタデータ)」参照)。
+        prediction_prompts: world.prediction_prompts().to_vec(),
+        pass_criteria: world.pass_criteria().to_vec(),
     }
 }
 
@@ -2289,6 +2298,137 @@ mod tests {
         // **磁場が復元されていることを実際に効かせるための30step**。`initial`
         // (Ezしか書けない)経路だと、ここで必ずハッシュがずれる。
         assert_round_trip(world, 30, 25, "fdtd");
+    }
+
+    // -----------------------------------------------------------------------
+    // **著者向けメタデータ**(`pass_criteria`/`prediction_prompts`)の往復。
+    // -----------------------------------------------------------------------
+
+    /// 合格基準と予測ヒントを持つシーンJSON(2プローブ)。
+    fn authored_scene_json() -> &'static str {
+        r#"{
+            "name": "authored",
+            "world": { "gravity": 9.80665, "dt": 0.008333333 },
+            "bodies": [
+                { "name": "ball", "shape": { "sphere": { "radius": 0.2 } },
+                  "material": "鋼(炭素鋼)", "position": [0, 5, 0] }
+            ],
+            "probes": [ { "body_pos_y": "ball" }, { "body_speed": "ball" } ],
+            "prediction_prompts": [
+                { "question": "落下1秒後の高さは?", "probe_index": 0,
+                  "expected_value": 0.0967 }
+            ],
+            "pass_criteria": [
+                { "probe_index": 0, "operator": "le", "threshold": 0.25 },
+                { "probe_index": 1, "operator": "ge", "threshold": 9.0 }
+            ]
+        }"#
+    }
+
+    /// **著者向けメタデータが往復で消えないこと**。移行前は`from_scenario`が
+    /// 読まず`to_scenario`が常に空を返していたため、エディタでシーンを保存する
+    /// たびに丸ごと落ちていた。
+    ///
+    /// **`.step()`した後でも同じ値が出ること**まで見るのが要点——物理から
+    /// 完全に隔離されている(実行で変化しない)ことの確認である。
+    #[test]
+    fn author_metadata_survives_the_round_trip_and_is_inert_to_stepping() {
+        let scenario = Scenario::from_json(authored_scene_json()).expect("valid scene");
+        let mut world = World::from_scenario(&scenario).expect("must build");
+
+        // 読み込み時点で`World`が持っていること。
+        assert_eq!(world.prediction_prompts().len(), 1);
+        assert_eq!(world.pass_criteria().len(), 2);
+
+        let hash_before = world.state_hash();
+        for _ in 0..120 {
+            world.step();
+        }
+        // 物理を進めてもメタデータは変わらない(かつ、メタデータは物理に効かない
+        // ——`state_hash`はメタデータ抜きの`World`と同じ経路で計算される)。
+        assert_ne!(
+            hash_before,
+            world.state_hash(),
+            "実際に時間発展していること"
+        );
+
+        let exported = to_scenario(&world, "authored");
+        assert_eq!(exported.prediction_prompts.len(), 1);
+        assert_eq!(
+            exported.prediction_prompts[0].question,
+            "落下1秒後の高さは?"
+        );
+        assert_eq!(exported.prediction_prompts[0].probe_index, 0);
+        assert_eq!(exported.prediction_prompts[0].expected_value, 0.0967);
+        assert_eq!(exported.pass_criteria.len(), 2);
+        assert_eq!(exported.pass_criteria[0].probe_index, 0);
+        assert!(matches!(
+            exported.pass_criteria[0].operator,
+            crate::scenario::PassCriterionOperator::Le
+        ));
+        assert_eq!(exported.pass_criteria[0].threshold, 0.25);
+        assert_eq!(exported.pass_criteria[1].probe_index, 1);
+        assert!(matches!(
+            exported.pass_criteria[1].operator,
+            crate::scenario::PassCriterionOperator::Ge
+        ));
+        assert_eq!(exported.pass_criteria[1].threshold, 9.0);
+
+        // 2周目(JSON文字列を経由)でも同じ。
+        let json = serde_json::to_string(&exported).expect("must serialize");
+        let parsed: Scenario = serde_json::from_str(&json).expect("must deserialize");
+        let again = World::from_scenario(&parsed).expect("must build");
+        assert_eq!(again.prediction_prompts().len(), 1);
+        assert_eq!(again.pass_criteria().len(), 2);
+    }
+
+    /// 著者向けメタデータは**`state_hash`に混ざらない**(決定論replayに影響
+    /// しない)ことの対照。同じ物理・メタデータ有無だけが違う2つを比べる。
+    #[test]
+    fn author_metadata_does_not_leak_into_the_state_hash() {
+        let with_meta =
+            World::from_scenario(&Scenario::from_json(authored_scene_json()).unwrap()).unwrap();
+        let stripped_json = authored_scene_json()
+            .replace(r#""prediction_prompts": ["#, r#""unused_prompts": ["#)
+            .replace(r#""pass_criteria": ["#, r#""unused_criteria": ["#);
+        let without_meta =
+            World::from_scenario(&Scenario::from_json(&stripped_json).unwrap()).unwrap();
+        assert!(without_meta.pass_criteria().is_empty());
+        assert_eq!(with_meta.state_hash(), without_meta.state_hash());
+    }
+
+    /// `append_scenario_bodies`(シーンJSON Import)経由でも取り込まれ、
+    /// **既存のメタデータを消さずに末尾へ積む**こと。`probe_index`は
+    /// 登録済みプローブ本数ぶんずれる(`World::append_author_metadata`のdoc参照)。
+    #[test]
+    fn importing_a_scene_appends_author_metadata_with_rebased_probe_indices() {
+        let scenario = Scenario::from_json(authored_scene_json()).expect("valid scene");
+        let mut world = World::from_scenario(&scenario).expect("must build");
+        assert_eq!(world.probe_count(), 2);
+
+        // 同じシーンをもう一度Importする(bodies + probes が末尾へ増える)。
+        let ids = world
+            .append_scenario_bodies(&scenario)
+            .expect("import must succeed");
+        let names: std::collections::HashMap<String, BodyId> = scenario
+            .bodies
+            .iter()
+            .zip(&ids)
+            .filter_map(|(b, id)| b.name.clone().map(|n| (n, *id)))
+            .collect();
+        world
+            .add_scenario_probes(&scenario, &names)
+            .expect("probes must resolve");
+
+        assert_eq!(world.probe_count(), 4);
+        assert_eq!(world.pass_criteria().len(), 4);
+        // 1件目は元のまま、3件目(=2回目のImport分)はオフセット2ぶんずれる。
+        assert_eq!(world.pass_criteria()[0].probe_index, 0);
+        assert_eq!(world.pass_criteria()[1].probe_index, 1);
+        assert_eq!(world.pass_criteria()[2].probe_index, 2);
+        assert_eq!(world.pass_criteria()[3].probe_index, 3);
+        assert_eq!(world.prediction_prompts().len(), 2);
+        assert_eq!(world.prediction_prompts()[1].probe_index, 2);
     }
 
     /// **PMLを有効にしたFDTD**(`FdtdScenarioJson::pml`)。点源から外へ広がる波を

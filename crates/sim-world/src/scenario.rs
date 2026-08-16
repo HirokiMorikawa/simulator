@@ -218,21 +218,21 @@ pub struct Scenario {
     #[serde(default)]
     pub probes: Vec<ProbeJson>,
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5「予測→実験
-    /// (オプションのミニパネル)」)向けのメタデータ。物理には影響しない
-    /// (`from_scenario`/`append_scenario_bodies`はこのフィールドを読まない)——
-    /// フロントエンド(`sim-wasm::WasmWorld::import_scene_json`)がインポート時に
-    /// 生のJSONを独立に読んで、ユーザーが数値予測を書ける入力欄+実測値との
-    /// 比較表を表示するためだけの、意味を検証しない自由記述のヒント。
+    /// (オプションのミニパネル)」)向けのメタデータ。ユーザーが数値予測を書ける
+    /// 入力欄+実測値との比較表を出すためだけの、意味を検証しない自由記述のヒント。
+    ///
+    /// **物理には影響しない**が、`World`は保持する(`World::prediction_prompts`)。
+    /// 移行前は「`from_scenario`/`append_scenario_bodies`は読まない・
+    /// `to_scenario`は常に空を返す」だったため、**エディタでシーンを保存する
+    /// たびに消えていた**——手で書いたヒントを読み込み、`export_scene_json`で
+    /// 書き戻すと丸ごと落ちる。物理に影響しないことと、実行時に保持しなくて
+    /// よいことは別の話である。`step()`も`state_hash()`もこの値に触れない。
     #[serde(default)]
     pub prediction_prompts: Vec<PredictionPromptJson>,
     /// 検証タブ(縦串④)の合格基準(設計docs/reviews/2026-08-14-
-    /// editor-implementation-plan.md「シーンに合格基準を書けるようにし」、
-    /// **残タスク完遂増分**——レビュー指摘「勝手に対象外にするのは禁止令」
-    /// への対応)。`prediction_prompts`と同じ扱い: 物理には影響しない
-    /// (`from_scenario`/`append_scenario_bodies`はこのフィールドを読まない)、
-    /// `to_scenario`(実行中`World`からの逆写像)は常に空を返す——`World`は
-    /// この著者向けメタデータを実行時状態として持たないため
-    /// (`prediction_prompts`と全く同じ理由・全く同じ制約)。
+    /// editor-implementation-plan.md「シーンに合格基準を書けるようにし」)。
+    /// `prediction_prompts`と全く同じ扱い(物理に影響しないが`World`が保持し、
+    /// 往復で消えない)。
     #[serde(default)]
     pub pass_criteria: Vec<PassCriterionJson>,
 }
@@ -273,7 +273,10 @@ impl RngStateJson {
 }
 
 /// `Scenario::prediction_prompts`の1件(モジュールdoc参照)。
-#[derive(Deserialize, Serialize)]
+///
+/// `Clone`は`World`が著者向けメタデータを保持する(=`World`の`#[derive(Clone)]`が
+/// これを通る)ために要る。
+#[derive(Deserialize, Serialize, Clone)]
 pub struct PredictionPromptJson {
     pub question: String,
     /// `probes`配列内でのインデックス(0起点)。この予測が対応するプローブ。
@@ -2191,6 +2194,17 @@ impl World {
         &mut self,
         scenario: &Scenario,
     ) -> Result<Vec<BodyId>, SceneError> {
+        // **著者向けメタデータ**(`Scenario::prediction_prompts`/`pass_criteria`)。
+        // 移行前はここが素通りだったため、シーンを読み込んで書き戻すたびに
+        // 消えていた。プローブはこの後(`add_scenario_probes`)で末尾へ追加
+        // されるので、`probe_index`は現在の本数ぶんずらす
+        // (`World::append_author_metadata`のdoc参照)。新規構築なら0で恒等。
+        let probe_offset = self.probe_count();
+        self.append_author_metadata(
+            &scenario.prediction_prompts,
+            &scenario.pass_criteria,
+            probe_offset,
+        );
         for over in &scenario.materials {
             // `extends`があれば従来通りその材料の複製が土台、無ければ標準表から
             // 独立した中立の基底(**増分C9**、`MaterialOverride`のdoc参照)。
