@@ -41,7 +41,7 @@
 //! `boundary_force_sums_to_resting_fluid_columns_weight_on_the_container`が
 //! 既に検証済み。
 
-use crate::domain_states::{Coupling, CouplingKind, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, CouplingRawState, DomainStates};
 use sim_core::DomainId;
 use sim_math::Vec3;
 
@@ -115,6 +115,29 @@ impl Coupling for SphRigid {
 
     fn referenced_bodies(&self) -> Vec<usize> {
         vec![self.body_index]
+    }
+
+    /// 境界粒子の確保区間(`CouplingRawState`のdoc参照)。`boundary_count`は
+    /// `local_offset`(フィボナッチ格子の分母)にも効くので、**個数が変わると
+    /// 境界形状そのものが変わる**——公開パラメータだけでは戻せない。
+    fn raw_state(&self) -> Option<CouplingRawState> {
+        Some(CouplingRawState::SphRigid {
+            boundary_start: self.boundary_start,
+            boundary_count: self.boundary_count,
+        })
+    }
+
+    fn restore_raw_state(&mut self, state: &CouplingRawState) -> Result<(), String> {
+        let CouplingRawState::SphRigid {
+            boundary_start,
+            boundary_count,
+        } = state
+        else {
+            return Err("SphRigid に別種の CouplingRawState が渡された".to_string());
+        };
+        self.boundary_start = *boundary_start;
+        self.boundary_count = *boundary_count;
+        Ok(())
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

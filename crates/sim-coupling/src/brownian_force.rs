@@ -30,7 +30,7 @@
 //! 熱ソルバが力学の後に走るため pre 相では前stepの値を読むが、この結合が想定する
 //! 「一定温度の熱浴」では差が生じない。
 
-use crate::domain_states::{Coupling, CouplingKind, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, CouplingRawState, DomainStates};
 use sim_core::DomainId;
 use sim_math::SimRng;
 
@@ -101,6 +101,24 @@ impl Coupling for BrownianForce {
 
     fn referenced_thermal_nodes(&self) -> Vec<usize> {
         vec![self.thermal_node]
+    }
+
+    /// **自前RNGのストリーム位置**(`CouplingRawState`のdoc参照)。この結合は
+    /// `World`中央の`rng`ではなく自分の`SimRng`を持つ(モジュールdoc参照)ため、
+    /// `Scenario::rng_state`では戻らない——`CouplingJson`の`seed`/`stream`は
+    /// **ストリームの先頭**を決めるだけなので、走らせた後の位置は表せない。
+    fn raw_state(&self) -> Option<CouplingRawState> {
+        Some(CouplingRawState::BrownianForce {
+            rng: self.rng.raw_state(),
+        })
+    }
+
+    fn restore_raw_state(&mut self, state: &CouplingRawState) -> Result<(), String> {
+        let CouplingRawState::BrownianForce { rng } = state else {
+            return Err("BrownianForce に別種の CouplingRawState が渡された".to_string());
+        };
+        self.rng.set_raw_state(*rng);
+        Ok(())
     }
 
     fn apply_pre(&mut self, world: &mut DomainStates, dt: f64) {

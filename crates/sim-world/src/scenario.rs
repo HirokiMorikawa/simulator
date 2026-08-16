@@ -790,6 +790,21 @@ impl ConvectionModeJson {
 
 /// `Scenario::couplings`の1件(モジュールdoc「縮約実装の理由」参照 — 現時点で
 /// `ImageChargeForce`のみ対応)。
+///
+/// # 結合の`raw_state`(内部基準値の生状態スナップショット)
+///
+/// `PistonGas`/`SphRigid`/`PhaseChangeMorph`/`BrownianForce`の4変種は
+/// `raw_state`を持つ。ドメインの`raw_state`(モジュールdoc参照)と**全く同じ規約**で、
+/// `#[serde(default)]`の`Option`(純粋に加算的)・`Some`のときはそちらが真・
+/// レシピ側のフィールド(`initial_volume`・`initial_enthalpy`・`seed`/`stream`・
+/// `boundary_points`)は人が読むためのメタデータになる。
+///
+/// **なぜ要ったか**: これら4種は生成時に取り込んだ**基準値**を非公開で持つ——
+/// ピストンの変位ゼロ点・境界粒子の確保区間・融解のエンタルピー・自前RNGの
+/// ストリーム位置。`CouplingJson`が書けるのは公開パラメータ(現在値)だけなので、
+/// 「ピストンが変位済み・氷が融解途中」のシーンをエクスポートすると、
+/// 再インポート後は**今の状態を新たな基準として再スタート**していた。
+/// `sim_coupling::CouplingRawState`のdocも参照。
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CouplingJson {
@@ -838,6 +853,9 @@ pub enum CouplingJson {
         /// ——質量は繰り越しに積まれたまま保持される(質量保存の等式は成り立つ)。
         #[serde(default)]
         melt_spawn: Option<MeltSpawnJson>,
+        /// **内部基準値の生状態スナップショット**(`CouplingJson`のdoc参照)。
+        #[serde(default)]
+        raw_state: Option<PhaseChangeMorphRawStateJson>,
     },
     /// D20(モーターと発電)向け(`sim_coupling::MotorCoupling`)。
     MotorCoupling {
@@ -851,7 +869,13 @@ pub enum CouplingJson {
         body: String,
         radius: f64,
         /// 剛体表面を表す境界粒子の個数(`SphRigid::new`が`SphFluid`側へ確保する)。
+        /// **`raw_state`があるときは確保しない**——`sph.raw_state`が境界粒子ごと
+        /// 復元済みなので、ここで再確保すると二重になる(このフィールドは人が
+        /// 読むためのメタデータとして現在値が書かれる)。
         boundary_points: usize,
+        /// **内部基準値の生状態スナップショット**(`CouplingJson`のdoc参照)。
+        #[serde(default)]
+        raw_state: Option<SphRigidRawStateJson>,
     },
     /// D14(煙と渦)向け(`sim_coupling::GridFluidRigid`)。格子流体と剛体の双方向。
     GridFluidRigid {
@@ -885,6 +909,9 @@ pub enum CouplingJson {
         axis: [f64; 3],
         area: f64,
         initial_volume: f64,
+        /// **内部基準値の生状態スナップショット**(`CouplingJson`のdoc参照)。
+        #[serde(default)]
+        raw_state: Option<PistonGasRawStateJson>,
     },
     /// D19(電気工作台)向け(`sim_coupling::JouleHeat`、**増分G2で追加**)。
     /// 回路の抵抗損失を熱ノードへ注入する。`thermal_node`は`thermal.nodes`配列の
@@ -906,6 +933,9 @@ pub enum CouplingJson {
         thermal_node: usize,
         seed: u64,
         stream: u64,
+        /// **内部基準値の生状態スナップショット**(`CouplingJson`のdoc参照)。
+        #[serde(default)]
+        raw_state: Option<BrownianForceRawStateJson>,
     },
     /// D21(磁石遊び、銅管落下)向け(`sim_coupling::InductionCoupling`)。
     /// `voltage_source_index`は`circuit.voltage_sources`配列のインデックス
@@ -945,6 +975,69 @@ pub enum CouplingJson {
         #[serde(default)]
         lift: Option<LiftModelJson>,
     },
+}
+
+/// `CouplingJson::PistonGas::raw_state`(`sim_coupling::CouplingRawState::PistonGas`の
+/// シーンJSON表現、`CouplingJson`のdoc「結合の`raw_state`」参照)。
+///
+/// `initial_volume`との違いが要点: あちらは`to_scenario`が**現在の**気体体積を書く
+/// ため、変位済みのピストンでは基準にならない。
+#[derive(Deserialize, Serialize)]
+pub struct PistonGasRawStateJson {
+    /// 変位0とみなす軸方向位置(`position.dot(axis)`)。
+    pub reference_axis_position: f64,
+    /// 変位0のときの気体体積 [m^3]。
+    pub reference_volume: f64,
+}
+
+/// `CouplingJson::SphRigid::raw_state`(`sim_coupling::CouplingRawState::SphRigid`)。
+///
+/// **これがあるときは境界粒子を確保し直さない**——`sph.raw_state`が
+/// `boundary_position`ごと復元しているので、`boundary_points`ぶん再確保すると
+/// 粒子が二重になる。
+#[derive(Deserialize, Serialize)]
+pub struct SphRigidRawStateJson {
+    /// `SphFluid::boundary_position`内での占有区間の先頭index。
+    pub boundary_start: usize,
+    /// 占有する境界粒子数。フィボナッチ格子の分母でもあるので、**個数が変わると
+    /// 境界形状そのものが変わる**。
+    pub boundary_count: usize,
+}
+
+/// `CouplingJson::PhaseChangeMorph::raw_state`
+/// (`sim_coupling::CouplingRawState::PhaseChangeMorph`)。
+///
+/// `initial_enthalpy`との違いが要点: あちらは**生成時**の値であって、融解が進んだ
+/// 今のエンタルピーではない。
+#[derive(Deserialize, Serialize)]
+pub struct PhaseChangeMorphRawStateJson {
+    /// `sim_thermal::PhaseState::enthalpy`(負なら融点未満の固相)。
+    pub enthalpy: f64,
+    /// `sim_thermal::PhaseState::mass`。
+    pub mass: f64,
+    /// 完全融解済み(剛体を無効化した後)か。
+    #[serde(default)]
+    pub despawned: bool,
+    /// まだ粒子1個ぶんに満たない融解質量の繰り越し [kg](質量保存の等式が依存する)。
+    #[serde(default)]
+    pub pending_spawn_mass: f64,
+    /// これまでに生成したSPH粒子数(生成位置の決定論ストリーム番号を兼ねる)。
+    #[serde(default)]
+    pub spawned_particles: usize,
+    /// 直前の`apply`時点の液相率(増分から今stepの融解質量を出すために持つ)。
+    #[serde(default)]
+    pub last_liquid_fraction: f64,
+}
+
+/// `CouplingJson::BrownianForce::raw_state`
+/// (`sim_coupling::CouplingRawState::BrownianForce`)。
+///
+/// `seed`/`stream`との違いが要点: あちらは**ストリームの先頭**を決めるだけで、
+/// 走らせた後の位置は表せない。この結合は`World`中央の`rng`とは独立した系列を
+/// 持つので、`Scenario::rng_state`でも戻らない。
+#[derive(Deserialize, Serialize)]
+pub struct BrownianForceRawStateJson {
+    pub rng: RngStateJson,
 }
 
 /// `DissipationToHeat::body_links`の1件(**群5で追加**)。`effusivity`を省略すると
@@ -1886,6 +1979,26 @@ pub enum FdtdInitialJson {
         amplitude: f64,
         width: f64,
     },
+}
+
+/// `world.couplings[index]`へ内部基準値の生状態を書き戻す
+/// (`CouplingJson`のdoc「結合の`raw_state`」参照)。
+///
+/// `Coupling::restore_raw_state`の`Err`を`SceneError::InvalidValue`へ写す——
+/// 種別の食い違いを黙って飲み込むと「`raw_state`を書いたのに効いていない」
+/// という最も気付きにくい壊れ方をするため、シーンエラーとして返す。
+fn restore_coupling_raw_state(
+    world: &mut World,
+    index: usize,
+    state: &sim_coupling::CouplingRawState,
+) -> Result<(), SceneError> {
+    let coupling = world
+        .couplings_raw_mut()
+        .get_mut(index)
+        .ok_or_else(|| SceneError::InvalidValue(format!("couplings[{index}] が見つからない")))?;
+    coupling
+        .restore_raw_state(state)
+        .map_err(|e| SceneError::InvalidValue(format!("couplings[{index}].raw_state: {e}")))
 }
 
 fn array_to_vec3(a: [f64; 3]) -> Vec3 {
@@ -3297,6 +3410,7 @@ impl World {
                     conductance,
                     initial_enthalpy,
                     melt_spawn,
+                    raw_state,
                 } => {
                     let id = *body_ids_by_name
                         .get(body)
@@ -3320,7 +3434,21 @@ impl World {
                             seed: spawn.seed,
                         });
                     }
-                    world.add_coupling(Box::new(coupling));
+                    let index = world.add_coupling(Box::new(coupling));
+                    if let Some(raw) = raw_state {
+                        restore_coupling_raw_state(
+                            &mut world,
+                            index,
+                            &sim_coupling::CouplingRawState::PhaseChangeMorph {
+                                enthalpy: raw.enthalpy,
+                                mass: raw.mass,
+                                despawned: raw.despawned,
+                                pending_spawn_mass: raw.pending_spawn_mass,
+                                spawned_particles: raw.spawned_particles,
+                                last_liquid_fraction: raw.last_liquid_fraction,
+                            },
+                        )?;
+                    }
                 }
                 CouplingJson::MotorCoupling {
                     body,
@@ -3342,6 +3470,7 @@ impl World {
                     body,
                     radius,
                     boundary_points,
+                    raw_state,
                 } => {
                     let id = *body_ids_by_name
                         .get(body)
@@ -3349,6 +3478,16 @@ impl World {
                     // `SphRigid::new`は剛体表面を表す境界粒子を`SphFluid`側へ
                     // 実際に確保する(位置は最初の`apply`で埋まる)ため、
                     // SPHドメインが先に有効化されている必要がある。
+                    //
+                    // **`raw_state`があるときは0個で作る**——`sph.raw_state`が
+                    // `boundary_position`ごと復元済みなので、ここで確保すると
+                    // 同じ剛体の境界粒子が二重に湧く。占有区間は直後の
+                    // `restore_raw_state`が入れ直す。
+                    let n_points = if raw_state.is_some() {
+                        0
+                    } else {
+                        *boundary_points
+                    };
                     let coupling = {
                         let sph = world.sph_mut().ok_or_else(|| {
                             SceneError::InvalidValue(
@@ -3356,14 +3495,19 @@ impl World {
                                     .to_string(),
                             )
                         })?;
-                        sim_coupling::SphRigid::new(
-                            sph,
-                            id.index as usize,
-                            *radius,
-                            *boundary_points,
-                        )
+                        sim_coupling::SphRigid::new(sph, id.index as usize, *radius, n_points)
                     };
-                    world.add_coupling(Box::new(coupling));
+                    let index = world.add_coupling(Box::new(coupling));
+                    if let Some(raw) = raw_state {
+                        restore_coupling_raw_state(
+                            &mut world,
+                            index,
+                            &sim_coupling::CouplingRawState::SphRigid {
+                                boundary_start: raw.boundary_start,
+                                boundary_count: raw.boundary_count,
+                            },
+                        )?;
+                    }
                 }
                 CouplingJson::GridFluidRigid {
                     body,
@@ -3416,6 +3560,7 @@ impl World {
                     axis,
                     area,
                     initial_volume,
+                    raw_state,
                 } => {
                     let id = *body_ids_by_name
                         .get(body)
@@ -3429,7 +3574,17 @@ impl World {
                         *area,
                         *initial_volume,
                     );
-                    world.add_coupling(Box::new(coupling));
+                    let index = world.add_coupling(Box::new(coupling));
+                    if let Some(raw) = raw_state {
+                        restore_coupling_raw_state(
+                            &mut world,
+                            index,
+                            &sim_coupling::CouplingRawState::PistonGas {
+                                reference_axis_position: raw.reference_axis_position,
+                                reference_volume: raw.reference_volume,
+                            },
+                        )?;
+                    }
                 }
                 CouplingJson::JouleHeat {
                     thermal_node,
@@ -3447,11 +3602,12 @@ impl World {
                     thermal_node,
                     seed,
                     stream,
+                    raw_state,
                 } => {
                     let id = body_ids_by_name
                         .get(body)
                         .ok_or_else(|| SceneError::UnknownBodyName(body.clone()))?;
-                    world.add_coupling(Box::new(sim_coupling::BrownianForce::new(
+                    let index = world.add_coupling(Box::new(sim_coupling::BrownianForce::new(
                         id.index as usize,
                         *radius,
                         *viscosity,
@@ -3459,6 +3615,15 @@ impl World {
                         *seed,
                         *stream,
                     )));
+                    if let Some(raw) = raw_state {
+                        restore_coupling_raw_state(
+                            &mut world,
+                            index,
+                            &sim_coupling::CouplingRawState::BrownianForce {
+                                rng: raw.rng.to_domain(),
+                            },
+                        )?;
+                    }
                 }
                 CouplingJson::InductionCoupling {
                     body,

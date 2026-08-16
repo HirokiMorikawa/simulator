@@ -37,7 +37,7 @@
 //! 文書化する制約、`SphRigid`・`GridFluidRigid`と同様に既存の`World`公開APIを拡張
 //! せずに実装できる範囲に留めた)。
 
-use crate::domain_states::{Coupling, CouplingKind, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, CouplingRawState, DomainStates};
 use sim_core::DomainId;
 use sim_math::{SimRng, Vec3};
 use sim_mechanics::BodyType;
@@ -208,6 +208,46 @@ impl Coupling for PhaseChangeMorph {
 
     fn referenced_thermal_nodes(&self) -> Vec<usize> {
         vec![self.thermal_node]
+    }
+
+    /// 融解の内部状態(`CouplingRawState`のdoc参照)。`CouplingJson`が持つ
+    /// `initial_enthalpy`は**生成時の**値であって、融解が進んだ今の
+    /// エンタルピーではない——これが無いと、融けかけの氷をエクスポート→
+    /// 再インポートしたときに融解が最初からやり直しになる。
+    /// 粒子生成の繰り越し(`pending_spawn_mass`)と生成数(ストリーム番号を兼ねる)も
+    /// 含めるのは、質量保存の等式と生成位置の決定論が両方これに依存するため。
+    fn raw_state(&self) -> Option<CouplingRawState> {
+        Some(CouplingRawState::PhaseChangeMorph {
+            enthalpy: self.state.enthalpy,
+            mass: self.state.mass,
+            despawned: self.despawned,
+            pending_spawn_mass: self.pending_spawn_mass,
+            spawned_particles: self.spawned_particles,
+            last_liquid_fraction: self.last_liquid_fraction,
+        })
+    }
+
+    fn restore_raw_state(&mut self, state: &CouplingRawState) -> Result<(), String> {
+        let CouplingRawState::PhaseChangeMorph {
+            enthalpy,
+            mass,
+            despawned,
+            pending_spawn_mass,
+            spawned_particles,
+            last_liquid_fraction,
+        } = state
+        else {
+            return Err("PhaseChangeMorph に別種の CouplingRawState が渡された".to_string());
+        };
+        self.state = PhaseState {
+            enthalpy: *enthalpy,
+            mass: *mass,
+        };
+        self.despawned = *despawned;
+        self.pending_spawn_mass = *pending_spawn_mass;
+        self.spawned_particles = *spawned_particles;
+        self.last_liquid_fraction = *last_liquid_fraction;
+        Ok(())
     }
 
     fn apply(&mut self, world: &mut DomainStates, dt: f64) {

@@ -42,7 +42,9 @@ pub use brownian_force::BrownianForce;
 pub use buoyancy_drag::{BuoyancyDrag, LiftModel};
 pub use convection_link::{ConvectionLink, ConvectionMode};
 pub use dissipation_to_heat::{effusivity, BodyThermalLink, DissipationToHeat};
-pub use domain_states::{Coupling, CouplingKind, CouplingParam, DomainStates, NoopCoupling};
+pub use domain_states::{
+    Coupling, CouplingKind, CouplingParam, CouplingRawState, DomainStates, NoopCoupling,
+};
 pub use grid_fluid_rigid::GridFluidRigid;
 pub use image_charge_force::ImageChargeForce;
 pub use induction_coupling::InductionCoupling;

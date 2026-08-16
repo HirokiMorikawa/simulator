@@ -114,6 +114,63 @@ impl CouplingKind {
     }
 }
 
+/// 結合の**内部基準値**の生状態スナップショット(`Coupling::raw_state`)。
+///
+/// **なぜ必要だったか**: 結合は公開フィールド(パラメータ)のほかに、生成時に
+/// 取り込んだ**基準値**や実行中に育つ**内部状態**を非公開で持つ——ピストンの
+/// 変位ゼロ点、SPH境界粒子の確保区間、融解のエンタルピー、自前RNGのストリーム
+/// 位置。`World → Scenario`の逆写像(`sim_world::export`)は公開パラメータしか
+/// 読めなかったため、「ピストンが変位済み・氷が融解途中」のシーンを
+/// エクスポートすると、再インポート後は**今の状態を新たな基準として再スタート**
+/// してしまっていた(`sim_world::export`モジュールdocの既知の制限)。
+///
+/// **なぜ`serde_json::Value`ではなく enum なのか**: `CouplingKind`と同じ理由。
+/// 自由なJSONだと実装側が任意の形を書けてしまい、読む側が構造で分岐できず、
+/// 新しい結合を足したときの対応漏れもコンパイラが検出できない。enumなら
+/// 網羅性が保証される。あわせて`sim-coupling`にserde依存を持ち込まずに済む
+/// ——シーンJSONの表現は`sim_world::scenario`側がミラーする(`sim_em`・
+/// `sim_fluid`等の生状態と同じ分業)。
+///
+/// **公開パラメータは含めない**。`body_index`・`radius`・`area`のような
+/// pubフィールドは`CouplingJson`が既に書けているので、ここに持つのは
+/// **非公開の分だけ**である(重複して持つと2つの真ができる)。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CouplingRawState {
+    /// `PistonGas`の変位ゼロ点。`initial_volume`(=`reference_volume`)は
+    /// `CouplingJson`にもあるが、あちらは**現在の気体体積**を書くため
+    /// 基準にはならない。
+    PistonGas {
+        reference_axis_position: f64,
+        reference_volume: f64,
+    },
+    /// `SphRigid`が`SphFluid::boundary_position`に確保した区間。
+    /// **区間を戻すのであって粒子を確保し直すのではない**——`sph`側の
+    /// `raw_state`が境界粒子ごと復元しているので、ここで再確保すると二重になる。
+    SphRigid {
+        boundary_start: usize,
+        boundary_count: usize,
+    },
+    /// `PhaseChangeMorph`の融解の内部状態(エンタルピー法の`PhaseState` +
+    /// 群9で足った粒子生成の繰り越し)。
+    PhaseChangeMorph {
+        /// `sim_thermal::PhaseState::enthalpy`。
+        enthalpy: f64,
+        /// `sim_thermal::PhaseState::mass`。
+        mass: f64,
+        /// 完全融解済み(剛体を無効化した後)か。
+        despawned: bool,
+        /// まだ粒子1個ぶんに満たない融解質量の繰り越し [kg]。
+        pending_spawn_mass: f64,
+        /// これまでに生成した粒子数(決定論のストリーム番号も兼ねる)。
+        spawned_particles: usize,
+        /// 直前の`apply`時点の液相率(増分から今stepの融解質量を出すために持つ)。
+        last_liquid_fraction: f64,
+    },
+    /// `BrownianForce`が**自前で**持つPRNGのストリーム位置。`World`中央の
+    /// `rng`とは独立した系列なので、`Scenario::rng_state`では戻らない。
+    BrownianForce { rng: sim_math::SimRngState },
+}
+
 /// ドメイン間結合(設計 docs/00-foundation/04-architecture.md §1.3「保存量の橋」)。
 /// 2つ(以上)のソルバの状態を読み、互いに作用を書き込む。取り出した量と注入した量が
 /// 一致することを実装側がデバッグビルドで検算する(設計の要求、§1.1.2(2))。
@@ -216,6 +273,27 @@ pub trait Coupling: CouplingClone + AsAnyCoupling {
     /// (あるいは出せるはずのスライダーが出ない)。
     fn supported_params(&self) -> &'static [CouplingParam] {
         &[]
+    }
+
+    /// **内部基準値の生状態スナップショット**(`CouplingRawState`のdoc参照)。
+    ///
+    /// 既定は`None`——非公開の基準値・内部状態を持たない結合(14種のうち10種)は
+    /// 公開パラメータだけで完全に再構成できるので、書き出すものが無い。
+    /// `PistonGas`・`SphRigid`・`PhaseChangeMorph`・`BrownianForce`の4種が上書きする。
+    fn raw_state(&self) -> Option<CouplingRawState> {
+        None
+    }
+
+    /// `raw_state`が返した状態を書き戻す(`raw_state`の逆)。
+    ///
+    /// 既定は`Err`——「対応していない」ことを黙って飲み込まず、呼び出し側
+    /// (`sim_world::scenario::from_scenario`)がシーンエラーとして報告できるようにする。
+    /// **種別が食い違う`CouplingRawState`を渡された実装も`Err`を返すこと**。
+    fn restore_raw_state(&mut self, _state: &CouplingRawState) -> Result<(), String> {
+        Err(format!(
+            "{} は生状態スナップショットに対応していない",
+            self.kind().name()
+        ))
     }
 }
 

@@ -12,7 +12,7 @@
 //! 気体は常にピストンの`axis`が指す向きに体積が増える側にあるものとして符号を取る
 //! (生成時の位置・体積を基準に、軸方向の変位 × 断面積を加減算)。
 
-use crate::domain_states::{Coupling, CouplingKind, DomainStates};
+use crate::domain_states::{Coupling, CouplingKind, CouplingRawState, DomainStates};
 use sim_core::DomainId;
 use sim_math::Vec3;
 use sim_mechanics::RigidBodySet;
@@ -63,6 +63,29 @@ impl Coupling for PistonGas {
 
     fn referenced_bodies(&self) -> Vec<usize> {
         vec![self.body_index]
+    }
+
+    /// 変位ゼロ点(`CouplingRawState`のdoc参照)。これが無いと、変位済みの
+    /// ピストンをエクスポート→再インポートしたときに「今の位置が変位0」に
+    /// なり、気体体積が現在値から再スタートしてしまう。
+    fn raw_state(&self) -> Option<CouplingRawState> {
+        Some(CouplingRawState::PistonGas {
+            reference_axis_position: self.reference_axis_position,
+            reference_volume: self.reference_volume,
+        })
+    }
+
+    fn restore_raw_state(&mut self, state: &CouplingRawState) -> Result<(), String> {
+        let CouplingRawState::PistonGas {
+            reference_axis_position,
+            reference_volume,
+        } = state
+        else {
+            return Err("PistonGas に別種の CouplingRawState が渡された".to_string());
+        };
+        self.reference_axis_position = *reference_axis_position;
+        self.reference_volume = *reference_volume;
+        Ok(())
     }
 
     fn apply(&mut self, world: &mut DomainStates, _dt: f64) {

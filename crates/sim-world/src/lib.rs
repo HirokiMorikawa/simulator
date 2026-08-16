@@ -1988,6 +1988,14 @@ impl World {
         &self.couplings
     }
 
+    /// 登録済み結合への可変アクセス(`couplings_raw`の可変版)。
+    /// `Coupling::restore_raw_state`(`sim_coupling::CouplingRawState`のdoc参照)を
+    /// `from_scenario`が呼ぶために要る——`add_coupling`はindexを返すだけで、
+    /// 積んだ後の結合へ触れる口が無かった。
+    pub fn couplings_raw_mut(&mut self) -> &mut [Box<dyn sim_coupling::Coupling>] {
+        &mut self.couplings
+    }
+
     /// 全ジョイントを種別タグ付きで列挙する(**群1で追加**、`JointInfo`のdoc参照)。
     pub fn joints(&self) -> Vec<JointInfo> {
         let m = &self.mechanics;

@@ -7,19 +7,22 @@
 //! fluids・thermal・circuit・probesは無言で脱落していた。この関数がその置き換え。
 //!
 //! **既知の制限(縮約、正直な記録)**:
-//! - `PistonGas`・`SphRigid`・`PhaseChangeMorph`・`BrownianForce`:
-//!   基準値(ピストンの変位ゼロ点・境界粒子の確保区間・融解の内部状態・RNGの
-//!   ストリーム位置)が`sim-coupling`側で非公開のため、公開されているパラメータ
-//!   (現在値)のみを書き戻す。ピストンが変位済み・氷が融解途中のシーンを
-//!   エクスポートすると、再インポート後は「今の状態を新たな基準」として
-//!   再スタートする(基準そのものではなく現在値を保存するため、以後の相対変位は
-//!   ゼロから再カウントされる)。
 //! - `kinetic_gas`: 圧力測定用の壁運動量アキュムレータ(`sim_statistical::GasSim`の
 //!   `wall_impulse_accum`/`wall_impulse_time`)が非公開のため書き出せない。
 //!   `GasSim`の`state_hash`はこの2つを含まない(位置・速度・`collision_count`のみ)
 //!   ので決定論replayには影響せず、**影響するのは`pressure()`の時間平均窓が
 //!   復元時点から引き直されること**だけである(`reset_pressure_accumulator`を
 //!   呼んだのと同じ状態になる)。窓を取り直せば同じ圧力へ収束する。
+//! - `bodies`の力アキュムレータ(`sim_mechanics::RigidBodySet`の
+//!   `force_accum`/`torque_accum`): シーンJSONに書く場所が無い(`BodyScenarioDesc`は
+//!   位置・姿勢・速度までで、`state_hash`もこの2つを含まない)。**post 相の結合が
+//!   積んだ反力は次stepの積分が消費する**ため、post 相を持つ結合
+//!   (`PistonGas`・`GridFluidRigid`等)と動的剛体を組み合わせたシーンでは、
+//!   エクスポート→再インポート後の**最初の1stepだけ**その反力が抜ける。
+//!   2step目以降は同じ量が積み直されるので、ずれは初回の $F\Delta t/m$ 一回分に
+//!   留まる。**結合の内部基準値(下記の解消済み)とは別問題**であり、剛体スキーマ
+//!   側の増分になる(本増分の対象外、`PistonGas`の往復テストが`Kinematic`
+//!   ピストンを使うのはこの欠落を混ぜないため)。
 //! - `fdtd`のPML: `sim_em::FdtdSim2D::with_pml`の分離場成分は書き出せない。
 //!   ただし`FdtdScenarioJson`にPMLを構成するフィールドが無く、`from_scenario`が
 //!   作る`World`のFDTDは常にPEC境界のみ(`pml: None`)なので、
@@ -47,6 +50,26 @@
 //! (「復元直後の一致」と「復元経路自体の決定論」の2本立て)は不要になり、
 //! 他の9ドメインと同じ`assert_round_trip`(復元直後 + 双方をさらに回した後の
 //! `state_hash`一致)へ統合した。
+//!
+//! **解消済みの制限(結合の内部基準値、`sim_coupling::CouplingRawState`)**:
+//! `PistonGas`(変位ゼロ点)・`SphRigid`(境界粒子の確保区間)・
+//! `PhaseChangeMorph`(融解のエンタルピーと粒子生成の繰り越し)・
+//! `BrownianForce`(自前RNGのストリーム位置)は、これらを非公開で持つため
+//! 公開パラメータ(現在値)しか書き戻せず、「ピストンが変位済み・氷が融解途中」の
+//! シーンをエクスポートすると再インポート後は**今の状態を新たな基準として
+//! 再スタート**していた。`Coupling`トレイトへ`raw_state`/`restore_raw_state`を
+//! 足し(既定は`None`/`Err`で、残る10種の挙動は不変)、`CouplingJson`の該当4変種へ
+//! `raw_state`を通したことで**基準値ごと往復する**ようになった。
+//! **結合は`state_hash`に含まれない**ため、往復の検証は「復元直後の一致」ではなく
+//! **復元後に双方を回して力学・熱・気体・SPHがずれないこと**で行う。
+//!
+//! この作業で分かった**`PistonGas`についての正直な訂正**: 体積は
+//! $V = V_{ref} + A\,(x - x_{ref})$ という**アフィン写像**なので、
+//! 体積の下限クランプ(`new_volume.max(1e-9)`、底突き)に当たっていない限り
+//! 「現在の体積と現在の位置」を新たな基準に取り直しても以後の体積は一致する
+//! ——移行前の記述「以後の相対変位はゼロから再カウントされる」は
+//! **クランプに当たった後にだけ当てはまる**誤りだった。`raw_state`が実際に
+//! 効くのはその領域であり、対照テストもそこに置いてある。
 
 use crate::{BodyId, ProbeTarget, World};
 use sim_math::Vec3;
@@ -55,17 +78,18 @@ use std::collections::HashMap;
 
 use crate::scenario::{
     AstroBodyJson, AstroScenarioJson, AtmosphereJson, AtmosphericDragJson, BodyScenarioDesc,
-    BodyThermalLinkJson, BrownianRawStateJson, BrownianScenarioJson, CapacitorJson,
-    CircuitScenarioJson, CompoundChildJson, ConductionRodRawStateJson, ConductionRodScenarioJson,
-    ConvectionModeJson, CouplingJson, DiodeJson, FdtdRawStateJson, FdtdScenarioJson, FluidJson,
-    GasScenarioJson, GaussianPacket2dJson, GaussianPacketJson, GridBoundaryJson,
-    GridFluid3DRawStateJson, GridFluid3DScenarioJson, GridFluidRawStateJson, GridFluidScenarioJson,
-    GridSolidBoxJson, InductorJson, IsingRawStateJson, IsingScenarioJson, JointJson,
-    KineticGasRawStateJson, KineticGasScenarioJson, LiftModelJson, MaterialOverride,
-    PhaseChangeOverrideJson, ProbeJson, Quantum1dRawStateJson, Quantum1dScenarioJson,
-    Quantum2dRawStateJson, Quantum2dScenarioJson, RelativisticCorrectionJson, ResistorJson,
-    RngStateJson, Scenario, ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson,
-    SoftBodyScenarioJson, SoftConstraintJson, SoftVolumeConstraintJson, SphRawStateJson,
+    BodyThermalLinkJson, BrownianForceRawStateJson, BrownianRawStateJson, BrownianScenarioJson,
+    CapacitorJson, CircuitScenarioJson, CompoundChildJson, ConductionRodRawStateJson,
+    ConductionRodScenarioJson, ConvectionModeJson, CouplingJson, DiodeJson, FdtdRawStateJson,
+    FdtdScenarioJson, FluidJson, GasScenarioJson, GaussianPacket2dJson, GaussianPacketJson,
+    GridBoundaryJson, GridFluid3DRawStateJson, GridFluid3DScenarioJson, GridFluidRawStateJson,
+    GridFluidScenarioJson, GridSolidBoxJson, InductorJson, IsingRawStateJson, IsingScenarioJson,
+    JointJson, KineticGasRawStateJson, KineticGasScenarioJson, LiftModelJson, MaterialOverride,
+    MeltSpawnJson, PhaseChangeMorphRawStateJson, PhaseChangeOverrideJson, PistonGasRawStateJson,
+    ProbeJson, Quantum1dRawStateJson, Quantum1dScenarioJson, Quantum2dRawStateJson,
+    Quantum2dScenarioJson, RelativisticCorrectionJson, ResistorJson, RngStateJson, Scenario,
+    ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson, SoftBodyScenarioJson,
+    SoftConstraintJson, SoftVolumeConstraintJson, SphRawStateJson, SphRigidRawStateJson,
     SphScenarioJson, SwitchJson, ThermalLinkJson, ThermalNodeJson, ThermalScenarioJson,
     VoltageSourceJson, WorldScenarioOptions,
 };
@@ -947,6 +971,72 @@ fn export_joints(world: &World, names: &HashMap<BodyId, String>) -> Vec<JointJso
     out
 }
 
+/// 結合の内部基準値(`sim_coupling::CouplingRawState`)をシーンJSON表現へ写す。
+///
+/// 4変種それぞれに個別の関数を置くのは、`CouplingJson`が**変種ごとに別々の
+/// `raw_state`型**を持つため(`FdtdRawStateJson`等のドメイン側と同じ方針——
+/// 型でどの結合の状態かが決まるので、読む側が種別で分岐せずに済む)。
+/// 種別が食い違えば`None`を返す(そのまま既定値経路になる、防御)。
+fn coupling_piston_gas_raw_state(c: &sim_coupling::PistonGas) -> Option<PistonGasRawStateJson> {
+    match sim_coupling::Coupling::raw_state(c)? {
+        sim_coupling::CouplingRawState::PistonGas {
+            reference_axis_position,
+            reference_volume,
+        } => Some(PistonGasRawStateJson {
+            reference_axis_position,
+            reference_volume,
+        }),
+        _ => None,
+    }
+}
+
+fn coupling_sph_rigid_raw_state(c: &sim_coupling::SphRigid) -> Option<SphRigidRawStateJson> {
+    match sim_coupling::Coupling::raw_state(c)? {
+        sim_coupling::CouplingRawState::SphRigid {
+            boundary_start,
+            boundary_count,
+        } => Some(SphRigidRawStateJson {
+            boundary_start,
+            boundary_count,
+        }),
+        _ => None,
+    }
+}
+
+fn coupling_phase_change_raw_state(
+    c: &sim_coupling::PhaseChangeMorph,
+) -> Option<PhaseChangeMorphRawStateJson> {
+    match sim_coupling::Coupling::raw_state(c)? {
+        sim_coupling::CouplingRawState::PhaseChangeMorph {
+            enthalpy,
+            mass,
+            despawned,
+            pending_spawn_mass,
+            spawned_particles,
+            last_liquid_fraction,
+        } => Some(PhaseChangeMorphRawStateJson {
+            enthalpy,
+            mass,
+            despawned,
+            pending_spawn_mass,
+            spawned_particles,
+            last_liquid_fraction,
+        }),
+        _ => None,
+    }
+}
+
+fn coupling_brownian_force_raw_state(
+    c: &sim_coupling::BrownianForce,
+) -> Option<BrownianForceRawStateJson> {
+    match sim_coupling::Coupling::raw_state(c)? {
+        sim_coupling::CouplingRawState::BrownianForce { rng } => Some(BrownianForceRawStateJson {
+            rng: RngStateJson::from_domain(rng),
+        }),
+        _ => None,
+    }
+}
+
 fn export_couplings(world: &World, names: &HashMap<BodyId, String>) -> Vec<CouplingJson> {
     let name_of = |idx: usize| -> Option<String> {
         names
@@ -1007,6 +1097,7 @@ fn export_couplings(world: &World, names: &HashMap<BodyId, String>) -> Vec<Coupl
                     let Some(body) = name_of(c.body_index) else {
                         continue;
                     };
+                    let raw = coupling_phase_change_raw_state(c);
                     out.push(CouplingJson::PhaseChangeMorph {
                         body,
                         thermal_node: c.thermal_node,
@@ -1016,10 +1107,16 @@ fn export_couplings(world: &World, names: &HashMap<BodyId, String>) -> Vec<Coupl
                         specific_heat_liquid: c.material.specific_heat_liquid,
                         initial_mass: c.initial_mass,
                         conductance: c.conductance,
-                        // 既知の制限(モジュールdoc参照): 内部の相状態・繰り越し
-                        // エンタルピーは非公開のため書き出せない。
+                        // レシピ側の`initial_enthalpy`は**生成時**の値を表すフィールド
+                        // なので、融解が進んだ今の値をここへ書くと意味がずれる。
+                        // 復元に使われるのは`raw_state`であり、こちらは0のままでよい
+                        // (`raw_state`が`None`の場合だけ効く既定値)。
                         initial_enthalpy: 0.0,
-                        melt_spawn: None,
+                        melt_spawn: c.spawn.map(|s| MeltSpawnJson {
+                            spawn_radius: s.spawn_radius,
+                            seed: s.seed,
+                        }),
+                        raw_state: raw,
                     });
                 }
             }
@@ -1041,12 +1138,14 @@ fn export_couplings(world: &World, names: &HashMap<BodyId, String>) -> Vec<Coupl
                     let Some(body) = name_of(c.body_index) else {
                         continue;
                     };
+                    let raw = coupling_sph_rigid_raw_state(c);
                     out.push(CouplingJson::SphRigid {
                         body,
+                        // 人が読むためのメタデータ(`raw_state`が真、
+                        // `SphRigidRawStateJson`のdoc参照)。
+                        boundary_points: raw.as_ref().map_or(0, |r| r.boundary_count),
                         radius: c.radius,
-                        // 既知の制限(モジュールdoc参照): 実際の境界粒子確保数は
-                        // 非公開。JSON側の再構成は新たに同数を確保し直す前提の値。
-                        boundary_points: 0,
+                        raw_state: raw,
                     });
                 }
             }
@@ -1098,9 +1197,10 @@ fn export_couplings(world: &World, names: &HashMap<BodyId, String>) -> Vec<Coupl
                         body,
                         axis: vec3_to_array(c.axis),
                         area: c.area,
-                        // 既知の制限(モジュールdoc参照): 変位ゼロ点(基準位置・
-                        // 基準体積)は非公開。現在の気体体積を新たな基準として書く。
+                        // 人が読むためのメタデータ(現在の気体体積)。変位ゼロ点は
+                        // `raw_state`が持つ(`PistonGasRawStateJson`のdoc参照)。
                         initial_volume,
+                        raw_state: coupling_piston_gas_raw_state(c),
                     });
                 }
             }
@@ -1122,10 +1222,12 @@ fn export_couplings(world: &World, names: &HashMap<BodyId, String>) -> Vec<Coupl
                         radius: c.radius,
                         viscosity: c.viscosity,
                         thermal_node: c.thermal_node,
-                        // 既知の制限(モジュールdoc参照): RNGストリーム位置は
-                        // 非公開のため常に新規シードで書き出す。
+                        // `seed`/`stream`はストリームの**先頭**を決めるだけで、
+                        // 走らせた後の位置は表せない(`SimRng::new`は種を状態へ
+                        // 畳み込んで捨てる)。位置は`raw_state`が持つ。
                         seed: 0,
                         stream: 0,
+                        raw_state: coupling_brownian_force_raw_state(c),
                     });
                 }
             }
@@ -1672,6 +1774,288 @@ mod tests {
             world.state_hash(),
             reloaded.state_hash(),
             "{label}: state_hash must still match after stepping both forward"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // **結合の内部基準値(`sim_coupling::CouplingRawState`)の往復テスト**(4種)。
+    //
+    // ドメインの`raw_state`と同じく「作った直後」ではなく**回してから**
+    // エクスポートする。**結合は`state_hash`に含まれない**ので、往復の成否は
+    // 復元直後のハッシュでは判定できない——基準値がずれていることは
+    // 「復元後に双方を回すと力学・熱・気体・SPHがずれる」形でしか現れない。
+    // `assert_round_trip`の後半(extra_steps)がそこを見ている。
+    // -----------------------------------------------------------------------
+
+    fn zero_gravity_world() -> World {
+        World::new(WorldOptions {
+            gravity: 0.0,
+            dt: 1.0 / 120.0,
+            seed: 0,
+        })
+    }
+
+    /// 一定速度で気体を圧縮する`Kinematic`ピストン(`sim_coupling::piston_gas`の
+    /// 単体テストと同じ構成)。**`Kinematic`にするのは`force_accum`を避けるため**
+    /// ——`PistonGas`は post 相で`force_accum`へ反力を積み、それを消費するのは
+    /// **次stepの積分**なので、動的ピストンだと「シーンJSONが`force_accum`を
+    /// 書けない」という別の(既知の、本増分の対象外の)欠落が混ざる。
+    /// `Kinematic`は力を受けないので、ここでは変位ゼロ点の往復だけを見られる。
+    fn piston_gas_world() -> (World, BodyId) {
+        let mut world = zero_gravity_world();
+        let mat = steel(&world);
+        let mut desc = RigidBodyDesc::dynamic(sim_mechanics::Shape::Sphere { radius: 0.05 }, mat);
+        desc.body_type = sim_mechanics::BodyType::Kinematic;
+        desc.linear_velocity = Vec3::new(-0.05, 0.0, 0.0); // 気体を圧縮する向き
+        let piston = world.create_body(desc);
+        world.enable_gas(sim_thermal::GasCompartment {
+            n_moles: 1.0,
+            volume: 1.0e-3,
+            temperature: 300.0,
+            gas: sim_thermal::GasSpecies::AIR,
+        });
+        let coupling = sim_coupling::PistonGas::new(
+            &world.mechanics().bodies,
+            piston.index as usize,
+            Vec3::new(1.0, 0.0, 0.0),
+            0.01,
+            1.0e-3,
+        );
+        world.add_coupling(Box::new(coupling));
+        (world, piston)
+    }
+
+    /// **底突き(体積の下限クランプ)まで圧縮してから反転させた**ワールドを作る。
+    ///
+    /// **なぜこの経路でないと対照にならないか(正直な記録)**: `PistonGas`の
+    /// 体積は $V = V_{ref} + A\,(x - x_{ref})$ という**アフィン写像**なので、
+    /// クランプに当たっていない限り「現在の体積と現在の位置」を新たな基準に
+    /// 取り直しても以後の体積は一致する——つまり変位ゼロ点は現在値から
+    /// 復元できてしまい、`raw_state`の有無で差が出ない。
+    /// 差が出るのは`new_volume.max(1e-9)`のクランプに当たった後だけである
+    /// (クランプがアフィン性を壊し、現在値からは基準を逆算できなくなる)。
+    fn bottomed_out_piston_gas_world() -> World {
+        let (mut world, piston) = piston_gas_world();
+        // 変位 -0.125 m ⇒ V = 1e-3 + 0.01*(-0.125) < 0 ⇒ 下限クランプに当たる。
+        for _ in 0..300 {
+            world.step();
+        }
+        assert!(
+            world.gas().unwrap().volume <= 1e-9,
+            "この対照は体積の下限クランプに当たっている必要がある"
+        );
+        // 反転させて引き戻す(クランプ域から出ると基準の違いが体積に現れる)。
+        world.mechanics_mut().bodies.linear_velocity[piston.index as usize] =
+            Vec3::new(0.05, 0.0, 0.0);
+        world
+    }
+
+    /// `PistonGas`(変位ゼロ点)。底突き後に反転させた状態でエクスポートする
+    /// (`bottomed_out_piston_gas_world`のdoc参照)。
+    ///
+    /// **`GasCompartment`は`state_hash`に含まれない**(自律的な時間発展を持たない
+    /// 従属量、`World::gas`のdoc参照)ので、判定はハッシュではなく気体の状態量
+    /// そのもの(体積・温度)をビット単位で突き合わせる形で行う。
+    #[test]
+    fn piston_gas_coupling_raw_state_round_trip_after_stepping() {
+        let mut world = bottomed_out_piston_gas_world();
+        let scenario = to_scenario(&world, "piston_gas");
+        let mut reloaded = World::from_scenario(&scenario).expect("round trip must parse back");
+        for _ in 0..100 {
+            world.step();
+            reloaded.step();
+        }
+        let (a, b) = (world.gas().unwrap(), reloaded.gas().unwrap());
+        assert_eq!(
+            a.volume.to_bits(),
+            b.volume.to_bits(),
+            "変位ゼロ点が戻っていれば体積はビット単位で一致する ({} vs {})",
+            a.volume,
+            b.volume
+        );
+        assert_eq!(a.temperature.to_bits(), b.temperature.to_bits());
+    }
+
+    /// `PistonGas`の`raw_state`を落とすと(=`initial_volume`(現在値)を新たな基準に
+    /// する移行前の挙動)以後の気体体積がずれることを、対照として固定する。
+    #[test]
+    fn piston_gas_round_trip_breaks_without_its_reference_point() {
+        let mut world = bottomed_out_piston_gas_world();
+        let mut scenario = to_scenario(&world, "piston_gas-no-ref");
+        for coupling in &mut scenario.couplings {
+            if let CouplingJson::PistonGas { raw_state, .. } = coupling {
+                *raw_state = None;
+            }
+        }
+        let mut reloaded = World::from_scenario(&scenario).expect("must still parse");
+        for _ in 0..100 {
+            world.step();
+            reloaded.step();
+        }
+        assert_ne!(
+            world.gas().unwrap().volume,
+            reloaded.gas().unwrap().volume,
+            "変位ゼロ点を落とせば「今の位置が変位0」になって体積がずれるはず\
+             (落としていないから一致している、という取り違えを防ぐための対照)"
+        );
+    }
+
+    /// `SphRigid`(境界粒子の確保区間)。`sph`側の`raw_state`が境界粒子ごと
+    /// 復元するので、結合側は**確保し直さず区間だけを戻す**(二重確保の防止)。
+    #[test]
+    fn sph_rigid_coupling_raw_state_round_trip_after_stepping() {
+        let mut world = empty_world();
+        let mat = steel(&world);
+        let mut desc = RigidBodyDesc::dynamic(sim_mechanics::Shape::Sphere { radius: 0.05 }, mat);
+        desc.transform.position = Vec3::new(0.1, 0.3, 0.1);
+        let ball = world.create_body(desc);
+
+        let mut fluid = sim_fluid::SphFluid::new(0.04, 1000.0, 20.0);
+        fluid.mass = 0.05;
+        for ix in 0..4 {
+            for iy in 0..4 {
+                for iz in 0..4 {
+                    fluid.position.push(Vec3::new(
+                        ix as f64 * 0.03,
+                        iy as f64 * 0.03,
+                        iz as f64 * 0.03,
+                    ));
+                    fluid.velocity.push(Vec3::ZERO);
+                    fluid.density.push(1000.0);
+                    fluid.pressure.push(0.0);
+                }
+            }
+        }
+        world.enable_sph(fluid);
+
+        let coupling = {
+            let sph = world.sph_mut().expect("sph domain");
+            sim_coupling::SphRigid::new(sph, ball.index as usize, 0.05, 12)
+        };
+        world.add_coupling(Box::new(coupling));
+        assert_round_trip(world, 20, 15, "sph_rigid");
+    }
+
+    /// `SphRigid`の`raw_state`が**境界粒子を再確保しない**こと(二重確保の対照)。
+    #[test]
+    fn sph_rigid_round_trip_does_not_duplicate_boundary_particles() {
+        let mut world = empty_world();
+        let mat = steel(&world);
+        let ball = world.create_body(RigidBodyDesc::dynamic(
+            sim_mechanics::Shape::Sphere { radius: 0.05 },
+            mat,
+        ));
+        world.enable_sph(sim_fluid::SphFluid::new(0.04, 1000.0, 20.0));
+        let coupling = {
+            let sph = world.sph_mut().expect("sph domain");
+            sim_coupling::SphRigid::new(sph, ball.index as usize, 0.05, 12)
+        };
+        world.add_coupling(Box::new(coupling));
+        let before = world.sph().unwrap().boundary_position.len();
+        assert_eq!(before, 12);
+
+        let scenario = to_scenario(&world, "sph-rigid-dup");
+        let reloaded = World::from_scenario(&scenario).expect("round trip must parse back");
+        assert_eq!(
+            reloaded.sph().unwrap().boundary_position.len(),
+            before,
+            "境界粒子は`sph.raw_state`が復元済み——結合側で確保し直すと二重になる"
+        );
+    }
+
+    /// `PhaseChangeMorph`(融解の内部状態)。融解が進んだ途中でエクスポートする——
+    /// `initial_enthalpy`は**生成時**の値なので、これだけでは融解が最初から
+    /// やり直しになる。
+    #[test]
+    fn phase_change_morph_coupling_raw_state_round_trip_after_stepping() {
+        let mut world = zero_gravity_world();
+        let mat = steel(&world);
+        let ball = world.create_body(RigidBodyDesc::dynamic(
+            sim_mechanics::Shape::Sphere { radius: 0.05 },
+            mat,
+        ));
+
+        let mut thermal = sim_thermal::ThermalSolver::new(293.15);
+        thermal.add_node(sim_thermal::ThermalNode::new(293.15, 4000.0));
+        world.enable_thermal(thermal);
+
+        world.add_coupling(Box::new(sim_coupling::PhaseChangeMorph::new(
+            ball.index as usize,
+            0,
+            sim_thermal::PhaseMaterial {
+                melting_temperature: 273.15,
+                latent_heat_fusion: 334_000.0,
+                specific_heat_solid: 2100.0,
+                specific_heat_liquid: 4186.0,
+            },
+            0.5,
+            50.0,
+            // 融点ちょうど(=融解が即座に始まる)。30step後は融解途中になる。
+            0.0,
+        )));
+        assert_round_trip(world, 30, 25, "phase_change_morph");
+    }
+
+    /// `BrownianForce`を1個持つワールド。**慣性時間 $\tau=m/\gamma$ が既定dtより
+    /// 十分長い**大きさを選ぶ(半径1cmの鋼球、水の粘性)——`sim-coupling`側の
+    /// 単体テストのようなミクロン球は $\tau\approx 2\times10^{-7}$ s で、
+    /// dt=1/120 だと明示的Euler-Maruyamaが発散して往復の判定にならない。
+    /// 注入されるゆらぎは極小(σ≈3e-13 m/s)だが、f64のビットとしては確実に効く。
+    fn brownian_force_world() -> World {
+        let mut world = empty_world();
+        let mat = steel(&world);
+        let radius = 0.01;
+        let bead = world.create_body(RigidBodyDesc::dynamic(
+            sim_mechanics::Shape::Sphere { radius },
+            mat,
+        ));
+
+        let mut thermal = sim_thermal::ThermalSolver::new(293.15);
+        thermal.add_node(sim_thermal::ThermalNode::new(293.15, 1000.0));
+        world.enable_thermal(thermal);
+
+        world.add_coupling(Box::new(sim_coupling::BrownianForce::new(
+            bead.index as usize,
+            radius,
+            1.002e-3,
+            0,
+            42,
+            99,
+        )));
+        world
+    }
+
+    /// `BrownianForce`(自前RNGのストリーム位置)。この結合は`World`中央の`rng`
+    /// とは独立した系列を持つので、`Scenario::rng_state`では戻らない。
+    #[test]
+    fn brownian_force_coupling_raw_state_round_trip_after_stepping() {
+        assert_round_trip(brownian_force_world(), 30, 25, "brownian_force");
+    }
+
+    /// `BrownianForce`の`raw_state`を落とすと(=`seed`/`stream`から作り直す
+    /// 移行前の挙動)以後の軌跡がずれることを、対照として固定する。
+    #[test]
+    fn brownian_force_round_trip_breaks_without_its_rng_stream_position() {
+        let mut world = brownian_force_world();
+        for _ in 0..30 {
+            world.step();
+        }
+
+        let mut scenario = to_scenario(&world, "brownian-force-no-rng");
+        for coupling in &mut scenario.couplings {
+            if let CouplingJson::BrownianForce { raw_state, .. } = coupling {
+                *raw_state = None;
+            }
+        }
+        let mut reloaded = World::from_scenario(&scenario).expect("must still parse");
+        let mut world = world;
+        world.step();
+        reloaded.step();
+        assert_ne!(
+            world.state_hash(),
+            reloaded.state_hash(),
+            "自前RNGの位置を落とせば次のstepでずれるはず(落としていないから一致している、\
+             という取り違えを防ぐための対照)"
         );
     }
 
