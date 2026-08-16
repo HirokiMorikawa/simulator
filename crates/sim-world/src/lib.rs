@@ -4203,7 +4203,7 @@ mod tests {
     /// `BuoyancyDrag`をレジストリ経由(`add_coupling`)で剛体に接続し、`demos.rs`のD6
     /// (F4部分、密度比0.6の直立直方体)と同じ釣り合い喫水深さの近傍で有界に留まる
     /// ことを確認する(既存の`MechanicsSolver.fluids`埋め込み経路(D6が使う)と同じ
-    /// 物理式(`sim_fluid::{submerged_box_axis_aligned, buoyancy_force}`)を使うが、
+    /// 物理式(`sim_fluid::{submerged_box_below_plane, buoyancy_force}`)を使うが、
     /// `mechanics_mut().fluids`は設定しない独立経路)。
     ///
     /// D6のF4部分は埋め込み経路(`apply_forces`内でmechanicsの各sub-stepごとに

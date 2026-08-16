@@ -29,15 +29,20 @@ use std::collections::HashSet;
 /// 呼び出し側が読む唯一の入口を`acceleration_at`(位置を受け取る)へ一本化でき、
 /// 場の種類を増やしても積分側のコードは変わらない。
 ///
-/// **正直な適用範囲**(移行前からの制約をそのまま引き継ぐ): この場が効くのは
-/// 自由体(Dynamic)への直接の重力積分(`MechanicsSolver::apply_forces`)と
-/// ポテンシャルエネルギー計算のみ。浮力(`sim_fluid::FluidRegion`)は
-/// 水面をワールドy座標の水平面として定義するモデルのため、重力の向きや
-/// 位置依存性に追従しない(`buoyancy_force`の既存実装、`sim-fluid`crateの
-/// 設計上の制約——水面が重力と独立に常に水平だという簡略化は、重力の向きを
-/// 可変にする前から存在した)。大気の抗力(`drag_force_sphere`)も同様に
-/// 重力に依存しない。**浮力・自然対流を重力場へ追従させるのは別の計画作業**で
-/// あり、本増分では踏み込まない(`MechanicsSolver::gravity`のdoc参照)。
+/// **正直な適用範囲**: この場が効くのは自由体(Dynamic)への直接の重力積分
+/// (`MechanicsSolver::apply_forces`)、ポテンシャルエネルギー計算、そして
+/// **浮力**(`up_and_magnitude_at`を読む`apply_forces`の水域処理・
+/// `sim_coupling::BuoyancyDrag`・`sim_coupling::BoussinesqBuoyancy`)である。
+///
+/// 浮力は**重力追従増分**で追いついた: 自由表面を`up`(=局所重力の逆向き)に
+/// 垂直な平面として持ち、力も`up`向きに出す(`sim_fluid::buoyancy`モジュールdoc
+/// 「浮力を重力場へ追従させる」)。それまでは水面がワールドy座標の水平面に
+/// 固定で、非`Uniform`な場では浮力を丸ごと無効化するしかなかった。
+///
+/// **まだ追従しないもの**: 大気の抗力(`drag_force_sphere`)は媒質に対する
+/// 相対速度だけで決まるので、そもそも重力に依存しない。自然対流の熱伝達率
+/// (`sim_coupling::ConvectionLink`)は「一様な鉛直重力」を前提とする経験相関式
+/// なので、スカラー縮約`gravity()`を読んだまま(同結合のdoc参照)。
 ///
 /// **`sim_astro`のN体重力とは別系統**: `sim_astro::NBodySystem`は天体どうしの
 /// 実際の万有引力を対ごとに計算する独立したドメインであり、この`GravityField`
@@ -135,6 +140,54 @@ impl GravityField {
                 }
                 -mu / distance
             }
+        }
+    }
+
+    /// 位置`position`における「上」——重力に逆らう向きの**単位ベクトル**と、
+    /// 重力加速度の**大きさ** [m/s^2] の組(**重力追従増分で追加**)。
+    /// 重力の向きが定義できない場合は`None`。
+    ///
+    /// **何のためにあるか**: 浮力は定義上「重力に逆らう向き」に働き、自由表面は
+    /// その向きに垂直な面になる(`sim_fluid::buoyancy`モジュールdoc)。
+    /// `acceleration_at`が返すベクトルから呼び出し側が毎回
+    /// 「正規化して符号を反転し、大きさを別に取る」のは冗長なうえ、一様場で
+    /// $\sqrt{g^2}$ の往復を挟んで`magnitude`と1ulpずれうる——ここで場の種類ごとに
+    /// 素直に組み立てて、その両方を避ける。
+    ///
+    /// **`None`を返す場合と、その意味**:
+    ///
+    /// - `Zero`: 「下」が無いので自由表面の向きが定義できない。浮力は
+    ///   **厳密に0**になる(押しのけた流体の重量も0なので物理的にも正しい)。
+    ///   向きを発明して力を出すより、消えることを明示する方を選ぶ。
+    /// - `PointSource`の中心近傍($r <$ `POINT_SOURCE_MIN_RADIUS`):
+    ///   `acceleration_at`が`Vec3::ZERO`へ縮退するのと同じ理由(向きが定義できず、
+    ///   そのまま計算するとNaNが伝播する)。
+    ///
+    /// `Uniform`は`magnitude`が0でも`Some`を返す——向き自体は定義されており、
+    /// 大きさ0がそのまま力0になるので`Zero`と観測上は一致する。
+    pub fn up_and_magnitude_at(&self, position: Vec3) -> Option<(Vec3, f64)> {
+        match *self {
+            GravityField::Uniform {
+                magnitude,
+                direction,
+            } => {
+                // `-direction`ではなく`ZERO - direction`。`direction`の0成分を
+                // 反転すると`-0.0`になり、力ベクトルの符号付きゼロが移行前
+                // (`Vec3::new(0.0, .., 0.0)`)と変わってしまうため。
+                Some((Vec3::ZERO - direction, magnitude))
+            }
+            GravityField::PointSource { center, mu } => {
+                let r = position - center;
+                let distance = r.length();
+                if distance < POINT_SOURCE_MIN_RADIUS {
+                    return None;
+                }
+                // 「上」= 中心から外向き。大きさは $\mu/r^2$
+                // (`mu`が負の斥力場なら大きさも負になり、浮力は中心向き——
+                // 「重力の逆向き」という定義がそのまま保たれる)。
+                Some((r.scale(1.0 / distance), mu / (distance * distance)))
+            }
+            GravityField::Zero => None,
         }
     }
 
@@ -400,14 +453,17 @@ impl MechanicsSolver {
     /// 選んだ)。移行前の公開フィールド`gravity`の読み出しをそのまま置き換える
     /// アクセサであり、呼び出し側の書き換えは`()`を足すだけで済む。
     ///
-    /// **これが隠していない挙動変化**: この値を使うのは(1)浮力
-    /// (`apply_forces`の`buoyancy_force`)、(2)`sim-coupling`の
-    /// Boussinesq浮力・自然対流のレイリー数、(3)Inspectorの環境パネル表示。
-    /// いずれも「重力は鉛直方向に一様」を前提とする縮約モデルであり、
-    /// `PointSource`場ではその前提自体が成立しない。0.0を返すことで
-    /// **これらは無効化される**(水平な水面を仮定した浮力を点源場で出す方が
-    /// 誤りが大きい)。浮力・自然対流を`acceleration_at`へ追従させるのは
-    /// 別の計画作業であり、本増分の対象外(`GravityField`のdoc参照)。
+    /// **これが隠していない挙動変化**: この値を残して使うのは
+    /// (1)`sim_coupling::ConvectionLink`の自然対流レイリー数、
+    /// (2)Inspectorの環境パネル表示。いずれも「重力は鉛直方向に一様」を前提とする
+    /// 縮約モデルであり、`PointSource`場ではその前提自体が成立しない。0.0を
+    /// 返すことで**これらは無効化される**。
+    ///
+    /// **浮力はここから外れた(重力追従増分)**: 浮力(`apply_forces`の水域処理・
+    /// `sim_coupling::{BuoyancyDrag, BoussinesqBuoyancy}`)は
+    /// `GravityField::up_and_magnitude_at`を読むようになり、`PointSource`場でも
+    /// 局所的な「上」に向かって働く。この関数を読んでいた頃の
+    /// 「非`Uniform`なら浮力が消える」挙動はもう無い。
     pub fn gravity(&self) -> f64 {
         self.field.uniform_magnitude()
     }
@@ -508,19 +564,33 @@ impl MechanicsSolver {
                     .fluids
                     .iter()
                     .find(|region| region.contains(self.bodies.position[i]));
-                if let (Some(water), Shape::Box { half_extents }) = (water, self.bodies.shape_of(i))
+                // 浮力(**重力追従増分**): 自由表面は「局所的な重力の逆向き`up`に
+                // 垂直な平面」で、力も`up`向きに出す(`sim_fluid::buoyancy`
+                // モジュールdoc)。重力の向きが定義できない場(`Zero`・点源の中心)
+                // では`up_and_magnitude_at`が`None`を返し、浮力は働かない。
+                // 既定の`-y`向き一様重力では`up = (0,1,0)`となり、
+                // `submerged_box_below_plane`も`buoyancy_force`も移行前と
+                // ビット単位で同一の値を返す(それぞれのdoc参照)。
+                let up_and_g = self.field.up_and_magnitude_at(self.bodies.position[i]);
+                if let (Some(water), Shape::Box { half_extents }, Some((up, g))) =
+                    (water, self.bodies.shape_of(i), up_and_g)
                 {
-                    let (v_sub, _c_buoy) = sim_fluid::submerged_box_axis_aligned(
+                    let (v_sub, _c_buoy) = sim_fluid::submerged_box_below_plane(
                         self.bodies.position[i],
                         *half_extents,
+                        up,
                         water.water_level,
                     );
-                    // 浮心は直立対称箱では常に body 中心と同じ x,z を持ち、浮力は鉛直成分
-                    // のみなのでトルクは厳密に0(r×F、r・Fが共にy軸方向で外積0)。
-                    // トルク適用は不要(_c_buoy は式の対称性の記録として保持)。
+                    // 浮心(`_c_buoy`)からトルクは積まない。重力が`-y`向きなら
+                    // 直立対称箱の浮心は body 中心と同じ x,z を持ち、浮力も鉛直成分
+                    // のみなのでトルクは厳密に0だった(r×F、r・Fが共にy軸方向で外積0)。
+                    // **傾いた水面では厳密に0ではなくなる**(切り口が非対称になり、
+                    // 浮心が`up`から横へずれる)が、姿勢を扱わないモデルで復原
+                    // モーメントだけ入れても整合しないため引き続き積まない
+                    // (`sim_fluid::buoyancy`モジュールdocの「既知の限界」)。
                     if v_sub > 0.0 {
                         self.bodies.force_accum[i] = self.bodies.force_accum[i]
-                            + sim_fluid::buoyancy_force(v_sub, water.density, self.gravity());
+                            + sim_fluid::buoyancy_force(v_sub, water.density, g, up);
                     }
                 }
             }
@@ -1820,9 +1890,10 @@ mod tests {
     }
 
     /// 一辺1m・質量500kgの直立立方体を`position`へ置き、1step回した後の`v_y`を返す。
-    /// 浮力は`gravity()`に比例する(`buoyancy_force`)ので**重力を切ると浮力も
-    /// 消える**——そのため重力は残したまま、「浮力の有無・大小で加速度がどう
-    /// 変わるか」を見る形にしてある。浮力ゼロなら戻り値はちょうど`-g*dt`。
+    /// 浮力は重力加速度の大きさに比例する(`sim_fluid::buoyancy_force`)ので
+    /// **重力を切ると浮力も消える**——そのため重力は既定(`-y`向き9.80665)のまま
+    /// 残し、「浮力の有無・大小で加速度がどう変わるか」を見る形にしてある。
+    /// 浮力ゼロなら戻り値はちょうど`-g*dt`。
     fn heave_velocity_after_one_step(fluids: Vec<FluidRegion>, position: Vec3) -> f64 {
         let mut materials = MaterialDb::standard();
         let material = buoyancy_material(&mut materials, 500.0);
@@ -1966,6 +2037,144 @@ mod tests {
         );
         // 2つ目を足していない(足せば ρ=3000 相当になる)。
         assert!((dense_first - expected_fully_submerged_heave(3000.0)).abs() > 1e-6);
+    }
+
+    // ------------------------------------------------------------------
+    // **重力追従増分**: 埋め込み経路(`apply_forces`)の浮力が`GravityField`へ
+    // 追従すること。`sim_coupling::BuoyancyDrag`(結合登録経路)と**同じ物理式**を
+    // 使う以上、片方だけ一般化して二つの実装が食い違う状態にしない。
+    // ------------------------------------------------------------------
+
+    /// 一辺1m・質量500kgの直立立方体を`position`へ置き、重力場を`field`にして
+    /// 1step回した後の速度ベクトルを返す(`heave_velocity_after_one_step`の
+    /// 重力場版)。
+    fn velocity_after_one_step_in_field(
+        fluids: Vec<FluidRegion>,
+        field: GravityField,
+        position: Vec3,
+    ) -> Vec3 {
+        let mut materials = MaterialDb::standard();
+        let material = buoyancy_material(&mut materials, 500.0);
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(0.0);
+        solver.set_gravity_field(field);
+        solver.fluids = fluids;
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            material,
+        );
+        desc.transform.position = position;
+        let idx = solver.create_body(desc, &materials);
+
+        let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+        solver.step(1.0 / 240.0, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+        solver.bodies.linear_velocity[idx]
+    }
+
+    /// 一様重力を傾けると、埋め込み経路の浮力も**傾いた`up`向き**へ回る。
+    /// 全没させて浮力の大きさを $\rho_f g V$ に固定し、正味の加速度が
+    /// $(\rho_f V - m)\,g/m$ の大きさで`up`向きになることを見る
+    /// (移行前は浮力だけが`+y`に固定で、この向きは出せなかった)。
+    #[test]
+    fn the_embedded_buoyancy_path_follows_a_tilted_uniform_gravity() {
+        let dt = 1.0 / 240.0;
+        let (g, mass, density) = (9.80665, 500.0, 1000.0);
+        let tilt = 30.0_f64.to_radians();
+        let up = Vec3::new(tilt.sin(), tilt.cos(), 0.0);
+        let field = GravityField::Uniform {
+            magnitude: g,
+            direction: Vec3::ZERO - up,
+        };
+        // 十分深く沈めて全没させる(`water_level`は`up`軸に沿った符号付き距離)。
+        let region = FluidRegion::new(0.0, density);
+        let position = up.scale(-5.0);
+
+        let v = velocity_after_one_step_in_field(vec![region], field, position);
+        let expected = up.scale((density * g * 1.0 - mass * g) / mass * dt);
+        assert!(
+            (v - expected).length() < 1e-12,
+            "傾いた重力では浮力も傾く: v={v:?} expected={expected:?}"
+        );
+        // 移行前の「浮力は常に+y」では出せない向きであること(x成分が立つ)。
+        assert!(v.x > 0.0, "v={v:?}");
+    }
+
+    /// `GravityField::Zero`では浮力は**厳密に0**(`up_and_magnitude_at`が`None`)。
+    /// 「下」が無い場所に水平な自由表面は定義できず、押しのけた流体の重量も0——
+    /// 意図した縮退であることを、全没した軽い箱(重力があれば必ず浮き上がる配置)で
+    /// 固定する(`GravityField::up_and_magnitude_at`のdoc)。
+    #[test]
+    fn zero_gravity_field_produces_no_buoyancy_in_the_embedded_path() {
+        let region = FluidRegion::new(0.0, 1000.0);
+        let position = Vec3::new(0.0, -5.0, 0.0);
+
+        let v = velocity_after_one_step_in_field(vec![region], GravityField::Zero, position);
+        assert_eq!(v, Vec3::ZERO, "無重力では浮力も重力も働かない: v={v:?}");
+
+        // 大きさ0の`Uniform`場も観測上は同じ(向きは定義されるが力が0になる)。
+        let v_uniform = velocity_after_one_step_in_field(
+            vec![region],
+            GravityField::Uniform {
+                magnitude: 0.0,
+                direction: Vec3::new(0.0, -1.0, 0.0),
+            },
+            position,
+        );
+        assert_eq!(v_uniform, Vec3::ZERO);
+
+        // 同じ配置で重力があれば確かに浮き上がる(上の0が「たまたま」ではない)。
+        let v_gravity = velocity_after_one_step_in_field(
+            vec![region],
+            GravityField::Uniform {
+                magnitude: 9.80665,
+                direction: Vec3::new(0.0, -1.0, 0.0),
+            },
+            position,
+        );
+        assert!(v_gravity.y > 0.0, "v={v_gravity:?}");
+    }
+
+    /// `GravityField::PointSource`では浮力が**中心から外向き**に働く
+    /// (局所的な「上」が中心から外向きだから)。移行前は`gravity()`が0.0を
+    /// 返して浮力が丸ごと消えていた場である。
+    /// 中心を通る自由表面(`water_level = |r|`)はどんな向きでも箱をちょうど
+    /// 半分にする(`sim_fluid`の`a_plane_through_the_center_halves_the_box_...`)
+    /// ので、浮力の大きさは $\rho_f\,(\mu/r^2)\,V/2$ で閉じる。
+    #[test]
+    fn point_source_gravity_makes_buoyancy_point_away_from_the_centre() {
+        let dt = 1.0 / 240.0;
+        let (mass, density) = (500.0, 1000.0);
+        let position = Vec3::new(3.0, 4.0, 0.0);
+        let radius = 5.0;
+        let mu = 245.0; // mu/r^2 = 9.8 m/s^2
+        let local_g = mu / (radius * radius);
+        let up = position.scale(1.0 / radius);
+        let field = GravityField::PointSource {
+            center: Vec3::ZERO,
+            mu,
+        };
+        // 自由表面は「原点から`up`軸に沿って`radius`」= 箱の中心を通る平面。
+        let region = FluidRegion::new(radius, density);
+
+        let v = velocity_after_one_step_in_field(vec![region], field, position);
+        // 浮力(外向き、V_sub = 0.5 m^3)+ 重力(内向き)。
+        let expected = up.scale((density * local_g * 0.5 - mass * local_g) / mass * dt);
+        assert!(
+            (v - expected).length() < 1e-12,
+            "v={v:?} expected={expected:?}"
+        );
+        // 浮力だけを取り出すと確かに中心から外向き(重力単独より内向き成分が小さい)。
+        let without_water = velocity_after_one_step_in_field(Vec::new(), field, position);
+        let buoyancy_part = v - without_water;
+        assert!(
+            buoyancy_part.dot(up) > 0.0,
+            "浮力は中心から外向き: {buoyancy_part:?}"
+        );
     }
 
     /// `fluid_region_at`/`fluid_temperature_at`が`apply_forces`と同じ引き当てを
