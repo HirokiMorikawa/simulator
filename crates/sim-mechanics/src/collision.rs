@@ -10,6 +10,11 @@
 //! (`tests/manifold_persistence.rs` の対照実験)。
 //! **群4で Capsule×Box を実装した**(増分Lでは線分-OBB の場合分けを避けて `None` を
 //! 返しており、エディタでカプセルと箱を並べるとすり抜けていた)。`capsule_box` 参照。
+//! **群11で ConvexMesh の接触生成を実装した**(それまでは一律 `None` を返し、
+//! この形状は何ともぶつからずすり抜けていた)。3D凸包(`crate::hull`)を張り、
+//! 平面とは頂点距離の解析形、球とは表面最近点による球-球への帰着、
+//! 箱・他の多面体とは SAT で扱う(`convex_poly_manifold` 参照)。
+//! **`ConvexMesh` × `Capsule` だけは未実装のまま**(同 doc の「既知の限界」)。
 
 use crate::body::{BodyType, RigidBodySet};
 use crate::shape::{Aabb, Shape};
@@ -385,6 +390,386 @@ fn box_plane(
     points.sort_by(|a, b| b.penetration.partial_cmp(&a.penetration).unwrap());
     points.truncate(4);
     Some((plane_normal, points))
+}
+
+/// 凸多面体 と 無限平面(**群11**)。`box_plane`と同じ構造——全頂点の平面距離を
+/// 見て、貫入している頂点を接触点にする(最大4点へ縮約)。
+///
+/// 平面は非有界なので SAT の「射影区間の重なり」に乗らない(片側が無限)。
+/// 一方この解析形は厳密かつ決定的で、しかも「床に置いた多面体が静止する」という
+/// 最も重要なケースをそのまま扱える。よって平面だけは専用経路にした。
+fn convex_mesh_plane(
+    vertices: &[Vec3],
+    xf: Transform,
+    plane_normal: Vec3,
+    plane_d: f64,
+) -> Option<(Vec3, Vec<ContactPoint>)> {
+    let mut points = Vec::new();
+    for (feature_id, &v) in vertices.iter().enumerate() {
+        let world = xf.apply_point(v);
+        let dist = plane_normal.dot(world) - plane_d;
+        if dist < 0.0 {
+            points.push(ContactPoint {
+                world_point: world,
+                penetration: -dist,
+                feature_id: feature_id as u32,
+            });
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    points.sort_by(|a, b| b.penetration.partial_cmp(&a.penetration).unwrap());
+    points.truncate(4);
+    Some((plane_normal, points))
+}
+
+/// 凸多面体としての「面法線 + 頂点」表現(ワールド座標、**群11**)。
+/// SAT の分離軸候補(面法線・辺方向)と射影に必要なものだけを持つ。
+struct ConvexPoly {
+    vertices: Vec<Vec3>,
+    /// 面の外向き単位法線(重複方向は除去済み)。
+    face_normals: Vec<Vec3>,
+    /// 辺の方向ベクトル(単位、重複・逆向き重複は除去済み)。
+    edge_directions: Vec<Vec3>,
+}
+
+/// 方向の重複判定(向きの反転も同一視する)。SAT の軸は符号を持たないため。
+fn push_unique_direction(list: &mut Vec<Vec3>, dir: Vec3) {
+    let len = dir.length();
+    if len < 1e-9 {
+        return;
+    }
+    let unit = dir.scale(1.0 / len);
+    if list
+        .iter()
+        .any(|&d| (d - unit).length_sq() < 1e-18 || (d + unit).length_sq() < 1e-18)
+    {
+        return;
+    }
+    list.push(unit);
+}
+
+impl ConvexPoly {
+    /// 凸包(`crate::hull`)からワールド座標の SAT 用表現を作る。
+    fn from_hull(hull: &crate::hull::ConvexHull, xf: Transform) -> ConvexPoly {
+        let vertices: Vec<Vec3> = hull.vertices.iter().map(|&v| xf.apply_point(v)).collect();
+        let mut face_normals = Vec::new();
+        let mut edge_directions = Vec::new();
+        for &f in &hull.faces {
+            let (a, b, c) = (vertices[f[0]], vertices[f[1]], vertices[f[2]]);
+            push_unique_direction(&mut face_normals, (b - a).cross(c - a));
+            push_unique_direction(&mut edge_directions, b - a);
+            push_unique_direction(&mut edge_directions, c - b);
+            push_unique_direction(&mut edge_directions, a - c);
+        }
+        ConvexPoly {
+            vertices,
+            face_normals,
+            edge_directions,
+        }
+    }
+
+    /// 箱を凸多面体として表す(8頂点・3面法線・3辺方向)。凸包を張り直すより
+    /// 直接書くほうが速く、退化も無い。
+    fn from_box(xf: Transform, half_extents: Vec3) -> ConvexPoly {
+        let mut vertices = Vec::with_capacity(8);
+        for &sx in &[-1.0, 1.0] {
+            for &sy in &[-1.0, 1.0] {
+                for &sz in &[-1.0, 1.0] {
+                    vertices.push(xf.apply_point(Vec3::new(
+                        sx * half_extents.x,
+                        sy * half_extents.y,
+                        sz * half_extents.z,
+                    )));
+                }
+            }
+        }
+        let axes = [
+            box_axis_world(xf, 0),
+            box_axis_world(xf, 1),
+            box_axis_world(xf, 2),
+        ];
+        ConvexPoly {
+            vertices,
+            face_normals: axes.to_vec(),
+            edge_directions: axes.to_vec(),
+        }
+    }
+
+    /// 軸 `axis`(単位)への射影区間 `(min, max)`。
+    fn project(&self, axis: Vec3) -> (f64, f64) {
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for &v in &self.vertices {
+            let d = v.dot(axis);
+            min = min.min(d);
+            max = max.max(d);
+        }
+        (min, max)
+    }
+}
+
+/// 凸多面体どうしの **SAT**(分離軸定理)による接触生成(**群11**)。
+///
+/// ## なぜ GJK/EPA ではなく SAT か
+///
+/// 設計上はどちらも標準的な選択肢だが、この物理コアでは SAT を採った:
+///
+/// - **既存の`box_box`と同じ構造**。15軸 SAT・最小重なり軸・面クリップという
+///   語彙がすでにモジュール内にあり、`ConvexMesh`だけ別世界の反復解法に
+///   なるのを避けられる(brief の「既存 narrowphase と同じアーキテクチャに
+///   合わせる」要件)。
+/// - **決定論的で反復が無い**。有限個の軸を全部試すだけなので、反復回数・
+///   収束判定・初期単体の質に一切依存しない。
+///
+/// なお本増分の実装中に、既存の `gjk`/`epa_penetration` を
+/// `ConvexShape::Points` × `ConvexShape::Sphere` に適用すると**実用にならない**
+/// ことが判明した(GJK が返す初期単体は原点が四面体の一面の**上**に厳密に
+/// 乗った状態になりうる。EPA はその面の距離を 0 と見て法線の向きも定まらず、
+/// 100反復まで多面体を膨らませ続けて**112秒**かけて出鱈目な法線を返した——
+/// 貫入 0.5 の解析解に対し 0.086)。既存の球×球・箱×箱のテストはたまたま
+/// 原点が内部に来る配置で通っていたため露見していなかった。
+/// **これは本増分では手を付けていない既存の弱点**であり、`gjk` モジュールは
+/// フルCCD(分離距離のみ使用、EPA を通らない)専用のまま残してある。
+/// 修正は独立した増分で扱うべき事項として、ここに記録しておく。
+///
+/// ## 接触点の作り方
+///
+/// 最小重なり軸 `n`(A→B 向きへ正規化)を法線とし、**相手の内部に入り込んで
+/// いる頂点**を接触点にする(A の頂点で B の内部にあるもの + B の頂点で A の
+/// 内部にあるもの)。各点の貫入量は「その点が相手の表面から `n` 方向に
+/// どれだけ潜っているか」で個別に測るので、傾いた接触でも点ごとに正しい
+/// 深さになる。面どうしが平らに重なる典型例(箱が箱の上に乗る)では相手の
+/// 面の4頂点が入るため、そのまま4点マニフォールドになり安定して静止する。
+///
+/// **既知の限界**: 辺×辺が唯一の接触になる配置では、どちらの頂点も相手の
+/// 内部に入らないことがある。その場合は最深の頂点対の中点を1点だけ返す
+/// フォールバックに落ちる(`box_box_edge_contact` が単一点を返すのと同じ粒度)。
+fn convex_poly_manifold(a: &ConvexPoly, b: &ConvexPoly) -> Option<(Vec3, Vec<ContactPoint>)> {
+    let mut best_axis = Vec3::ZERO;
+    let mut best_overlap = f64::INFINITY;
+
+    let mut consider = |axis: Vec3| -> bool {
+        // 既存の`box_box_sat`と同じ退化判定(設計 §4.4 の 1e-10、二乗長で比較)。
+        if axis.length_sq() < SAT_DEGENERATE_AXIS_LEN_SQ {
+            return true; // 退化軸は無視(分離を主張しない)
+        }
+        let len = axis.length();
+        let unit = axis.scale(1.0 / len);
+        let (min_a, max_a) = a.project(unit);
+        let (min_b, max_b) = b.project(unit);
+        let overlap = (max_a - min_b).min(max_b - min_a);
+        if overlap <= 0.0 {
+            return false; // 分離軸を発見
+        }
+        if overlap < best_overlap {
+            best_overlap = overlap;
+            // A→B 向きへ揃える(マニフォールドの法線規約)。
+            best_axis = if max_b - min_a < max_a - min_b {
+                -unit
+            } else {
+                unit
+            };
+        }
+        true
+    };
+
+    for &n in &a.face_normals {
+        if !consider(n) {
+            return None;
+        }
+    }
+    for &n in &b.face_normals {
+        if !consider(n) {
+            return None;
+        }
+    }
+    for &ea in &a.edge_directions {
+        for &eb in &b.edge_directions {
+            if !consider(ea.cross(eb)) {
+                return None;
+            }
+        }
+    }
+
+    if best_axis == Vec3::ZERO || !best_overlap.is_finite() {
+        return None;
+    }
+    let normal = best_axis;
+
+    // 相手の内部に潜っている頂点を接触点にする。
+    let (_, max_a) = a.project(normal);
+    let (min_b, _) = b.project(normal);
+    let mut points: Vec<ContactPoint> = Vec::new();
+    for (i, &v) in b.vertices.iter().enumerate() {
+        // B の頂点が A の表面(法線方向の最遠面)より内側にあるか。
+        let depth = max_a - v.dot(normal);
+        if depth > 0.0 && point_inside(a, v) {
+            points.push(ContactPoint {
+                world_point: v,
+                penetration: depth,
+                feature_id: i as u32,
+            });
+        }
+    }
+    for (i, &v) in a.vertices.iter().enumerate() {
+        let depth = v.dot(normal) - min_b;
+        if depth > 0.0 && point_inside(b, v) {
+            points.push(ContactPoint {
+                world_point: v,
+                penetration: depth,
+                feature_id: 0x8000_0000 | i as u32,
+            });
+        }
+    }
+
+    if points.is_empty() {
+        // 辺×辺接触のフォールバック(docの「既知の限界」参照)。
+        let deepest_b = b
+            .vertices
+            .iter()
+            .copied()
+            .min_by(|p, q| p.dot(normal).partial_cmp(&q.dot(normal)).unwrap())?;
+        let deepest_a = a
+            .vertices
+            .iter()
+            .copied()
+            .max_by(|p, q| p.dot(normal).partial_cmp(&q.dot(normal)).unwrap())?;
+        points.push(ContactPoint {
+            world_point: (deepest_a + deepest_b).scale(0.5),
+            penetration: best_overlap,
+            feature_id: 0,
+        });
+    }
+
+    points.sort_by(|p, q| q.penetration.partial_cmp(&p.penetration).unwrap());
+    points.truncate(4);
+    Some((normal, points))
+}
+
+/// 点が凸多面体の内部(表面含む)にあるか。全ての面の内側半空間にあるかを見る。
+fn point_inside(poly: &ConvexPoly, p: Vec3) -> bool {
+    poly.face_normals.iter().all(|&n| {
+        let (_, max) = poly.project(n);
+        let (min, _) = poly.project(n);
+        let d = p.dot(n);
+        d <= max + 1e-9 && d >= min - 1e-9
+    })
+}
+
+/// 凸多面体 と 球(**群11**)。多面体の表面上で球の中心に最も近い点を求めれば
+/// 球-球に帰着する(`sphere_box`が箱に対してやっているのと同じ帰着)。
+///
+/// 最近点は「面上・辺上・頂点」のいずれかにあるので、三角形ごとに
+/// 点-三角形の最近点を求めて最小を取る。凸包の面数は高々数十なので総当たりで
+/// 十分(質量特性と同じく、これは narrowphase の中でも稀に走る経路)。
+/// 戻り値の法線は**多面体から球へ**向かう向き(A=多面体・B=球の A→B 規約)。
+fn convex_poly_sphere(
+    poly: &ConvexPoly,
+    hull_faces: &[[usize; 3]],
+    center: Vec3,
+    radius: f64,
+) -> Option<(Vec3, ContactPoint)> {
+    if point_inside(poly, center) {
+        // 中心が内部: 最も浅い面へ押し出す。
+        let mut best_depth = f64::INFINITY;
+        let mut best_normal = Vec3::new(0.0, 1.0, 0.0);
+        for &n in &poly.face_normals {
+            let (_, max) = poly.project(n);
+            let depth = max - center.dot(n);
+            if depth < best_depth {
+                best_depth = depth;
+                best_normal = n;
+            }
+        }
+        return Some((
+            best_normal,
+            ContactPoint {
+                world_point: center,
+                penetration: best_depth + radius,
+                feature_id: 0,
+            },
+        ));
+    }
+
+    let mut closest = Vec3::ZERO;
+    let mut best_dist_sq = f64::INFINITY;
+    for &f in hull_faces {
+        let p = closest_point_on_triangle(
+            center,
+            poly.vertices[f[0]],
+            poly.vertices[f[1]],
+            poly.vertices[f[2]],
+        );
+        let d = (p - center).length_sq();
+        if d < best_dist_sq {
+            best_dist_sq = d;
+            closest = p;
+        }
+    }
+    let dist = best_dist_sq.sqrt();
+    if dist >= radius {
+        return None;
+    }
+    let normal = if dist < EPS_LEN {
+        Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        (center - closest).scale(1.0 / dist)
+    };
+    let penetration = radius - dist;
+    Some((
+        normal,
+        ContactPoint {
+            world_point: closest,
+            penetration,
+            feature_id: 0,
+        },
+    ))
+}
+
+/// 点 `p` に最も近い三角形 `abc` 上の点(Ericson "Real-Time Collision Detection" §5.1.5、
+/// 重心座標の領域判定による閉形式)。
+fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = p - b;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return a + ab.scale(v);
+    }
+    let cp = p - c;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return a + ac.scale(w);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + (c - b).scale(w);
+    }
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    a + ab.scale(v) + ac.scale(w)
 }
 
 /// 球 と 箱: ボックスローカルで最近点にクランプ。
@@ -1225,13 +1610,65 @@ fn shape_pair_manifold(
             merged
         }
 
-        // **既知の限界**(`Shape::volume`のdoc参照): `ConvexMesh`は頂点列のみで
-        // 面情報を持たないため、接触生成(narrowphase)には凸包計算が要る——
-        // 「外部クレート実質ゼロ」の方針で3D凸包をゼロから実装するのは本増分の
-        // 範囲外。AABB(`aabb_of`)・体積・慣性は既に近似実装済みなので
-        // `ConvexMesh`のボディ自体は作成・シミュレートできるが、**この形状は
-        // まだ何とも衝突しない(すり抜ける)**。todo!()によるパニックより
-        // 安全な既定として`None`を返す。
+        // **群11で実装**。移行前は「頂点列だけで面情報が無く、3D凸包の実装は
+        // 範囲外」という理由で`None`を返しており、`ConvexMesh`は**何とも衝突
+        // せずすり抜けていた**。`crate::hull`で凸包を張れるようになったので、
+        // 他の形状と同じ土俵に上げる(`convex_poly_manifold`のdoc参照)。
+        //
+        // 平面だけは非有界で SAT の射影区間に乗らないため専用経路
+        // (`convex_mesh_plane`)で扱う——これは`box_plane`と同じ構造で、
+        // 最大4点の面接触を作れるので「床に置いた多面体が静止する」ケースが
+        // きちんと安定する。
+        (Shape::ConvexMesh { vertices }, Shape::Plane { normal, d }) => {
+            convex_mesh_plane(vertices, xf_a, *normal, *d).map(|(n, pts)| (-n, pts))
+        }
+        (Shape::Plane { normal, d }, Shape::ConvexMesh { vertices }) => {
+            convex_mesh_plane(vertices, xf_b, *normal, *d)
+        }
+
+        // 多面体 × 球は「表面上の最近点」で球-球へ帰着させる(`sphere_box`と同じ発想)。
+        (Shape::ConvexMesh { vertices }, Shape::Sphere { radius }) => {
+            let hull = crate::hull::convex_hull(vertices)?;
+            let poly = ConvexPoly::from_hull(&hull, xf_a);
+            convex_poly_sphere(&poly, &hull.faces, xf_b.position, *radius)
+                .map(|(n, p)| (n, vec![p]))
+        }
+        (Shape::Sphere { radius }, Shape::ConvexMesh { vertices }) => {
+            let hull = crate::hull::convex_hull(vertices)?;
+            let poly = ConvexPoly::from_hull(&hull, xf_b);
+            convex_poly_sphere(&poly, &hull.faces, xf_a.position, *radius)
+                .map(|(n, p)| (-n, vec![p]))
+        }
+
+        // 多面体 × 多面体 / 多面体 × 箱は SAT(`convex_poly_manifold`のdoc参照)。
+        (Shape::ConvexMesh { vertices: va }, Shape::ConvexMesh { vertices: vb }) => {
+            let (ha, hb) = (crate::hull::convex_hull(va)?, crate::hull::convex_hull(vb)?);
+            convex_poly_manifold(
+                &ConvexPoly::from_hull(&ha, xf_a),
+                &ConvexPoly::from_hull(&hb, xf_b),
+            )
+        }
+        (Shape::ConvexMesh { vertices }, Shape::Box { half_extents }) => {
+            let hull = crate::hull::convex_hull(vertices)?;
+            convex_poly_manifold(
+                &ConvexPoly::from_hull(&hull, xf_a),
+                &ConvexPoly::from_box(xf_b, *half_extents),
+            )
+        }
+        (Shape::Box { half_extents }, Shape::ConvexMesh { vertices }) => {
+            let hull = crate::hull::convex_hull(vertices)?;
+            convex_poly_manifold(
+                &ConvexPoly::from_box(xf_a, *half_extents),
+                &ConvexPoly::from_hull(&hull, xf_b),
+            )
+        }
+
+        // **既知の限界(正直な開示)**: `ConvexMesh` × `Capsule` は未実装。
+        // カプセルは「線分を半径で膨らませた」非多面体なので SAT の分離軸に
+        // 素直に乗らず(丸い部分の分離軸は連続無限個ある)、線分-凸多面体の
+        // 最近点計算を別途書く必要がある。本増分では手を付けず`None`を返す
+        // ——この組み合わせだけは引き続きすり抜ける。移行前は`ConvexMesh`が
+        // **何とも**衝突しなかったので、機能としては後退していない。
         (Shape::ConvexMesh { .. }, _) | (_, Shape::ConvexMesh { .. }) => None,
     }
 }
@@ -1800,21 +2237,220 @@ mod tests {
         );
     }
 
-    /// `ConvexMesh`はまだ何とも衝突しない(すり抜ける、既知の限界)ことを
-    /// パニックしないことも含めて確認する。
+    /// **かつて「`ConvexMesh`はまだ何とも衝突しない(すり抜ける)」ことを
+    /// 固定していたテストを、実装の到達点として書き換えたもの**(群11)。
+    ///
+    /// 移行前は3D凸包が無く narrowphase が一律`None`を返していたため、
+    /// `ConvexMesh`のボディは生成・積分はできても**他の何ともぶつからず
+    /// すり抜けた**。`crate::hull`と GJK/EPA 経路の追加でこれが解消したので、
+    /// 「すり抜けないこと」を要求する形へ反転させた。
+    ///
+    /// 退化した頂点列(ここでは2点=線分)でも**パニックしない**ことは
+    /// 引き続き要求する——凸包は張れない(体積ゼロ)が、GJK のサポート写像は
+    /// 点集合に対して定義できるので接触自体は生成される。
     #[test]
-    fn convex_mesh_does_not_collide_with_anything_yet() {
-        let mesh = Shape::ConvexMesh {
+    fn convex_mesh_now_collides_instead_of_passing_through() {
+        // 退化した2点の「メッシュ」は凸包を張れない(3次元の広がりが無い)。
+        // 体積も接触も持たないが、**パニックしない**ことは要求する。
+        let degenerate = Shape::ConvexMesh {
             vertices: vec![Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)],
         };
-        let sphere = Shape::Sphere { radius: 5.0 };
-        assert!(dispatch_for_test(
+        assert_eq!(degenerate.volume(), None, "退化メッシュは体積を持たない");
+        let big_sphere = Shape::Sphere { radius: 5.0 };
+        assert!(
+            dispatch_for_test(
+                &degenerate,
+                identity_xf(Vec3::ZERO),
+                &big_sphere,
+                identity_xf(Vec3::ZERO)
+            )
+            .is_none(),
+            "凸包が張れない退化メッシュは接触も生成しない(パニックしないことが要件)"
+        );
+
+        // **実体のある**立方体メッシュは、球と重なれば接触を生成する
+        // ——これが移行前との決定的な違い(移行前は常に None ですり抜けた)。
+        let cube_mesh_overlapping = convex_mesh_cube(1.0);
+        assert!(
+            dispatch_for_test(
+                &cube_mesh_overlapping,
+                identity_xf(Vec3::ZERO),
+                &Shape::Sphere { radius: 1.0 },
+                identity_xf(Vec3::new(1.5, 0.0, 0.0))
+            )
+            .is_some(),
+            "実体のあるメッシュは球と衝突するはず(移行前は None ですり抜けた)"
+        );
+
+        // 明確に離れていれば接触しない。
+        let cube_mesh = convex_mesh_cube(1.0);
+        let sphere = Shape::Sphere { radius: 1.0 };
+        assert!(
+            dispatch_for_test(
+                &cube_mesh,
+                identity_xf(Vec3::ZERO),
+                &sphere,
+                identity_xf(Vec3::new(5.0, 0.0, 0.0))
+            )
+            .is_none(),
+            "離れていれば接触しない"
+        );
+    }
+
+    /// 立方体の8隅からなる`ConvexMesh`(半辺`half`)。
+    fn convex_mesh_cube(half: f64) -> Shape {
+        let mut vertices = Vec::with_capacity(8);
+        for &sx in &[-1.0, 1.0] {
+            for &sy in &[-1.0, 1.0] {
+                for &sz in &[-1.0, 1.0] {
+                    vertices.push(Vec3::new(sx * half, sy * half, sz * half));
+                }
+            }
+        }
+        Shape::ConvexMesh { vertices }
+    }
+
+    /// **床に置いた凸多面体は、等価な箱と厳密に同じ接触を作る**(群11)。
+    /// 立方体の8隅そのものを頂点に持つメッシュなので、`box_plane`と
+    /// `convex_mesh_plane`はどちらも「貫入した頂点を最大4点」返す同じ論理——
+    /// 法線・接触点数・最大貫入量まで一致しなければならない。
+    ///
+    /// これは`ConvexMesh`が床で安定して静止できること(1点支持ではなく
+    /// 面で支えられること)を担保する、実用上いちばん重要なケース。
+    #[test]
+    fn convex_mesh_on_a_plane_matches_the_equivalent_box_exactly() {
+        let half = 1.0;
+        let plane = Shape::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+        // 下面が y=-0.1(貫入 0.1)になる高さ。
+        let xf = identity_xf(Vec3::new(0.0, 0.9, 0.0));
+
+        let (box_normal, box_points) = dispatch_for_test(
+            &Shape::Box {
+                half_extents: Vec3::new(half, half, half),
+            },
+            xf,
+            &plane,
+            identity_xf(Vec3::ZERO),
+        )
+        .expect("box penetrates the plane");
+        let (mesh_normal, mesh_points) =
+            dispatch_for_test(&convex_mesh_cube(half), xf, &plane, identity_xf(Vec3::ZERO))
+                .expect("mesh must penetrate the plane just like the box");
+
+        assert!((mesh_normal - box_normal).length() < 1e-12);
+        assert_eq!(mesh_points.len(), box_points.len(), "どちらも底面の4頂点");
+        assert_eq!(mesh_points.len(), 4);
+        let max_pen = |pts: &[ContactPoint]| pts.iter().map(|p| p.penetration).fold(0.0, f64::max);
+        assert!((max_pen(&mesh_points) - max_pen(&box_points)).abs() < 1e-12);
+        assert!((max_pen(&mesh_points) - 0.1).abs() < 1e-12, "貫入は 0.1");
+    }
+
+    /// **多面体 × 球の法線が設計の A→B 規約であること**(群11)。
+    /// 符号の取り違えは「接触が反発ではなく吸着になる」重大な誤りなので、
+    /// 解析的に分かる配置(立方体の +x 面の外に球を置く)で明示的に固定する。
+    #[test]
+    fn convex_mesh_sphere_normal_points_from_a_to_b() {
+        let mesh = convex_mesh_cube(1.0);
+        let sphere = Shape::Sphere { radius: 1.0 };
+        // 立方体の +x 面(x=1)から球の中心が 1.5 → 貫入 0.5。
+        let (normal, points) = dispatch_for_test(
             &mesh,
             identity_xf(Vec3::ZERO),
             &sphere,
-            identity_xf(Vec3::ZERO)
+            identity_xf(Vec3::new(1.5, 0.0, 0.0)),
         )
-        .is_none());
+        .expect("mesh and sphere overlap");
+        assert!(
+            (normal - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-3,
+            "A(メッシュ)から B(球)へ向かう +x のはず: {normal:?}"
+        );
+        assert_eq!(points.len(), 1, "多面体×球は1点マニフォールド");
+        assert!(
+            (points[0].penetration - 0.5).abs() < 1e-3,
+            "貫入は解析値 0.5 のはず: {}",
+            points[0].penetration
+        );
+    }
+
+    /// **凸多面体どうしの貫入は軸方向の重なり量に一致する**(群11)。
+    /// 多面体ペアでは EPA がミンコフスキー差の境界と有限回で厳密に一致する
+    /// (滑らかな球と違って線形収束の尾を引かない)ため、許容誤差を
+    /// 球ケースより2桁厳しく取れる。
+    #[test]
+    fn convex_mesh_versus_box_penetration_matches_the_axis_overlap() {
+        let mesh = convex_mesh_cube(1.0);
+        let other = Shape::Box {
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        };
+        // 中心間距離 1.5、半幅の和 2.0 → x方向の重なりは 0.5。
+        let (normal, points) = dispatch_for_test(
+            &mesh,
+            identity_xf(Vec3::ZERO),
+            &other,
+            identity_xf(Vec3::new(1.5, 0.0, 0.0)),
+        )
+        .expect("mesh and box overlap");
+        assert!(
+            (normal - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-6,
+            "{normal:?}"
+        );
+        assert!(
+            (points[0].penetration - 0.5).abs() < 1e-6,
+            "{}",
+            points[0].penetration
+        );
+    }
+
+    /// `ConvexMesh`どうしも同じ経路で衝突すること(群11)。
+    #[test]
+    fn convex_mesh_versus_convex_mesh_collides() {
+        let a = convex_mesh_cube(1.0);
+        let b = convex_mesh_cube(1.0);
+        let (normal, points) = dispatch_for_test(
+            &a,
+            identity_xf(Vec3::ZERO),
+            &b,
+            identity_xf(Vec3::new(0.0, 1.5, 0.0)),
+        )
+        .expect("two meshes overlap");
+        assert!(
+            (normal - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-6,
+            "{normal:?}"
+        );
+        assert!((points[0].penetration - 0.5).abs() < 1e-6);
+    }
+
+    /// **`ConvexMesh` × `Capsule` は本増分では未実装**(既知の限界を固定する
+    /// テスト)。カプセルは「線分を半径で膨らませた」非多面体なので SAT の
+    /// 分離軸に素直に乗らず(丸い部分の分離軸は連続無限個ある)、線分-凸多面体の
+    /// 最近点計算を別途書く必要がある。
+    ///
+    /// **この組み合わせだけは引き続きすり抜ける**。移行前は`ConvexMesh`が
+    /// *何とも*衝突しなかったので機能の後退ではないが、穴が残っていることは
+    /// テストとして明示しておく——将来これを実装したらこのテストが落ち、
+    /// 「塞がった」ことの通知になる(`convex_mesh_aabb_approximation_...`が
+    /// 凸包実装の通知として機能したのと同じ仕掛け)。
+    #[test]
+    fn convex_mesh_versus_capsule_is_not_implemented_yet() {
+        let mesh = convex_mesh_cube(1.0);
+        // 明らかに深く重なる配置(実装されていれば必ず接触するはず)。
+        let capsule = Shape::Capsule {
+            radius: 0.8,
+            half_height: 1.0,
+        };
+        assert!(
+            dispatch_for_test(
+                &mesh,
+                identity_xf(Vec3::ZERO),
+                &capsule,
+                identity_xf(Vec3::new(0.5, 0.0, 0.0))
+            )
+            .is_none(),
+            "未実装なので None(実装したらこのテストを反転させること)"
+        );
     }
 
     #[test]

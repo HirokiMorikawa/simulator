@@ -16,6 +16,7 @@ mod ccd;
 mod collision;
 mod contact;
 mod gjk;
+mod hull;
 mod joint;
 mod shape;
 mod sleep;

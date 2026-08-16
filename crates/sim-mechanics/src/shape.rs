@@ -134,9 +134,16 @@ impl Shape {
             //   場合の非対角成分(慣性乗積)を捨てていた。
             //   → 完全な`Mat3`を返すようになったので厳密。
             //
-            // **残る近似(正直な開示)**: 部品どうしが**重なっている**場合、
-            // 重なり領域の質量を二重計上する(`union_volume`のdoc参照)。
-            // 重なりの無い配置(既存シーンのほぼ全て)では厳密。
+            // **残る近似(正直な開示)**: **体積**は`union_volume`がブーリアン和を
+            // 取るので重なっていても正しいが、**慣性テンソルと重心の質量配分**は
+            // 各部品の素の体積比 `p.volume / total_volume` のままである。
+            // つまり部品が重なっている領域は「密度2倍」として重心・慣性に効く。
+            // 重なりの無い配置(既存シーンのほぼ全て)では厳密で、L字のように
+            // 9%程度重なる構成でも重心・慣性への影響は数%に留まる。
+            // 完全に正すには union 領域そのものを積分する必要があり、本増分の
+            // 範囲外とした(質量=体積×密度の側だけでも正しくしたのは、
+            // 質量が運動方程式へ一次で効くのに対し、質量配分の偏りは
+            // 慣性テンソルへ二次的にしか効かないため)。
             Shape::Compound { children } => {
                 let parts: Vec<(sim_math::Transform, MassProperties)> = children
                     .iter()
@@ -222,39 +229,327 @@ impl Shape {
     }
 }
 
-/// `Compound`の体積。`naive_sum`は各部品の体積の単純和。
+/// `Compound`の体積を**ブーリアン和(union)**として求める(群11)。
+/// `naive_sum` は各部品の体積の単純和(重なりを二重計上した値)。
 ///
-/// **既知の限界(群11時点では未解消、次の増分で対応)**: 部品どうしが重なって
-/// いても単純和のまま返すため、重なり領域を二重計上する。CSGのブーリアン和は
-/// まだ実装していない。
-fn union_volume(_children: &[(sim_math::Transform, Shape)], naive_sum: f64) -> f64 {
-    naive_sum
+/// ## なぜ必要か
+///
+/// 移行前は `children.map(volume).sum()` をそのまま返していたため、部品が
+/// 重なって配置されていると重なり領域を二重計上して質量を過大評価していた。
+/// これは机上の心配ではない——`sim-wasm` の `spawn_compound_l_shape` が作る
+/// L字は縦棒と横棒が実際に交差しており、単純和 0.75 m³ に対し真の和は
+/// 0.6875 m³、**9%の過大評価**だった(`tests`で解析的に固定してある)。
+///
+/// ## 3段構えの実装(なぜ Monte Carlo 一本にしないか)
+///
+/// 1. **部品が互いに素なら単純和がそのまま厳密**。形状は自身のAABBに含まれる
+///    ので、AABBが重ならない部品対は形状も重ならない。既存シーンのほとんど
+///    (と既存テスト)はこの経路に落ち、**数値は1ビットも変わらない**。
+///    Monte Carlo を無条件に使うと、重なりゼロの構成でも推定誤差が乗って
+///    `compound_volume_is_the_sum_of_its_children` のような厳密比較のテストが
+///    壊れてしまう——それは実装の後退である。
+/// 2. **重なりがあり、かつ全部品が軸並行な箱なら座標圧縮で厳密**。
+///    全部品の x/y/z 境界値で空間を格子に切ると、各セルは「どれかの箱に
+///    完全に含まれる」か「どの箱とも交わらない」かのどちらかになる
+///    (Klee の測度問題の標準解法)。含まれるセルの体積を足せば**厳密な**
+///    union が出る。これが実使用の主経路(L字も車体もほぼ箱で組まれる)。
+/// 3. **それ以外(球・カプセル・回転した箱が重なる場合)は層化 Monte Carlo**。
+///    決定論的な固定列(下記)で union の AABB 内に点を撒き、「どれかの部品に
+///    含まれる」割合から体積を推定する。
+///
+/// ### Monte Carlo の誤差(経路3を通る場合のみ)
+///
+/// サンプル数 $N=200{,}000$、包含率 $p$ の二項分布なので体積の相対標準誤差は
+/// $\sqrt{(1-p)/(pN)}$。実用域の $p\gtrsim0.2$ なら **0.45% 以下**、
+/// $p=0.5$ なら 0.22%。質量はこの精度で決まる(密度指定でボディを作る場合)。
+/// 厳密さが要るなら `mass_override` で質量を直接指定できる。
+///
+/// 決定論のため乱数生成器は使わず、**加法的再帰列(Weyl列)**を3次元に
+/// 拡張した低食い違い量列を使う。同じ形状には常に同じ推定値が返る
+/// (この物理コアの決定論方針。`state_hash` の再現性を壊さない)。
+fn union_volume(children: &[(sim_math::Transform, Shape)], naive_sum: f64) -> f64 {
+    let leaves = flatten_leaves(
+        children,
+        sim_math::Transform {
+            position: Vec3::ZERO,
+            rotation: sim_math::Quat::IDENTITY,
+        },
+    );
+    if leaves.len() < 2 {
+        return naive_sum;
+    }
+
+    // 経路1: 部品が互いに素(AABBが1つも重ならない)なら単純和が厳密。
+    let boxes: Vec<Aabb> = leaves.iter().map(|(xf, s)| leaf_aabb(s, *xf)).collect();
+    let mut any_overlap = false;
+    'outer: for i in 0..boxes.len() {
+        for j in (i + 1)..boxes.len() {
+            if aabbs_overlap(boxes[i], boxes[j]) {
+                any_overlap = true;
+                break 'outer;
+            }
+        }
+    }
+    if !any_overlap {
+        return naive_sum;
+    }
+
+    // 経路2: 全部品が軸並行な箱 → 座標圧縮で厳密。
+    if let Some(exact) = axis_aligned_box_union_volume(&leaves) {
+        return exact;
+    }
+
+    // 経路3: 層化 Monte Carlo。
+    monte_carlo_union_volume(&leaves, &boxes)
 }
 
-/// `ConvexMesh`の質量特性。
+/// `Compound`を(入れ子も含めて)葉の形状へ平坦化し、それぞれの親ローカル系での
+/// 変換を添えて返す。union の判定は「葉のどれかに含まれるか」で行うため、
+/// 入れ子の`Compound`をそのまま部品として扱うと包含判定が再帰的になって
+/// 扱いにくい——先に潰しておく。
+fn flatten_leaves(
+    children: &[(sim_math::Transform, Shape)],
+    parent: sim_math::Transform,
+) -> Vec<(sim_math::Transform, Shape)> {
+    let mut out = Vec::new();
+    for (xf, shape) in children {
+        let world = parent.compose(*xf);
+        match shape {
+            Shape::Compound { children: inner } => out.extend(flatten_leaves(inner, world)),
+            // 体積を持たない形状は union に寄与しない。
+            Shape::Plane { .. } => {}
+            other => out.push((world, other.clone())),
+        }
+    }
+    out
+}
+
+/// 葉形状のローカル→親フレームでのAABB。
+fn leaf_aabb(shape: &Shape, xf: sim_math::Transform) -> Aabb {
+    match shape {
+        Shape::Sphere { radius } => {
+            let r = Vec3::new(*radius, *radius, *radius);
+            Aabb {
+                min: xf.position - r,
+                max: xf.position + r,
+            }
+        }
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => {
+            // 芯線(ローカル+y)の両端を包む球2つのAABB。
+            let axis = xf.rotation.rotate(Vec3::new(0.0, *half_height, 0.0));
+            let r = Vec3::new(*radius, *radius, *radius);
+            let (a, b) = (xf.position + axis, xf.position - axis);
+            Aabb {
+                min: Vec3::new(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)) - r,
+                max: Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)) + r,
+            }
+        }
+        Shape::Box { half_extents } => {
+            let mut min = Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            let mut max = Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for &sx in &[-1.0, 1.0] {
+                for &sy in &[-1.0, 1.0] {
+                    for &sz in &[-1.0, 1.0] {
+                        let p = xf.apply_point(Vec3::new(
+                            sx * half_extents.x,
+                            sy * half_extents.y,
+                            sz * half_extents.z,
+                        ));
+                        min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+                        max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+                    }
+                }
+            }
+            Aabb { min, max }
+        }
+        Shape::ConvexMesh { vertices } => {
+            let world: Vec<Vec3> = vertices.iter().map(|&v| xf.apply_point(v)).collect();
+            points_aabb(&world).unwrap_or(Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            })
+        }
+        Shape::Plane { .. } | Shape::Compound { .. } => Aabb {
+            min: Vec3::ZERO,
+            max: Vec3::ZERO,
+        },
+    }
+}
+
+fn aabbs_overlap(a: Aabb, b: Aabb) -> bool {
+    a.min.x < b.max.x
+        && a.max.x > b.min.x
+        && a.min.y < b.max.y
+        && a.max.y > b.min.y
+        && a.min.z < b.max.z
+        && a.max.z > b.min.z
+}
+
+/// 回転していない`Box`だけで構成されている場合の**厳密な** union 体積
+/// (座標圧縮 / Klee の測度問題)。1つでも箱以外・回転ありがあれば `None`。
+fn axis_aligned_box_union_volume(leaves: &[(sim_math::Transform, Shape)]) -> Option<f64> {
+    let mut boxes: Vec<Aabb> = Vec::with_capacity(leaves.len());
+    for (xf, shape) in leaves {
+        let Shape::Box { half_extents } = shape else {
+            return None;
+        };
+        // 回転が実質恒等でなければこの経路は使えない。
+        if !rotation_is_identity(xf.rotation) {
+            return None;
+        }
+        boxes.push(Aabb {
+            min: xf.position - *half_extents,
+            max: xf.position + *half_extents,
+        });
+    }
+
+    // 各軸の境界値を集めて昇順・重複除去(座標圧縮)。
+    let axis_values = |pick: fn(Vec3) -> f64| -> Vec<f64> {
+        let mut v: Vec<f64> = boxes
+            .iter()
+            .flat_map(|b| [pick(b.min), pick(b.max)])
+            .collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.dedup();
+        v
+    };
+    let xs = axis_values(|p| p.x);
+    let ys = axis_values(|p| p.y);
+    let zs = axis_values(|p| p.z);
+
+    // セル数が過大なら諦める(部品数が多い場合の保険。O(n^3)セル)。
+    if xs.len().saturating_mul(ys.len()).saturating_mul(zs.len()) > 2_000_000 {
+        return None;
+    }
+
+    let mut total = 0.0;
+    for i in 0..xs.len().saturating_sub(1) {
+        for j in 0..ys.len().saturating_sub(1) {
+            for k in 0..zs.len().saturating_sub(1) {
+                // セルの中心がどれかの箱に入っていれば、セル全体が入っている
+                // (境界値で切ってあるのでセルは各箱に対して「全部入り」か
+                //  「全く入らない」かのどちらかしかない)。
+                let c = Vec3::new(
+                    0.5 * (xs[i] + xs[i + 1]),
+                    0.5 * (ys[j] + ys[j + 1]),
+                    0.5 * (zs[k] + zs[k + 1]),
+                );
+                let inside = boxes.iter().any(|b| {
+                    c.x >= b.min.x
+                        && c.x <= b.max.x
+                        && c.y >= b.min.y
+                        && c.y <= b.max.y
+                        && c.z >= b.min.z
+                        && c.z <= b.max.z
+                });
+                if inside {
+                    total += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j]) * (zs[k + 1] - zs[k]);
+                }
+            }
+        }
+    }
+    Some(total)
+}
+
+fn rotation_is_identity(q: sim_math::Quat) -> bool {
+    // w=±1 なら回転角0(符号の違いは同じ姿勢を表す)。
+    (q.w.abs() - 1.0).abs() < 1e-12 && q.x.abs() < 1e-12 && q.y.abs() < 1e-12 && q.z.abs() < 1e-12
+}
+
+/// Monte Carlo のサンプル数(`union_volume` のdocに誤差評価あり)。
+const UNION_MONTE_CARLO_SAMPLES: usize = 200_000;
+
+/// 層化 Monte Carlo による union 体積の推定(`union_volume` のdoc参照)。
+fn monte_carlo_union_volume(leaves: &[(sim_math::Transform, Shape)], boxes: &[Aabb]) -> f64 {
+    // 全体のAABB(サンプリング領域)。
+    let mut min = boxes[0].min;
+    let mut max = boxes[0].max;
+    for b in &boxes[1..] {
+        min = Vec3::new(min.x.min(b.min.x), min.y.min(b.min.y), min.z.min(b.min.z));
+        max = Vec3::new(max.x.max(b.max.x), max.y.max(b.max.y), max.z.max(b.max.z));
+    }
+    let size = max - min;
+    let bounding_volume = size.x * size.y * size.z;
+    if bounding_volume <= 0.0 {
+        return 0.0;
+    }
+
+    // 加法的再帰(Weyl)列。3次元に均一かつ決定論的な低食い違い量列で、
+    // 定数は plastic number の冪の逆数(Roberts の R_d 列)。
+    const A1: f64 = 0.819_172_513_396_164_4;
+    const A2: f64 = 0.671_043_606_703_789_9;
+    const A3: f64 = 0.549_700_477_901_802_6;
+
+    let hulls: Vec<Option<crate::hull::ConvexHull>> = leaves
+        .iter()
+        .map(|(_, s)| match s {
+            Shape::ConvexMesh { vertices } => crate::hull::convex_hull(vertices),
+            _ => None,
+        })
+        .collect();
+
+    let mut hits = 0usize;
+    for n in 0..UNION_MONTE_CARLO_SAMPLES {
+        let t = (n + 1) as f64;
+        let u = (t * A1).fract();
+        let v = (t * A2).fract();
+        let w = (t * A3).fract();
+        let p = Vec3::new(min.x + u * size.x, min.y + v * size.y, min.z + w * size.z);
+        let inside = leaves
+            .iter()
+            .zip(&hulls)
+            .any(|((xf, s), hull)| leaf_contains_point(s, *xf, p, hull.as_ref()));
+        if inside {
+            hits += 1;
+        }
+    }
+    bounding_volume * hits as f64 / UNION_MONTE_CARLO_SAMPLES as f64
+}
+
+/// 点`p`(親フレーム)が葉形状の内部にあるか。
+fn leaf_contains_point(
+    shape: &Shape,
+    xf: sim_math::Transform,
+    p: Vec3,
+    hull: Option<&crate::hull::ConvexHull>,
+) -> bool {
+    // 形状ローカルへ戻してから判定する。
+    let local = xf.inverse().apply_point(p);
+    match shape {
+        Shape::Sphere { radius } => local.length_sq() <= radius * radius,
+        Shape::Box { half_extents } => {
+            local.x.abs() <= half_extents.x
+                && local.y.abs() <= half_extents.y
+                && local.z.abs() <= half_extents.z
+        }
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => {
+            // 芯線(ローカル+y、±half_height)への距離。
+            let clamped_y = local.y.clamp(-half_height, *half_height);
+            let d = local - Vec3::new(0.0, clamped_y, 0.0);
+            d.length_sq() <= radius * radius
+        }
+        Shape::ConvexMesh { .. } => hull.is_some_and(|h| h.contains(local, 0.0)),
+        Shape::Plane { .. } | Shape::Compound { .. } => false,
+    }
+}
+
+/// `ConvexMesh`の質量特性。**3D凸包を実際に張って厳密に積分する**
+/// (群11、`crate::hull`参照)。
 ///
-/// **既知の限界(群11時点では未解消、次の増分で対応)**: 真の凸包体積・慣性には
-/// 面情報(三角形分割)が要るが`ConvexMesh`は頂点列のみ持つ。ここでは軸並行
-/// 境界箱(AABB)による直方体近似で代用する。凸包はAABBに内接するため
-/// **常に過大評価**になる(正四面体で体積3倍、正八面体で6倍——
-/// `shape::tests`のカナリアテスト参照)。密度から質量を出す用途では安全側では
-/// ないことに注意——形状を直接指定して`mass_override`を使うか、密度を実効値へ
-/// 調整することを推奨。
+/// 移行前は頂点群のAABBによる直方体近似で、凸包はAABBに内接するため常に
+/// 過大評価だった(正四面体で体積3倍・正八面体で6倍)。いまは面三角形ごとの
+/// 符号付き四面体分解で体積・重心・慣性テンソルのすべてが解析的に厳密。
 ///
-/// 移行前と違い**重心はAABBの中心**を返す(頂点群が原点まわりに非対称なら
-/// ローカル原点とはずれる)。これは`Box`近似の慣性が「AABBの中心まわり」で
-/// あることと整合させるため——移行前は慣性だけAABB中心まわりで計算しつつ
-/// 重心を原点と見なしており、内部矛盾していた。
+/// 3次元的な広がりを持たない退化入力(点/直線/平面上、頂点3個以下)は
+/// 体積を持たないので `None`(`Plane` と同じ扱い)。
 fn convex_mesh_mass_properties(vertices: &[Vec3]) -> Option<MassProperties> {
-    let aabb = points_aabb(vertices)?;
-    let size = aabb.max - aabb.min;
-    let half_extents = size.scale(0.5);
-    let approximation = Shape::Box { half_extents };
-    Some(MassProperties {
-        volume: size.x * size.y * size.z,
-        center_of_mass: (aabb.min + aabb.max).scale(0.5),
-        unit_inertia: approximation.unit_mass_inertia_tensor(),
-    })
+    crate::hull::convex_hull(vertices)?.mass_properties()
 }
 
 /// 点群の軸並行境界箱(空なら`None`)。`Shape::ConvexMesh`のAABB近似
@@ -566,6 +861,183 @@ mod tests {
         );
     }
 
+    /// **重なりの無い`Compound`は単純和のまま厳密**(群11で union を入れても
+    /// この経路の数値は1ビットも変わらないことを固定する)。
+    /// `compound_volume_is_the_sum_of_its_children` と対になるテスト。
+    #[test]
+    fn disjoint_compound_volume_is_still_the_exact_sum() {
+        let compound = Shape::Compound {
+            children: vec![
+                (
+                    identity_transform(Vec3::ZERO),
+                    Shape::Box {
+                        half_extents: Vec3::new(0.5, 0.5, 0.5),
+                    },
+                ),
+                (
+                    identity_transform(Vec3::new(10.0, 0.0, 0.0)),
+                    Shape::Sphere { radius: 1.0 },
+                ),
+            ],
+        };
+        let expected = 1.0 + 4.0 / 3.0 * std::f64::consts::PI;
+        // 厳密比較(Monte Carlo の推定誤差が混ざっていたらここで落ちる)。
+        assert!((compound.volume().unwrap() - expected).abs() < 1e-15);
+    }
+
+    /// **重なった軸並行の箱2つの union が解析解と厳密に一致する**(群11)。
+    ///
+    /// 一辺2の立方体2つを x 方向に 1 だけずらして重ねる。
+    /// 単純和は 8+8=16、重なりは 1×2×2=4 なので**真の union は 12**。
+    /// 座標圧縮(Klee)の経路が厳密解を返すことを確認する。
+    #[test]
+    fn overlapping_axis_aligned_boxes_use_the_exact_union_volume() {
+        let half = Vec3::new(1.0, 1.0, 1.0);
+        let compound = Shape::Compound {
+            children: vec![
+                (
+                    identity_transform(Vec3::ZERO),
+                    Shape::Box { half_extents: half },
+                ),
+                (
+                    identity_transform(Vec3::new(1.0, 0.0, 0.0)),
+                    Shape::Box { half_extents: half },
+                ),
+            ],
+        };
+        let volume = compound.volume().unwrap();
+        assert!(
+            (volume - 12.0).abs() < 1e-12,
+            "重なり 4 を差し引いた 12 のはず(単純和は 16): {volume}"
+        );
+    }
+
+    /// **実使用のL字コンパウンド**(`sim-wasm::spawn_compound_l_shape`と同一形状)
+    /// の union 体積が解析解と厳密に一致すること(群11)。
+    ///
+    /// - 縦棒: 中心 (0, 0.75, 0)、半寸 (0.25, 1.0, 0.25) → 体積 0.5
+    /// - 横棒: 中心 (0.25, -0.25, 0)、半寸 (0.5, 0.25, 0.25) → 体積 0.25
+    /// - 交差領域: x∈[-0.25,0.25](幅0.5)、y∈[-0.25,0](厚み0.25)、
+    ///   z∈[-0.25,0.25](幅0.5) → 0.0625
+    ///
+    /// よって単純和 0.75 に対し**真の union は 0.6875**。移行前はこの 0.75 を
+    /// そのまま質量に使っており、**9%の質量過大評価**だった。
+    #[test]
+    fn l_shaped_compound_union_volume_matches_the_analytic_value() {
+        let compound = Shape::Compound {
+            children: vec![
+                (
+                    identity_transform(Vec3::new(0.0, 0.75, 0.0)),
+                    Shape::Box {
+                        half_extents: Vec3::new(0.25, 1.0, 0.25),
+                    },
+                ),
+                (
+                    identity_transform(Vec3::new(0.25, -0.25, 0.0)),
+                    Shape::Box {
+                        half_extents: Vec3::new(0.5, 0.25, 0.25),
+                    },
+                ),
+            ],
+        };
+        let volume = compound.volume().unwrap();
+        assert!(
+            (volume - 0.6875).abs() < 1e-12,
+            "L字の真の union は 0.6875 のはず(単純和 0.75、重なり 0.0625): {volume}"
+        );
+        // 移行前の値へ戻っていないこと(退化した検証にしない)。
+        assert!(
+            (volume - 0.75).abs() > 1e-3,
+            "単純和 0.75 に戻っている: {volume}"
+        );
+    }
+
+    /// 完全に入れ子(小さい箱が大きい箱の内部)なら union は大きいほうの体積。
+    /// 座標圧縮が「包含」を正しく扱えることの確認。
+    #[test]
+    fn fully_contained_child_does_not_add_volume() {
+        let compound = Shape::Compound {
+            children: vec![
+                (
+                    identity_transform(Vec3::ZERO),
+                    Shape::Box {
+                        half_extents: Vec3::new(1.0, 1.0, 1.0),
+                    },
+                ),
+                (
+                    identity_transform(Vec3::ZERO),
+                    Shape::Box {
+                        half_extents: Vec3::new(0.3, 0.3, 0.3),
+                    },
+                ),
+            ],
+        };
+        assert!((compound.volume().unwrap() - 8.0).abs() < 1e-12);
+    }
+
+    /// **Monte Carlo 経路(球どうしの重なり)が解析解に近いこと**(群11)。
+    ///
+    /// 半径 $r$ の等しい球を中心間距離 $d<2r$ で重ねたときのレンズ体積は
+    /// $V_\cap=\frac{\pi(2r-d)^2(d^2+4dr)}{12d}$(標準的な球冠の公式)。
+    /// union はその 2 球ぶんから交差を引いたもの。
+    ///
+    /// 許容誤差: `union_volume` の doc の誤差評価どおり、N=200,000 の
+    /// 相対標準誤差は実用域で 0.5% 以下。統計的な揺らぎに 3σ 相当の余裕を
+    /// 見て **2%** を上限とする(決定論的な列なので実行ごとにぶれはしないが、
+    /// 「推定量として妥当な範囲」を要求する意図)。
+    #[test]
+    fn overlapping_spheres_union_volume_is_close_to_the_analytic_value() {
+        let r = 1.0_f64;
+        let d = 1.2_f64;
+        let compound = Shape::Compound {
+            children: vec![
+                (identity_transform(Vec3::ZERO), Shape::Sphere { radius: r }),
+                (
+                    identity_transform(Vec3::new(d, 0.0, 0.0)),
+                    Shape::Sphere { radius: r },
+                ),
+            ],
+        };
+        let sphere_volume = 4.0 / 3.0 * std::f64::consts::PI * r.powi(3);
+        let lens =
+            std::f64::consts::PI * (2.0 * r - d).powi(2) * (d * d + 4.0 * d * r) / (12.0 * d);
+        let expected = 2.0 * sphere_volume - lens;
+
+        let volume = compound.volume().unwrap();
+        let rel = (volume - expected).abs() / expected;
+        assert!(
+            rel < 2e-2,
+            "Monte Carlo の union 推定が解析解から離れすぎ: \
+             actual={volume} expected={expected} rel={rel:.4}"
+        );
+        // 単純和(交差を二重計上した値)よりは確実に小さいこと。
+        assert!(
+            volume < 2.0 * sphere_volume - 0.5 * lens,
+            "重なりが差し引かれていない: {volume}"
+        );
+    }
+
+    /// 同じ形状には**常に同じ体積**が返る(決定論。Monte Carlo 経路でも
+    /// 乱数生成器を使わず固定の低食い違い量列を使うため)。
+    #[test]
+    fn union_volume_is_deterministic() {
+        let make = || Shape::Compound {
+            children: vec![
+                (
+                    identity_transform(Vec3::ZERO),
+                    Shape::Sphere { radius: 1.0 },
+                ),
+                (
+                    identity_transform(Vec3::new(1.2, 0.0, 0.0)),
+                    Shape::Sphere { radius: 1.0 },
+                ),
+            ],
+        };
+        let a = make().volume().unwrap();
+        let b = make().volume().unwrap();
+        assert_eq!(a, b, "同じ形状なら厳密に同じ値であること");
+    }
+
     /// `ConvexMesh`はAABB近似(モジュールdoc参照)なので、頂点が立方体の
     /// 8隅そのものなら`Shape::Box`と完全に一致するはず。
     #[test]
@@ -638,30 +1110,34 @@ mod tests {
         assert!(actual.x > actual.y && actual.y > actual.z, "{actual:?}");
     }
 
-    /// **AABB近似の「カナリア」**(正しさの証明ではない、現状の**誤り方**を固定する
-    /// テスト)。`ConvexMesh`は面情報を持たず、体積・慣性を頂点群のAABBで代用する
-    /// (`volume()`のdoc「既知の限界」参照)。既存の
-    /// `convex_mesh_of_a_cubes_corners_matches_the_equivalent_box`は、AABBが
-    /// たまたま厳密になる立方体の8隅しか見ていない。
+    /// **かつてのAABB近似「カナリア」を、凸包実装の到達点として書き換えたもの**。
     ///
-    /// ここでは**AABB近似が確実に外れる**正多面体を2つ使い、真の解析的体積との
-    /// 比を固定する:
+    /// 移行前このテストは、`ConvexMesh`が面情報を持たず体積・慣性を頂点群の
+    /// AABBで代用していた時代の**誤り方**を固定していた——正四面体の体積を
+    /// ちょうど3倍、正八面体をちょうど6倍に過大評価する、という比を
+    /// assert していた。そして doc には「将来の3D凸包実装が入ったらこの
+    /// テストは落ちる——その時は比が 1.0 になったことを確認する形へ意図的に
+    /// 書き換える」と書かれていた。**群11でその時が来たので、宣言どおり
+    /// 書き換えた**(落ちたこと自体が「近似が実装に置き換わった」という通知)。
+    ///
+    /// いまは `crate::hull` が実際に凸包を張り、面三角形ごとの符号付き四面体
+    /// 分解で体積・重心・慣性を解析的に積分する。したがって近似ではなく
+    /// **厳密な解析解との一致**を要求する:
+    ///
     /// - 正四面体 $(\pm1,\pm1,\pm1)$ の交互4頂点。辺長 $a=2\sqrt2$、
-    ///   $V=a^3/(6\sqrt2)=8/3$。AABB は一辺2の立方体なので $V_{AABB}=8$ ——
-    ///   **ちょうど3倍**の過大評価。
-    /// - 正八面体 $(\pm1,0,0),(0,\pm1,0),(0,0,\pm1)$。$V=4/3$ に対し
-    ///   $V_{AABB}=8$ ——**ちょうど6倍**。
+    ///   $V=a^3/(6\sqrt2)=8/3$、慣性は等方で $I/m=a^2/20=0.4$。
+    /// - 正八面体 $(\pm1,0,0),(0,\pm1,0),(0,0,\pm1)$。辺長 $a=\sqrt2$、
+    ///   $V=4/3$、慣性は等方で $I/m=a^2/10=0.2$。
     ///
-    /// 慣性も同様に過大評価になる(どちらの多面体も対称性から慣性テンソルは
-    /// 等方で、正四面体は $I/m=a^2/20=0.4$、正八面体は $I/m=a^2/10=0.2$。
-    /// AABB近似はどちらも一辺2の立方体の $2/3$)。
+    /// どちらも正多面体(2本以上の3回対称軸を持つ点群)なので、対称性から
+    /// **慣性テンソルは等方**——非対角成分は厳密にゼロ、対角3成分は等しい。
+    /// これは「主軸の取り違え」に対する強い検出力を持つ。
     ///
-    /// **将来の3D凸包(quickhull)実装が入ったらこのテストは落ちる**——その時は
-    /// 比が 1.0 になったことを確認する形へ意図的に書き換える(落ちること自体が
-    /// 「近似が実装に置き換わった」という通知になる)。倍数はすべて有理数で
-    /// 厳密に表せるので許容誤差は丸め誤差ぶんの 1e-12(相対)。
+    /// 許容誤差: 有理数・平方根の閉形式どうしの比較で、実装側も四面体分解の
+    /// 有限個の積和(反復解法を含まない)なので、倍精度の丸め誤差だけを
+    /// 見込んだ 1e-12(相対)。
     #[test]
-    fn convex_mesh_aabb_approximation_overestimates_regular_polyhedra() {
+    fn convex_mesh_hull_matches_the_exact_volume_and_inertia_of_regular_polyhedra() {
         // 正四面体: 立方体の隅を1つおきに取ると正四面体になる。
         let edge = 2.0 * std::f64::consts::SQRT_2;
         let tetrahedron = Shape::ConvexMesh {
@@ -677,12 +1153,6 @@ mod tests {
             (tetra_true_volume - 8.0 / 3.0).abs() < 1e-12,
             "解析式 a^3/(6√2) は 8/3 になるはず: {tetra_true_volume}"
         );
-        let tetra_approx = tetrahedron.volume().unwrap();
-        assert!(
-            (tetra_approx / tetra_true_volume - 3.0).abs() < 1e-12,
-            "現状のAABB近似は正四面体の体積をちょうど3倍に過大評価する: \
-             approx={tetra_approx} true={tetra_true_volume}"
-        );
 
         // 正八面体。
         let octahedron = Shape::ConvexMesh {
@@ -696,31 +1166,56 @@ mod tests {
             ],
         };
         let octa_true_volume = 4.0 / 3.0;
-        let octa_approx = octahedron.volume().unwrap();
-        assert!(
-            (octa_approx / octa_true_volume - 6.0).abs() < 1e-12,
-            "現状のAABB近似は正八面体の体積をちょうど6倍に過大評価する: \
-             approx={octa_approx} true={octa_true_volume}"
-        );
 
-        // 慣性も過大評価(どちらも真の値は等方、AABB近似は一辺2の立方体の 2/3)。
-        let cube_unit_inertia = 2.0 / 3.0;
-        let tetra_true_inertia = edge * edge / 20.0; // = 0.4
-        let octa_true_inertia = 2.0 / 10.0; // 辺長 a=√2 の正八面体、a²/10
-        for (shape, true_inertia, label) in [
-            (&tetrahedron, tetra_true_inertia, "正四面体"),
-            (&octahedron, octa_true_inertia, "正八面体"),
+        for (shape, true_volume, true_inertia, label) in [
+            (
+                &tetrahedron,
+                tetra_true_volume,
+                edge * edge / 20.0,
+                "正四面体",
+            ),
+            (&octahedron, octa_true_volume, 2.0 / 10.0, "正八面体"),
         ] {
-            let i = shape.unit_mass_inertia_diagonal();
+            // 体積: 比が **1.0**(移行前は 3.0 / 6.0 だった)。
+            let volume = shape.volume().unwrap();
             assert!(
-                (i.x - cube_unit_inertia).abs() < 1e-12
-                    && (i.y - cube_unit_inertia).abs() < 1e-12
-                    && (i.z - cube_unit_inertia).abs() < 1e-12,
-                "{label}: 現状は外接立方体の慣性そのもの: {i:?}"
+                (volume / true_volume - 1.0).abs() < 1e-12,
+                "{label}: 凸包の体積は解析解と厳密に一致するはず: \
+                 actual={volume} true={true_volume} (比={})",
+                volume / true_volume
+            );
+
+            // 重心: どちらも頂点の総和がゼロ = 原点対称なので厳密に原点。
+            let com = shape.center_of_mass();
+            assert!(com.length() < 1e-12, "{label}: 重心は原点のはず: {com:?}");
+
+            // 慣性: 対称性から等方。対角3成分が解析値に一致し、非対角はゼロ。
+            let tensor = shape.unit_mass_inertia_tensor();
+            for k in 0..3 {
+                assert!(
+                    (tensor.m[k][k] / true_inertia - 1.0).abs() < 1e-12,
+                    "{label}: I[{k}][{k}]={} は解析解 {true_inertia} と一致するはず",
+                    tensor.m[k][k]
+                );
+            }
+            for (i, j) in [(0usize, 1usize), (0, 2), (1, 2)] {
+                assert!(
+                    tensor.m[i][j].abs() < 1e-12 * true_inertia,
+                    "{label}: 正多面体の慣性テンソルは等方なので I[{i}][{j}] はゼロのはず: {}",
+                    tensor.m[i][j]
+                );
+            }
+
+            // 移行前のAABB近似値(外接立方体、一辺2 → V=8、I/m=2/3)とは
+            // **明確に違う**ことを固定する(退化した検証にしないため)。
+            assert!(
+                (volume - 8.0).abs() > 1.0,
+                "{label}: AABBの体積 8 に戻っていないこと: {volume}"
             );
             assert!(
-                i.x > true_inertia,
-                "{label}: AABB近似は真の慣性 {true_inertia} を過大評価する: {i:?}"
+                (tensor.m[0][0] - 2.0 / 3.0).abs() > 1e-3,
+                "{label}: AABBの慣性 2/3 に戻っていないこと: {}",
+                tensor.m[0][0]
             );
         }
     }
