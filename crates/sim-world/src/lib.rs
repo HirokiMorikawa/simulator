@@ -57,10 +57,16 @@ mod export;
 mod integration_scenarios;
 mod orchestrator;
 mod overlap;
+mod raw_bytes;
 mod raycast;
 mod scenario;
 
 pub use export::{shape_to_shape_json, to_scenario};
+pub use raw_bytes::{
+    decode_base64, decode_bool_bitpacked_base64, decode_f64_le_base64, decode_i8_base64,
+    decode_vec3_le_base64, encode_base64, encode_bool_bitpacked_base64, encode_f64_le_base64,
+    encode_f64_le_base64_finite, encode_i8_base64, encode_vec3_le_base64, RawBytesError,
+};
 pub use scenario::{
     run_headless_scenario, shape_json_to_shape, BodyScenarioDesc, CompoundChildJson,
     HeadlessRunResult, MaterialOverride, PassCriterionJson, PassCriterionOperator,
