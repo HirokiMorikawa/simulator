@@ -23,10 +23,6 @@
 //!   留まる。**結合の内部基準値(下記の解消済み)とは別問題**であり、剛体スキーマ
 //!   側の増分になる(本増分の対象外、`PistonGas`の往復テストが`Kinematic`
 //!   ピストンを使うのはこの欠落を混ぜないため)。
-//! - `fdtd`のPML: `sim_em::FdtdSim2D::with_pml`の分離場成分は書き出せない。
-//!   ただし`FdtdScenarioJson`にPMLを構成するフィールドが無く、`from_scenario`が
-//!   作る`World`のFDTDは常にPEC境界のみ(`pml: None`)なので、
-//!   エクスポート→再インポートの往復ではこの制限に到達しない。
 //!
 //! **解消済みの制限(**生状態スナップショット**、`scenario`モジュールdoc参照)**:
 //! `grid_fluid`/`grid_fluid_3d`/`sph`/`soft_body`/`quantum_1d`/`quantum_2d`/
@@ -70,6 +66,18 @@
 //! ——移行前の記述「以後の相対変位はゼロから再カウントされる」は
 //! **クランプに当たった後にだけ当てはまる**誤りだった。`raw_state`が実際に
 //! 効くのはその領域であり、対照テストもそこに置いてある。
+//!
+//! **解消済みの制限(`fdtd`のPML、`FdtdScenarioJson::pml`)**:
+//! 移行前は`FdtdScenarioJson`にPMLを構成するフィールドが無く、`from_scenario`が
+//! 作る`World`のFDTDは常にPEC境界のみ(`pml: None`)だった——つまり
+//! 「分離場成分を書き出せない」以前に、**シーンJSONからPMLへ到達する経路が
+//! 存在しなかった**(開放空間を模したいシーンは箱の壁で全反射していた)。
+//! `pml: Option<PmlJson>`(`layers`/`target_reflection`)を足して`with_pml`へ
+//! 配線し、`FdtdRawStateJson::pml`に分離場成分 $(E_{zx}, E_{zy})$ を持たせた
+//! ことで、**PML有効なFDTDも時間発展後に`state_hash`一致で往復する**。
+//! 係数表8本は`(nx, ny, h, dt, layers, target_reflection)`の決定的関数なので
+//! JSONへは書かない(`PmlJson`のdoc参照)——`from_scenario`は`dt`を戻してから
+//! `with_pml`を呼び、同じ係数を組み直す。
 
 use crate::{BodyId, ProbeTarget, World};
 use sim_math::Vec3;
@@ -80,12 +88,13 @@ use crate::scenario::{
     AstroBodyJson, AstroScenarioJson, AtmosphereJson, AtmosphericDragJson, BodyScenarioDesc,
     BodyThermalLinkJson, BrownianForceRawStateJson, BrownianRawStateJson, BrownianScenarioJson,
     CapacitorJson, CircuitScenarioJson, CompoundChildJson, ConductionRodRawStateJson,
-    ConductionRodScenarioJson, ConvectionModeJson, CouplingJson, DiodeJson, FdtdRawStateJson,
-    FdtdScenarioJson, FluidJson, GasScenarioJson, GaussianPacket2dJson, GaussianPacketJson,
-    GridBoundaryJson, GridFluid3DRawStateJson, GridFluid3DScenarioJson, GridFluidRawStateJson,
-    GridFluidScenarioJson, GridSolidBoxJson, InductorJson, IsingRawStateJson, IsingScenarioJson,
-    JointJson, KineticGasRawStateJson, KineticGasScenarioJson, LiftModelJson, MaterialOverride,
-    MeltSpawnJson, PhaseChangeMorphRawStateJson, PhaseChangeOverrideJson, PistonGasRawStateJson,
+    ConductionRodScenarioJson, ConvectionModeJson, CouplingJson, DiodeJson, FdtdPmlRawStateJson,
+    FdtdRawStateJson, FdtdScenarioJson, FluidJson, GasScenarioJson, GaussianPacket2dJson,
+    GaussianPacketJson, GridBoundaryJson, GridFluid3DRawStateJson, GridFluid3DScenarioJson,
+    GridFluidRawStateJson, GridFluidScenarioJson, GridSolidBoxJson, InductorJson,
+    IsingRawStateJson, IsingScenarioJson, JointJson, KineticGasRawStateJson,
+    KineticGasScenarioJson, LiftModelJson, MaterialOverride, MeltSpawnJson,
+    PhaseChangeMorphRawStateJson, PhaseChangeOverrideJson, PistonGasRawStateJson, PmlJson,
     ProbeJson, Quantum1dRawStateJson, Quantum1dScenarioJson, Quantum2dRawStateJson,
     Quantum2dScenarioJson, RelativisticCorrectionJson, ResistorJson, RngStateJson, Scenario,
     ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson, SoftBodyScenarioJson,
@@ -850,6 +859,20 @@ fn export_ising(world: &World) -> Option<IsingScenarioJson> {
 
 fn export_fdtd(world: &World) -> Option<FdtdScenarioJson> {
     let sim = world.fdtd()?;
+    // PMLは**構築レシピ側**(係数表は`layers`/`target_reflection`から決定的に
+    // 組み直せる、`PmlJson`のdoc参照)。時間発展する分離場成分だけが`raw_state`。
+    let pml = sim
+        .pml_target_reflection()
+        .map(|target_reflection| PmlJson {
+            layers: sim.pml_layers(),
+            target_reflection,
+        });
+    let pml_raw = sim
+        .pml_split_fields()
+        .map(|(ezx, ezy)| FdtdPmlRawStateJson {
+            ezx: ezx.to_vec(),
+            ezy: ezy.to_vec(),
+        });
     Some(FdtdScenarioJson {
         nx: sim.nx(),
         ny: sim.ny(),
@@ -857,11 +880,13 @@ fn export_fdtd(world: &World) -> Option<FdtdScenarioJson> {
         courant: Some(sim.dt / sim.h()),
         // レシピ側の`initial`は $E_z$ しか書けない(磁場が落ちる)。`raw_state`が真。
         initial: None,
+        pml,
         raw_state: Some(FdtdRawStateJson {
             ez: sim.ez_raw().to_vec(),
             hx: sim.hx_raw().to_vec(),
             hy: sim.hy_raw().to_vec(),
             dt: sim.dt,
+            pml: pml_raw,
         }),
     })
 }
@@ -2264,6 +2289,115 @@ mod tests {
         // **磁場が復元されていることを実際に効かせるための30step**。`initial`
         // (Ezしか書けない)経路だと、ここで必ずハッシュがずれる。
         assert_round_trip(world, 30, 25, "fdtd");
+    }
+
+    /// **PMLを有効にしたFDTD**(`FdtdScenarioJson::pml`)。点源から外へ広がる波を
+    /// 層で吸わせながら時間発展させてから往復させる。
+    ///
+    /// 移行前はシーンJSONにPMLを構成する口が無く、`from_scenario`が作るFDTDは
+    /// 常にPEC境界のみだったため、この経路自体が存在しなかった。
+    fn pml_world() -> World {
+        let mut world = empty_world();
+        let mut sim = sim_em::FdtdSim2D::new(32, 32, 0.02, 0.5).with_pml(6, 1.0e-6);
+        // 中央の点源(層まで届いて実際に吸収が効く配置)。
+        sim.set_ez(16, 16, 2.0);
+        sim.set_ez(15, 16, 1.0);
+        sim.set_ez(16, 15, 1.0);
+        world.enable_fdtd(sim);
+        world
+    }
+
+    #[test]
+    fn fdtd_pml_raw_state_round_trip_after_stepping() {
+        let world = pml_world();
+        // 波面がPML層へ入るまで回す(層内では`ezx`/`ezy`が別々の減衰を受けるので、
+        // 分離成分の分配がここで初めて「半分ずつ」から離れる)。
+        assert_round_trip(world, 40, 30, "fdtd_pml");
+    }
+
+    /// PML設定(`fdtd.pml`)がシーンJSONを通ること + 係数表がレシピから
+    /// 決定的に組み直せていること(`PmlJson`のdocの主張の裏取り)。
+    #[test]
+    fn fdtd_pml_config_survives_the_json_round_trip() {
+        let mut world = pml_world();
+        for _ in 0..40 {
+            world.step();
+        }
+        let scenario = to_scenario(&world, "fdtd_pml-json");
+        let pml =
+            scenario.fdtd.as_ref().unwrap().pml.as_ref().expect(
+                "PML有効なFDTDは`fdtd.pml`を書き出すこと(移行前はこのフィールドが無かった)",
+            );
+        assert_eq!(pml.layers, 6);
+        assert_eq!(pml.target_reflection, 1.0e-6);
+
+        // JSON文字列を経由しても分離場成分が壊れないこと。
+        let json = serde_json::to_string(&scenario).expect("Scenario must serialize");
+        let parsed: Scenario = serde_json::from_str(&json).expect("Scenario must deserialize");
+        let mut reloaded = World::from_scenario(&parsed).expect("round trip must parse back");
+        assert_eq!(reloaded.fdtd().unwrap().pml_layers(), 6);
+        assert_eq!(world.state_hash(), reloaded.state_hash());
+        for _ in 0..30 {
+            world.step();
+            reloaded.step();
+        }
+        assert_eq!(world.state_hash(), reloaded.state_hash());
+    }
+
+    /// PMLの`raw_state`から分離場成分を落とすと往復が壊れることを、対照として
+    /// 固定する(「$E_z$の半分ずつでは足りない」という`FdtdPmlRawStateJson`の
+    /// docの主張の裏取り)。
+    #[test]
+    fn fdtd_pml_round_trip_breaks_without_the_split_fields() {
+        let mut world = pml_world();
+        for _ in 0..40 {
+            world.step();
+        }
+        let mut scenario = to_scenario(&world, "fdtd_pml-no-split");
+        scenario
+            .fdtd
+            .as_mut()
+            .unwrap()
+            .raw_state
+            .as_mut()
+            .unwrap()
+            .pml = None;
+        let mut reloaded = World::from_scenario(&scenario).expect("must still parse");
+        world.step();
+        reloaded.step();
+        assert_ne!(
+            world.state_hash(),
+            reloaded.state_hash(),
+            "分離場成分を落とせば次のstepでずれるはず(落としていないから一致している、\
+             という取り違えを防ぐための対照)"
+        );
+    }
+
+    /// PMLの構成値が不正なシーンJSONは`assert!`でプロセスを落とさず
+    /// `SceneError::InvalidValue`になること(`apply_fdtd_pml`のdoc参照)。
+    #[test]
+    fn invalid_fdtd_pml_config_is_a_scene_error_not_a_panic() {
+        let base = r#"{
+            "name": "pml", "world": { "gravity": 0.0, "dt": 0.008333333 },
+            "fdtd": { "nx": 16, "ny": 16, "h": 0.02, "pml": PML }
+        }"#;
+        let cases = [
+            r#"{ "layers": 0, "target_reflection": 1e-6 }"#,
+            r#"{ "layers": 7, "target_reflection": 1e-6 }"#,
+            r#"{ "layers": 4, "target_reflection": 0.0 }"#,
+            r#"{ "layers": 4, "target_reflection": 1.0 }"#,
+        ];
+        for case in cases {
+            let json = base.replace("PML", case);
+            let scenario = Scenario::from_json(&json).expect("スキーマとしては妥当");
+            assert!(
+                matches!(
+                    World::from_scenario(&scenario),
+                    Err(crate::scenario::SceneError::InvalidValue(_))
+                ),
+                "{case} は InvalidValue になるべき"
+            );
+        }
     }
 
     /// FDTDの`raw_state`から磁場を落とすと往復が壊れることを、対照として固定する

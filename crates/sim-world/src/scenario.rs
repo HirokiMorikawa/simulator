@@ -1937,10 +1937,37 @@ pub struct FdtdScenarioJson {
     /// 初期条件。未指定なら全ゼロ(何も起きない)。
     #[serde(default)]
     pub initial: Option<FdtdInitialJson>,
+    /// **PML吸収境界**(`sim_em::FdtdSim2D::with_pml`)。未指定ならPEC境界のみ
+    /// (移行前の挙動そのまま——それまでシーンJSONにPMLを構成する口が無く、
+    /// `from_scenario`が作るFDTDは常に`pml: None`だった)。
+    ///
+    /// **PECのままだと箱の壁で波が全反射する**ので、開放空間(点源から外へ
+    /// 広がる波)を書きたいシーンはこれを指定する。
+    #[serde(default)]
+    pub pml: Option<PmlJson>,
     /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら`initial`は
     /// 評価しない。
     #[serde(default)]
     pub raw_state: Option<FdtdRawStateJson>,
+}
+
+/// `FdtdScenarioJson::pml`(`sim_em::FdtdSim2D::with_pml`の引数)。
+///
+/// **これは構築レシピ側であって`raw_state`ではない**。PMLの係数表8本は
+/// `(nx, ny, h, dt, layers, target_reflection)`の**純粋な決定的関数**
+/// (`sim_em::fdtd::Pml::build`)なので、入力の2つを書けばビット単位で
+/// 組み直せる——巨大な係数配列をJSONへ書き下す必要は無い
+/// (生状態スナップショットの規約3「派生を持たない」と同じ考え方)。
+/// 時間発展する状態のほう、すなわち分離場成分 $(E_{zx}, E_{zy})$ は
+/// `FdtdRawStateJson::pml`が持つ。
+#[derive(Deserialize, Serialize)]
+pub struct PmlJson {
+    /// 吸収層の厚さ[セル](設計 docs/13-electromagnetism §9 の推奨は10、範囲8–16)。
+    /// `2*layers + 2 < min(nx, ny)`(内部領域が残ること)を満たす必要がある。
+    pub layers: usize,
+    /// 設計上の目標反射率 $R_0$。$(0,1)$ の範囲で、設計§7「反射率 < −40 dB」に
+    /// 対して余裕を見た`1e-6`程度が標準的。
+    pub target_reflection: f64,
 }
 
 /// `FdtdScenarioJson::raw_state`(`sim_em::FdtdSim2D`の全状態)。
@@ -1950,11 +1977,7 @@ pub struct FdtdScenarioJson {
 /// 「$E_z$は今の値・$H$は全ゼロ」という別の状態にしかならず、次のstepから
 /// 波形がずれる。`FdtdSim2D::state_hash`も3配列すべてを含む。
 ///
-/// **既知の制限**: PML(`FdtdSim2D::with_pml`)の分離場成分は復元されない。
-/// そもそも`FdtdScenarioJson`にPMLを構成するフィールドが無く、`from_scenario`が
-/// 作る`World`のFDTDは常にPEC境界のみ(`pml: None`)なので、この経路では起こらない。
-/// 別経路でPMLを有効化した`World`をエクスポートした場合、$E_z$から半分ずつ
-/// 分離成分を作り直す形になる(`FdtdSim2D::set_raw_fields`参照)。
+/// **PMLの分離場成分**は`pml`が持つ(`FdtdPmlRawStateJson`参照)。
 #[derive(Deserialize, Serialize)]
 pub struct FdtdRawStateJson {
     /// $E_z$(長さ`nx*ny`、`i + nx*j`)。
@@ -1965,6 +1988,29 @@ pub struct FdtdRawStateJson {
     pub hy: Vec<f64>,
     /// 時間刻み(`courant * h`。Courant数からの再計算ではなく実値を持つ)。
     pub dt: f64,
+    /// **PMLの分離場成分**(`FdtdScenarioJson::pml`が`Some`のときのみ意味を持つ)。
+    #[serde(default)]
+    pub pml: Option<FdtdPmlRawStateJson>,
+}
+
+/// `FdtdRawStateJson::pml`(Berenger分離場PMLの時間発展する状態)。
+///
+/// **なぜ$E_z$だけでは足りないのか**: PML有効時の $E_z$ は毎step
+/// $E_z = E_{zx} + E_{zy}$ として分離成分から**再構成される**。
+/// `FdtdSim2D::set_raw_fields`は分離成分を $E_z$ の半分ずつに置くので
+/// 不変条件は満たすが、**元の分配とは別物**である——層内では $E_{zx}$ と
+/// $E_{zy}$ が別々の減衰係数を受けるため、分配が違えば次stepから波形がずれる
+/// (磁場を落とすと壊れるのと同じ構造の話)。
+///
+/// 係数表8本(`ca_x`/`cb_x`/…)は持たない。`(nx, ny, h, dt, layers,
+/// target_reflection)`の決定的関数なので`PmlJson`から組み直せる
+/// (`PmlJson`のdoc参照)。
+#[derive(Deserialize, Serialize)]
+pub struct FdtdPmlRawStateJson {
+    /// $E_{zx}$(長さ`nx*ny`)。
+    pub ezx: Vec<f64>,
+    /// $E_{zy}$(長さ`nx*ny`)。
+    pub ezy: Vec<f64>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -1979,6 +2025,41 @@ pub enum FdtdInitialJson {
         amplitude: f64,
         width: f64,
     },
+}
+
+/// `fdtd.pml`が指定されていればPML吸収境界を有効にする(`PmlJson`のdoc参照)。
+///
+/// `FdtdSim2D::with_pml`は不正な引数で`assert!`する(層数0・層が格子を埋め尽くす・
+/// 反射率が$(0,1)$外)。**シーンJSONはユーザーが書くデータなので、そのまま渡すと
+/// 不正入力でプロセスが落ちる**——ここで同じ条件を先に検査して
+/// `SceneError::InvalidValue`へ写す(`SceneError::InvalidValue`のdocの方針)。
+fn apply_fdtd_pml(
+    sim: sim_em::FdtdSim2D,
+    f: &FdtdScenarioJson,
+) -> Result<sim_em::FdtdSim2D, SceneError> {
+    let Some(pml) = &f.pml else {
+        return Ok(sim);
+    };
+    if pml.layers == 0 {
+        return Err(SceneError::InvalidValue(
+            "fdtd.pml.layers は1以上でなければならない".to_string(),
+        ));
+    }
+    if 2 * pml.layers + 2 >= f.nx.min(f.ny) {
+        return Err(SceneError::InvalidValue(format!(
+            "fdtd.pml.layers={} がPML層で格子を埋め尽くしている(内部領域が残らない、\
+             2*layers+2 < min(nx,ny)={} が必要)",
+            pml.layers,
+            f.nx.min(f.ny)
+        )));
+    }
+    if !(pml.target_reflection > 0.0 && pml.target_reflection < 1.0) {
+        return Err(SceneError::InvalidValue(format!(
+            "fdtd.pml.target_reflection は (0,1) でなければならない ({})",
+            pml.target_reflection
+        )));
+    }
+    Ok(sim.with_pml(pml.layers, pml.target_reflection))
 }
 
 /// `world.couplings[index]`へ内部基準値の生状態を書き戻す
@@ -3091,10 +3172,32 @@ impl World {
                 // 戻すため、構築後に直接代入する(`dt`はpub)。
                 let mut sim = sim_em::FdtdSim2D::new(f.nx, f.ny, f.h, f.courant.unwrap_or(0.5));
                 sim.dt = raw.dt;
+                // **PMLは`dt`を戻した後に組む**——`Pml::build`は`self.dt`から
+                // 係数表を作り、`step_dt_pml`も`self.dt`を基準に`scale`を取るため、
+                // 順序を逆にすると係数が構築時のCourant数由来の`dt`のものになる。
+                sim = apply_fdtd_pml(sim, f)?;
                 sim.set_raw_fields(raw.ez.clone(), raw.hx.clone(), raw.hy.clone());
+                if let Some(pml_raw) = &raw.pml {
+                    // `set_raw_fields`が置いた「$E_z$の半分ずつ」を、元の分配で
+                    // 上書きする(`FdtdPmlRawStateJson`のdoc参照)。
+                    let n = f.nx * f.ny;
+                    if pml_raw.ezx.len() != n || pml_raw.ezy.len() != n {
+                        return Err(SceneError::InvalidValue(format!(
+                            "fdtd.raw_state.pml: ezx/ezy は nx*ny={n} でなければならない                              ({}/{})",
+                            pml_raw.ezx.len(),
+                            pml_raw.ezy.len()
+                        )));
+                    }
+                    if !sim.set_pml_split_fields(pml_raw.ezx.clone(), pml_raw.ezy.clone()) {
+                        return Err(SceneError::InvalidValue(
+                            "fdtd.raw_state.pml を書いたが fdtd.pml が無い(PMLが無効)".to_string(),
+                        ));
+                    }
+                }
                 world.enable_fdtd(sim);
             } else {
                 let mut sim = sim_em::FdtdSim2D::new(f.nx, f.ny, f.h, f.courant.unwrap_or(0.5));
+                sim = apply_fdtd_pml(sim, f)?;
                 match &f.initial {
                     Some(FdtdInitialJson::CavityMode { m, n, amplitude }) => {
                         for j in 1..f.ny - 1 {
