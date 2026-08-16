@@ -399,14 +399,14 @@ fn export_bodies(
         .collect()
 }
 
+/// 流体領域を**登録順のまま**書き出す(順序が重なり時の優先順位そのものなので、
+/// 並べ替えてはいけない、`sim_mechanics::MechanicsSolver::fluids`のdoc参照)。
 fn export_fluids(world: &World) -> Vec<FluidJson> {
-    match &world.mechanics().water {
-        Some(w) => vec![FluidJson::StaticWater {
-            water_level: w.water_level,
-            density: w.density,
-        }],
-        None => Vec::new(),
-    }
+    world
+        .fluid_regions()
+        .iter()
+        .map(FluidJson::from_region)
+        .collect()
 }
 
 fn export_thermal(world: &World) -> Option<ThermalScenarioJson> {
@@ -1569,6 +1569,90 @@ mod tests {
             world.state_hash(),
             reloaded.state_hash(),
             "state_hash must still match after stepping (joint reference state preserved)"
+        );
+    }
+
+    /// **流体領域の一般化**: 複数の流体領域が、形状(半空間/AABB)・水面・密度・
+    /// 水温・**並び順**まで含めて往復すること。並び順は重なり時の優先順位そのもの
+    /// (`sim_mechanics::MechanicsSolver::fluids`のdoc)なので、順序が入れ替わる
+    /// 往復は物理を変える。
+    #[test]
+    fn multiple_fluid_regions_round_trip_with_their_shape_temperature_and_order() {
+        let mut world = World::new(WorldOptions {
+            gravity: 9.80665,
+            dt: 1.0 / 120.0,
+            seed: 0,
+        });
+        let regions = [
+            // AABBを先に置く(半空間より優先されるべき順序)。
+            sim_fluid::FluidRegion::aabb(
+                Vec3::new(-2.0, -5.0, -2.0),
+                Vec3::new(2.0, 1.0, 2.0),
+                0.25,
+                1025.0,
+            )
+            .with_temperature(277.15),
+            sim_fluid::FluidRegion::aabb(
+                Vec3::new(4.0, -5.0, -2.0),
+                Vec3::new(8.0, 1.0, 2.0),
+                0.0,
+                1200.0,
+            ),
+            sim_fluid::FluidRegion::new(-1.0, 998.2).with_temperature(293.15),
+        ];
+        for region in regions {
+            world.add_fluid_region(region);
+        }
+
+        let scenario = to_scenario(&world, "fluid-regions-round-trip");
+        // JSONを実際に通す(`FluidJson`のserde表現ごと確かめる)。
+        let json = serde_json::to_string(&scenario).expect("serializable");
+        let parsed = Scenario::from_json(&json).expect("round trip must parse back");
+        let reloaded = World::from_scenario(&parsed).expect("round trip must build");
+
+        assert_eq!(
+            reloaded.fluid_regions(),
+            &regions[..],
+            "形状・水面・密度・水温・並び順がすべて保たれること"
+        );
+    }
+
+    /// 領域が1つも無い`World`は`fluids`が空配列のまま往復する(移行前の
+    /// `water: None`に相当、`aabb_water`変種の追加が既定を変えていないこと)。
+    #[test]
+    fn a_world_without_fluid_regions_round_trips_to_an_empty_fluids_section() {
+        let world = World::new(WorldOptions {
+            gravity: 9.80665,
+            dt: 1.0 / 120.0,
+            seed: 0,
+        });
+        let scenario = to_scenario(&world, "no-fluids");
+        assert!(scenario.fluids.is_empty());
+        let reloaded = World::from_scenario(&scenario).expect("round trip must build");
+        assert!(reloaded.fluid_regions().is_empty());
+    }
+
+    /// **後方互換の往復**: 実アセット(`scenes/d6-floating-box-f4.json`)を読み、
+    /// 書き戻し、読み直しても水域が移行前と同一の半空間領域のままであること。
+    /// エクスポータが`static_water`ではなく`aabb_water`を書き始めたら破れる。
+    #[test]
+    fn an_existing_static_water_scene_still_exports_as_static_water() {
+        let json = include_str!("../../../scenes/d6-floating-box-f4.json");
+        let scenario = Scenario::from_json(json).expect("既存シーンは妥当なJSON");
+        let world = World::from_scenario(&scenario).expect("既存シーンは構築できる");
+        let exported = to_scenario(&world, "d6-round-trip");
+        assert!(matches!(
+            exported.fluids.as_slice(),
+            [FluidJson::StaticWater {
+                water_level,
+                density,
+                temperature: None,
+            }] if *water_level == 0.0 && *density == 998.2
+        ));
+        let reloaded = World::from_scenario(&exported).expect("round trip must build");
+        assert_eq!(
+            reloaded.fluid_regions(),
+            &[sim_fluid::FluidRegion::new(0.0, 998.2)]
         );
     }
 

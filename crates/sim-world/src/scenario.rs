@@ -3,11 +3,19 @@
 //! **縮約実装の理由**: 設計例示のJSONスキーマ(`world`/`materials`/`bodies`/`fluids`/
 //! `couplings`/`probes`)のうち、`couplings`(`Coupling` registryがまだ`World::step()`
 //! に接続されていない、各`sim-coupling`実装のモジュールdoc参照)以外は実装する。
-//! `fluids`は`sim_mechanics::MechanicsSolver::water`(P1スコープの単一`static_water`
-//! 領域、`sim_fluid::buoyancy`冒頭の注記参照)のみ対応 — 設計例示のAABB表現ではなく
-//! `water_level`(水平面の高さ)+`density`の縮約表現とする(現在の`StaticWaterRegion`
-//! 自体がAABBではなく単一の水位面のみを表すため)。`temperature`(水温、熱ドメインとの
-//! 結合)は未対応。`probes`は`body_pos_y`/`body_speed`のみ(`bodies[].name`で名前
+//! `fluids`は**複数の流体領域**(`sim_mechanics::MechanicsSolver::fluids`)を扱える
+//! ——移行前は単一の`static_water`領域(無限に広い水平面1枚)のみだった縮約を
+//! `sim_fluid::FluidRegion`の一般化で解消した。書けるのは
+//! **形状**(`static_water`=水平半空間 / `aabb_water`=軸並行直方体で境界づけた水域、
+//! `FluidJson`のdoc参照)と**水温**(`temperature`)で、領域を複数書けば書いた順が
+//! 重なり時の優先順位になる。**残る限界(正直な記録)**: (1)形状は上記2種のみ
+//! (球・任意凸形状は未対応)、(2)領域の内外判定は剛体の重心1点で行う縮約
+//! (`sim_fluid::FluidShape::Aabb`のdoc「既知の限界」)、(3)**`temperature`を
+//! 読む結合はまだ無い** — 熱ドメインとの対流結合(`sim_coupling::ConvectionLink`)は
+//! 流体側も`ThermalNode`のindexで受け取る形なので、生の流体温度を熱源に取る経路が
+//! 存在しない。値としては構築・往復・`MechanicsSolver::fluid_temperature_at`での
+//! 参照までができ、実際に熱を動かすのは`ConvectionLink`側へ変種を足す後続増分になる。
+//! `probes`は`body_pos_y`/`body_speed`のみ(`bodies[].name`で名前
 //! 解決)対応 — 設計例示の`{"ledger": "thermal"}`のような`ProbeTarget::LedgerKinetic`
 //! に素直に対応しない形は後続増分。validator(参照整合検査)はこの縮約版が対象とする
 //! 範囲(材料参照・剛体名参照)のみ実装する — 排他結合検査(`sim-coupling::
@@ -66,7 +74,6 @@
 
 use crate::{BodyId, ProbeTarget, World, WorldOptions};
 use serde::{Deserialize, Serialize};
-use sim_fluid::StaticWaterRegion;
 use sim_math::Vec3;
 use sim_mechanics::{BodyType, DragModel, RigidBodyDesc, Shape};
 use std::collections::HashMap;
@@ -578,12 +585,106 @@ fn identity_quat() -> [f64; 4] {
     [0.0, 0.0, 0.0, 1.0]
 }
 
-/// モジュールdoc「縮約実装の理由」参照 — 設計例示のAABBではなく`water_level`+
-/// `density`の縮約表現。
+/// `Scenario::fluids`の1要素(`sim_fluid::FluidRegion`のシーンJSON表現)。
+///
+/// **移行前は`static_water`1変種のみ**で、無限に広い水平半空間しか書けなかった
+/// (モジュールdoc「縮約実装の理由」参照)。設計例示が挙げる境界(AABB)と
+/// `temperature`(水温)を、**既存のシーンJSONを1文字も変えずに**書けるよう
+/// 次の2点で広げた:
+///
+/// 1. `static_water`へ`temperature`を追加した(`#[serde(default)]`の`Option`
+///    なので純粋に加算的——省略時は移行前と同じ`None`)。
+/// 2. AABBで境界づけられた水域の変種`aabb_water`を追加した。
+///
+/// **どちらの変種でも浮力の式は同じ**(`sim_fluid::buoyancy`)。変種が決めるのは
+/// 「その領域が**どこに**効くか」だけである。複数書けば書いた順が優先順位に
+/// なる(`sim_mechanics::MechanicsSolver::fluids`のdocの決着規則)。
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FluidJson {
-    StaticWater { water_level: f64, density: f64 },
+    /// 無限に広い水平半空間(`sim_fluid::FluidShape::HalfSpace`)。
+    /// **移行前と完全に同一**——`temperature`を省略した既存シーンは
+    /// バイト単位で同じ`FluidRegion`になる。
+    StaticWater {
+        water_level: f64,
+        density: f64,
+        /// 水温 [K]。省略可。**熱ドメインへの結合はまだ無い**
+        /// (`sim_fluid::FluidRegion::temperature`のdoc参照)。
+        #[serde(default)]
+        temperature: Option<f64>,
+    },
+    /// AABBで境界づけられた水域(`sim_fluid::FluidShape::Aabb`)。水槽・プール。
+    AabbWater {
+        /// 領域の下限`[x,y,z]`。
+        min: [f64; 3],
+        /// 領域の上限`[x,y,z]`。剛体の重心がここを出ると浮力を失うので、
+        /// **想定される浮上高さより上**(水槽の縁)に取ること
+        /// (`sim_fluid::FluidShape::Aabb`のdoc「既知の限界」)。
+        max: [f64; 3],
+        /// 自由表面の高さ。省略時は`max[1]`(縁まで満水)。`max[1]`より
+        /// 下に置けば満水でない水槽になる。
+        #[serde(default)]
+        water_level: Option<f64>,
+        density: f64,
+        /// 水温 [K]。省略可(`static_water`と同じ、結合は未配線)。
+        #[serde(default)]
+        temperature: Option<f64>,
+    },
+}
+
+impl FluidJson {
+    /// シーンJSONの1要素を`sim_fluid::FluidRegion`へ変換する
+    /// (`from_scenario`が使う唯一の写像)。シーンJSON Import
+    /// (`sim-wasm::WasmWorld::import_scene_json`→`append_scenario_bodies`)は
+    /// `fluids`セクションを扱わないため、ここは通らない
+    /// (`append_scenario_bodies`のdocの対象外リスト参照)。
+    fn to_region(&self) -> sim_fluid::FluidRegion {
+        match self {
+            FluidJson::StaticWater {
+                water_level,
+                density,
+                temperature,
+            } => sim_fluid::FluidRegion {
+                temperature: *temperature,
+                ..sim_fluid::FluidRegion::new(*water_level, *density)
+            },
+            FluidJson::AabbWater {
+                min,
+                max,
+                water_level,
+                density,
+                temperature,
+            } => {
+                let min = array_to_vec3(*min);
+                let max = array_to_vec3(*max);
+                sim_fluid::FluidRegion {
+                    temperature: *temperature,
+                    // 省略時は縁まで満水(`water_level`のdoc)。
+                    ..sim_fluid::FluidRegion::aabb(min, max, water_level.unwrap_or(max.y), *density)
+                }
+            }
+        }
+    }
+
+    /// `to_region`の逆(`export::to_scenario`が使う)。`water_level`は
+    /// 省略せず常に書く——`max[1]`との一致に依存させると、`max`を編集した
+    /// ときに水面が黙って動いてしまうため。
+    pub(crate) fn from_region(region: &sim_fluid::FluidRegion) -> FluidJson {
+        match region.shape {
+            sim_fluid::FluidShape::HalfSpace => FluidJson::StaticWater {
+                water_level: region.water_level,
+                density: region.density,
+                temperature: region.temperature,
+            },
+            sim_fluid::FluidShape::Aabb { min, max } => FluidJson::AabbWater {
+                min: [min.x, min.y, min.z],
+                max: [max.x, max.y, max.z],
+                water_level: Some(region.water_level),
+                density: region.density,
+                temperature: region.temperature,
+            },
+        }
+    }
 }
 
 /// `Scenario::thermal`(モジュールdoc「縮約実装の理由」参照)。
@@ -2421,7 +2522,9 @@ impl World {
         //
         // **判定の対応付け(縮約と正直な記録)**: `SceneCouplingConfig`の6フラグの
         // うち、シーンJSONから実際に判定できるのは浮力の2つだけである——
-        // `fluids[].static_water`があれば静的水域の浮力、`couplings`に
+        // `fluids`に領域が1つでもあれば静的水域の浮力(形状は問わない
+        // ——`static_water`でも`aabb_water`でも同じ集中定数モデルなので、
+        // 解像流体との排他という観点では区別しない)、`couplings`に
         // `BuoyancyDrag`があれば registry 経由の浮力。
         // 空気抗力とコンデンサ電場エネルギーは、そもそも`CouplingJson`に対応する
         // 変種が無く(現状は`ImageChargeForce`/`BrownianForce`/`InductionCoupling`
@@ -2429,10 +2532,7 @@ impl World {
         // `false`のままになる。**この検査が実際に働くのは浮力の組だけ**であり、
         // 残り2組は対応する`CouplingJson`変種が増えた時点で意味を持ち始める。
         let coupling_config = sim_coupling::SceneCouplingConfig {
-            static_water_buoyancy: scenario
-                .fluids
-                .iter()
-                .any(|f| matches!(f, FluidJson::StaticWater { .. })),
+            static_water_buoyancy: !scenario.fluids.is_empty(),
             resolved_fluid_buoyancy: scenario
                 .couplings
                 .iter()
@@ -2481,16 +2581,12 @@ impl World {
             }
         }
 
+        // 流体領域は**書いた順に追加する**——`fluids`配列の並びがそのまま
+        // 重なり時の優先順位になる(`sim_mechanics::MechanicsSolver::fluids`の
+        // 決着規則)。移行前はここで`water`を上書きしていたため、複数書いても
+        // 最後の1つしか残らなかった。
         for fluid in &scenario.fluids {
-            match fluid {
-                FluidJson::StaticWater {
-                    water_level,
-                    density,
-                } => {
-                    world.mechanics_mut().water =
-                        Some(StaticWaterRegion::new(*water_level, *density));
-                }
-            }
+            world.add_fluid_region(fluid.to_region());
         }
 
         if let Some(thermal_json) = &scenario.thermal {
@@ -3526,7 +3622,7 @@ impl World {
                     // 有効にする(片方だけでは物理が決まらない)。
                     let water = match (water_level, water_density) {
                         (Some(level), Some(density)) => {
-                            Some(sim_fluid::StaticWaterRegion::new(*level, *density))
+                            Some(sim_fluid::FluidRegion::new(*level, *density))
                         }
                         _ => None,
                     };
@@ -4335,7 +4431,7 @@ mod tests {
         ));
     }
 
-    /// `fluids`(縮約: `water_level`+`density`、モジュールdoc参照)+`probes`
+    /// `fluids`(`static_water`=水平半空間、`FluidJson`のdoc参照)+`probes`
     /// (`body_pos_y`、`bodies[].name`による名前解決)を実際にパースして
     /// `World`を構築し、浮力が働くこと(木箱が沈み込みつつも自由落下より遅く
     /// 沈む)とプローブ履歴がサンプルされることを確認する。
@@ -4358,7 +4454,10 @@ mod tests {
         let mut world =
             World::from_scenario(&scenario).expect("should build without validation errors");
 
-        assert!(world.mechanics_mut().water.is_some());
+        assert_eq!(
+            world.fluid_regions(),
+            &[sim_fluid::FluidRegion::new(1.0, 1000.0)]
+        );
 
         for _ in 0..10 {
             world.step();
@@ -4366,6 +4465,191 @@ mod tests {
 
         let history: Vec<f64> = world.probe(0).unwrap().history().copied().collect();
         assert_eq!(history.len(), 10);
+    }
+
+    // ------------------------------------------------------------------
+    // 流体領域の一般化(`FluidJson`、`sim_fluid::FluidRegion`)。
+    // ------------------------------------------------------------------
+
+    /// **後方互換の要**: 実アセット(`scenes/d6-floating-box-f4.json`・
+    /// `scenes/d6-floating-box-f5.json`)が書いている`static_water`が、
+    /// 移行前と**厳密に同じ**`FluidRegion`(水平半空間・水温なし)へ写ること。
+    /// ここが崩れると既存シーンの物理が黙って変わる。
+    #[test]
+    fn existing_scenes_static_water_maps_to_the_legacy_half_space_region() {
+        for json in [
+            include_str!("../../../scenes/d6-floating-box-f4.json"),
+            include_str!("../../../scenes/d6-floating-box-f5.json"),
+            include_str!("../../../scenes/d18-ice-in-drink.json"),
+        ] {
+            let scenario = Scenario::from_json(json).expect("既存シーンは妥当なJSON");
+            let world = World::from_scenario(&scenario).expect("既存シーンは構築できる");
+            assert_eq!(
+                world.fluid_regions(),
+                &[sim_fluid::FluidRegion::new(0.0, 998.2)],
+                "既存シーンの水域は移行前と同一の半空間領域でなければならない"
+            );
+            // 形状・水温は移行前と同じ「無し」。
+            assert_eq!(
+                world.fluid_regions()[0].shape,
+                sim_fluid::FluidShape::HalfSpace
+            );
+            assert_eq!(world.fluid_regions()[0].temperature, None);
+        }
+    }
+
+    /// **複数領域**: 密度の違う2つのAABB水域を並べ、それぞれの中の箱が
+    /// **自分の領域の密度**で浮力を受けること(重い方に浮かぶ箱は沈まず、
+    /// 軽い方の箱は沈む、という定性で分ける)。同じ材料・同じ形状・同じ深さで
+    /// 置くので、差が出るなら領域の引き当てが効いているということ。
+    #[test]
+    fn from_scenario_wires_multiple_fluid_regions_that_act_independently() {
+        let json = r#"
+        {
+          "name": "two-tanks",
+          "world": { "gravity": 9.80665, "dt": 0.004166666 },
+          "materials": [ { "extends": "木材(松)", "name": "test-wood", "density": 1500.0 } ],
+          "bodies": [
+            { "shape": { "box": { "half": [0.1, 0.1, 0.1] } }, "material": "test-wood",
+              "position": [-5, -1, 0], "name": "in_light_tank" },
+            { "shape": { "box": { "half": [0.1, 0.1, 0.1] } }, "material": "test-wood",
+              "position": [5, -1, 0], "name": "in_heavy_tank" }
+          ],
+          "fluids": [
+            { "aabb_water": { "min": [-10, -5, -2], "max": [-1, 2, 2],
+                              "water_level": 0.0, "density": 1000.0 } },
+            { "aabb_water": { "min": [1, -5, -2], "max": [10, 2, 2],
+                              "water_level": 0.0, "density": 3000.0 } }
+          ],
+          "probes": [ { "body_pos_y": "in_light_tank" }, { "body_pos_y": "in_heavy_tank" } ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).expect("valid JSON");
+        let mut world = World::from_scenario(&scenario).expect("should build");
+        assert_eq!(world.fluid_regions().len(), 2);
+        assert_eq!(world.fluid_regions()[0].density, 1000.0);
+        assert_eq!(world.fluid_regions()[1].density, 3000.0);
+
+        for _ in 0..240 {
+            world.step();
+        }
+        let light = *world.probe(0).unwrap().history().last().unwrap();
+        let heavy = *world.probe(1).unwrap().history().last().unwrap();
+        // 密度1500の箱: ρ_f=1000 の水槽では沈む、ρ_f=3000 の水槽では浮き上がる。
+        assert!(light < -1.0, "軽い水槽の箱は沈むはず: y={light}");
+        assert!(heavy > -1.0, "重い水槽の箱は浮き上がるはず: y={heavy}");
+    }
+
+    /// **形状が実際に領域を閉じている**: AABB水域の**外**に置いた箱は、
+    /// 「無限に広い半空間なら水面下」の高さにいても浮力を受けず、自由落下する。
+    /// 同じシーンの`aabb_water`を`static_water`へ差し替えれば同じ箱が浮く、
+    /// という対比で「形状のせいで浮かない」ことを分離する。
+    #[test]
+    fn an_aabb_fluid_region_does_not_lift_a_body_outside_its_bounds() {
+        let bounded = r#"
+        {
+          "name": "bounded-tank",
+          "world": { "gravity": 9.80665, "dt": 0.004166666 },
+          "materials": [ { "extends": "木材(松)", "name": "test-wood", "density": 400.0 } ],
+          "bodies": [
+            { "shape": { "box": { "half": [0.1, 0.1, 0.1] } }, "material": "test-wood",
+              "position": [20, -1, 0], "name": "outside" }
+          ],
+          "fluids": [
+            { "aabb_water": { "min": [-2, -5, -2], "max": [2, 2, 2],
+                              "water_level": 0.0, "density": 1000.0 } }
+          ],
+          "probes": [ { "body_pos_y": "outside" } ]
+        }
+        "#;
+        let scenario = Scenario::from_json(bounded).expect("valid JSON");
+        let mut world = World::from_scenario(&scenario).expect("should build");
+        for _ in 0..240 {
+            world.step();
+        }
+        let y_bounded = *world.probe(0).unwrap().history().last().unwrap();
+
+        // 自由落下の解析値。1秒(240step × dt)で -g t^2/2 ぶん落ちる。
+        let dt = 0.004166666;
+        let t = 240.0 * dt;
+        let free_fall = -1.0 - 0.5 * 9.80665 * t * t;
+        assert!(
+            (y_bounded - free_fall).abs() / t.max(1e-9) < 0.05,
+            "AABBの外では浮力が働かず自由落下するはず: y={y_bounded} free_fall={free_fall}"
+        );
+
+        // 同じ配置でも半空間なら浮力が効く(=形状が原因であることの分離)。
+        let unbounded = bounded.replace(
+            r#"{ "aabb_water": { "min": [-2, -5, -2], "max": [2, 2, 2],
+                              "water_level": 0.0, "density": 1000.0 } }"#,
+            r#"{ "static_water": { "water_level": 0.0, "density": 1000.0 } }"#,
+        );
+        let scenario = Scenario::from_json(&unbounded).expect("valid JSON");
+        let mut world = World::from_scenario(&scenario).expect("should build");
+        for _ in 0..240 {
+            world.step();
+        }
+        let y_unbounded = *world.probe(0).unwrap().history().last().unwrap();
+        assert!(
+            y_unbounded > y_bounded + 1.0,
+            "半空間なら同じ箱に浮力が効く: bounded={y_bounded} unbounded={y_unbounded}"
+        );
+    }
+
+    /// `aabb_water`の`water_level`省略時は`max[1]`(縁まで満水)になること、
+    /// `temperature`が`FluidRegion`まで届き`fluid_temperature_at`で引けること。
+    #[test]
+    fn aabb_water_defaults_its_water_level_to_the_top_face_and_carries_a_temperature() {
+        let json = r#"
+        {
+          "name": "warm-tank",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [],
+          "fluids": [
+            { "aabb_water": { "min": [-1, -2, -1], "max": [1, 0.5, 1],
+                              "density": 998.2, "temperature": 305.0 } }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).expect("valid JSON");
+        let world = World::from_scenario(&scenario).expect("should build");
+        let region = world.fluid_regions()[0];
+        assert_eq!(region.water_level, 0.5, "省略時の水面はmax[1]");
+        assert_eq!(region.temperature, Some(305.0));
+
+        // 熱ドメインへの結合はまだ無いが、値としては引ける
+        // (`MechanicsSolver::fluid_temperature_at`のdocの限界)。
+        let mechanics = world.mechanics();
+        assert_eq!(
+            mechanics.fluid_temperature_at(Vec3::new(0.0, -1.0, 0.0)),
+            Some(305.0)
+        );
+        assert_eq!(
+            mechanics.fluid_temperature_at(Vec3::new(50.0, -1.0, 0.0)),
+            None
+        );
+    }
+
+    /// `static_water`に`temperature`を足しても、水面・密度・形状は移行前のまま
+    /// (純粋に加算的なフィールドであることの固定)。
+    #[test]
+    fn static_water_accepts_an_optional_temperature_without_changing_anything_else() {
+        let json = r#"
+        {
+          "name": "warm-sea",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": [],
+          "fluids": [
+            { "static_water": { "water_level": 1.5, "density": 1025.0, "temperature": 291.0 } }
+          ]
+        }
+        "#;
+        let scenario = Scenario::from_json(json).expect("valid JSON");
+        let world = World::from_scenario(&scenario).expect("should build");
+        assert_eq!(
+            world.fluid_regions(),
+            &[sim_fluid::FluidRegion::new(1.5, 1025.0).with_temperature(291.0)]
+        );
     }
 
     /// ヘッドレスランナー(設計§8)の最小骨格: シーンJSON(浮力+`body_pos_y`プローブの

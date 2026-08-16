@@ -1449,33 +1449,45 @@ impl WasmWorld {
     /// Settingsの環境パネル——静的水域(水位・密度)を設定する
     /// (`World::add_fluid_region`の薄い写像、`set_environment`経由なので
     /// 重力・大気・周囲温度は変えない)。
+    ///
+    /// **縮約(流体領域の一般化に際しての正直な記録)**: `World`側は複数領域・
+    /// 形状つきの`fluids: Vec<FluidRegion>`を持てるようになったが、このJS向け
+    /// APIは**登録済み領域を1つの水平半空間で置き換える**移行前の形のままに
+    /// してある——Settingsの環境パネルが「水位・密度」の2フィールドしか持たない
+    /// 単一領域フォームであり、複数領域・AABBを編集するUIが無いためである。
+    /// 複数領域を持つシーンはシーンJSON(`fluids`セクション)から読み込む形で
+    /// 扱い、このパネルからは触らない。UI側に領域リストの編集器を足すのは
+    /// 後続増分。
     fn set_water_region_impl(&mut self, water_level: f64, density: f64) {
         let mut env = self.inner.environment();
-        env.water = Some(sim_fluid::StaticWaterRegion::new(water_level, density));
+        env.fluids = vec![sim_fluid::FluidRegion::new(water_level, density)];
         self.inner.set_environment(env);
     }
 
-    /// 静的水域を無効化する。
+    /// 静的水域を無効化する(登録済みの領域を全て取り除く)。
     fn clear_water_region_impl(&mut self) {
         let mut env = self.inner.environment();
-        env.water = None;
+        env.fluids.clear();
         self.inner.set_environment(env);
     }
 
-    /// 静的水域の水位[m]。無効なら`NaN`。
+    /// 静的水域の水位[m]。無効なら`NaN`。複数領域があるときは**先頭**を返す
+    /// (`set_water_region_impl`のdocの縮約)。
     fn water_level_impl(&self) -> f64 {
         self.inner
             .environment()
-            .water
+            .fluids
+            .first()
             .map(|w| w.water_level)
             .unwrap_or(f64::NAN)
     }
 
-    /// 静的水域の密度[kg/m^3]。無効なら`NaN`。
+    /// 静的水域の密度[kg/m^3]。無効なら`NaN`(`water_level_impl`と同じ縮約)。
     fn water_density_impl(&self) -> f64 {
         self.inner
             .environment()
-            .water
+            .fluids
+            .first()
             .map(|w| w.density)
             .unwrap_or(f64::NAN)
     }
@@ -3493,10 +3505,7 @@ impl WasmWorld {
         self.inner
             .add_coupling(Box::new(sim_coupling::BuoyancyDrag {
                 body_index: id.index as usize,
-                water: Some(sim_fluid::StaticWaterRegion::new(
-                    water_level,
-                    water_density,
-                )),
+                water: Some(sim_fluid::FluidRegion::new(water_level, water_density)),
                 atmosphere: None,
                 lift: None,
             }));

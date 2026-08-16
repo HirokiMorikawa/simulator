@@ -24,7 +24,7 @@
 //! 剛体の質量は`initial_mass*(1-liquid_fraction)`(固相残存質量比)として
 //! `RigidBodySet::inv_mass`を直接更新する(形状(`Shape`)自体は縮小しない——密度が
 //! 見かけ上下がっていく近似、`Shape`のランタイム変形は`RigidBodySet`に未実装のため
-//! 対象外)。この質量変化は既存の`BuoyancyDrag`・埋め込み浮力(`MechanicsSolver.water`)
+//! 対象外)。この質量変化は既存の`BuoyancyDrag`・埋め込み浮力(`MechanicsSolver.fluids`)
 //! 双方に無変更で伝播する(いずれも毎step`bodies.mass(idx)`を読み直すため、本
 //! Couplingが質量を更新するだけで浮力側が自動的に追従する——D18「氷と飲み物」の
 //! 「アルキメデス統合」が求める浮力との連動は、新規コードなしでこの構成上の性質から

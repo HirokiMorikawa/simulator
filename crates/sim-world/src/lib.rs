@@ -749,7 +749,9 @@ pub enum JointDesc {
 /// 既存の呼び出し側が`gravity`/`gravity_direction`だけを読み書きし続けられる
 /// ことを優先した。`environment()`は常に`gravity_field: Some(..)`を埋めるので、
 /// 読んでそのまま書き戻す往復では非一様な場も無損失で保たれる。
-#[derive(Clone, Copy, Debug)]
+///
+/// **流体領域の一般化に伴い`Copy`ではなくなった**——`fluids`が`Vec`になったため。
+#[derive(Clone, Debug)]
 pub struct EnvironmentDesc {
     /// 重力の大きさ [m/s^2](非`Uniform`な場では0.0、
     /// `sim_mechanics::MechanicsSolver::gravity`のdoc参照)。
@@ -762,7 +764,10 @@ pub struct EnvironmentDesc {
     /// `gravity`/`gravity_direction`より優先する(構造体docの優先規則)。
     pub gravity_field: Option<sim_mechanics::GravityField>,
     pub atmosphere: Option<sim_fluid::Atmosphere>,
-    pub water: Option<sim_fluid::StaticWaterRegion>,
+    /// 流体領域一覧(`sim_mechanics::MechanicsSolver::fluids`をそのまま写す)。
+    /// **移行前は`water: Option<StaticWaterRegion>`**で、水域は高々1つだった。
+    /// `set_environment`はこの`Vec`で丸ごと置き換える(空なら水域なし)。
+    pub fluids: Vec<sim_fluid::FluidRegion>,
     /// `None`なら熱ドメインが無効(`enable_thermal`未呼び出し)、または
     /// 変更しない。
     pub ambient_temperature: Option<f64>,
@@ -2671,14 +2676,29 @@ impl World {
         }
     }
 
-    /// 静的水域(設計 docs/20-integration/04-world-api.md §2
-    /// `add_fluid_region(desc: FluidDesc) -> FluidId`の縮約——現時点で「領域」
-    /// として追加できる流体は`sim_fluid::StaticWaterRegion`(単一の水位面)のみ
-    /// (SPH・格子流体は`enable_sph`/`enable_grid_fluid`が別に受け持つ、
-    /// モジュールdoc参照)。既存の水域があれば置き換える(`World`は水域を
-    /// 高々1つしか持てない、`MechanicsSolver::water`のdoc参照)。
-    pub fn add_fluid_region(&mut self, region: sim_fluid::StaticWaterRegion) {
-        self.mechanics.water = Some(region);
+    /// 流体領域を1つ**追加する**(設計 docs/20-integration/04-world-api.md §2
+    /// `add_fluid_region(desc: FluidDesc) -> FluidId`)。集中定数の浮力領域
+    /// (`sim_fluid::FluidRegion`)のみを対象とする——SPH・格子流体は
+    /// `enable_sph`/`enable_grid_fluid`が別に受け持つ(モジュールdoc参照)。
+    ///
+    /// **移行前は「置き換え」だった**(`World`は水域を高々1つしか持てなかった)。
+    /// 領域が`Vec`になったので素直な追加になり、戻り値でindex(設計の`FluidId`
+    /// 相当)を返す。重なった領域の決着規則は
+    /// `sim_mechanics::MechanicsSolver::fluids`のdoc参照——**追加した順が
+    /// そのまま優先順位**になる。全消しは`clear_fluid_regions`。
+    pub fn add_fluid_region(&mut self, region: sim_fluid::FluidRegion) -> usize {
+        self.mechanics.fluids.push(region);
+        self.mechanics.fluids.len() - 1
+    }
+
+    /// 登録済みの流体領域一覧(追加順=優先順)。
+    pub fn fluid_regions(&self) -> &[sim_fluid::FluidRegion] {
+        &self.mechanics.fluids
+    }
+
+    /// 流体領域を全て取り除く。
+    pub fn clear_fluid_regions(&mut self) {
+        self.mechanics.fluids.clear();
     }
 
     /// 現在の環境設定を`EnvironmentDesc`として読む(Inspectorの環境パネルが
@@ -2689,7 +2709,7 @@ impl World {
             gravity_direction: self.mechanics.gravity_direction(),
             gravity_field: Some(self.mechanics.gravity_field()),
             atmosphere: self.mechanics.atmosphere,
-            water: self.mechanics.water,
+            fluids: self.mechanics.fluids.clone(),
             ambient_temperature: self.thermal.as_ref().map(|t| t.ambient_temperature),
         }
     }
@@ -2709,7 +2729,7 @@ impl World {
             }
         }
         self.mechanics.atmosphere = desc.atmosphere;
-        self.mechanics.water = desc.water;
+        self.mechanics.fluids = desc.fluids;
         if let Some(t) = desc.ambient_temperature {
             if let Some(thermal) = self.thermal.as_mut() {
                 thermal.ambient_temperature = t;
@@ -3170,16 +3190,30 @@ mod tests {
         assert_eq!(world.mechanics().wheel_joints[0].motor_speed, 1.0);
     }
 
-    /// `add_fluid_region`が`MechanicsSolver::water`を設定し、既存の水域を
-    /// 置き換えること。
+    /// `add_fluid_region`が`MechanicsSolver::fluids`へ**追加**すること
+    /// (**移行前は置き換えだった**)。indexが登録順=優先順を表し、
+    /// `clear_fluid_regions`で全消しできる。
     #[test]
-    fn add_fluid_region_sets_and_replaces_the_static_water_region() {
+    fn add_fluid_region_appends_regions_in_registration_order() {
         let mut world = World::new(WorldOptions::default());
-        world.add_fluid_region(sim_fluid::StaticWaterRegion::new(1.0, 1000.0));
-        assert_eq!(world.mechanics().water.unwrap().water_level, 1.0);
+        assert_eq!(
+            world.add_fluid_region(sim_fluid::FluidRegion::new(1.0, 1000.0)),
+            0
+        );
+        assert_eq!(
+            world.add_fluid_region(sim_fluid::FluidRegion::new(2.0, 1000.0)),
+            1
+        );
 
-        world.add_fluid_region(sim_fluid::StaticWaterRegion::new(2.0, 1000.0));
-        assert_eq!(world.mechanics().water.unwrap().water_level, 2.0);
+        let regions = world.fluid_regions();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].water_level, 1.0);
+        assert_eq!(regions[1].water_level, 2.0);
+        // `mechanics()`側と同じものを見ている。
+        assert_eq!(world.mechanics().fluids.len(), 2);
+
+        world.clear_fluid_regions();
+        assert!(world.fluid_regions().is_empty());
     }
 
     /// `environment`/`set_environment`が重力(大きさ・向き)・大気・水域・
@@ -3197,10 +3231,20 @@ mod tests {
             // `None` = 従来のスカラー2つ経路(構造体docの優先規則)。
             gravity_field: None,
             atmosphere: Some(sim_fluid::Atmosphere::still(0.02, 1.1e-5)),
-            water: Some(sim_fluid::StaticWaterRegion::new(-1.0, 1000.0)),
+            // **流体領域の一般化**: 複数領域・形状・水温をまとめて往復する。
+            fluids: vec![
+                sim_fluid::FluidRegion::new(-1.0, 1000.0),
+                sim_fluid::FluidRegion::aabb(
+                    sim_math::Vec3::new(-1.0, -2.0, -1.0),
+                    sim_math::Vec3::new(1.0, 0.5, 1.0),
+                    0.0,
+                    1200.0,
+                )
+                .with_temperature(277.0),
+            ],
             ambient_temperature: Some(210.0),
         };
-        world.set_environment(desc);
+        world.set_environment(desc.clone());
 
         let read_back = world.environment();
         assert_eq!(read_back.gravity, 3.71);
@@ -3209,7 +3253,9 @@ mod tests {
             sim_math::Vec3::new(1.0, 0.0, 0.0)
         );
         assert_eq!(read_back.atmosphere.unwrap().density, 0.02);
-        assert_eq!(read_back.water.unwrap().water_level, -1.0);
+        assert_eq!(read_back.fluids, desc.fluids);
+        assert_eq!(read_back.fluids[0].water_level, -1.0);
+        assert_eq!(read_back.fluids[1].temperature, Some(277.0));
         assert_eq!(read_back.ambient_temperature, Some(210.0));
         assert_eq!(world.thermal().unwrap().ambient_temperature, 210.0);
     }
@@ -3239,7 +3285,7 @@ mod tests {
                 gravity_direction: sim_math::Vec3::new(1.0, 0.0, 0.0),
                 gravity_field: Some(field),
                 atmosphere: None,
-                water: None,
+                fluids: Vec::new(),
                 ambient_temperature: None,
             });
             assert_eq!(world.environment().gravity_field, Some(field));
@@ -4156,9 +4202,9 @@ mod tests {
 
     /// `BuoyancyDrag`をレジストリ経由(`add_coupling`)で剛体に接続し、`demos.rs`のD6
     /// (F4部分、密度比0.6の直立直方体)と同じ釣り合い喫水深さの近傍で有界に留まる
-    /// ことを確認する(既存の`MechanicsSolver.water`埋め込み経路(D6が使う)と同じ
+    /// ことを確認する(既存の`MechanicsSolver.fluids`埋め込み経路(D6が使う)と同じ
     /// 物理式(`sim_fluid::{submerged_box_axis_aligned, buoyancy_force}`)を使うが、
-    /// `mechanics_mut().water`は設定しない独立経路)。
+    /// `mechanics_mut().fluids`は設定しない独立経路)。
     ///
     /// D6のF4部分は埋め込み経路(`apply_forces`内でmechanicsの各sub-stepごとに
     /// 浮力を再評価)のため実質的に減衰項なしでも密着した釣り合いに留まるが、この
@@ -4208,7 +4254,7 @@ mod tests {
 
         world.add_coupling(Box::new(sim_coupling::BuoyancyDrag {
             body_index: box_id.index as usize,
-            water: Some(sim_fluid::StaticWaterRegion::new(0.0, water_density)),
+            water: Some(sim_fluid::FluidRegion::new(0.0, water_density)),
             atmosphere: None,
             lift: None,
         }));

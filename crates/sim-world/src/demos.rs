@@ -514,7 +514,7 @@ mod tests {
 
     /// D6 浮き沈み(同docs Phase 1表)。「密度スライダー付きの箱を水域へ」
     /// 「合格基準: F4(喫水)、F5(振動周期)」。`sim-mechanics`のF4/F5解析解テストと
-    /// 同じ構成(`StaticWaterRegion`、密度比0.6/0.5の箱)を`World`経由で再現し、
+    /// 同じ構成(`FluidRegion`、密度比0.6/0.5の箱)を`World`経由で再現し、
     /// (1)平衡喫水深さが密度比どおりであること(F4)、(2)平衡点から変位させた箱が
     /// 解析解の周期で上下振動すること(F5)の両方を確認する。
     #[test]
@@ -546,8 +546,7 @@ mod tests {
         {
             let ratio = 0.6;
             let mut world = World::new(WorldOptions::default());
-            world.mechanics_mut().water =
-                Some(sim_fluid::StaticWaterRegion::new(0.0, water_density));
+            world.mechanics_mut().fluids = vec![sim_fluid::FluidRegion::new(0.0, water_density)];
             let body = floating_body_material(&mut world, ratio * water_density);
             let h_sub = ratio * side;
             let equilibrium_y = -h_sub + half;
@@ -574,8 +573,7 @@ mod tests {
         {
             let ratio = 0.5;
             let mut world = World::new(WorldOptions::default());
-            world.mechanics_mut().water =
-                Some(sim_fluid::StaticWaterRegion::new(0.0, water_density));
+            world.mechanics_mut().fluids = vec![sim_fluid::FluidRegion::new(0.0, water_density)];
             let body = floating_body_material(&mut world, ratio * water_density);
             let equilibrium_y = -(ratio * side) + half;
             let amplitude = 0.1;
@@ -1314,7 +1312,7 @@ mod tests {
         let initial_mass = ice_density * side * side * side;
 
         let mut world = World::new(WorldOptions::default());
-        world.mechanics_mut().water = Some(sim_fluid::StaticWaterRegion::new(0.0, water_density));
+        world.mechanics_mut().fluids = vec![sim_fluid::FluidRegion::new(0.0, water_density)];
         let ice_material = world.materials_mut().push(sim_core::Material {
             name: "test-d18-ice",
             density: ice_density,

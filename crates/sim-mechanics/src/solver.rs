@@ -14,7 +14,7 @@ use sim_core::{
     Approximation, EnergyBreakdown, Event, EventKind, MaterialDb, Solver, SolverContext, SourceId,
     StateHasher,
 };
-use sim_fluid::{Atmosphere, StaticWaterRegion};
+use sim_fluid::{Atmosphere, FluidRegion};
 use sim_math::Vec3;
 use std::collections::HashSet;
 
@@ -31,7 +31,7 @@ use std::collections::HashSet;
 ///
 /// **正直な適用範囲**(移行前からの制約をそのまま引き継ぐ): この場が効くのは
 /// 自由体(Dynamic)への直接の重力積分(`MechanicsSolver::apply_forces`)と
-/// ポテンシャルエネルギー計算のみ。浮力(`sim_fluid::StaticWaterRegion`)は
+/// ポテンシャルエネルギー計算のみ。浮力(`sim_fluid::FluidRegion`)は
 /// 水面をワールドy座標の水平面として定義するモデルのため、重力の向きや
 /// 位置依存性に追従しない(`buoyancy_force`の既存実装、`sim-fluid`crateの
 /// 設計上の制約——水面が重力と独立に常に水平だという簡略化は、重力の向きを
@@ -195,9 +195,29 @@ pub struct MechanicsSolver {
     /// `None`(既定)は真空相当(抗力なし)。P1 は単一の一様媒質のみ(局所媒質・格子流体
     /// との排他は Phase 3、docs/11-fluid/05 §6)。
     pub atmosphere: Option<Atmosphere>,
-    /// 浮力の評価に使う静的水域(設計 docs/11-fluid/04-free-surface-buoyancy.md §3)。
-    /// `None`(既定)は水域なし。P1 は直立姿勢の直方体のみ対応(`sim_fluid::buoyancy` 冒頭注記)。
-    pub water: Option<StaticWaterRegion>,
+    /// 浮力の評価に使う流体領域(設計 docs/11-fluid/04-free-surface-buoyancy.md §3)。
+    /// 空(既定)は水域なし。P1 は直立姿勢の直方体のみ対応(`sim_fluid::buoyancy` 冒頭注記)。
+    ///
+    /// # 複数領域の決着規則(**移行前は`Option`だった**)
+    ///
+    /// 領域は**リスト順に走査し、剛体の基準点(`bodies.position[i]`、重心)を
+    /// 含む最初の領域**をその剛体の水域とする。重なった領域があっても
+    /// 2つ目以降は評価しない——浮力を足し合わせると同じ体積を二重に押し上げる
+    /// ことになるためである。「どちらとも取れる入力をどちらに倒すか」を
+    /// docに書いて固定しておく流儀は、`sim_fluid::GridFluid2D::set_solid_cells`が
+    /// 「半端に切れたセルは丸ごと Solid か Fluid になる」と離散化の決着を
+    /// 明示しているのと同じ(黙って決めると決定論が読めなくなる)。
+    /// 順序に意味があるので、シーンJSONの`fluids`配列の並びがそのまま
+    /// 優先順位になる。
+    ///
+    /// 基準点が重心1点であることの帰結: 領域の境界をまたいで置かれた大きな剛体は、
+    /// 重心が入っている側の領域だけを見る(`sim_fluid::FluidShape::Aabb`のdocの
+    /// 「既知の限界」と同じ、点判定の縮約)。
+    ///
+    /// **移行前との一致**: 要素が1つで`FluidShape::HalfSpace`(=旧
+    /// `StaticWaterRegion`)なら`contains`は常に`true`なので、全剛体がその領域を
+    /// 引き当てる——移行前の`water: Some(..)`と完全に同一の挙動になる。
+    pub fluids: Vec<FluidRegion>,
     /// マニフォールド持続化 + warm starting 用の永続キャッシュ(設計
     /// docs/10-mechanics/02-collision-detection.md §4.7・03-contact-solver.md §4.4)。
     /// `persistence_enabled` の切り替えは `set_manifold_persistence` から行う。
@@ -277,7 +297,7 @@ impl MechanicsSolver {
             },
             restitution_velocity_threshold: contact::DEFAULT_RESTITUTION_VELOCITY_THRESHOLD,
             atmosphere: None,
-            water: None,
+            fluids: Vec::new(),
             contact_cache: contact::ManifoldCache::new(),
             axis_cache: collision::AxisCache::new(),
             full_ccd_enabled: true,
@@ -438,6 +458,29 @@ impl MechanicsSolver {
         self.field.acceleration_at(position)
     }
 
+    /// 点`position`を含む**最初の**流体領域(`fluids`のdocの決着規則)。
+    /// どの領域にも入っていなければ`None`。`apply_forces`が浮力の評価に使うのと
+    /// 厳密に同じ引き当てなので、外から「この点はどの水域か」を問い合わせる用途
+    /// (エディタの表示・後続の結合)にもそのまま使える。
+    pub fn fluid_region_at(&self, position: Vec3) -> Option<&FluidRegion> {
+        self.fluids.iter().find(|region| region.contains(position))
+    }
+
+    /// 点`position`を含む最初の流体領域の水温 [K]。領域が無いか、その領域が
+    /// 温度を持たなければ`None`。
+    ///
+    /// **これが熱ドメインの何に繋がっているか(正直な記録)**: **まだ何にも
+    /// 繋がっていない**。`sim_coupling::ConvectionLink`は流体側も
+    /// `ThermalNode`のindex(`fluid_node`)で受け取る形なので、生の流体温度を
+    /// 熱源に取る経路が存在しない。このアクセサは、`sim-coupling`側へ
+    /// 「流体領域を熱源に取る`ConvectionLink`の変種」を足すときに読む先を
+    /// 先に用意しておくものであり、現時点で熱を動かす効果は無い
+    /// (`sim_fluid::FluidRegion::temperature`のdocと同じ限界)。
+    pub fn fluid_temperature_at(&self, position: Vec3) -> Option<f64> {
+        self.fluid_region_at(position)
+            .and_then(|region| region.temperature)
+    }
+
     /// 設計 §4 パイプラインの `apply_forces`。P1 スコープ: 重力 + 球の抗力
     /// (docs/11-fluid/05-aero-hydrodynamics.md §2.1)+ 直立直方体の浮力
     /// (docs/11-fluid/04-free-surface-buoyancy.md §2.1)。結合力は後続増分。
@@ -460,8 +503,12 @@ impl MechanicsSolver {
                         + sim_fluid::drag_force_sphere(radius, atm, self.bodies.linear_velocity[i]);
                 }
 
-                if let (Some(water), Shape::Box { half_extents }) =
-                    (&self.water, self.bodies.shape_of(i))
+                // 剛体の重心を含む最初の流体領域(`fluids`のdocの決着規則)。
+                let water = self
+                    .fluids
+                    .iter()
+                    .find(|region| region.contains(self.bodies.position[i]));
+                if let (Some(water), Shape::Box { half_extents }) = (water, self.bodies.shape_of(i))
                 {
                     let (v_sub, _c_buoy) = sim_fluid::submerged_box_axis_aligned(
                         self.bodies.position[i],
@@ -702,7 +749,7 @@ impl Solver for MechanicsSolver {
                 can_disable: false,
             },
         ];
-        if self.water.is_some() {
+        if !self.fluids.is_empty() {
             out.push(Approximation {
                 name: "浮力: 静的水域(集中定数)",
                 reason: "自由表面を追跡せず、水面の高さと密度だけで浮力を出す。\
@@ -1746,5 +1793,246 @@ mod tests {
         let energy = solver.total_energy();
         assert_eq!(energy.potential, 0.0);
         assert!(energy.kinetic > 0.0);
+    }
+
+    // ------------------------------------------------------------------
+    // 流体領域の一般化(`MechanicsSolver::fluids`、`sim_fluid::FluidRegion`)。
+    // ------------------------------------------------------------------
+
+    /// 浮力の検証用材料(摩擦・反発ゼロ、密度指定)。
+    fn buoyancy_material(materials: &mut MaterialDb, density: f64) -> sim_core::MaterialId {
+        materials.push(sim_core::Material {
+            name: "test-fluid-region-body",
+            density,
+            friction: 0.0,
+            restitution: 0.0,
+            youngs_modulus: None,
+            specific_heat: 1000.0,
+            conductivity: 1.0,
+            emissivity: 0.5,
+            melting: None,
+            resistivity: None,
+            relative_permittivity: 1.0,
+            refractive_index: None,
+            source: "test fixture",
+            uncertainty: 0.0,
+        })
+    }
+
+    /// 一辺1m・質量500kgの直立立方体を`position`へ置き、1step回した後の`v_y`を返す。
+    /// 浮力は`gravity()`に比例する(`buoyancy_force`)ので**重力を切ると浮力も
+    /// 消える**——そのため重力は残したまま、「浮力の有無・大小で加速度がどう
+    /// 変わるか」を見る形にしてある。浮力ゼロなら戻り値はちょうど`-g*dt`。
+    fn heave_velocity_after_one_step(fluids: Vec<FluidRegion>, position: Vec3) -> f64 {
+        let mut materials = MaterialDb::standard();
+        let material = buoyancy_material(&mut materials, 500.0);
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        solver.fluids = fluids;
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            material,
+        );
+        desc.transform.position = position;
+        let idx = solver.create_body(desc, &materials);
+
+        let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+        solver.step(1.0 / 240.0, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+        solver.bodies.linear_velocity[idx].y
+    }
+
+    /// 一辺1m・質量500kgの立方体が全没しているときの1step後の`v_y`(解析値)。
+    fn expected_fully_submerged_heave(density: f64) -> f64 {
+        let g = 9.80665;
+        let mass = 500.0;
+        (density * g * 1.0 - mass * g) / mass * (1.0 / 240.0)
+    }
+
+    /// **後方互換**: 要素1つの`HalfSpace`領域は、移行前の`water: Some(..)`と
+    /// 同じく「水平位置に関係なく全剛体へ効く」。水面下でも、水面をまたいで
+    /// 浮いていても浮力が出る(`sim_fluid::FluidShape::HalfSpace`のdoc)。
+    #[test]
+    fn a_single_half_space_region_applies_everywhere_like_the_legacy_water_field() {
+        let dt = 1.0 / 240.0;
+        let g = 9.80665;
+        let region = FluidRegion::new(0.0, 1000.0);
+
+        // 完全に水面下(V_sub=1m^3、質量500kg)-> 上向きの正味加速度。
+        let submerged = heave_velocity_after_one_step(vec![region], Vec3::new(0.0, -5.0, 0.0));
+        assert!(submerged > 0.0, "v_y={submerged}");
+        assert!((submerged - expected_fully_submerged_heave(1000.0)).abs() < 1e-12);
+        // 水面をまたいで浮いている(重心が水面上)-> 半分水没ぶんの浮力が出る。
+        let straddling = heave_velocity_after_one_step(vec![region], Vec3::new(0.0, 0.0, 0.0));
+        assert!(
+            straddling > -g * dt + 1e-9,
+            "水面をまたぐ浮体にも浮力が出る: v_y={straddling}"
+        );
+        // 完全に水面より上 -> 浮力ゼロ(自由落下)。
+        let dry = heave_velocity_after_one_step(vec![region], Vec3::new(0.0, 10.0, 0.0));
+        assert!((dry - (-g * dt)).abs() < 1e-12, "v_y={dry}");
+        // 遠く離れた水平位置でも、半空間は無限に広いので同じ。
+        let far = heave_velocity_after_one_step(vec![region], Vec3::new(1.0e4, -5.0, -1.0e4));
+        assert_eq!(far, submerged);
+    }
+
+    /// **形状が実際に領域を閉じている**: AABBの外にある剛体は、
+    /// 「無限に広い半空間なら水面下」の高さにいても浮力を受けない。
+    #[test]
+    fn an_aabb_region_does_not_apply_to_a_body_outside_its_bounds() {
+        let dt = 1.0 / 240.0;
+        let g = 9.80665;
+        let tank = FluidRegion::aabb(
+            Vec3::new(-2.0, -5.0, -2.0),
+            Vec3::new(2.0, 2.0, 2.0),
+            0.0,
+            1000.0,
+        );
+
+        // 水槽の中(水面下)-> 浮力あり。
+        let inside = heave_velocity_after_one_step(vec![tank], Vec3::new(0.0, -1.0, 0.0));
+        assert!(
+            (inside - expected_fully_submerged_heave(1000.0)).abs() < 1e-12,
+            "v_y={inside}"
+        );
+        // 同じ高さだが水槽の外(+x)-> 自由落下(浮力ゼロ)。
+        let outside = heave_velocity_after_one_step(vec![tank], Vec3::new(10.0, -1.0, 0.0));
+        assert!(
+            (outside - (-g * dt)).abs() < 1e-12,
+            "AABBの外では浮力が働かない: v_y={outside}"
+        );
+        // z方向にも閉じている。
+        let outside_z = heave_velocity_after_one_step(vec![tank], Vec3::new(0.0, -1.0, -10.0));
+        assert!((outside_z - (-g * dt)).abs() < 1e-12, "v_y={outside_z}");
+        // 底より下へ抜けても領域外。
+        let below = heave_velocity_after_one_step(vec![tank], Vec3::new(0.0, -20.0, 0.0));
+        assert!((below - (-g * dt)).abs() < 1e-12, "v_y={below}");
+    }
+
+    /// **複数領域が独立に効く**: 密度の違う2つの水槽を並べ、それぞれの中に
+    /// 置いた剛体が**自分の入っている領域の密度**で浮力を受けること。
+    #[test]
+    fn two_disjoint_regions_each_apply_their_own_density() {
+        let left = FluidRegion::aabb(
+            Vec3::new(-10.0, -5.0, -2.0),
+            Vec3::new(-1.0, 2.0, 2.0),
+            0.0,
+            1000.0,
+        );
+        let right = FluidRegion::aabb(
+            Vec3::new(1.0, -5.0, -2.0),
+            Vec3::new(10.0, 2.0, 2.0),
+            0.0,
+            2000.0, // 倍の密度
+        );
+
+        let left_v = heave_velocity_after_one_step(vec![left, right], Vec3::new(-5.0, -1.0, 0.0));
+        let right_v = heave_velocity_after_one_step(vec![left, right], Vec3::new(5.0, -1.0, 0.0));
+        assert!(
+            (left_v - expected_fully_submerged_heave(1000.0)).abs() < 1e-12,
+            "v_y={left_v}"
+        );
+        assert!(
+            (right_v - expected_fully_submerged_heave(2000.0)).abs() < 1e-12,
+            "v_y={right_v}"
+        );
+        // 領域の並び順を入れ替えても、重なっていないので結果は変わらない。
+        let swapped = heave_velocity_after_one_step(vec![right, left], Vec3::new(-5.0, -1.0, 0.0));
+        assert_eq!(swapped, left_v);
+    }
+
+    /// **重なった領域はリスト順で先勝ち**(`fluids`のdocの決着規則)。
+    /// 足し合わせない(足すと同じ体積を二重に押し上げる)ことも同時に固定する。
+    #[test]
+    fn overlapping_regions_resolve_to_the_first_match_in_list_order() {
+        let bounds = (Vec3::new(-5.0, -5.0, -5.0), Vec3::new(5.0, 5.0, 5.0));
+        let dense = FluidRegion::aabb(bounds.0, bounds.1, 0.0, 2000.0);
+        let light = FluidRegion::aabb(bounds.0, bounds.1, 0.0, 1000.0);
+        let position = Vec3::new(0.0, -1.0, 0.0);
+
+        let dense_first = heave_velocity_after_one_step(vec![dense, light], position);
+        assert!(
+            (dense_first - expected_fully_submerged_heave(2000.0)).abs() < 1e-12,
+            "v_y={dense_first}"
+        );
+        let light_first = heave_velocity_after_one_step(vec![light, dense], position);
+        assert!(
+            (light_first - expected_fully_submerged_heave(1000.0)).abs() < 1e-12,
+            "v_y={light_first}"
+        );
+        // 2つ目を足していない(足せば ρ=3000 相当になる)。
+        assert!((dense_first - expected_fully_submerged_heave(3000.0)).abs() > 1e-6);
+    }
+
+    /// `fluid_region_at`/`fluid_temperature_at`が`apply_forces`と同じ引き当てを
+    /// 返すこと。温度は領域に付いた値をそのまま返し、温度を持たない領域・
+    /// どの領域にも入らない点では`None`。
+    #[test]
+    fn fluid_region_and_temperature_accessors_follow_the_same_resolution_rule() {
+        let cold = FluidRegion::aabb(
+            Vec3::new(-5.0, -5.0, -5.0),
+            Vec3::new(0.0, 5.0, 5.0),
+            0.0,
+            1000.0,
+        )
+        .with_temperature(275.15);
+        let untempered = FluidRegion::aabb(
+            Vec3::new(0.0, -5.0, -5.0),
+            Vec3::new(5.0, 5.0, 5.0),
+            0.0,
+            1000.0,
+        );
+        let mut solver = MechanicsSolver::new(9.80665);
+        solver.fluids = vec![cold, untempered];
+
+        assert_eq!(
+            solver.fluid_region_at(Vec3::new(-2.0, 0.0, 0.0)),
+            Some(&cold)
+        );
+        assert_eq!(
+            solver.fluid_temperature_at(Vec3::new(-2.0, 0.0, 0.0)),
+            Some(275.15)
+        );
+        // 温度を持たない領域は`None`(領域自体は引き当たる)。
+        assert_eq!(
+            solver.fluid_region_at(Vec3::new(2.0, 0.0, 0.0)),
+            Some(&untempered)
+        );
+        assert_eq!(solver.fluid_temperature_at(Vec3::new(2.0, 0.0, 0.0)), None);
+        // どの領域にも入らない点。
+        assert_eq!(solver.fluid_region_at(Vec3::new(100.0, 0.0, 0.0)), None);
+        assert_eq!(
+            solver.fluid_temperature_at(Vec3::new(100.0, 0.0, 0.0)),
+            None
+        );
+        // 境界(x=0)は両方に含まれるが、リスト順で先の`cold`が勝つ。
+        assert_eq!(solver.fluid_region_at(Vec3::ZERO), Some(&cold));
+    }
+
+    /// `approximations()`の「浮力: 静的水域」項目は、領域が1つでも複数でも出る
+    /// (移行前の`water.is_some()`の置き換えが漏れていないこと)。
+    #[test]
+    fn the_static_water_approximation_is_listed_whenever_any_region_exists() {
+        let has_buoyancy = |solver: &MechanicsSolver| {
+            solver
+                .approximations()
+                .iter()
+                .any(|a| a.name == "浮力: 静的水域(集中定数)")
+        };
+        let mut solver = MechanicsSolver::new(9.80665);
+        assert!(!has_buoyancy(&solver));
+        solver.fluids = vec![FluidRegion::new(0.0, 1000.0)];
+        assert!(has_buoyancy(&solver));
+        solver.fluids.push(FluidRegion::aabb(
+            Vec3::ZERO,
+            Vec3::new(1.0, 1.0, 1.0),
+            0.5,
+            1000.0,
+        ));
+        assert!(has_buoyancy(&solver));
     }
 }

@@ -27,7 +27,7 @@ pub use aero::{
     FULL_STALL_ANGLE, STALL_ANGLE,
 };
 pub use buoyancy::{
-    buoyancy_force, hydrostatic_pressure, submerged_box_axis_aligned, StaticWaterRegion,
+    buoyancy_force, hydrostatic_pressure, submerged_box_axis_aligned, FluidRegion, FluidShape,
 };
 pub use grid_fluid::{CellType, GridBoundary, GridFluid2D};
 pub use grid_fluid3d::{GridBoundary3D, GridFluid3D, PressureSolveReport};

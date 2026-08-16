@@ -2,10 +2,12 @@
 //! (浮力・抗力・揚力)」)。
 //!
 //! **既存の`MechanicsSolver`埋め込み実装との関係**: `sim_mechanics::MechanicsSolver`は
-//! `water: Option<StaticWaterRegion>`・`atmosphere: Option<Atmosphere>`フィールドを持ち、
-//! `apply_forces`内でシーン全体の該当形状(直立直方体の浮力・球の抗力)全てに無条件で
+//! `fluids: Vec<FluidRegion>`・`atmosphere: Option<Atmosphere>`フィールドを持ち、
+//! `apply_forces`内でシーン全体の該当形状(直立直方体の浮力・球の抗力)全てに
 //! 同じ物理式(`sim_fluid::{buoyancy_force, drag_force_sphere, submerged_box_axis_aligned}`)
-//! を適用する(シーン全体で単一の水域・大気を共有する既存の縮約、多数の既存テスト・
+//! を適用する(結合登録を要さず、剛体を置くだけで効く経路。どの水域が効くかは
+//! 剛体の重心を含む最初の領域という決着規則で決まり(`MechanicsSolver::fluids`の
+//! doc)、大気はシーン全体で1つを共有する縮約のまま。多数の既存テスト・
 //! デモ(F4・F5・F1・F3・D6・D7等)がこの経路に依存する)。本Couplingはこれを置き換える
 //! ものではない(切り出しは広く使われた既存経路への高リスクな変更になるため対象外、
 //! 「既存のMechanicsSolver埋め込み実装の切り出しリスク」として繰り返し見送ってきた
@@ -14,7 +16,17 @@
 //! 配線を提供する(`LorentzForce`・`BrownianForce`と同じ「剛体ごとの明示的な結合登録」
 //! パターン、`MechanicsSolver`の内部状態を一切変更しない)。
 //!
-//! **二重計上に関する注意**: 同一剛体に対して`MechanicsSolver.water`/`.atmosphere`
+//! **なぜこちらは`Vec`にしないのか(流体領域の一般化に際しての判断)**:
+//! `MechanicsSolver::fluids`が複数領域を持つのは、シーン全体の全剛体を1つの
+//! フィールドで面倒みる埋め込み経路だからで、「この剛体はどの水域か」を
+//! 位置から引き当てる規則が要る。対してこの`Coupling`は**剛体1体につき1件
+//! 登録する**形なので、どの水域に結ぶかはシーン構築側が登録時に明示済みである
+//! ——引き当て規則を重ねる意味がない。したがって`water`は`Option<FluidRegion>`の
+//! ままとし、一般化の恩恵(形状・水温)だけを型から受け取る。形状は効く:
+//! `water`にAABB領域を与えれば、その剛体が領域の外にいるstepでは浮力が
+//! 出なくなる(`FluidRegion::contains`)。
+//!
+//! **二重計上に関する注意**: 同一剛体に対して`MechanicsSolver.fluids`/`.atmosphere`
 //! (埋め込み経路)とこの`Coupling`の両方を有効にすると同じ物理を2回適用してしまう
 //! (設計§2規則2)。シーン構築側がどちらか一方のみを選ぶ責任を持つ(設計のシーン設定
 //! `SceneCouplingConfig`の`static_water_buoyancy`フラグが表す区別と同じ)。
@@ -36,7 +48,7 @@
 
 use crate::domain_states::{Coupling, CouplingKind, CouplingParam, DomainStates};
 use sim_core::DomainId;
-use sim_fluid::{Atmosphere, StaticWaterRegion};
+use sim_fluid::{Atmosphere, FluidRegion};
 use sim_math::Vec3;
 use sim_mechanics::{DragModel, Shape};
 
@@ -67,7 +79,9 @@ pub enum LiftModel {
 #[derive(Clone)]
 pub struct BuoyancyDrag {
     pub body_index: usize,
-    pub water: Option<StaticWaterRegion>,
+    /// この剛体を結ぶ流体領域(モジュールdoc「なぜこちらは`Vec`にしないのか」参照)。
+    /// `FluidShape::Aabb`なら剛体の重心が領域外にあるstepでは浮力を出さない。
+    pub water: Option<FluidRegion>,
     pub atmosphere: Option<Atmosphere>,
     /// 揚力(**群5で追加**)。`None`なら揚力を評価しない(移行前と同じ挙動)。
     pub lift: Option<LiftModel>,
@@ -106,8 +120,13 @@ impl Coupling for BuoyancyDrag {
         if let Some(water) = &self.water {
             if let Shape::Box { half_extents } = *world.mechanics.bodies.shape_of(idx) {
                 let pos = world.mechanics.bodies.position[idx];
-                let (v_sub, _) =
-                    sim_fluid::submerged_box_axis_aligned(pos, half_extents, water.water_level);
+                // 領域の内外判定(`FluidRegion::contains`)。`HalfSpace`(移行前の
+                // `StaticWaterRegion`相当)では常に`true`なので、移行前と同一の挙動。
+                let (v_sub, _) = if water.contains(pos) {
+                    sim_fluid::submerged_box_axis_aligned(pos, half_extents, water.water_level)
+                } else {
+                    (0.0, pos)
+                };
                 if v_sub > 0.0 {
                     // **正直な限界(重力場の抽象化増分)**: ここは重力場の
                     // スカラー縮約(`MechanicsSolver::gravity`)を読んでおり、
@@ -248,7 +267,7 @@ mod tests {
         let mut mechanics = MechanicsSolver::new(gravity);
         let body = mechanics.create_body(desc, &materials);
 
-        let water = StaticWaterRegion::new(0.5, 1000.0);
+        let water = FluidRegion::new(0.5, 1000.0);
         let (v_sub, _) = sim_fluid::submerged_box_axis_aligned(
             Vec3::new(0.0, 0.25, 0.0),
             half_extents,
@@ -329,7 +348,7 @@ mod tests {
 
         let mut coupling = BuoyancyDrag {
             body_index: body,
-            water: Some(StaticWaterRegion::new(0.0, 1000.0)),
+            water: Some(FluidRegion::new(0.0, 1000.0)),
             atmosphere: None,
             lift: None,
         };
@@ -337,6 +356,50 @@ mod tests {
         coupling.apply(&mut states(&mut mechanics), 0.01);
 
         assert_eq!(mechanics.bodies.linear_velocity[body], velocity_before);
+    }
+
+    /// **流体領域の一般化**: `water`にAABB領域を与えると、領域の外にいる剛体には
+    /// (「無限に広い半空間なら水面下」の高さでも)浮力を出さない。
+    /// 同じ剛体・同じ高さで`HalfSpace`なら出る、という対比で形状が効いていることを見る。
+    #[test]
+    fn buoyancy_drag_respects_the_bounds_of_an_aabb_fluid_region() {
+        let materials = MaterialDb::standard();
+        let wood = materials.find_by_name("木材(松)").unwrap();
+        let half_extents = Vec3::new(0.5, 0.5, 0.5);
+
+        let impulse = |water: FluidRegion, position: Vec3| -> Vec3 {
+            let mut desc = RigidBodyDesc::dynamic(Shape::Box { half_extents }, wood);
+            desc.mass_override = Some(10.0);
+            desc.transform.position = position;
+            let mut mechanics = MechanicsSolver::new(9.80665);
+            let body = mechanics.create_body(desc, &materials);
+            let mut coupling = BuoyancyDrag {
+                body_index: body,
+                water: Some(water),
+                atmosphere: None,
+                lift: None,
+            };
+            let before = mechanics.bodies.linear_velocity[body];
+            coupling.apply(&mut states(&mut mechanics), 0.01);
+            mechanics.bodies.linear_velocity[body] - before
+        };
+
+        let tank = FluidRegion::aabb(
+            Vec3::new(-2.0, -5.0, -2.0),
+            Vec3::new(2.0, 2.0, 2.0),
+            0.0,
+            1000.0,
+        );
+        let half_space = FluidRegion::new(0.0, 1000.0);
+        let inside = Vec3::new(0.0, -1.0, 0.0);
+        let outside = Vec3::new(10.0, -1.0, 0.0);
+
+        // 水槽の中では半空間と同じ浮力(式は一切変えていない)。
+        assert_eq!(impulse(tank, inside), impulse(half_space, inside));
+        assert!(impulse(tank, inside).y > 0.0);
+        // 水槽の外では浮力ゼロ。半空間なら同じ位置で浮力が出る。
+        assert_eq!(impulse(tank, outside), Vec3::ZERO);
+        assert!(impulse(half_space, outside).y > 0.0);
     }
 
     /// 質量0以下(静的/キネマティック)の剛体には適用しない(他のCoupling実装と同じ
@@ -358,7 +421,7 @@ mod tests {
 
         let mut coupling = BuoyancyDrag {
             body_index: body,
-            water: Some(StaticWaterRegion::new(0.5, 1000.0)),
+            water: Some(FluidRegion::new(0.5, 1000.0)),
             atmosphere: None,
             lift: None,
         };
@@ -670,7 +733,7 @@ mod tests {
         half_extents: Vec3,
         mass: f64,
         density: f64,
-        water: StaticWaterRegion,
+        water: FluidRegion,
         gravity: f64,
         start_y: f64,
         dt: f64,
@@ -744,7 +807,7 @@ mod tests {
         let side = 1.0_f64;
         let waterline_area = side * side;
         let mass = ratio * water_density * side.powi(3);
-        let water = StaticWaterRegion::new(0.0, water_density);
+        let water = FluidRegion::new(0.0, water_density);
 
         // 解析解: d = m/(ρ_f A)、箱中心はそこから半分の高さだけ上。
         let draft = mass / (water_density * waterline_area);
@@ -819,7 +882,7 @@ mod tests {
         let side = 1.0_f64;
         let waterline_area = side * side;
         let mass = ratio * water_density * side.powi(3);
-        let water = StaticWaterRegion::new(0.0, water_density);
+        let water = FluidRegion::new(0.0, water_density);
         let equilibrium_y = -(mass / (water_density * waterline_area)) + half_extents.y;
 
         let omega = (water_density * gravity * waterline_area / mass).sqrt();
