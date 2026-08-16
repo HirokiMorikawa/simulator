@@ -84,10 +84,14 @@ pub enum WasmError {
     /// `sim_world::run_headless_scenario`の失敗(検証パネル経路)。
     HeadlessRun(sim_world::SceneError),
 
-    // --- serde_jsonのシリアライズ失敗(`serde_json::Error`は`PartialEq`を
-    // 持たないため、`Display`済みの文字列で保持する) ---
+    // --- serde_jsonのシリアライズ/デシリアライズ失敗(`serde_json::Error`は
+    // `PartialEq`を持たないため、`Display`済みの文字列で保持する) ---
     /// `body_shape_json_at`のシリアライズ失敗。
     ShapeSerializeFailed(String),
+    /// `spawn_shape_json`が受け取った形状JSONが`ShapeJson`として読めない
+    /// (**Prefabの任意形状対応で追加**)。上の3つと違い**実際に踏める**
+    /// ——JS側が組み立てた文字列がそのまま渡ってくるため。
+    ShapeParseFailed(String),
     /// `export_scene_json`/`bookmark_export_scene_json`のシリアライズ失敗。
     ScenarioSerializeFailed(String),
     /// `run_headless_scenario_json`の結果シリアライズ失敗。
@@ -192,6 +196,7 @@ impl std::fmt::Display for WasmError {
             | WasmError::HeadlessRun(e) => write!(f, "{e:?}"),
 
             WasmError::ShapeSerializeFailed(e) => write!(f, "failed to serialize shape: {e}"),
+            WasmError::ShapeParseFailed(e) => write!(f, "failed to parse shape json: {e}"),
             WasmError::ScenarioSerializeFailed(e) => write!(f, "failed to serialize scenario: {e}"),
             WasmError::HeadlessResultSerializeFailed(e) => {
                 write!(f, "failed to serialize result: {e}")
@@ -348,6 +353,23 @@ struct SpawnedBodyMeta {
     /// ボディindexが総ずれするため、削除は**このフラグで表す**
     /// (`World::remove_body`が下層スロットを詰めないのと同じ方針)。
     removed: bool,
+}
+
+/// `SpawnedBodyMeta::label`の既定接頭辞(`Sphere_3`の`Sphere`の部分)。
+/// 固定レシピのスポナー(`spawn_sphere_impl`等)がリテラルで書いているのと
+/// 同じ綴りを、任意形状スポナー(`spawn_shape_json_impl`)が形状から引く
+/// ために切り出した。`body_shape_kind_at_impl`が返す小文字スネークケースの
+/// **種別名とは別物**——あちらはJS側との外部規約なので、表示用ラベルの
+/// 都合で綴りを変えられない。
+fn shape_label_prefix(shape: &Shape) -> &'static str {
+    match shape {
+        Shape::Sphere { .. } => "Sphere",
+        Shape::Box { .. } => "Box",
+        Shape::Capsule { .. } => "Capsule",
+        Shape::Plane { .. } => "Plane",
+        Shape::Compound { .. } => "Compound",
+        Shape::ConvexMesh { .. } => "ConvexMesh",
+    }
 }
 
 #[wasm_bindgen]
@@ -690,7 +712,12 @@ impl WasmWorld {
     /// ドラッグで再利用」の縮約実装——Bodyの形状/材質のみ対象、Joint/Circuit組は
     /// 対象外)向けに、`index`番目のボディの形状の種類を返す
     /// ("sphere"/"box"/"capsule"/"plane"/"compound"/"convex_mesh")。
-    /// `body_shape_params_f64_at`と対で使う。
+    /// **寸法そのものは`body_shape_json_at`から読む**——以前は平坦なf64配列を
+    /// 返す`body_shape_params_f64_at`と対で使っていたが、Compound/ConvexMeshを
+    /// 表現できず両形状だけ別経路になっていたため、寸法の読み出しを
+    /// `body_shape_json_at`へ一本化して当該メソッドは削除した
+    /// (`body_shape_json_at_impl`のdoc参照)。こちらは「Planeか否か」など
+    /// 種類だけで足りる判定が残っているため存続する。
     /// **2026-08-14修正**: `Shape::Capsule`が`_ => "other"`に落ちて
     /// "capsule"を返さない実バグがあった(フロント`duplicate()`の
     /// `kind === "capsule"`分岐が到達不能だった)。Compound/ConvexMeshの
@@ -709,44 +736,24 @@ impl WasmWorld {
         )
     }
 
-    /// `body_shape_kind_at`と対応する数値パラメータ: sphere→`[radius]`、
-    /// box→`[hx,hy,hz]`、capsule→`[radius,half_height]`、
-    /// plane→`[nx,ny,nz,d]`、compound/convex_mesh→空配列(可変長構造は
-    /// 平坦なf64配列で表現できないため——Prefab保存も両形状は対象外のまま)。
+    /// `index`番目のボディの、入れ子構造も含めた完全な形状記述をシーンJSON
+    /// 形式(`ShapeJson`を`serde_json`でシリアライズした文字列)で返す。
+    /// **6形状すべてを無損失に表現できる唯一の読み出し口**であり、フロント側は
+    /// 複製(`duplicate()`)もPrefabキャプチャもここ1本から形状を読む。
     ///
-    /// **`Vec<f64>`を返す(以前は`Float64Array`だった)**: 唯一の呼び出し元である
-    /// `read_component`は受け取った`Float64Array`を直後に`.to_vec()`で戻して
-    /// JSONへ流し込んでいた——JS側へ型付き配列として渡る経路はどこにも無く、
-    /// 往復は純粋な無駄だった。加えて`Float64Array`はネイティブターゲットで
-    /// 構築できないため、この往復が`read_component`の成功パスまで
-    /// ネイティブテスト不能にしていた(`WasmError`のdoc参照)。JSから見た
-    /// `read_component`の戻り値(JSON配列文字列)は変わらない。
-    fn body_shape_params_f64_at_impl(&self, index: usize) -> Result<Vec<f64>, WasmError> {
-        let id = self.try_body_id_at(index)?;
-        Ok(
-            match self.inner.mechanics().bodies.shape_of(id.index as usize) {
-                Shape::Sphere { radius } => vec![*radius],
-                Shape::Box { half_extents } => {
-                    vec![half_extents.x, half_extents.y, half_extents.z]
-                }
-                Shape::Capsule {
-                    radius,
-                    half_height,
-                } => vec![*radius, *half_height],
-                Shape::Plane { normal, d } => vec![normal.x, normal.y, normal.z, *d],
-                Shape::Compound { .. } | Shape::ConvexMesh { .. } => Vec::new(),
-            },
-        )
-    }
-
-    /// `body_shape_kind_at`が`"compound"`/`"convex_mesh"`を返すボディの、
-    /// 入れ子構造も含めた完全な形状記述をシーンJSON形式(`ShapeJson`を
-    /// `serde_json`でシリアライズした文字列)で返す。`body_shape_params_f64_at`
-    /// が平坦なf64配列で表現できない両形状向けの専用経路——
-    /// フロント側の`duplicate()`が「スポーン時の既定形状(L字/立方体)だと
-    /// 決め打ちする」縮約をせず、複製後の実際の形状からメッシュを
-    /// 再構築できるようにする(シーンJSON importと同じ`meshFromShapeJson`
-    /// を再利用できる形で返す)。
+    /// **以前は`compound`/`convex_mesh`専用の迂回路だった**: 元々は平坦な
+    /// f64配列を返す`body_shape_params_f64_at`(sphere→`[radius]`、
+    /// box→`[hx,hy,hz]`、capsule→`[radius,half_height]`)が主経路で、
+    /// 可変長の入れ子構造(Compound)や頂点群(ConvexMesh)を平坦な配列で
+    /// 表現できないぶんだけこちらが補っていた。結果としてフロントの
+    /// `duplicate()`は「sphere/box/capsuleは配列、compound/convex_meshはJSON」
+    /// という**形状の種類ごとに分かれた2経路**を抱え、Prefabキャプチャに
+    /// 至っては配列側しか持たないまま球/箱だけの機能に留まっていた
+    /// (Compound/ConvexMeshのボディを作ってもPrefab化できない実質的な欠落)。
+    /// 表現力で劣る側を残す理由が無いため`body_shape_params_f64_at`は削除し、
+    /// 読み出しをこの1本へ統合した(シーンJSON importと同じ
+    /// `meshFromShapeJson`がそのまま使える形で返す)。書き戻し側の対は
+    /// `spawn_shape_json`。
     fn body_shape_json_at_impl(&self, index: usize) -> Result<String, WasmError> {
         let id = self.try_body_id_at(index)?;
         let shape = self.inner.mechanics().bodies.shape_of(id.index as usize);
@@ -766,8 +773,17 @@ impl WasmWorld {
     /// 未知の名前なら`WasmError::UnknownMaterial`を返す(呼び出し側UIが
     /// `SPAWN_MATERIALS`等の既知の名前だけを渡す前提だが、**2026-07-27の監査で
     /// 修正**: 以前は`panic!`していた——`try_body_id_at`のdocと同じ理由で
-    /// Result化した)。戻り値が`Vec<f64>`である理由は
-    /// `body_shape_params_f64_at_impl`のdocと同じ。
+    /// Result化した)。
+    ///
+    /// **`Vec<f64>`を返す(以前は`Float64Array`だった)**: 唯一の呼び出し元である
+    /// `read_component`は受け取った`Float64Array`を直後に`.to_vec()`で戻して
+    /// JSONへ流し込んでいた——JS側へ型付き配列として渡る経路はどこにも無く、
+    /// 往復は純粋な無駄だった。加えて`Float64Array`はネイティブターゲットで
+    /// 構築できないため、この往復が`read_component`の成功パスまで
+    /// ネイティブテスト不能にしていた(`WasmError`のdoc参照)。JSから見た
+    /// `read_component`の戻り値(JSON配列文字列)は変わらない。
+    /// (この記述は元々`body_shape_params_f64_at_impl`のdocにあり、同メソッドを
+    /// 削除した際にここへ移した——同じ経緯を辿った`Vec<f64>`返しはこれが最後。)
     fn material_properties_f64_impl(&self, name: &str) -> Result<Vec<f64>, WasmError> {
         let id = self
             .inner
@@ -1018,6 +1034,61 @@ impl WasmWorld {
             id,
             label,
             material_label: material_name,
+            base_shape: shape,
+            constraint_joint_index: None,
+            hinge_motor_index: None,
+            removed: false,
+        });
+        Ok(index)
+    }
+
+    /// **任意の形状をそのまま配置する汎用スポナー**——`shape_json`
+    /// (`body_shape_json_at`が返すのと同じ`ShapeJson`のJSON表現)を
+    /// `shape_json_to_shape`で`Shape`へ戻し、`material_name`で`(x,y,z)`へ
+    /// 置く。新しいボディのindexを返す規約は`spawn_sphere`と同じ。
+    ///
+    /// **なぜ要ったか(Prefabの実質的な欠落)**: 既存の`spawn_*`はどれも
+    /// **固定レシピ**である——`spawn_box`は立方体1辺、`spawn_compound_l_shape`は
+    /// L字、`spawn_convex_mesh_cube`は立方体の8隅と、寸法の自由度こそあれ
+    /// 「どんな形状か」は呼び出し名で決まってしまう。そのためPrefab
+    /// (`body_shape_kind_at`+形状パラメータをキャプチャして再スポーンする機能)は
+    /// 球/箱しか扱えず、ユーザーがCompound/ConvexMeshのボディを組んでも
+    /// 「Prefabとして保存」が黙って何もしない状態だった。ここが埋まることで
+    /// キャプチャ側(`body_shape_json_at`)と再スポーン側が**同じ`ShapeJson`
+    /// という1つの語彙**で対になり、6形状すべてが往復する。
+    ///
+    /// **`Plane`も受け付ける**(弾かない)——形状JSONの語彙をここで狭めると
+    /// 「読めるが書き戻せない」非対称が復活するため。無限平面を動剛体として
+    /// 増やすことに意味が無いのは事実だが、それはUI側の判断
+    /// (`captureBody`が`plane`を弾く)として持たせている。
+    fn spawn_shape_json_impl(
+        &mut self,
+        shape_json: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        material_name: &str,
+    ) -> Result<usize, WasmError> {
+        let parsed: sim_world::ShapeJson = serde_json::from_str(shape_json)
+            .map_err(|e| WasmError::ShapeParseFailed(e.to_string()))?;
+        let shape = sim_world::shape_json_to_shape(&parsed);
+        let material = self
+            .inner
+            .materials()
+            .find_by_name(material_name)
+            .ok_or_else(|| WasmError::UnknownMaterial(material_name.to_string()))?;
+        let mut desc = RigidBodyDesc::dynamic(shape.clone(), material);
+        desc.transform.position = sim_math::Vec3::new(x, y, z);
+        let id = self.inner.create_body(desc);
+        let index = self.body_count_impl();
+        // 既定ラベルは固定レシピのスポナーと同じ体系(`Sphere_3`等)に揃える
+        // ——Hierarchyの行がスポーン経路によって別の命名になると、同じ形状の
+        // ボディが由来だけで違って見える。
+        let label = format!("{}_{index}", shape_label_prefix(&shape));
+        self.bodies.push(SpawnedBodyMeta {
+            id,
+            label,
+            material_label: material_name.to_string(),
             base_shape: shape,
             constraint_joint_index: None,
             hinge_motor_index: None,
@@ -2924,6 +2995,16 @@ impl WasmWorld {
                 )?;
                 Ok(format!("{{\"index\":{index}}}"))
             }
+            "spawn_shape_json" => {
+                let index = self.spawn_shape_json_impl(
+                    &s("shape_json"),
+                    f("x"),
+                    f("y"),
+                    f("z"),
+                    &s("material_name"),
+                )?;
+                Ok(format!("{{\"index\":{index}}}"))
+            }
             "remove_body_at" => {
                 self.remove_body_at_impl(u("index"))?;
                 Ok("{}".to_string())
@@ -3149,10 +3230,6 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 Ok(self.body_is_removed_at_impl(index)?.to_string())
             }
-            "body_shape_params_f64_at" => {
-                let index: usize = arg.parse().unwrap_or(0);
-                Ok(serde_json::json!(self.body_shape_params_f64_at_impl(index)?).to_string())
-            }
             "material_properties_f64" => {
                 Ok(serde_json::json!(self.material_properties_f64_impl(arg)?).to_string())
             }
@@ -3265,7 +3342,7 @@ impl WasmWorld {
                 "body_count", "body_label_at", "body_is_static_at",
                 "body_shape_label_at", "body_shape_kind_at", "body_shape_json_at",
                 "body_material_label_at", "body_is_removed_at",
-                "body_shape_params_f64_at", "material_properties_f64",
+                "material_properties_f64",
                 "circuit_element_count", "circuit_element_label_at",
                 "circuit_divider_voltage", "circuit_editor_motor_current",
                 "circuit_node_voltage", "heater_node_temperature",
@@ -5315,11 +5392,15 @@ mod tests {
     }
 
     /// **Task#8第四弾の回帰テスト**: ボディのスポーン/削除/複製/材料派生
-    /// 8個と、その内省10個も`apply_component`/`read_component`経由で操作できる
-    /// ことを確認する。`body_shape_params_f64_at`/`material_properties_f64`は
-    /// 以前「`Float64Array`を返す実装がネイティブでSIGABRTする」ため除外して
-    /// いたが、両`_impl`を`Vec<f64>`返しへ直した(往復は元々無駄だった、
-    /// `body_shape_params_f64_at_impl`のdoc参照)ので今は検証対象に含める。
+    /// 9個と、その内省9個も`apply_component`/`read_component`経由で操作できる
+    /// ことを確認する。`material_properties_f64`は以前「`Float64Array`を返す
+    /// 実装がネイティブでSIGABRTする」ため除外していたが、`_impl`を
+    /// `Vec<f64>`返しへ直した(往復は元々無駄だった、
+    /// `material_properties_f64_impl`のdoc参照)ので今は検証対象に含める。
+    /// **形状パラメータの内省は`body_shape_json_at`1本**——同じ経緯で
+    /// 検証対象に入っていた`body_shape_params_f64_at`は、Compound/ConvexMeshを
+    /// 表現できず読み出しを2経路に割っていたため削除した
+    /// (`body_shape_json_at_impl`のdoc参照)。
     #[test]
     fn apply_component_and_read_component_spawn_and_introspect_bodies_via_generic_dispatch() {
         let mut world = new_world();
@@ -5424,13 +5505,27 @@ mod tests {
             )
             .expect("derive_material via apply_component must succeed");
 
-        // `Vec<f64>`返しへ直した2つの内省(上のdoc参照)。
+        // 任意形状スポナー——固定レシピの5種と違い、形状そのものを
+        // `body_shape_json_at`と同じ`ShapeJson`表現で受ける(9個目のスポーン)。
+        let result = world
+            .apply_component_impl(
+                "spawn_shape_json",
+                r#"{"shape_json":"{\"capsule\":{\"radius\":0.2,\"half_height\":0.6}}","x":6.0,"y":3.0,"z":0.0,"material_name":"アルミニウム"}"#,
+            )
+            .expect("spawn_shape_json via apply_component must succeed");
+        assert_eq!(result, "{\"index\":8}");
         assert_eq!(
             world
-                .read_component_impl("body_shape_params_f64_at", "2")
+                .read_component_impl("body_shape_kind_at", "8")
                 .unwrap(),
-            "[0.4]"
+            "capsule"
         );
+        assert_eq!(
+            world.read_component_impl("body_label_at", "8").unwrap(),
+            "Capsule_8"
+        );
+
+        // `Vec<f64>`返しへ直した内省(上のdoc参照)。
         let props = world
             .read_component_impl("material_properties_f64", "アルミニウム")
             .unwrap();
@@ -5441,7 +5536,7 @@ mod tests {
 
         // === ここから下は`WasmError`導入で初めて検証できるようになったErrパス ===
 
-        // 未知の材質名: スポーン5種・材料派生・材質物性の内省が同じ
+        // 未知の材質名: スポーン6種・材料派生・材質物性の内省が同じ
         // `UnknownMaterial`を返す(材質名は`find_by_name`が引けなかった名前
         // そのものが載る)。
         let bogus = "存在しない材質";
@@ -5465,6 +5560,12 @@ mod tests {
             world.spawn_convex_mesh_cube_impl(0.0, 1.0, 0.0, 0.5, bogus.to_string()),
             WasmError::UnknownMaterial(bogus.to_string()),
         );
+        // 任意形状スポナーも同じ規約——**形状JSONの妥当性より材質名の解決が
+        // 後**である点まで含めて確かめる(形状は読めているのに材質で落ちる)。
+        assert_err_is(
+            world.spawn_shape_json_impl(r#"{"sphere":{"radius":0.3}}"#, 0.0, 1.0, 0.0, bogus),
+            WasmError::UnknownMaterial(bogus.to_string()),
+        );
         assert_err_is(
             world.material_properties_f64_impl(bogus),
             WasmError::UnknownMaterial(bogus.to_string()),
@@ -5474,7 +5575,7 @@ mod tests {
             WasmError::UnknownMaterial(bogus.to_string()),
         );
         // 失敗したスポーンはボディを1つも増やしていない(Errが状態を汚していない)。
-        assert_eq!(world.read_component_impl("body_count", "").unwrap(), "8");
+        assert_eq!(world.read_component_impl("body_count", "").unwrap(), "9");
 
         // 派生先の名前が既存とぶつかる / 密度が正の有限値でない。
         assert_err_is(
@@ -5509,13 +5610,6 @@ mod tests {
         );
         assert_err_is(
             world.body_shape_kind_at_impl(count),
-            WasmError::BodyIndexOutOfRange {
-                index: count,
-                count,
-            },
-        );
-        assert_err_is(
-            world.body_shape_params_f64_at_impl(count),
             WasmError::BodyIndexOutOfRange {
                 index: count,
                 count,
@@ -6701,7 +6795,7 @@ mod tests {
         // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
         // 足したらこの数と`component_schema`の表の両方を更新すること**——
         // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
-        const APPLY_KIND_COUNT: usize = 73;
+        const APPLY_KIND_COUNT: usize = 74;
         assert_eq!(
             entries.len(),
             APPLY_KIND_COUNT,
@@ -7001,9 +7095,7 @@ mod tests {
     /// `spawn_convex_mesh_cube`(Compound/ConvexMeshをUIから作る経路)が
     /// 成功し、`body_shape_kind_at`が正しい種別文字列を返し、
     /// `body_shape_json_at`が有効なシーンJSON形状(`convex_mesh`タグを
-    /// 含む)を返すこと。**`body_shape_params_f64_at`はここでは呼ばない**
-    /// ——`Float64Array`はネイティブターゲットでは構築自体がパニックする
-    /// (このテストモジュールのdoc冒頭の「正直な制約」参照)。
+    /// 含む)を返すこと。
     #[test]
     fn spawn_compound_and_convex_mesh_succeed_and_are_introspectable() {
         let mut world = new_world();
@@ -7032,6 +7124,140 @@ mod tests {
         let parsed: sim_world::ShapeJson =
             serde_json::from_str(&convex_json).expect("must be a valid ShapeJson");
         assert!(matches!(parsed, sim_world::ShapeJson::ConvexMesh { .. }));
+    }
+
+    /// **Prefabの任意形状対応で追加**——`spawn_shape_json`が
+    /// `body_shape_json_at`と**無損失に対になる**こと。
+    ///
+    /// これがPrefab機能の実体そのものである: ユーザーが組んだボディの形状を
+    /// `body_shape_json_at`で読み(キャプチャ)、後から`spawn_shape_json`で
+    /// 同じ形状のボディを作る(再スポーン)。**Compound(入れ子)と
+    /// ConvexMesh(頂点群)を必ず含める**——固定レシピのスポナーしか無かった
+    /// 頃にPrefab化できなかったのがまさにこの2形状であり、平坦なf64配列では
+    /// 表現できずに落ちていた情報(子の変換・頂点座標)が本当に往復すること
+    /// をここで固定する。
+    ///
+    /// 比較は**JSON文字列そのもの**で行う。`Shape`は`PartialEq`を持たない
+    /// うえ、間に挟まる`shape_json_to_shape`/`shape_to_shape_json`の
+    /// どちらか片方だけが情報を落としても`Shape`同士の目視比較では
+    /// 気付きにくいためである(文字列一致なら子の順序・座標まで丸ごと縛れる)。
+    #[test]
+    fn spawn_shape_json_round_trips_every_shape_including_compound_and_convex_mesh() {
+        let mut world = new_world();
+
+        // ① キャプチャ元を固定レシピのスポナーで作り、その形状JSONを読む。
+        let compound_source = world
+            .spawn_compound_l_shape_impl(1.0, 5.0, 0.0, "コンクリート".to_string())
+            .expect("known material name must succeed");
+        let compound_json = world.body_shape_json_at_impl(compound_source).unwrap();
+        let convex_source = world
+            .spawn_convex_mesh_cube_impl(2.0, 5.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .expect("known material name must succeed");
+        let convex_json = world.body_shape_json_at_impl(convex_source).unwrap();
+
+        // ② 読んだJSONをそのまま渡して再スポーンし、読み直したJSONが
+        //    1バイトも違わないこと(=往復で情報が落ちていないこと)。
+        let compound_spawned = world
+            .spawn_shape_json_impl(&compound_json, -1.0, 5.0, 0.0, "コンクリート")
+            .expect("captured compound must respawn");
+        assert_eq!(
+            world.body_shape_json_at_impl(compound_spawned).unwrap(),
+            compound_json
+        );
+        assert_eq!(
+            world.body_shape_kind_at_impl(compound_spawned).unwrap(),
+            "compound"
+        );
+        // ラベルは固定レシピのスポナーと同じ体系(`shape_label_prefix`)。
+        assert_eq!(
+            world.body_label_at_impl(compound_spawned).unwrap(),
+            format!("Compound_{compound_spawned}")
+        );
+        assert_eq!(
+            world.body_material_label_at_impl(compound_spawned).unwrap(),
+            "コンクリート"
+        );
+
+        let convex_spawned = world
+            .spawn_shape_json_impl(&convex_json, -2.0, 5.0, 0.0, "鋼(炭素鋼)")
+            .expect("captured convex mesh must respawn");
+        assert_eq!(
+            world.body_shape_json_at_impl(convex_spawned).unwrap(),
+            convex_json
+        );
+        assert_eq!(
+            world.body_shape_kind_at_impl(convex_spawned).unwrap(),
+            "convex_mesh"
+        );
+        assert_eq!(
+            world.body_label_at_impl(convex_spawned).unwrap(),
+            format!("ConvexMesh_{convex_spawned}")
+        );
+
+        // ③ 残る4形状も同じ1つの経路で作れる(固定レシピのスポナーが
+        //    受け付けない寸法——非立方体の箱——も通ることまで見る:
+        //    `spawn_box`は`half_extent`1つしか取らず立方体しか作れなかった)。
+        for (shape_json, expected_kind, expected_prefix) in [
+            (r#"{"sphere":{"radius":0.42}}"#, "sphere", "Sphere"),
+            (r#"{"box":{"half":[0.1,0.4,0.9]}}"#, "box", "Box"),
+            (
+                r#"{"capsule":{"radius":0.2,"half_height":0.7}}"#,
+                "capsule",
+                "Capsule",
+            ),
+            (
+                r#"{"plane":{"normal":[0.0,1.0,0.0],"d":0.0}}"#,
+                "plane",
+                "Plane",
+            ),
+        ] {
+            let index = world
+                .spawn_shape_json_impl(shape_json, 0.0, 3.0, 0.0, "コンクリート")
+                .expect("valid ShapeJson must spawn");
+            assert_eq!(world.body_shape_kind_at_impl(index).unwrap(), expected_kind);
+            assert_eq!(
+                world.body_shape_json_at_impl(index).unwrap(),
+                shape_json,
+                "{expected_kind}の形状JSONが往復していない"
+            );
+            assert_eq!(
+                world.body_label_at_impl(index).unwrap(),
+                format!("{expected_prefix}_{index}")
+            );
+        }
+
+        // ④ 走らせても落ちない(再構築した`Shape`が`World`の積分・接触へ
+        //    そのまま乗ること——形状JSONを読めるだけでは足りない)。
+        for _ in 0..60 {
+            world.step();
+        }
+
+        // ⑤ Errパス: 壊れたJSON・`ShapeJson`として解釈できないJSON・未知の
+        //    材質名がそれぞれ別の変種で返る(`WasmError`のdoc参照)。
+        assert_err_matches!(
+            world.spawn_shape_json_impl("{ this is not json", 0.0, 0.0, 0.0, "コンクリート"),
+            WasmError::ShapeParseFailed(_)
+        );
+        assert_err_matches!(
+            world.spawn_shape_json_impl(
+                r#"{"pyramid":{"height":1.0}}"#,
+                0.0,
+                0.0,
+                0.0,
+                "コンクリート"
+            ),
+            WasmError::ShapeParseFailed(_)
+        );
+        assert_err_is(
+            world.spawn_shape_json_impl(
+                r#"{"sphere":{"radius":0.3}}"#,
+                0.0,
+                0.0,
+                0.0,
+                "存在しない材質",
+            ),
+            WasmError::UnknownMaterial("存在しない材質".to_string()),
+        );
     }
 
     /// フレーム階層: ROOTの子フレームを追加でき、親indexが正しく読めること。
@@ -7439,7 +7665,7 @@ mod tests {
     /// のではなく)。同じ式を両側に書いても「同じ式は同じ文字列を作る」しか
     /// 言えず、文面が変わってしまったことを検出できないため。
     ///
-    /// **本テストが全変種を舐めることの副次的な意味(正直な記録)**: 37変種の
+    /// **本テストが全変種を舐めることの副次的な意味(正直な記録)**: 38変種の
     /// うち5つは、実際に踏ませる呼び出しをネイティブテストから書けない——
     /// `ShapeSerializeFailed`/`ScenarioSerializeFailed`/
     /// `HeadlessResultSerializeFailed`は`serde_json::to_string`の失敗だが、
@@ -7480,6 +7706,12 @@ mod tests {
             (
                 WasmError::ShapeSerializeFailed("boom".to_string()),
                 "failed to serialize shape: boom",
+            ),
+            // シリアライズ側と違い、こちらは`spawn_shape_json`へ壊れた文字列を
+            // 渡せば実際に踏める(その変種のdoc参照)。
+            (
+                WasmError::ShapeParseFailed("boom".to_string()),
+                "failed to parse shape json: boom",
             ),
             (
                 WasmError::ScenarioSerializeFailed("boom".to_string()),

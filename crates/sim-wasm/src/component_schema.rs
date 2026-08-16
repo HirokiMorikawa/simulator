@@ -659,6 +659,22 @@ pub fn apply_schema() -> Vec<ComponentKindSchema> {
                 s("material_name"),
             ],
         ),
+        // 任意形状スポナー(`spawn_shape_json_impl`のdoc参照)。上の5つと違い
+        // 寸法フィールドを持たず、形状そのものを`shape_json`
+        // (`body_shape_json_at`が返すのと同じ`ShapeJson`のJSON表現)で受ける
+        // ——`nullable`にしてあるのは、省略時の既定`""`が寸法の`0.0`のように
+        // 「小さいが妥当な形状」にはならず`ShapeParseFailed`で弾かれる
+        // 生の数値扱いできないフィールドだからである。
+        kind(
+            "spawn_shape_json",
+            vec![
+                s("shape_json").nullable(),
+                f("x", "m"),
+                f("y", "m"),
+                f("z", "m"),
+                s("material_name"),
+            ],
+        ),
         kind("remove_body_at", vec![u("index")]),
         kind("duplicate_body_at", vec![u("index"), f("offset", "m")]),
         kind(

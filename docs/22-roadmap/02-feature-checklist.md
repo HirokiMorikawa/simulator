@@ -890,6 +890,12 @@ Toolbarシーン選択・Circuit-focusレイアウト)と増分群F(設計項目
   (各行に「スポーン」ボタン)を持つ実装へ置き換えた。スポーンは既存の
   `spawn_sphere`/`spawn_box`をそのまま再利用するため、対応形状はsphere/box
   のみ(box は`spawn_box`自身の制約により立方体のみ、直方体は非対応)。
+  **後日この形状縮約は解消した**——`body_shape_params_f64_at`(平坦なf64配列で
+  Compound/ConvexMeshを表現できない)を`body_shape_json_at`へ統合して削除し、
+  任意の`ShapeJson`を配置する`spawn_shape_json`を新設したことで、無限平面
+  (床)を除く5形状すべてがPrefab化できる(直方体も潰れない)。詳細は
+  [03-editor-todo.md](03-editor-todo.md)「Prefab/複製の形状読み書きを
+  `ShapeJson`一本へ統合する」。
   Playwrightで、既定のBox_1をPrefab保存→一覧表示→スポーンボタンクリックで
   Hierarchyに新規`Box_2`が追加されることを確認した(最初のテストスクリプトは
   `text=スポーン`セレクタが意図した要素をクリックできず何も起きなかったが、
@@ -3198,11 +3204,13 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       Scenesタブも実データ接続済み——現在のボディ一覧の表示+シーンJSON
       エクスポート、および`World::append_scenario_bodies`経由のシーンJSON
       Import(`fluids`/`probes`セクション非対応の制約あり)。Prefabsタブも
-      実データ接続済み——`sim-wasm`の`body_shape_kind_at`/
-      `body_shape_params_f64_at`で選択中ボディの形状+材質を読み取って
-      名前付きで保存し、一覧から`spawn_sphere`/`spawn_box`経由で再スポーン
-      できる(縮約実装: Body形状+材質のみ、対応形状はsphere/box(boxは
-      立方体のみ)、Joint/Circuitのプレファブ化・永続化は対象外)。
+      実データ接続済み——`sim-wasm`の`body_shape_json_at`で選択中ボディの
+      形状(`ShapeJson`)+材質を読み取って名前付きで保存し、一覧から
+      `spawn_shape_json`経由で再スポーンできる(縮約実装: Body形状+材質のみ、
+      Joint/Circuitのプレファブ化・永続化は対象外。**形状の制約は無い**——
+      当初は`body_shape_params_f64_at`の平坦なf64配列で読んで
+      `spawn_sphere`/`spawn_box`で戻していたためsphere/box(boxは立方体)
+      だけだったが、後日`ShapeJson`一本へ統合して解消した)。
       Playwrightで保存→一覧表示→再スポーンによるHierarchyへの新規ボディ
       追加を確認した。
       **群2で「Replay再生実行(replay)自体は未実装、エクスポートのみ」という

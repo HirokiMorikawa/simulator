@@ -224,6 +224,11 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   右クリックメニュー・Hierarchy複製・材料派生ダイアログ・Materialsタブ・
   Prefab機能)・Playwright(縦串①受け入れテストの`body_count`直接呼び出し
   含む)・3本のQAスクリプトとも新メソッド経由に更新。
+  **後日削除**: このうち`body_shape_params_f64_at`は、平坦なf64配列では
+  Compound/ConvexMeshを表現できず形状の読み出しを2経路に割っていたため、
+  `body_shape_json_at`へ統合して削除した(内省は9個、スポーンは
+  `spawn_shape_json`を加えて9個になった。下の「Prefab/複製の形状読み書きを
+  `ShapeJson`一本へ統合」参照)。
 
   検証: Rust側新規テスト(スポーン8種すべて+複製+削除+材料派生をJSON経由で
   実際に操作し、`body_count`/各種内省に反映されることを確認)、
@@ -377,7 +382,10 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
   - 複製(`duplicate()`)がCompound/ConvexMeshでも動くよう、新設した
     `body_shape_json_at`(実際の形状をシーンJSON形式で読み直す、
     `shape_to_shape_json`を再利用)経由でメッシュを再構築——スポーン時の
-    既定形状だと決め打ちしない。
+    既定形状だと決め打ちしない。**この時点では`duplicate()`は
+    sphere/box/capsuleを`body_shape_params_f64_at`の平坦なf64配列から
+    手組みし、その配列で表現できない2形状だけこちらへ落とす形だった**
+    (後日`ShapeJson`一本へ統合、次項)。
   - **副次的に発見・修正した実バグ**: `ShapeJson::ConvexMesh`のJSONタグが
     列挙型全体の`#[serde(rename_all = "lowercase")]`だけでは単語区切りが
     消えて`"convexmesh"`になり、フロント側が前提としていた`"convex_mesh"`
@@ -389,6 +397,44 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
     複製してもクラッシュしないこと)を検証する受け入れテストを追加
     (「テスト不能」への直接の反証)。Rust側もスポーン成功パス・
     `body_shape_kind_at`/`body_shape_json_at`の往復を単体テストで確認。
+- [x] Prefab/複製の形状読み書きを`ShapeJson`一本へ統合する
+  上の縦串⑤で`body_shape_json_at`を足した結果、フロントには**形状を読む道が
+  2本**残っていた——`body_shape_params_f64_at`(平坦なf64配列)と
+  `body_shape_json_at`(`ShapeJson`)である。前者はCompound(可変長の入れ子)も
+  ConvexMesh(頂点群)も表現できず空配列を返すため、`duplicate()`は
+  「sphere/box/capsuleは配列、compound/convex_meshはJSON」という形状の種類
+  ごとの分岐を抱え、**Prefabに至っては配列側しか持たないまま球/箱だけの機能に
+  留まっていた**(Compound/ConvexMeshのボディを組んで「プレハブ化」を押しても
+  `captureBody`が`null`を返し、ユーザーから見れば黙って何も起きない)。
+  表現力で劣る側を残す理由が無いので、読み出しを`body_shape_json_at`へ統合し
+  `body_shape_params_f64_at`は削除した(`read_component`のarm・
+  `component_schema`の`read`一覧・単体テストとも撤去)。
+  - 書き戻し側の対として`WasmWorld::spawn_shape_json`を新設
+    (`spawn_shape_json_impl(shape_json, x, y, z, material_name) ->
+    Result<usize, WasmError>`)。既存の`spawn_*`はどれも**固定レシピ**
+    (`spawn_box`は立方体1辺、`spawn_compound_l_shape`はL字…)で「どんな形状か」が
+    メソッド名で決まってしまい、任意の形状を置く口が無かった。`ShapeJson`を
+    `shape_json_to_shape`で`Shape`へ戻して`World::create_body`に載せるだけの
+    薄い経路で、`apply_component`/`component_schema`にも他のスポーンと同じ形で
+    登録した(apply kindは73→74)。壊れた形状JSONは新設の
+    `WasmError::ShapeParseFailed`で弾く。
+  - `duplicate()`は種類ごとの分岐が丸ごと消え、`body_shape_json_at`→
+    `meshFromShapeJson`の1経路になった(`meshFromShapeJson`は元から6形状すべてを
+    描けるので、球/箱/カプセルのTHREE.Geometry手組みは重複でしかなかった)。
+  - `PrefabDefinition`は`{kind, params: number[]}`から
+    `{kind(表示用), shape: ImportedShapeJson}`へ。**保存済みPrefabの移行は不要**
+    ——`prefabs`配列は`setUpProjectDrawer`のローカル変数でlocalStorage等の
+    永続化先を持たず(設計どおり「ブラウザセッション内のみ保持」)、旧形式が
+    この型へ流れ込む経路そのものが無い。永続化を足す際にスキーマ版数を持たせる
+    こと、と型のdocへ明記した。副次的に**非立方体の箱がPrefab化で立方体へ
+    潰れる**縮約(`spawn_box`が`half_extent`1つしか取らないため)も解消した。
+  - 検証: Rust側に`spawn_shape_json`↔`body_shape_json_at`の往復テスト
+    (Compound/ConvexMeshを含む6形状すべて、JSON文字列の完全一致で子の変換・
+    頂点座標まで固定+60step実行+Errパス3種)を追加。Playwrightに
+    「複合形状/凸包メッシュをプレハブ化して再スポーンできる」受け入れテストを
+    追加(Hierarchy右クリック→プレハブ化→Prefabsタブ→スポーン→行が増える→
+    60step実行でクラッシュしない)。cargo test --workspace全緑、
+    Playwright 29/29全緑。
 - [x] 縦串①(ジョイント)の受け入れテストを緑にする
   `demo/tests/acceptance-d24.spec.ts`。D24相当の車(シャシー+車輪4個+
   WheelJoint4本)をScene View/Inspectorの**UI操作だけ**(スポーンパレット・

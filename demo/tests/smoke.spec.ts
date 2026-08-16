@@ -955,6 +955,70 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
   expect(errors).toEqual([]);
 });
 
+test("Prefab: 複合形状/凸包メッシュをプレハブ化して再スポーンできる", async ({
+  page,
+}) => {
+  // **形状の読み書きを`ShapeJson`1本へ統合した増分の受け入れテスト**。
+  // それ以前のPrefabは`body_shape_params_f64_at`(平坦なf64配列)で寸法を
+  // 読み、`spawn_sphere`/`spawn_box`という固定レシピのスポナーで戻す作り
+  // だったため、**Compound/ConvexMeshのボディは「プレハブ化」を押しても
+  // 黙って何も起きなかった**(`captureBody`が球/箱以外を`null`で弾く)。
+  // `body_shape_json_at`↔`spawn_shape_json`の対に載せ替えた今、両形状が
+  // キャプチャ→再スポーンまで往復することを実UI経由で確かめる。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const rowCount = () => page.locator("#hierarchy-tree .tree-body").count();
+
+  // ① プレハブ化の元になるボディを2つ作る(複合形状と凸包メッシュ)。
+  await addViaMenu(page, "＋ 複合形状 (L字)");
+  await page.waitForTimeout(100);
+  await addViaMenu(page, "＋ 凸包メッシュ");
+  await page.waitForTimeout(100);
+
+  // ② Hierarchy 右クリック →「プレハブ化」。旧実装ではここで
+  //    「この形状はPrefab化できません」のalertが出て登録されなかった。
+  for (const label of ["Compound_", "ConvexMesh_"]) {
+    const row = page.locator("#hierarchy-tree .tree-body", { hasText: label }).first();
+    await row.click({ button: "right" });
+    await expect(page.locator("#context-menu")).toBeVisible();
+    await page.locator("#context-menu button", { hasText: "プレハブ化" }).click();
+    await page.waitForTimeout(100);
+  }
+
+  // ③ Project ドロワーの Prefabs タブに2件とも並ぶ(表示ラベルの形状名は
+  //    `body_shape_kind_at`が返す種別名)。
+  await page.click('.project-tab[data-tab="prefabs"]');
+  const projectBody = page.locator("#project-body");
+  await expect(projectBody).toContainText("compound");
+  await expect(projectBody).toContainText("convex_mesh");
+
+  // ④ 2件とも「スポーン」でき、Hierarchy の行が実際に増える
+  //    (=`spawn_shape_json`がキャプチャした形状を復元できている)。
+  const beforeSpawn = await rowCount();
+  const spawnButtons = projectBody.locator("li button", { hasText: "スポーン" });
+  await expect(spawnButtons).toHaveCount(2);
+  await spawnButtons.nth(0).click();
+  await spawnButtons.nth(1).click();
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBe(beforeSpawn + 2);
+  // 復元されたボディのラベルは形状から引かれる(`shape_label_prefix`)ので、
+  // 「球として戻ってきた」等の取り違えはラベルで検出できる。
+  await expect(page.locator("#hierarchy-tree")).toContainText("Compound_");
+  await expect(page.locator("#hierarchy-tree")).toContainText("ConvexMesh_");
+
+  // ⑤ 再スポーンしたボディを実際に走らせてもクラッシュしない(描画・物理の
+  //    両方が復元後の形状で動くこと)。`⏭`はPlayへ入ってからでないと無効。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.fill("#input-step-count", "60");
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
+
+  expect(errors).toEqual([]);
+});
+
 test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体/気体ドメインを要するもの)がUIから追加できる", async ({
   page,
 }) => {

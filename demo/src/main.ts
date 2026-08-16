@@ -461,10 +461,28 @@ type CircuitFreeWiringState = { active: boolean };
 // Joint/Circuit組・ドラッグ&ドロップ・複数シーンをまたいだ永続化は対象外、
 // ブラウザセッション内のみ保持)。`setUpProjectDrawer`から`world`への
 // 直接アクセスを持たないため、他のRef同様コールバック経由で配線する。
+//
+// **形状は`ImportedShapeJson`(シーンJSONの`ShapeJson`と同じ形)で持つ**。
+// 以前は`kind: string`+`params: number[]`(`body_shape_params_f64_at`が返す
+// 平坦なf64配列)だったが、この表現ではCompound(入れ子)もConvexMesh(頂点群)
+// も書けず、**両形状のボディはPrefab化しようとしても黙って何も起きなかった**
+// (`captureBody`が球/箱以外を`null`で弾いていた)。`body_shape_json_at`↔
+// `spawn_shape_json`という無損失に対になるwasm APIへ載せ替え、無限平面(床)を
+// 除く5形状すべてをPrefab化できるようにした(平面を外す理由は`captureBody`の
+// コメント参照)。`kind`はPrefabs一覧の表示ラベル専用として残す
+// (形状の再構築には使わない)。
+//
+// **保存済みPrefabの移行は不要**——`prefabs`配列は`setUpProjectDrawer`の
+// ローカル変数で、localStorage等の永続化先を一切持たない(上記「ブラウザ
+// セッション内のみ保持」)。リロードすれば必ず空から始まるため、旧形式の
+// `{kind, params}`がこの型に流れ込む経路そのものが存在しない。永続化を
+// 足すときは、その時点でスキーマ版数を持たせること。
 type PrefabDefinition = {
   name: string;
+  /// Prefabs一覧の表示用(`body_shape_kind_at`が返す種別名)。
   kind: string;
-  params: number[];
+  /// 形状そのもの(`body_shape_json_at`が返す`ShapeJson`をパースしたもの)。
+  shape: ImportedShapeJson;
   material: string;
 };
 type PrefabRef = {
@@ -6122,11 +6140,18 @@ async function setUpSceneView(
     return true;
   }
 
-  // Prefabs(`PrefabRef`のdoc参照)。球/箱のみ対応(スポーンパレットの
-  // `spawn_sphere`/`spawn_box`自体がこの2形状しか受け付けないのと同じ制約)。
-  // `spawn_box`は立方体のみ(単一`half_extent`引数)のため、非立方体の箱を
-  // captureした場合は`params[0]`(半径/1軸目のhalf_extent)のみを使う
-  // (既知の簡略化)。
+  // Prefabs(`PrefabDefinition`のdoc参照)。**無限平面(床)を除く5形状すべてに
+  // 対応**——キャプチャは`body_shape_json_at`、再スポーンは`spawn_shape_json`
+  // (任意の`ShapeJson`をそのまま配置する汎用スポナー)という無損失な対に
+  // 載っている。
+  //
+  // 以前は球/箱だけだった。`body_shape_params_f64_at`(平坦なf64配列)で
+  // 寸法を読み、`spawn_sphere`/`spawn_box`という固定レシピのスポナーで戻す
+  // 作りだったため、①Compound/ConvexMeshは配列で表現できず`captureBody`が
+  // `null`を返し(ユーザーから見れば「Prefab化を押しても何も起きない」)、
+  // ②箱も`spawn_box`が単一`half_extent`しか取らないので非立方体は立方体に
+  // 潰れる、という2つの欠落があった。どちらも形状の表現力の問題なので、
+  // 表現力で劣る経路を残さず`ShapeJson`1本へ寄せて解消した。
   prefabRef.current = {
     captureSelectedBody: () => {
       // ボディが無いシーン(D9/D34/D35のようなギャラリーシーン)で選択が
@@ -6137,42 +6162,30 @@ async function setUpSceneView(
     captureBody: (index) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return null;
       const kind = world.read_component("body_shape_kind_at", String(index));
-      if (kind !== "sphere" && kind !== "box") return null;
-      const params = (JSON.parse(world.read_component("body_shape_params_f64_at", String(index))) as number[]);
+      // Planeだけは対象外——無限平面を増やしても物理的に意味が無く、位置も
+      // `normal`/`d`から決まるので「スポーン位置に置く」という操作自体が
+      // 成り立たない(`duplicate()`が床を弾くのと同じ理由)。wasm側の
+      // `spawn_shape_json`はPlaneも受け付けるが、そこで狭めず**UI側の判断**
+      // として持つ(`spawn_shape_json_impl`のdoc参照)。
+      if (kind === "plane") return null;
+      const shape = JSON.parse(
+        world.read_component("body_shape_json_at", String(index)),
+      ) as ImportedShapeJson;
       const material = world.read_component("body_material_label_at", String(index));
-      return { kind, params, material };
+      return { kind, shape, material };
     },
     spawn: (prefab) => {
       const { x, z } = nextSpawnPosition();
-      if (prefab.kind === "sphere") {
-        const radius = prefab.params[0] ?? SPAWN_SPHERE_RADIUS;
-        const bodyIndex = applyComponent(world, "spawn_sphere", {
-          x,
-          y: SPAWN_HEIGHT,
-          z,
-          radius,
-          material_name: prefab.material,
-        }).index as number;
-        const mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(radius, 16, 12),
-          new THREE.MeshStandardMaterial({ color: 0x6699ff }),
-        );
-        addSpawnedMesh(bodyIndex, mesh);
-      } else if (prefab.kind === "box") {
-        const halfExtent = prefab.params[0] ?? SPAWN_BOX_HALF_EXTENT;
-        const bodyIndex = applyComponent(world, "spawn_box", {
-          x,
-          y: SPAWN_HEIGHT,
-          z,
-          half_extent: halfExtent,
-          material_name: prefab.material,
-        }).index as number;
-        const mesh = new THREE.Mesh(
-          new THREE.BoxGeometry(halfExtent * 2, halfExtent * 2, halfExtent * 2),
-          new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
-        );
-        addSpawnedMesh(bodyIndex, mesh);
-      }
+      const bodyIndex = applyComponent(world, "spawn_shape_json", {
+        shape_json: JSON.stringify(prefab.shape),
+        x,
+        y: SPAWN_HEIGHT,
+        z,
+        material_name: prefab.material,
+      }).index as number;
+      // 見た目はシーンJSON import・複製と同じ`meshFromShapeJson`で組む
+      // ——形状ごとのTHREE.Geometry組み立てをここに再掲しない。
+      addSpawnedMesh(bodyIndex, meshFromShapeJson(prefab.shape).mesh);
     },
   };
 
@@ -6346,38 +6359,16 @@ async function setUpSceneView(
         index,
         offset: DUPLICATE_OFFSET_M,
       }).index as number;
-      const kind = world.read_component("body_shape_kind_at", String(newIndex));
-      const params = (JSON.parse(world.read_component("body_shape_params_f64_at", String(newIndex))) as number[]);
-      let mesh: THREE.Mesh | null = null;
-      if (kind === "sphere") {
-        mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(params[0], 16, 12),
-          new THREE.MeshStandardMaterial({ color: 0x6699ff }),
-        );
-      } else if (kind === "box") {
-        mesh = new THREE.Mesh(
-          new THREE.BoxGeometry(params[0] * 2, params[1] * 2, params[2] * 2),
-          new THREE.MeshStandardMaterial({ color: 0x66cc66 }),
-        );
-      } else if (kind === "capsule") {
-        mesh = new THREE.Mesh(
-          new THREE.CapsuleGeometry(params[0], params[1] * 2, 8, 16),
-          new THREE.MeshStandardMaterial({ color: 0xcc88ff }),
-        );
-      } else if (kind === "compound" || kind === "convex_mesh") {
-        // `body_shape_params_f64_at`は可変長の入れ子構造(Compound)や頂点群
-        // (ConvexMesh)を平坦なf64配列で表現できないため空配列を返す
-        // ——スポーン時の既定形状(L字/立方体)だと決め打ちせず、
-        // `body_shape_json_at`で複製後の実際の形状を読み直し、シーンJSON
-        // importと同じ`meshFromShapeJson`でメッシュを再構築する。
-        const shapeJson = JSON.parse(
-          world.read_component("body_shape_json_at", String(newIndex)),
-        ) as ImportedShapeJson;
-        mesh = meshFromShapeJson(shapeJson).mesh;
-      }
-      // Plane(床)は複製対象外——`duplicate_body_at` は作ってしまうが、
-      // 無限平面を2枚重ねても意味が無いのでメッシュは作らない。
-      if (mesh) addSpawnedMesh(newIndex, mesh);
+      // **形状の読み直しは`body_shape_json_at`1本**。以前はsphere/box/capsuleを
+      // `body_shape_params_f64_at`(平坦なf64配列)から手組みし、その配列で
+      // 表現できないcompound/convex_meshだけ`body_shape_json_at`へ落とす、
+      // という**形状の種類ごとに分かれた2経路**だった。同じ「複製後の実形状から
+      // メッシュを作る」処理が2通りある必然性は無く(`meshFromShapeJson`は
+      // 元から6形状すべてを描ける)、種類ごとの分岐ごと畳んだ。
+      const shapeJson = JSON.parse(
+        world.read_component("body_shape_json_at", String(newIndex)),
+      ) as ImportedShapeJson;
+      addSpawnedMesh(newIndex, meshFromShapeJson(shapeJson).mesh);
     },
     remove(index) {
       applyComponent(world, "remove_body_at", { index });
@@ -6419,7 +6410,8 @@ async function setUpSceneView(
     capturePrefab(index) {
       const captured = prefabRef.current?.captureBody(index);
       if (!captured) {
-        window.alert("この形状はPrefab化できません(球/箱のみ対応)");
+        // 残る唯一の非対応は無限平面(床、`captureBody`のdoc参照)。
+        window.alert("この形状はPrefab化できません(無限平面(床)は対象外)");
         return;
       }
       prefabSaveRef.current?.({
