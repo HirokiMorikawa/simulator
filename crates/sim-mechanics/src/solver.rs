@@ -18,27 +18,176 @@ use sim_fluid::{Atmosphere, StaticWaterRegion};
 use sim_math::Vec3;
 use std::collections::HashSet;
 
+/// 重力場(**重力場の抽象化増分で追加**)。
+///
+/// **なぜ列挙にしたか**: それまで`MechanicsSolver`は重力を
+/// `gravity: f64`(大きさ)と`gravity_direction: Vec3`(向き)の2つの公開
+/// フィールドで持っていた。この表現は**一様場しか表せない**——空間のどこでも
+/// 同じ加速度ベクトルになる場である。「小惑星の周りを回る」「惑星表面の重力が
+/// 高度で弱まる」といった、点源(中心力)の場を書く手段が無く、無重力ですら
+/// 「大きさ0の一様場」という遠回りな表現しか無かった。列挙にすることで、
+/// 呼び出し側が読む唯一の入口を`acceleration_at`(位置を受け取る)へ一本化でき、
+/// 場の種類を増やしても積分側のコードは変わらない。
+///
+/// **正直な適用範囲**(移行前からの制約をそのまま引き継ぐ): この場が効くのは
+/// 自由体(Dynamic)への直接の重力積分(`MechanicsSolver::apply_forces`)と
+/// ポテンシャルエネルギー計算のみ。浮力(`sim_fluid::StaticWaterRegion`)は
+/// 水面をワールドy座標の水平面として定義するモデルのため、重力の向きや
+/// 位置依存性に追従しない(`buoyancy_force`の既存実装、`sim-fluid`crateの
+/// 設計上の制約——水面が重力と独立に常に水平だという簡略化は、重力の向きを
+/// 可変にする前から存在した)。大気の抗力(`drag_force_sphere`)も同様に
+/// 重力に依存しない。**浮力・自然対流を重力場へ追従させるのは別の計画作業**で
+/// あり、本増分では踏み込まない(`MechanicsSolver::gravity`のdoc参照)。
+///
+/// **`sim_astro`のN体重力とは別系統**: `sim_astro::NBodySystem`は天体どうしの
+/// 実際の万有引力を対ごとに計算する独立したドメインであり、この`GravityField`
+/// (「普通の剛体を何が加速するか」を決める外場)とは混ぜない。天体は
+/// `GravityField`を必要としない。
+///
+/// **`SoftBody`/`SphFluid`とも別系統**: 両者はシーンJSONから直接設定される
+/// 自前の`gravity`を持つ(`soft_body.gravity`・`sph.gravity`)。ドメインごとの
+/// 設定であり、本列挙の対象外。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GravityField {
+    /// 一様場(移行前の唯一の挙動)。空間のどこでも`magnitude * direction`。
+    Uniform {
+        /// 重力加速度の大きさ [m/s^2]。既定 9.80665
+        /// (docs/00-foundation/03-units-conventions.md)。
+        magnitude: f64,
+        /// 重力加速度の向き(単位ベクトル、既定は下向き`(0,-1,0)`)。
+        /// `MechanicsSolver::set_gravity_direction`が常に正規化して保持する。
+        direction: Vec3,
+    },
+    /// 点源(中心力)場。`center`へ向かう逆二乗の加速度
+    /// $\mathbf{a} = -\mu\,\mathbf{r}/|\mathbf{r}|^3$($\mathbf{r}$は`center`
+    /// からの相対位置)。
+    ///
+    /// **なぜ逆二乗にしたか**: 「点源の重力」が物理的に意味するのはこれであり、
+    /// 円軌道速度$v=\sqrt{\mu/r}$・vis-viva・「高度が上がると重力が弱まる」と
+    /// いった解析解がそのまま検証に使える。線形場や大きさ一定の中心力にすると
+    /// 実装は簡単になるが、対応する既知の解析解がシーン作者にとって役に立たない。
+    ///
+    /// **中心の特異点**: $|\mathbf{r}|$が`POINT_SOURCE_MIN_RADIUS`未満のときは
+    /// `Vec3::ZERO`を返す。厳密な中心では向きが定義できず、そのまま計算すると
+    /// NaN/無限大が速度→位置→`state_hash`と伝播してシーン全体を汚染するため、
+    /// 安全側へ縮退させる。
+    ///
+    /// **既知の限界**: ソフトニング半径は導入していない。中心へ十分近づけば
+    /// 加速度は実際に発散し、固定dtの陽的(semi-implicit Euler)積分は破綻する。
+    /// ソフトニングを入れると点源の解析解から系統的にずれ、円軌道テストの
+    /// 検証力が落ちるため、「点源は点源のまま」にして限界をここに書く方を選んだ。
+    PointSource {
+        /// 場の中心(ワールド座標)。
+        center: Vec3,
+        /// 標準重力パラメータ $\mu = GM$ [m^3/s^2](`sim_astro::swingby`が
+        /// 使う`mu`と同じ量・同じ名前)。
+        mu: f64,
+    },
+    /// 無重力。`Uniform { magnitude: 0.0, .. }`と数値的には等価だが、
+    /// 「重力が無い」という意図をシーンJSONと`Debug`出力に明示できる。
+    Zero,
+}
+
+/// `GravityField::PointSource`が加速度を`Vec3::ZERO`へ縮退させる中心からの
+/// 距離 [m](同variantのdoc参照)。
+pub const POINT_SOURCE_MIN_RADIUS: f64 = 1e-9;
+
+impl GravityField {
+    /// **この場の唯一の入口**——位置`position`における重力加速度 [m/s^2]。
+    /// 積分・力の累積・ポテンシャルはすべてこれを経由する(場の種類が増えても
+    /// 呼び出し側は変わらない)。
+    pub fn acceleration_at(&self, position: Vec3) -> Vec3 {
+        match *self {
+            GravityField::Uniform {
+                magnitude,
+                direction,
+            } => direction.scale(magnitude),
+            GravityField::PointSource { center, mu } => {
+                let r = position - center;
+                let distance = r.length();
+                if distance < POINT_SOURCE_MIN_RADIUS {
+                    return Vec3::ZERO;
+                }
+                // -mu * r / |r|^3。`normalize_or_zero`を経由せず直接割るのは、
+                // 1/r^2 と 1/|r| を1回の除算にまとめて丸めを減らすため。
+                r.scale(-mu / (distance * distance * distance))
+            }
+            GravityField::Zero => Vec3::ZERO,
+        }
+    }
+
+    /// 単位質量あたりの重力ポテンシャル [J/kg](`MechanicsSolver::total_energy`用)。
+    /// 一様場は$-\mathbf{g}\cdot\mathbf{x}$(基準 原点)、点源は$-\mu/r$
+    /// (基準 無限遠)——どちらも$-\nabla\Phi = \mathbf{a}$を満たす。
+    ///
+    /// 点源で$r$が`POINT_SOURCE_MIN_RADIUS`未満のときは0を返す
+    /// (`acceleration_at`と同じ理由の縮退。中心近傍のポテンシャルは
+    /// 発散するため、エネルギー台帳へ無限大を流し込まない)。
+    pub fn potential_per_mass(&self, position: Vec3) -> f64 {
+        match *self {
+            GravityField::Uniform { .. } | GravityField::Zero => {
+                -self.acceleration_at(position).dot(position)
+            }
+            GravityField::PointSource { center, mu } => {
+                let distance = (position - center).length();
+                if distance < POINT_SOURCE_MIN_RADIUS {
+                    return 0.0;
+                }
+                -mu / distance
+            }
+        }
+    }
+
+    /// 「この場を一様場1つで近似したときの大きさ」[m/s^2]
+    /// (`MechanicsSolver::gravity`が返す値の実体、そちらのdocに判断根拠がある)。
+    fn uniform_magnitude(&self) -> f64 {
+        match *self {
+            GravityField::Uniform { magnitude, .. } => magnitude,
+            GravityField::PointSource { .. } | GravityField::Zero => 0.0,
+        }
+    }
+
+    /// 「この場を一様場1つで近似したときの向き」(`MechanicsSolver::
+    /// gravity_direction`が返す値の実体、そちらのdoc参照)。
+    fn uniform_direction(&self) -> Vec3 {
+        match *self {
+            GravityField::Uniform { direction, .. } => direction,
+            // 向きが定義できない場では既定の下向きを返す(ゼロベクトルを返すと
+            // 「正規化された単位ベクトル」という呼び出し側の前提を壊す)。
+            // 大きさが0なので積は正しく`Vec3::ZERO`になる。
+            GravityField::PointSource { .. } | GravityField::Zero => DEFAULT_GRAVITY_DIRECTION,
+        }
+    }
+}
+
+/// 重力の既定の向き(下向き)。ゼロベクトルを渡されたときのフォールバックにも使う。
+const DEFAULT_GRAVITY_DIRECTION: Vec3 = Vec3 {
+    x: 0.0,
+    y: -1.0,
+    z: 0.0,
+};
+
+/// 向きを正規化し、正規化できない(ゼロベクトル)なら既定の下向きへ落とす。
+/// `set_gravity_direction`/`set_gravity_field`が共有する唯一の実装。
+fn normalized_or_default_direction(direction: Vec3) -> Vec3 {
+    let normalized = direction.normalize_or_zero();
+    if normalized.length() > 0.0 {
+        normalized
+    } else {
+        DEFAULT_GRAVITY_DIRECTION
+    }
+}
+
 #[derive(Clone)]
 pub struct MechanicsSolver {
     pub bodies: RigidBodySet,
-    /// 重力加速度の大きさ(m/s^2)。既定 9.80665(docs/00-foundation/03-units-conventions.md)。
-    /// `gravity_direction`と組み合わせた`gravity * gravity_direction`が実際の
-    /// 加速度ベクトル(自由体の力積分・ポテンシャルエネルギーが使う)。
-    pub gravity: f64,
-    /// 重力加速度の向き(単位ベクトル、既定は下向き`(0,-1,0)`)。**残タスク完遂
-    /// 増分で追加**(レビュー指摘「見送らず対応すること」への対応——それまでは
-    /// 大きさのみが可変で、向きは`-y`固定だった)。`set_gravity_direction`で
-    /// 変更する(常に正規化して保持する)。
-    ///
-    /// **正直な適用範囲**: 影響するのは自由体(Dynamic)への直接の重力積分
-    /// (`apply_forces`)とポテンシャルエネルギー計算のみ。`water`(浮力、
-    /// `sim_fluid::StaticWaterRegion`)は水面をワールドy座標の水平面として
-    /// 定義するモデルのため、重力の向きを変えても浮力の向き自体は`+y`のまま
-    /// (`buoyancy_force`の既存実装、本増分より前からの`sim-fluid`crateの
-    /// 設計上の制約——水面が重力と独立に常に水平だという簡略化は、重力の
-    /// 向きを可変にする前から存在した)。同様に大気の抗力(`drag_force_sphere`)も
-    /// 重力の向きに依存しない。
-    pub gravity_direction: Vec3,
+    /// 重力場(`GravityField`のdoc参照)。**公開フィールドではなく
+    /// `gravity_field`/`set_gravity_field`と、一様場向けの薄いアクセサ
+    /// (`gravity`/`set_gravity`/`gravity_direction`/`set_gravity_direction`)
+    /// 経由で触る**——`direction`の正規化とゼロベクトルのフォールバックを
+    /// 迂回されないようにするため(移行前の`pub gravity_direction`は
+    /// `set_gravity_direction`を通さない代入を許していた)。
+    field: GravityField,
     /// 反発を無視する接近速度の閾値(設計 §4.3・§9、既定 0.5 m/s)。ジッタ防止用の
     /// ヒューリスティクスであり、理想化された弾性衝突の検証(M5 等)では 0 に下げてよい。
     pub restitution_velocity_threshold: f64,
@@ -114,11 +263,18 @@ pub struct MechanicsSolver {
 }
 
 impl MechanicsSolver {
+    /// 一様重力(大きさ`gravity`・向きは既定の下向き)のソルバを作る。
+    /// **シグネチャは`GravityField`導入前から変えていない**——ワークスペース全体の
+    /// 約750本のテストとシーン構築経路がこの形で呼んでいるため、`GravityField`を
+    /// 引数に取る形へ変えると本質と無関係な差分が全域へ広がる。非一様な場は
+    /// `set_gravity_field`で後から与える(`GravityField`のdoc参照)。
     pub fn new(gravity: f64) -> MechanicsSolver {
         MechanicsSolver {
             bodies: RigidBodySet::new(),
-            gravity,
-            gravity_direction: Vec3::new(0.0, -1.0, 0.0),
+            field: GravityField::Uniform {
+                magnitude: gravity,
+                direction: DEFAULT_GRAVITY_DIRECTION,
+            },
             restitution_velocity_threshold: contact::DEFAULT_RESTITUTION_VELOCITY_THRESHOLD,
             atmosphere: None,
             water: None,
@@ -195,21 +351,91 @@ impl MechanicsSolver {
         self.hinge_motors.push(motor);
     }
 
-    /// 重力の向きを設定する(`gravity_direction`のdoc参照)。ゼロベクトルは
-    /// 正規化できないため既定の下向きへフォールバックする(壊れた入力で
-    /// 重力が消えたり発散したりしないための安全側の縮退)。
-    pub fn set_gravity_direction(&mut self, direction: Vec3) {
-        let normalized = direction.normalize_or_zero();
-        self.gravity_direction = if normalized.length() > 0.0 {
-            normalized
-        } else {
-            Vec3::new(0.0, -1.0, 0.0)
+    /// 現在の重力場(`GravityField`のdoc参照)。
+    pub fn gravity_field(&self) -> GravityField {
+        self.field
+    }
+
+    /// 重力場をまるごと差し替える(`PointSource`/`Zero`へ到達する唯一の入口)。
+    /// `Uniform`の`direction`はここでも正規化する——`set_gravity_direction`と
+    /// 同じ不変条件(保持する向きは常に単位ベクトル、ゼロベクトルは既定の
+    /// 下向きへフォールバック)を、場の与え方によらず成り立たせるため。
+    pub fn set_gravity_field(&mut self, field: GravityField) {
+        self.field = match field {
+            GravityField::Uniform {
+                magnitude,
+                direction,
+            } => GravityField::Uniform {
+                magnitude,
+                direction: normalized_or_default_direction(direction),
+            },
+            other => other,
         };
     }
 
-    /// 実際の重力加速度ベクトル(`gravity * gravity_direction`)。
-    pub fn gravity_vector(&self) -> Vec3 {
-        self.gravity_direction.scale(self.gravity)
+    /// 重力加速度の**大きさ** [m/s^2]。
+    ///
+    /// **非`Uniform`な場では0.0を返す**(`Zero`は厳密に正しい。`PointSource`は
+    /// 位置依存なのでスカラー1つでは表せず、代表点を発明するより0を返す方を
+    /// 選んだ)。移行前の公開フィールド`gravity`の読み出しをそのまま置き換える
+    /// アクセサであり、呼び出し側の書き換えは`()`を足すだけで済む。
+    ///
+    /// **これが隠していない挙動変化**: この値を使うのは(1)浮力
+    /// (`apply_forces`の`buoyancy_force`)、(2)`sim-coupling`の
+    /// Boussinesq浮力・自然対流のレイリー数、(3)Inspectorの環境パネル表示。
+    /// いずれも「重力は鉛直方向に一様」を前提とする縮約モデルであり、
+    /// `PointSource`場ではその前提自体が成立しない。0.0を返すことで
+    /// **これらは無効化される**(水平な水面を仮定した浮力を点源場で出す方が
+    /// 誤りが大きい)。浮力・自然対流を`acceleration_at`へ追従させるのは
+    /// 別の計画作業であり、本増分の対象外(`GravityField`のdoc参照)。
+    pub fn gravity(&self) -> f64 {
+        self.field.uniform_magnitude()
+    }
+
+    /// 重力加速度の**向き**(正規化済み単位ベクトル)。
+    /// **非`Uniform`な場では既定の下向き`(0,-1,0)`を返す**(向きが定義できない
+    /// 場でゼロベクトルを返すと「単位ベクトルである」という呼び出し側の前提が
+    /// 壊れるため)。`gravity()`が0.0を返すので、
+    /// `gravity() * gravity_direction()`は`Zero`でも`PointSource`でも
+    /// `Vec3::ZERO`——「この場を一様場1つで近似したベクトル」という意味で
+    /// 一貫している(`Uniform`/`Zero`では厳密、`PointSource`では縮退)。
+    pub fn gravity_direction(&self) -> Vec3 {
+        self.field.uniform_direction()
+    }
+
+    /// 重力の大きさを設定する(移行前の`solver.gravity = g`の置き換え)。
+    /// **非`Uniform`な場に対しては一様場への差し替えになる**——旧公開フィールドが
+    /// 持っていた「大きさを決めれば重力が決まる」という意味をそのまま保つため
+    /// (向きは`gravity_direction()`が返す値、すなわち既定の下向き)。
+    /// 非一様な場を保ったまま強さだけを変えたい場合は`set_gravity_field`を使う。
+    pub fn set_gravity(&mut self, magnitude: f64) {
+        self.set_gravity_field(GravityField::Uniform {
+            magnitude,
+            direction: self.gravity_direction(),
+        });
+    }
+
+    /// 重力の向きを設定する(`GravityField::Uniform::direction`のdoc参照)。
+    /// ゼロベクトルは正規化できないため既定の下向きへフォールバックする
+    /// (壊れた入力で重力が消えたり発散したりしないための安全側の縮退)。
+    /// **移行前と挙動は完全に同一**(`Uniform`場の向きだけを差し替える)。
+    ///
+    /// 非`Uniform`な場に対しては、`set_gravity`と同じ理由で
+    /// 「大きさ`gravity()`(=0.0)・向き`direction`の一様場」への差し替えになる。
+    /// `Zero`からの遷移は数値的に無害(大きさ0のまま)だが、`PointSource`は
+    /// 失われる——スカラー2つのAPIで書き込む操作は「一様場を選ぶ」ことだ、
+    /// という一貫した規則を採る(黙って無視するより、規則が読める方がよい)。
+    pub fn set_gravity_direction(&mut self, direction: Vec3) {
+        self.set_gravity_field(GravityField::Uniform {
+            magnitude: self.gravity(),
+            direction,
+        });
+    }
+
+    /// 位置`position`における重力加速度ベクトル [m/s^2]
+    /// (`GravityField::acceleration_at`への薄い委譲)。
+    pub fn gravity_at(&self, position: Vec3) -> Vec3 {
+        self.field.acceleration_at(position)
     }
 
     /// 設計 §4 パイプラインの `apply_forces`。P1 スコープ: 重力 + 球の抗力
@@ -220,8 +446,12 @@ impl MechanicsSolver {
         for i in 0..n {
             if self.bodies.body_type[i] == BodyType::Dynamic && !self.bodies.asleep[i] {
                 let mass = self.bodies.mass(i);
-                self.bodies.force_accum[i] =
-                    self.bodies.force_accum[i] + self.gravity_vector().scale(mass);
+                // 重力は**剛体の位置で評価する**(一様場では位置に依存しないので
+                // 移行前と完全に同一、点源場では剛体ごとに異なる)。剛体の広がりは
+                // 無視して重心位置1点で代表する縮約——潮汐力(場の勾配が生む
+                // トルク)は扱わない。
+                let gravity = self.field.acceleration_at(self.bodies.position[i]);
+                self.bodies.force_accum[i] = self.bodies.force_accum[i] + gravity.scale(mass);
 
                 if let (Some(atm), DragModel::Sphere { radius }) =
                     (&self.atmosphere, self.bodies.drag[i])
@@ -243,7 +473,7 @@ impl MechanicsSolver {
                     // トルク適用は不要(_c_buoy は式の対称性の記録として保持)。
                     if v_sub > 0.0 {
                         self.bodies.force_accum[i] = self.bodies.force_accum[i]
-                            + sim_fluid::buoyancy_force(v_sub, water.density, self.gravity);
+                            + sim_fluid::buoyancy_force(v_sub, water.density, self.gravity());
                     }
                 }
             }
@@ -427,7 +657,9 @@ impl Solver for MechanicsSolver {
         }
     }
 
-    /// Dynamic 剛体の運動エネルギー(並進+回転)+ 重力ポテンシャル(基準 y=0)。
+    /// Dynamic 剛体の運動エネルギー(並進+回転)+ 重力ポテンシャル
+    /// (`GravityField::potential_per_mass`。一様場は基準 原点=移行前と同一、
+    /// 点源場は基準 無限遠)。
     /// Kinematic の運動は外部注入エネルギーとして台帳側(World)が扱うため、ここでは対象外
     /// (docs/00-foundation/04-architecture.md §1.1.2(2))。
     fn total_energy(&self) -> EnergyBreakdown {
@@ -444,7 +676,7 @@ impl Solver for MechanicsSolver {
                 let omega = self.bodies.angular_velocity[i];
                 kinetic += 0.5 * omega.dot(inertia_world.mul_vec(omega));
             }
-            potential -= mass * self.gravity_vector().dot(self.bodies.position[i]);
+            potential += mass * self.field.potential_per_mass(self.bodies.position[i]);
         }
         EnergyBreakdown {
             kinetic,
@@ -1207,7 +1439,7 @@ mod tests {
             let mut events = EventQueue::new();
             let mut solver = MechanicsSolver::new(g);
             solver.set_gravity_direction(gravity_direction);
-            let down = solver.gravity_direction;
+            let down = solver.gravity_direction();
             // 揺動面は「重力方向」と「それに直交する perp」が張る平面。
             let perp = Vec3::new(0.0, 0.0, 1.0).cross(down).normalize_or_zero();
             assert!(perp.length() > 0.5, "swing plane is degenerate: {down:?}");
@@ -1291,5 +1523,228 @@ mod tests {
             "the period must depend only on |g|, not on its direction: \
              tilted={measured} down={straight_down}"
         );
+    }
+
+    /// **重力場の抽象化増分**: `MechanicsSolver::new`が作る既定の場が
+    /// 「大きさ`gravity`・向き下向きの一様場」であること、
+    /// スカラー2つのアクセサ(`gravity`/`gravity_direction`)が移行前の
+    /// 公開フィールドと同じ値を返すこと、そして`set_gravity_direction`が
+    /// 大きさを保ったまま向きだけを(正規化して)変えること。
+    #[test]
+    fn default_field_is_uniform_and_the_scalar_accessors_mirror_the_old_fields() {
+        let mut solver = MechanicsSolver::new(9.80665);
+        assert_eq!(
+            solver.gravity_field(),
+            GravityField::Uniform {
+                magnitude: 9.80665,
+                direction: Vec3::new(0.0, -1.0, 0.0),
+            }
+        );
+        assert_eq!(solver.gravity(), 9.80665);
+        assert_eq!(solver.gravity_direction(), Vec3::new(0.0, -1.0, 0.0));
+
+        // 正規化される(大きさは変わらない)。
+        solver.set_gravity_direction(Vec3::new(3.0, 0.0, 0.0));
+        assert_eq!(solver.gravity_direction(), Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(solver.gravity(), 9.80665);
+        // ゼロベクトルは既定の下向きへ縮退する(移行前と同じ安全側の挙動)。
+        solver.set_gravity_direction(Vec3::ZERO);
+        assert_eq!(solver.gravity_direction(), Vec3::new(0.0, -1.0, 0.0));
+        assert_eq!(solver.gravity(), 9.80665);
+        // `set_gravity`は向きを保ったまま大きさだけを変える。
+        solver.set_gravity_direction(Vec3::new(0.0, 0.0, 1.0));
+        solver.set_gravity(1.62);
+        assert_eq!(
+            solver.gravity_field(),
+            GravityField::Uniform {
+                magnitude: 1.62,
+                direction: Vec3::new(0.0, 0.0, 1.0),
+            }
+        );
+    }
+
+    /// **重力場の抽象化増分**: 非`Uniform`な場に対する`gravity`/`gravity_direction`の
+    /// 縮約(両メソッドのdoc「一様場1つで近似したときの値」)を固定する。
+    #[test]
+    fn scalar_accessors_degrade_to_zero_magnitude_for_non_uniform_fields() {
+        let mut solver = MechanicsSolver::new(9.80665);
+        for field in [
+            GravityField::Zero,
+            GravityField::PointSource {
+                center: Vec3::new(1.0, 2.0, 3.0),
+                mu: 3.986e14,
+            },
+        ] {
+            solver.set_gravity_field(field);
+            assert_eq!(solver.gravity(), 0.0);
+            assert_eq!(solver.gravity_direction(), Vec3::new(0.0, -1.0, 0.0));
+            // 「一様場として見たベクトル」は常に厳密にゼロ(積が定義通り)。
+            assert_eq!(
+                solver.gravity_direction().scale(solver.gravity()),
+                Vec3::ZERO
+            );
+        }
+    }
+
+    /// **重力場の抽象化増分**: `GravityField::acceleration_at`の3種の分岐を、
+    /// 積分器を介さず直接確認する。
+    #[test]
+    fn acceleration_at_follows_each_field_kind() {
+        // 一様場は位置に依存しない。
+        let uniform = GravityField::Uniform {
+            magnitude: 2.0,
+            direction: Vec3::new(0.0, -1.0, 0.0),
+        };
+        assert_eq!(
+            uniform.acceleration_at(Vec3::new(100.0, -50.0, 7.0)),
+            Vec3::new(0.0, -2.0, 0.0)
+        );
+        assert_eq!(
+            uniform.acceleration_at(Vec3::ZERO),
+            Vec3::new(0.0, -2.0, 0.0)
+        );
+
+        assert_eq!(
+            GravityField::Zero.acceleration_at(Vec3::new(1.0, 2.0, 3.0)),
+            Vec3::ZERO
+        );
+
+        // 点源: 中心を向き、大きさは mu/r^2。距離を2倍にすると1/4になる。
+        let mu = 4.0e14;
+        let point = GravityField::PointSource {
+            center: Vec3::ZERO,
+            mu,
+        };
+        let r = 1.0e7;
+        let a_near = point.acceleration_at(Vec3::new(r, 0.0, 0.0));
+        assert!((a_near.y).abs() < 1e-12 && (a_near.z).abs() < 1e-12);
+        assert!((a_near.x + mu / (r * r)).abs() / (mu / (r * r)) < 1e-12);
+        let a_far = point.acceleration_at(Vec3::new(0.0, 2.0 * r, 0.0));
+        assert!((a_far.length() * 4.0 - a_near.length()).abs() / a_near.length() < 1e-12);
+        assert!(a_far.y < 0.0, "acceleration must point toward the center");
+
+        // 中心そのものは`Vec3::ZERO`へ縮退する(NaN/無限大を出さない)。
+        let at_center = point.acceleration_at(Vec3::ZERO);
+        assert_eq!(at_center, Vec3::ZERO);
+        assert!(point
+            .acceleration_at(Vec3::new(POINT_SOURCE_MIN_RADIUS * 0.5, 0.0, 0.0))
+            .length()
+            .is_finite());
+    }
+
+    /// **重力場の抽象化増分・解析解テスト**: `GravityField::PointSource`(逆二乗)の
+    /// 下で、半径 $r$ の円軌道の解析解速度 $v=\sqrt{\mu/r}$ を初速に与えた自由体が、
+    /// **多周回にわたってほぼ一定の半径を保つ**こと。逆二乗則が本当に $1/r^2$ で
+    /// あることの直接の検証(大きさ一定の中心力や線形バネ場では、この初速で円軌道に
+    /// ならない)。
+    ///
+    /// **許容誤差がゆるい理由**: `MechanicsSolver`は`sim_astro`の軌道専用積分器では
+    /// なく、接触・拘束を含む汎用剛体ソルバであり、積分は semi-implicit Euler
+    /// (1次)である。シンプレクティック性はあるので**永年的な半径のドリフトは
+    /// 起きない**が、1次精度ゆえ軌道は $O(\Delta t)$ の離心率を持った楕円へずれる
+    /// (このずれは周回ごとに増えるのではなく、一定の振幅で振動する)。したがって
+    /// ここで固定するのは「半径が有界に留まる」ことであって「軌道が高精度である」
+    /// ことではない——後者は`sim_astro`の専用積分器の受け持ちである。
+    /// $r=10^7$m・$\mu=4\times10^{14}$(周期 $T=2\pi\sqrt{r^3/\mu}\simeq 3140$s)を
+    /// $\Delta t=1$s(周期の約1/3140)で10周させ、相対偏差 2% を要求する
+    /// (実測は 1% 未満)。
+    #[test]
+    fn circular_orbit_in_a_point_source_field_keeps_its_radius() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mu = 4.0e14;
+        let radius = 1.0e7;
+        let center = Vec3::ZERO;
+        let mut solver = MechanicsSolver::new(0.0);
+        solver.set_gravity_field(GravityField::PointSource { center, mu });
+
+        // 初期条件: +x に距離 r、速度は +z 向き(軌道面は xz)に v=sqrt(mu/r)。
+        let speed = (mu / radius).sqrt();
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 1.0 }, steel);
+        desc.transform.position = center + Vec3::new(radius, 0.0, 0.0);
+        desc.linear_velocity = Vec3::new(0.0, 0.0, speed);
+        let sat = solver.create_body(desc, &materials);
+
+        let period = 2.0 * std::f64::consts::PI * (radius * radius * radius / mu).sqrt();
+        let dt = 1.0;
+        let steps = (10.0 * period / dt) as u32;
+        let mut min_radius = f64::INFINITY;
+        let mut max_radius: f64 = 0.0;
+        let mut max_out_of_plane: f64 = 0.0;
+        for _ in 0..steps {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            let _: Vec<Event> = events.drain_sorted();
+            let relative = solver.bodies.position[sat] - center;
+            min_radius = min_radius.min(relative.length());
+            max_radius = max_radius.max(relative.length());
+            max_out_of_plane = max_out_of_plane.max(relative.y.abs());
+        }
+
+        assert!(
+            (min_radius - radius).abs() / radius < 2.0e-2,
+            "orbit radius must not collapse: min={min_radius:.6e} r={radius:.6e}"
+        );
+        assert!(
+            (max_radius - radius).abs() / radius < 2.0e-2,
+            "orbit radius must not grow: max={max_radius:.6e} r={radius:.6e}"
+        );
+        // 中心力なので角運動量の向き(=軌道面)は厳密に保存する。面外成分は
+        // 丸め誤差だけであるべき(半径に対する相対で 1e-12)。
+        assert!(
+            max_out_of_plane / radius < 1e-12,
+            "a central force must keep the orbit planar: {max_out_of_plane:.3e}"
+        );
+    }
+
+    /// **重力場の抽象化増分・解析解テスト**: `GravityField::Zero`では、外力を
+    /// 何も受けない自由体の速度と位置が**厳密に**慣性運動のまま
+    /// (等速直線運動)であること。「重力を消す」経路が本当に何も加えていない
+    /// ことの確認——`Uniform { magnitude: 0.0, .. }`との数値的な等価性も含めて
+    /// 固定する。
+    #[test]
+    fn zero_field_leaves_a_free_body_in_exact_inertial_motion() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut solver = MechanicsSolver::new(9.80665);
+        solver.set_gravity_field(GravityField::Zero);
+        let velocity = Vec3::new(1.0, 2.0, -3.0);
+        let start = Vec3::new(0.0, 100.0, 0.0);
+        let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.05 }, steel);
+        desc.transform.position = start;
+        desc.linear_velocity = velocity;
+        let idx = solver.create_body(desc, &materials);
+
+        let dt = 1.0 / 120.0;
+        let steps = 2000;
+        for _ in 0..steps {
+            let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+            solver.step(dt, &mut ctx);
+            let _: Vec<Event> = events.drain_sorted();
+            // 速度は1stepも変化してはならない(重力が0なら加速度も厳密に0)。
+            assert_eq!(
+                solver.bodies.linear_velocity[idx], velocity,
+                "GravityField::Zero must not change the velocity at all"
+            );
+        }
+        // 位置は等速直線運動そのもの。`addcarry_scaled`の逐次加算と同じ順序で
+        // 期待値を作れば厳密一致するが、ここは浮動小数の加算順序に依存しない
+        // 相対許容(1e-12)で十分——検証したいのは「ドリフトしないこと」。
+        let expected = start + velocity.scale(dt * steps as f64);
+        let drift = (solver.bodies.position[idx] - expected).length();
+        assert!(
+            drift / expected.length() < 1e-12,
+            "position must follow exact inertial motion: drift={drift:.3e}"
+        );
+        // ポテンシャルは常に0、力学的エネルギーは運動エネルギーのみ。
+        let energy = solver.total_energy();
+        assert_eq!(energy.potential, 0.0);
+        assert!(energy.kinetic > 0.0);
     }
 }

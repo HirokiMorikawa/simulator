@@ -171,9 +171,22 @@ pub fn to_scenario(world: &World, name: &str) -> Scenario {
 
 fn export_world_options(world: &World) -> WorldScenarioOptions {
     let mechanics = world.mechanics();
+    let field = mechanics.gravity_field();
     WorldScenarioOptions {
-        gravity: mechanics.gravity,
-        gravity_direction: Some(vec3_to_array(mechanics.gravity_direction)),
+        // `gravity`/`gravity_direction`は「一様場として見たときの値」
+        // (`MechanicsSolver::gravity`のdoc参照)。非`Uniform`な場では
+        // `(0.0, 下向き)`になるが、そのとき`gravity_field`が書かれていて
+        // 読み込み側はそちらを優先するので情報は落ちない。
+        gravity: mechanics.gravity(),
+        gravity_direction: Some(vec3_to_array(mechanics.gravity_direction())),
+        // **`Uniform`のときは書き出さない**——既存の`scenes/*.json`は
+        // すべて一様場であり、往復出力にキーが1つ増えるのを避けるため
+        // (`WorldScenarioOptions::gravity_field`のdoc参照)。
+        // `Uniform`は上の2フィールドで無損失に表現できるので情報も落ちない。
+        gravity_field: match field {
+            sim_mechanics::GravityField::Uniform { .. } => None,
+            other => Some(crate::scenario::gravity_field_to_json(other)),
+        },
         dt: world.dt(),
         restitution_velocity_threshold: Some(mechanics.restitution_velocity_threshold),
         atmosphere: mechanics.atmosphere.as_ref().map(|a| AtmosphereJson {
@@ -2737,5 +2750,105 @@ mod tests {
             reloaded.probe(1).unwrap().target,
             ProbeTarget::StateHashDigest
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 重力場(`GravityField`)の往復。**重力場の抽象化増分**。
+    // -----------------------------------------------------------------------
+
+    /// 重力場だけを差し替えた、自由体1個のワールド。点源場でも軌道になるよう
+    /// 中心から離れた位置・接線方向の初速を与える(場が本当に復元されているかは
+    /// 「その後の軌跡が一致するか」でしか判定できないため、静止した体では
+    /// テストにならない)。
+    fn world_with_gravity_field(field: sim_mechanics::GravityField) -> World {
+        let mut world = empty_world();
+        world.mechanics_mut().set_gravity_field(field);
+        let mat = steel(&world);
+        let mut desc = RigidBodyDesc::dynamic(sim_mechanics::Shape::Sphere { radius: 0.5 }, mat);
+        desc.transform.position = Vec3::new(30.0, 40.0, 0.0);
+        desc.linear_velocity = Vec3::new(1.0, 0.0, 2.0);
+        world.create_body(desc);
+        world
+    }
+
+    /// **重力場の抽象化増分**: `GravityField`の3種すべてが
+    /// `to_scenario`→`from_scenario`で往復し、復元直後だけでなく
+    /// **双方をさらに時間発展させたあとも**`state_hash`が一致すること。
+    ///
+    /// 復元直後の一致だけでは足りない——重力場は初期状態ではなく*その後の
+    /// 加速度*を決めるので、場の復元が壊れていても $t=0$ のハッシュは一致して
+    /// しまう。`assert_round_trip`が後半で回す`extra_steps`がここでの本体である。
+    #[test]
+    fn gravity_field_round_trips_for_every_kind_including_after_stepping() {
+        let cases = [
+            (
+                "uniform",
+                sim_mechanics::GravityField::Uniform {
+                    magnitude: 3.71, // 火星
+                    direction: Vec3::new(1.0, -2.0, 0.5),
+                },
+            ),
+            (
+                "point-source",
+                sim_mechanics::GravityField::PointSource {
+                    center: Vec3::new(0.0, -10.0, 0.0),
+                    mu: 5.0e5,
+                },
+            ),
+            ("zero", sim_mechanics::GravityField::Zero),
+        ];
+        for (label, field) in cases {
+            assert_round_trip(world_with_gravity_field(field), 20, 40, label);
+            // 場そのものが同じvariantで戻っていること(ハッシュ一致だけだと、
+            // たまたま軌跡が同じ別の場に化けていても気づけない)。
+            let world = world_with_gravity_field(field);
+            let reloaded = World::from_scenario(&to_scenario(&world, label)).unwrap();
+            assert_eq!(
+                reloaded.mechanics().gravity_field(),
+                world.mechanics().gravity_field(),
+                "{label}: the field itself must survive the round trip"
+            );
+        }
+    }
+
+    /// **重力場の抽象化増分**: 書き出し側の約束
+    /// (`WorldScenarioOptions::gravity_field`のdoc)——`Uniform`のときは
+    /// `gravity_field`キーを**出さない**(既存の`scenes/*.json`の往復出力に
+    /// キーを増やさない)、非`Uniform`のときだけ出す。
+    #[test]
+    fn gravity_field_key_is_written_only_for_non_uniform_fields() {
+        let uniform = to_scenario(
+            &world_with_gravity_field(sim_mechanics::GravityField::Uniform {
+                magnitude: 9.80665,
+                direction: Vec3::new(0.0, -1.0, 0.0),
+            }),
+            "uniform",
+        );
+        assert!(uniform.world.gravity_field.is_none());
+        assert_eq!(uniform.world.gravity, 9.80665);
+
+        let zero = to_scenario(
+            &world_with_gravity_field(sim_mechanics::GravityField::Zero),
+            "zero",
+        );
+        assert!(matches!(
+            zero.world.gravity_field,
+            Some(crate::scenario::GravityFieldJson::Zero)
+        ));
+        // 非`Uniform`では`gravity`は「一様場として見た値」=0.0になるが、
+        // 読み込み側は`gravity_field`を優先するので情報は落ちない。
+        assert_eq!(zero.world.gravity, 0.0);
+
+        let point = to_scenario(
+            &world_with_gravity_field(sim_mechanics::GravityField::PointSource {
+                center: Vec3::new(1.0, 2.0, 3.0),
+                mu: 7.0e5,
+            }),
+            "point",
+        );
+        assert!(matches!(
+            point.world.gravity_field,
+            Some(crate::scenario::GravityFieldJson::PointSource { .. })
+        ));
     }
 }

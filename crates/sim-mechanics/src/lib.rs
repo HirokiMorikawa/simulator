@@ -39,5 +39,5 @@ pub use soft_body::{
     rope, tetrahedron_volume, BendingConstraint, DistanceConstraint, SoftBody, VolumeConstraint,
     DEFAULT_DAMPING, DEFAULT_ITERATIONS, DEFAULT_SUBSTEPS,
 };
-pub use solver::MechanicsSolver;
+pub use solver::{GravityField, MechanicsSolver, POINT_SOURCE_MIN_RADIUS};
 pub use vehicle::{pacejka_force, pacejka_peak_slip, PacejkaParams};

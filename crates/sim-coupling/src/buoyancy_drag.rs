@@ -109,8 +109,22 @@ impl Coupling for BuoyancyDrag {
                 let (v_sub, _) =
                     sim_fluid::submerged_box_axis_aligned(pos, half_extents, water.water_level);
                 if v_sub > 0.0 {
+                    // **正直な限界(重力場の抽象化増分)**: ここは重力場の
+                    // スカラー縮約(`MechanicsSolver::gravity`)を読んでおり、
+                    // 位置依存の`GravityField::acceleration_at`は見ていない。
+                    // `sim_fluid::buoyancy_force`が水面をワールドy軸に垂直な
+                    // 水平面として持つモデルである以上、重力の向きや勾配へ
+                    // 追従させても整合しないためである(この制約は重力の向きを
+                    // 可変にした時点から存在する)。結果として、非`Uniform`な
+                    // 重力場では`gravity()`が0.0を返し**浮力は無効化される**
+                    // (同メソッドのdoc参照)。浮力を重力場へ追従させるのは
+                    // 別の計画作業であり、本増分では踏み込まない。
                     force = force
-                        + sim_fluid::buoyancy_force(v_sub, water.density, world.mechanics.gravity);
+                        + sim_fluid::buoyancy_force(
+                            v_sub,
+                            water.density,
+                            world.mechanics.gravity(),
+                        );
                 }
             }
         }

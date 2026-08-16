@@ -187,6 +187,27 @@ pub enum Command {
         param: sim_coupling::CouplingParam,
         value: f64,
     },
+    /// 重力場(`sim_mechanics::GravityField`)を差し替える(**重力場の抽象化増分**)。
+    ///
+    /// **なぜCommandにしたか**: 重力の変更は以降の全stepの結果を変える。
+    /// `command_log()`に残らない変更は、同じシーン・同じseed・同じログから
+    /// 再生しても軌跡が一致しない——**黙ってリプレイされない変更は決定論のバグ**
+    /// である(モジュールdoc「実行中の変更はcreate系と本コマンドの2経路のみ」)。
+    ///
+    /// **既存の状況を正直に書いておく**: 移行前から存在する
+    /// `MechanicsSolver::set_gravity`/`set_gravity_direction`への直接呼び出し
+    /// (`World::set_environment`と`sim-wasm`の`set_gravity`/
+    /// `set_gravity_direction` kind)は**Commandを経由せず即時に効き、
+    /// この`command_log()`には残らない**。現状それらの記録を担っているのは
+    /// フロントエンド側の別台帳(`demo/src/main.ts`の`CommandLogEntry::
+    /// SetGravity`/`SetGravityDirection`、Replayタブが読む)であり、
+    /// **物理コアだけを使う経路(ヘッドレス実行・Rust APIの直接利用)では
+    /// 記録されない**という穴が残っている。本増分ではそこには手を付けていない
+    /// ——Command化すると適用が1step遅れる挙動変更になり、既にその即時性に
+    /// 依存している既存フロントエンド(本増分の対象外)を壊すため。
+    /// 新しい経路(`sim-wasm`の`push_set_gravity_field` kind)だけが、
+    /// フロントエンドに依存せず物理コア側で記録される。
+    SetGravityField { field: sim_mechanics::GravityField },
 }
 
 /// `World::energy_report`の1ドメイン分(**群3で追加**、`energy_report`のdoc参照)。
@@ -714,11 +735,26 @@ pub enum JointDesc {
 /// 積分とポテンシャルエネルギー計算のみ(浮力・大気抗力は向きに依存しない、
 /// `sim-fluid`crateの水面モデルが水平面固定であることに由来する既存の
 /// 制約で、本増分の対象外)。
+///
+/// **重力場の抽象化増分**: `gravity_field`を追加した。`Some`ならそちらが
+/// 優先され、`None`なら従来どおり`gravity`+`gravity_direction`から一様場を
+/// 組み立てる——シーンJSONの`world.gravity_field`と**まったく同じ優先規則**
+/// (`scenario::WorldScenarioOptions::gravity_field`参照)。表現が二重になるが、
+/// 既存の呼び出し側が`gravity`/`gravity_direction`だけを読み書きし続けられる
+/// ことを優先した。`environment()`は常に`gravity_field: Some(..)`を埋めるので、
+/// 読んでそのまま書き戻す往復では非一様な場も無損失で保たれる。
 #[derive(Clone, Copy, Debug)]
 pub struct EnvironmentDesc {
+    /// 重力の大きさ [m/s^2](非`Uniform`な場では0.0、
+    /// `sim_mechanics::MechanicsSolver::gravity`のdoc参照)。
+    /// `gravity_field`が`Some`のときは無視される。
     pub gravity: f64,
     /// 重力の向き(単位ベクトルとして正規化される、既定は下向き`(0,-1,0)`)。
+    /// `gravity_field`が`Some`のときは無視される。
     pub gravity_direction: sim_math::Vec3,
+    /// 重力場そのもの(`sim_mechanics::GravityField`)。`Some`なら
+    /// `gravity`/`gravity_direction`より優先する(構造体docの優先規則)。
+    pub gravity_field: Option<sim_mechanics::GravityField>,
     pub atmosphere: Option<sim_fluid::Atmosphere>,
     pub water: Option<sim_fluid::StaticWaterRegion>,
     /// `None`なら熱ドメインが無効(`enable_thermal`未呼び出し)、または
@@ -1223,6 +1259,16 @@ impl World {
                 } => {
                     if let Some(coupling) = self.couplings.get_mut(coupling_index) {
                         coupling.set_scalar_param(param, value);
+                    }
+                }
+                Command::SetGravityField { field } => {
+                    // 重力が変われば、静止仮定で眠っている剛体も動き出しうる。
+                    // `SetCollisionFilter`等と同じ理由で全Dynamic剛体を起こす
+                    // (起こさないと`sleep::update_sleep_state`が力適用・速度積分
+                    // ごと止めたままになり、新しい重力場が効かない)。
+                    self.mechanics.set_gravity_field(field);
+                    for i in 0..self.mechanics.bodies.len() {
+                        self.mechanics.bodies.asleep[i] = false;
                     }
                 }
             }
@@ -2633,8 +2679,9 @@ impl World {
     /// 表示・編集フォームの初期値に使う)。
     pub fn environment(&self) -> EnvironmentDesc {
         EnvironmentDesc {
-            gravity: self.mechanics.gravity,
-            gravity_direction: self.mechanics.gravity_direction,
+            gravity: self.mechanics.gravity(),
+            gravity_direction: self.mechanics.gravity_direction(),
+            gravity_field: Some(self.mechanics.gravity_field()),
             atmosphere: self.mechanics.atmosphere,
             water: self.mechanics.water,
             ambient_temperature: self.thermal.as_ref().map(|t| t.ambient_temperature),
@@ -2646,8 +2693,15 @@ impl World {
     /// 熱ドメインを勝手に`enable_thermal`しない——ドメインの有効化は
     /// シーン構築の責務であり、環境設定の責務ではないため)。
     pub fn set_environment(&mut self, desc: EnvironmentDesc) {
-        self.mechanics.gravity = desc.gravity;
-        self.mechanics.set_gravity_direction(desc.gravity_direction);
+        // `gravity_field`が`Some`ならそれが唯一の情報源(構造体docの優先規則)。
+        // `None`のときだけ、スカラー2つから一様場を組み立てる従来の経路を通る。
+        match desc.gravity_field {
+            Some(field) => self.mechanics.set_gravity_field(field),
+            None => {
+                self.mechanics.set_gravity(desc.gravity);
+                self.mechanics.set_gravity_direction(desc.gravity_direction);
+            }
+        }
         self.mechanics.atmosphere = desc.atmosphere;
         self.mechanics.water = desc.water;
         if let Some(t) = desc.ambient_temperature {
@@ -3134,6 +3188,8 @@ mod tests {
         let desc = EnvironmentDesc {
             gravity: 3.71, // 火星の重力
             gravity_direction: sim_math::Vec3::new(1.0, 0.0, 0.0),
+            // `None` = 従来のスカラー2つ経路(構造体docの優先規則)。
+            gravity_field: None,
             atmosphere: Some(sim_fluid::Atmosphere::still(0.02, 1.1e-5)),
             water: Some(sim_fluid::StaticWaterRegion::new(-1.0, 1000.0)),
             ambient_temperature: Some(210.0),
@@ -3150,6 +3206,61 @@ mod tests {
         assert_eq!(read_back.water.unwrap().water_level, -1.0);
         assert_eq!(read_back.ambient_temperature, Some(210.0));
         assert_eq!(world.thermal().unwrap().ambient_temperature, 210.0);
+    }
+
+    /// **重力場の抽象化増分**: `EnvironmentDesc`が`GravityField`の3種すべてを
+    /// 往復できること、そして`gravity_field: Some(..)`がスカラー2つ
+    /// (`gravity`/`gravity_direction`)より優先されること(構造体docの優先規則)。
+    #[test]
+    fn environment_desc_round_trips_every_gravity_field_kind_and_field_wins() {
+        let fields = [
+            sim_mechanics::GravityField::Uniform {
+                magnitude: 1.62, // 月の重力
+                direction: sim_math::Vec3::new(0.0, -1.0, 0.0),
+            },
+            sim_mechanics::GravityField::PointSource {
+                center: sim_math::Vec3::new(1.0, 2.0, 3.0),
+                mu: 4.0e5,
+            },
+            sim_mechanics::GravityField::Zero,
+        ];
+        for field in fields {
+            let mut world = World::new(WorldOptions::default());
+            world.set_environment(EnvironmentDesc {
+                // わざと場と矛盾する値を入れる——優先規則が効いていれば
+                // これらは無視されるはず。
+                gravity: 99.0,
+                gravity_direction: sim_math::Vec3::new(1.0, 0.0, 0.0),
+                gravity_field: Some(field),
+                atmosphere: None,
+                water: None,
+                ambient_temperature: None,
+            });
+            assert_eq!(world.environment().gravity_field, Some(field));
+            assert_eq!(world.mechanics().gravity_field(), field);
+        }
+    }
+
+    /// **重力場の抽象化増分**: `Command::SetGravityField`が次stepの先頭で適用され、
+    /// `command_log()`へ記録されること(同variantのdoc「黙ってリプレイされない
+    /// 変更は決定論のバグ」)。
+    #[test]
+    fn set_gravity_field_command_applies_and_is_recorded_in_the_command_log() {
+        let mut world = World::new(WorldOptions::default());
+        let field = sim_mechanics::GravityField::PointSource {
+            center: sim_math::Vec3::ZERO,
+            mu: 3.986e14,
+        };
+        world.push_command(Command::SetGravityField { field });
+        // Commandは「次step先頭」で効く——push直後はまだ既定の一様場のまま。
+        assert!(matches!(
+            world.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Uniform { .. }
+        ));
+        world.step();
+        assert_eq!(world.mechanics().gravity_field(), field);
+        assert_eq!(world.command_log().len(), 1);
+        assert_eq!(world.command_log()[0].1, Command::SetGravityField { field });
     }
 
     /// `Shape::Compound`の`todo!()`穴埋め(統合エディタ実装計画の縦串①)の

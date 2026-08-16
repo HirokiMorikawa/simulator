@@ -67,9 +67,17 @@ impl Coupling for BoussinesqBuoyancy {
         // f_y = -beta*(T-T_amb)*g_y、g_y = -gravity(MechanicsSolver::gravityのdoc参照:
         // 大きさで表され、y方向には-gravityとして作用する)なので
         // f_y = beta*(T-T_amb)*gravity(暖かい熱源(T>T_amb)ほど上向きに浮力が働く)。
+        //
+        // **正直な限界(重力場の抽象化増分)**: この式は「重力が鉛直(y)方向の
+        // 一様場である」ことを前提に、格子流体のv成分だけへ加速度を足している。
+        // よってスカラー縮約`gravity()`を読み、位置依存の
+        // `GravityField::acceleration_at`は見ていない——非`Uniform`な場では
+        // `gravity()`が0.0を返し、この浮力は無効になる(同メソッドのdoc参照)。
+        // Boussinesq浮力を任意方向・位置依存の重力場へ一般化するのは
+        // 別の計画作業であり、本増分の対象外。
         let accel_y = self.thermal_expansion_coefficient
             * (temperature - self.ambient_temperature)
-            * world.mechanics.gravity;
+            * world.mechanics.gravity();
         for v in grid_fluid.v.iter_mut() {
             *v += accel_y * dt;
         }

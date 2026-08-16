@@ -78,7 +78,7 @@ pub enum FieldDefault {
 
 /// `apply`側1フィールドぶんのスキーマ。
 ///
-/// **`serde_json::json!`の入れ子ではなくstructにした理由**: 72 kind・
+/// **`serde_json::json!`の入れ子ではなくstructにした理由**: 73 kind・
 /// 延べ300超のフィールドを`json!`マクロで手書きすると、キー名のtypoも
 /// 型の取り違えもコンパイラが一切検出しない。structなら
 /// `FieldType`/`FieldDefault`が列挙で縛られ、キー名は`#[derive(Serialize)]`が
@@ -112,8 +112,12 @@ pub struct ComponentFieldSchema {
 ///
 /// フィールド数はkindによって0個(`clear_atmosphere`・`spawn_fluid_block`等)
 /// から11個(`add_wheel_joint`)まで開きがあるが、**どれも「名前付き
-/// パラメータの平坦な並び」という同じ形に収まる**——payload形状が
-/// 動的なkindは1つも無かったので、この一様な表現を崩す必要は生じていない。
+/// パラメータの平坦な並び」という同じ形に収まる**。
+///
+/// **唯一の例外**(重力場の抽象化増分): `push_set_gravity_field`だけは
+/// `kind`フィールドの値によって意味を持つフィールドが変わる。それでも表現は
+/// 平坦なまま(全フィールドを並べ、`kind`が見ないものは無視される)に留めて
+/// あり、事情は`apply_schema`内の同kindのコメントに書いた。
 #[derive(Clone, Debug, Serialize)]
 pub struct ComponentKindSchema {
     pub kind: &'static str,
@@ -508,6 +512,32 @@ pub fn apply_schema() -> Vec<ComponentKindSchema> {
         kind(
             "set_gravity_direction",
             vec![f_nd("x"), f_nd("y"), f_nd("z")],
+        ),
+        // **既知の限界(`s()`のdocに書いた列挙値の話と同じ形)**: `kind`は
+        // `uniform`/`point_source`/`zero`の3値固定だが、このスキーマは
+        // 「文字列」までしか言えない。さらにこのkindは**`kind`の値によって
+        // 意味を持つフィールドが変わる**唯一の例外である
+        // (`uniform`は`magnitude`と`x`/`y`/`z`、`point_source`は`center_*`と
+        // `mu`、`zero`はどれも見ない)。`ComponentKindSchema`のdocが言う
+        // 「payload形状が動的なkindは1つも無かった」はここで初めて破れる。
+        // 表現形式を場合分け可能な形へ拡張するのではなく、**全フィールドを
+        // 平坦に並べて余分な値は無視される**(既定値が渡っても`kind`が見ない)
+        // 設計にして、この注記で限界を伝える方を選んだ——スキーマの表現力を
+        // 上げると`apply_component_impl`との写像の単純さ(このモジュールの
+        // 唯一の安全装置)が失われるため。
+        kind(
+            "push_set_gravity_field",
+            vec![
+                s("kind"),
+                f("magnitude", "m/s^2"),
+                f_nd("x"),
+                f_nd("y"),
+                f_nd("z"),
+                f("center_x", "m"),
+                f("center_y", "m"),
+                f("center_z", "m"),
+                f("mu", "m^3/s^2"),
+            ],
         ),
         kind("set_dt", vec![f("dt", "s").positive()]),
         kind(

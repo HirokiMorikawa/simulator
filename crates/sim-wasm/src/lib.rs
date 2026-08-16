@@ -153,6 +153,8 @@ pub enum WasmError {
     InvalidScaleComponent,
     /// `push_set_body_type`——Dynamic/Static/Kinematic以外の名前。
     UnknownBodyType(String),
+    /// `push_set_gravity_field`——uniform/point_source/zero以外の`kind`名。
+    UnknownGravityFieldKind,
 
     // --- 対象に対してその操作が成り立たない ---
     /// 床(index 0)は削除できない。
@@ -276,6 +278,10 @@ impl std::fmt::Display for WasmError {
             WasmError::UnknownBodyType(kind) => write!(
                 f,
                 "unknown body type {kind:?} (expected Dynamic/Static/Kinematic)"
+            ),
+            WasmError::UnknownGravityFieldKind => write!(
+                f,
+                "unknown gravity field kind (expected uniform/point_source/zero)"
             ),
 
             WasmError::CannotRemoveFloor => write!(f, "床は削除できません(シーンの基準面)"),
@@ -1272,13 +1278,17 @@ impl WasmWorld {
     /// `MechanicsSolver.gravity`は元々公開フィールドで実行時に変更可能だったが、
     /// **wasm側にsetterが無かったためフロントエンドから触れなかった**
     /// (`WorldOptions`はコンストラクタでしか受け取らない、と誤解していた)。
+    /// **重力場の抽象化増分での変化**: 実体は`MechanicsSolver::set_gravity`
+    /// (旧公開フィールドへの代入と同じ意味を保つアクセサ)になった。
+    /// 一様場に対する挙動は完全に同一。
     fn set_gravity_impl(&mut self, gravity: f64) {
-        self.inner.mechanics_mut().gravity = gravity;
+        self.inner.mechanics_mut().set_gravity(gravity);
     }
 
-    /// 現在の重力加速度の大きさ [m/s^2]。
+    /// 現在の重力加速度の大きさ [m/s^2](非`Uniform`な重力場では0.0、
+    /// `MechanicsSolver::gravity`のdoc参照)。
     fn gravity_impl(&self) -> f64 {
-        self.inner.mechanics().gravity
+        self.inner.mechanics().gravity()
     }
 
     /// 重力の向きを実行時に変更する(**残タスク完遂増分**、レビュー指摘
@@ -1291,10 +1301,75 @@ impl WasmWorld {
             .set_gravity_direction(Vec3::new(x, y, z));
     }
 
-    /// 現在の重力の向き(正規化済み単位ベクトル)を`[x, y, z]`で返す。
+    /// 現在の重力の向き(正規化済み単位ベクトル)を`[x, y, z]`で返す
+    /// (非`Uniform`な重力場では既定の下向き、
+    /// `MechanicsSolver::gravity_direction`のdoc参照)。
     fn gravity_direction_impl(&self) -> Float64Array {
-        let d = self.inner.mechanics().gravity_direction;
+        let d = self.inner.mechanics().gravity_direction();
         Float64Array::from(&[d.x, d.y, d.z][..])
+    }
+
+    /// 重力**場**を差し替える(**重力場の抽象化増分**)。
+    /// `kind`が`"uniform"`なら`magnitude`+`(x,y,z)`、`"point_source"`なら
+    /// `(center_x, center_y, center_z)`+`mu`、`"zero"`なら追加の引数を見ない
+    /// (`sim_mechanics::GravityField`のdoc参照)。
+    ///
+    /// **既存の`set_gravity`/`set_gravity_direction`との違い**: あちらは即時に
+    /// 効き`commandLog`に残らない(移行前からの挙動、後方互換のためそのまま)。
+    /// こちらは`Command::SetGravityField`として積まれ、**次stepの先頭で適用され
+    /// 記録される**——重力場の変更は以降の全stepを変えるため、記録されないと
+    /// リプレイが一致しない(同Commandのdoc参照)。
+    #[allow(clippy::too_many_arguments)]
+    fn push_set_gravity_field_impl(
+        &mut self,
+        kind: &str,
+        magnitude: f64,
+        x: f64,
+        y: f64,
+        z: f64,
+        center_x: f64,
+        center_y: f64,
+        center_z: f64,
+        mu: f64,
+    ) -> Result<(), WasmError> {
+        let field = match kind {
+            "uniform" => sim_mechanics::GravityField::Uniform {
+                magnitude,
+                direction: Vec3::new(x, y, z),
+            },
+            "point_source" => sim_mechanics::GravityField::PointSource {
+                center: Vec3::new(center_x, center_y, center_z),
+                mu,
+            },
+            "zero" => sim_mechanics::GravityField::Zero,
+            _ => return Err(WasmError::UnknownGravityFieldKind),
+        };
+        self.inner
+            .push_command(sim_world::Command::SetGravityField { field });
+        Ok(())
+    }
+
+    /// 現在の重力場をJSONで返す(`push_set_gravity_field`が受け取るのと同じ
+    /// `kind`名を使う——読んだものをそのまま書き戻せるようにするため)。
+    fn gravity_field_impl(&self) -> String {
+        match self.inner.mechanics().gravity_field() {
+            sim_mechanics::GravityField::Uniform {
+                magnitude,
+                direction,
+            } => serde_json::json!({
+                "kind": "uniform",
+                "magnitude": magnitude,
+                "direction": [direction.x, direction.y, direction.z],
+            })
+            .to_string(),
+            sim_mechanics::GravityField::PointSource { center, mu } => serde_json::json!({
+                "kind": "point_source",
+                "center": [center.x, center.y, center.z],
+                "mu": mu,
+            })
+            .to_string(),
+            sim_mechanics::GravityField::Zero => serde_json::json!({ "kind": "zero" }).to_string(),
+        }
     }
 
     /// タイムステップ [s] を実行時に変更する(**群2で追加**)。
@@ -2697,6 +2772,20 @@ impl WasmWorld {
                 self.set_gravity_direction_impl(f("x"), f("y"), f("z"));
                 Ok("{}".to_string())
             }
+            "push_set_gravity_field" => {
+                self.push_set_gravity_field_impl(
+                    &s("kind"),
+                    f("magnitude"),
+                    f("x"),
+                    f("y"),
+                    f("z"),
+                    f("center_x"),
+                    f("center_y"),
+                    f("center_z"),
+                    f("mu"),
+                )?;
+                Ok("{}".to_string())
+            }
             "set_dt" => {
                 self.set_dt_impl(f("dt"))?;
                 Ok("{}".to_string())
@@ -2994,6 +3083,7 @@ impl WasmWorld {
             "gravity_direction" => {
                 Ok(serde_json::json!(self.gravity_direction_impl().to_vec()).to_string())
             }
+            "gravity_field" => Ok(self.gravity_field_impl()),
             "dt" => Ok(self.dt_impl().to_string()),
             "atmosphere_density" => Ok(self.atmosphere_density_impl().to_string()),
             "atmosphere_viscosity" => Ok(self.atmosphere_viscosity_impl().to_string()),
@@ -3155,7 +3245,7 @@ impl WasmWorld {
                 "coupling_count", "coupling_info_text", "coupling_kind_summary",
                 "coupling_supported_params",
                 "joint_info_text", "thermal_node_count",
-                "gravity", "gravity_direction", "dt",
+                "gravity", "gravity_direction", "gravity_field", "dt",
                 "atmosphere_density", "atmosphere_viscosity", "atmosphere_wind",
                 "water_level", "water_density",
                 "body_mass_at", "body_type_at", "body_collision_group_at",
@@ -5866,20 +5956,142 @@ mod tests {
     fn set_gravity_direction_changes_and_normalizes_the_stored_direction() {
         let mut world = new_world();
         assert_eq!(
-            world.inner.mechanics().gravity_direction,
+            world.inner.mechanics().gravity_direction(),
             sim_math::Vec3::new(0.0, -1.0, 0.0)
         );
 
         world.set_gravity_direction_impl(3.0, 0.0, 0.0);
-        let direction = world.inner.mechanics().gravity_direction;
+        let direction = world.inner.mechanics().gravity_direction();
         assert!((direction.length() - 1.0).abs() < 1e-12);
         assert!((direction.x - 1.0).abs() < 1e-12);
 
         // ゼロベクトルは既定の下向きへ安全にフォールバックする。
         world.set_gravity_direction_impl(0.0, 0.0, 0.0);
         assert_eq!(
-            world.inner.mechanics().gravity_direction,
+            world.inner.mechanics().gravity_direction(),
             sim_math::Vec3::new(0.0, -1.0, 0.0)
+        );
+    }
+
+    /// **重力場の抽象化増分**: 新しい`push_set_gravity_field` kindが3種の場を
+    /// 構築でき、**Commandとして次stepの先頭で適用され`commandLog`へ記録される**
+    /// こと(`sim_world::Command::SetGravityField`のdoc「黙ってリプレイされない
+    /// 変更は決定論のバグ」)。読み戻しは`gravity_field` kindで行い、
+    /// 書いた`kind`名がそのまま返ることも確かめる(往復できる形にしてある)。
+    #[test]
+    fn push_set_gravity_field_builds_every_kind_and_is_recorded_as_a_command() {
+        let mut world = new_world();
+
+        world
+            .apply_component_impl(
+                "push_set_gravity_field",
+                r#"{"kind":"point_source","center_x":0.0,"center_y":-100.0,"center_z":0.0,"mu":4.0e14}"#,
+            )
+            .unwrap();
+        // Commandなのでstepするまで効かない。
+        assert!(matches!(
+            world.inner.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Uniform { .. }
+        ));
+        world.step();
+        assert_eq!(
+            world.inner.mechanics().gravity_field(),
+            sim_mechanics::GravityField::PointSource {
+                center: Vec3::new(0.0, -100.0, 0.0),
+                mu: 4.0e14,
+            }
+        );
+        assert_eq!(world.inner.command_log().len(), 1);
+        let read_back: serde_json::Value =
+            serde_json::from_str(&world.read_component_impl("gravity_field", "").unwrap()).unwrap();
+        assert_eq!(read_back["kind"], "point_source");
+        assert_eq!(read_back["mu"], 4.0e14);
+
+        world
+            .apply_component_impl("push_set_gravity_field", r#"{"kind":"zero"}"#)
+            .unwrap();
+        world.step();
+        assert_eq!(
+            world.inner.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Zero
+        );
+        let read_back: serde_json::Value =
+            serde_json::from_str(&world.read_component_impl("gravity_field", "").unwrap()).unwrap();
+        assert_eq!(read_back["kind"], "zero");
+
+        // `uniform`は向きを正規化して保持する(既存の`set_gravity_direction`と
+        // 同じ不変条件、`MechanicsSolver::set_gravity_field`のdoc参照)。
+        world
+            .apply_component_impl(
+                "push_set_gravity_field",
+                r#"{"kind":"uniform","magnitude":1.62,"x":0.0,"y":0.0,"z":5.0}"#,
+            )
+            .unwrap();
+        world.step();
+        assert_eq!(
+            world.inner.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Uniform {
+                magnitude: 1.62,
+                direction: Vec3::new(0.0, 0.0, 1.0),
+            }
+        );
+        let read_back: serde_json::Value =
+            serde_json::from_str(&world.read_component_impl("gravity_field", "").unwrap()).unwrap();
+        assert_eq!(read_back["kind"], "uniform");
+        assert_eq!(read_back["magnitude"], 1.62);
+
+        // 知らない`kind`は弾く(黙って既定の場にしない)。
+        assert_err_is(
+            world.apply_component_impl("push_set_gravity_field", r#"{"kind":"radial"}"#),
+            WasmError::UnknownGravityFieldKind,
+        );
+    }
+
+    /// **重力場の抽象化増分**: 既存の`set_gravity`/`set_gravity_direction`/
+    /// `gravity`/`gravity_direction`が**移行前と1ビットも変わらず**動くこと
+    /// (フロントエンドは本増分の対象外なので、ここが壊れると即座に実害になる)。
+    /// あわせて、非`Uniform`な場での縮約(`MechanicsSolver::gravity`のdoc)も固定する。
+    #[test]
+    fn legacy_gravity_kinds_keep_working_and_degrade_predictably_for_non_uniform_fields() {
+        let mut world = new_world();
+        world
+            .apply_component_impl("set_gravity", r#"{"gravity":3.71}"#)
+            .unwrap();
+        assert_eq!(world.read_component_impl("gravity", "").unwrap(), "3.71");
+        world
+            .apply_component_impl("set_gravity_direction", r#"{"x":2.0,"y":0.0,"z":0.0}"#)
+            .unwrap();
+        // 大きさは向きの変更で保たれる。
+        assert_eq!(world.read_component_impl("gravity", "").unwrap(), "3.71");
+        assert_eq!(
+            world.inner.mechanics().gravity_direction(),
+            Vec3::new(1.0, 0.0, 0.0)
+        );
+
+        // 点源場では、スカラー2つのAPIは「一様場として見た値」=(0.0, 下向き)
+        // へ縮退する(浮力・自然対流がその前提を失うため、意図的に無効化される)。
+        world
+            .apply_component_impl(
+                "push_set_gravity_field",
+                r#"{"kind":"point_source","center_x":0.0,"center_y":0.0,"center_z":0.0,"mu":1.0e5}"#,
+            )
+            .unwrap();
+        world.step();
+        assert_eq!(world.read_component_impl("gravity", "").unwrap(), "0");
+        assert_eq!(
+            world.inner.mechanics().gravity_direction(),
+            Vec3::new(0.0, -1.0, 0.0)
+        );
+        // スカラーAPIで書き戻すと一様場を選んだことになる(同docの規則)。
+        world
+            .apply_component_impl("set_gravity", r#"{"gravity":9.80665}"#)
+            .unwrap();
+        assert_eq!(
+            world.inner.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Uniform {
+                magnitude: 9.80665,
+                direction: Vec3::new(0.0, -1.0, 0.0),
+            }
         );
     }
 
@@ -6480,7 +6692,7 @@ mod tests {
         // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
         // 足したらこの数と`component_schema`の表の両方を更新すること**——
         // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
-        const APPLY_KIND_COUNT: usize = 72;
+        const APPLY_KIND_COUNT: usize = 73;
         assert_eq!(
             entries.len(),
             APPLY_KIND_COUNT,

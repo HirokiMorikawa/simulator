@@ -652,3 +652,53 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
      この力積分変更だけを明確に切り分け、それ以外の純粋加算的な部分
      (推力Coupling・操縦面Command・着陸装置=既存WheelJoint+Pacejkaの流用)
      を先に進める。
+- [x] 重力を`GravityField`(一様/点源/無重力)へ抽象化する
+  縦串③で入れた`gravity: f64` + `gravity_direction: Vec3`の2フィールド表現は
+  **一様場しか表せない**——空間のどこでも同じ加速度ベクトルになる場である。
+  点源(逆二乗の中心力)を書く手段が無く、無重力ですら「大きさ0の一様場」と
+  いう遠回りな表現しか無かった。`sim_mechanics::GravityField`
+  (`Uniform{magnitude,direction}` / `PointSource{center,mu}` / `Zero`)へ
+  置き換え、呼び出し側が読む唯一の入口を`acceleration_at(position)`に
+  一本化した(場の種類を増やしても積分側は変わらない)。`PointSource`は
+  $\mathbf{a}=-\mu\mathbf{r}/|\mathbf{r}|^3$ の真の逆二乗——円軌道速度
+  $v=\sqrt{\mu/r}$ 等の解析解がそのまま検証に使えるため。
+  - **後方互換を最優先した**: `MechanicsSolver::new(gravity: f64)`は不変
+    (ワークスペース全体の約750テストが無改修で動く)。`gravity()`/
+    `gravity_direction()`/`set_gravity()`/`set_gravity_direction()`は
+    アクセサとして残し、正規化・ゼロベクトルのフォールバック規約も
+    移行前と1ビットも変えていない。シーンJSONは`world.gravity_field`を
+    **加算的に**足しただけで、キーが無ければ従来どおり
+    `gravity`+`gravity_direction`から一様場を組む。`scenes/*.json`43件の
+    `state_hash`が $t=0$ と100step後の両方で移行前と完全一致することを
+    確認済み(検証用ハーネスは使い捨て)。
+  - **正直な適用範囲(縮約)**: 非`Uniform`な場では`gravity()`が0.0を返す。
+    これは代表点を発明しないための意図的な縮退で、結果として**浮力
+    (`buoyancy_force`)・Boussinesq浮力・自然対流のレイリー数は点源場で
+    無効になる**。いずれも「重力は鉛直方向に一様」を前提とする経験式・
+    水平水面モデルであり、点源場ではその前提自体が成立しないため、
+    水平な水面を仮定した浮力を出すより無効化する方が誤りが小さい。
+    これらを`acceleration_at`へ追従させるのは**別の計画作業**であり、
+    本増分では踏み込んでいない。
+  - `EnvironmentDesc`に`gravity_field: Option<GravityField>`を追加
+    (`Some`優先、シーンJSONと同じ優先規則)。wasmへ
+    `push_set_gravity_field`(apply)と`gravity_field`(read)を新設し、
+    `component_schema`にも載せた——既存の`set_gravity`/
+    `set_gravity_direction`/`gravity`/`gravity_direction`は
+    一切変えていない(フロントエンドは本増分の対象外)。
+  - **決定論**: 新設の`Command::SetGravityField`として`command_log()`へ
+    記録される。既存の`set_gravity`/`set_gravity_direction`は移行前から
+    即時適用でRust側の`command_log()`に残らない(記録しているのは
+    フロントエンド側の別台帳)——この穴は本増分では塞いでいない。
+    Command化すると適用が1step遅れる挙動変更になり、その即時性に依存する
+    既存フロントエンドを壊すため。
+  - 検証: 解析解テスト2本を新規追加。①`PointSource`場で円軌道速度
+    $v=\sqrt{\mu/r}$ を与えた自由体が10周にわたり半径を保つ(汎用剛体
+    ソルバのsemi-implicit Eulerは1次精度なので許容2%、`sim_astro`の
+    専用積分器のような高精度は要求しない——固定したいのは「半径が有界に
+    留まる」ことである。中心力なので軌道面は相対1e-12で厳密に保存)。
+    ②`Zero`場で自由体の速度が1stepも変化しない。既存の
+    `pendulum_period_under_tilted_gravity_matches_two_pi_sqrt_l_over_g`
+    (周期は$g$の**大きさ**だけで決まる)は無改修で通り続ける——
+    `GravityField`が壊してはならない不変量の回帰ガードそのもの。
+    シーンJSON往復は3種すべてで`state_hash`一致(時間発展後も)、
+    `gravity_field`キー無しの後方互換も個別に固定。

@@ -320,6 +320,18 @@ pub struct WorldScenarioOptions {
     /// レビュー指摘「見送らず対応すること」への対応で追加)。
     #[serde(default)]
     pub gravity_direction: Option<[f64; 3]>,
+    /// 重力**場**(`sim_mechanics::GravityField`、**重力場の抽象化増分**で追加)。
+    /// 一様場しか書けなかった`gravity`+`gravity_direction`に対し、点源(逆二乗の
+    /// 中心力)と明示的な無重力を書けるようにする。
+    ///
+    /// **優先規則と後方互換**: `Some`ならこのキーだけを見る(`gravity`・
+    /// `gravity_direction`は無視される)。`None`(=キーが無い)なら従来どおり
+    /// `gravity`+`gravity_direction`から一様場を組み立てる——**既存の
+    /// `scenes/*.json`はこのキーを持たないので、読み込み結果は1ビットも変わらない**。
+    /// `export::export_world_options`も、場が`Uniform`のときはこのキーを
+    /// 書き出さない(既存シーンの往復出力を変えないため)。
+    #[serde(default)]
+    pub gravity_field: Option<GravityFieldJson>,
     pub dt: f64,
     /// 反発を適用しない法線方向相対速度のしきい値(`sim_mechanics::MechanicsSolver::
     /// restitution_velocity_threshold`、数値安定化のための既定値がある)。未指定なら
@@ -342,6 +354,34 @@ pub struct WorldScenarioOptions {
 pub struct AtmosphereJson {
     pub density: f64,
     pub viscosity: f64,
+}
+
+/// `WorldScenarioOptions::gravity_field`(同フィールドのdoc参照)。
+/// `sim_mechanics::GravityField`と1:1に対応する。
+///
+/// タグの付け方は`GridBoundaryJson`と同じserdeの既定(外部タグ+
+/// `rename_all = "snake_case"`)——単位variantは文字列`"zero"`、
+/// データ付きvariantは`{"point_source": { ... }}`になる。
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GravityFieldJson {
+    /// 一様場。`direction`は正規化される(ゼロベクトルは既定の下向きへ
+    /// フォールバック、`MechanicsSolver::set_gravity_direction`と同じ規約)。
+    /// `direction`省略時は既定の下向き`(0,-1,0)`。
+    Uniform {
+        magnitude: f64,
+        #[serde(default = "default_gravity_direction")]
+        direction: [f64; 3],
+    },
+    /// 点源(逆二乗の中心力)。`mu`は標準重力パラメータ$GM$ [m^3/s^2]
+    /// (`sim_mechanics::GravityField::PointSource`のdoc参照)。
+    PointSource { center: [f64; 3], mu: f64 },
+    /// 無重力。
+    Zero,
+}
+
+fn default_gravity_direction() -> [f64; 3] {
+    [0.0, -1.0, 0.0]
 }
 
 /// シーンJSONの材料定義(設計§3「`extends`による材料派生」— 「密度だけ変えた木」等)。
@@ -2099,6 +2139,44 @@ fn array_to_vec3(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
 
+/// `GravityFieldJson` → `sim_mechanics::GravityField`。
+/// `Uniform`の`direction`の正規化は`MechanicsSolver::set_gravity_field`が
+/// 引き受けるので、ここでは配列→`Vec3`の写像だけを行う。
+pub(crate) fn gravity_field_from_json(field: &GravityFieldJson) -> sim_mechanics::GravityField {
+    match field {
+        GravityFieldJson::Uniform {
+            magnitude,
+            direction,
+        } => sim_mechanics::GravityField::Uniform {
+            magnitude: *magnitude,
+            direction: array_to_vec3(*direction),
+        },
+        GravityFieldJson::PointSource { center, mu } => sim_mechanics::GravityField::PointSource {
+            center: array_to_vec3(*center),
+            mu: *mu,
+        },
+        GravityFieldJson::Zero => sim_mechanics::GravityField::Zero,
+    }
+}
+
+/// `gravity_field_from_json`の逆写像(`export::export_world_options`が使う)。
+pub(crate) fn gravity_field_to_json(field: sim_mechanics::GravityField) -> GravityFieldJson {
+    match field {
+        sim_mechanics::GravityField::Uniform {
+            magnitude,
+            direction,
+        } => GravityFieldJson::Uniform {
+            magnitude,
+            direction: [direction.x, direction.y, direction.z],
+        },
+        sim_mechanics::GravityField::PointSource { center, mu } => GravityFieldJson::PointSource {
+            center: [center.x, center.y, center.z],
+            mu,
+        },
+        sim_mechanics::GravityField::Zero => GravityFieldJson::Zero,
+    }
+}
+
 /// `GridBoundaryJson` → `sim_fluid::GridBoundary`。構築レシピ経路と
 /// 生状態スナップショット経路の両方から呼ばれるので関数へ括り出してある。
 fn grid_boundary_from_json(boundary: &GridBoundaryJson) -> sim_fluid::GridBoundary {
@@ -2385,10 +2463,20 @@ impl World {
             world.mechanics_mut().atmosphere =
                 Some(sim_fluid::Atmosphere::still(atm.density, atm.viscosity));
         }
-        if let Some(direction) = scenario.world.gravity_direction {
-            world
+        // 重力場: `gravity_field`が有ればそれが唯一の情報源、無ければ従来どおり
+        // `gravity`(`WorldOptions`経由で既に反映済み)+`gravity_direction`。
+        // `WorldScenarioOptions::gravity_field`のdocの優先規則そのまま。
+        match &scenario.world.gravity_field {
+            Some(field) => world
                 .mechanics_mut()
-                .set_gravity_direction(array_to_vec3(direction));
+                .set_gravity_field(gravity_field_from_json(field)),
+            None => {
+                if let Some(direction) = scenario.world.gravity_direction {
+                    world
+                        .mechanics_mut()
+                        .set_gravity_direction(array_to_vec3(direction));
+                }
+            }
         }
         let ids = world.append_scenario_bodies(scenario)?;
 
@@ -6546,7 +6634,7 @@ mod tests {
         let scenario = Scenario::from_json(json).unwrap();
         let world = World::from_scenario(&scenario).unwrap();
         assert_eq!(
-            world.mechanics().gravity_direction,
+            world.mechanics().gravity_direction(),
             sim_math::Vec3::new(0.0, -1.0, 0.0)
         );
     }
@@ -6565,8 +6653,111 @@ mod tests {
         let scenario = Scenario::from_json(json).unwrap();
         let world = World::from_scenario(&scenario).unwrap();
         assert_eq!(
-            world.mechanics().gravity_direction,
+            world.mechanics().gravity_direction(),
             sim_math::Vec3::new(1.0, 0.0, 0.0)
+        );
+    }
+
+    /// **重力場の抽象化増分・後方互換の要**: `gravity_field`キーを持たない
+    /// (=既存の`scenes/*.json`すべてと同じ形の)シーンJSONが、移行前と
+    /// **完全に同じ`GravityField::Uniform`**になること。大きさ・向きの両方を
+    /// `GravityField`のvariantごと突き合わせる——スカラーのアクセサ経由だけで
+    /// 確かめると、場が`Zero`へ化けていても`gravity()`が0.0を返すのと
+    /// 区別できない場合がある。
+    #[test]
+    fn scene_json_without_gravity_field_key_still_produces_the_legacy_uniform_field() {
+        // (1) 向きの指定も無い最小形。
+        let json = r#"
+        {
+          "name": "legacy-gravity",
+          "world": { "gravity": 9.80665, "dt": 0.008333333 },
+          "bodies": []
+        }
+        "#;
+        let world = World::from_scenario(&Scenario::from_json(json).unwrap()).unwrap();
+        assert_eq!(
+            world.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Uniform {
+                magnitude: 9.80665,
+                direction: sim_math::Vec3::new(0.0, -1.0, 0.0),
+            }
+        );
+
+        // (2) 旧`gravity_direction`だけを使う形(正規化されること込み)。
+        let json = r#"
+        {
+          "name": "legacy-gravity-direction",
+          "world": { "gravity": 1.62, "dt": 0.008333333, "gravity_direction": [0.0, 0.0, 5.0] },
+          "bodies": []
+        }
+        "#;
+        let world = World::from_scenario(&Scenario::from_json(json).unwrap()).unwrap();
+        assert_eq!(
+            world.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Uniform {
+                magnitude: 1.62,
+                direction: sim_math::Vec3::new(0.0, 0.0, 1.0),
+            }
+        );
+    }
+
+    /// **重力場の抽象化増分**: シーンJSONの`world.gravity_field`から3種すべての
+    /// 場が構築できること、そして`gravity`/`gravity_direction`が同時に書かれて
+    /// いても`gravity_field`が勝つこと(`WorldScenarioOptions::gravity_field`の
+    /// docの優先規則)。
+    #[test]
+    fn scene_json_gravity_field_builds_every_kind_and_takes_priority() {
+        // わざと矛盾する`gravity`/`gravity_direction`を併記して、優先規則を試す。
+        let json = r#"
+        {
+          "name": "point-source",
+          "world": {
+            "gravity": 9.80665,
+            "gravity_direction": [1.0, 0.0, 0.0],
+            "dt": 0.008333333,
+            "gravity_field": { "point_source": { "center": [0.0, -100.0, 0.0], "mu": 4.0e14 } }
+          },
+          "bodies": []
+        }
+        "#;
+        let world = World::from_scenario(&Scenario::from_json(json).unwrap()).unwrap();
+        assert_eq!(
+            world.mechanics().gravity_field(),
+            sim_mechanics::GravityField::PointSource {
+                center: sim_math::Vec3::new(0.0, -100.0, 0.0),
+                mu: 4.0e14,
+            }
+        );
+
+        // 単位variantは外部タグの規約どおり素の文字列(`GravityFieldJson`のdoc参照)。
+        let json = r#"
+        {
+          "name": "zero-gravity",
+          "world": { "gravity": 9.80665, "dt": 0.008333333, "gravity_field": "zero" },
+          "bodies": []
+        }
+        "#;
+        let world = World::from_scenario(&Scenario::from_json(json).unwrap()).unwrap();
+        assert_eq!(
+            world.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Zero
+        );
+
+        // `uniform`は`direction`を省略でき、省略時は既定の下向き。
+        let json = r#"
+        {
+          "name": "uniform-gravity",
+          "world": { "gravity": 0.0, "dt": 0.008333333, "gravity_field": { "uniform": { "magnitude": 3.71 } } },
+          "bodies": []
+        }
+        "#;
+        let world = World::from_scenario(&Scenario::from_json(json).unwrap()).unwrap();
+        assert_eq!(
+            world.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Uniform {
+                magnitude: 3.71,
+                direction: sim_math::Vec3::new(0.0, -1.0, 0.0),
+            }
         );
     }
 
