@@ -260,10 +260,14 @@
   未知数から外す**形にし、`pressure_force_on_solid` も Solid–Fluid 面の一般の面積分
   $\mathbf F=-\sum p\hat n h$ に置き換えた(移行前は「矩形のバウンディングindexを
   走査する」実装で、矩形以外では正しい面を選べなかった)。
-- `GridSolidBox`(単一矩形)は`sim_coupling::GridFluidRigid`のために残したが、
-  **`pub`フィールドの直接代入から`set_solid_box`(代入と同時にラスタライズ)へ変えた**
-  ——直接代入のままだと`step`を呼ぶ前に`pressure_force_on_solid`が固体を見つけられず、
-  X2の結合テストが実際に落ちた。
+- `GridSolidBox`(単一矩形)は当初`sim_coupling::GridFluidRigid`のために残していたが、
+  **後に削除して固体表現を`cell_type`へ一本化した**——セル種別と単一矩形という
+  二重表現は「どちらが勝つか」の規則が暗黙(`set_solid_cells`が`solid`を`None`へ倒し、
+  `step`の冒頭が`solid`から再ラスタライズして上書きし返す)で、生状態スナップショットを
+  戻した直後の`step`が復元済みセル種別を潰し得るという実害もあった。
+  `GridFluidRigid`は`set_solid_cells`に矩形判定の閉包を渡す形へ移した(コストは同じ
+  $O(n_x n_y)$、かつ`step`側の重複ラスタライズが消えたぶん1step当たりの全セル走査は
+  2回から1回へ減った)。
 - シーンJSONへ `boundary` / `vorticity_confinement_epsilon` / `solids` を公開し、
   新シーン `scenes/d14b-cylinder-channel.json`(流路+円柱+渦度強化)を追加した。
   既存のD14との差がそのまま成果である: D14は周期境界+動的剛体に貼った矩形マスクでしか

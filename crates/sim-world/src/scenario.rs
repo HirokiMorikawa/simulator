@@ -1443,6 +1443,12 @@ pub struct GridFluidScenarioJson {
 /// (`GridFluid2D::cell_type`のdoc参照)。`last_pressure`は毎stepの投影で
 /// 上書きされる派生キャッシュなので持たない(`GridFluid2D`側のdocが明記している
 /// とおり`state_hash`にも入っていない)。
+///
+/// **`solid_box`は廃止した**: `GridFluid2D`が`cell_type`とは別に持っていた単一矩形
+/// マスク(`GridSolidBox`)を削除して固体表現を一本化したため、その写しだった
+/// `solid_box`フィールドも落とした。エクスポートは常に`solid_cells`/`solid_velocity`を
+/// 書いており矩形マスクはその冗長な写しでしかなかったので、**情報は落ちない**。
+/// 旧スナップショットに残る`solid_box`キーは(未知フィールドとして)無視される。
 #[derive(Deserialize, Serialize)]
 pub struct GridFluidRawStateJson {
     /// 速度場(長さ`nx*ny`、行優先 `i + nx*j`)。
@@ -1455,10 +1461,6 @@ pub struct GridFluidRawStateJson {
     /// 固体セルの速度(長さ`nx*ny`、Fluidセルではゼロ)。
     #[serde(default)]
     pub solid_velocity: Vec<[f64; 3]>,
-    /// 単一矩形マスク(`GridFluidRigid`結合の後方互換経路)。
-    /// `state_hash`に入るので復元対象。
-    #[serde(default)]
-    pub solid_box: Option<GridSolidBoxJson>,
     /// 以下は`GridFluid2D`の係数・境界条件。`raw_state`だけで完結させるため
     /// (レシピ側の同名フィールドは`raw_state`があるとき読まれない)ここにも持つ。
     pub density: f64,
@@ -1466,15 +1468,6 @@ pub struct GridFluidRawStateJson {
     pub vorticity_confinement_epsilon: f64,
     #[serde(default)]
     pub boundary: Option<GridBoundaryJson>,
-}
-
-/// `GridFluidRawStateJson::solid_box`(`sim_fluid::GridSolidBox`)。
-#[derive(Deserialize, Serialize)]
-pub struct GridSolidBoxJson {
-    pub center: [f64; 2],
-    pub half_width: f64,
-    pub half_height: f64,
-    pub velocity: [f64; 3],
 }
 
 /// `Scenario::grid_fluid_3d`(`sim_fluid::GridFluid3D`、**群9で追加**)。
@@ -1512,8 +1505,9 @@ pub struct GridFluid3DScenarioJson {
 
 /// `GridFluid3DScenarioJson::raw_state`(`sim_fluid::GridFluid3D`の全状態)。
 /// 2D版の`GridFluidRawStateJson`に `w`(z方向速度)と `smoke_density`
-/// (受動スカラー、`state_hash`に入る)が加わる。3Dは単一矩形マスクの後方互換経路を
-/// 持たないので`solid_box`は無い。`last_pressure`・マルチグリッド階層キャッシュは
+/// (受動スカラー、`state_hash`に入る)が加わる。固体はセル種別が唯一の表現
+/// (3Dは最初からこの形で、2Dも単一矩形マスクを廃してこれに揃った)。
+/// `last_pressure`・マルチグリッド階層キャッシュは
 /// いずれも派生値なので持たない(階層はセル種別から再構築される)。
 #[derive(Deserialize, Serialize)]
 pub struct GridFluid3DRawStateJson {
@@ -2696,12 +2690,6 @@ impl World {
                 fluid.density = raw.density;
                 fluid.kinematic_viscosity = raw.kinematic_viscosity;
                 fluid.vorticity_confinement_epsilon = raw.vorticity_confinement_epsilon;
-                let solid_box = raw.solid_box.as_ref().map(|b| sim_fluid::GridSolidBox {
-                    center: (b.center[0], b.center[1]),
-                    half_width: b.half_width,
-                    half_height: b.half_height,
-                    velocity: array_to_vec3(b.velocity),
-                });
                 if !raw.solid_cells.is_empty() {
                     if raw.solid_cells.len() != n {
                         return Err(SceneError::InvalidValue(format!(
@@ -2717,14 +2705,9 @@ impl World {
                         )));
                     }
                     fluid.set_raw_solid_state(
-                        solid_box,
                         raw.solid_cells.iter().map(cell_type_from_bool).collect(),
                         solid_velocity_or_zeros(&raw.solid_velocity, n),
                     );
-                } else if let Some(solid_box) = solid_box {
-                    // セル種別を省いて矩形マスクだけ書いた手書きJSONへの配慮:
-                    // `set_solid_box`がラスタライズする(レシピ経路と同じ挙動)。
-                    fluid.set_solid_box(Some(solid_box));
                 }
                 world.enable_grid_fluid(fluid);
             } else {

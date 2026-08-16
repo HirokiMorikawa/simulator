@@ -4066,7 +4066,7 @@ mod tests {
     /// 確認する(圧力積分によるマスキング手法自体の定量的な物理的妥当性は
     /// `sim_fluid::GridFluidRigidBox2D`(X2)の既存テストが既に検証済みなので、ここでは
     /// `World`のCouplingレジストリ経由での配線 — mechanicsボディの位置・速度が
-    /// `grid_fluid`の`solid`マスクに反映され、圧力反力がボディに戻ってくること — を
+    /// `grid_fluid`のセル種別マスクに反映され、圧力反力がボディに戻ってくること — を
     /// 定性的に確認する、`SphRigid`実装検証時に確立した「動的な定量検証はSPH/格子流体
     /// 特有の縁効果に弱い」という教訓を踏まえた判断)。
     #[test]
@@ -4098,7 +4098,46 @@ mod tests {
         )));
 
         let x_before = world.body_position(body).unwrap().x;
-        for _ in 0..20 {
+
+        // まず1step進めて、固体マスクが剛体位置へ追従していることを確認する。固体表現は
+        // `cell_type`へ一本化されたので、移行前のように`solid_box()`で矩形を読み戻すの
+        // ではなく、**Solidセルのx範囲の中心**が剛体のx位置と一致することを見る。
+        //
+        // 20step後ではなくここで見るのは、この軽い剛体(質量0.02kg)が一様流に押されて
+        // **格子の外**(x≈76、格子は 0..1.6)まで飛んでいくため——外に出た後は
+        // ラスタライズされるセルが1つも無く、マスク追従の主張が空になる。
+        // (移行前の`solid_box()`は「セルを1つも塗らなくても矩形は保持される」ので、
+        // 20step後でも読み戻せてしまい、この検査は事実上空振りしていた。)
+        world.step();
+        {
+            let grid = world.grid_fluid().unwrap();
+            let body_pos = world.body_position(body).unwrap();
+            let mut solid_x: Vec<f64> = Vec::new();
+            for j in 0..grid.ny {
+                for i in 0..grid.nx {
+                    if grid.cell_type()[i + grid.nx * j] == sim_fluid::CellType::Solid {
+                        solid_x.push((i as f64 + 0.5) * grid.h);
+                    }
+                }
+            }
+            assert!(
+                !solid_x.is_empty(),
+                "GridFluidRigid should have rasterized the body into Solid cells: \
+                 body_pos={body_pos:?}"
+            );
+            let min_x = solid_x.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max_x = solid_x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let center_x = 0.5 * (min_x + max_x);
+            assert!(
+                (center_x - body_pos.x).abs() < grid.h,
+                "solid cells should be centered on the body's x position: \
+                 center_x={center_x} body_pos.x={} h={}",
+                body_pos.x,
+                grid.h
+            );
+        }
+
+        for _ in 0..19 {
             world.step();
         }
         let x_after = world.body_position(body).unwrap().x;
@@ -4112,19 +4151,6 @@ mod tests {
         assert!(
             vx_after.is_finite() && vx_after > 0.0,
             "body's x-velocity should be finite and positive (downstream): vx_after={vx_after}"
-        );
-
-        let solid = world
-            .grid_fluid()
-            .unwrap()
-            .solid_box()
-            .expect("GridFluidRigid should have set the solid mask by now");
-        let body_pos = world.body_position(body).unwrap();
-        assert!(
-            (solid.center.0 - body_pos.x).abs() < 1e-9,
-            "solid mask should track the body's x position: solid.center.0={} body_pos.x={}",
-            solid.center.0,
-            body_pos.x
         );
     }
 

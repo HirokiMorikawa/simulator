@@ -101,16 +101,15 @@ use crate::scenario::{
     ConductionRodScenarioJson, ConvectionModeJson, CouplingJson, DiodeJson, FdtdPmlRawStateJson,
     FdtdRawStateJson, FdtdScenarioJson, FluidJson, GasScenarioJson, GaussianPacket2dJson,
     GaussianPacketJson, GridBoundaryJson, GridFluid3DRawStateJson, GridFluid3DScenarioJson,
-    GridFluidRawStateJson, GridFluidScenarioJson, GridSolidBoxJson, InductorJson,
-    IsingRawStateJson, IsingScenarioJson, JointJson, KineticGasRawStateJson,
-    KineticGasScenarioJson, LiftModelJson, MaterialOverride, MeltSpawnJson,
-    PhaseChangeMorphRawStateJson, PhaseChangeOverrideJson, PistonGasRawStateJson, PmlJson,
-    ProbeJson, Quantum1dRawStateJson, Quantum1dScenarioJson, Quantum2dRawStateJson,
-    Quantum2dScenarioJson, RelativisticCorrectionJson, ResistorJson, RngStateJson, Scenario,
-    ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson, SoftBodyScenarioJson,
-    SoftConstraintJson, SoftVolumeConstraintJson, SphRawStateJson, SphRigidRawStateJson,
-    SphScenarioJson, SwitchJson, ThermalLinkJson, ThermalNodeJson, ThermalScenarioJson,
-    VoltageSourceJson, WorldScenarioOptions,
+    GridFluidRawStateJson, GridFluidScenarioJson, InductorJson, IsingRawStateJson,
+    IsingScenarioJson, JointJson, KineticGasRawStateJson, KineticGasScenarioJson, LiftModelJson,
+    MaterialOverride, MeltSpawnJson, PhaseChangeMorphRawStateJson, PhaseChangeOverrideJson,
+    PistonGasRawStateJson, PmlJson, ProbeJson, Quantum1dRawStateJson, Quantum1dScenarioJson,
+    Quantum2dRawStateJson, Quantum2dScenarioJson, RelativisticCorrectionJson, ResistorJson,
+    RngStateJson, Scenario, ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson,
+    SoftBodyScenarioJson, SoftConstraintJson, SoftVolumeConstraintJson, SphRawStateJson,
+    SphRigidRawStateJson, SphScenarioJson, SwitchJson, ThermalLinkJson, ThermalNodeJson,
+    ThermalScenarioJson, VoltageSourceJson, WorldScenarioOptions,
 };
 
 /// この export セッション内で使う、生存ボディの決定的な名前
@@ -645,12 +644,6 @@ fn export_grid_fluid(world: &World) -> Option<GridFluidScenarioJson> {
                 .copied()
                 .map(vec3_to_array)
                 .collect(),
-            solid_box: fluid.solid_box().map(|b| GridSolidBoxJson {
-                center: [b.center.0, b.center.1],
-                half_width: b.half_width,
-                half_height: b.half_height,
-                velocity: vec3_to_array(b.velocity),
-            }),
             density: fluid.density,
             kinematic_viscosity: fluid.kinematic_viscosity,
             vorticity_confinement_epsilon: fluid.vorticity_confinement_epsilon,
