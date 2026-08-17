@@ -40,7 +40,8 @@ fn d24_car_scene_survives_save_load_replay_with_matching_state_hash() {
     let baseline_hash = baseline.state_hash();
 
     let fresh = World::from_scenario(&scenario).expect("d24-car.json must build a World");
-    let saved = sim_world::to_scenario(&fresh, "d24-car-roundtrip");
+    let saved = sim_world::to_scenario(&fresh, "d24-car-roundtrip")
+        .expect("d24-car は発散しないので生状態は有限");
     let saved_json = serde_json::to_string(&saved).expect("saved Scenario must serialize");
     let reloaded_scenario =
         Scenario::from_json(&saved_json).expect("saved Scenario JSON must reparse");

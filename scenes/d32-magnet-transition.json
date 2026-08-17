@@ -3,8 +3,16 @@
   "seed": 13,
   "world": { "gravity": 0.0, "dt": 1.0 },
   "ising": {
-    "l": 48,
     "j_coupling": 1.0,
+    "l": 48,
+    "raw_state": {
+      "j_coupling": 1.0,
+      "l": 48,
+      "spins": "Af//Af8B//8BAf//Af///wH/Af//AQH/////Af//Af8B/wH/AQEBAf///wH/////Af////8B/wEB/wH//////wEBAf//AQH/////AQEB/wEB/////wEBAQH/AQEB//8BAf//AQH///8BAf//AQH/Af8BAf8BAf8BAf//Af//Af///wH//wEB/////wEB/wEBAQEBAQEB/wH/AQEBAf8BAf//////AQH/AQH///////8BAQEB/wH/AQEBAf8BAQEB/wH///8BAQEBAQH/Af////8B/wH/AQH/AQEB//8B/wEBAf//Af//Af8BAQH/Af////8BAf//Af//////Af8BAQEB//8B/wH/Af//////AQEB//8BAQEB//8BAQH/Af8BAf///////////wEB/wH//wEB//8BAf8BAf8BAQH/////Af///wEBAf////8BAQEB////AQEB/wEBAf//Af///wH///8BAQEB//8B/wH/Af8B//8B////AQH/////AQH/Af//Af8B/wH/AQH///8B/wH//wH/AQH///8B//8B/wEB//8B/wH/AQH//wEB/////wH/Af8BAQH/Af////8B/wH/Af///wEBAf//Af//////Af///wEBAQEBAQH/AQEB//8BAf8BAf8B//8B////Af8BAQH/Af8BAf8B////AQEBAf//Af///wEB////Af////8BAf//Af8B/wEB/wEBAQEB/wH///8B/wEB/wEBAf///wH/////Af8B////Af//Af8BAf8BAQEBAQEB/wEBAf8BAQH/AQH/Af//Af8BAf8BAf//Af///wEB/wH//wH///8B//////8B/wH/AQH//wEBAQEB/wH/////Af//Af8B/wEB////Af8B/wH/Af//////AQEB/wEBAQH/Af///wH//wH//////wEBAQEB/////wH/AQH//wEB//8B/wH/Af//Af8B/////wEB/wEB/wEB/wEBAf8B/////wH///8B//8B//8BAQH//wEBAf8B////Af8B//////8B//8BAf//AQH//wH//wH/Af8BAf///wH/Af8BAf//////AQEBAQH/AQH/Af8BAQEBAf///wH//wEB//8B/wEB//8BAQH//wEB//8B/wEBAQEB//8B/wEB/////wH/Af////8BAQEBAf8B//8BAQH//wEB//8B/wEBAQEBAf8B/wH//wEB//8B//8BAQH/AQH//wH//wEBAf8B////AQEBAQH/AQH//wEB/wH/AQH/Af8B//8B//8BAQH/AQEBAf///wEBAf8BAQH/AQH//wH/AQEBAf8BAf////8B//8B/wH/AQEB/wEBAQH//wEB/wEBAQH/Af//Af//AQEB/wH/Af8BAQEB////Af///wH/AQH/AQH/Af8BAf///wH//wH///8B////Af////8BAQH/AQEB//8BAQEBAf///////wH///8B//////8B////Af8B/wH//wH/AQEB////AQEBAQEBAQH/AQH/Af//Af8B////Af//AQEB/wEB/wEB/wEBAQEBAf///wEBAQEB/wH/AQEBAQH/AQEBAf////8B/wH///8B////AQH/Af8BAQH/AQH//wH/AQH//wH/AQEBAQEBAf8B/wEB/wH/Af//Af///wEBAQH/AQEB////////AQH/////Af8BAf///wEB//8B////////Af8BAQEBAQH/AQH/Af////8B//////8B/wH///8B//8BAQH/Af//AQEB/wH//wEB/wEB//8B/////////wH/AQEB//8B/wEBAf///////wEB//8B/////wEBAf//AQEBAQEB/////wEBAQH/AQEBAf////8BAf8B////AQH/AQH/AQH/AQH///8BAQEB/wH/Af////8BAf8B/////wEBAf8B/wH/AQH/Af//////Af8B////Af8BAf//Af////8BAf8B/wEB/wH///8BAQH/Af///wEB/wH/Af//////AQEB//8BAQH/AQEBAf8B/wEB/wEB////AQH/AQEBAf//////AQEB//8B////AQEBAf//Af//Af8BAf//////AQH//wH//wH//////////wEB/wH/Af//AQEBAQEB//8B/wH/AQH//wH/AQEBAf8B/wH///////////8B/wEB////////Af8BAf8B/wEB/wEB/wEB/wH///8B/wH//wEB//////8BAf//AQEBAf///wEB/wEBAQEB//8B//8B//8BAQEBAf8B////Af////8BAQEBAf8BAQH/////AQH/AQEB/wH//wEBAQEB/wH//wEBAQH//wH//wH/////AQH//wH//wEBAQEBAQH/Af8BAQEBAf///wH/////////AQH/AQH//wEB/wH/Af//AQEBAf8BAf///wEB/wH///8B//8B//////8B//8BAf8B/wH/AQEBAQH/Af8BAQH//wH///8B//8B////Af//AQH/AQEBAf8B/wH/Af8BAQH/AQEB/////wEB/wH/Af//AQEBAQH/AQEB/wEB/wEBAf//AQH/AQEB/////wH//////wH//wEBAf//////AQEB//8B//////8B/wEB/wEBAf//AQH/AQEBAf///wH/AQH/Af////////8BAQEBAf//AQH///8BAf8B/////wH//wH/AQH//wEB//////8BAf8BAQH//wEBAQH/AQH/AQEBAf8B////AQH/Af///wEB////////Af////8BAf8BAQEBAQEBAQEBAf8B/wEBAQEBAQH//wH/Af////8B//8BAQEBAf//AQH/AQEBAf///wH/////AQH/Af//Af//////Af8BAQEBAf8B/wH///8BAf//AQH///8BAf///wEBAf///wEBAQEB//8BAQEB/wEBAf8B/wH//wH/Af//////AQEBAQH/AQH//wEBAf8B//8BAf///wH//wEB/////wEBAf////8B/wH/AQEB//8B/wH///8BAf8B//8B/wH/AQH//wEBAQH/Af///wH/AQH/AQH/////Af8B//8BAQH/AQH/",
+      "temperature": 2.0,
+      "updates_per_step": 4,
+      "use_wolff": true
+    },
     "temperature": 2.0,
     "updates_per_step": 4,
     "use_wolff": true

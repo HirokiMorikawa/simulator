@@ -84,9 +84,11 @@
 //!
 //! - [`encode_f64_le_base64`] は**全域関数**(`String`を必ず返す)。低レベルの
 //!   詰め替えとして値の意味を判定しない。NaNが来ればNaNのビットを忠実に書く。
-//! - [`encode_f64_le_base64_finite`] は非有限値を [`RawBytesError::NonFiniteValue`]
-//!   として**拒否する**検査付きの版。将来ドメインを移行する側は、発散を静かに
-//!   ファイルへ焼き付けてしまわないよう**こちらを使うことを推奨する**。
+//! - [`encode_f64_le_base64_finite`] / [`encode_vec3_le_base64_finite`] は非有限値を
+//!   [`RawBytesError::NonFiniteValue`] として**拒否する**検査付きの版。ドメイン移行側は
+//!   発散を静かにファイルへ焼き付けてしまわないよう**こちらを使う**
+//!   (11ドメインの`raw_state`エクスポートは実際にこちらを通っている)。
+//!   `bool`/`i8`に検査版が無いのは、その2型に非有限という概念が無いためである。
 //!
 //! 復号側は常に全域(非有限値も素通しで復元する)。既に書かれたファイルを
 //! 読めなくしても救いにならないためである。
@@ -392,6 +394,29 @@ pub fn encode_vec3_le_base64(values: &[[f64; 3]]) -> String {
         }
     }
     encode_base64(&bytes)
+}
+
+/// [`encode_vec3_le_base64`]の検査付きの版([`encode_f64_le_base64_finite`]の3次元版)。
+/// 非有限値が1つでもあれば[`RawBytesError::NonFiniteValue`]を返す。
+///
+/// **`index`は成分の通し番号**(要素`k`のy成分なら`3*k+1`)であって要素番号ではない
+/// ——平坦化したバイト列に対する位置を指すほうが、壊れた箇所を突き止めるのに直接役立つ。
+///
+/// 位置・速度は**発散が最初に現れる場所**(粒子が飛んでNaNになる)なので、
+/// `f64`列だけを検査してここを素通しにすると検査の意味が薄い。
+pub fn encode_vec3_le_base64_finite(values: &[[f64; 3]]) -> Result<String, RawBytesError> {
+    if let Some((index, value)) = values
+        .iter()
+        .flatten()
+        .enumerate()
+        .find(|(_, v)| !v.is_finite())
+    {
+        return Err(RawBytesError::NonFiniteValue {
+            index,
+            value: *value,
+        });
+    }
+    Ok(encode_vec3_le_base64(values))
 }
 
 /// [`encode_vec3_le_base64`]の逆。バイト列長が24の倍数であることを検査する。
@@ -769,6 +794,28 @@ mod tests {
         // 全域版はNaNを受け入れ、ビットごと往復させる(モジュールdoc §「NaN の扱い」)。
         let via_total = decode_f64_le_base64(&encode_f64_le_base64(&[f64::NAN])).unwrap();
         assert!(via_total[0].is_nan());
+    }
+
+    /// `[f64; 3]`版の検査。`index`が**成分の通し番号**であること
+    /// (`encode_vec3_le_base64_finite`のdoc)をここで固定する——要素番号と
+    /// 取り違えると、壊れた粒子を指すつもりのindexが3倍ずれる。
+    #[test]
+    fn vec3_finite_encoder_rejects_non_finite_by_component_index() {
+        assert!(encode_vec3_le_base64_finite(&[[1.0, 2.0, 3.0], [-1.0, 0.0, 0.5]]).is_ok());
+        // 要素1(2つ目)のy成分 → 通し番号 3*1+1 = 4。
+        assert_eq!(
+            encode_vec3_le_base64_finite(&[[0.0; 3], [1.0, f64::INFINITY, 2.0]]),
+            Err(RawBytesError::NonFiniteValue {
+                index: 4,
+                value: f64::INFINITY
+            })
+        );
+        // 有限なら全域版とバイト列が一致する(検査は符号化結果に影響しない)。
+        let vs = [[1.5, -2.5, 3.5], [0.0, -0.0, 1e300]];
+        assert_eq!(
+            encode_vec3_le_base64_finite(&vs).unwrap(),
+            encode_vec3_le_base64(&vs)
+        );
     }
 
     /// 導出した`PartialEq`は`f64`の`PartialEq`をそのまま使うので、

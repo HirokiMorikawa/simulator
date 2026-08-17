@@ -106,7 +106,7 @@ use crate::scenario::{
     MaterialOverride, MeltSpawnJson, PhaseChangeMorphRawStateJson, PhaseChangeOverrideJson,
     PistonGasRawStateJson, PmlJson, ProbeJson, Quantum1dRawStateJson, Quantum1dScenarioJson,
     Quantum2dRawStateJson, Quantum2dScenarioJson, RelativisticCorrectionJson, ResistorJson,
-    RngStateJson, Scenario, ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson,
+    RngStateJson, Scenario, SceneError, ShapeJson, SoftBendingConstraintJson, SoftBodyRawStateJson,
     SoftBodyScenarioJson, SoftConstraintJson, SoftVolumeConstraintJson, SphRawStateJson,
     SphRigidRawStateJson, SphScenarioJson, SwitchJson, ThermalLinkJson, ThermalNodeJson,
     ThermalScenarioJson, VoltageSourceJson, WorldScenarioOptions,
@@ -119,16 +119,41 @@ fn body_name(id: BodyId) -> String {
     format!("body_{}", id.index)
 }
 
+// ---------------------------------------------------------------------------
+// `raw_state`の数値配列(base64+LE生バイト、`crate::raw_bytes`)の符号化。
+//
+// **検査付きの版**(`*_finite`)を使う: 生状態にNaN・±Infが入っているなら
+// それは符号化の問題ではなく**シミュレーションが発散した**という上流の異常であり、
+// 静かにファイルへ焼き付けるべきではない(`raw_bytes`モジュールdoc §「NaN の扱い」の
+// 推奨に従う)。だから`to_scenario`は`Result`を返す——発散した`World`を
+// 「妥当なシーン」として書き出せてしまうより、書き出しに失敗するほうがよい。
+// `field`には`"grid_fluid.raw_state.u"`のようなJSONパスを渡す。
+// ---------------------------------------------------------------------------
+
+fn encode_f64_field(field: &str, values: &[f64]) -> Result<String, SceneError> {
+    crate::raw_bytes::encode_f64_le_base64_finite(values)
+        .map_err(|e| SceneError::InvalidValue(format!("{field}: {e}")))
+}
+
+fn encode_vec3_field(field: &str, values: &[Vec3]) -> Result<String, SceneError> {
+    let arrays: Vec<[f64; 3]> = values.iter().copied().map(vec3_to_array).collect();
+    crate::raw_bytes::encode_vec3_le_base64_finite(&arrays)
+        .map_err(|e| SceneError::InvalidValue(format!("{field}: {e}")))
+}
+
 /// 実行中の`World`を、`Scenario::from_scenario`で読み戻せるシーンドキュメントへ
 /// 変換する(モジュールdoc「既知の制限」参照)。
-pub fn to_scenario(world: &World, name: &str) -> Scenario {
+///
+/// **`Err`になるのは生状態に非有限値がある(=発散した)ときだけ**である
+/// (上の符号化ヘルパのコメント参照)。それ以外の経路は全域で、失敗しない。
+pub fn to_scenario(world: &World, name: &str) -> Result<Scenario, SceneError> {
     let live_bodies = world.body_ids();
     let names: HashMap<BodyId, String> =
         live_bodies.iter().map(|id| (*id, body_name(*id))).collect();
 
     let (materials, material_name_of) = export_materials(world, &live_bodies);
 
-    Scenario {
+    Ok(Scenario {
         name: name.to_string(),
         // `World`は`SimRng::new`が畳み込んだ後の元シードを保持しないので、ここは
         // 常に0のままである。**代わりに`rng_state`(今のストリーム位置)を書く**
@@ -148,24 +173,24 @@ pub fn to_scenario(world: &World, name: &str) -> Scenario {
         couplings: export_couplings(world, &names),
         circuit: export_circuit(world),
         astro: export_astro(world),
-        soft_body: export_soft_body(world),
-        grid_fluid: export_grid_fluid(world),
-        grid_fluid_3d: export_grid_fluid_3d(world),
-        conduction_rod: export_conduction_rod(world),
-        sph: export_sph(world),
+        soft_body: export_soft_body(world)?,
+        grid_fluid: export_grid_fluid(world)?,
+        grid_fluid_3d: export_grid_fluid_3d(world)?,
+        conduction_rod: export_conduction_rod(world)?,
+        sph: export_sph(world)?,
         gas: export_gas(world),
-        quantum_1d: export_quantum_1d(world),
-        quantum_2d: export_quantum_2d(world),
-        brownian: export_brownian(world),
-        kinetic_gas: export_kinetic_gas(world),
-        ising: export_ising(world),
-        fdtd: export_fdtd(world),
+        quantum_1d: export_quantum_1d(world)?,
+        quantum_2d: export_quantum_2d(world)?,
+        brownian: export_brownian(world)?,
+        kinetic_gas: export_kinetic_gas(world)?,
+        ising: export_ising(world)?,
+        fdtd: export_fdtd(world)?,
         probes: export_probes(world, &names),
         // **著者向けメタデータ**。`World`が保持するようになったのでそのまま
         // 書き戻す(モジュールdoc「解消済みの制限(著者向けメタデータ)」参照)。
         prediction_prompts: world.prediction_prompts().to_vec(),
         pass_criteria: world.pass_criteria().to_vec(),
-    }
+    })
 }
 
 fn export_world_options(world: &World) -> WorldScenarioOptions {
@@ -554,9 +579,11 @@ fn export_gas(world: &World) -> Option<GasScenarioJson> {
 // `raw_state`に復元用の生状態を入れる。
 // ---------------------------------------------------------------------------
 
-fn export_soft_body(world: &World) -> Option<SoftBodyScenarioJson> {
-    let body = world.soft_body()?;
-    Some(SoftBodyScenarioJson {
+fn export_soft_body(world: &World) -> Result<Option<SoftBodyScenarioJson>, SceneError> {
+    let Some(body) = world.soft_body() else {
+        return Ok(None);
+    };
+    Ok(Some(SoftBodyScenarioJson {
         // レシピ側は空にする(`rope`ヘルパの引数は`SoftBody`から逆算できない——
         // 分割数もレスト長も拘束の集合へ潰れてしまっている)。`raw_state`が真。
         rope: None,
@@ -568,15 +595,13 @@ fn export_soft_body(world: &World) -> Option<SoftBodyScenarioJson> {
         iterations: Some(body.iterations),
         damping: Some(body.damping),
         raw_state: Some(SoftBodyRawStateJson {
-            position: body.position.iter().copied().map(vec3_to_array).collect(),
-            prev_position: body
-                .prev_position
-                .iter()
-                .copied()
-                .map(vec3_to_array)
-                .collect(),
-            velocity: body.velocity.iter().copied().map(vec3_to_array).collect(),
-            inv_mass: body.inv_mass.clone(),
+            position: encode_vec3_field("soft_body.raw_state.position", &body.position)?,
+            prev_position: encode_vec3_field(
+                "soft_body.raw_state.prev_position",
+                &body.prev_position,
+            )?,
+            velocity: encode_vec3_field("soft_body.raw_state.velocity", &body.velocity)?,
+            inv_mass: encode_f64_field("soft_body.raw_state.inv_mass", &body.inv_mass)?,
             constraints: body
                 .constraints
                 .iter()
@@ -612,13 +637,20 @@ fn export_soft_body(world: &World) -> Option<SoftBodyScenarioJson> {
             iterations: body.iterations,
             damping: body.damping,
         }),
-    })
+    }))
 }
 
-fn export_grid_fluid(world: &World) -> Option<GridFluidScenarioJson> {
-    let fluid = world.grid_fluid()?;
+fn export_grid_fluid(world: &World) -> Result<Option<GridFluidScenarioJson>, SceneError> {
+    let Some(fluid) = world.grid_fluid() else {
+        return Ok(None);
+    };
     let boundary = grid_boundary_to_json(fluid.boundary());
-    Some(GridFluidScenarioJson {
+    let (solid_cells, solid_velocity) = encode_solid_state(
+        "grid_fluid.raw_state",
+        fluid.cell_type(),
+        fluid.solid_velocity(),
+    )?;
+    Ok(Some(GridFluidScenarioJson {
         nx: fluid.nx,
         ny: fluid.ny,
         h: fluid.h,
@@ -631,30 +663,59 @@ fn export_grid_fluid(world: &World) -> Option<GridFluidScenarioJson> {
         vorticity_confinement_epsilon: Some(fluid.vorticity_confinement_epsilon),
         solids: Vec::new(),
         raw_state: Some(GridFluidRawStateJson {
-            u: fluid.u.clone(),
-            v: fluid.v.clone(),
-            solid_cells: fluid
-                .cell_type()
-                .iter()
-                .map(|c| *c == sim_fluid::CellType::Solid)
-                .collect(),
-            solid_velocity: fluid
-                .solid_velocity()
-                .iter()
-                .copied()
-                .map(vec3_to_array)
-                .collect(),
+            u: encode_f64_field("grid_fluid.raw_state.u", &fluid.u)?,
+            v: encode_f64_field("grid_fluid.raw_state.v", &fluid.v)?,
+            solid_cells,
+            solid_velocity,
             density: fluid.density,
             kinematic_viscosity: fluid.kinematic_viscosity,
             vorticity_confinement_epsilon: fluid.vorticity_confinement_epsilon,
             boundary: Some(grid_boundary_to_json(fluid.boundary())),
         }),
-    })
+    }))
 }
 
-fn export_grid_fluid_3d(world: &World) -> Option<GridFluid3DScenarioJson> {
-    let fluid = world.grid_fluid_3d()?;
-    Some(GridFluid3DScenarioJson {
+/// セル種別と固体速度を`solid_cells`/`solid_velocity`へ符号化する(2D/3Dで共通)。
+/// `CellType`は`{Fluid, Solid}`の2値なので情報は落ちない
+/// (`GridFluidRawStateJson::solid_cells`のdoc参照)。
+///
+/// **固体が1セルも無く固体速度も全ゼロなら、両方を空文字列にする**。
+/// `from_scenario`は`solid_cells`が空のとき固体の復元をまるごと飛ばし、
+/// `GridFluid{2D,3D}::new`が作る「全セルFluid・固体速度ゼロ」がそのまま残る
+/// ——つまり**復元結果はビット単位で同一**である。
+/// こうするのは、固体を置いていないシーン(D15対流など)で
+/// `solid_velocity`が`nx*ny`個ぶんのゼロベクトル(2Dの32×32で32KB、
+/// 3Dの24×12×12で108KB)をチェックイン済みファイルへ書き込むことになり、
+/// **中身のないbase64がシーンの実質的な内容を埋め尽くしてしまう**ため。
+/// 固体があるシーン(D14渦列の円柱など)では従来どおり全セルぶん書く。
+fn encode_solid_state(
+    field_prefix: &str,
+    cells: &[sim_fluid::CellType],
+    solid_velocity: &[Vec3],
+) -> Result<(String, String), SceneError> {
+    let bits: Vec<bool> = cells
+        .iter()
+        .map(|c| *c == sim_fluid::CellType::Solid)
+        .collect();
+    if !bits.iter().any(|b| *b) && solid_velocity.iter().all(|v| *v == Vec3::ZERO) {
+        return Ok((String::new(), String::new()));
+    }
+    Ok((
+        crate::raw_bytes::encode_bool_bitpacked_base64(&bits),
+        encode_vec3_field(&format!("{field_prefix}.solid_velocity"), solid_velocity)?,
+    ))
+}
+
+fn export_grid_fluid_3d(world: &World) -> Result<Option<GridFluid3DScenarioJson>, SceneError> {
+    let Some(fluid) = world.grid_fluid_3d() else {
+        return Ok(None);
+    };
+    let (solid_cells, solid_velocity) = encode_solid_state(
+        "grid_fluid_3d.raw_state",
+        fluid.cell_type(),
+        fluid.solid_velocity(),
+    )?;
+    Ok(Some(GridFluid3DScenarioJson {
         nx: fluid.nx,
         ny: fluid.ny,
         nz: fluid.nz,
@@ -666,27 +727,21 @@ fn export_grid_fluid_3d(world: &World) -> Option<GridFluid3DScenarioJson> {
         solids: Vec::new(),
         smoke_blocks: Vec::new(),
         raw_state: Some(GridFluid3DRawStateJson {
-            u: fluid.u.clone(),
-            v: fluid.v.clone(),
-            w: fluid.w.clone(),
-            smoke_density: fluid.smoke_density.clone(),
-            solid_cells: fluid
-                .cell_type()
-                .iter()
-                .map(|c| *c == sim_fluid::CellType::Solid)
-                .collect(),
-            solid_velocity: fluid
-                .solid_velocity()
-                .iter()
-                .copied()
-                .map(vec3_to_array)
-                .collect(),
+            u: encode_f64_field("grid_fluid_3d.raw_state.u", &fluid.u)?,
+            v: encode_f64_field("grid_fluid_3d.raw_state.v", &fluid.v)?,
+            w: encode_f64_field("grid_fluid_3d.raw_state.w", &fluid.w)?,
+            smoke_density: encode_f64_field(
+                "grid_fluid_3d.raw_state.smoke_density",
+                &fluid.smoke_density,
+            )?,
+            solid_cells,
+            solid_velocity,
             density: fluid.density,
             kinematic_viscosity: fluid.kinematic_viscosity,
             vorticity_confinement_epsilon: fluid.vorticity_confinement_epsilon,
             boundary: Some(grid_boundary_3d_to_json(fluid.boundary())),
         }),
-    })
+    }))
 }
 
 fn grid_boundary_to_json(boundary: sim_fluid::GridBoundary) -> GridBoundaryJson {
@@ -707,10 +762,12 @@ fn grid_boundary_3d_to_json(boundary: sim_fluid::GridBoundary3D) -> GridBoundary
     }
 }
 
-fn export_conduction_rod(world: &World) -> Option<ConductionRodScenarioJson> {
-    let rod = world.conduction_rod()?;
+fn export_conduction_rod(world: &World) -> Result<Option<ConductionRodScenarioJson>, SceneError> {
+    let Some(rod) = world.conduction_rod() else {
+        return Ok(None);
+    };
     let node_count = rod.temperature.len();
-    Some(ConductionRodScenarioJson {
+    Ok(Some(ConductionRodScenarioJson {
         node_count,
         length: rod.dx * (node_count.max(1) - 1) as f64,
         // レシピ側の「一様な初期温度」は時間発展後には存在しない。人が読むときの
@@ -721,19 +778,28 @@ fn export_conduction_rod(world: &World) -> Option<ConductionRodScenarioJson> {
         boundary_left: rod.temperature.first().copied(),
         boundary_right: rod.temperature.last().copied(),
         raw_state: Some(ConductionRodRawStateJson {
-            temperature: rod.temperature.clone(),
+            temperature: encode_f64_field(
+                "conduction_rod.raw_state.temperature",
+                &rod.temperature,
+            )?,
             dx: rod.dx,
             thermal_diffusivity: rod.thermal_diffusivity,
             volumetric_heat_capacity: rod.volumetric_heat_capacity,
-            conductivity: rod.conductivity.clone(),
+            conductivity: rod
+                .conductivity
+                .as_deref()
+                .map(|k| encode_f64_field("conduction_rod.raw_state.conductivity", k))
+                .transpose()?,
             cross_section_area: rod.cross_section_area,
         }),
-    })
+    }))
 }
 
-fn export_sph(world: &World) -> Option<SphScenarioJson> {
-    let fluid = world.sph()?;
-    Some(SphScenarioJson {
+fn export_sph(world: &World) -> Result<Option<SphScenarioJson>, SceneError> {
+    let Some(fluid) = world.sph() else {
+        return Ok(None);
+    };
+    Ok(Some(SphScenarioJson {
         h: fluid.h,
         rest_density: fluid.rho0,
         sound_speed: fluid.c_s,
@@ -741,29 +807,29 @@ fn export_sph(world: &World) -> Option<SphScenarioJson> {
         blocks: Vec::new(),
         boundary_blocks: Vec::new(),
         raw_state: Some(SphRawStateJson {
-            position: fluid.position.iter().copied().map(vec3_to_array).collect(),
-            velocity: fluid.velocity.iter().copied().map(vec3_to_array).collect(),
-            density: fluid.density.clone(),
-            pressure: fluid.pressure.clone(),
+            position: encode_vec3_field("sph.raw_state.position", &fluid.position)?,
+            velocity: encode_vec3_field("sph.raw_state.velocity", &fluid.velocity)?,
+            density: encode_f64_field("sph.raw_state.density", &fluid.density)?,
+            pressure: encode_f64_field("sph.raw_state.pressure", &fluid.pressure)?,
             mass: fluid.mass,
             h: fluid.h,
             rho0: fluid.rho0,
             c_s: fluid.c_s,
             viscosity_alpha: fluid.viscosity_alpha,
             gravity: fluid.gravity,
-            boundary_position: fluid
-                .boundary_position
-                .iter()
-                .copied()
-                .map(vec3_to_array)
-                .collect(),
+            boundary_position: encode_vec3_field(
+                "sph.raw_state.boundary_position",
+                &fluid.boundary_position,
+            )?,
         }),
-    })
+    }))
 }
 
-fn export_quantum_1d(world: &World) -> Option<Quantum1dScenarioJson> {
-    let wave = world.quantum_1d()?;
-    Some(Quantum1dScenarioJson {
+fn export_quantum_1d(world: &World) -> Result<Option<Quantum1dScenarioJson>, SceneError> {
+    let Some(wave) = world.quantum_1d() else {
+        return Ok(None);
+    };
+    Ok(Some(Quantum1dScenarioJson {
         n: wave.psi.len(),
         dx: wave.dx,
         // レシピ側の波束パラメータは時間発展後の`psi`から逆算できない
@@ -775,17 +841,25 @@ fn export_quantum_1d(world: &World) -> Option<Quantum1dScenarioJson> {
         },
         potential: None,
         raw_state: Some(Quantum1dRawStateJson {
-            psi_re: wave.psi.iter().map(|c| c.re).collect(),
-            psi_im: wave.psi.iter().map(|c| c.im).collect(),
-            v: wave.v.clone(),
+            psi_re: encode_f64_field(
+                "quantum_1d.raw_state.psi_re",
+                &wave.psi.iter().map(|c| c.re).collect::<Vec<_>>(),
+            )?,
+            psi_im: encode_f64_field(
+                "quantum_1d.raw_state.psi_im",
+                &wave.psi.iter().map(|c| c.im).collect::<Vec<_>>(),
+            )?,
+            v: encode_f64_field("quantum_1d.raw_state.v", &wave.v)?,
             dx: wave.dx,
         }),
-    })
+    }))
 }
 
-fn export_quantum_2d(world: &World) -> Option<Quantum2dScenarioJson> {
-    let wave = world.quantum_2d()?;
-    Some(Quantum2dScenarioJson {
+fn export_quantum_2d(world: &World) -> Result<Option<Quantum2dScenarioJson>, SceneError> {
+    let Some(wave) = world.quantum_2d() else {
+        return Ok(None);
+    };
+    Ok(Some(Quantum2dScenarioJson {
         nx: wave.nx,
         ny: wave.ny,
         dx: wave.dx,
@@ -800,20 +874,28 @@ fn export_quantum_2d(world: &World) -> Option<Quantum2dScenarioJson> {
         },
         double_slit: None,
         raw_state: Some(Quantum2dRawStateJson {
-            psi_re: wave.psi.iter().map(|c| c.re).collect(),
-            psi_im: wave.psi.iter().map(|c| c.im).collect(),
-            v: wave.v.clone(),
+            psi_re: encode_f64_field(
+                "quantum_2d.raw_state.psi_re",
+                &wave.psi.iter().map(|c| c.re).collect::<Vec<_>>(),
+            )?,
+            psi_im: encode_f64_field(
+                "quantum_2d.raw_state.psi_im",
+                &wave.psi.iter().map(|c| c.im).collect::<Vec<_>>(),
+            )?,
+            v: encode_f64_field("quantum_2d.raw_state.v", &wave.v)?,
             nx: wave.nx,
             ny: wave.ny,
             dx: wave.dx,
             dy: wave.dy,
         }),
-    })
+    }))
 }
 
-fn export_brownian(world: &World) -> Option<BrownianScenarioJson> {
-    let set = world.brownian()?;
-    Some(BrownianScenarioJson {
+fn export_brownian(world: &World) -> Result<Option<BrownianScenarioJson>, SceneError> {
+    let Some(set) = world.brownian() else {
+        return Ok(None);
+    };
+    Ok(Some(BrownianScenarioJson {
         particle_count: set.position.len(),
         mass: set.mass,
         gamma: set.gamma,
@@ -822,19 +904,21 @@ fn export_brownian(world: &World) -> Option<BrownianScenarioJson> {
         // 拡散後の粒子群に「共通の初期位置」は存在しない。`raw_state`が真。
         initial_position: None,
         raw_state: Some(BrownianRawStateJson {
-            position: set.position.iter().copied().map(vec3_to_array).collect(),
-            velocity: set.velocity.iter().copied().map(vec3_to_array).collect(),
+            position: encode_vec3_field("brownian.raw_state.position", &set.position)?,
+            velocity: encode_vec3_field("brownian.raw_state.velocity", &set.velocity)?,
             mass: set.mass,
             gamma: set.gamma,
             kb_t: set.kb_t,
             external_force: vec3_to_array(set.external_force),
         }),
-    })
+    }))
 }
 
-fn export_kinetic_gas(world: &World) -> Option<KineticGasScenarioJson> {
-    let gas = world.kinetic_gas()?;
-    Some(KineticGasScenarioJson {
+fn export_kinetic_gas(world: &World) -> Result<Option<KineticGasScenarioJson>, SceneError> {
+    let Some(gas) = world.kinetic_gas() else {
+        return Ok(None);
+    };
+    Ok(Some(KineticGasScenarioJson {
         particle_count: gas.position.len(),
         mass: gas.mass,
         radius: gas.radius,
@@ -843,37 +927,42 @@ fn export_kinetic_gas(world: &World) -> Option<KineticGasScenarioJson> {
         // 実測温度を書いておく(人が読むためのメタデータ、復元には使われない)。
         temperature: gas.temperature(),
         raw_state: Some(KineticGasRawStateJson {
-            position: gas.position.iter().copied().map(vec3_to_array).collect(),
-            velocity: gas.velocity.iter().copied().map(vec3_to_array).collect(),
+            position: encode_vec3_field("kinetic_gas.raw_state.position", &gas.position)?,
+            velocity: encode_vec3_field("kinetic_gas.raw_state.velocity", &gas.velocity)?,
             mass: gas.mass,
             radius: gas.radius,
             box_size: vec3_to_array(gas.box_size),
             collision_count: gas.collision_count,
         }),
-    })
+    }))
 }
 
-fn export_ising(world: &World) -> Option<IsingScenarioJson> {
-    let sim = world.ising()?;
-    Some(IsingScenarioJson {
+fn export_ising(world: &World) -> Result<Option<IsingScenarioJson>, SceneError> {
+    let Some(sim) = world.ising() else {
+        return Ok(None);
+    };
+    Ok(Some(IsingScenarioJson {
         l: sim.l,
         j_coupling: sim.j_coupling,
         temperature: sim.temperature,
         updates_per_step: Some(sim.updates_per_step),
         use_wolff: Some(sim.use_wolff),
         raw_state: Some(IsingRawStateJson {
-            spins: sim.spins.clone(),
+            // `i8`に非有限という概念は無いので検査版は無い(`raw_bytes`モジュールdoc)。
+            spins: crate::raw_bytes::encode_i8_base64(&sim.spins),
             l: sim.l,
             j_coupling: sim.j_coupling,
             temperature: sim.temperature,
             updates_per_step: sim.updates_per_step,
             use_wolff: sim.use_wolff,
         }),
-    })
+    }))
 }
 
-fn export_fdtd(world: &World) -> Option<FdtdScenarioJson> {
-    let sim = world.fdtd()?;
+fn export_fdtd(world: &World) -> Result<Option<FdtdScenarioJson>, SceneError> {
+    let Some(sim) = world.fdtd() else {
+        return Ok(None);
+    };
     // PMLは**構築レシピ側**(係数表は`layers`/`target_reflection`から決定的に
     // 組み直せる、`PmlJson`のdoc参照)。時間発展する分離場成分だけが`raw_state`。
     let pml = sim
@@ -884,11 +973,14 @@ fn export_fdtd(world: &World) -> Option<FdtdScenarioJson> {
         });
     let pml_raw = sim
         .pml_split_fields()
-        .map(|(ezx, ezy)| FdtdPmlRawStateJson {
-            ezx: ezx.to_vec(),
-            ezy: ezy.to_vec(),
-        });
-    Some(FdtdScenarioJson {
+        .map(|(ezx, ezy)| -> Result<FdtdPmlRawStateJson, SceneError> {
+            Ok(FdtdPmlRawStateJson {
+                ezx: encode_f64_field("fdtd.raw_state.pml.ezx", ezx)?,
+                ezy: encode_f64_field("fdtd.raw_state.pml.ezy", ezy)?,
+            })
+        })
+        .transpose()?;
+    Ok(Some(FdtdScenarioJson {
         nx: sim.nx(),
         ny: sim.ny(),
         h: sim.h(),
@@ -897,13 +989,13 @@ fn export_fdtd(world: &World) -> Option<FdtdScenarioJson> {
         initial: None,
         pml,
         raw_state: Some(FdtdRawStateJson {
-            ez: sim.ez_raw().to_vec(),
-            hx: sim.hx_raw().to_vec(),
-            hy: sim.hy_raw().to_vec(),
+            ez: encode_f64_field("fdtd.raw_state.ez", sim.ez_raw())?,
+            hx: encode_f64_field("fdtd.raw_state.hx", sim.hx_raw())?,
+            hy: encode_f64_field("fdtd.raw_state.hy", sim.hy_raw())?,
             dt: sim.dt,
             pml: pml_raw,
         }),
-    })
+    }))
 }
 
 fn export_joints(world: &World, names: &HashMap<BodyId, String>) -> Vec<JointJson> {
@@ -1444,6 +1536,15 @@ mod tests {
 
     fn steel(world: &World) -> sim_core::MaterialId {
         world.materials().find_by_name("鋼(炭素鋼)").unwrap()
+    }
+
+    /// テスト用の`to_scenario`。`to_scenario`が`Err`を返すのは生状態に非有限値が
+    /// あるとき(=発散したとき)だけで、テストのシーンはどれも発散しないので、
+    /// ここで畳んでしまって本題(往復の一致)だけを見る。
+    /// 発散を実際に`Err`として捕まえることは
+    /// `export_rejects_non_finite_raw_state`が別途固定する。
+    fn to_scenario(world: &World, name: &str) -> Scenario {
+        super::to_scenario(world, name).expect("テストのシーンは発散しない")
     }
 
     /// D24相当の縮図: シャシー+車輪(WheelJoint、操舵・駆動あり)、振り子(BallJoint、
@@ -2642,9 +2743,15 @@ mod tests {
         }
         let mut scenario = to_scenario(&world, "fdtd-no-h");
         let raw = scenario.fdtd.as_mut().unwrap().raw_state.as_mut().unwrap();
-        let (hx_len, hy_len) = (raw.hx.len(), raw.hy.len());
-        raw.hx = vec![0.0; hx_len];
-        raw.hy = vec![0.0; hy_len];
+        // base64を復号してから長さを採り、同じ長さのゼロ配列で置き換える。
+        let hx_len = crate::raw_bytes::decode_f64_le_base64(&raw.hx)
+            .unwrap()
+            .len();
+        let hy_len = crate::raw_bytes::decode_f64_le_base64(&raw.hy)
+            .unwrap()
+            .len();
+        raw.hx = crate::raw_bytes::encode_f64_le_base64(&vec![0.0; hx_len]);
+        raw.hy = crate::raw_bytes::encode_f64_le_base64(&vec![0.0; hy_len]);
         let mut reloaded = World::from_scenario(&scenario).expect("must still parse");
         let mut world = world;
         world.step();

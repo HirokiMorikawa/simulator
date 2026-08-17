@@ -83,6 +83,12 @@ pub enum WasmError {
     ScenarioProbes(sim_world::SceneError),
     /// `sim_world::run_headless_scenario`の失敗(検証パネル経路)。
     HeadlessRun(sim_world::SceneError),
+    /// `sim_world::to_scenario`の失敗(`export_scene_json`/
+    /// `bookmark_export_scene_json`経路)。**生状態に非有限値がある**
+    /// (=シミュレーションが発散した)ときだけ起きる
+    /// ——`sim_world::to_scenario`のdoc参照。下の`ScenarioSerializeFailed`が
+    /// `serde_json`側の失敗であるのに対し、こちらは書き出す前の中身の異常である。
+    ScenarioExport(sim_world::SceneError),
 
     // --- serde_jsonのシリアライズ/デシリアライズ失敗(`serde_json::Error`は
     // `PartialEq`を持たないため、`Display`済みの文字列で保持する) ---
@@ -193,7 +199,8 @@ impl std::fmt::Display for WasmError {
             | WasmError::WorldBuild(e)
             | WasmError::AppendScenarioBodies(e)
             | WasmError::ScenarioProbes(e)
-            | WasmError::HeadlessRun(e) => write!(f, "{e:?}"),
+            | WasmError::HeadlessRun(e)
+            | WasmError::ScenarioExport(e) => write!(f, "{e:?}"),
 
             WasmError::ShapeSerializeFailed(e) => write!(f, "failed to serialize shape: {e}"),
             WasmError::ShapeParseFailed(e) => write!(f, "failed to parse shape json: {e}"),
@@ -4532,7 +4539,8 @@ impl WasmWorld {
     /// 常に欠落していた)を追う過程で発覚した)。
     fn bookmark_export_scene_json_impl(&self, index: usize) -> Result<String, WasmError> {
         let (label, snapshot) = self.try_bookmark_at(index)?;
-        let scenario = sim_world::to_scenario(snapshot, &format!("bookmark-{label}"));
+        let scenario = sim_world::to_scenario(snapshot, &format!("bookmark-{label}"))
+            .map_err(WasmError::ScenarioExport)?;
         serde_json::to_string(&scenario)
             .map_err(|e| WasmError::ScenarioSerializeFailed(e.to_string()))
     }
@@ -4543,7 +4551,8 @@ impl WasmWorld {
     /// `sim_world::to_scenario`を経由する(旧実装は`world`/`bodies`だけの
     /// 手書きシリアライズだった、上のdoc参照)。
     fn export_scene_json_impl(&self) -> Result<String, WasmError> {
-        let scenario = sim_world::to_scenario(&self.inner, "current");
+        let scenario =
+            sim_world::to_scenario(&self.inner, "current").map_err(WasmError::ScenarioExport)?;
         serde_json::to_string(&scenario)
             .map_err(|e| WasmError::ScenarioSerializeFailed(e.to_string()))
     }

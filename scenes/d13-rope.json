@@ -2,16 +2,156 @@
   "name": "d13-rope",
   "world": { "gravity": 9.80665, "dt": 0.008333333 },
   "soft_body": {
-    "rope": {
-      "from": [-0.5, 0, 0],
-      "to": [0.5, 0, 0],
-      "segments": 20,
-      "mass_per_particle": 0.01,
-      "total_rest_length": 1.2,
-      "compliance": 1e-10
+    "constraints": [],
+    "damping": 2.0,
+    "gravity": [
+      0.0,
+      -9.80665,
+      0.0
+    ],
+    "iterations": 2,
+    "particles": [],
+    "pinned": [],
+    "raw_state": {
+      "bending_constraints": [],
+      "constraints": [
+        {
+          "compliance": 1e-10,
+          "i": 0,
+          "j": 1,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 1,
+          "j": 2,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 2,
+          "j": 3,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 3,
+          "j": 4,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 4,
+          "j": 5,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 5,
+          "j": 6,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 6,
+          "j": 7,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 7,
+          "j": 8,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 8,
+          "j": 9,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 9,
+          "j": 10,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 10,
+          "j": 11,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 11,
+          "j": 12,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 12,
+          "j": 13,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 13,
+          "j": 14,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 14,
+          "j": 15,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 15,
+          "j": 16,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 16,
+          "j": 17,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 17,
+          "j": 18,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 18,
+          "j": 19,
+          "rest": 0.06
+        },
+        {
+          "compliance": 1e-10,
+          "i": 19,
+          "j": 20,
+          "rest": 0.06
+        }
+      ],
+      "damping": 2.0,
+      "gravity": [
+        0.0,
+        -9.80665,
+        0.0
+      ],
+      "inv_mass": "AAAAAAAAAAAAAAAAAABZQAAAAAAAAFlAAAAAAAAAWUAAAAAAAABZQAAAAAAAAFlAAAAAAAAAWUAAAAAAAABZQAAAAAAAAFlAAAAAAAAAWUAAAAAAAABZQAAAAAAAAFlAAAAAAAAAWUAAAAAAAABZQAAAAAAAAFlAAAAAAAAAWUAAAAAAAABZQAAAAAAAAFlAAAAAAAAAWUAAAAAAAABZQAAAAAAAAAAA",
+      "iterations": 2,
+      "position": "AAAAAAAA4L8AAAAAAAAAAAAAAAAAAAAAzczMzMzM3L8AAAAAAAAAAAAAAAAAAAAAmpmZmZmZ2b8AAAAAAAAAAAAAAAAAAAAAZmZmZmZm1r8AAAAAAAAAAAAAAAAAAAAAMzMzMzMz078AAAAAAAAAAAAAAAAAAAAAAAAAAAAA0L8AAAAAAAAAAAAAAAAAAAAAmpmZmZmZyb8AAAAAAAAAAAAAAAAAAAAANDMzMzMzw78AAAAAAAAAAAAAAAAAAAAAmJmZmZmZub8AAAAAAAAAAAAAAAAAAAAAmJmZmZmZqb8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoJmZmZmZqT8AAAAAAAAAAAAAAAAAAAAAmJmZmZmZuT8AAAAAAAAAAAAAAAAAAAAANDMzMzMzwz8AAAAAAAAAAAAAAAAAAAAAmJmZmZmZyT8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA0D8AAAAAAAAAAAAAAAAAAAAANDMzMzMz0z8AAAAAAAAAAAAAAAAAAAAAZmZmZmZm1j8AAAAAAAAAAAAAAAAAAAAAmpmZmZmZ2T8AAAAAAAAAAAAAAAAAAAAAzMzMzMzM3D8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA4D8AAAAAAAAAAAAAAAAAAAAA",
+      "prev_position": "AAAAAAAA4L8AAAAAAAAAAAAAAAAAAAAAzczMzMzM3L8AAAAAAAAAAAAAAAAAAAAAmpmZmZmZ2b8AAAAAAAAAAAAAAAAAAAAAZmZmZmZm1r8AAAAAAAAAAAAAAAAAAAAAMzMzMzMz078AAAAAAAAAAAAAAAAAAAAAAAAAAAAA0L8AAAAAAAAAAAAAAAAAAAAAmpmZmZmZyb8AAAAAAAAAAAAAAAAAAAAANDMzMzMzw78AAAAAAAAAAAAAAAAAAAAAmJmZmZmZub8AAAAAAAAAAAAAAAAAAAAAmJmZmZmZqb8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAoJmZmZmZqT8AAAAAAAAAAAAAAAAAAAAAmJmZmZmZuT8AAAAAAAAAAAAAAAAAAAAANDMzMzMzwz8AAAAAAAAAAAAAAAAAAAAAmJmZmZmZyT8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA0D8AAAAAAAAAAAAAAAAAAAAANDMzMzMz0z8AAAAAAAAAAAAAAAAAAAAAZmZmZmZm1j8AAAAAAAAAAAAAAAAAAAAAmpmZmZmZ2T8AAAAAAAAAAAAAAAAAAAAAzMzMzMzM3D8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA4D8AAAAAAAAAAAAAAAAAAAAA",
+      "substeps": 4,
+      "velocity": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "volume_constraints": []
     },
-    "pinned": [0, 20],
-    "damping": 2.0
+    "rope": null,
+    "substeps": 4
   },
   "probes": [
     { "soft_body_pos_y": 10 },
