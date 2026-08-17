@@ -4270,25 +4270,63 @@ impl WasmWorld {
     }
 
     /// 流体場オーバーレイ(設計docs/23-frontend/01-editor.md §1.3「流体場」の土台)
-    /// 向けに、小さな水塊(3×3×3粒子)+その直下の床(1層の境界粒子、
-    /// `SphFluid::add_boundary_particle`)を追加する。既にSPH流体が有効なら
-    /// (`World::sph_mut`)そこへ粒子を追加する(複数回スポーンすると水塊が
-    /// 増えていく、`fluid_spawn_count`でX方向にずらして重なりを避ける)。
+    /// 向けに、小さな水塊(3×3×3粒子)+**それを受け止める容器**(3層の床と
+    /// 4面の側壁、`SphFluid::add_boundary_particle`)を追加する。既にSPH流体が
+    /// 有効なら(`World::sph_mut`)そこへ粒子を追加する(複数回スポーンすると
+    /// 水塊が増えていく、`fluid_spawn_count`でX方向にずらして重なりを避ける)。
     /// まだ無効なら新規`SphFluid`を構築して有効化する(初回のみ)。
+    ///
+    /// **QA不具合2で書き換えた点**。以前は境界が「1層の床」だけで壁が無く、
+    /// $h=0.15$ に対し格子間隔 $\Delta x=0.1$ という設計§4.1・§9 の規約
+    /// ($\Delta x = h/2$)を外れた組み合わせだった。着水した水は横へ薄く広がって
+    /// 1〜2粒子厚の膜になり、膜はカーネル欠損で密度推定が静止密度を割るため
+    /// Tait 状態方程式の圧力が 0 にクランプされ、境界の反発力
+    /// ($2p_i/\rho_i^2$ に比例)がまったく立たない——支えを失った水は毎step
+    /// 少しずつ沈み、**床を抜けて落ち続けた**(実測: 2 秒で 27 粒子中 20 個が
+    /// 床より 0.5 m 下)。
+    ///
+    /// そこで (1) $h = 2\Delta x$ として規約を満たし、(2) 床を3層にし、
+    /// (3) **水塊がちょうど収まる大きさの側壁4面**を足した。容器を水塊より
+    /// 大きくしてはいけない——広い容器では同じ水量が薄い膜になってしまい、
+    /// 壁を足した意味が無くなる(内側をちょうど 3×3 格子にして、水が
+    /// 3 粒子ぶんの深さを保てるようにしている)。
     fn spawn_fluid_block_impl(&mut self) {
-        let h: f64 = 0.15;
         let rho0: f64 = 1000.0;
-        let c_s: f64 = 20.0;
         let dx: f64 = 0.1;
-        let n = 3;
-        let floor_half = 0.6;
+        // 設計§4.1・§9 の規約 Δx = h/2。
+        let h: f64 = 2.0 * dx;
+        let n: i32 = 3;
+        // 容器の壁の厚み(層数)。設計§4.1・§9 の既定。
+        let layers: i32 = 3;
         let floor_y = -dx;
 
         let spawn_index = self.fluid_spawn_count;
         self.fluid_spawn_count += 1;
-        let origin = Vec3::new(3.0 + spawn_index as f64 * 1.5, 2.0, 0.0);
+        // **落差を Δx(0.1 m)に抑える**(QA不具合2)。以前は y=2.0 から
+        // 床(y=-0.1)まで 2.1 m 落としていて着水速度が 6.4 m/s になり、
+        // 人工音速 20 m/s に対して Mach 0.32 だった。WCSPH が弱圧縮の近似として
+        // 成り立つのは流速が人工音速より十分小さいとき(設計§2.2)だけなので、
+        // この落差では**状態方程式が着水を止めるだけの圧力を作れず**、
+        // 容器を足しても水が突き抜けた(実測 27 粒子中 5〜12 個)。
+        //
+        // **3×3×3 = 27 粒子という小さな塊は SPH としてそもそも際どい**——
+        // すべての粒子が自由表面粒子で、密度推定が静止密度を割る粒子が常にある
+        // (実測 606.6)。落差を大きく取ると着水時に過圧縮して圧力が 10 万 Pa
+        // 級に跳ね、**塊が容器から弾き飛ばされて**近傍ゼロ(密度 = 自己寄与
+        // 318.3 のみ)の粒子が生まれ、以後は何にも捕まらず落ち続けた。
+        // 「流体オーバーレイを見せる」のが目的の追加なので、静かに置いて
+        // 少しだけ落ちる(=容器に受け止められるのが見える)挙動にする。
+        let drop = dx;
+        let origin = Vec3::new(3.0 + spawn_index as f64 * 1.5, floor_y + dx + drop, 0.0);
 
-        let mut particle_positions = Vec::with_capacity(n * n * n);
+        // **人工音速は落差から決める**。静水圧平衡試験も `c_s = 10 u_max`
+        // (`u_max = sqrt(2gH)`)という同じ規則を使っている(設計§2.2・§9)。
+        // 落差から決めれば着水時の Mach 数が 0.1 に収まる。
+        let drop_height = (origin.y - floor_y).max(dx);
+        let u_max = (2.0 * 9.80665 * drop_height).sqrt();
+        let c_s: f64 = 10.0 * u_max;
+
+        let mut particle_positions = Vec::with_capacity((n * n * n) as usize);
         for ix in 0..n {
             for iy in 0..n {
                 for iz in 0..n {
@@ -4297,15 +4335,39 @@ impl WasmWorld {
                 }
             }
         }
+
+        // 容器は格子に載せて組む。内側は水塊とちょうど同じ 3×3 格子
+        // (x,z のインデックス 0..n)で、その外側 `layers` 層が壁になる。
         let mut boundary_positions = Vec::new();
-        let mut fx = origin.x - floor_half;
-        while fx <= origin.x + floor_half {
-            let mut fz = origin.z - floor_half;
-            while fz <= origin.z + floor_half {
-                boundary_positions.push(Vec3::new(fx, floor_y, fz));
-                fz += dx;
+        let at = |ix: i32, iy: i32, iz: i32| {
+            Vec3::new(
+                origin.x + ix as f64 * dx,
+                floor_y + iy as f64 * dx,
+                origin.z + iz as f64 * dx,
+            )
+        };
+        let lo = -layers; // 壁の外端。
+        let hi = n - 1 + layers; // 反対側の壁の外端。
+                                 // 床(`layers`層、壁の下まで敷いて角を埋める)。
+        for ix in lo..=hi {
+            for iz in lo..=hi {
+                for l in 0..layers {
+                    boundary_positions.push(at(ix, -l, iz));
+                }
             }
-            fx += dx;
+        }
+        // 側壁4面(床の1段上から、水塊がすべて収まる高さまで)。
+        let wall_top = n + layers;
+        for iy in 1..=wall_top {
+            for ix in lo..=hi {
+                for iz in lo..=hi {
+                    let outside_x = ix < 0 || ix > n - 1;
+                    let outside_z = iz < 0 || iz > n - 1;
+                    if outside_x || outside_z {
+                        boundary_positions.push(at(ix, iy, iz));
+                    }
+                }
+            }
         }
 
         if let Some(sph) = self.inner.sph_mut() {
@@ -7395,6 +7457,64 @@ mod tests {
             .restore_bookmark_impl(0)
             .expect("bookmark 0 must exist");
         assert!((world.time_impl() - time_at_bookmark).abs() < 1e-12);
+    }
+
+    /// `＋ 追加 → 流体` で足した水塊が容器に受け止められること(QA不具合2)。
+    ///
+    /// 以前は境界が「1層の床」だけで壁が無く、着水した水は横へ薄く広がって
+    /// 膜になり、カーネル欠損で圧力が 0 にクランプされて支えを失い、
+    /// **床を抜けて落ち続けた**(実測: 2 秒で 27 粒子中 20 個が床より 0.5 m 下)。
+    /// 床を3層+側壁4面の容器にして、Δx = h/2 の規約も満たすようにした。
+    #[test]
+    fn a_spawned_fluid_block_is_caught_by_its_container_instead_of_leaking_through() {
+        let mut world = new_world();
+        world.spawn_fluid_block_impl();
+        let sph = world.inner.sph().expect("SPHドメインが有効になる");
+        assert_eq!(sph.position.len(), 27, "水塊は 3×3×3 粒子");
+        // Δx = h/2(設計§4.1・§9)。
+        let dx = (sph.mass / sph.rho0).cbrt();
+        assert!(
+            (sph.h - 2.0 * dx).abs() < 1e-12,
+            "格子間隔は h/2 であるべき: h={} dx={dx}",
+            sph.h
+        );
+        // 床は3層(最上層 y=-dx、以下 -2dx, -3dx)。
+        let floor_y = -dx;
+        let deepest_boundary = sph
+            .boundary_position
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::MAX, f64::min);
+        assert!(
+            (deepest_boundary - (floor_y - 2.0 * dx)).abs() < 1e-9,
+            "床は3層であるべき: 最下層 y={deepest_boundary}"
+        );
+        // 側壁があること(床より上に境界粒子が居る)。
+        assert!(
+            sph.boundary_position
+                .iter()
+                .any(|p| p.y > floor_y + 0.5 * dx),
+            "容器の側壁が無い(床だけだと水が横へ広がって膜になり漏れる)"
+        );
+
+        // 2 秒ぶん進めて、1 粒子も容器を抜けないこと。
+        for _ in 0..240 {
+            world.inner.step();
+        }
+        let sph = world.inner.sph().expect("SPHドメインが有効");
+        let escaped: Vec<f64> = sph
+            .position
+            .iter()
+            .map(|p| p.y)
+            .filter(|y| *y < floor_y - 2.0 * dx)
+            .collect();
+        assert!(
+            escaped.is_empty(),
+            "{} / {} 個が容器の底(y={})を抜けた: {escaped:?}",
+            escaped.len(),
+            sph.position.len(),
+            floor_y - 2.0 * dx,
+        );
     }
 
     /// Import が捨てたセクションを申告すること(QA不具合5)。

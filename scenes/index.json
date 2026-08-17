@@ -244,7 +244,7 @@
       "file": "d23-pouring-water.json",
       "demo": "D23",
       "title": "注ぐ水",
-      "description": "SPHの水塊が落下して床に溜まる。Scene Viewには粒子が描かれないのでProbeグラフ(粒子高さ・密度)で観測する(D23)。",
+      "description": "SPHの水塊が落下して容器(3層の床+側壁4面の境界粒子)に受け止められ、溜まる。Scene Viewには粒子が描かれないのでProbeグラフ(粒子高さ・密度)で観測する(D23)。",
       "domains": [
         "sph"
       ]
