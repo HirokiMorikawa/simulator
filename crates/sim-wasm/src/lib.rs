@@ -418,6 +418,54 @@ pub struct WasmWorld {
     /// プローブ値を読むために使う。新規Importのたびに置き換わる(縮約実装、
     /// 複数回インポートした場合は最後のシナリオの`probes`のみ対象)。
     imported_probe_handles: Vec<usize>,
+    /// 直近の`import_scene_json`が**JSONに書かれていたのに取り込まなかった**
+    /// セクション名(QA不具合5)。Importは`materials`/`bodies`/`probes`しか
+    /// 見ないため、それ以外は黙って捨てられていた——D10をImportしても
+    /// `coupling_count`は0のままで、UI上は「2件のボディを追加しました」と
+    /// 出るだけで**結合が落ちたことがユーザーに伝わらなかった**。
+    /// `read_component("last_import_skipped_sections", "")`で読める。
+    last_import_skipped_sections: Vec<String>,
+}
+
+/// シーンJSON Import が**書かれていたのに取り込まなかった**セクション名を列挙する
+/// (QA不具合5)。
+///
+/// Import(`WasmWorld::import_scene_json`)が見るのは
+/// `materials`/`bodies`(`World::append_scenario_bodies`)と`probes`だけで、
+/// 残りは黙って捨てられる。捨てたことをユーザーへ伝えられるように、
+/// **JSON に実際に書かれていたセクションのうち適用しなかったもの**を返す。
+///
+/// **なぜ「全部取り込む」ようにしないのか(正直な記録)**: Import は実行中の
+/// ワールドへの「追加」であり、既に有効なドメインを無条件に上書きするのは
+/// 意図しない挙動になりうる(`append_scenario_bodies`のdoc参照)。さらに
+/// `couplings`は熱ノードindexや回路ノードindexを**そのシーンの番号体系で**
+/// 参照するため、既存ワールドへ足すには番号の再割り当てが要る——
+/// 「Import は現在のワールドへマージなのか差し替えなのか」という設計判断を
+/// 伴う話で、この修正の範囲を超える。まずは**黙って落とさない**ことだけを
+/// 保証する。
+fn skipped_import_sections(scenario: &sim_world::Scenario) -> Vec<String> {
+    let mut skipped: Vec<String> = Vec::new();
+    let mut note = |present: bool, name: &str| {
+        if present {
+            skipped.push(name.to_string());
+        }
+    };
+    note(!scenario.fluids.is_empty(), "fluids");
+    note(scenario.thermal.is_some(), "thermal");
+    note(!scenario.joints.is_empty(), "joints");
+    note(!scenario.couplings.is_empty(), "couplings");
+    note(scenario.circuit.is_some(), "circuit");
+    note(scenario.astro.is_some(), "astro");
+    note(scenario.soft_body.is_some(), "soft_body");
+    note(scenario.grid_fluid.is_some(), "grid_fluid");
+    note(scenario.conduction_rod.is_some(), "conduction_rod");
+    note(scenario.sph.is_some(), "sph");
+    note(scenario.gas.is_some(), "gas");
+    note(scenario.brownian.is_some(), "brownian");
+    note(scenario.kinetic_gas.is_some(), "kinetic_gas");
+    note(scenario.ising.is_some(), "ising");
+    note(scenario.fdtd.is_some(), "fdtd");
+    skipped
 }
 
 #[wasm_bindgen]
@@ -518,6 +566,7 @@ impl WasmWorld {
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
             imported_probe_handles: Vec::new(),
+            last_import_skipped_sections: Vec::new(),
         }
     }
 
@@ -613,6 +662,7 @@ impl WasmWorld {
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
             imported_probe_handles,
+            last_import_skipped_sections: Vec::new(),
         })
     }
 
@@ -1248,7 +1298,15 @@ impl WasmWorld {
             .add_scenario_probes(&scenario, &body_ids_by_name)
             .map_err(WasmError::ScenarioProbes)?;
 
+        self.last_import_skipped_sections = skipped_import_sections(&scenario);
+
         Ok(scenario.bodies.len())
+    }
+
+    /// 直近の`import_scene_json`が取り込まなかったセクション名(QA不具合5)。
+    /// `read_component("last_import_skipped_sections", "")`の実体。
+    fn last_import_skipped_sections_impl(&self) -> &[String] {
+        &self.last_import_skipped_sections
     }
 
     /// 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5)向けに、直近の
@@ -3200,6 +3258,9 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 Ok(serde_json::json!(self.body_position_at_f64_impl(index)?.to_vec()).to_string())
             }
+            "last_import_skipped_sections" => {
+                Ok(serde_json::json!(self.last_import_skipped_sections_impl()).to_string())
+            }
             "body_type_at" => {
                 let index: usize = arg.parse().unwrap_or(0);
                 self.body_type_at_impl(index)
@@ -3359,6 +3420,7 @@ impl WasmWorld {
                 "circuit_node_voltage", "heater_node_temperature",
                 "time", "step_count", "state_hash", "energy_residual",
                 "max_body_speed", "active_approximations_text",
+                "last_import_skipped_sections",
                 "imported_probe_count", "imported_probe_label_at",
                 "imported_probe_value_at", "probe_history_bytes_estimate",
                 "imported_probe_history_len", "frame_count", "frame_parent_index",
@@ -7335,6 +7397,47 @@ mod tests {
         assert!((world.time_impl() - time_at_bookmark).abs() < 1e-12);
     }
 
+    /// Import が捨てたセクションを申告すること(QA不具合5)。
+    ///
+    /// D10(摩擦の熱)は`thermal`と`couplings`を持つが、Import は`bodies`と
+    /// `probes`しか取り込まない。**黙って落とすのをやめる**のがこの修正の
+    /// 目的なので、「落としたものが名前で分かる」ことを直接押さえる。
+    #[test]
+    fn import_scene_json_reports_the_sections_it_did_not_apply() {
+        let mut world = new_world();
+        let json = include_str!("../../../scenes/d10-brake-heat.json");
+        let before = world.body_count_impl();
+        let added = world
+            .import_scene_json_impl(json)
+            .expect("D10 の JSON は Import できる");
+
+        // ボディは実際に増える(ここは従来どおり動いている)。
+        assert_eq!(added, 2);
+        assert_eq!(world.body_count_impl(), before + 2);
+
+        // `thermal`と`couplings`はどちらも D10 に書かれているが取り込まれない。
+        let skipped = world.last_import_skipped_sections_impl().to_vec();
+        assert!(
+            skipped.contains(&"thermal".to_string()) && skipped.contains(&"couplings".to_string()),
+            "D10 の thermal / couplings が申告されるべき: {skipped:?}"
+        );
+        // 実際に結合は入っていない(申告の内容が事実と一致していること)。
+        assert_eq!(world.coupling_count_impl(), 0);
+
+        // `read_component`経由(UI が読む経路)でも JSON 配列で出る。
+        let text = world
+            .read_component_impl("last_import_skipped_sections", "")
+            .expect("last_import_skipped_sections via read_component must succeed");
+        let parsed: Vec<String> = serde_json::from_str(&text).expect("JSON 文字列配列であること");
+        assert_eq!(parsed, skipped);
+
+        // 書かれていないセクションは申告しない(D10 に回路も流体も無い)。
+        assert!(
+            !skipped.contains(&"circuit".to_string()) && !skipped.contains(&"fluids".to_string()),
+            "書かれていないセクションを申告してはいけない: {skipped:?}"
+        );
+    }
+
     /// `body_position_at_f64`が f32 では表現できない刻みを保つこと(QA不具合6)。
     ///
     /// D25(ブラウン運動)の粒子列の端は x = 0.299 m にあり、そこでの f32 の
@@ -7347,7 +7450,9 @@ mod tests {
         let mut world = new_world();
         let base_x = 0.299; // D25 の粒子列の端。
         let nanometers = 2.0e-9; // D25 のブラウン変位のオーダー。
-        world.set_body_position_at_impl(1, base_x, 0.0, 0.0).unwrap();
+        world
+            .set_body_position_at_impl(1, base_x, 0.0, 0.0)
+            .unwrap();
         let f32_before = world.body_position_at_impl(1).unwrap()[0];
         let f64_before = world.body_position_at_f64_impl(1).unwrap()[0];
 

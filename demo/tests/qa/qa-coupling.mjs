@@ -461,9 +461,23 @@ await boot(page);
   r.check("Y6-1", "シーン JSON の Import で剛体は増える",
     after.bodies === before.bodies + 2,
     `body_count = ${before.bodies} → ${after.bodies}`);
-  r.check("Y6-2", "Import した JSON の `couplings` セクションも取り込まれる",
-    after.couplings > before.couplings,
-    `coupling_count = ${before.couplings} → ${after.couplings}(Import は bodies/probes のみを取り込み、couplings・thermal・circuit は捨てる)`);
+  // **Import は今も `couplings`/`thermal` を取り込まない**(不具合 5 は
+  // 「黙って落とす」のをやめる修正で、全面対応はしていない——Import は実行中の
+  // ワールドへの「追加」であり、`couplings` が参照する熱ノード/回路ノードの
+  // 番号体系を既存ワールドへ足すには番号の再割り当てという設計判断が要る)。
+  // したがってここで守るのは「落としたことがユーザーに伝わる」こと。
+  const skipped = JSON.parse(
+    await page.evaluate(() => window.__world.read_component("last_import_skipped_sections", "")),
+  );
+  const statusText = (await page.locator("#scene-import-status").textContent()) ?? "";
+  const reported =
+    skipped.includes("couplings") &&
+    skipped.includes("thermal") &&
+    /couplings/.test(statusText) &&
+    /thermal/.test(statusText);
+  r.check("Y6-2", "Import が取り込まなかったセクションをユーザーへ申告する",
+    reported && after.couplings === before.couplings,
+    `落としたセクション = [${skipped.join(", ")}]、UI 表示 = "${statusText.trim()}"(coupling_count = ${before.couplings} → ${after.couplings})`);
 }
 
 // -------- Y7: Timeline の巻き戻しが結合先ドメインの状態も戻すか

@@ -327,7 +327,12 @@ type SceneBodyExport = {
   isStatic: boolean;
 };
 type SceneExportRef = { current: (() => SceneBodyExport[]) | null };
-type SceneImportRef = { current: ((json: string) => number) | null };
+/// Import の結果。`skipped`は**JSON に書かれていたのに取り込まなかった**
+/// セクション名(QA不具合5)。Import は `materials`/`bodies`/`probes` しか
+/// 見ないため、`couplings`/`thermal`/`circuit`/`fluids` などは捨てられる。
+/// 捨てたことを UI とコンソールの両方へ出すためにここまで運ぶ。
+type SceneImportResult = { count: number; skipped: string[] };
+type SceneImportRef = { current: ((json: string) => SceneImportResult) | null };
 /// 検証タブ(**残タスク完遂の縦串④増分**)が、現在のワールドを
 /// `sim_world::Scenario`形式のJSON文字列として読むための口
 /// (`world.read_component("export_scene_json", "")`の薄い写像、`SceneExportRef`と同じ理由で
@@ -2331,6 +2336,14 @@ function setUpProjectDrawer(
   let freeWiringNumNodes = 0;
   const freeWiringComponents: FreeWiringComponent[] = [];
 
+  /// Import の結果表示(`importStatus`)は**再描画を跨いで残す必要がある**。
+  /// `renderScenesTab()` は `body.innerHTML = ""` で作り直すため、change
+  /// ハンドラ内で `importStatus.textContent` を書いた直後に `renderScenesTab()`
+  /// を呼ぶと、書いたばかりの要素ごと捨てられて**メッセージが一切出なかった**
+  /// (QA不具合5の「捨てたことがユーザーに伝わらない」を UI 側で直すときに
+  /// 判明した。従来の「N件のボディを追加しました」も同じ理由で見えていない)。
+  let lastImportStatusMessage = "";
+
   function renderScenesTab() {
     body.innerHTML = "";
     if (!sceneExportRef.current) {
@@ -2432,6 +2445,8 @@ function setUpProjectDrawer(
     body.appendChild(importInput);
 
     const importStatus = document.createElement("p");
+    importStatus.id = "scene-import-status";
+    importStatus.textContent = lastImportStatusMessage;
     body.appendChild(importStatus);
 
     importInput.addEventListener("change", () => {
@@ -2440,12 +2455,24 @@ function setUpProjectDrawer(
       file
         .text()
         .then((text) => {
-          const count = sceneImportRef.current!(text);
-          importStatus.textContent = `${count}件のボディを追加しました。`;
+          const { count, skipped } = sceneImportRef.current!(text);
+          // QA不具合5: 捨てたセクションを**UI にも**出す。以前は
+          // 「2件のボディを追加しました」だけで、結合や熱が落ちたことが
+          // ユーザーに伝わらなかった(D10 を Import しても結合は 0 件のまま)。
+          lastImportStatusMessage =
+            `${count}件のボディを追加しました。` +
+            (skipped.length > 0
+              ? ` ただし ${skipped.join(" / ")} は取り込まれていません` +
+                `(Import が扱うのは materials / bodies / probes のみ)。` +
+                `これらを含めて読み込むには Scene ギャラリーから開いてください。`
+              : "");
+          // 再描画が `importStatus` を作り直すので、先に文言を控えてから描く
+          // (`lastImportStatusMessage`のdoc参照)。
           renderScenesTab();
         })
         .catch((err: unknown) => {
-          importStatus.textContent = `Import失敗: ${err}`;
+          lastImportStatusMessage = `Import失敗: ${err}`;
+          importStatus.textContent = lastImportStatusMessage;
         });
     });
   }
@@ -5841,8 +5868,20 @@ async function setUpSceneView(
     };
   }
 
-  sceneImportRef.current = (json: string) => {
+  sceneImportRef.current = (json: string): SceneImportResult => {
     const count = world.import_scene_json(json);
+    // QA不具合5: Import が取り込まなかったセクションを申告させる
+    // (`skipped_import_sections`のdoc参照)。黙って落とすのをやめる。
+    const skipped = JSON.parse(
+      world.read_component("last_import_skipped_sections", ""),
+    ) as string[];
+    if (skipped.length > 0) {
+      console.warn(
+        `シーンJSON Import: ${skipped.join(" / ")} セクションは取り込まれませんでした` +
+          `(Import が扱うのは materials / bodies / probes のみです)。` +
+          `これらを含めて読み込むにはツールバーの Scene ギャラリーから開いてください。`,
+      );
+    }
     const parsed = JSON.parse(json) as ImportedScenarioJson;
     const bodies = parsed.bodies ?? [];
     currentPredictionPrompts = parsed.prediction_prompts ?? [];
@@ -5863,7 +5902,7 @@ async function setUpSceneView(
       mesh.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
       addSpawnedMesh(bodyIndex, mesh);
     }
-    return count;
+    return { count, skipped };
   };
 
   // シーンギャラリー(`SceneGalleryRef`のdoc参照)。Importと異なり`world`
