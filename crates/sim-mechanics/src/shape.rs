@@ -53,7 +53,10 @@ pub enum Shape {
     Compound {
         children: Vec<(sim_math::Transform, Shape)>,
     },
-    /// Phase 5(GJK/EPA)。
+    /// Phase 5(GJK/EPA)。**常にその頂点群の凸包として**扱われる
+    /// (`crate::hull::convex_hull`)——非凸な三角形メッシュから正しい
+    /// `Shape`を作りたい場合は面情報が要るので`Shape::from_triangle_mesh`
+    /// (近似凸分解、`crate::decompose`)を使う。
     ConvexMesh {
         vertices: Vec<Vec3>,
     },
@@ -214,6 +217,50 @@ impl Shape {
         self.mass_properties()
             .map(|p| p.unit_inertia)
             .unwrap_or(Mat3::from_diagonal(Vec3::ZERO))
+    }
+
+    /// 任意の(凹みを含みうる)三角形メッシュから`Shape`を作る(近似凸分解、
+    /// `crate::decompose`参照、V-HACD相当)。
+    ///
+    /// `Shape::ConvexMesh{vertices}`は頂点だけを持ち**常にその凸包として**
+    /// 扱われる——手で凸だと分かっている点群を渡す用途のための型で、
+    /// 意味を変えるとその前提を壊す。非凸メッシュ(L字・U字・くびれのある
+    /// ダンベル型など)を正しく扱うには面情報(`triangles`、どの3頂点が
+    /// 実際の表面を成すか)が要るので、別のコンストラクタとして用意した。
+    ///
+    /// `vertices`はメッシュの全頂点、`triangles`は各三角形を頂点インデックス
+    /// 3つ組(**外向き**の巻き順、`crate::hull`と同じ規約)で表す。
+    ///
+    /// 分解結果が1パーツなら(=元から実質凸)`ConvexMesh{vertices}`を
+    /// **入力の頂点そのまま**で返す——`convex_hull`は同じ点群に対して
+    /// 常に同じ結果になるので、これは既存の`ConvexMesh`と1ビットも
+    /// 違わない(「凸メッシュには影響しない」という群の前提を保つ)。
+    /// 複数パーツなら、各パーツを`ConvexMesh`として持つ`Compound`を返す
+    /// ——質量特性(`union_volume`)も接触生成(collision.rsの`Compound`分解)も
+    /// **既存の経路をそのまま使う**、この関数自身は分解の一度きりの実行だけを担う。
+    pub fn from_triangle_mesh(vertices: Vec<Vec3>, triangles: Vec<[usize; 3]>) -> Shape {
+        let parts = crate::decompose::decompose_mesh(&vertices, &triangles);
+        match parts.len() {
+            0 => Shape::ConvexMesh { vertices }, // 退化入力(体積なし)。元の点はそのまま残す。
+            1 => Shape::ConvexMesh { vertices },
+            _ => Shape::Compound {
+                children: parts
+                    .into_iter()
+                    .map(|hull| {
+                        let identity = sim_math::Transform {
+                            position: Vec3::ZERO,
+                            rotation: sim_math::Quat::IDENTITY,
+                        };
+                        (
+                            identity,
+                            Shape::ConvexMesh {
+                                vertices: hull.vertices,
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        }
     }
 
     /// `unit_mass_inertia_tensor`の対角成分のみ。
@@ -1218,5 +1265,101 @@ mod tests {
                 tensor.m[0][0]
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // `Shape::from_triangle_mesh`(近似凸分解、`crate::decompose`)
+    // ------------------------------------------------------------------
+
+    /// **回帰**: すでに凸な三角形メッシュ(箱)は`from_triangle_mesh`を通しても
+    /// 分解が起きず、`Shape::ConvexMesh{vertices}`を直接使った場合と
+    /// 体積・慣性が完全に一致すること——分解の追加で既存の凸メッシュの
+    /// 挙動が1ビットも変わらないことの固定(課題要件6)。
+    #[test]
+    fn from_triangle_mesh_of_a_convex_box_matches_plain_convex_mesh() {
+        let (vertices, triangles) = crate::decompose::box_mesh(1.5);
+        let decomposed = Shape::from_triangle_mesh(vertices.clone(), triangles);
+        let plain = Shape::ConvexMesh { vertices };
+
+        // 分解しても1パーツのままなので`ConvexMesh`のまま返ってくるはず。
+        assert!(
+            matches!(decomposed, Shape::ConvexMesh { .. }),
+            "凸なメッシュはCompoundへ分解されないはず: {decomposed:?}"
+        );
+
+        let (dv, pv) = (decomposed.volume().unwrap(), plain.volume().unwrap());
+        assert!(
+            (dv - pv).abs() < 1e-12,
+            "体積は完全一致のはず: {dv} vs {pv}"
+        );
+        let (dc, pc) = (decomposed.center_of_mass(), plain.center_of_mass());
+        assert!(
+            (dc - pc).length() < 1e-12,
+            "重心は完全一致のはず: {dc:?} vs {pc:?}"
+        );
+        let (di, pi) = (
+            decomposed.unit_mass_inertia_tensor(),
+            plain.unit_mass_inertia_tensor(),
+        );
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (di.m[i][j] - pi.m[i][j]).abs() < 1e-12,
+                    "慣性テンソルは完全一致のはず: I[{i}][{j}]={} vs {}",
+                    di.m[i][j],
+                    pi.m[i][j]
+                );
+            }
+        }
+    }
+
+    /// **本体**: 非凸なL字メッシュ(`crate::decompose::l_shaped_prism_mesh`、
+    /// `l_shaped_compound_union_volume_matches_the_analytic_value`と同一形状・
+    /// 真の体積0.6875)を`from_triangle_mesh`に通すと`Compound`になり、
+    /// その体積が「頂点だけを渡して素朴に凸包扱いした場合」より真の値へ
+    /// 明確に近いこと(課題要件5・6・7の統合テスト)。
+    #[test]
+    fn from_triangle_mesh_of_a_concave_l_shape_is_close_to_the_true_volume() {
+        let (vertices, triangles) = crate::decompose::l_shaped_prism_mesh();
+        let true_volume = 0.6875;
+
+        // 素朴な扱い(=移行前の唯一の手段): 頂点だけ渡して凸包にする。
+        let naive = Shape::ConvexMesh {
+            vertices: vertices.clone(),
+        };
+        let naive_volume = naive.volume().unwrap();
+        assert!(
+            naive_volume > true_volume * 1.2,
+            "素朴な凸包は真の体積より20%以上過大評価するはず: naive={naive_volume}"
+        );
+
+        // 分解あり: 非凸を認識してCompoundになるはず。
+        let decomposed = Shape::from_triangle_mesh(vertices, triangles);
+        assert!(
+            matches!(decomposed, Shape::Compound { .. }),
+            "非凸なL字はCompoundへ分解されるはず: {decomposed:?}"
+        );
+        let decomposed_volume = decomposed.volume().unwrap();
+        let rel_error = (decomposed_volume - true_volume).abs() / true_volume;
+        assert!(
+            rel_error < 0.10,
+            "分解後の体積は真の体積(0.6875)に近いはず: decomposed={decomposed_volume} \
+             rel_error={rel_error:.4}"
+        );
+        assert!(
+            (decomposed_volume - true_volume).abs() < (naive_volume - true_volume) * 0.5,
+            "分解後の体積は素朴な凸包よりも真の値へ有意に近いはず: \
+             decomposed={decomposed_volume} naive={naive_volume} true={true_volume}"
+        );
+
+        // 慣性・重心も有限で、対称形状(x=0面に対して対称なL字ではないが、
+        // 有限領域内に収まる)であることの健全性チェック。
+        let com = decomposed.center_of_mass();
+        assert!(com.x.is_finite() && com.y.is_finite() && com.z.is_finite());
+        let inertia = decomposed.unit_mass_inertia_diagonal();
+        assert!(
+            inertia.x > 0.0 && inertia.y > 0.0 && inertia.z > 0.0,
+            "{inertia:?}"
+        );
     }
 }

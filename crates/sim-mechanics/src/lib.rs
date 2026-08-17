@@ -15,6 +15,7 @@ mod body;
 mod ccd;
 mod collision;
 mod contact;
+mod decompose;
 mod gjk;
 mod hull;
 mod joint;
