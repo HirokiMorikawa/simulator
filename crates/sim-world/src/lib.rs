@@ -43,9 +43,10 @@
 //! ——`step()`は「pre 相(全結合)→ 全ドメインsub-step → post 相(全結合)」の順に走る。
 //! 各結合がどちらの相に載るかは`sim-coupling`側の実装が決める(既定は post、
 //! 各モジュールdoc参照)。登録済み`Coupling`(`add_coupling`)を
-//! 自動適用するレジストリも実装済み(`couplings`フィールド、`apply_coupling`のdoc参照)。シーンJSON`couplings`セクションからの自動解決・排他結合検査
-//! (`sim-coupling::validate_exclusive_couplings`)との接続は未実装(`scenario`モジュール
-//! doc参照)。`quantum`/`statistical`は
+//! 自動適用するレジストリも実装済み(`couplings`フィールド、`apply_coupling`のdoc参照)。
+//! シーンJSON`couplings`セクションからの自動解決・排他結合検査
+//! (`sim-coupling::validate_exclusive_couplings`)も`from_scenario`に接続済み
+//! (`scenario`モジュールdoc参照)。`quantum`/`statistical`は
 //! 専用シーンでのみ有効化する設計方針のため見送る。`gas`
 //! (`sim_thermal::GasCompartment`、断熱圧縮の`PistonGas`結合が使う)・`conduction_rod`
 //! (`sim_thermal::ConductionRod1D`、D16「熱伝導レース」が使う)は`Solver`を実装しない —
@@ -2852,8 +2853,8 @@ impl World {
     /// `Coupling`を毎stepの後に自動適用するレジストリ自体は`add_coupling`/`couplings`
     /// フィールドとして実装済み(このメソッドのdoc下部参照)。**pre/post 2相への分離も
     /// 群5で完了**(`step()`のdoc参照)。シーンJSON`couplings`セクションからの
-    /// 自動解決・排他結合検査(`sim-coupling::validate_exclusive_couplings`)との
-    /// 接続は未実装(`from_scenario`のモジュールdoc参照)。
+    /// 自動解決・排他結合検査(`sim-coupling::validate_exclusive_couplings`)も
+    /// `from_scenario`に接続済み(`scenario`モジュールdoc参照)。
     /// 本メソッドは、`add_coupling`によるレジストリ登録より前から存在する、呼び出し側が
     /// 呼び出し頻度・タイミングを明示的に管理する下位のプリミティブとして残している
     /// (統合シナリオテストの一部・レジストリ自体の内部実装が使う)。`step()`の後に

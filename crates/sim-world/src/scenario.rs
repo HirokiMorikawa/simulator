@@ -1,8 +1,13 @@
 //! シーン記述(JSON)。設計 docs/20-integration/04-world-api.md §3。
 //!
-//! **縮約実装の理由**: 設計例示のJSONスキーマ(`world`/`materials`/`bodies`/`fluids`/
-//! `couplings`/`probes`)のうち、`couplings`(`Coupling` registryがまだ`World::step()`
-//! に接続されていない、各`sim-coupling`実装のモジュールdoc参照)以外は実装する。
+//! **現状(過去の「縮約実装」段階から更新)**: 設計例示のJSONスキーマ
+//! (`world`/`materials`/`bodies`/`fluids`/`couplings`/`probes`)は全項目実装済み。
+//! `couplings`は`CouplingJson`14種すべてに対応し、排他結合検査
+//! (`sim_coupling::validate_exclusive_couplings`、`SceneError::
+//! ExclusiveCouplingViolation`)も`from_scenario`に接続されている。`probes`は
+//! `ProbeJson`30種(力学・熱・天体・回路・ソフトボディ・格子流体・SPH・量子・
+//! 統計・FDTD・エネルギー台帳・状態ハッシュダイジェスト)に対応する。
+//!
 //! `fluids`は**複数の流体領域**(`sim_mechanics::MechanicsSolver::fluids`)を扱える
 //! ——移行前は単一の`static_water`領域(無限に広い水平面1枚)のみだった縮約を
 //! `sim_fluid::FluidRegion`の一般化で解消した。書けるのは
@@ -15,12 +20,8 @@
 //! 流体側も`ThermalNode`のindexで受け取る形なので、生の流体温度を熱源に取る経路が
 //! 存在しない。値としては構築・往復・`MechanicsSolver::fluid_temperature_at`での
 //! 参照までができ、実際に熱を動かすのは`ConvectionLink`側へ変種を足す後続増分になる。
-//! `probes`は`body_pos_y`/`body_speed`のみ(`bodies[].name`で名前
-//! 解決)対応 — 設計例示の`{"ledger": "thermal"}`のような`ProbeTarget::LedgerKinetic`
-//! に素直に対応しない形は後続増分。validator(参照整合検査)はこの縮約版が対象とする
-//! 範囲(材料参照・剛体名参照)のみ実装する — 排他結合検査(`sim-coupling::
-//! validate_exclusive_couplings`)は`couplings`セクション未実装のため接続できない
-//! (後続増分)。`bodies[]`には`rotation`(クォータニオン`[x,y,z,w]`、未指定なら
+//! validator(参照整合検査)は材料参照・剛体名参照・排他結合(上記)を検査する。
+//! `bodies[]`には`rotation`(クォータニオン`[x,y,z,w]`、未指定なら
 //! 恒等回転)・`linear_velocity`(未指定ならゼロ)も追加済み(D5斜面のような
 //! 回転済み初期配置・D2弾道のような初速を要するシナリオへの対応、ヘッドレス
 //! ランナーの適用例参照)。
@@ -209,10 +210,11 @@ pub struct Scenario {
     pub bodies: Vec<BodyScenarioDesc>,
     #[serde(default)]
     pub fluids: Vec<FluidJson>,
-    /// 熱ドメイン(`sim_thermal::ThermalSolver`)。未指定なら無効(縮約実装:
-    /// ノード間リンク(`ThermalSolver::add_link`、伝導ネットワーク)・放射
-    /// (`emissivity`)は対象外——D9(冷めるコーヒー)が要る「対流のみの単一
-    /// ノード」のみサポートする、モジュールdoc「縮約実装の理由」参照)。
+    /// 熱ドメイン(`sim_thermal::ThermalSolver`)。未指定なら無効。ノード間の
+    /// 伝導リンク(`ThermalScenarioJson::links`)・放射の相手側温度
+    /// (`environment_radiation_temperature`)も**増分Hで追加済み**——D9(冷める
+    /// コーヒー)の単独ノードだけでなく、D10(摩擦熱→周囲)・D18(氷↔飲み物)の
+    /// ような伝導ネットワークを持つシーンも表現できる。
     #[serde(default)]
     pub thermal: Option<ThermalScenarioJson>,
     /// 剛体間の拘束(設計の例示JSONには無い項目——D11(振り子と時計)が要る
@@ -223,13 +225,10 @@ pub struct Scenario {
     #[serde(default)]
     pub joints: Vec<JointJson>,
     /// `sim-coupling`の`Coupling`実装群(設計の例示JSONでは`["buoyancy_drag", ...]`の
-    /// ような名前配列だが、`sim-coupling`registry自体が未接続な設計の縮約状態
-    /// (モジュールdoc冒頭参照)を反映し、この実装では各`Coupling`をパラメータ付きで
-    /// 直接構成する形にする)。現時点では`ImageChargeForce`(D26帯電風船の鏡像力)・
-    /// `BrownianForce`(D25ブラウン運動)・`InductionCoupling`(D21銅管落下の渦電流
-    /// ブレーキ)のみ対応——残り11種は後続増分(この`couplings`セクション自体、
-    /// 設計が「排他結合検査」を要求する多対多の相互作用検証はまだ及ばない、
-    /// 最小の一歩)。`joints`と同じ理由で`from_scenario`側のみで処理する。
+    /// ような名前配列だが、この実装では各`Coupling`をパラメータ付きで直接構成する
+    /// 形にする)。`CouplingJson`の14種すべてに対応済み——排他結合検査
+    /// (`sim_coupling::validate_exclusive_couplings`)も接続されている。
+    /// `joints`と同じ理由で`from_scenario`側のみで処理する。
     #[serde(default)]
     pub couplings: Vec<CouplingJson>,
     /// 回路ドメイン(`sim_em::Circuit`)。未指定なら無効。ノードはインデックス
