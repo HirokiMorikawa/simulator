@@ -21,10 +21,6 @@
     "nodes": [{ "temperature": 350.0, "heat_capacity": 200000.0 }]
   },
   "sph": {
-    "blocks": [],
-    "boundary_blocks": [],
-    "h": 0.05,
-    "particle_mass": 0.05,
     "raw_state": {
       "boundary_position": "MzMzMzMzw7+amZmZmZmpvzMzMzMzM8O/MzMzMzMzw7+amZmZmZmpv5mZmZmZmbm/MzMzMzMzw7+amZmZmZmpv5iZmZmZmam/MzMzMzMzw7+amZmZmZmpvwAAAAAAAIA8MzMzMzMzw7+amZmZmZmpv5yZmZmZmak/MzMzMzMzw7+amZmZmZmpv5qZmZmZmbk/MzMzMzMzw7+amZmZmZmpvzUzMzMzM8M/mZmZmZmZub+amZmZmZmpvzMzMzMzM8O/mZmZmZmZub+amZmZmZmpv5mZmZmZmbm/mZmZmZmZub+amZmZmZmpv5iZmZmZmam/mZmZmZmZub+amZmZmZmpvwAAAAAAAIA8mZmZmZmZub+amZmZmZmpv5yZmZmZmak/mZmZmZmZub+amZmZmZmpv5qZmZmZmbk/mZmZmZmZub+amZmZmZmpvzUzMzMzM8M/mJmZmZmZqb+amZmZmZmpvzMzMzMzM8O/mJmZmZmZqb+amZmZmZmpv5mZmZmZmbm/mJmZmZmZqb+amZmZmZmpv5iZmZmZmam/mJmZmZmZqb+amZmZmZmpvwAAAAAAAIA8mJmZmZmZqb+amZmZmZmpv5yZmZmZmak/mJmZmZmZqb+amZmZmZmpv5qZmZmZmbk/mJmZmZmZqb+amZmZmZmpvzUzMzMzM8M/AAAAAAAAgDyamZmZmZmpvzMzMzMzM8O/AAAAAAAAgDyamZmZmZmpv5mZmZmZmbm/AAAAAAAAgDyamZmZmZmpv5iZmZmZmam/AAAAAAAAgDyamZmZmZmpvwAAAAAAAIA8AAAAAAAAgDyamZmZmZmpv5yZmZmZmak/AAAAAAAAgDyamZmZmZmpv5qZmZmZmbk/AAAAAAAAgDyamZmZmZmpvzUzMzMzM8M/nJmZmZmZqT+amZmZmZmpvzMzMzMzM8O/nJmZmZmZqT+amZmZmZmpv5mZmZmZmbm/nJmZmZmZqT+amZmZmZmpv5iZmZmZmam/nJmZmZmZqT+amZmZmZmpvwAAAAAAAIA8nJmZmZmZqT+amZmZmZmpv5yZmZmZmak/nJmZmZmZqT+amZmZmZmpv5qZmZmZmbk/nJmZmZmZqT+amZmZmZmpvzUzMzMzM8M/mpmZmZmZuT+amZmZmZmpvzMzMzMzM8O/mpmZmZmZuT+amZmZmZmpv5mZmZmZmbm/mpmZmZmZuT+amZmZmZmpv5iZmZmZmam/mpmZmZmZuT+amZmZmZmpvwAAAAAAAIA8mpmZmZmZuT+amZmZmZmpv5yZmZmZmak/mpmZmZmZuT+amZmZmZmpv5qZmZmZmbk/mpmZmZmZuT+amZmZmZmpvzUzMzMzM8M/NTMzMzMzwz+amZmZmZmpvzMzMzMzM8O/NTMzMzMzwz+amZmZmZmpv5mZmZmZmbm/NTMzMzMzwz+amZmZmZmpv5iZmZmZmam/NTMzMzMzwz+amZmZmZmpvwAAAAAAAIA8NTMzMzMzwz+amZmZmZmpv5yZmZmZmak/NTMzMzMzwz+amZmZmZmpv5qZmZmZmbk/NTMzMzMzwz+amZmZmZmpvzUzMzMzM8M/",
       "c_s": 20.0,
@@ -37,9 +33,7 @@
       "rho0": 1000.0,
       "velocity": "",
       "viscosity_alpha": 0.08
-    },
-    "rest_density": 1000.0,
-    "sound_speed": 20.0
+    }
   },
   "couplings": [
     {

@@ -2,9 +2,7 @@
   "name": "d29-radio-tank",
   "world": { "gravity": 0.0, "dt": 0.005 },
   "fdtd": {
-    "courant": 0.5,
     "h": 0.02,
-    "initial": null,
     "nx": 81,
     "ny": 81,
     "pml": null,

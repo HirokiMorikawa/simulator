@@ -2,18 +2,6 @@
   "name": "d27-double-slit",
   "world": { "gravity": 0.0, "dt": 0.002 },
   "quantum_2d": {
-    "double_slit": null,
-    "dx": 0.1,
-    "dy": 0.1,
-    "nx": 256,
-    "ny": 128,
-    "packet": {
-      "k0": 0.0,
-      "sigma_x": 0.0,
-      "sigma_y": 0.0,
-      "x0": 0.0,
-      "y0": 0.0
-    },
     "raw_state": {
       "dx": 0.1,
       "dy": 0.1,

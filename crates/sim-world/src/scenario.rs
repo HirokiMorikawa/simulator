@@ -25,38 +25,98 @@
 //! 回転済み初期配置・D2弾道のような初速を要するシナリオへの対応、ヘッドレス
 //! ランナーの適用例参照)。
 //!
-//! # 生状態スナップショット(`raw_state`)
+//! # 状態スナップショット(`raw_state`)
 //!
 //! `soft_body`/`grid_fluid`/`grid_fluid_3d`/`conduction_rod`/`sph`/`quantum_1d`/
 //! `quantum_2d`/`brownian`/`kinetic_gas`/`ising`/`fdtd` の11ドメインは、
-//! **スキーマが「構築レシピ」**である——SPHなら粒子を敷き詰める直方体ブロック、
-//! 量子なら波束の中心と分散、イジングならPRNGシードからの初期化、というように
-//! **$t=0$ の作り方**を書く形になっている。人が手で書くシーンとしてはこれが正しい
-//! (粒子1万個の座標を JSON へ書き下すことはできない)が、その代償として
-//! **時間発展した`World`をこのスキーマへ書き戻すことが原理的にできない**。
-//! `sim_world::export::to_scenario`(`World → Scenario`の逆写像)がこの11ドメインを
-//! 長らく`None`のまま落としていたのはこのためである。
+//! **状態スナップショットだけで書く**。`raw_state`は必須(`Option`ではない)で、
+//! 構築レシピ形式のフィールド(`blocks`・`packet`・`rope`・`initial`・`solids`・
+//! `initial_velocity`・`particle_count`等)は**スキーマから無くなっている**。
 //!
-//! そこで各`*ScenarioJson`へ **`raw_state`(生状態スナップショット)という
-//! 逃がし口**を1つずつ足す。規約は3つ:
+//! ## なぜ二重表現を畳んだか
 //!
-//! 1. `#[serde(default)] Option<...>` なので**純粋に加算的**——既存の
-//!    `scenes/*.json` は1文字も変えずにこれまでどおり構築レシピ経路で読める
-//!    (`raw_state`が`None`のときの挙動は移行前とバイト単位で同一)。
-//! 2. `Some`のときは`raw_state`が**唯一の真**であり、構築レシピ側のフィールド
-//!    (`blocks`・`packet`・`initial`・`solids`・`density`等)は評価すらしない。
-//!    唯一の例外は格子寸法(`grid_fluid`の`nx`/`ny`/`h`、`fdtd`の`nx`/`ny`/`h`等)の
-//!    ような**スキーマ上必須のフィールド**で、これらは`Option`にできず必ず値がある
-//!    ため、そのまま読む(エクスポータは当然現在値を書く)。寸法まで`raw_state`側へ
-//!    持たせて完全に自己完結しているドメイン(`quantum_2d`の`nx`/`ny`、`ising`の`l`
-//!    など)はそちらを使う。いずれにせよ**レシピ由来の初期条件**
-//!    (`packet`・`blocks`・`initial`・`solids`・`initial_velocity`)は復元に
-//!    使わない——エクスポータが人が読むためのメタデータとして現在値を書くことは
-//!    あっても、真は`raw_state`である。
+//! 移行前はこの11ドメインが「構築レシピ」と`raw_state`の**両方**を持ち、
+//! `raw_state`があるときはレシピ側を評価しない、という優先順位で動いていた。
+//! レシピ側(SPHなら粒子を敷き詰める直方体ブロック、量子なら波束の中心と分散、
+//! イジングならPRNGシードからの初期化)は**$t=0$ の作り方**を書く形式で、
+//! 元々は「人が手でシーンを書くための便宜」として入っていた。
+//!
+//! しかしレシピは**時間発展した`World`を表現できない**(分散した波束はもはや
+//! ガウス型ではなく、拡散した粒子群に共通の初期位置は無い)。`raw_state`は
+//! まさにその穴を埋めるために足したものであり、**往復の忠実性という一番効く
+//! 用途ではレシピは常に劣る表現**だった。
+//!
+//! そして構築のほうは**`World`のRust API(`enable_*`)が本来の入口**である。
+//! レシピ構文を読んでいたのは`from_scenario`と、チェックイン済みの
+//! ギャラリーシーン(`scenes/*.json`)だけで、そのシーンを全件`raw_state`へ
+//! 移した時点でレシピ経路の**利用者が1つも残らなくなった**
+//! ——`sim-wasm`のスポーン・ドメイン有効化(`spawn_fluid_block`・
+//! `enable_grid_fluid_2d_domain`)も`World`を直接組み立てており、
+//! シーンJSONのレシピ構文は通らない。
+//!
+//! だから畳んだ。**シーンファイルは純粋なスナップショットである**——構築は
+//! Rust APIの仕事で、シーンJSONの仕事ではない。
+//!
+//! **払った代償(正直な記録)**: これで**新しいシーンを手書きのJSONから
+//! 起こすことはできなくなった**。$t=0$ のシーンを1本作るにも、Rust側で
+//! `World`を組んで`to_scenario`でエクスポートする必要がある
+//! (`scenes/*.json`の移行そのものがその手順で行われた)。
+//! しかも`sim-wasm`側にUIの構築口があるのは11ドメインのうち
+//! `grid_fluid`(`enable_grid_fluid_2d_domain`)と`sph`(`spawn_fluid_block`)の
+//! **2つだけ**で、残る9ドメイン(`soft_body`/`grid_fluid_3d`/`conduction_rod`/
+//! `quantum_1d`/`quantum_2d`/`brownian`/`kinetic_gas`/`ising`/`fdtd`)は
+//! エディタからも新規に置けない。**この移行が奪ったのはJSONレシピという
+//! 経路であって、UIの口はもともと無かった**——つまり穴が空いたわけではないが、
+//! 「UIがあるから手書き経路は不要」という単純な話でもない。
+//! これらのドメインに新規シーンを起こす口が要るなら、
+//! それはエディタ側にUIを足す作業であり、シーンJSONへレシピを戻す作業ではない。
+//!
+//! ## 規約
+//!
+//! 1. `raw_state`が**唯一の真**であり、必須である。欠けていればスキーマエラー。
+//! 2. `raw_state`の外に残るのは、**その配列を復号するのに要る構造パラメータだけ**
+//!    ——`grid_fluid`/`grid_fluid_3d`/`fdtd`の`nx`/`ny`/`nz`/`h`(平坦な配列の
+//!    どこで行が折り返すかが決まらないと読めない)と、`fdtd`の`pml`
+//!    (係数表8本を決定的に組み直すための2値、`PmlJson`のdoc参照)である。
+//!    これらは「初期状態の作り方」ではなく**データの形**なので、レシピではない。
+//!    寸法まで`raw_state`側が持っているドメイン(`quantum_2d`の`nx`/`ny`、
+//!    `ising`の`l`)は、`*ScenarioJson`が`raw_state`1本だけになる。
 //! 3. 内容は**その`state_hash`が覆う状態 + 以後のstepの決定論に効く設定**に限る。
 //!    毎stepの冒頭で必ず上書きされる派生キャッシュ(`GridFluid2D::last_pressure`、
 //!    `SphFluid`の近傍ハッシュ、`SphFluid::boundary_force`)は持たない——
 //!    復元後の最初のstepで同じ値が再計算されるので、決定論に影響しない。
+//!
+//! **残る歪み(正直な記録)**: 8ドメインの`*ScenarioJson`は`raw_state`という
+//! 単一フィールドだけを持つ**入れ物**になった(`"ising": {"raw_state": {...}}`)。
+//! 入れ子が1段無駄に見えるのは事実で、`*RawStateJson`のフィールドを
+//! `*ScenarioJson`へ直接インライン展開する選択もあった。そうしなかったのは、
+//! (1)11ドメインすべてが同じ形(`raw_state`を1つ読む)で揃うほうが
+//! `from_scenario`側が読みやすく、(2)`*RawStateJson`のdocに積み上がっている
+//! 「何を持ち何を持たないか・なぜか」の記録を型ごと保てるためである。
+//!
+//! ## 数値配列の符号化
+//!
+//! `*RawStateJson`の**可変長の数値配列**(`u`/`v`/`w`/`ez`/`psi_re`/`position`/
+//! `solid_cells`/`spins`等)は、JSONの数値配列ではなく
+//! **base64 + リトルエンディアン生バイトの文字列**である(`crate::raw_bytes`、
+//! 設計 docs/20-integration/04-world-api.md §3)。理由と実測は`raw_bytes`の
+//! モジュールdocに書いてある——要点は**f64の往復がJSONの10進テキストと
+//! パーサの丸め挙動に依存しなくなる**こと(厳密性が構成上保証される)で、
+//! サイズはおおむね副産物である。
+//!
+//! 固定長の配列(`[f64; 3]`の`gravity`・`external_force`・`box_size`など)は
+//! **従来どおりJSONの数値配列**にしてある。要素数が3つ程度では生バイト化の
+//! 利点が無く、人が読めるほうが勝つ。
+//!
+//! 符号化は**非有限値を拒否する版**(`encode_*_finite`)を通す。復号の失敗は
+//! `SceneError::InvalidValue`へ、どのドメインのどのフィールドかを添えて写す。
+//!
+//! **`serde_json`の`float_roundtrip`は今も要る**。`raw_bytes`のモジュールdocは
+//! 「全ドメインの移行が終わった時点で外せる」と書いているが、これは
+//! **11ドメインの`raw_state`についてだけ正しい**——`bodies[].position`・
+//! `materials`・`thermal`・`circuit`など、シーンJSONの他の大半は今も10進の
+//! f64であり、D24車のsave→load→60stepがハッシュ一致する
+//! (`tests/editor_acceptance.rs`)のはそのパーサ挙動に依存している。
 //!
 //! `World::append_scenario_bodies`は`materials`/`bodies`セクションのみを
 //! 実行中のワールドへ追加する処理として`from_scenario`から切り出したもの
@@ -139,7 +199,7 @@ pub struct Scenario {
     /// `#[serde(default)]`の`Option`なので純粋に加算的——省略時(既存の
     /// `scenes/*.json`すべて)は`seed`から新規に初期化する移行前の挙動になる。
     /// `Some`のときは`seed`より優先される(`seed`は人が読むためのメタデータとして
-    /// 残る、`raw_state`と構築レシピの関係と同じ規約)。
+    /// 残る)。
     #[serde(default)]
     pub rng_state: Option<RngStateJson>,
     pub world: WorldScenarioOptions,
@@ -952,10 +1012,19 @@ impl ConvectionModeJson {
 /// # 結合の`raw_state`(内部基準値の生状態スナップショット)
 ///
 /// `PistonGas`/`SphRigid`/`PhaseChangeMorph`/`BrownianForce`の4変種は
-/// `raw_state`を持つ。ドメインの`raw_state`(モジュールdoc参照)と**全く同じ規約**で、
-/// `#[serde(default)]`の`Option`(純粋に加算的)・`Some`のときはそちらが真・
-/// レシピ側のフィールド(`initial_volume`・`initial_enthalpy`・`seed`/`stream`・
-/// `boundary_points`)は人が読むためのメタデータになる。
+/// `raw_state`を持つ。`#[serde(default)]`の`Option`(純粋に加算的)で、
+/// `Some`のときはそちらが真・構成側のフィールド(`initial_volume`・
+/// `initial_enthalpy`・`seed`/`stream`・`boundary_points`)は人が読むための
+/// メタデータになる。
+///
+/// **11ドメインの`raw_state`とは規約が違う**(移行前は同じだった)。ドメイン側は
+/// 構築レシピを撤去して`raw_state`を必須にしたが(モジュールdoc §「状態
+/// スナップショット(`raw_state`)」)、**結合側は`Option`のまま**である。
+/// 理由は、結合の構成側フィールドが「初期状態の作り方」ではなく
+/// **結合そのものの定義**(どのボディとどのドメインを繋ぐか、断面積、シード)で
+/// あって、`raw_state`が無くても結合は意味を持つからである
+/// ——ドメインのレシピのように「`raw_state`があれば無用になる」関係にない。
+/// 結合側の一本化は別途検討する余地があるが、この移行の対象外とした。
 ///
 /// **なぜ要ったか**: これら4種は生成時に取り込んだ**基準値**を非公開で持つ——
 /// ピストンの変位ゼロ点・境界粒子の確保区間・融解のエンタルピー・自前RNGの
@@ -1378,39 +1447,11 @@ pub struct AstroBodyJson {
     pub mass: f64,
 }
 
-/// `Scenario::soft_body`(`sim_mechanics::SoftBody`、**増分Hで追加**)。
-///
-/// **縮約**: 粒子と距離拘束を直接並べるほか、D13(ロープ)向けに
-/// `rope`ヘルパ相当の生成を`rope`フィールドで書ける近道を用意する
-/// (20分割のロープを粒子21個+拘束20本として手で書くのは現実的でないため)。
-/// `rope`と`particles`は排他ではなく、`rope`を展開した後に`particles`を足す。
+/// `Scenario::soft_body`(`sim_mechanics::SoftBody`)。
+/// 状態スナップショットのみ(モジュールdoc §「状態スナップショット(`raw_state`)」)。
 #[derive(Deserialize, Serialize)]
 pub struct SoftBodyScenarioJson {
-    /// 直線ロープの生成(`sim_mechanics::rope`と同じ引数)。
-    #[serde(default)]
-    pub rope: Option<RopeJson>,
-    #[serde(default)]
-    pub particles: Vec<SoftParticleJson>,
-    #[serde(default)]
-    pub constraints: Vec<SoftConstraintJson>,
-    /// 追加でピン留めする粒子のインデックス(`rope`の端点固定などに使う)。
-    #[serde(default)]
-    pub pinned: Vec<usize>,
-    /// 自動ステップ用の積分設定(`SoftBody`の同名フィールド、未指定なら既定値)。
-    #[serde(default)]
-    pub gravity: Option<[f64; 3]>,
-    #[serde(default)]
-    pub substeps: Option<u32>,
-    #[serde(default)]
-    pub iterations: Option<u32>,
-    #[serde(default)]
-    pub damping: Option<f64>,
-    /// **生状態スナップショット**(モジュールdoc「生状態スナップショット(`raw_state`)」
-    /// 参照)。`Some`ならこのフィールドだけで
-    /// `SoftBody`を丸ごと復元し、上の構築レシピ(`rope`/`particles`/`constraints`/
-    /// `pinned`)は一切評価しない。
-    #[serde(default)]
-    pub raw_state: Option<SoftBodyRawStateJson>,
+    pub raw_state: SoftBodyRawStateJson,
 }
 
 /// `SoftBodyScenarioJson::raw_state`(`sim_mechanics::SoftBody`の全状態)。
@@ -1464,27 +1505,7 @@ pub struct SoftVolumeConstraintJson {
     pub compliance: f64,
 }
 
-/// `SoftBodyScenarioJson::rope`(`sim_mechanics::rope`ヘルパの引数)。
-#[derive(Deserialize, Serialize)]
-pub struct RopeJson {
-    pub from: [f64; 3],
-    pub to: [f64; 3],
-    pub segments: usize,
-    pub mass_per_particle: f64,
-    pub total_rest_length: f64,
-    #[serde(default)]
-    pub compliance: f64,
-}
-
-/// `SoftBodyScenarioJson::particles`の1件。`mass`が0以下ならピン留め
-/// (`SoftBody::add_particle`の規約そのまま)。
-#[derive(Deserialize, Serialize)]
-pub struct SoftParticleJson {
-    pub position: [f64; 3],
-    pub mass: f64,
-}
-
-/// `SoftBodyScenarioJson::constraints`の1件。
+/// `SoftBodyRawStateJson::constraints`の1件。
 #[derive(Deserialize, Serialize)]
 pub struct SoftConstraintJson {
     pub i: usize,
@@ -1505,49 +1526,23 @@ pub struct MeltSpawnJson {
     pub seed: u64,
 }
 
-/// `Scenario::grid_fluid`(`sim_fluid::GridFluid2D`、**増分Hで追加**)。
+/// `Scenario::grid_fluid`(`sim_fluid::GridFluid2D`)。
+/// 状態スナップショットのみ(モジュールdoc §「状態スナップショット(`raw_state`)」)。
+///
+/// `nx`/`ny`/`h`は**格子の寸法**であって構築レシピではない——`raw_state`の
+/// 平坦な配列はこれが無いと復号できない(長さ`nx*ny`のどこで行が折り返すかが
+/// 決まらない)。係数・境界条件・固体は`raw_state`が持つ。
 #[derive(Deserialize, Serialize)]
 pub struct GridFluidScenarioJson {
     pub nx: usize,
     pub ny: usize,
     pub h: f64,
-    /// `Solver::step`が使う既定密度。未指定なら`GridFluid2D::new`の既定。
-    #[serde(default)]
-    pub density: Option<f64>,
-    #[serde(default)]
-    pub kinematic_viscosity: Option<f64>,
-    /// 格子全体を一様な初期速度で満たす `[u, v]`(**増分Hで追加**)。
-    ///
-    /// **なぜ要ったか**: `GridFluid2D`は周期境界で、流入境界を設定する手段が無い。
-    /// 静止状態から始めると外力の無いD14(カルマン渦列)は**何も起きない**
-    /// (実測で平均鉛直速度が 0 のまま動かないことを確認した)。一様流で満たせば
-    /// 周期境界がそのまま流れを循環させ、障害物まわりの擾乱が観測できる。
-    /// **縮約**: 本物の流入・流出境界ではないので、下流の後流が上流へ回り込む。
-    /// レイノルズ数の定量的な検証(F11のSt数)は`sim-fluid`側の専用テストが担い、
-    /// このシーンが示すのは「障害物が一様流を実際に乱すこと」までである。
-    #[serde(default)]
-    pub initial_velocity: Option<[f64; 2]>,
-    /// 境界条件(**群9で公開**、群7で`GridFluid2D`側には入っていたがシーンJSONから
-    /// 選べなかった)。`"periodic"`(既定)か `{"channel": {"inflow_speed": 1.0}}`。
-    /// `Channel`にすると `initial_velocity` を書かなくても流入面から流れが入ってくる。
-    #[serde(default)]
-    pub boundary: Option<GridBoundaryJson>,
-    /// 渦度強化 $\varepsilon_{conf}$(設計§4.5、**群9で公開**)。
-    /// **非物理的な補償項**なので、0以外にすると近似バッジが出る。既定 0(検証モード)。
-    #[serde(default)]
-    pub vorticity_confinement_epsilon: Option<f64>,
-    /// 任意形状の固体境界(**群9で公開**)。複数置ける。
-    #[serde(default)]
-    pub solids: Vec<GridSolidJson>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら速度場・固体マスクを
-    /// そのまま復元し、`initial_velocity`/`solids`は評価しない。
-    #[serde(default)]
-    pub raw_state: Option<GridFluidRawStateJson>,
+    pub raw_state: GridFluidRawStateJson,
 }
 
 /// `GridFluidScenarioJson::raw_state`(`sim_fluid::GridFluid2D`の全状態)。
 ///
-/// `solids`(構築レシピ)が「矩形と円しか書けない」のに対し、こちらは
+/// 撤去した`solids`(構築レシピ)が「矩形と円しか書けない」のに対し、こちらは
 /// セル種別を1セルずつ持つので**`set_solid_cells`で敷いた任意形状も戻せる**
 /// (`GridFluid2D::cell_type`のdoc参照)。`last_pressure`は毎stepの投影で
 /// 上書きされる派生キャッシュなので持たない(`GridFluid2D`側のdocが明記している
@@ -1576,8 +1571,7 @@ pub struct GridFluidRawStateJson {
     /// 固体セルの速度(長さ`nx*ny`、Fluidセルではゼロ)。
     /// `raw_bytes::encode_vec3_le_base64`。`solid_cells`が空なら空。
     pub solid_velocity: String,
-    /// 以下は`GridFluid2D`の係数・境界条件。`raw_state`だけで完結させるため
-    /// (レシピ側の同名フィールドは`raw_state`があるとき読まれない)ここにも持つ。
+    /// 以下は`GridFluid2D`の係数・境界条件。
     pub density: f64,
     pub kinematic_viscosity: f64,
     pub vorticity_confinement_epsilon: f64,
@@ -1585,7 +1579,8 @@ pub struct GridFluidRawStateJson {
     pub boundary: Option<GridBoundaryJson>,
 }
 
-/// `Scenario::grid_fluid_3d`(`sim_fluid::GridFluid3D`、**群9で追加**)。
+/// `Scenario::grid_fluid_3d`(`sim_fluid::GridFluid3D`)。
+/// 状態スナップショットのみ(2D版`GridFluidScenarioJson`と同じ形)。
 ///
 /// **解像度に注意**: 3Dはマルチグリッド前処理PCG(群10)でも 64³ で1ステップ約 207 ms
 /// かかる(`sim-fluid/examples/grid_fluid3d_bench.rs` の実測)。ギャラリーのシーンは
@@ -1596,26 +1591,7 @@ pub struct GridFluid3DScenarioJson {
     pub ny: usize,
     pub nz: usize,
     pub h: f64,
-    #[serde(default)]
-    pub density: Option<f64>,
-    #[serde(default)]
-    pub kinematic_viscosity: Option<f64>,
-    /// `"periodic"`(既定)か `{"channel": {"inflow_speed": 1.0}}`。
-    #[serde(default)]
-    pub boundary: Option<GridBoundaryJson>,
-    /// 渦度強化 $\varepsilon_{conf}$(**非物理的な補償項**、0以外にすると近似バッジが出る)。
-    #[serde(default)]
-    pub vorticity_confinement_epsilon: Option<f64>,
-    /// 任意形状の固体境界。
-    #[serde(default)]
-    pub solids: Vec<GridSolid3DJson>,
-    /// 煙(受動スカラー、設計§3 `smoke_density`)の初期の塊。
-    #[serde(default)]
-    pub smoke_blocks: Vec<SmokeBlockJson>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら`solids`/
-    /// `smoke_blocks`は評価しない。
-    #[serde(default)]
-    pub raw_state: Option<GridFluid3DRawStateJson>,
+    pub raw_state: GridFluid3DRawStateJson,
 }
 
 /// `GridFluid3DScenarioJson::raw_state`(`sim_fluid::GridFluid3D`の全状態)。
@@ -1649,54 +1625,7 @@ pub struct GridFluid3DRawStateJson {
     pub boundary: Option<GridBoundaryJson>,
 }
 
-/// `GridFluid3DScenarioJson::solids` の1要素(**群9で追加**)。
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GridSolid3DJson {
-    Box {
-        center: [f64; 3],
-        half_extents: [f64; 3],
-    },
-    Sphere {
-        center: [f64; 3],
-        radius: f64,
-    },
-}
-
-impl GridSolid3DJson {
-    fn contains(&self, x: f64, y: f64, z: f64) -> bool {
-        match self {
-            GridSolid3DJson::Box {
-                center,
-                half_extents,
-            } => {
-                (x - center[0]).abs() < half_extents[0]
-                    && (y - center[1]).abs() < half_extents[1]
-                    && (z - center[2]).abs() < half_extents[2]
-            }
-            GridSolid3DJson::Sphere { center, radius } => {
-                let (dx, dy, dz) = (x - center[0], y - center[1], z - center[2]);
-                dx * dx + dy * dy + dz * dz < radius * radius
-            }
-        }
-    }
-}
-
-/// `GridFluid3DScenarioJson::smoke_blocks` の1要素(**群9で追加**)。
-/// `min`(セル添字)から各軸`counts`個ぶんのセルへ `density` を書き込む。
-#[derive(Deserialize, Serialize)]
-pub struct SmokeBlockJson {
-    pub min: [usize; 3],
-    pub counts: [usize; 3],
-    #[serde(default = "one")]
-    pub density: f64,
-}
-
-fn one() -> f64 {
-    1.0
-}
-
-/// `GridFluidScenarioJson::boundary`(**群9で追加**)。
+/// `GridFluid{,3D}RawStateJson::boundary`(**群9で追加**)。
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GridBoundaryJson {
@@ -1704,62 +1633,14 @@ pub enum GridBoundaryJson {
     Channel { inflow_speed: f64 },
 }
 
-/// `GridFluidScenarioJson::solids` の1要素(**群9で追加**)。
-/// `GridFluid2D::set_solid_cells` はどんな形でも受けられるので、ここは
-/// シーンJSONで書きたい代表的な形だけを列挙する(必要になったら足せばよい)。
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GridSolidJson {
-    Box {
-        center: [f64; 2],
-        half_extents: [f64; 2],
-    },
-    Circle {
-        center: [f64; 2],
-        radius: f64,
-    },
-}
-
-impl GridSolidJson {
-    fn contains(&self, x: f64, y: f64) -> bool {
-        match self {
-            GridSolidJson::Box {
-                center,
-                half_extents,
-            } => (x - center[0]).abs() < half_extents[0] && (y - center[1]).abs() < half_extents[1],
-            GridSolidJson::Circle { center, radius } => {
-                let (dx, dy) = (x - center[0], y - center[1]);
-                dx * dx + dy * dy < radius * radius
-            }
-        }
-    }
-}
-
-/// `Scenario::conduction_rod`(`sim_thermal::ConductionRod1D`、**増分Hで追加**)。
+/// `Scenario::conduction_rod`(`sim_thermal::ConductionRod1D`)。
+/// 状態スナップショットのみ(モジュールdoc §「状態スナップショット(`raw_state`)」)。
 ///
-/// **縮約**: `thermal_diffusivity`は直接指定するほか、`material`(材質名)を
-/// 書けば`MaterialDb`から $\alpha = k/(\rho c_p)$ を計算する。D16(熱伝導レース)は
-/// 「銅・鋼・木材の $\alpha$ の比が立ち上がり順を決める」デモなので、
-/// 材質名で書けることがそのままデモの主旨になる。
+/// 節点数・棒の長さ・両端のDirichlet境界温度はいずれも`raw_state.temperature`と
+/// `raw_state.dx`から出る(境界は温度分布の両端そのもの)ので、ここには何も要らない。
 #[derive(Deserialize, Serialize)]
 pub struct ConductionRodScenarioJson {
-    pub node_count: usize,
-    pub length: f64,
-    pub initial_temperature: f64,
-    #[serde(default)]
-    pub thermal_diffusivity: Option<f64>,
-    #[serde(default)]
-    pub material: Option<String>,
-    /// 両端のDirichlet境界温度(`set_boundary_temperatures`)。
-    #[serde(default)]
-    pub boundary_left: Option<f64>,
-    #[serde(default)]
-    pub boundary_right: Option<f64>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら温度分布をそのまま
-    /// 復元し、`node_count`/`length`/`initial_temperature`/`thermal_diffusivity`/
-    /// `material`/`boundary_*`は評価しない(材質名からαを引く経路も通らない)。
-    #[serde(default)]
-    pub raw_state: Option<ConductionRodRawStateJson>,
+    pub raw_state: ConductionRodRawStateJson,
 }
 
 /// `ConductionRodScenarioJson::raw_state`(`sim_thermal::ConductionRod1D`の全状態)。
@@ -1784,31 +1665,13 @@ pub struct ConductionRodRawStateJson {
     pub cross_section_area: f64,
 }
 
-/// `Scenario::sph`(`sim_fluid::SphFluid`、**増分Hで追加**)。
+/// `Scenario::sph`(`sim_fluid::SphFluid`)。
+/// 状態スナップショットのみ(モジュールdoc §「状態スナップショット(`raw_state`)」)。
 ///
-/// **縮約**: 粒子を1つずつ並べるのは非現実的なので、直方体ブロックを格子状に
-/// 敷き詰める`blocks`と、境界粒子を敷く`boundary_blocks`で書く。
+/// 平滑化長・静止密度・音速・粒子質量はすべて`raw_state`が持つ(`h`/`rho0`/`c_s`/`mass`)。
 #[derive(Deserialize, Serialize)]
 pub struct SphScenarioJson {
-    /// 平滑化長。
-    pub h: f64,
-    /// 静止密度。
-    pub rest_density: f64,
-    /// 数値音速。
-    pub sound_speed: f64,
-    /// 1粒子の質量。**未指定だと`SphFluid`の既定のままになり密度が静止密度から
-    /// 大きく外れる**ので、通常は `rest_density * spacing^3` を明示する
-    /// (`sim-fluid`のテスト群がすべてそうしている)。
-    #[serde(default)]
-    pub particle_mass: Option<f64>,
-    #[serde(default)]
-    pub blocks: Vec<SphBlockJson>,
-    #[serde(default)]
-    pub boundary_blocks: Vec<SphBlockJson>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら粒子を1つずつ
-    /// 復元し、`blocks`/`boundary_blocks`は評価しない。
-    #[serde(default)]
-    pub raw_state: Option<SphRawStateJson>,
+    pub raw_state: SphRawStateJson,
 }
 
 /// `SphScenarioJson::raw_state`(`sim_fluid::SphFluid`の全状態)。
@@ -1843,17 +1706,6 @@ pub struct SphRawStateJson {
     pub boundary_position: String,
 }
 
-/// `SphScenarioJson::blocks`の1件。`min`から`spacing`刻みで各軸`counts`個の
-/// 粒子を格子状に置く。
-#[derive(Deserialize, Serialize)]
-pub struct SphBlockJson {
-    pub min: [f64; 3],
-    pub counts: [usize; 3],
-    pub spacing: f64,
-    #[serde(default)]
-    pub velocity: [f64; 3],
-}
-
 /// `Scenario::gas`(`sim_thermal::GasCompartment`、**増分H3で追加**)。
 ///
 /// **注意(縮約)**: `GasCompartment`は`Solver`を実装しておらず`World::step()`は
@@ -1875,24 +1727,15 @@ pub struct GasScenarioJson {
     pub molar_mass: Option<f64>,
 }
 
-/// `Scenario::quantum_1d`(**群3で追加**)。1D TDSE(原子単位 $\hbar=m_e=1$)。
+/// `Scenario::quantum_1d`。1D TDSE(原子単位 $\hbar=m_e=1$)。
+/// 状態スナップショットのみ(モジュールdoc §「状態スナップショット(`raw_state`)」)。
 ///
-/// **ポテンシャルは「よく使う3形」を列挙する**——任意関数を JSON で表現する仕組み
-/// (数式パーサ)を作るのは大がかりで、D27(矩形障壁のトンネル)・D29(調和振動子)が
-/// 要るのはこの3形で足りる。足りなくなったら形を足す。
+/// **ポテンシャルを「よく使う3形」の列挙で書く構築レシピは無くなった**。任意の
+/// ポテンシャルを載せた`World`は列挙では表せず、`raw_state.v`が格子点ごとの値を
+/// そのまま持つほうが表現力で上回る(矩形障壁も調和振動子もその特別な場合である)。
 #[derive(Deserialize, Serialize)]
 pub struct Quantum1dScenarioJson {
-    /// 格子点数(2の冪、`sim_math::fft`の制約)。
-    pub n: usize,
-    pub dx: f64,
-    /// 初期ガウス波束 $\exp[-(x-x_0)^2/(4\sigma^2)+ik_0x]$。
-    pub packet: GaussianPacketJson,
-    #[serde(default)]
-    pub potential: Option<Potential1dJson>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら波動関数と
-    /// ポテンシャルをそのまま復元し、`packet`/`potential`は評価しない。
-    #[serde(default)]
-    pub raw_state: Option<Quantum1dRawStateJson>,
+    pub raw_state: Quantum1dRawStateJson,
 }
 
 /// `Quantum1dScenarioJson::raw_state`(`sim_quantum::WaveFunction1D`の全状態)。
@@ -1902,8 +1745,9 @@ pub struct Quantum1dScenarioJson {
 /// かつ複素数のJSON表現を勝手に決めるとスキーマがぶれる。
 /// 長さは両方とも格子点数`n`に一致していなければならない。
 ///
-/// `v`(ポテンシャル)も持つ:`Potential1dJson`は矩形障壁・調和振動子・井戸の
-/// 3形しか書けないので、任意のポテンシャルを載せた`World`はレシピ側では表せない。
+/// `v`(ポテンシャル)も持つ。撤去した構築レシピは矩形障壁・調和振動子・井戸の
+/// 3形しか書けなかったので、格子点ごとの値を持つこちらのほうが表現力で上回る
+/// ——任意のポテンシャルを載せた`World`も往復する。
 #[derive(Deserialize, Serialize)]
 pub struct Quantum1dRawStateJson {
     /// 波動関数の実部(長さ`n`)。`raw_bytes::encode_f64_le_base64_finite`
@@ -1916,39 +1760,11 @@ pub struct Quantum1dRawStateJson {
     pub dx: f64,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct GaussianPacketJson {
-    pub x0: f64,
-    pub sigma: f64,
-    pub k0: f64,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Potential1dJson {
-    /// 矩形障壁(D27 トンネル効果)。`[x_min, x_max]` の区間で高さ `height`。
-    Barrier { x_min: f64, x_max: f64, height: f64 },
-    /// 調和振動子 $V=\frac12 m\omega^2(x-x_c)^2$(原子単位 $m=1$、D29)。
-    Harmonic { center: f64, omega: f64 },
-    /// 無限井戸(区間外を`height`で塞ぐ)。
-    Well { x_min: f64, x_max: f64, height: f64 },
-}
-
-/// `Scenario::quantum_2d`(**群3で追加**)。D28(二重スリット)。
+/// `Scenario::quantum_2d`。D28(二重スリット)。
+/// 状態スナップショットのみ(1D版と同じ理由、`Quantum1dScenarioJson`のdoc参照)。
 #[derive(Deserialize, Serialize)]
 pub struct Quantum2dScenarioJson {
-    pub nx: usize,
-    pub ny: usize,
-    pub dx: f64,
-    pub dy: f64,
-    pub packet: GaussianPacket2dJson,
-    /// 二重スリットの壁(未指定なら自由空間)。
-    #[serde(default)]
-    pub double_slit: Option<DoubleSlitJson>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら`packet`/
-    /// `double_slit`は評価しない。
-    #[serde(default)]
-    pub raw_state: Option<Quantum2dRawStateJson>,
+    pub raw_state: Quantum2dRawStateJson,
 }
 
 /// `Quantum2dScenarioJson::raw_state`(`sim_quantum::WaveFunction2D`の全状態)。
@@ -1969,51 +1785,15 @@ pub struct Quantum2dRawStateJson {
     pub dy: f64,
 }
 
-#[derive(Deserialize, Serialize)]
-pub struct GaussianPacket2dJson {
-    pub x0: f64,
-    pub y0: f64,
-    pub sigma_x: f64,
-    pub sigma_y: f64,
-    pub k0: f64,
-}
-
-/// 二重スリット壁(x=`wall_x` に厚み `thickness` の高いポテンシャル壁を立て、
-/// `slit_centers` の各位置に幅 `slit_width` の開口を空ける)。
-#[derive(Deserialize, Serialize)]
-pub struct DoubleSlitJson {
-    pub wall_x: f64,
-    pub thickness: f64,
-    pub height: f64,
-    pub slit_centers: Vec<f64>,
-    pub slit_width: f64,
-}
-
-/// `Scenario::brownian`(**群3で追加**)。D25(ブラウン運動)。
+/// `Scenario::brownian`。D25(ブラウン運動)。
+/// 状態スナップショットのみ(モジュールdoc §「状態スナップショット(`raw_state`)」)。
 ///
-/// **これまで D25 は `format!` で300粒子ぶんの剛体を動的生成する
-/// インラインシーンだった**(静的ファイル化に不向きとして `scenes/` へ
-/// 切り出さずインラインのまま残していた)。粒子集合を「個数+分布」として
-/// 宣言できるようにすれば静的ファイルで書けるので、その形にする。
+/// 粒子数は`raw_state.position`の長さそのもので、質量・γ・$k_BT$・外力も
+/// `raw_state`が持つ。「個数+共通の初期位置」で宣言する構築レシピは無くなった
+/// ——拡散した粒子群に共通の初期位置は存在しない。
 #[derive(Deserialize, Serialize)]
 pub struct BrownianScenarioJson {
-    pub particle_count: usize,
-    /// 粒子質量 [kg]。
-    pub mass: f64,
-    /// ストークス抵抗係数 γ [kg/s]。
-    pub gamma: f64,
-    /// $k_BT$ [J]。
-    pub kb_t: f64,
-    /// 一様外力 [N](重力・浮力の正味など)。未指定なら 0(自由拡散)。
-    #[serde(default)]
-    pub external_force: Option<[f64; 3]>,
-    /// 初期位置。未指定なら全粒子を原点に置く(自由拡散の MSD 測定の標準設定)。
-    #[serde(default)]
-    pub initial_position: Option<[f64; 3]>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら
-    /// `particle_count`/`initial_position`は評価しない。
-    #[serde(default)]
-    pub raw_state: Option<BrownianRawStateJson>,
+    pub raw_state: BrownianRawStateJson,
 }
 
 /// `BrownianScenarioJson::raw_state`(`sim_statistical::BrownianParticleSet`の全状態)。
@@ -2034,21 +1814,15 @@ pub struct BrownianRawStateJson {
     pub external_force: [f64; 3],
 }
 
-/// `Scenario::kinetic_gas`(**群3で追加**)。D30(気体分子の箱)。
+/// `Scenario::kinetic_gas`。D30(気体分子の箱)。
+/// 状態スナップショットのみ(モジュールdoc §「状態スナップショット(`raw_state`)」)。
+///
+/// 「粒子数+マクスウェル分布のサンプリング温度」からPRNGで配置を作る構築レシピは
+/// 無くなった。温度は`GasSim::temperature()`が速度から**測る**量であって
+/// 状態ではないので、`raw_state`には入らない(測れば出る)。
 #[derive(Deserialize, Serialize)]
 pub struct KineticGasScenarioJson {
-    pub particle_count: usize,
-    /// 分子質量 [kg]。
-    pub mass: f64,
-    /// 剛体球半径 [m]。
-    pub radius: f64,
-    pub box_size: [f64; 3],
-    /// 初期速度をサンプルする温度 [K](マクスウェル分布)。
-    pub temperature: f64,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら
-    /// `particle_count`/`temperature`は評価しない(PRNGからの配置生成も行わない)。
-    #[serde(default)]
-    pub raw_state: Option<KineticGasRawStateJson>,
+    pub raw_state: KineticGasRawStateJson,
 }
 
 /// `KineticGasScenarioJson::raw_state`(`sim_statistical::GasSim`の全状態)。
@@ -2074,25 +1848,15 @@ pub struct KineticGasRawStateJson {
     pub collision_count: u64,
 }
 
-/// `Scenario::ising`(**群3で追加**)。D31(イジング模型の相転移)。
+/// `Scenario::ising`。D31(イジング模型の相転移)。
+/// 状態スナップショットのみ(モジュールdoc §「状態スナップショット(`raw_state`)」)。
+///
+/// 格子の一辺・J・温度・更新回数・Wolffの有無はすべて`raw_state`が持つ。
+/// PRNGシードから全スピンをランダム初期化する構築レシピは無くなった
+/// ——平衡化が進んだ配置はシードから再現できない。
 #[derive(Deserialize, Serialize)]
 pub struct IsingScenarioJson {
-    /// 格子の一辺 L(全 L×L スピン)。
-    pub l: usize,
-    /// 交換相互作用 J。
-    pub j_coupling: f64,
-    /// 温度 $k_BT/J$ の単位。臨界点は $T_c = 2/\ln(1+\sqrt2) \approx 2.269$。
-    pub temperature: f64,
-    /// 1 step あたりの更新回数(未指定なら1)。
-    #[serde(default)]
-    pub updates_per_step: Option<u32>,
-    /// Wolff クラスタ法を使うか(未指定なら false = メトロポリス法)。
-    #[serde(default)]
-    pub use_wolff: Option<bool>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら`l`は評価せず
-    /// (`spins`の長さから決まる)、PRNGでのランダム初期化も行わない。
-    #[serde(default)]
-    pub raw_state: Option<IsingRawStateJson>,
+    pub raw_state: IsingRawStateJson,
 }
 
 /// `IsingScenarioJson::raw_state`(`sim_statistical::IsingSim`の全状態)。
@@ -2110,36 +1874,31 @@ pub struct IsingRawStateJson {
     pub use_wolff: bool,
 }
 
-/// `Scenario::fdtd`(**群3で追加**)。D32(電磁波の伝播)。
+/// `Scenario::fdtd`。D32(電磁波の伝播)。
+/// 状態スナップショット + 格子寸法 + PML構成(モジュールdoc
+/// §「状態スナップショット(`raw_state`)」)。
+///
+/// `nx`/`ny`/`h`は**格子の寸法**であって構築レシピではない(`raw_state`の平坦な
+/// 配列はこれが無いと復号できない)。`courant`は`dt`を作るためだけの量で、
+/// `raw_state.dt`が実値を持つので落とした。
 #[derive(Deserialize, Serialize)]
 pub struct FdtdScenarioJson {
     pub nx: usize,
     pub ny: usize,
     /// 格子間隔 h(正規化単位、$c=1$)。
     pub h: f64,
-    /// Courant 数 $c\Delta t/h$(2D の上限は $1/\sqrt2$、既定 0.5)。
-    #[serde(default)]
-    pub courant: Option<f64>,
-    /// 初期条件。未指定なら全ゼロ(何も起きない)。
-    #[serde(default)]
-    pub initial: Option<FdtdInitialJson>,
-    /// **PML吸収境界**(`sim_em::FdtdSim2D::with_pml`)。未指定ならPEC境界のみ
-    /// (移行前の挙動そのまま——それまでシーンJSONにPMLを構成する口が無く、
-    /// `from_scenario`が作るFDTDは常に`pml: None`だった)。
+    /// **PML吸収境界**(`sim_em::FdtdSim2D::with_pml`)。未指定ならPEC境界のみ。
     ///
     /// **PECのままだと箱の壁で波が全反射する**ので、開放空間(点源から外へ
     /// 広がる波)を書きたいシーンはこれを指定する。
     #[serde(default)]
     pub pml: Option<PmlJson>,
-    /// **生状態スナップショット**(モジュールdoc参照)。`Some`なら`initial`は
-    /// 評価しない。
-    #[serde(default)]
-    pub raw_state: Option<FdtdRawStateJson>,
+    pub raw_state: FdtdRawStateJson,
 }
 
 /// `FdtdScenarioJson::pml`(`sim_em::FdtdSim2D::with_pml`の引数)。
 ///
-/// **これは構築レシピ側であって`raw_state`ではない**。PMLの係数表8本は
+/// **これは`raw_state`ではなく構成パラメータである**。PMLの係数表8本は
 /// `(nx, ny, h, dt, layers, target_reflection)`の**純粋な決定的関数**
 /// (`sim_em::fdtd::Pml::build`)なので、入力の2つを書けばビット単位で
 /// 組み直せる——巨大な係数配列をJSONへ書き下す必要は無い
@@ -2199,20 +1958,6 @@ pub struct FdtdPmlRawStateJson {
     pub ezx: String,
     /// $E_{zy}$(長さ`nx*ny`、同上)。
     pub ezy: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FdtdInitialJson {
-    /// 矩形空洞の固有モード $E_z = \sin(m\pi x/a)\sin(n\pi y/b)$(設計§7の検証設定)。
-    CavityMode { m: u32, n: u32, amplitude: f64 },
-    /// 単一格子点のガウス的な盛り上がり(点源からの波の広がりを見る)。
-    Pulse {
-        i: usize,
-        j: usize,
-        amplitude: f64,
-        width: f64,
-    },
 }
 
 /// `fdtd.pml`が指定されていればPML吸収境界を有効にする(`PmlJson`のdoc参照)。
@@ -2349,8 +2094,8 @@ pub(crate) fn gravity_field_to_json(field: sim_mechanics::GravityField) -> Gravi
     }
 }
 
-/// `GridBoundaryJson` → `sim_fluid::GridBoundary`。構築レシピ経路と
-/// 生状態スナップショット経路の両方から呼ばれるので関数へ括り出してある。
+/// `GridBoundaryJson` → `sim_fluid::GridBoundary`。2D格子と、下の3D版と対を
+/// なす変換なので関数へ括り出してある。
 fn grid_boundary_from_json(boundary: &GridBoundaryJson) -> sim_fluid::GridBoundary {
     match boundary {
         GridBoundaryJson::Periodic => sim_fluid::GridBoundary::Periodic,
@@ -2734,446 +2479,245 @@ impl World {
             world.enable_astro(sys);
         }
 
-        // **増分Hで追加した4ドメイン**。ここまで`World`は`enable_soft_body`/
-        // `enable_grid_fluid`/`enable_conduction_rod`/`enable_sph`を持ちながら、
-        // シーンJSONからは1つも構成できなかった(D13/D14/D15/D16/D23が
-        // 「ヘッドレスGreen・目視チェック保留」で滞留していた根本原因)。
+        // **状態スナップショットのみの11ドメイン**(モジュールdoc §「状態
+        // スナップショット(`raw_state`)」)。以下どのドメインも同じ形をしている:
+        // `raw_state`の配列を復号 → 長さを検証 → ドメインを直接組み立てる。
         if let Some(sb) = &scenario.soft_body {
-            if let Some(raw) = &sb.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。構築レシピ
-                // (`rope`/`particles`/`constraints`/`pinned`)は一切評価しない。
-                let position = decode_vec3_field("soft_body.raw_state.position", &raw.position)?;
-                let prev_position =
-                    decode_vec3_field("soft_body.raw_state.prev_position", &raw.prev_position)?;
-                let velocity = decode_vec3_field("soft_body.raw_state.velocity", &raw.velocity)?;
-                let inv_mass = decode_f64_field("soft_body.raw_state.inv_mass", &raw.inv_mass)?;
-                let n = position.len();
-                if prev_position.len() != n || velocity.len() != n || inv_mass.len() != n {
-                    return Err(SceneError::InvalidValue(format!(
-                        "soft_body.raw_state: position/prev_position/velocity/inv_mass の長さが\
-                         揃っていない ({n}/{}/{}/{})",
-                        prev_position.len(),
-                        velocity.len(),
-                        inv_mass.len()
-                    )));
-                }
-                let mut body = sim_mechanics::SoftBody::new();
-                body.position = position.into_iter().map(array_to_vec3).collect();
-                body.prev_position = prev_position.into_iter().map(array_to_vec3).collect();
-                body.velocity = velocity.into_iter().map(array_to_vec3).collect();
-                body.inv_mass = inv_mass;
-                for c in &raw.constraints {
-                    body.constraints
-                        .push(sim_mechanics::DistanceConstraint::new(
-                            c.i,
-                            c.j,
-                            c.rest,
-                            c.compliance,
-                        ));
-                }
-                for c in &raw.bending_constraints {
-                    body.bending_constraints
-                        .push(sim_mechanics::BendingConstraint::new(
-                            c.i,
-                            c.j,
-                            c.k,
-                            c.rest,
-                            c.compliance,
-                        ));
-                }
-                for c in &raw.volume_constraints {
-                    body.volume_constraints
-                        .push(sim_mechanics::VolumeConstraint::new(
-                            c.particles,
-                            c.rest_volume,
-                            c.compliance,
-                        ));
-                }
-                body.gravity = array_to_vec3(raw.gravity);
-                body.substeps = raw.substeps;
-                body.iterations = raw.iterations;
-                body.damping = raw.damping;
-                world.enable_soft_body(body);
-            } else {
-                let mut body = if let Some(r) = &sb.rope {
-                    sim_mechanics::rope(
-                        array_to_vec3(r.from),
-                        array_to_vec3(r.to),
-                        r.segments,
-                        r.mass_per_particle,
-                        r.total_rest_length,
-                        r.compliance,
-                    )
-                } else {
-                    sim_mechanics::SoftBody::new()
-                };
-                for particle in &sb.particles {
-                    body.add_particle(array_to_vec3(particle.position), particle.mass);
-                }
-                for c in &sb.constraints {
-                    body.add_distance_constraint(c.i, c.j, c.rest, c.compliance);
-                }
-                for &index in &sb.pinned {
-                    if index >= body.position.len() {
-                        return Err(SceneError::InvalidValue(format!(
-                            "soft_body.pinned references particle {index} but only {} exist",
-                            body.position.len()
-                        )));
-                    }
-                    body.pin(index);
-                }
-                if let Some(g) = sb.gravity {
-                    body.gravity = array_to_vec3(g);
-                }
-                if let Some(n) = sb.substeps {
-                    body.substeps = n;
-                }
-                if let Some(n) = sb.iterations {
-                    body.iterations = n;
-                }
-                if let Some(d) = sb.damping {
-                    body.damping = d;
-                }
-                world.enable_soft_body(body);
+            let raw = &sb.raw_state;
+            let position = decode_vec3_field("soft_body.raw_state.position", &raw.position)?;
+            let prev_position =
+                decode_vec3_field("soft_body.raw_state.prev_position", &raw.prev_position)?;
+            let velocity = decode_vec3_field("soft_body.raw_state.velocity", &raw.velocity)?;
+            let inv_mass = decode_f64_field("soft_body.raw_state.inv_mass", &raw.inv_mass)?;
+            let n = position.len();
+            if prev_position.len() != n || velocity.len() != n || inv_mass.len() != n {
+                return Err(SceneError::InvalidValue(format!(
+                    "soft_body.raw_state: position/prev_position/velocity/inv_mass の長さが\
+                     揃っていない ({n}/{}/{}/{})",
+                    prev_position.len(),
+                    velocity.len(),
+                    inv_mass.len()
+                )));
             }
+            let mut body = sim_mechanics::SoftBody::new();
+            body.position = position.into_iter().map(array_to_vec3).collect();
+            body.prev_position = prev_position.into_iter().map(array_to_vec3).collect();
+            body.velocity = velocity.into_iter().map(array_to_vec3).collect();
+            body.inv_mass = inv_mass;
+            for c in &raw.constraints {
+                body.constraints
+                    .push(sim_mechanics::DistanceConstraint::new(
+                        c.i,
+                        c.j,
+                        c.rest,
+                        c.compliance,
+                    ));
+            }
+            for c in &raw.bending_constraints {
+                body.bending_constraints
+                    .push(sim_mechanics::BendingConstraint::new(
+                        c.i,
+                        c.j,
+                        c.k,
+                        c.rest,
+                        c.compliance,
+                    ));
+            }
+            for c in &raw.volume_constraints {
+                body.volume_constraints
+                    .push(sim_mechanics::VolumeConstraint::new(
+                        c.particles,
+                        c.rest_volume,
+                        c.compliance,
+                    ));
+            }
+            body.gravity = array_to_vec3(raw.gravity);
+            body.substeps = raw.substeps;
+            body.iterations = raw.iterations;
+            body.damping = raw.damping;
+            world.enable_soft_body(body);
         }
 
         if let Some(gf) = &scenario.grid_fluid {
-            if let Some(raw) = &gf.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。
-                let n = gf.nx * gf.ny;
-                let u = decode_f64_field("grid_fluid.raw_state.u", &raw.u)?;
-                let v = decode_f64_field("grid_fluid.raw_state.v", &raw.v)?;
-                if u.len() != n || v.len() != n {
+            let raw = &gf.raw_state;
+            let n = gf.nx * gf.ny;
+            let u = decode_f64_field("grid_fluid.raw_state.u", &raw.u)?;
+            let v = decode_f64_field("grid_fluid.raw_state.v", &raw.v)?;
+            if u.len() != n || v.len() != n {
+                return Err(SceneError::InvalidValue(format!(
+                    "grid_fluid.raw_state: u/v の長さが nx*ny={n} と一致しない ({}/{})",
+                    u.len(),
+                    v.len()
+                )));
+            }
+            let solid_cells =
+                decode_bool_field("grid_fluid.raw_state.solid_cells", &raw.solid_cells)?;
+            let solid_velocity =
+                decode_vec3_field("grid_fluid.raw_state.solid_velocity", &raw.solid_velocity)?;
+            let mut fluid = sim_fluid::GridFluid2D::new(gf.nx, gf.ny, gf.h);
+            // `with_boundary`は`Channel`のとき速度場を流入速度で初期化するので、
+            // **必ず生の速度場を書き込む前に**適用する。
+            if let Some(boundary) = &raw.boundary {
+                fluid = fluid.with_boundary(grid_boundary_from_json(boundary));
+            }
+            fluid.u = u;
+            fluid.v = v;
+            fluid.density = raw.density;
+            fluid.kinematic_viscosity = raw.kinematic_viscosity;
+            fluid.vorticity_confinement_epsilon = raw.vorticity_confinement_epsilon;
+            if !solid_cells.is_empty() {
+                if solid_cells.len() != n {
                     return Err(SceneError::InvalidValue(format!(
-                        "grid_fluid.raw_state: u/v の長さが nx*ny={n} と一致しない ({}/{})",
-                        u.len(),
-                        v.len()
+                        "grid_fluid.raw_state.solid_cells の長さが nx*ny={n} と一致しない ({})",
+                        solid_cells.len()
                     )));
                 }
-                let solid_cells =
-                    decode_bool_field("grid_fluid.raw_state.solid_cells", &raw.solid_cells)?;
-                let solid_velocity =
-                    decode_vec3_field("grid_fluid.raw_state.solid_velocity", &raw.solid_velocity)?;
-                let mut fluid = sim_fluid::GridFluid2D::new(gf.nx, gf.ny, gf.h);
-                // `with_boundary`は`Channel`のとき速度場を流入速度で初期化するので、
-                // **必ず生の速度場を書き込む前に**適用する(レシピ経路と同じ順序)。
-                if let Some(boundary) = &raw.boundary {
-                    fluid = fluid.with_boundary(grid_boundary_from_json(boundary));
+                if !solid_velocity.is_empty() && solid_velocity.len() != n {
+                    return Err(SceneError::InvalidValue(format!(
+                        "grid_fluid.raw_state.solid_velocity の長さが nx*ny={n} と\
+                         一致しない ({})",
+                        solid_velocity.len()
+                    )));
                 }
-                fluid.u = u;
-                fluid.v = v;
-                fluid.density = raw.density;
-                fluid.kinematic_viscosity = raw.kinematic_viscosity;
-                fluid.vorticity_confinement_epsilon = raw.vorticity_confinement_epsilon;
-                if !solid_cells.is_empty() {
-                    if solid_cells.len() != n {
-                        return Err(SceneError::InvalidValue(format!(
-                            "grid_fluid.raw_state.solid_cells の長さが nx*ny={n} と一致しない ({})",
-                            solid_cells.len()
-                        )));
-                    }
-                    if !solid_velocity.is_empty() && solid_velocity.len() != n {
-                        return Err(SceneError::InvalidValue(format!(
-                            "grid_fluid.raw_state.solid_velocity の長さが nx*ny={n} と\
-                             一致しない ({})",
-                            solid_velocity.len()
-                        )));
-                    }
-                    fluid.set_raw_solid_state(
-                        solid_cells.iter().map(cell_type_from_bool).collect(),
-                        solid_velocity_or_zeros(&solid_velocity, n),
-                    );
-                }
-                world.enable_grid_fluid(fluid);
-            } else {
-                let mut fluid = sim_fluid::GridFluid2D::new(gf.nx, gf.ny, gf.h);
-                if let Some(d) = gf.density {
-                    fluid.density = d;
-                }
-                if let Some(v) = gf.kinematic_viscosity {
-                    fluid.kinematic_viscosity = v;
-                }
-                // 境界条件は初期速度より先に適用する(`with_boundary`はChannelのとき
-                // 流入速度で場を初期化するので、順序が逆だと初期速度が上書きされる)。
-                if let Some(boundary) = &gf.boundary {
-                    fluid = fluid.with_boundary(grid_boundary_from_json(boundary));
-                }
-                if let Some([u0, v0]) = gf.initial_velocity {
-                    fluid.u.iter_mut().for_each(|x| *x = u0);
-                    fluid.v.iter_mut().for_each(|x| *x = v0);
-                }
-                if let Some(epsilon) = gf.vorticity_confinement_epsilon {
-                    fluid.vorticity_confinement_epsilon = epsilon;
-                }
-                if !gf.solids.is_empty() {
-                    let solids = &gf.solids;
-                    fluid.set_solid_cells(|x, y| {
-                        if solids.iter().any(|s| s.contains(x, y)) {
-                            Some(sim_math::Vec3::ZERO) // シーン定義の固体は静止(動く固体は結合が担う)
-                        } else {
-                            None
-                        }
-                    });
-                }
-                world.enable_grid_fluid(fluid);
+                fluid.set_raw_solid_state(
+                    solid_cells.iter().map(cell_type_from_bool).collect(),
+                    solid_velocity_or_zeros(&solid_velocity, n),
+                );
             }
+            world.enable_grid_fluid(fluid);
         }
 
         if let Some(gf) = &scenario.grid_fluid_3d {
-            if let Some(raw) = &gf.raw_state {
-                // **生状態スナップショット経路**(2D版と同じ、モジュールdoc参照)。
-                let n = gf.nx * gf.ny * gf.nz;
-                let u = decode_f64_field("grid_fluid_3d.raw_state.u", &raw.u)?;
-                let v = decode_f64_field("grid_fluid_3d.raw_state.v", &raw.v)?;
-                let w = decode_f64_field("grid_fluid_3d.raw_state.w", &raw.w)?;
-                if u.len() != n || v.len() != n || w.len() != n {
+            let raw = &gf.raw_state;
+            let n = gf.nx * gf.ny * gf.nz;
+            let u = decode_f64_field("grid_fluid_3d.raw_state.u", &raw.u)?;
+            let v = decode_f64_field("grid_fluid_3d.raw_state.v", &raw.v)?;
+            let w = decode_f64_field("grid_fluid_3d.raw_state.w", &raw.w)?;
+            if u.len() != n || v.len() != n || w.len() != n {
+                return Err(SceneError::InvalidValue(format!(
+                    "grid_fluid_3d.raw_state: u/v/w の長さが nx*ny*nz={n} と一致しない \
+                     ({}/{}/{})",
+                    u.len(),
+                    v.len(),
+                    w.len()
+                )));
+            }
+            let smoke_density =
+                decode_f64_field("grid_fluid_3d.raw_state.smoke_density", &raw.smoke_density)?;
+            let solid_cells =
+                decode_bool_field("grid_fluid_3d.raw_state.solid_cells", &raw.solid_cells)?;
+            let solid_velocity = decode_vec3_field(
+                "grid_fluid_3d.raw_state.solid_velocity",
+                &raw.solid_velocity,
+            )?;
+            let mut fluid = sim_fluid::GridFluid3D::new(gf.nx, gf.ny, gf.nz, gf.h);
+            if let Some(boundary) = &raw.boundary {
+                fluid = fluid.with_boundary(grid_boundary_3d_from_json(boundary));
+            }
+            fluid.u = u;
+            fluid.v = v;
+            fluid.w = w;
+            if smoke_density.len() == n {
+                fluid.smoke_density = smoke_density;
+            }
+            fluid.density = raw.density;
+            fluid.kinematic_viscosity = raw.kinematic_viscosity;
+            fluid.vorticity_confinement_epsilon = raw.vorticity_confinement_epsilon;
+            if !solid_cells.is_empty() {
+                if solid_cells.len() != n {
                     return Err(SceneError::InvalidValue(format!(
-                        "grid_fluid_3d.raw_state: u/v/w の長さが nx*ny*nz={n} と一致しない \
-                         ({}/{}/{})",
-                        u.len(),
-                        v.len(),
-                        w.len()
+                        "grid_fluid_3d.raw_state.solid_cells の長さが nx*ny*nz={n} と\
+                         一致しない ({})",
+                        solid_cells.len()
                     )));
                 }
-                let smoke_density =
-                    decode_f64_field("grid_fluid_3d.raw_state.smoke_density", &raw.smoke_density)?;
-                let solid_cells =
-                    decode_bool_field("grid_fluid_3d.raw_state.solid_cells", &raw.solid_cells)?;
-                let solid_velocity = decode_vec3_field(
-                    "grid_fluid_3d.raw_state.solid_velocity",
-                    &raw.solid_velocity,
-                )?;
-                let mut fluid = sim_fluid::GridFluid3D::new(gf.nx, gf.ny, gf.nz, gf.h);
-                if let Some(boundary) = &raw.boundary {
-                    fluid = fluid.with_boundary(grid_boundary_3d_from_json(boundary));
+                if !solid_velocity.is_empty() && solid_velocity.len() != n {
+                    return Err(SceneError::InvalidValue(format!(
+                        "grid_fluid_3d.raw_state.solid_velocity の長さが nx*ny*nz={n} と\
+                         一致しない ({})",
+                        solid_velocity.len()
+                    )));
                 }
-                fluid.u = u;
-                fluid.v = v;
-                fluid.w = w;
-                if smoke_density.len() == n {
-                    fluid.smoke_density = smoke_density;
-                }
-                fluid.density = raw.density;
-                fluid.kinematic_viscosity = raw.kinematic_viscosity;
-                fluid.vorticity_confinement_epsilon = raw.vorticity_confinement_epsilon;
-                if !solid_cells.is_empty() {
-                    if solid_cells.len() != n {
-                        return Err(SceneError::InvalidValue(format!(
-                            "grid_fluid_3d.raw_state.solid_cells の長さが nx*ny*nz={n} と\
-                             一致しない ({})",
-                            solid_cells.len()
-                        )));
-                    }
-                    if !solid_velocity.is_empty() && solid_velocity.len() != n {
-                        return Err(SceneError::InvalidValue(format!(
-                            "grid_fluid_3d.raw_state.solid_velocity の長さが nx*ny*nz={n} と\
-                             一致しない ({})",
-                            solid_velocity.len()
-                        )));
-                    }
-                    fluid.set_raw_solid_state(
-                        solid_cells.iter().map(cell_type_from_bool).collect(),
-                        solid_velocity_or_zeros(&solid_velocity, n),
-                    );
-                }
-                world.enable_grid_fluid_3d(fluid);
-            } else {
-                let mut fluid = sim_fluid::GridFluid3D::new(gf.nx, gf.ny, gf.nz, gf.h);
-                // 2D版と同じ理由で境界条件を最初に適用する(`Channel`は流入速度で場を
-                // 初期化するため、順序が逆だと初期化が上書きされる)。
-                if let Some(boundary) = &gf.boundary {
-                    fluid = fluid.with_boundary(grid_boundary_3d_from_json(boundary));
-                }
-                if let Some(d) = gf.density {
-                    fluid.density = d;
-                }
-                if let Some(v) = gf.kinematic_viscosity {
-                    fluid.kinematic_viscosity = v;
-                }
-                if let Some(epsilon) = gf.vorticity_confinement_epsilon {
-                    fluid.vorticity_confinement_epsilon = epsilon;
-                }
-                if !gf.solids.is_empty() {
-                    let solids = &gf.solids;
-                    fluid.set_solid_cells(|x, y, z| {
-                        if solids.iter().any(|s| s.contains(x, y, z)) {
-                            Some(sim_math::Vec3::ZERO) // シーン定義の固体は静止
-                        } else {
-                            None
-                        }
-                    });
-                }
-                for block in &gf.smoke_blocks {
-                    for dk in 0..block.counts[2] {
-                        for dj in 0..block.counts[1] {
-                            for di in 0..block.counts[0] {
-                                let (i, j, k) =
-                                    (block.min[0] + di, block.min[1] + dj, block.min[2] + dk);
-                                if i < gf.nx && j < gf.ny && k < gf.nz {
-                                    fluid.smoke_density[i + gf.nx * (j + gf.ny * k)] =
-                                        block.density;
-                                }
-                            }
-                        }
-                    }
-                }
-                world.enable_grid_fluid_3d(fluid);
+                fluid.set_raw_solid_state(
+                    solid_cells.iter().map(cell_type_from_bool).collect(),
+                    solid_velocity_or_zeros(&solid_velocity, n),
+                );
             }
+            world.enable_grid_fluid_3d(fluid);
         }
 
         if let Some(rod) = &scenario.conduction_rod {
-            if let Some(raw) = &rod.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。材質名からαを
-                // 引く経路も通らない(復元したいのは今のαそのもの)。
-                let temperature =
-                    decode_f64_field("conduction_rod.raw_state.temperature", &raw.temperature)?;
-                if temperature.len() < 2 {
+            let raw = &rod.raw_state;
+            let temperature =
+                decode_f64_field("conduction_rod.raw_state.temperature", &raw.temperature)?;
+            if temperature.len() < 2 {
+                return Err(SceneError::InvalidValue(format!(
+                    "conduction_rod.raw_state.temperature は2要素以上必要 (got {})",
+                    temperature.len()
+                )));
+            }
+            let conductivity = raw
+                .conductivity
+                .as_deref()
+                .map(|k| decode_f64_field("conduction_rod.raw_state.conductivity", k))
+                .transpose()?;
+            if let Some(k) = &conductivity {
+                if k.len() != temperature.len() {
                     return Err(SceneError::InvalidValue(format!(
-                        "conduction_rod.raw_state.temperature は2要素以上必要 (got {})",
+                        "conduction_rod.raw_state.conductivity の長さが temperature と\
+                         一致しない ({} vs {})",
+                        k.len(),
                         temperature.len()
                     )));
                 }
-                let conductivity = raw
-                    .conductivity
-                    .as_deref()
-                    .map(|k| decode_f64_field("conduction_rod.raw_state.conductivity", k))
-                    .transpose()?;
-                if let Some(k) = &conductivity {
-                    if k.len() != temperature.len() {
-                        return Err(SceneError::InvalidValue(format!(
-                            "conduction_rod.raw_state.conductivity の長さが temperature と\
-                             一致しない ({} vs {})",
-                            k.len(),
-                            temperature.len()
-                        )));
-                    }
-                }
-                let mut bar = sim_thermal::ConductionRod1D::new(
-                    temperature.len(),
-                    raw.dx * (temperature.len() - 1) as f64,
-                    0.0,
-                    raw.thermal_diffusivity,
-                );
-                bar.temperature = temperature;
-                // `new`が`length/(n-1)`から計算した`dx`を、丸め差を残さないよう生値で上書きする。
-                bar.dx = raw.dx;
-                bar.volumetric_heat_capacity = raw.volumetric_heat_capacity;
-                bar.conductivity = conductivity;
-                bar.cross_section_area = raw.cross_section_area;
-                world.enable_conduction_rod(bar);
-            } else {
-                // 熱拡散率は直接指定が最優先、無ければ材質名から α=k/(ρ·c_p) を計算する
-                // (D16「熱伝導レース」は材質ごとのαの比がそのままデモの主旨なので、
-                // 材質名で書けることに意味がある)。
-                let alpha =
-                    match (&rod.thermal_diffusivity, &rod.material) {
-                        (Some(a), _) => *a,
-                        (None, Some(name)) => {
-                            let id = world
-                                .materials()
-                                .find_by_name(name)
-                                .ok_or_else(|| SceneError::UnknownMaterial(name.clone()))?;
-                            let m = world.materials().get(id);
-                            m.conductivity / (m.density * m.specific_heat)
-                        }
-                        (None, None) => return Err(SceneError::InvalidValue(
-                            "conduction_rod requires either `thermal_diffusivity` or `material`"
-                                .to_string(),
-                        )),
-                    };
-                if rod.node_count < 2 {
-                    return Err(SceneError::InvalidValue(format!(
-                        "conduction_rod.node_count must be at least 2 (got {})",
-                        rod.node_count
-                    )));
-                }
-                let mut bar = sim_thermal::ConductionRod1D::new(
-                    rod.node_count,
-                    rod.length,
-                    rod.initial_temperature,
-                    alpha,
-                );
-                // 片側だけ書いた場合はもう片側を初期温度のままにする。
-                if rod.boundary_left.is_some() || rod.boundary_right.is_some() {
-                    bar.set_boundary_temperatures(
-                        rod.boundary_left.unwrap_or(rod.initial_temperature),
-                        rod.boundary_right.unwrap_or(rod.initial_temperature),
-                    );
-                }
-                world.enable_conduction_rod(bar);
             }
+            let mut bar = sim_thermal::ConductionRod1D::new(
+                temperature.len(),
+                raw.dx * (temperature.len() - 1) as f64,
+                0.0,
+                raw.thermal_diffusivity,
+            );
+            bar.temperature = temperature;
+            // `new`が`length/(n-1)`から計算した`dx`を、丸め差を残さないよう生値で上書きする。
+            bar.dx = raw.dx;
+            bar.volumetric_heat_capacity = raw.volumetric_heat_capacity;
+            bar.conductivity = conductivity;
+            bar.cross_section_area = raw.cross_section_area;
+            world.enable_conduction_rod(bar);
         }
 
         if let Some(sph_json) = &scenario.sph {
-            if let Some(raw) = &sph_json.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。粒子を敷き詰める
-                // `blocks`/`boundary_blocks`は評価しない。
-                let position = decode_vec3_field("sph.raw_state.position", &raw.position)?;
-                let velocity = decode_vec3_field("sph.raw_state.velocity", &raw.velocity)?;
-                let density = decode_f64_field("sph.raw_state.density", &raw.density)?;
-                let pressure = decode_f64_field("sph.raw_state.pressure", &raw.pressure)?;
-                let boundary_position =
-                    decode_vec3_field("sph.raw_state.boundary_position", &raw.boundary_position)?;
-                let n = position.len();
-                if velocity.len() != n || density.len() != n || pressure.len() != n {
-                    return Err(SceneError::InvalidValue(format!(
-                        "sph.raw_state: position/velocity/density/pressure の長さが揃っていない \
-                         ({n}/{}/{}/{})",
-                        velocity.len(),
-                        density.len(),
-                        pressure.len()
-                    )));
-                }
-                let mut fluid = sim_fluid::SphFluid::new(raw.h, raw.rho0, raw.c_s);
-                fluid.mass = raw.mass;
-                fluid.viscosity_alpha = raw.viscosity_alpha;
-                fluid.gravity = raw.gravity;
-                fluid.position = position.into_iter().map(array_to_vec3).collect();
-                fluid.velocity = velocity.into_iter().map(array_to_vec3).collect();
-                fluid.density = density;
-                fluid.pressure = pressure;
-                for p in boundary_position {
-                    // `add_boundary_particle`は`boundary_force`の長さも一緒に揃えるので
-                    // これを使う(直接代入すると長さが食い違って`SphRigid`が読むときに落ちる)。
-                    fluid.add_boundary_particle(array_to_vec3(p));
-                }
-                world.enable_sph(fluid);
-            } else {
-                let mut fluid = sim_fluid::SphFluid::new(
-                    sph_json.h,
-                    sph_json.rest_density,
-                    sph_json.sound_speed,
-                );
-                if let Some(m) = sph_json.particle_mass {
-                    fluid.mass = m;
-                }
-                let each = |block: &SphBlockJson, f: &mut dyn FnMut(Vec3)| {
-                    for ix in 0..block.counts[0] {
-                        for iy in 0..block.counts[1] {
-                            for iz in 0..block.counts[2] {
-                                f(Vec3::new(
-                                    block.min[0] + ix as f64 * block.spacing,
-                                    block.min[1] + iy as f64 * block.spacing,
-                                    block.min[2] + iz as f64 * block.spacing,
-                                ));
-                            }
-                        }
-                    }
-                };
-                for block in &sph_json.blocks {
-                    let velocity = array_to_vec3(block.velocity);
-                    each(block, &mut |p| {
-                        fluid.add_particle(p, velocity);
-                    });
-                }
-                for block in &sph_json.boundary_blocks {
-                    each(block, &mut |p| {
-                        fluid.add_boundary_particle(p);
-                    });
-                }
-                world.enable_sph(fluid);
+            let raw = &sph_json.raw_state;
+            let position = decode_vec3_field("sph.raw_state.position", &raw.position)?;
+            let velocity = decode_vec3_field("sph.raw_state.velocity", &raw.velocity)?;
+            let density = decode_f64_field("sph.raw_state.density", &raw.density)?;
+            let pressure = decode_f64_field("sph.raw_state.pressure", &raw.pressure)?;
+            let boundary_position =
+                decode_vec3_field("sph.raw_state.boundary_position", &raw.boundary_position)?;
+            let n = position.len();
+            if velocity.len() != n || density.len() != n || pressure.len() != n {
+                return Err(SceneError::InvalidValue(format!(
+                    "sph.raw_state: position/velocity/density/pressure の長さが揃っていない \
+                     ({n}/{}/{}/{})",
+                    velocity.len(),
+                    density.len(),
+                    pressure.len()
+                )));
             }
+            let mut fluid = sim_fluid::SphFluid::new(raw.h, raw.rho0, raw.c_s);
+            fluid.mass = raw.mass;
+            fluid.viscosity_alpha = raw.viscosity_alpha;
+            fluid.gravity = raw.gravity;
+            fluid.position = position.into_iter().map(array_to_vec3).collect();
+            fluid.velocity = velocity.into_iter().map(array_to_vec3).collect();
+            fluid.density = density;
+            fluid.pressure = pressure;
+            for p in boundary_position {
+                // `add_boundary_particle`は`boundary_force`の長さも一緒に揃えるので
+                // これを使う(直接代入すると長さが食い違って`SphRigid`が読むときに落ちる)。
+                fluid.add_boundary_particle(array_to_vec3(p));
+            }
+            world.enable_sph(fluid);
         }
 
         if let Some(gas) = &scenario.gas {
@@ -3196,350 +2740,178 @@ impl World {
         // そもそも保持しておらず(`Solver`未実装で載る経路が原理的に無かった)、
         // D25/D27–D32 が「ドメイン自体が存在しない」として滞留していた。
         if let Some(q) = &scenario.quantum_1d {
-            if let Some(raw) = &q.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。`packet`/`potential`は
-                // 評価しない。
-                let psi_re = decode_f64_field("quantum_1d.raw_state.psi_re", &raw.psi_re)?;
-                let psi_im = decode_f64_field("quantum_1d.raw_state.psi_im", &raw.psi_im)?;
-                let v = decode_f64_field("quantum_1d.raw_state.v", &raw.v)?;
-                let n = psi_re.len();
-                if !n.is_power_of_two() {
-                    return Err(SceneError::InvalidValue(format!(
-                        "quantum_1d.raw_state.psi_re の長さは2の冪(FFTの制約)、got {n}"
-                    )));
-                }
-                if psi_im.len() != n || v.len() != n {
-                    return Err(SceneError::InvalidValue(format!(
-                        "quantum_1d.raw_state: psi_re/psi_im/v の長さが揃っていない \
-                         ({n}/{}/{})",
-                        psi_im.len(),
-                        v.len()
-                    )));
-                }
-                let mut wave = sim_quantum::WaveFunction1D::new(n, raw.dx);
-                wave.psi = psi_re
-                    .iter()
-                    .zip(psi_im.iter())
-                    .map(|(re, im)| sim_math::Complex64::new(*re, *im))
-                    .collect();
-                wave.v = v;
-                world.enable_quantum_1d(wave);
-            } else {
-                if !q.n.is_power_of_two() {
-                    return Err(SceneError::InvalidValue(format!(
-                        "quantum_1d.n must be a power of two (FFT constraint), got {}",
-                        q.n
-                    )));
-                }
-                let mut wave = sim_quantum::WaveFunction1D::new(q.n, q.dx);
-                wave.set_gaussian_wave_packet(q.packet.x0, q.packet.sigma, q.packet.k0);
-                if let Some(potential) = &q.potential {
-                    for i in 0..q.n {
-                        let x = i as f64 * q.dx;
-                        wave.v[i] = match potential {
-                            Potential1dJson::Barrier {
-                                x_min,
-                                x_max,
-                                height,
-                            } => {
-                                if x >= *x_min && x <= *x_max {
-                                    *height
-                                } else {
-                                    0.0
-                                }
-                            }
-                            Potential1dJson::Harmonic { center, omega } => {
-                                0.5 * omega * omega * (x - center) * (x - center)
-                            }
-                            Potential1dJson::Well {
-                                x_min,
-                                x_max,
-                                height,
-                            } => {
-                                if x < *x_min || x > *x_max {
-                                    *height
-                                } else {
-                                    0.0
-                                }
-                            }
-                        };
-                    }
-                }
-                world.enable_quantum_1d(wave);
+            let raw = &q.raw_state;
+            let psi_re = decode_f64_field("quantum_1d.raw_state.psi_re", &raw.psi_re)?;
+            let psi_im = decode_f64_field("quantum_1d.raw_state.psi_im", &raw.psi_im)?;
+            let v = decode_f64_field("quantum_1d.raw_state.v", &raw.v)?;
+            let n = psi_re.len();
+            if !n.is_power_of_two() {
+                return Err(SceneError::InvalidValue(format!(
+                    "quantum_1d.raw_state.psi_re の長さは2の冪(FFTの制約)、got {n}"
+                )));
             }
+            if psi_im.len() != n || v.len() != n {
+                return Err(SceneError::InvalidValue(format!(
+                    "quantum_1d.raw_state: psi_re/psi_im/v の長さが揃っていない \
+                     ({n}/{}/{})",
+                    psi_im.len(),
+                    v.len()
+                )));
+            }
+            let mut wave = sim_quantum::WaveFunction1D::new(n, raw.dx);
+            wave.psi = psi_re
+                .iter()
+                .zip(psi_im.iter())
+                .map(|(re, im)| sim_math::Complex64::new(*re, *im))
+                .collect();
+            wave.v = v;
+            world.enable_quantum_1d(wave);
         }
 
         if let Some(q) = &scenario.quantum_2d {
-            if let Some(raw) = &q.raw_state {
-                // **生状態スナップショット経路**(1D版と同じ、モジュールdoc参照)。
-                if !raw.nx.is_power_of_two() || !raw.ny.is_power_of_two() {
-                    return Err(SceneError::InvalidValue(
-                        "quantum_2d.raw_state.nx/ny must be powers of two (FFT constraint)"
-                            .to_string(),
-                    ));
-                }
-                let n = raw.nx * raw.ny;
-                let psi_re = decode_f64_field("quantum_2d.raw_state.psi_re", &raw.psi_re)?;
-                let psi_im = decode_f64_field("quantum_2d.raw_state.psi_im", &raw.psi_im)?;
-                let v = decode_f64_field("quantum_2d.raw_state.v", &raw.v)?;
-                if psi_re.len() != n || psi_im.len() != n || v.len() != n {
-                    return Err(SceneError::InvalidValue(format!(
-                        "quantum_2d.raw_state: psi_re/psi_im/v の長さが nx*ny={n} と一致しない \
-                         ({}/{}/{})",
-                        psi_re.len(),
-                        psi_im.len(),
-                        v.len()
-                    )));
-                }
-                let mut wave = sim_quantum::WaveFunction2D::new(raw.nx, raw.ny, raw.dx, raw.dy);
-                wave.psi = psi_re
-                    .iter()
-                    .zip(psi_im.iter())
-                    .map(|(re, im)| sim_math::Complex64::new(*re, *im))
-                    .collect();
-                wave.v = v;
-                world.enable_quantum_2d(wave);
-            } else {
-                if !q.nx.is_power_of_two() || !q.ny.is_power_of_two() {
-                    return Err(SceneError::InvalidValue(
-                        "quantum_2d.nx/ny must be powers of two (FFT constraint)".to_string(),
-                    ));
-                }
-                let mut wave = sim_quantum::WaveFunction2D::new(q.nx, q.ny, q.dx, q.dy);
-                wave.set_gaussian_wave_packet(
-                    q.packet.x0,
-                    q.packet.y0,
-                    q.packet.sigma_x,
-                    q.packet.sigma_y,
-                    q.packet.k0,
-                );
-                if let Some(slit) = &q.double_slit {
-                    for iy in 0..q.ny {
-                        let y = iy as f64 * q.dy;
-                        // スリットの開口内なら壁を立てない。
-                        let in_slit = slit
-                            .slit_centers
-                            .iter()
-                            .any(|c| (y - c).abs() <= slit.slit_width * 0.5);
-                        if in_slit {
-                            continue;
-                        }
-                        for ix in 0..q.nx {
-                            let x = ix as f64 * q.dx;
-                            if (x - slit.wall_x).abs() <= slit.thickness * 0.5 {
-                                wave.v[iy * q.nx + ix] = slit.height;
-                            }
-                        }
-                    }
-                }
-                world.enable_quantum_2d(wave);
+            let raw = &q.raw_state;
+            if !raw.nx.is_power_of_two() || !raw.ny.is_power_of_two() {
+                return Err(SceneError::InvalidValue(
+                    "quantum_2d.raw_state.nx/ny must be powers of two (FFT constraint)".to_string(),
+                ));
             }
+            let n = raw.nx * raw.ny;
+            let psi_re = decode_f64_field("quantum_2d.raw_state.psi_re", &raw.psi_re)?;
+            let psi_im = decode_f64_field("quantum_2d.raw_state.psi_im", &raw.psi_im)?;
+            let v = decode_f64_field("quantum_2d.raw_state.v", &raw.v)?;
+            if psi_re.len() != n || psi_im.len() != n || v.len() != n {
+                return Err(SceneError::InvalidValue(format!(
+                    "quantum_2d.raw_state: psi_re/psi_im/v の長さが nx*ny={n} と一致しない \
+                     ({}/{}/{})",
+                    psi_re.len(),
+                    psi_im.len(),
+                    v.len()
+                )));
+            }
+            let mut wave = sim_quantum::WaveFunction2D::new(raw.nx, raw.ny, raw.dx, raw.dy);
+            wave.psi = psi_re
+                .iter()
+                .zip(psi_im.iter())
+                .map(|(re, im)| sim_math::Complex64::new(*re, *im))
+                .collect();
+            wave.v = v;
+            world.enable_quantum_2d(wave);
         }
 
         if let Some(b) = &scenario.brownian {
-            if let Some(raw) = &b.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。
-                let position = decode_vec3_field("brownian.raw_state.position", &raw.position)?;
-                let velocity = decode_vec3_field("brownian.raw_state.velocity", &raw.velocity)?;
-                if velocity.len() != position.len() {
-                    return Err(SceneError::InvalidValue(format!(
-                        "brownian.raw_state: position/velocity の長さが一致しない ({} vs {})",
-                        position.len(),
-                        velocity.len()
-                    )));
-                }
-                let mut set =
-                    sim_statistical::BrownianParticleSet::new(raw.mass, raw.gamma, raw.kb_t);
-                set.external_force = array_to_vec3(raw.external_force);
-                for (p, v) in position.iter().zip(velocity.iter()) {
-                    set.add_particle(array_to_vec3(*p), array_to_vec3(*v));
-                }
-                world.enable_brownian(set);
-            } else {
-                let mut set = sim_statistical::BrownianParticleSet::new(b.mass, b.gamma, b.kb_t);
-                if let Some(f) = b.external_force {
-                    set.external_force = array_to_vec3(f);
-                }
-                let start = b.initial_position.map_or(Vec3::ZERO, array_to_vec3);
-                for _ in 0..b.particle_count {
-                    set.add_particle(start, Vec3::ZERO);
-                }
-                world.enable_brownian(set);
+            let raw = &b.raw_state;
+            let position = decode_vec3_field("brownian.raw_state.position", &raw.position)?;
+            let velocity = decode_vec3_field("brownian.raw_state.velocity", &raw.velocity)?;
+            if velocity.len() != position.len() {
+                return Err(SceneError::InvalidValue(format!(
+                    "brownian.raw_state: position/velocity の長さが一致しない ({} vs {})",
+                    position.len(),
+                    velocity.len()
+                )));
             }
+            let mut set = sim_statistical::BrownianParticleSet::new(raw.mass, raw.gamma, raw.kb_t);
+            set.external_force = array_to_vec3(raw.external_force);
+            for (p, v) in position.iter().zip(velocity.iter()) {
+                set.add_particle(array_to_vec3(*p), array_to_vec3(*v));
+            }
+            world.enable_brownian(set);
         }
 
         if let Some(g) = &scenario.kinetic_gas {
-            if let Some(raw) = &g.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。粒子配置を
-                // PRNGから引き直さず、そのまま戻す。
-                let position = decode_vec3_field("kinetic_gas.raw_state.position", &raw.position)?;
-                let velocity = decode_vec3_field("kinetic_gas.raw_state.velocity", &raw.velocity)?;
-                if velocity.len() != position.len() {
-                    return Err(SceneError::InvalidValue(format!(
-                        "kinetic_gas.raw_state: position/velocity の長さが一致しない ({} vs {})",
-                        position.len(),
-                        velocity.len()
-                    )));
-                }
-                let mut gas =
-                    sim_statistical::GasSim::new(raw.mass, raw.radius, array_to_vec3(raw.box_size));
-                for (p, v) in position.iter().zip(velocity.iter()) {
-                    gas.add_particle(array_to_vec3(*p), array_to_vec3(*v));
-                }
-                gas.collision_count = raw.collision_count;
-                world.enable_kinetic_gas(gas);
-            } else {
-                let mut gas =
-                    sim_statistical::GasSim::new(g.mass, g.radius, array_to_vec3(g.box_size));
-                // **位置と速度は World の seed 付き PRNG から引く**——シーンJSONに
-                // 数百粒子ぶんの座標を書き下すのは現実的でなく、かつ決定論も保てる
-                // (同じ seed なら同じ配置になる)。D25 が `format!` で粒子を動的生成
-                // していたのと同じ問題を、シーン側ではなくローダ側で解く。
-                let mut rng = sim_math::SimRng::new(scenario.seed, 0x67617300);
-                let b = array_to_vec3(g.box_size);
-                for _ in 0..g.particle_count {
-                    // 壁にめり込まないよう半径ぶん内側に収める。
-                    let inset =
-                        |extent: f64, u: f64| g.radius + u * (extent - 2.0 * g.radius).max(0.0);
-                    let position = Vec3::new(
-                        inset(b.x, rng.next_f64()),
-                        inset(b.y, rng.next_f64()),
-                        inset(b.z, rng.next_f64()),
-                    );
-                    let sigma =
-                        (sim_statistical::BOLTZMANN_CONSTANT * g.temperature / g.mass).sqrt();
-                    gas.add_particle(position, rng.maxwell_boltzmann_velocity(sigma));
-                }
-                world.enable_kinetic_gas(gas);
+            let raw = &g.raw_state;
+            // 粒子配置をPRNGから引き直さず、そのまま戻す。
+            let position = decode_vec3_field("kinetic_gas.raw_state.position", &raw.position)?;
+            let velocity = decode_vec3_field("kinetic_gas.raw_state.velocity", &raw.velocity)?;
+            if velocity.len() != position.len() {
+                return Err(SceneError::InvalidValue(format!(
+                    "kinetic_gas.raw_state: position/velocity の長さが一致しない ({} vs {})",
+                    position.len(),
+                    velocity.len()
+                )));
             }
+            let mut gas =
+                sim_statistical::GasSim::new(raw.mass, raw.radius, array_to_vec3(raw.box_size));
+            for (p, v) in position.iter().zip(velocity.iter()) {
+                gas.add_particle(array_to_vec3(*p), array_to_vec3(*v));
+            }
+            gas.collision_count = raw.collision_count;
+            world.enable_kinetic_gas(gas);
         }
 
         if let Some(i) = &scenario.ising {
-            if let Some(raw) = &i.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。`IsingSim::new`の
-                // PRNGランダム初期化を通さず、平衡化済みのスピン配置をそのまま戻す。
-                let spins = decode_i8_field("ising.raw_state.spins", &raw.spins)?;
-                if spins.len() != raw.l * raw.l {
-                    return Err(SceneError::InvalidValue(format!(
-                        "ising.raw_state.spins の長さが l*l={} と一致しない ({})",
-                        raw.l * raw.l,
-                        spins.len()
-                    )));
-                }
-                let mut rng = sim_math::SimRng::new(scenario.seed, 0x6973696e);
-                let mut sim = sim_statistical::IsingSim::new(
-                    raw.l,
-                    raw.j_coupling,
-                    raw.temperature,
-                    &mut rng,
-                );
-                sim.spins = spins;
-                sim.updates_per_step = raw.updates_per_step;
-                sim.use_wolff = raw.use_wolff;
-                world.enable_ising(sim);
-            } else {
-                let mut rng = sim_math::SimRng::new(scenario.seed, 0x6973696e);
-                let mut sim =
-                    sim_statistical::IsingSim::new(i.l, i.j_coupling, i.temperature, &mut rng);
-                if let Some(n) = i.updates_per_step {
-                    sim.updates_per_step = n;
-                }
-                if let Some(w) = i.use_wolff {
-                    sim.use_wolff = w;
-                }
-                world.enable_ising(sim);
+            let raw = &i.raw_state;
+            // `IsingSim::new`のPRNGランダム初期化を通さず、平衡化済みの
+            // スピン配置をそのまま戻す。
+            let spins = decode_i8_field("ising.raw_state.spins", &raw.spins)?;
+            if spins.len() != raw.l * raw.l {
+                return Err(SceneError::InvalidValue(format!(
+                    "ising.raw_state.spins の長さが l*l={} と一致しない ({})",
+                    raw.l * raw.l,
+                    spins.len()
+                )));
             }
+            let mut rng = sim_math::SimRng::new(scenario.seed, 0x6973696e);
+            let mut sim =
+                sim_statistical::IsingSim::new(raw.l, raw.j_coupling, raw.temperature, &mut rng);
+            sim.spins = spins;
+            sim.updates_per_step = raw.updates_per_step;
+            sim.use_wolff = raw.use_wolff;
+            world.enable_ising(sim);
         }
 
         if let Some(f) = &scenario.fdtd {
-            if let Some(raw) = &f.raw_state {
-                // **生状態スナップショット経路**(モジュールdoc参照)。`initial`は
-                // 評価しない。leapfrogの片割れである磁場まで戻すのが要点。
-                let ez = decode_f64_field("fdtd.raw_state.ez", &raw.ez)?;
-                let hx = decode_f64_field("fdtd.raw_state.hx", &raw.hx)?;
-                let hy = decode_f64_field("fdtd.raw_state.hy", &raw.hy)?;
-                if ez.len() != f.nx * f.ny {
-                    return Err(SceneError::InvalidValue(format!(
-                        "fdtd.raw_state.ez の長さが nx*ny={} と一致しない ({})",
-                        f.nx * f.ny,
-                        ez.len()
-                    )));
-                }
-                if hx.len() != f.nx * (f.ny - 1) || hy.len() != (f.nx - 1) * f.ny {
-                    return Err(SceneError::InvalidValue(format!(
-                        "fdtd.raw_state: hx は nx*(ny-1)={}、hy は (nx-1)*ny={} でなければ\
-                         ならない ({}/{})",
-                        f.nx * (f.ny - 1),
-                        (f.nx - 1) * f.ny,
-                        hx.len(),
-                        hy.len()
-                    )));
-                }
-                // `new`の第4引数はCourant数で`dt = courant*h`。生値の`dt`を丸め差なく
-                // 戻すため、構築後に直接代入する(`dt`はpub)。
-                let mut sim = sim_em::FdtdSim2D::new(f.nx, f.ny, f.h, f.courant.unwrap_or(0.5));
-                sim.dt = raw.dt;
-                // **PMLは`dt`を戻した後に組む**——`Pml::build`は`self.dt`から
-                // 係数表を作り、`step_dt_pml`も`self.dt`を基準に`scale`を取るため、
-                // 順序を逆にすると係数が構築時のCourant数由来の`dt`のものになる。
-                sim = apply_fdtd_pml(sim, f)?;
-                sim.set_raw_fields(ez, hx, hy);
-                if let Some(pml_raw) = &raw.pml {
-                    // `set_raw_fields`が置いた「$E_z$の半分ずつ」を、元の分配で
-                    // 上書きする(`FdtdPmlRawStateJson`のdoc参照)。
-                    let n = f.nx * f.ny;
-                    let ezx = decode_f64_field("fdtd.raw_state.pml.ezx", &pml_raw.ezx)?;
-                    let ezy = decode_f64_field("fdtd.raw_state.pml.ezy", &pml_raw.ezy)?;
-                    if ezx.len() != n || ezy.len() != n {
-                        return Err(SceneError::InvalidValue(format!(
-                            "fdtd.raw_state.pml: ezx/ezy は nx*ny={n} でなければならない                              ({}/{})",
-                            ezx.len(),
-                            ezy.len()
-                        )));
-                    }
-                    if !sim.set_pml_split_fields(ezx, ezy) {
-                        return Err(SceneError::InvalidValue(
-                            "fdtd.raw_state.pml を書いたが fdtd.pml が無い(PMLが無効)".to_string(),
-                        ));
-                    }
-                }
-                world.enable_fdtd(sim);
-            } else {
-                let mut sim = sim_em::FdtdSim2D::new(f.nx, f.ny, f.h, f.courant.unwrap_or(0.5));
-                sim = apply_fdtd_pml(sim, f)?;
-                match &f.initial {
-                    Some(FdtdInitialJson::CavityMode { m, n, amplitude }) => {
-                        for j in 1..f.ny - 1 {
-                            for i in 1..f.nx - 1 {
-                                let sx = (*m as f64 * std::f64::consts::PI * i as f64
-                                    / (f.nx - 1) as f64)
-                                    .sin();
-                                let sy = (*n as f64 * std::f64::consts::PI * j as f64
-                                    / (f.ny - 1) as f64)
-                                    .sin();
-                                sim.set_ez(i, j, amplitude * sx * sy);
-                            }
-                        }
-                    }
-                    Some(FdtdInitialJson::Pulse {
-                        i: ci,
-                        j: cj,
-                        amplitude,
-                        width,
-                    }) => {
-                        for j in 1..f.ny - 1 {
-                            for i in 1..f.nx - 1 {
-                                let dx = (i as f64 - *ci as f64) * f.h;
-                                let dy = (j as f64 - *cj as f64) * f.h;
-                                let r2 = dx * dx + dy * dy;
-                                sim.set_ez(i, j, amplitude * (-r2 / (width * width)).exp());
-                            }
-                        }
-                    }
-                    None => {}
-                }
-                world.enable_fdtd(sim);
+            let raw = &f.raw_state;
+            // leapfrogの片割れである磁場まで戻すのが要点。
+            let ez = decode_f64_field("fdtd.raw_state.ez", &raw.ez)?;
+            let hx = decode_f64_field("fdtd.raw_state.hx", &raw.hx)?;
+            let hy = decode_f64_field("fdtd.raw_state.hy", &raw.hy)?;
+            if ez.len() != f.nx * f.ny {
+                return Err(SceneError::InvalidValue(format!(
+                    "fdtd.raw_state.ez の長さが nx*ny={} と一致しない ({})",
+                    f.nx * f.ny,
+                    ez.len()
+                )));
             }
+            if hx.len() != f.nx * (f.ny - 1) || hy.len() != (f.nx - 1) * f.ny {
+                return Err(SceneError::InvalidValue(format!(
+                    "fdtd.raw_state: hx は nx*(ny-1)={}、hy は (nx-1)*ny={} でなければ\
+                     ならない ({}/{})",
+                    f.nx * (f.ny - 1),
+                    (f.nx - 1) * f.ny,
+                    hx.len(),
+                    hy.len()
+                )));
+            }
+            // `new`の第4引数はCourant数で`dt = courant*h`だが、直後に`raw_state.dt`の
+            // 実値で上書きするので、ここで渡す値は結果に影響しない(既定の0.5を渡す)。
+            // 生値で入れ直すのは`courant * h`の丸め差を残さないためである(`dt`はpub)。
+            let mut sim = sim_em::FdtdSim2D::new(f.nx, f.ny, f.h, 0.5);
+            sim.dt = raw.dt;
+            // **PMLは`dt`を戻した後に組む**——`Pml::build`は`self.dt`から
+            // 係数表を作り、`step_dt_pml`も`self.dt`を基準に`scale`を取るため、
+            // 順序を逆にすると係数が構築時のCourant数由来の`dt`のものになる。
+            sim = apply_fdtd_pml(sim, f)?;
+            sim.set_raw_fields(ez, hx, hy);
+            if let Some(pml_raw) = &raw.pml {
+                // `set_raw_fields`が置いた「$E_z$の半分ずつ」を、元の分配で
+                // 上書きする(`FdtdPmlRawStateJson`のdoc参照)。
+                let n = f.nx * f.ny;
+                let ezx = decode_f64_field("fdtd.raw_state.pml.ezx", &pml_raw.ezx)?;
+                let ezy = decode_f64_field("fdtd.raw_state.pml.ezy", &pml_raw.ezy)?;
+                if ezx.len() != n || ezy.len() != n {
+                    return Err(SceneError::InvalidValue(format!(
+                        "fdtd.raw_state.pml: ezx/ezy は nx*ny={n} でなければならない                              ({}/{})",
+                        ezx.len(),
+                        ezy.len()
+                    )));
+                }
+                if !sim.set_pml_split_fields(ezx, ezy) {
+                    return Err(SceneError::InvalidValue(
+                        "fdtd.raw_state.pml を書いたが fdtd.pml が無い(PMLが無効)".to_string(),
+                    ));
+                }
+            }
+            world.enable_fdtd(sim);
         }
 
         for joint in &scenario.joints {
@@ -5711,10 +5083,7 @@ mod tests {
                 .conduction_rod
                 .as_mut()
                 .expect("d16は conduction_rod を持つ");
-            rod.raw_state
-                .as_mut()
-                .expect("移行後の d16 は raw_state を持つ")
-                .thermal_diffusivity = alpha_of(material);
+            rod.raw_state.thermal_diffusivity = alpha_of(material);
             let swapped = serde_json::to_string(&scenario).expect("Scenarioはserializable");
             let result = run_headless_scenario(&swapped, 60).expect("valid scenario JSON");
             *result.probe_histories[0].last().expect("履歴が空でない")

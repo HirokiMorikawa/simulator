@@ -3,16 +3,6 @@
   "seed": 5,
   "world": { "gravity": 0.0, "dt": 1e-8 },
   "brownian": {
-    "external_force": [
-      0.0,
-      0.0,
-      0.0
-    ],
-    "gamma": 9.4e-09,
-    "initial_position": null,
-    "kb_t": 4.0471e-21,
-    "mass": 5.5e-16,
-    "particle_count": 600,
     "raw_state": {
       "external_force": [
         0.0,

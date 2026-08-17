@@ -7676,7 +7676,7 @@ mod tests {
     /// のではなく)。同じ式を両側に書いても「同じ式は同じ文字列を作る」しか
     /// 言えず、文面が変わってしまったことを検出できないため。
     ///
-    /// **本テストが全変種を舐めることの副次的な意味(正直な記録)**: 38変種の
+    /// **本テストが全変種を舐めることの副次的な意味(正直な記録)**: 39変種の
     /// うち5つは、実際に踏ませる呼び出しをネイティブテストから書けない——
     /// `ShapeSerializeFailed`/`ScenarioSerializeFailed`/
     /// `HeadlessResultSerializeFailed`は`serde_json::to_string`の失敗だが、
@@ -7685,6 +7685,9 @@ mod tests {
     /// `ImportedProbeHandleMissing`は`World`側にprobe削除経路が無いため
     /// 到達しない(その変種のdoc参照)。これら5つについては、本テストの
     /// 文面固定が唯一の回帰防御になる。
+    ///
+    /// `ScenarioExport`(**状態スナップショット移行で追加**)も実際に踏ませるには
+    /// 発散した`World`が要るので、ここでは文面だけを固定する。
     #[test]
     fn display_reproduces_the_exact_messages_that_used_to_reach_jsvalue() {
         use sim_world::SceneError;
@@ -7711,6 +7714,13 @@ mod tests {
         assert_eq!(
             WasmError::HeadlessRun(SceneError::JsonParse("boom".to_string())).to_string(),
             r#"JsonParse("boom")"#
+        );
+        assert_eq!(
+            WasmError::ScenarioExport(SceneError::InvalidValue(
+                "sph.raw_state.position: 非有限値NaNがindex 3にある(発散の疑い)".to_string()
+            ))
+            .to_string(),
+            r#"InvalidValue("sph.raw_state.position: 非有限値NaNがindex 3にある(発散の疑い)")"#
         );
 
         let cases: Vec<(WasmError, &str)> = vec![
