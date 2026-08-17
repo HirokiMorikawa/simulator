@@ -41,8 +41,16 @@ await page.mouse.move(cx - 120, cy - 60, { steps: 12 });
 await page.mouse.up({ button: "right" });
 await page.waitForTimeout(400);
 const cam2 = await cameraPos();
-r.check("A2-2", "右ドラッグでパン", Math.hypot(cam2[0] - cam1[0], cam2[1] - cam1[1]) > 0.2,
-  `camera xy ${cam1.slice(0, 2).map((v) => v.toFixed(2))} → ${cam2.slice(0, 2).map((v) => v.toFixed(2))}`);
+// **判定は 3 成分の変位で行う**。以前は x と y だけを見ていたが、パンは
+// スクリーン空間(`screenSpacePanning`)なので**カメラの向き次第でどの世界軸へ
+// 動くかが変わる**。直前の A2-1 が視点を持ち上げて見下ろし気味にするため、
+// このパンはほぼ world x–z 平面内で起き、y はほとんど動かない
+// (実測 dx=0.07 dy=−0.10 dz=0.20)。x と y だけを見ると「パンが効いていない」
+// ように見えるが、動いているのは z である。パンの正しさは
+// 2·Δpx·d·tan(fov/2)/clientHeight と一致するかで確かめてある。
+const panned = Math.hypot(cam2[0] - cam1[0], cam2[1] - cam1[1], cam2[2] - cam1[2]);
+r.check("A2-2", "右ドラッグでパン", panned > 0.2,
+  `camera ${cam1.map((v) => v.toFixed(2))} → ${cam2.map((v) => v.toFixed(2))}(変位 ${panned.toFixed(3)} m)`);
 
 const dist0 = await page.evaluate(() => window.__camera.position.length());
 await page.mouse.move(cx, cy);

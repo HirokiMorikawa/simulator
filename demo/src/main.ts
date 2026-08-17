@@ -4731,14 +4731,33 @@ async function setUpSceneView(
   // ドラッグ開始点との画面上の角度差をそのままワールド軸周りの回転角として
   // 適用する単純な実装(Blenderのようなビュー平面トラックボールではなく、
   // 選択軸周りの単純回転)。
-  const ROTATION_RING_RADIUS = 1.0;
+  // **リングの半径は Translate Gizmo の矢印長(`GIZMO_AXIS_LENGTH`)に合わせる**
+  // (QA不具合 C3-1)。以前は 1.0 で、矢印長 1.2・スケールハンドル 1.6 と
+  // 三者三様だった——ギズモを掴む距離がツールごとに違うと、ユーザは「さっき
+  // 掴めた場所」を頼りにできない。
+  const ROTATION_RING_RADIUS = GIZMO_AXIS_LENGTH;
   const ROTATION_RING_TUBE_RADIUS = 0.03;
+  // **掴み判定用の太いリング(不可視)**。見えているリングの管半径は 0.03 で、
+  // 半径 1.2 のリングに対して当たり判定が実質「線」しかない。少しでも狙いが
+  // ずれるとレイは何にも当たらず、`pointerdown` はボディのピックへ落ちて
+  // **回転ドラッグが黙って無反応になる**(QA不具合 C3-1 の実測: リング上を
+  // 正確に掴めば回転するが、半径 1.2 の位置——見た目のリングから 0.2 m 外——
+  // では一切反応しなかった)。three.js の TransformControls と同じ手法で、
+  // 描画しない太い当たり判定用メッシュを重ねて掴みやすくする。
+  // `material.visible = false` は描画だけを止め、レイキャストには当たる
+  // (Raycaster は可視性を見ない)。
+  const ROTATION_PICKER_TUBE_RADIUS = 0.16;
   const rotationGizmoGroup = new THREE.Group();
   const rotationHandleMeshes: {
     mesh: THREE.Mesh;
     axisName: "x" | "y" | "z";
   }[] = [];
   for (const { axis, color, name } of GIZMO_AXES) {
+    // TorusGeometryは既定でXY平面上(穴の軸はZ)にあるため、穴の軸を`axis`へ合わせる。
+    const orientation = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      axis,
+    );
     const ring = new THREE.Mesh(
       new THREE.TorusGeometry(
         ROTATION_RING_RADIUS,
@@ -4748,10 +4767,21 @@ async function setUpSceneView(
       ),
       new THREE.MeshBasicMaterial({ color }),
     );
-    // TorusGeometryは既定でXY平面上(穴の軸はZ)にあるため、穴の軸を`axis`へ合わせる。
-    ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), axis);
+    ring.quaternion.copy(orientation);
     rotationGizmoGroup.add(ring);
-    rotationHandleMeshes.push({ mesh: ring, axisName: name });
+    const picker = new THREE.Mesh(
+      new THREE.TorusGeometry(
+        ROTATION_RING_RADIUS,
+        ROTATION_PICKER_TUBE_RADIUS,
+        6,
+        32,
+      ),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    );
+    picker.quaternion.copy(orientation);
+    rotationGizmoGroup.add(picker);
+    // 掴み判定は太い方だけを見る(見えるリングは描画専用)。
+    rotationHandleMeshes.push({ mesh: picker, axisName: name });
   }
   rotationGizmoGroup.visible = false;
   scene.add(rotationGizmoGroup);
@@ -6472,8 +6502,20 @@ async function setUpSceneView(
   //
   // 右ドラッグは OrbitControls のパンに割り当ててあるので、**パンした直後は
   // メニューを出さない**(パンのたびにメニューが開くと操作にならない)。
-  // `pointerdown` から `contextmenu` までの移動量で判別する——`click` と
-  // ドラッグを `DRAG_THRESHOLD_PX` で判別している既存のピック処理と同じ手法。
+  // `click` とドラッグを `DRAG_THRESHOLD_PX` で判別している既存のピック処理と
+  // 同じ手法で、移動量から判別する。
+  //
+  // **判定は `pointerup` で行う**(QA不具合 A2-2)。以前は `contextmenu` の
+  // 座標と `pointerdown` の座標を比べていたが、Chromium は `contextmenu` を
+  // **`pointerdown` の直後**(ボタンを離す前・カーソルが動く前)に発火するため、
+  // 移動量は常に 0 で「ドラッグではない」と判定され、**右ボタンを押した瞬間に
+  // 必ずパレットが開いていた**。開いたパレットはカーソル直下に残るので、
+  // 次の右押しはキャンバスではなくメニュー要素へヒットテストされ、
+  // `renderer.domElement` の `pointerdown` が発火しない——結果 OrbitControls が
+  // PAN 状態に入らず、**2 回目以降のパンが一切効かなくなっていた**
+  // (実測: 連続 3 回のパンで 0.41 → 0.015 → 0.0003 m)。
+  // `pointerup` まで待てば移動量が確定するので、ドラッグとクリックを正しく
+  // 分けられる。`contextmenu` はブラウザ既定メニューの抑止だけに使う。
   const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   const groundHit = new THREE.Vector3();
   let rightDownScreen: { x: number; y: number } | null = null;
@@ -6481,16 +6523,22 @@ async function setUpSceneView(
     if (event.button === 2)
       rightDownScreen = { x: event.clientX, y: event.clientY };
   });
+  // ブラウザ既定のコンテキストメニューは常に抑止する(パレットは下の
+  // `pointerup` が出す)。
   renderer.domElement.addEventListener("contextmenu", (event) => {
     event.preventDefault();
-    if (rightDownScreen) {
-      const moved = Math.hypot(
-        event.clientX - rightDownScreen.x,
-        event.clientY - rightDownScreen.y,
-      );
-      rightDownScreen = null;
-      if (moved > DRAG_THRESHOLD_PX) return; // パンだったのでメニューは出さない。
-    }
+  });
+  // 右ドラッグが途中で失われたら押し始めの記録も捨てる(離した扱いにしない)。
+  renderer.domElement.addEventListener("pointercancel", (event) => {
+    if (event.button === 2) rightDownScreen = null;
+  });
+  renderer.domElement.addEventListener("pointerup", (event) => {
+    if (event.button !== 2) return;
+    const down = rightDownScreen;
+    rightDownScreen = null;
+    if (!down) return;
+    const moved = Math.hypot(event.clientX - down.x, event.clientY - down.y);
+    if (moved > DRAG_THRESHOLD_PX) return; // パンだったのでメニューは出さない。
     // クリック位置を地面(y=0)へ投影する。カメラが地面と平行に近いと交点が
     // 得られないので、その場合は既存の `nextSpawnPosition()` へ落とす。
     const rect = renderer.domElement.getBoundingClientRect();
