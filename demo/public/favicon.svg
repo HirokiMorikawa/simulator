@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- 統合エディタのファビコン(QA不具合 8)。放物線を描いて落ちる剛体 = 力学、
+       それを受ける床。Scene View の背景色(#111)に合わせた暗い角丸地に載せる。 -->
+  <rect width="32" height="32" rx="6" fill="#111111"/>
+  <path d="M5 7 Q 15 9 21 25" fill="none" stroke="#4488ff" stroke-width="2"
+        stroke-linecap="round" stroke-dasharray="3 3" opacity="0.85"/>
+  <line x1="4" y1="27" x2="28" y2="27" stroke="#44ff44" stroke-width="2.5"
+        stroke-linecap="round"/>
+  <circle cx="21" cy="23" r="4" fill="#ff4444"/>
+</svg>

@@ -1170,6 +1170,80 @@ function readNumber(world: WasmWorld, kind: string, arg = ""): number {
   return Number(world.read_component(kind, arg));
 }
 
+/// HUD 用の数値整形(QA不具合 7)。**固定桁だと組み合わせシーンで HUD が
+/// 嘘をつく**——D20 の ΔT = 1.25×10⁻⁴ K は小数 2 桁固定ではまったく動かず、
+/// 「熱が伝わっていない」ように見えていた。桁数を値の大きさで切り替え、
+/// 極端に小さい値は指数表記へ落とす。
+function formatHudNumber(value: number): string {
+  if (!Number.isFinite(value)) return "—";
+  const magnitude = Math.abs(value);
+  if (magnitude === 0) return "0";
+  if (magnitude < 1e-3 || magnitude >= 1e5) return value.toExponential(3);
+  if (magnitude < 1) return value.toFixed(5);
+  return value.toFixed(4);
+}
+
+/// HUD が読む「回路電圧」「熱ノード温度」を、**読み込んでいるシーンが宣言した
+/// プローブから決める**(QA不具合 7)。
+///
+/// 以前は `circuit_divider_voltage`(既定シーンの分圧点 = ノード 2 固定)と
+/// `heater_node_temperature`(熱ノード 0 固定)を無条件に出していた。D20 は
+/// 2 ノード回路なのでノード 2 が存在せず、`circuit_probe` の `unwrap_or(0.0)`
+/// がそのまま `circuit V = 0.000 V` になる——**実際の発電電圧 0.5 V は Probe
+/// グラフには出るのに HUD だけが 0 と言う**状態だった。ドメインを組み合わせた
+/// シーンほど HUD が嘘をつくため、シーン側の `probes` 宣言(そのシーンの作者が
+/// 「これが見たい量だ」と書いたもの)を素直に第一候補にする。
+///
+/// プローブを宣言していないシーン(既定シーンなど)では従来の固定アクセサへ
+/// 落ちる——既定シーンの分圧回路は実際にノード 2 が分圧点なので、そこでは
+/// 従来表示が正しい。
+/// `circuit_divider_voltage` が読むノード(sim-wasm の `CIRCUIT_DIVIDER_NODE`)。
+/// 表示だけに使う——値そのものは従来どおり Rust 側のアクセサから取る。
+const CIRCUIT_DIVIDER_NODE_LABEL = "2";
+
+type HudDomainProbe = { index: number; node: string } | null;
+type HudProbeSelection = {
+  world: WasmWorld;
+  probeCount: number;
+  circuit: HudDomainProbe;
+  temperature: HudDomainProbe;
+  /// 温度の初期値。ΔT を出すのに使う(絶対値だけでは微小変化が読めない)。
+  temperatureBaseline: number | null;
+};
+let hudProbeSelection: HudProbeSelection | null = null;
+
+function selectHudProbes(world: WasmWorld): HudProbeSelection {
+  const probeCount = readNumber(world, "imported_probe_count");
+  // `world` の同一性と本数の両方を鍵にする——ギャラリー読み込みは `world` を
+  // 差し替え、Import は同じ `world` へプローブを足すため、片方だけでは
+  // キャッシュが古くなる。
+  if (
+    hudProbeSelection &&
+    hudProbeSelection.world === world &&
+    hudProbeSelection.probeCount === probeCount
+  ) {
+    return hudProbeSelection;
+  }
+  let circuit: HudDomainProbe = null;
+  let temperature: HudDomainProbe = null;
+  for (let i = 0; i < probeCount; i += 1) {
+    // ラベルは `probe_target_label` が作る `CircuitV[2]` / `NodeTemp[0]` 形式。
+    const label = world.read_component("imported_probe_label_at", String(i));
+    const circuitMatch = /^CircuitV\[(\d+)\]$/.exec(label);
+    if (circuitMatch && !circuit) circuit = { index: i, node: circuitMatch[1] };
+    const tempMatch = /^NodeTemp\[(\d+)\]$/.exec(label);
+    if (tempMatch && !temperature) temperature = { index: i, node: tempMatch[1] };
+  }
+  hudProbeSelection = {
+    world,
+    probeCount,
+    circuit,
+    temperature,
+    temperatureBaseline: null,
+  };
+  return hudProbeSelection;
+}
+
 /// `couplingRow`が`BuoyancyDrag`の各行に出す「操縦面舵角」欄を配線する
 /// (**残タスク完遂の縦串⑤増分**)。度→ラジアン変換して`apply_component`
 /// (kind="push_set_coupling_control_surface_deflection")へ送るだけの薄い配線
@@ -7223,12 +7297,53 @@ async function setUpSceneView(
     // ドメインが無効、または素子ゼロの意味を持たない状態)を「無」の判定に使う。
     const heaterTemperature = readNumber(world, "heater_node_temperature");
     const hasCircuit = readNumber(world, "circuit_element_count") > 0;
+    // QA不具合7: 読み込んだシーンが宣言したプローブを第一候補にする
+    // (`selectHudProbes`のdoc参照)。宣言が無ければ従来の固定アクセサへ落ちる。
+    const hudProbes = selectHudProbes(world);
+    let circuitLine = "circuit V = —";
+    if (hudProbes.circuit) {
+      const volts = readNumber(world, "imported_probe_value_at", String(hudProbes.circuit.index));
+      circuitLine = `circuit V[${hudProbes.circuit.node}] = ${formatHudNumber(volts)} V`;
+    } else if (hasCircuit) {
+      circuitLine = `circuit V[${CIRCUIT_DIVIDER_NODE_LABEL}] = ${formatHudNumber(readNumber(world, "circuit_divider_voltage"))} V`;
+    }
+    let temperatureLine = "heater T = —";
+    const sceneTemperature = hudProbes.temperature
+      ? readNumber(world, "imported_probe_value_at", String(hudProbes.temperature.index))
+      : heaterTemperature;
+    if (Number.isFinite(sceneTemperature)) {
+      // **基準は「プローブが最初に記録したサンプル」から取る**。
+      // `imported_probe_value_at` は履歴が空だと 0 を返すので、step 0 の
+      // フレームで現在値を基準にすると ΔT が「293 K も上がった」ことになる。
+      // かつ「HUD が最初に描かれた時点の値」を基準にすると、停止状態で
+      // `⏭` を 600 step 送ってから見たときに Δ が常に 0 になってしまう。
+      // 履歴の先頭を使えばどちらの経路でも初期温度が基準になる
+      // (履歴はリングバッファだが、非空になった最初のフレームで確定させる)。
+      if (hudProbes.temperatureBaseline === null) {
+        if (hudProbes.temperature) {
+          const history = world.imported_probe_history_f64(hudProbes.temperature.index);
+          if (history.length > 0) hudProbes.temperatureBaseline = history[0];
+        } else {
+          hudProbes.temperatureBaseline = sceneTemperature;
+        }
+      }
+      const node = hudProbes.temperature ? hudProbes.temperature.node : "0";
+      const delta =
+        hudProbes.temperatureBaseline === null
+          ? 0
+          : sceneTemperature - hudProbes.temperatureBaseline;
+      // ΔT を併記する——絶対値の桁が大きい(293 K)ので、微小変化は差分でしか
+      // 読めない(D20 の ΔT = 1.25×10⁻⁴ K が「まったく動かない」と見えていた)。
+      temperatureLine =
+        `heater T[${node}] = ${formatHudNumber(sceneTemperature)} K` +
+        (delta === 0 ? "" : ` (Δ ${delta > 0 ? "+" : ""}${formatHudNumber(delta)})`);
+    }
     hud.textContent = [
       `t = ${readNumber(world, "time").toFixed(3)} s`,
       `step = ${readNumber(world, "step_count").toString()}`,
       `y = ${selectedBodyValid ? selectedPosition[1].toFixed(4) : "—"} m`,
-      `circuit V = ${hasCircuit ? readNumber(world, "circuit_divider_voltage").toFixed(3) + " V" : "—"}`,
-      `heater T = ${Number.isNaN(heaterTemperature) ? "—" : heaterTemperature.toFixed(2) + " K"}`,
+      circuitLine,
+      temperatureLine,
     ].join("\n");
     timelineTime.textContent = `t = ${readNumber(world, "time").toFixed(3)} s`;
     timelineStep.textContent = `step = ${readNumber(world, "step_count").toString()}`;

@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- ファビコンを明示する(QA不具合 8)。宣言が無いとブラウザが既定で
+         `/favicon.ico` を取りに行き、起動のたびに Console の Errors タブへ
+         404 が 1 件積まれて本物のエラーを見つけにくくしていた。
+         `public/` 配下なので dev / preview / build のどれでも同じ URL で出る。 -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>物理エンジン統合エディタ</title>
   </head>
   <body>
