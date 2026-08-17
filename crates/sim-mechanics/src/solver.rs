@@ -300,16 +300,18 @@ pub struct MechanicsSolver {
     /// する)。0にクランプしない — Baumgarte安定化・warm startingは稀に1step内で微小に
     /// 運動エネルギーを増やすことがある(PGS系接触ソルバの既知の数値アーティファクト、
     /// 物理的な現象ではない)ため、クランプすると増加分を無視し減少分だけ計上する系統的な
-    /// 片側バイアスになる。実装検証中の発見: それでもなお、10秒・1200stepの滑走→静止
-    /// シナリオでは、この量の累積和が実際の力学的エネルギー総損失(区間の`total_energy()`
-    /// の差)より約9%大きいことを確認した — 原因は、Baumgarte位置誤差補正がこの
-    /// (`contact::resolve()`呼び出し前後のみの)測定窓では運動エネルギー変化として
-    /// 現れる一方、その補正効果は次stepの位置積分にも影響し、測定窓の外側で部分的に
-    /// 打ち消されるため、前後差分の単純な累積が系統的に過大評価になること(PGS+
-    /// Baumgarteソルバの既知の限界であり、クランプの有無では解決しない)。根本修正
-    /// (Baumgarteのバイアス速度分を測定から除外する等)は接触ソルバへの踏み込んだ変更を
-    /// 要するため本増分では見送り、`sim-coupling::DissipationToHeat`の受け入れテスト側で
-    /// この系統誤差を踏まえた許容誤差(rel<15%)を設定して対応する。
+    /// 片側バイアスになる。
+    ///
+    /// **測定窓から外力の速度増分を除いている**(`external_velocity_hold_energy`
+    /// のdoc参照、QA不具合1の修正)。除く前は 10秒・1200stepの滑走→静止シナリオで
+    /// この量の累積和が実際の力学的エネルギー総損失より約9%大きく、原因を
+    /// Baumgarte位置誤差補正の測定窓外への波及だと記録していたが、**実際は
+    /// 測定窓の直前で`integrate_velocities`が足す重力ぶんの速度増分**だった
+    /// ——床に置かれた剛体は毎step $\frac12 m(g\Delta t)^2$(D10 で 26.2 J/step)を
+    /// 散逸として計上し、UI では「箱が完全に止まったまま温度計だけが上がり続ける」
+    /// という形で見えていた。増分の法線成分を差し引いた今は、同シナリオの
+    /// 対記帳誤差が rel<2% に収まる(`sim-coupling::DissipationToHeat`の
+    /// 受け入れテスト参照)。
     pub last_contact_dissipation: f64,
     /// 直近stepの接触解決で**剛体ごとに**失われた運動エネルギー [J](**群5で追加**、
     /// `body_index`で引く。総和は`last_contact_dissipation`と厳密に一致する)。
@@ -320,8 +322,9 @@ pub struct MechanicsSolver {
     /// (`last_contact_dissipation`)だけでは配分できない。`last_manifolds`(どの剛体
     /// どうしが接触したか)と組み合わせて使う。
     ///
-    /// 上記`last_contact_dissipation`の系統誤差(約9%の過大評価)はこの分解値にも
-    /// そのまま含まれる(同じ測定窓の前後差分を剛体ごとに取っているだけ)。
+    /// 外力の速度増分を除く補正(`external_velocity_hold_energy`)は**剛体ごとに**
+    /// 適用され、全体値はこの分解値の総和として作られる——docが約束する
+    /// 「総和は`last_contact_dissipation`と厳密に一致する」を保つため。
     pub last_contact_dissipation_by_body: Vec<f64>,
     /// 直近stepで検出された接触ペア(`(body_a, body_b)`、`ContactManifold`と同じ正規化
     /// 順序)。今stepの検出結果との差分から`EventKind::ContactStarted`/`ContactEnded`
@@ -649,6 +652,57 @@ impl MechanicsSolver {
 
     /// 少なくとも一方が「起きている dynamic body」なら解決対象(設計 §4「起床は新規接触・
     /// 力適用時」の反対: 両側とも寝ていれば新規に動く要素が無い)。
+    /// 接触が「外力を支える」ために打ち消した速度増分の運動エネルギー [J]を
+    /// 剛体ごとに返す(**QA不具合1の修正**)。
+    ///
+    /// **何が問題だったか**: `last_contact_dissipation`は`contact::resolve()`の
+    /// 前後の運動エネルギー差で散逸を測る。ところが測定窓の直前に
+    /// `integrate_velocities`が走っており、床に置かれた剛体は毎step
+    /// **重力ぶんの速度増分 $g\Delta t$ を得てから**接触解決へ入る。接触は
+    /// その増分を毎step打ち消すので、差分は毎step
+    /// $\frac12 m (g\Delta t)^2$ だけ正になる——D10(摩擦の熱)では
+    /// $\frac12\cdot7850\cdot(9.80665\cdot0.008333)^2 = 26.2$ J/step。
+    /// **箱が完全に止まっていても温度計だけが上がり続ける**という形で表面化し、
+    /// 滑走中も同じ寄与が乗るため停止時点で熱が運動エネルギーより 4.7 % 多かった。
+    ///
+    /// これは物理ではなく**演算子分割の副作用**である。semi-implicit Euler では
+    /// 重力が「変位を伴わずに」運動エネルギーを足し、接触がそれを取り除く。
+    /// 1 step を通せば何も起きていないのに、窓の中だけを見ると散逸に見える。
+    ///
+    /// **どう直したか**: 外力が足した速度増分 $\Delta v_\text{ext}$ のうち、
+    /// **接触法線方向の成分**の運動エネルギーを測定から差し引く。
+    /// 接触が打ち消すのはこの成分だからである。剛体が複数の接触を持つ場合は
+    /// 法線ごとの射影のうち最大のものだけを使う——各接触で重複して引くと
+    /// 引きすぎるため(角の 2 面接触などは重力増分を分担して打ち消す)。
+    ///
+    /// **意図的に残る近似**: 衝突(反発)の瞬間は接近速度が $g\Delta t$ より
+    /// 桁違いに大きく、この補正は $O(\Delta t^2)$ の微小量しか引かないので
+    /// 反発の散逸はほぼそのまま残る。逆に静止接触では補正が増分そのものと一致し、
+    /// 散逸は 0 になる。並進のみを補正し回転は触らない——重力はトルクを生まない
+    /// (重心に働く)ため、打ち消される増分は並進速度にしか現れない。
+    fn external_velocity_hold_energy(
+        &self,
+        active_manifolds: &[collision::ContactManifold],
+        external_velocity_delta: &[Vec3],
+    ) -> Vec<f64> {
+        let mut max_normal_speed_sq = vec![0.0_f64; self.bodies.len()];
+        for m in active_manifolds {
+            for body in [m.body_a, m.body_b] {
+                if self.bodies.body_type[body] != BodyType::Dynamic || self.bodies.asleep[body] {
+                    continue;
+                }
+                let along_normal = external_velocity_delta[body].dot(m.normal);
+                let squared = along_normal * along_normal;
+                if squared > max_normal_speed_sq[body] {
+                    max_normal_speed_sq[body] = squared;
+                }
+            }
+        }
+        (0..self.bodies.len())
+            .map(|i| 0.5 * self.bodies.mass(i) * max_normal_speed_sq[i])
+            .collect()
+    }
+
     fn manifold_is_active(&self, m: &collision::ContactManifold) -> bool {
         let a_awake_dynamic =
             self.bodies.body_type[m.body_a] == BodyType::Dynamic && !self.bodies.asleep[m.body_a];
@@ -699,7 +753,18 @@ impl Solver for MechanicsSolver {
     fn step(&mut self, dt: f64, ctx: &mut SolverContext) {
         self.apply_forces();
         joint::apply_hinge_motors(&self.hinge_motors, &mut self.bodies, dt);
+        // 外力(重力・抗力・`apply_force`)が今stepで速度へ足した増分を控える
+        // (`external_velocity_delta`、QA不具合1)。接触解決がこの増分を打ち消す
+        // ぶんは散逸ではないので、あとで測定から差し引く。
+        let velocity_before_external: Vec<Vec3> = self.bodies.linear_velocity.clone();
         self.integrate_velocities(dt);
+        let external_velocity_delta: Vec<Vec3> = self
+            .bodies
+            .linear_velocity
+            .iter()
+            .zip(velocity_before_external.iter())
+            .map(|(after, before)| *after - *before)
+            .collect();
         // 処理順「ジョイント→接触」(設計 docs/10-mechanics/05-joints-constraints.md §4.1)。
         joint::resolve_distance(&self.joints, &mut self.bodies, dt);
         joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
@@ -731,17 +796,32 @@ impl Solver for MechanicsSolver {
         );
         let ke_after_contact = self.total_energy().kinetic;
         let ke_by_body_after = self.kinetic_energy_by_body();
+        // **重力を支える法線インパルスぶんを測定から除く**(QA不具合1、
+        // `external_velocity_hold_energy`のdoc参照)。
+        let gravity_hold =
+            self.external_velocity_hold_energy(&active_manifolds, &external_velocity_delta);
         self.last_contact_dissipation_by_body = ke_by_body_before
             .iter()
             .zip(ke_by_body_after.iter())
-            .map(|(before, after)| before - after)
+            .zip(gravity_hold.iter())
+            .map(|((before, after), hold)| {
+                let raw = before - after;
+                // 補正は測定値を超えない範囲でだけ引く——引きすぎて負の散逸を
+                // 作らないため。`raw`が負(warm start等の数値的な増加)のときは
+                // 補正を0にして`raw`をそのまま残す(このフィールドのdocが言う
+                // 「0にクランプしない」方針を壊さない)。
+                raw - hold.min(raw.max(0.0))
+            })
             .collect();
         debug_assert!(
             ke_after_contact <= ke_before_contact + 1e-6 * ke_before_contact.max(1.0),
             "contact resolution must not increase kinetic energy beyond numerical noise: \
              before={ke_before_contact} after={ke_after_contact}"
         );
-        self.last_contact_dissipation = ke_before_contact - ke_after_contact;
+        // 全体値は分解値の総和として作る(このフィールドのdocが約束する
+        // 「総和は`last_contact_dissipation`と厳密に一致する」を保つため。
+        // 補正を全体値へ独立に適用すると一致が崩れる)。
+        self.last_contact_dissipation = self.last_contact_dissipation_by_body.iter().sum();
         // 接触が完全に消えたボディ対のエントリを捨てる(設計 §4.7、GC)。スリープで
         // ソルバをスキップしたペアも「生きている接触」として渡す(`retain_pairs` doc参照)。
         let live_pairs: std::collections::BTreeSet<(usize, usize)> =

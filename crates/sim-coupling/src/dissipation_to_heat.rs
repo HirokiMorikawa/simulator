@@ -222,11 +222,14 @@ mod tests {
     /// 摩擦で滑走→静止する箱の運動エネルギー損失が、`DissipationToHeat`経由で
     /// 単一の熱ノードの温度上昇(C・ΔT)としておおむね過不足なく計上されることを確認する
     /// (設計§1「保存量の橋」の対記帳、docs/00-foundation/04-architecture.md §1.1.2(2))。
-    /// 許容誤差はrel<15% — 実装検証中、`MechanicsSolver::last_contact_dissipation`
-    /// (同crateのdoc参照)の累積和が実際の力学的エネルギー総損失を系統的に約9%上回る
-    /// (Baumgarte位置誤差補正の測定窓外への波及、PGS接触ソルバの既知の限界)ことを
-    /// 発見したため、対記帳が「概ね」機能することを確認する趣旨でこの誤差域を採用する
-    /// (厳密な対記帳は接触ソルバ側の改修を要するため後続増分)。
+    /// **許容誤差はrel<2%**(QA不具合1の修正で 15% から締めた)。以前は
+    /// `MechanicsSolver::last_contact_dissipation`の累積和が実際の力学的エネルギー
+    /// 総損失を系統的に約9%上回っていたため 15% を採っていた。原因は
+    /// Baumgarte ではなく**測定窓に重力の速度増分が入っていたこと**で、
+    /// 床に置かれた剛体が毎step $\frac12 m(g\Delta t)^2$ を散逸として計上して
+    /// いた(`MechanicsSolver::external_velocity_hold_energy`のdoc参照)。
+    /// その寄与を除いた今は誤差が桁で縮んだので、対記帳が「概ね」ではなく
+    /// 実際に閉じていることを確認できる水準まで締める。
     #[test]
     fn dissipation_to_heat_pairs_kinetic_energy_loss_with_thermal_node_heat_gain() {
         let materials = MaterialDb::standard();
@@ -308,8 +311,93 @@ mod tests {
         let heat_gained = 1000.0 * (final_temp - 293.15);
         let rel_err = (heat_gained - mechanical_energy_lost).abs() / mechanical_energy_lost;
         assert!(
-            rel_err < 0.15,
+            rel_err < 0.02,
             "heat_gained={heat_gained:.4} mechanical_energy_lost={mechanical_energy_lost:.4} rel_err={rel_err:.4}"
+        );
+    }
+
+    /// **静止した剛体は発熱しない**(QA不具合1の回帰テスト)。
+    ///
+    /// D10(摩擦の熱)の箱は step 61 で止まるのに、熱ノードの温度は step 121 まで
+    /// 上がり続けていた(330.13 → 331.70 K、+1,573 J)。増分は 26.2 J/step で、
+    /// これは $\frac12 m(g\Delta t)^2$ と一致する——**接触の法線インパルスが
+    /// 毎step打ち消す重力ぶんの速度増分が散逸として計上されていた**。
+    /// 発熱が止まったのは物理的な理由ではなく、0.5 秒後にスリープが接触解決ごと
+    /// 止めるからでしかなかった。
+    ///
+    /// ここでは**スリープに入る前**の区間を見る——スリープが隠してしまう前に
+    /// 「静止しているのに熱が湧く」ことを直接捕まえるため。初速 0 で床に置いた
+    /// 箱を、スリープ閾値(`SLEEP_TIME_THRESHOLD` = 0.5 s)より短い 0.25 秒だけ
+    /// 進めて、その間の散逸の累積が(重力ぶんの偽の寄与ではなく)ほぼ 0 で
+    /// あることを確認する。修正前はここで 26.2 J/step × 30 step ≈ 786 J が出る。
+    #[test]
+    fn a_body_resting_on_the_floor_dissipates_no_heat_before_it_falls_asleep() {
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+
+        let mut mechanics = MechanicsSolver::new(9.80665);
+        let mut floor_desc = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            steel,
+        );
+        floor_desc.body_type = BodyType::Static;
+        mechanics.create_body(floor_desc, &materials);
+
+        // 初速 0 で床にちょうど乗せる(滑走も落下もしない = 散逸すべき量が無い)。
+        let mut box_desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 0.5, 0.5),
+            },
+            steel,
+        );
+        box_desc.transform.position = Vec3::new(0.0, 0.5, 0.0);
+        let box_idx = mechanics.create_body(box_desc, &materials);
+        let mass = mechanics.bodies.mass(box_idx);
+
+        let dt = 1.0 / 120.0;
+        // 0.25 s < SLEEP_TIME_THRESHOLD(0.5 s)なのでまだ眠らない。
+        let steps = 30;
+        let mut per_step: Vec<f64> = Vec::with_capacity(steps);
+        for _ in 0..steps {
+            let mut ctx = SolverContext {
+                materials: &materials,
+                rng: &mut rng,
+                events: &mut events,
+            };
+            mechanics.step(dt, &mut ctx);
+            per_step.push(mechanics.last_contact_dissipation);
+        }
+        // **最初の数stepは着地の過渡**なので除く。y=0.5 は「ちょうど触れる」
+        // 位置で貫入が 0 なので、1step目はまだ接触が検出されず箱は自由落下し、
+        // 次のstepで実際に着地する——この着地は**本物の非弾性衝突で、散逸するのが
+        // 正しい**(既存テストのコメントが言う「わずかな沈み込み・跳ね」)。
+        // 見たいのはその後の「静止して乗っているだけ」の区間である。
+        let settle = 10;
+        let resting: f64 = per_step[settle..].iter().sum();
+
+        // まだ眠っていない(眠っていたら接触解決が止まって当たり前に0になり、
+        // この検証が意味を失う)。
+        assert!(
+            !mechanics.bodies.asleep[box_idx],
+            "この検証はスリープ前の区間を見る前提なので、まだ起きているべき"
+        );
+        // 修正前の偽の寄与(1step ぶん)= 26.2 J。静止区間 20 step ぶんの累積が
+        // **その 1 step ぶんにも満たない**ことを要求する(修正前はここに
+        // 26.2 × 20 = 524 J が出ていた)。
+        let spurious_per_step = 0.5 * mass * (9.80665 * dt).powi(2);
+        assert!(
+            resting < spurious_per_step,
+            "床に静止した箱は発熱しないべき: step {settle}..{steps} の {} step で \
+             {resting} J 散逸した(重力ぶんの偽の寄与は 1step あたり \
+             {spurious_per_step} J で、修正前はこの区間に {} J 出ていた)。\
+             per_step={per_step:?}",
+            steps - settle,
+            spurious_per_step * (steps - settle) as f64
         );
     }
 
