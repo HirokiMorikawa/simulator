@@ -17,6 +17,25 @@ const cx = canvasBox.x + canvasBox.width / 2;
 const cy = canvasBox.y + canvasBox.height / 2;
 const cameraPos = () => page.evaluate(() => [window.__camera.position.x, window.__camera.position.y, window.__camera.position.z]);
 
+/// **カメラが止まるまで待ってから読む**。OrbitControls は `enableDamping` を
+/// 使っているので、マウスを離したあとも慣性で数十フレーム動き続ける。
+/// 固定の `waitForTimeout(400)` で読むと、**そのとき何フレーム回れたか**
+/// (= マシンの負荷)で測定値が変わる——実測で同じ操作が 0.098 m にも
+/// 0.236 m にもなり、判定が負荷次第で揺れていた。位置の変化が止まるまで
+/// ポーリングすれば、減衰が収束した後の値を必ず読める。
+async function settledCameraPos(timeoutMs = 3000) {
+  const started = Date.now();
+  let previous = await cameraPos();
+  while (Date.now() - started < timeoutMs) {
+    await page.waitForTimeout(80);
+    const current = await cameraPos();
+    const delta = Math.hypot(...current.map((v, i) => v - previous[i]));
+    if (delta < 1e-4) return current;
+    previous = current;
+  }
+  return previous;
+}
+
 /// 表示中のギズモ(Group)の数。W/E/R でちょうど 1 つ、Q で 0 になるはず。
 const visibleGizmos = () =>
   page.evaluate(() => window.__scene.children.filter((o) => o.isGroup && o.visible).length);
@@ -30,8 +49,7 @@ await page.mouse.move(cx, cy);
 await page.mouse.down({ button: "middle" });
 await page.mouse.move(cx + 150, cy + 40, { steps: 12 });
 await page.mouse.up({ button: "middle" });
-await page.waitForTimeout(400);
-const cam1 = await cameraPos();
+const cam1 = await settledCameraPos();
 const orbited = Math.hypot(...cam1.map((v, i) => v - cam0[i]));
 r.check("A2-1", "中ドラッグで軌道回転", orbited > 0.5, `Δ|camera| = ${orbited.toFixed(3)} m`);
 
@@ -39,8 +57,7 @@ await page.mouse.move(cx, cy);
 await page.mouse.down({ button: "right" });
 await page.mouse.move(cx - 120, cy - 60, { steps: 12 });
 await page.mouse.up({ button: "right" });
-await page.waitForTimeout(400);
-const cam2 = await cameraPos();
+const cam2 = await settledCameraPos();
 // **判定は 3 成分の変位で行う**。以前は x と y だけを見ていたが、パンは
 // スクリーン空間(`screenSpacePanning`)なので**カメラの向き次第でどの世界軸へ
 // 動くかが変わる**。直前の A2-1 が視点を持ち上げて見下ろし気味にするため、
@@ -55,7 +72,7 @@ r.check("A2-2", "右ドラッグでパン", panned > 0.2,
 const dist0 = await page.evaluate(() => window.__camera.position.length());
 await page.mouse.move(cx, cy);
 await page.mouse.wheel(0, -600);
-await page.waitForTimeout(400);
+await settledCameraPos();
 const dist1 = await page.evaluate(() => window.__camera.position.length());
 r.check("A2-3", "ホイールでズーム", Math.abs(dist1 - dist0) > 0.3, `|camera| ${dist0.toFixed(2)} → ${dist1.toFixed(2)}`);
 

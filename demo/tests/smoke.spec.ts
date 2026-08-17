@@ -227,10 +227,15 @@ test("D19(電気工作台)を読み込むと Circuit タブと Hierarchy が実�
 
   // HUD は分圧点(node2)の電圧を出す。E5 の解析解は 9V * 2k/(1k+2k) = 6.000V。
   // **読み込み直後は 0.000 V**——回路は`step()`で初めて解かれるため、1step進める。
+  //
+  // 表記が `circuit V = ...` から **`circuit V[2] = ...`** に変わっているのは
+  // QA不具合7の修正による。HUD は固定のノード番号ではなく**シーンが宣言した
+  // プローブ**を読むようになり、どのノードを表示しているかを併記する
+  // (D19 の `probes` 先頭が `circuit_node_voltage: 2` なのでノード 2)。
   await page.click("#btn-mode-play");
   await page.click("#btn-play"); // 一時停止(`setMode`が既に再生を始めている)
   await page.click("#btn-step");
-  await expect(page.locator("#hud")).toContainText("circuit V = 6.000 V");
+  await expect(page.locator("#hud")).toContainText("circuit V[2] = 6.0000 V");
 
   // Hierarchy の Circuits サブツリーに実際の素子が並ぶ(葉ノードで検証する
   // ——"Circuits" の li は入れ子の ul を含むため exact 一致しない)。
@@ -239,12 +244,17 @@ test("D19(電気工作台)を読み込むと Circuit タブと Hierarchy が実�
   await expect(hierarchy.getByText("R: N1 – N2 1000 Ω", { exact: true })).toBeVisible();
   await expect(hierarchy.getByText("C: N3 – GND 0.001 F", { exact: true })).toBeVisible();
   await expect(hierarchy.getByText("SW0: N1 – N4 (閉)", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("D: N4 → GND", { exact: true })).toBeVisible();
+  // ダイオードは N4 直結から **470Ω の電流制限抵抗を挟んだ N5** へ移した
+  // (QA不具合3: 直列抵抗が無く 9V 源をダイオードが短絡して −7.875×10⁶ A が
+  // 流れていた)。
+  await expect(hierarchy.getByText("R: N4 – N5 470 Ω", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("D: N5 → GND", { exact: true })).toBeVisible();
 
   // Circuit タブ本体も同じ実素子を出し、**固定デモ回路の嘘の数字は消えている**。
   await page.click('.project-tab[data-tab="circuit"]');
   const topology = page.locator("#project-body .circuit-topology");
-  await expect(topology).toContainText("回路の素子(実際に配線されているもの、7件)");
+  // 7件 → 8件: QA不具合3の修正で LED 枝へ電流制限抵抗 470Ω を足したぶん。
+  await expect(topology).toContainText("回路の素子(実際に配線されているもの、8件)");
   await expect(topology).toContainText("R: N1 – N2 1000 Ω");
   await expect(topology).not.toContainText("100Ω");
   await expect(topology).not.toContainText("10V 電源");
