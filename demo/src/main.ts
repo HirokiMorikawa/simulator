@@ -1116,7 +1116,11 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   const staticBadge = (world.read_component("body_is_static_at", String(index)) === "true")
     ? ' <span class="badge">Static</span>'
     : "";
-  const initialPosition = world.body_position_at_f32(index);
+  // `body_position_at_f32`はWasmメモリを直接指す一時的なビューを返す(B16、
+  // `crates/sim-wasm/src/lib.rs`の`HotPathViewBuffers`のdoc参照)ため、下の
+  // テンプレートリテラルが他のWasm呼び出し(`read_component`)を挟んで
+  // 参照する前に、ここで即座にプレーンな配列へ読み切っておく。
+  const initialPosition = Array.from(world.body_position_at_f32(index));
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
@@ -3592,13 +3596,17 @@ async function setUpSceneView(
     const count = readNumber(world, "body_count");
     const bodies: SceneBodyExport[] = [];
     for (let i = 0; i < count; i++) {
-      const pos = world.body_position_at_f32(i);
+      // `body_position_at_f32`はWasmメモリを直接指す一時的なビューを返す
+      // (B16、`HotPathViewBuffers`のdoc参照)ため、後続の`read_component`呼び出し
+      // を挟む前にプレーンな配列へ読み切っておく(でないと`position`フィールドの
+      // 評価時には`pos`がもう指しているメモリの中身が変わっている恐れがある)。
+      const [px, py, pz] = world.body_position_at_f32(i);
       bodies.push({
         index: i,
         label: world.read_component("body_label_at", String(i)),
         shape: world.read_component("body_shape_label_at", String(i)),
         material: world.read_component("body_material_label_at", String(i)),
-        position: [pos[0], pos[1], pos[2]],
+        position: [px, py, pz],
         isStatic: (world.read_component("body_is_static_at", String(i)) === "true"),
       });
     }
@@ -4385,7 +4393,11 @@ async function setUpSceneView(
   scene.add(astroGroup);
 
   function updateAstroOverlay(currentWorld: WasmWorld) {
-    const positions = currentWorld.astro_positions_f32();
+    // `astro_positions_f32`はWasmメモリを直接指す一時的なビューを返す(B16、
+    // `HotPathViewBuffers`のdoc参照)。この下で`astro_masses_f64`という別の
+    // Wasm呼び出しを挟むため、そのビューが無効化される前に自前のコピーへ
+    // 読み切っておく(`positions`はこの関数の残り全体で使い続ける)。
+    const positions = Float32Array.from(currentWorld.astro_positions_f32());
     const count = positions.length / 3;
     if (count === 0) {
       astroGroup.visible = false;
@@ -4612,7 +4624,11 @@ async function setUpSceneView(
       fieldPanel.hidden = false;
       return;
     }
-    const density = currentWorld.quantum_1d_density_f32();
+    // `quantum_1d_density_f32`はWasmメモリを直接指す一時的なビューを返す
+    // (B16、`HotPathViewBuffers`のdoc参照)。すぐ下で`quantum_1d_potential_f32`
+    // という別のWasm呼び出しを挟むため、そのビューが無効化される前に自前の
+    // コピーへ読み切っておく。
+    const density = Float32Array.from(currentWorld.quantum_1d_density_f32());
     if (density.length > 0) {
       fieldTitle.textContent = `量子 1D |ψ|² と V(x)(格子 ${density.length} 点)`;
       drawQuantum1d(density, currentWorld.quantum_1d_potential_f32());
@@ -5328,19 +5344,24 @@ async function setUpSceneView(
           cameraDirection,
           pointerDownHit.worldPoint,
         );
-        const p = world.body_position_at_f32(grabbedBodyIndex);
+        // `body_position_at_f32`はWasmメモリを直接指す一時的なビューを返す
+        // (B16、`HotPathViewBuffers`のdoc参照)。下の`applyComponent`が挟む
+        // Wasm呼び出し(`apply_component`)より前に、`pushCommandLog`でも
+        // 再利用する3値をここで読み切っておく(でないと2回目の参照時には
+        // 無効化されている恐れがある)。
+        const [px, py, pz] = world.body_position_at_f32(grabbedBodyIndex);
         applyComponent(world, "push_grab", {
           body_index: grabbedBodyIndex,
-          target_x: p[0],
-          target_y: p[1],
-          target_z: p[2],
+          target_x: px,
+          target_y: py,
+          target_z: pz,
         });
         pushCommandLog(world, {
           kind: "Grab",
           bodyIndex: grabbedBodyIndex,
-          targetX: p[0],
-          targetY: p[1],
-          targetZ: p[2],
+          targetX: px,
+          targetY: py,
+          targetZ: pz,
         });
       }
     }
@@ -6170,15 +6191,21 @@ async function setUpSceneView(
       replayWorld.step();
     }
 
-    const finalBoxPos = replayWorld.body_position_at_f32(BODY_INDEX_BOX);
+    // `body_position_at_f32`はWasmメモリを直接指す一時的なビューを返す(B16、
+    // `HotPathViewBuffers`のdoc参照)。しかも`replayWorld`と`world`は別々の
+    // `WasmWorld`インスタンスでも同じ1個のWasmモジュールインスタンス(=同じ
+    // 線形メモリ)を共有しているため、どちらか一方への後続呼び出しがもう一方の
+    // ビューをも無効化しうる。この関数はこの後`world`/`replayWorld`双方へ
+    // 何度も呼び出すので、ここで即座にプレーンな配列へ読み切っておく。
+    const finalBoxPos = Array.from(replayWorld.body_position_at_f32(BODY_INDEX_BOX));
     // ライブ側の`world`はシーンギャラリー経由で任意のシーンに差し替わっている
     // 可能性があり、index 1(既定シーンの箱)が存在しないことがある——`sceneChanged`
     // が真の時点で`matches`は`false`確定なので、位置の意味自体が無いプレース
     // ホルダで安全に済ませる(**残タスク完遂のシーンギャラリー増分**で追加した
     // ガード、以前は既定シーン以外あり得なかったため無条件アクセスで安全だった)。
     const liveBoxPos = sceneChanged
-      ? new Float32Array(3)
-      : world.body_position_at_f32(BODY_INDEX_BOX);
+      ? [0, 0, 0]
+      : Array.from(world.body_position_at_f32(BODY_INDEX_BOX));
     const finalStateHash = replayWorld.read_component("state_hash", "");
     const liveStateHash = world.read_component("state_hash", "");
     return {
@@ -7149,9 +7176,14 @@ async function setUpSceneView(
 
     if (frameOverlayToggle.checked) {
       for (const [frameIndex, helper] of frameAxesHelpers) {
+        // `frame_world_position_f32`/`frame_world_rotation_f32`はいずれも
+        // Wasmメモリを直接指す一時的なビューを返す(B16、`HotPathViewBuffers`の
+        // doc参照)。`pos`を読み切る前に`rot`側のWasm呼び出しを挟むと`pos`の
+        // ビューが無効化されうるため、他の同種呼び出し(`body_position_at_f32`
+        // 等)と同じく「呼んだら即座に読み切る」順序を守る。
         const pos = world.frame_world_position_f32(frameIndex);
-        const rot = world.frame_world_rotation_f32(frameIndex);
         helper.position.set(pos[0], pos[1], pos[2]);
+        const rot = world.frame_world_rotation_f32(frameIndex);
         helper.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
         helper.visible = true;
       }
@@ -7192,32 +7224,37 @@ async function setUpSceneView(
     // 撤廃前は実際にここで毎フレームパニックしていた(`heater_node_temperature`/
     // `Circuit::node_voltage`と同じバグの系統、増分3-3/B2で発見した2件と同型)。
     const selectedBodyValid = hasSelectedBody();
-    const selectedPosition = selectedBodyValid
-      ? world.body_position_at_f32(selectedBodyIndex)
-      : new Float32Array(3);
-    const selectedRotation = selectedBodyValid
-      ? world.body_rotation_at_f32(selectedBodyIndex)
-      : new Float32Array([0, 0, 0, 1]);
-    const selectedVelocity = selectedBodyValid
-      ? world.body_velocity_at_f32(selectedBodyIndex)
-      : new Float32Array(3);
-    inspectorPosition.set(
-      selectedPosition[0],
-      selectedPosition[1],
-      selectedPosition[2],
-    );
-    inspectorRotationQuat.set(
-      selectedRotation[0],
-      selectedRotation[1],
-      selectedRotation[2],
-      selectedRotation[3],
-    );
+    // `body_position_at_f32`/`body_rotation_at_f32`/`body_velocity_at_f32`は
+    // いずれもWasmメモリを直接指す一時的なビューを返す(B16、
+    // `HotPathViewBuffers`のdoc参照)——3つとも取得してからまとめて読むと、
+    // 後段の呼び出しが前段のビューを無効化しうる。呼んだら即座に
+    // `inspectorXxx`へ読み切ってから次を呼ぶ順序を守る。
+    if (selectedBodyValid) {
+      const selectedPosition = world.body_position_at_f32(selectedBodyIndex);
+      inspectorPosition.set(
+        selectedPosition[0],
+        selectedPosition[1],
+        selectedPosition[2],
+      );
+      const selectedRotation = world.body_rotation_at_f32(selectedBodyIndex);
+      inspectorRotationQuat.set(
+        selectedRotation[0],
+        selectedRotation[1],
+        selectedRotation[2],
+        selectedRotation[3],
+      );
+      const selectedVelocity = world.body_velocity_at_f32(selectedBodyIndex);
+      inspectorVelocity.set(
+        selectedVelocity[0],
+        selectedVelocity[1],
+        selectedVelocity[2],
+      );
+    } else {
+      inspectorPosition.set(0, 0, 0);
+      inspectorRotationQuat.set(0, 0, 0, 1);
+      inspectorVelocity.set(0, 0, 0);
+    }
     inspectorRotation.setFromQuaternion(inspectorRotationQuat);
-    inspectorVelocity.set(
-      selectedVelocity[0],
-      selectedVelocity[1],
-      selectedVelocity[2],
-    );
     if (selectedBodyValid) {
       updateInspectorTransformFields(
         inspectorPosition,
@@ -7237,7 +7274,13 @@ async function setUpSceneView(
         series.push({
           label: world.read_component("imported_probe_label_at", String(i)),
           color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
-          history: world.imported_probe_history_f64(i),
+          // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
+          // 返す(B16、`HotPathViewBuffers`のdoc参照)——このループが呼ぶたび
+          // 同じ1本の永続バッファを使い回すため、`series`へ積んだ後の要素を
+          // 次のイテレーションが上書きしてしまう。`updateProbeGraph`が全系列を
+          // まとめて後で描く(=ループを抜けるまで読まない)以上、ここで即座に
+          // 自前のコピーへ読み切っておく必要がある。
+          history: Float64Array.from(world.imported_probe_history_f64(i)),
         });
       }
       updateProbeGraph(series, readNumber(world, "dt"), readNumber(world, "time"));
@@ -7247,12 +7290,18 @@ async function setUpSceneView(
           {
             label: "BodyPosY",
             color: "#9cf",
-            history: world.y_probe_history_f64(),
+            // `y_probe_history_f64`/`speed_probe_history_f64`はいずれもWasm
+            // メモリを直接指す一時的なビューを返す(B16、`HotPathViewBuffers`の
+            // doc参照)。`updateProbeGraph`(`setUpProbeGraph`のdoc参照)は
+            // 渡した`series`をCSVエクスポート用に次のフレーム以降・他のWasm
+            // 呼び出しをまたいで保持し続けるため、ここで即座に自前のコピーへ
+            // 読み切っておく必要がある。
+            history: Float64Array.from(world.y_probe_history_f64()),
           },
           {
             label: "BodySpeed",
             color: "#fc6",
-            history: world.speed_probe_history_f64(),
+            history: Float64Array.from(world.speed_probe_history_f64()),
           },
         ],
         readNumber(world, "dt"),
@@ -7380,7 +7429,7 @@ async function setUpSceneView(
     hud.textContent = [
       `t = ${readNumber(world, "time").toFixed(3)} s`,
       `step = ${readNumber(world, "step_count").toString()}`,
-      `y = ${selectedBodyValid ? selectedPosition[1].toFixed(4) : "—"} m`,
+      `y = ${selectedBodyValid ? inspectorPosition.y.toFixed(4) : "—"} m`,
       circuitLine,
       temperatureLine,
     ].join("\n");

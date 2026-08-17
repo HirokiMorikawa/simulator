@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use js_sys::{Float32Array, Float64Array};
+use js_sys::{Float32Array, Float64Array, Uint8Array};
 use sim_core::FrameId;
 use sim_math::{Quat, Vec3};
 use sim_mechanics::{BallJoint, BodyType, HingeMotorPd, RigidBodyDesc, Shape};
@@ -379,6 +379,78 @@ fn shape_label_prefix(shape: &Shape) -> &'static str {
     }
 }
 
+/// **B16「ゼロコピーのメモリビューAPIへ統一」**: `apply_component`のdoc
+/// 「正直な適用範囲」が対象外と明言した、毎フレーム呼ばれる型付き配列の
+/// 読み出し系(`body_position_at_f32`等、レンダリングループのホットパス)向けの
+/// 永続バッファ集。JSON文字列化を避けて`Float32Array`/`Float64Array`/
+/// `Uint8Array`を直接返す設計自体はそのまま(そこは変えない狙いの取り組みでは
+/// ない)——変えたのは**戻り値の作り方**。
+///
+/// 従来は呼び出しのたびに`Float32Array::from(&values[..])`等で**新しいJS側
+/// 配列オブジェクトを割り当ててコピー**していた。60fpsのレンダリングループで
+/// 本構造体が持つ約20種のアクセサを毎フレーム呼ぶと、使い捨ての型付き配列が
+/// フレームごとに何十個も生成され、素通りするだけのGC圧になっていた。
+///
+/// この構造体のフィールドはアクセサ1個につき1本の永続`Vec`——各アクセサは
+/// 呼び出しのたびに対応するフィールドを`clear`してから値を書き直し(値自体は
+/// 毎フレーム変わるのでここは避けられない)、最後に`js_sys::XxxArray::view(&buf)`
+/// (`unsafe`)でWasm線形メモリを直接指す一時的なビューを返す。JS側は新しい
+/// 配列オブジェクトを割り当てずに済む代わりに、**返された配列を次にWasmへ
+/// 呼び出す前に読み切る**という約束を守らなければならない
+/// (`demo/src/main.ts`の呼び出し箇所のコメント参照)——`view()`はRustの`Vec`が
+/// 指すメモリをエイリアスするだけなので、その後Wasm側で該当`Vec`が
+/// (次にこのメソッドを呼んだときの`clear`+書き込みや、無関係な別の呼び出しで
+/// Wasmのリニアメモリ自体が成長・移動することも含め)再確保されると、ビューは
+/// 古い(場合によっては解放済みの)メモリを指したままになり、JS側は不定な値を
+/// 読むか最悪OOBアクセスになる。
+///
+/// この不変条件を守るため、各アクセサ内では**バッファへの書き込みを完全に
+/// 終えてから`view()`を呼び、`view()`の戻り値を関数の最後の式にする**
+/// (=`view()`を作った後、同じ呼び出し内でその`buf`に触れる処理を続けない)。
+#[derive(Default)]
+struct HotPathViewBuffers {
+    /// `frame_rotation_at_f32`用。
+    frame_rotation: Vec<f32>,
+    /// `frame_world_position_f32`用。
+    frame_world_position: Vec<f32>,
+    /// `frame_world_rotation_f32`用。
+    frame_world_rotation: Vec<f32>,
+    /// `body_position_at_f32`用。
+    body_position: Vec<f32>,
+    /// `body_velocity_at_f32`用。
+    body_velocity: Vec<f32>,
+    /// `body_rotation_at_f32`用。
+    body_rotation: Vec<f32>,
+    /// `constraint_anchor_points_at`用。
+    constraint_anchor_points: Vec<f32>,
+    /// `quantum_1d_density_f32`用。
+    quantum_1d_density: Vec<f32>,
+    /// `quantum_2d_density_f32`用。
+    quantum_2d_density: Vec<f32>,
+    /// `ising_spins_u8`用。
+    ising_spins: Vec<u8>,
+    /// `kinetic_gas_positions_f32`用。
+    kinetic_gas_positions: Vec<f32>,
+    /// `brownian_positions_f32`用。
+    brownian_positions: Vec<f32>,
+    /// `soft_body_positions_f32`用。
+    soft_body_positions: Vec<f32>,
+    /// `astro_positions_f32`用。
+    astro_positions: Vec<f32>,
+    /// `conduction_rod_temperatures_f32`用。
+    conduction_rod_temperatures: Vec<f32>,
+    /// `fluid_particle_positions_f32`用。
+    fluid_particle_positions: Vec<f32>,
+    /// `y_probe_history_f64`用。
+    y_probe_history: Vec<f64>,
+    /// `speed_probe_history_f64`用。
+    speed_probe_history: Vec<f64>,
+    /// `contact_points_f32`用。
+    contact_points: Vec<f32>,
+    /// `imported_probe_history_f64`用。
+    imported_probe_history: Vec<f64>,
+}
+
 #[wasm_bindgen]
 pub struct WasmWorld {
     inner: World,
@@ -425,6 +497,9 @@ pub struct WasmWorld {
     /// 出るだけで**結合が落ちたことがユーザーに伝わらなかった**。
     /// `read_component("last_import_skipped_sections", "")`で読める。
     last_import_skipped_sections: Vec<String>,
+    /// ホットパスの型付き配列アクセサが使い回す永続バッファ集
+    /// (`HotPathViewBuffers`のdoc、B16参照)。
+    view_buffers: HotPathViewBuffers,
 }
 
 /// シーンJSON Import が**書かれていたのに取り込まなかった**セクション名を列挙する
@@ -567,6 +642,7 @@ impl WasmWorld {
             fluid_spawn_count: 0,
             imported_probe_handles: Vec::new(),
             last_import_skipped_sections: Vec::new(),
+            view_buffers: HotPathViewBuffers::default(),
         }
     }
 
@@ -663,6 +739,7 @@ impl WasmWorld {
             fluid_spawn_count: 0,
             imported_probe_handles,
             last_import_skipped_sections: Vec::new(),
+            view_buffers: HotPathViewBuffers::default(),
         })
     }
 
@@ -1906,10 +1983,19 @@ impl WasmWorld {
     /// `Float64Array`の構築はネイティブターゲットでは行えない(モジュール末尾の
     /// テストdoc参照)ため、**index検証と値の取り出しだけを
     /// `imported_probe_history_impl`へ切り出した**——`Err`パスをネイティブで
-    /// 検証できるようにするためで、JS側から見た戻り値は従来と同一。
-    pub fn imported_probe_history_f64(&self, index: usize) -> Result<Float64Array, JsValue> {
+    /// 検証できるようにするためで、JS側から見た戻り値の中身は従来と同一。
+    ///
+    /// **B16(ゼロコピー化)**: 戻り値は`self.view_buffers.imported_probe_history`を
+    /// エイリアスする一時的なビュー(`HotPathViewBuffers`のdoc参照)。呼び出し側は
+    /// 値を読み切ってから次のWasm呼び出しへ進むこと。
+    pub fn imported_probe_history_f64(&mut self, index: usize) -> Result<Float64Array, JsValue> {
         let values = self.imported_probe_history_impl(index)?;
-        Ok(Float64Array::from(values.as_slice()))
+        let buf = &mut self.view_buffers.imported_probe_history;
+        buf.clear();
+        buf.extend_from_slice(&values);
+        // SAFETY: `buf`への書き込みはここまでで完了しており、このビューを
+        // 構築した後は関数を抜けるだけ(`HotPathViewBuffers`のdoc参照)。
+        Ok(unsafe { Float64Array::view(buf) })
     }
 
     /// `imported_probe_history_f64`の実体(`Float64Array`化する前の生の履歴)。
@@ -2012,13 +2098,19 @@ impl WasmWorld {
     /// 渡すと転送量が倍になるうえ、描画側(Three.js/Canvas)は`f32`しか使わない。
     ///
     /// 量子1D: 確率密度 $|\psi(x)|^2$(格子点数ぶん)。
-    pub fn quantum_1d_density_f32(&self) -> Float32Array {
-        let values: Vec<f32> = self
-            .inner
-            .quantum_1d()
-            .map(|q| q.psi.iter().map(|p| p.norm_sq() as f32).collect())
-            .unwrap_or_default();
-        Float32Array::from(values.as_slice())
+    ///
+    /// **B16(ゼロコピー化)**: 戻り値は`self.view_buffers.quantum_1d_density`を
+    /// エイリアスする一時的なビュー(`HotPathViewBuffers`のdoc参照)。呼び出し側は
+    /// 値を読み切ってから次のWasm呼び出しへ進むこと。
+    pub fn quantum_1d_density_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.quantum_1d_density;
+        buf.clear();
+        if let Some(q) = self.inner.quantum_1d() {
+            buf.extend(q.psi.iter().map(|p| p.norm_sq() as f32));
+        }
+        // SAFETY: `buf`への書き込みはここまでで完了しており、このビューを
+        // 構築した後は関数を抜けるだけ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// 量子1Dのポテンシャル $V(x)$(密度と同じ格子点数)。障壁・井戸の位置を
@@ -2037,13 +2129,17 @@ impl WasmWorld {
     }
 
     /// 量子2D: 確率密度 $|\psi(x,y)|^2$ を行優先で返す(`nx*ny`要素)。
-    pub fn quantum_2d_density_f32(&self) -> Float32Array {
-        let values: Vec<f32> = self
-            .inner
-            .quantum_2d()
-            .map(|q| q.psi.iter().map(|p| p.norm_sq() as f32).collect())
-            .unwrap_or_default();
-        Float32Array::from(values.as_slice())
+    ///
+    /// **B16(ゼロコピー化)**: `quantum_1d_density_f32`と同じ規約
+    /// (`self.view_buffers.quantum_2d_density`をエイリアスする一時的なビュー)。
+    pub fn quantum_2d_density_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.quantum_2d_density;
+        buf.clear();
+        if let Some(q) = self.inner.quantum_2d() {
+            buf.extend(q.psi.iter().map(|p| p.norm_sq() as f32));
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// 量子2Dのポテンシャル(スリット壁の位置を density と重ねて描くため)。
@@ -2065,11 +2161,20 @@ impl WasmWorld {
     }
 
     /// イジング模型のスピン格子(+1 → 1、-1 → 0 の`u8`、`l*l`要素)。
-    pub fn ising_spins_u8(&self) -> Vec<u8> {
-        self.inner
-            .ising()
-            .map(|i| i.spins.iter().map(|&s| u8::from(s > 0)).collect())
-            .unwrap_or_default()
+    ///
+    /// **B16(ゼロコピー化)**: 以前は`Vec<u8>`を返し、wasm-bindgenの標準変換が
+    /// 新しい`Uint8Array`へコピーしていた。他の19メソッドと同じ規約
+    /// (`self.view_buffers.ising_spins`をエイリアスする一時的なビュー、
+    /// `HotPathViewBuffers`のdoc参照)へ揃えるため、明示的に`Uint8Array`を返す
+    /// 形にした。
+    pub fn ising_spins_u8(&mut self) -> Uint8Array {
+        let buf = &mut self.view_buffers.ising_spins;
+        buf.clear();
+        if let Some(i) = self.inner.ising() {
+            buf.extend(i.spins.iter().map(|&s| u8::from(s > 0)));
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Uint8Array::view(buf) }
     }
 
     pub fn ising_size(&self) -> usize {
@@ -2078,20 +2183,24 @@ impl WasmWorld {
 
     /// 気体分子の位置(`[x,y,z]`の並び)。粒子数が多いので`stride`で間引ける
     /// (格子流体オーバーレイと同じ方針)。
-    pub fn kinetic_gas_positions_f32(&self, stride: usize) -> Float32Array {
+    ///
+    /// **B16(ゼロコピー化)**: `quantum_1d_density_f32`と同じ規約
+    /// (`self.view_buffers.kinetic_gas_positions`をエイリアスする一時的な
+    /// ビュー)。
+    pub fn kinetic_gas_positions_f32(&mut self, stride: usize) -> Float32Array {
         let stride = stride.max(1);
-        let values: Vec<f32> = self
-            .inner
-            .kinetic_gas()
-            .map(|g| {
+        let buf = &mut self.view_buffers.kinetic_gas_positions;
+        buf.clear();
+        if let Some(g) = self.inner.kinetic_gas() {
+            buf.extend(
                 g.position
                     .iter()
                     .step_by(stride)
-                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
-                    .collect()
-            })
-            .unwrap_or_default();
-        Float32Array::from(values.as_slice())
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+            );
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// 気体分子の速さのヒストグラム(設計 docs/21-verification/03-demo-scenarios.md
@@ -2120,20 +2229,23 @@ impl WasmWorld {
     }
 
     /// ブラウン粒子の位置(`[x,y,z]`の並び)。
-    pub fn brownian_positions_f32(&self, stride: usize) -> Float32Array {
+    ///
+    /// **B16(ゼロコピー化)**: `kinetic_gas_positions_f32`と同じ規約
+    /// (`self.view_buffers.brownian_positions`をエイリアスする一時的なビュー)。
+    pub fn brownian_positions_f32(&mut self, stride: usize) -> Float32Array {
         let stride = stride.max(1);
-        let values: Vec<f32> = self
-            .inner
-            .brownian()
-            .map(|b| {
+        let buf = &mut self.view_buffers.brownian_positions;
+        buf.clear();
+        if let Some(b) = self.inner.brownian() {
+            buf.extend(
                 b.position
                     .iter()
                     .step_by(stride)
-                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
-                    .collect()
-            })
-            .unwrap_or_default();
-        Float32Array::from(values.as_slice())
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+            );
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// FDTD の Ez 場(行優先、`nx*ny`要素)。
@@ -2166,18 +2278,22 @@ impl WasmWorld {
     /// **D13(ロープと旗)は Scene View に何も描かれていなかった**——ソフトボディは
     /// 剛体ではないので `bodyMeshes` の同期対象外で、Probe Graphs でしか
     /// 観測できない状態だった。
-    pub fn soft_body_positions_f32(&self) -> Float32Array {
-        let values: Vec<f32> = self
-            .inner
-            .soft_body()
-            .map(|b| {
+    ///
+    /// **B16(ゼロコピー化)**: `quantum_1d_density_f32`と同じ規約
+    /// (`self.view_buffers.soft_body_positions`をエイリアスする一時的な
+    /// ビュー)。
+    pub fn soft_body_positions_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.soft_body_positions;
+        buf.clear();
+        if let Some(b) = self.inner.soft_body() {
+            buf.extend(
                 b.position
                     .iter()
-                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
-                    .collect()
-            })
-            .unwrap_or_default();
-        Float32Array::from(values.as_slice())
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+            );
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// ソフトボディの距離拘束のペア(`[i, j]`の並び)。線分として描くために要る。
@@ -2196,18 +2312,21 @@ impl WasmWorld {
     /// 天体の位置(`[x,y,z]`の並び、**群3で追加**)。
     /// **D34/D35/D36 も Scene View には何も描かれていなかった**——天体は
     /// `RigidBodySet` とは別の質点集合で、剛体メッシュの同期対象外だった。
-    pub fn astro_positions_f32(&self) -> Float32Array {
-        let values: Vec<f32> = self
-            .inner
-            .astro()
-            .map(|a| {
+    ///
+    /// **B16(ゼロコピー化)**: `quantum_1d_density_f32`と同じ規約
+    /// (`self.view_buffers.astro_positions`をエイリアスする一時的なビュー)。
+    pub fn astro_positions_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.astro_positions;
+        buf.clear();
+        if let Some(a) = self.inner.astro() {
+            buf.extend(
                 a.position
                     .iter()
-                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32])
-                    .collect()
-            })
-            .unwrap_or_default();
-        Float32Array::from(values.as_slice())
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+            );
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// 天体の質量(相対的な描画サイズを決めるために使う)。
@@ -2222,13 +2341,18 @@ impl WasmWorld {
 
     /// 1D熱伝導棒の温度分布(**群3で追加**)。D16 も Scene View には何も
     /// 描かれず Probe Graphs のみだった。
-    pub fn conduction_rod_temperatures_f32(&self) -> Float32Array {
-        let values: Vec<f32> = self
-            .inner
-            .conduction_rod()
-            .map(|r| r.temperature.iter().map(|&t| t as f32).collect())
-            .unwrap_or_default();
-        Float32Array::from(values.as_slice())
+    ///
+    /// **B16(ゼロコピー化)**: `quantum_1d_density_f32`と同じ規約
+    /// (`self.view_buffers.conduction_rod_temperatures`をエイリアスする
+    /// 一時的なビュー)。
+    pub fn conduction_rod_temperatures_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.conduction_rod_temperatures;
+        buf.clear();
+        if let Some(r) = self.inner.conduction_rod() {
+            buf.extend(r.temperature.iter().map(|&t| t as f32));
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// ドメイン別のエネルギー内訳(`World::energy_report`、**群3で追加**)。
@@ -2604,11 +2728,20 @@ impl WasmWorld {
     /// `imported_probe_history_f64`と同じ理由で、実体(index検証+アンカー点の
     /// 取り出し)を`constraint_anchor_points_impl`へ切り出してある。
     /// 拘束を持たないボディは`None`——従来どおり長さ0の`Float32Array`になる。
-    pub fn constraint_anchor_points_at(&self, index: usize) -> Result<Float32Array, JsValue> {
-        match self.constraint_anchor_points_impl(index)? {
-            None => Ok(Float32Array::new_with_length(0)),
-            Some(points) => Ok(Float32Array::from(&points[..])),
+    ///
+    /// **B16(ゼロコピー化)**: 戻り値は`self.view_buffers.constraint_anchor_points`を
+    /// エイリアスする一時的なビュー(`HotPathViewBuffers`のdoc参照)。呼び出し側は
+    /// 値を読み切ってから次のWasm呼び出しへ進むこと。
+    pub fn constraint_anchor_points_at(&mut self, index: usize) -> Result<Float32Array, JsValue> {
+        let points = self.constraint_anchor_points_impl(index)?;
+        let buf = &mut self.view_buffers.constraint_anchor_points;
+        buf.clear();
+        if let Some(points) = points {
+            buf.extend_from_slice(&points);
         }
+        // SAFETY: `buf`への書き込みはここまでで完了しており、このビューを
+        // 構築した後は関数を抜けるだけ(`HotPathViewBuffers`のdoc参照)。
+        Ok(unsafe { Float32Array::view(buf) })
     }
 
     /// `constraint_anchor_points_at`の実体。拘束を持たないボディなら`None`。
@@ -4150,9 +4283,18 @@ impl WasmWorld {
     /// クォータニオン`[x, y, z, w]`(f32)で返す。
     /// `imported_probe_history_f64`と同じ理由で、index検証と値の取り出しは
     /// `frame_rotation_at_impl`側(ネイティブテスト可能)。
-    pub fn frame_rotation_at_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+    ///
+    /// **B16(ゼロコピー化)**: 戻り値は`self.view_buffers.frame_rotation`を
+    /// エイリアスする一時的なビュー(`HotPathViewBuffers`のdoc参照)。呼び出し側は
+    /// 値を読み切ってから次のWasm呼び出しへ進むこと。
+    pub fn frame_rotation_at_f32(&mut self, frame_index: usize) -> Result<Float32Array, JsValue> {
         let rotation = self.frame_rotation_at_impl(frame_index)?;
-        Ok(Float32Array::from(&rotation[..]))
+        let buf = &mut self.view_buffers.frame_rotation;
+        buf.clear();
+        buf.extend_from_slice(&rotation);
+        // SAFETY: `buf`への書き込みはここまでで完了しており、このビューを
+        // 構築した後は関数を抜けるだけ(`HotPathViewBuffers`のdoc参照)。
+        Ok(unsafe { Float32Array::view(buf) })
     }
 
     /// `frame_rotation_at_f32`の実体。
@@ -4201,9 +4343,20 @@ impl WasmWorld {
     /// (親フレームからの相対回転のみ、単一のROOT直下フレームを想定していた
     /// 旧API)と異なり、複数フレームが親子関係を持つ場合(フレーム階層
     /// ドリルインUI)でも階層を遡って合成した実際のワールド位置を返す。
-    pub fn frame_world_position_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+    ///
+    /// **B16(ゼロコピー化)**: `frame_rotation_at_f32`と同じ規約
+    /// (`self.view_buffers.frame_world_position`をエイリアスする一時的な
+    /// ビュー)。
+    pub fn frame_world_position_f32(
+        &mut self,
+        frame_index: usize,
+    ) -> Result<Float32Array, JsValue> {
         let position = self.frame_world_position_impl(frame_index)?;
-        Ok(Float32Array::from(&position[..]))
+        let buf = &mut self.view_buffers.frame_world_position;
+        buf.clear();
+        buf.extend_from_slice(&position);
+        // SAFETY: `frame_rotation_at_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        Ok(unsafe { Float32Array::view(buf) })
     }
 
     /// `frame_world_position_f32`の実体(`frame_rotation_at_impl`と同じ規約)。
@@ -4219,9 +4372,20 @@ impl WasmWorld {
 
     /// `frame_index`番目のフレームのROOT(ワールド)座標系での姿勢
     /// (`frame_world_position_f32`と同じ理由で`transform_to_root`を使う)。
-    pub fn frame_world_rotation_f32(&self, frame_index: usize) -> Result<Float32Array, JsValue> {
+    ///
+    /// **B16(ゼロコピー化)**: `frame_rotation_at_f32`と同じ規約
+    /// (`self.view_buffers.frame_world_rotation`をエイリアスする一時的な
+    /// ビュー)。
+    pub fn frame_world_rotation_f32(
+        &mut self,
+        frame_index: usize,
+    ) -> Result<Float32Array, JsValue> {
         let rotation = self.frame_world_rotation_impl(frame_index)?;
-        Ok(Float32Array::from(&rotation[..]))
+        let buf = &mut self.view_buffers.frame_world_rotation;
+        buf.clear();
+        buf.extend_from_slice(&rotation);
+        // SAFETY: `frame_rotation_at_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        Ok(unsafe { Float32Array::view(buf) })
     }
 
     /// `frame_world_rotation_f32`の実体(`frame_rotation_at_impl`と同じ規約)。
@@ -4404,30 +4568,40 @@ impl WasmWorld {
     /// 全流体粒子の位置をフラットな`[x0,y0,z0,x1,y1,z1,...]`(f32)で返す
     /// (毎フレーム粒子数分`body_position_at_f32`相当を個別呼び出しするのは
     /// wasm境界越えのオーバーヘッドが大きいため、1回のクエリにまとめた)。
-    pub fn fluid_particle_positions_f32(&self) -> Float32Array {
-        let Some(sph) = self.inner.sph() else {
-            return Float32Array::new_with_length(0);
-        };
-        let mut flat = Vec::with_capacity(sph.position.len() * 3);
-        for p in &sph.position {
-            flat.push(p.x as f32);
-            flat.push(p.y as f32);
-            flat.push(p.z as f32);
+    ///
+    /// **B16(ゼロコピー化)**: `quantum_1d_density_f32`と同じ規約
+    /// (`self.view_buffers.fluid_particle_positions`をエイリアスする一時的な
+    /// ビュー)。
+    pub fn fluid_particle_positions_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.fluid_particle_positions;
+        buf.clear();
+        if let Some(sph) = self.inner.sph() {
+            buf.extend(
+                sph.position
+                    .iter()
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+            );
         }
-        Float32Array::from(&flat[..])
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// `index`番目のボディの位置 [x, y, z](f32)。
     /// `imported_probe_history_f64`と同じ理由で、index検証と値の取り出しは
-    /// `body_position_at_impl`側(ネイティブテスト可能)。`Float32Array`の
-    /// 組み立て方(`new_with_length`+`set_index`)は従来のまま変えていない。
-    pub fn body_position_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+    /// `body_position_at_impl`側(ネイティブテスト可能)。
+    ///
+    /// **B16(ゼロコピー化)**: 以前の`Float32Array`の組み立て方
+    /// (`new_with_length`+`set_index`)から、`self.view_buffers.body_position`を
+    /// エイリアスする一時的なビューを返す形へ変えた(`HotPathViewBuffers`の
+    /// doc参照)。呼び出し側は値を読み切ってから次のWasm呼び出しへ進むこと。
+    pub fn body_position_at_f32(&mut self, index: usize) -> Result<Float32Array, JsValue> {
         let p = self.body_position_at_impl(index)?;
-        let out = Float32Array::new_with_length(3);
-        out.set_index(0, p[0]);
-        out.set_index(1, p[1]);
-        out.set_index(2, p[2]);
-        Ok(out)
+        let buf = &mut self.view_buffers.body_position;
+        buf.clear();
+        buf.extend_from_slice(&p);
+        // SAFETY: `buf`への書き込みはここまでで完了しており、このビューを
+        // 構築した後は関数を抜けるだけ(`HotPathViewBuffers`のdoc参照)。
+        Ok(unsafe { Float32Array::view(buf) })
     }
 
     /// `body_position_at_f32`の実体。
@@ -4465,13 +4639,16 @@ impl WasmWorld {
     }
 
     /// `index`番目のボディの速度 [vx, vy, vz](f32)。
-    pub fn body_velocity_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+    ///
+    /// **B16(ゼロコピー化)**: `body_position_at_f32`と同じ規約
+    /// (`self.view_buffers.body_velocity`をエイリアスする一時的なビュー)。
+    pub fn body_velocity_at_f32(&mut self, index: usize) -> Result<Float32Array, JsValue> {
         let v = self.body_velocity_at_impl(index)?;
-        let out = Float32Array::new_with_length(3);
-        out.set_index(0, v[0]);
-        out.set_index(1, v[1]);
-        out.set_index(2, v[2]);
-        Ok(out)
+        let buf = &mut self.view_buffers.body_velocity;
+        buf.clear();
+        buf.extend_from_slice(&v);
+        // SAFETY: `body_position_at_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        Ok(unsafe { Float32Array::view(buf) })
     }
 
     /// `body_velocity_at_f32`の実体(`body_position_at_impl`と同じ規約)。
@@ -4485,14 +4662,16 @@ impl WasmWorld {
     }
 
     /// `index`番目のボディの姿勢クォータニオン [x, y, z, w](f32)。
-    pub fn body_rotation_at_f32(&self, index: usize) -> Result<Float32Array, JsValue> {
+    ///
+    /// **B16(ゼロコピー化)**: `body_position_at_f32`と同じ規約
+    /// (`self.view_buffers.body_rotation`をエイリアスする一時的なビュー)。
+    pub fn body_rotation_at_f32(&mut self, index: usize) -> Result<Float32Array, JsValue> {
         let q = self.body_rotation_at_impl(index)?;
-        let out = Float32Array::new_with_length(4);
-        out.set_index(0, q[0]);
-        out.set_index(1, q[1]);
-        out.set_index(2, q[2]);
-        out.set_index(3, q[3]);
-        Ok(out)
+        let buf = &mut self.view_buffers.body_rotation;
+        buf.clear();
+        buf.extend_from_slice(&q);
+        // SAFETY: `body_position_at_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        Ok(unsafe { Float32Array::view(buf) })
     }
 
     /// `body_rotation_at_f32`の実体(`body_position_at_impl`と同じ規約)。
@@ -4748,31 +4927,42 @@ impl WasmWorld {
     /// 力学ボディを持たないシーン——D9/D34/D35——を読み込んだ場合)なら空配列を
     /// 返す(`.expect`していた旧実装はここでパニックしていた——既定シーン
     /// (`WasmWorld::new`)は必ず`Some`のため挙動は変わらない)。
-    pub fn y_probe_history_f64(&self) -> Float64Array {
-        let Some(handle) = self.y_probe else {
-            return Float64Array::new_with_length(0);
-        };
-        let probe = self
-            .inner
-            .probe(handle)
-            .expect("y_probe, once Some, is registered and never removed");
-        let values: Vec<f64> = probe.history().copied().collect();
-        Float64Array::from(values.as_slice())
+    ///
+    /// **B16(ゼロコピー化)**: `quantum_1d_density_f32`と同じ規約
+    /// (`self.view_buffers.y_probe_history`をエイリアスする一時的なビュー)。
+    pub fn y_probe_history_f64(&mut self) -> Float64Array {
+        let buf = &mut self.view_buffers.y_probe_history;
+        buf.clear();
+        if let Some(handle) = self.y_probe {
+            let probe = self
+                .inner
+                .probe(handle)
+                .expect("y_probe, once Some, is registered and never removed");
+            buf.extend(probe.history().copied());
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float64Array::view(buf) }
     }
 
     /// 箱の速さ(`ProbeTarget::BodySpeed`)プローブの観測履歴(古い順)。
     /// y座標プローブと同じProbe Graphsパネルに2系列目として表示するデモ用。
     /// `y_probe_history_f64`と同じ理由で`speed_probe`が`None`なら空配列を返す。
-    pub fn speed_probe_history_f64(&self) -> Float64Array {
-        let Some(handle) = self.speed_probe else {
-            return Float64Array::new_with_length(0);
-        };
-        let probe = self
-            .inner
-            .probe(handle)
-            .expect("speed_probe, once Some, is registered and never removed");
-        let values: Vec<f64> = probe.history().copied().collect();
-        Float64Array::from(values.as_slice())
+    ///
+    /// **B16(ゼロコピー化)**: `y_probe_history_f64`と同じ規約
+    /// (`self.view_buffers.speed_probe_history`をエイリアスする一時的な
+    /// ビュー)。
+    pub fn speed_probe_history_f64(&mut self) -> Float64Array {
+        let buf = &mut self.view_buffers.speed_probe_history;
+        buf.clear();
+        if let Some(handle) = self.speed_probe {
+            let probe = self
+                .inner
+                .probe(handle)
+                .expect("speed_probe, once Some, is registered and never removed");
+            buf.extend(probe.history().copied());
+        }
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float64Array::view(buf) }
     }
 
     /// エディタのPlayモード操作(設計docs/23-frontend/01-editor.md §4「介入は全て
@@ -4963,15 +5153,20 @@ impl WasmWorld {
     /// Scene View オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「接触点」)向けに、
     /// 直近stepの接触点ワールド座標を`[x0,y0,z0,x1,y1,z1,...]`のフラット配列で返す
     /// (既存の`World::contact_points`をそのまま使う)。
-    pub fn contact_points_f32(&self) -> Float32Array {
+    ///
+    /// **B16(ゼロコピー化)**: `quantum_1d_density_f32`と同じ規約
+    /// (`self.view_buffers.contact_points`をエイリアスする一時的なビュー)。
+    pub fn contact_points_f32(&mut self) -> Float32Array {
         let points = self.inner.contact_points();
-        let out = Float32Array::new_with_length((points.len() * 3) as u32);
-        for (i, p) in points.iter().enumerate() {
-            out.set_index((i * 3) as u32, p.x as f32);
-            out.set_index((i * 3 + 1) as u32, p.y as f32);
-            out.set_index((i * 3 + 2) as u32, p.z as f32);
-        }
-        out
+        let buf = &mut self.view_buffers.contact_points;
+        buf.clear();
+        buf.extend(
+            points
+                .iter()
+                .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+        );
+        // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// Consoleパネル(設計docs/23-frontend/01-editor.md §1.5「`SolverDiagnostics`の
