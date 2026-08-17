@@ -229,13 +229,18 @@ await page.reload();
 await boot(page);
 await loadScene(page, "d25-brownian");
 {
-  // 初期位置は原点ではなく 1 mm 間隔の列なので、**変位**を測るために先に控える
-  // (Inspector が読むのと同じ `body_position_at_f32` を全ボディについて回す)。
+  // 初期位置は原点ではなく 1 mm 間隔の列なので、**変位**を測るために先に控える。
+  // **f64 の読み出し(`read_component("body_position_at_f64")`)を使う**
+  // (不具合 6 の修正)。描画に使う `body_position_at_f32` は f32 なので、
+  // 粒子列の端(x = 0.299 m)での刻みが 3.0×10⁻⁸ m あり、ブラウン変位
+  // (2×10⁻⁹ m オーダー)は量子化ノイズに完全に埋もれる——以前ここで
+  // 測れていたのは物理ではなく量子化誤差だった。
   const positions = () =>
     page.evaluate(() => {
       const w = window.__world;
       const out = [];
-      for (let i = 0; i < Number(w.read_component("body_count", "")); i += 1) out.push(Array.from(w.body_position_at_f32(i)));
+      for (let i = 0; i < Number(w.read_component("body_count", "")); i += 1)
+        out.push(JSON.parse(w.read_component("body_position_at_f64", String(i))));
       return out;
     });
   const p0 = await positions();
@@ -259,9 +264,10 @@ await loadScene(page, "d25-brownian");
   r.check("X8-1", "熱 → 力学: ブラウン力と Stokes 抵抗が等分配則 ⟨v²⟩ = 3k_BT/m で釣り合う",
     rel(v2, (3 * kT) / mass) < 0.1,
     `⟨v²⟩ = ${v2.toExponential(3)} m²/s²(解析 3k_BT/m = ${((3 * kT) / mass).toExponential(3)} m²/s²、比 ${(v2 / ((3 * kT) / mass)).toFixed(3)})`);
-  // MSD は UI からは読めない。座標は f32(`body_position_at_f32`)で公開されており、
-  // 粒子列の端(x = 0.299 m)での刻みは 3.0e-8 m。ナノメートルの変位はこの量子化
-  // ノイズに埋もれる(下の実測が解析解の 4 倍を返すのは、ノイズを測っているため)。
+  // MSD は f64 座標(`body_position_at_f64`)から計算する。**t は緩和時間
+  // τ = m/(6πηr) ≈ 2.3×10⁻⁷ s の 12 倍程度しかない**ので、純粋な拡散
+  // (6Dt)からは弾道領域ぶんのずれが残る(厳密には 6D(t − τ(1−e^(−t/τ))) で
+  // 約 8 % 小さい)。判定の許容 30 % はそれを飲み込む幅である。
   const msd =
     p1.reduce((sum, p, i) => sum + (p[0] - p0[i][0]) ** 2 + (p[1] - p0[i][1]) ** 2 + (p[2] - p0[i][2]) ** 2, 0) /
     p1.length;
@@ -270,7 +276,7 @@ await loadScene(page, "d25-brownian");
   const analytic = 6 * D * t;
   r.check("X8-2", "アンサンブル MSD が UI から読める(Stokes–Einstein の 6Dt と一致)",
     rel(msd, analytic) < 0.3,
-    `MSD(300 粒子, t=${t.toExponential(3)} s) = ${msd.toExponential(3)} m² / 解析 6Dt = ${analytic.toExponential(3)} m² — 変位 ~2 nm に対し f32 座標の刻みは端の粒子で 3.0e-8 m`);
+    `MSD(300 粒子, t=${t.toExponential(3)} s) = ${msd.toExponential(3)} m² / 解析 6Dt = ${analytic.toExponential(3)} m²(比 ${(msd / analytic).toFixed(3)}、f64 座標で測定)`);
 }
 
 // -------- X8b: 流体 × 容器(D23 注ぐ水)

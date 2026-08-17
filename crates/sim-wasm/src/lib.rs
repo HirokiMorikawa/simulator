@@ -3196,6 +3196,10 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 Ok(self.body_mass_at_impl(index)?.to_string())
             }
+            "body_position_at_f64" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(serde_json::json!(self.body_position_at_f64_impl(index)?.to_vec()).to_string())
+            }
             "body_type_at" => {
                 let index: usize = arg.parse().unwrap_or(0);
                 self.body_type_at_impl(index)
@@ -3344,8 +3348,8 @@ impl WasmWorld {
                 "gravity", "gravity_direction", "gravity_field", "dt",
                 "atmosphere_density", "atmosphere_viscosity", "atmosphere_wind",
                 "water_level", "water_density",
-                "body_mass_at", "body_type_at", "body_collision_group_at",
-                "body_collision_mask_at",
+                "body_mass_at", "body_position_at_f64", "body_type_at",
+                "body_collision_group_at", "body_collision_mask_at",
                 "body_count", "body_label_at", "body_is_static_at",
                 "body_shape_label_at", "body_shape_kind_at", "body_shape_json_at",
                 "body_material_label_at", "body_is_removed_at",
@@ -4310,6 +4314,30 @@ impl WasmWorld {
             .body_position(id)
             .expect("body is created in new() and never removed");
         Ok([p.x as f32, p.y as f32, p.z as f32])
+    }
+
+    /// `index`番目のボディの位置 [x, y, z]を**f64のまま**返す
+    /// (`read_component("body_position_at_f64", "<index>")`の実体、QA不具合6)。
+    ///
+    /// `body_position_at_f32`はレンダリングループのホットパスなので f32 の
+    /// `Float32Array`を返す。ところが f32 の刻みは粒子列の端(x = 0.299 m)で
+    /// **3.0×10⁻⁸ m** あり、D25(ブラウン運動)の 2×10⁻⁹ m オーダーの変位は
+    /// この量子化ノイズに完全に埋もれる——UI から計算したアンサンブル MSD が
+    /// 解析解 $6Dt$ の 4.4 倍になっていたのは、物理ではなく**量子化誤差を
+    /// 測っていた**ためだった。等分配則($\langle v^2\rangle$、速度は
+    /// 10⁻³ m/s オーダー)は f32 でも足りるが、拡散の定量検証には届かない。
+    ///
+    /// **描画には使わない**。`read_component`は1呼び出しごとに JSON 文字列を
+    /// 作るので、粒子数ぶん毎フレーム回すホットパスは
+    /// `body_position_at_f32`のままにする(`apply_component`のdoc
+    /// 「正直な適用範囲」と同じ線引き)。精密な測定・検証のときだけこちらを使う。
+    fn body_position_at_f64_impl(&self, index: usize) -> Result<[f64; 3], WasmError> {
+        let id = self.try_body_id_at(index)?;
+        let p = self
+            .inner
+            .body_position(id)
+            .expect("body is created in new() and never removed");
+        Ok([p.x, p.y, p.z])
     }
 
     /// `index`番目のボディの速度 [vx, vy, vz](f32)。
@@ -7305,6 +7333,61 @@ mod tests {
             .restore_bookmark_impl(0)
             .expect("bookmark 0 must exist");
         assert!((world.time_impl() - time_at_bookmark).abs() < 1e-12);
+    }
+
+    /// `body_position_at_f64`が f32 では表現できない刻みを保つこと(QA不具合6)。
+    ///
+    /// D25(ブラウン運動)の粒子列の端は x = 0.299 m にあり、そこでの f32 の
+    /// 刻みは約 3.0×10⁻⁸ m。ブラウン変位は 2×10⁻⁹ m オーダーなので、f32 では
+    /// **変位そのものが 0 に丸められる**。同じ座標を f64 で読めば残ることを
+    /// 「0.299 m に 2 nm を足して読み戻す」形で確かめる——f32 経路では
+    /// 足す前と足した後が同じ値になり、f64 経路では違う値になる。
+    #[test]
+    fn body_position_at_f64_resolves_displacements_that_f32_quantizes_away() {
+        let mut world = new_world();
+        let base_x = 0.299; // D25 の粒子列の端。
+        let nanometers = 2.0e-9; // D25 のブラウン変位のオーダー。
+        world.set_body_position_at_impl(1, base_x, 0.0, 0.0).unwrap();
+        let f32_before = world.body_position_at_impl(1).unwrap()[0];
+        let f64_before = world.body_position_at_f64_impl(1).unwrap()[0];
+
+        world
+            .set_body_position_at_impl(1, base_x + nanometers, 0.0, 0.0)
+            .unwrap();
+        let f32_after = world.body_position_at_impl(1).unwrap()[0];
+        let f64_after = world.body_position_at_f64_impl(1).unwrap()[0];
+
+        // f32 では 2 nm の差が消える(これが MSD が解析解の 4.4 倍になった原因)。
+        assert_eq!(
+            f32_before, f32_after,
+            "f32 経路は 2 nm の変位を量子化で失うはず(この前提が崩れたら\
+             不具合6の説明ごと見直す): before={f32_before} after={f32_after}"
+        );
+        // f64 なら残る(0.299 における f64 の刻みは約 5.5×10⁻¹⁷ なので、
+        // 差そのものの相対誤差で見る)。
+        let recovered = (f64_after - f64_before) / nanometers;
+        assert!(
+            (recovered - 1.0).abs() < 1e-6,
+            "f64 経路は 2 nm の変位を保つべき: before={f64_before} after={f64_after} \
+             (復元した変位の比 {recovered})"
+        );
+
+        // `read_component`経由(UI が実際に使う経路)でも同じ値が JSON 配列で出る。
+        let text = world
+            .read_component_impl("body_position_at_f64", "1")
+            .expect("body_position_at_f64 via read_component must succeed");
+        let parsed: [f64; 3] = serde_json::from_str(&text).expect("JSON 配列であること");
+        assert_eq!(parsed[0], f64_after);
+
+        // Errパス: 他の body 系と同じく`try_body_id_at`を通る。
+        let count = world.body_count_impl();
+        assert_eq!(
+            world.body_position_at_f64_impl(count),
+            Err(WasmError::BodyIndexOutOfRange {
+                index: count,
+                count
+            })
+        );
     }
 
     /// 位置/姿勢の直接編集(Gizmo相当)が成功パスで正しく反映され、範囲外
