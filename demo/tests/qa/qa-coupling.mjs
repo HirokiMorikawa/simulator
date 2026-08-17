@@ -149,21 +149,31 @@ await run("d19-electric-workbench", 600);
     rel(v3[idx], analytic3) < 0.03,
     `V₃(${tAt.toFixed(4)} s) = ${v3[idx].toFixed(4)} V(解析 ${analytic3.toFixed(4)} V、後退 Euler の数値減衰ぶん)`);
   // 回路 → 熱: 抵抗損失 ΣV²/R を積分した値が熱ノードの ΔT·C と一致するか。
-  // 抵抗は 1kΩ(N1–N2)・2kΩ(N2–GND)・500Ω(N3–GND)。
+  // 抵抗は 1kΩ(N1–N2)・2kΩ(N2–GND)・500Ω(N3–GND)・470Ω(N4–N5)。
+  // 470Ω は LED 枝の電流制限抵抗(不具合 3 の修正で追加)。これを足し忘れると
+  // `JouleHeat` が熱へ渡す量(全抵抗の ΣV²/R)と食い違う。
+  const v4 = byLabel(ps, "CircuitV[4]").h;
+  const v5 = byLabel(ps, "CircuitV[5]").h;
   let joule = 0;
   for (let i = 0; i < v2.length; i += 1) {
-    joule += ((9.0 - v2[i]) ** 2 / 1000.0 + v2[i] ** 2 / 2000.0 + v3[i] ** 2 / 500.0) * dt;
+    joule +=
+      ((9.0 - v2[i]) ** 2 / 1000.0 +
+        v2[i] ** 2 / 2000.0 +
+        v3[i] ** 2 / 500.0 +
+        (v4[i] - v5[i]) ** 2 / 470.0) *
+      dt;
   }
   const dT = temp.at(-1) - 293.15;
   r.check("X4-3", "回路 → 熱: 抵抗損失の積分が熱ノードの ΔT·C と一致",
     rel(dT * 1000.0, joule) < 0.02,
     `C·ΔT = ${(dT * 1000).toFixed(5)} J / ΣV²/R の積分 = ${joule.toFixed(5)} J(差 ${((dT * 1000 - joule) / joule * 100).toFixed(2)} %)`);
-  // ダイオード枝(SW0 閉 → D → GND)は 9V 源をほぼ短絡する。スイッチの
-  // オン抵抗が MA オーダーの電流を流し、その損失は JouleHeat(抵抗のみを
-  // 合計する)に入らないため、台帳にも熱ノードにも現れない。
+  // ダイオード枝(SW0 閉 → 470Ω → D → GND)。以前は直列抵抗が無く、閉じた
+  // スイッチのオン抵抗だけが 9V 源とダイオードの間にあったため −7.875×10⁶ A
+  // という物理的にありえない電流が流れていた(不具合 3)。LED の電流制限抵抗
+  // 470Ω を入れて、分圧枝 3 mA + LED 枝 ≈ 18 mA の妥当な値にした。
   r.check("X4-4", "ダイオード枝の電流が物理的に妥当な範囲にある",
     Math.abs(cur.at(-1)) < 1e3,
-    `電源電流 = ${cur.at(-1).toExponential(3)} A(スイッチ SW0 が 9V 源をダイオードへ直結して短絡している)`);
+    `電源電流 = ${cur.at(-1).toExponential(3)} A(LED 枝の電流制限抵抗 470Ω、V[5] = ${v5.at(-1).toFixed(4)} V がダイオードの順方向電圧)`);
   await shot("d19-workbench");
 }
 

@@ -4707,10 +4707,17 @@ mod tests {
             let final_x = *result.probe_histories[0]
                 .last()
                 .expect("history should not be empty");
+            // **上限だけでなく下限も見る**(QA不具合 4)。上限だけだと、壁の剛体が
+            // 無くて風船が x=0 を突き抜けて飛び去った場合(実測 400 step で
+            // x = −10.6 m)も `final_x <= 0.03` を満たしてしまい、
+            // 「壁に貼りつく」という合格基準が空振りする——実際にこの穴のせいで
+            // 突き抜けが検出されていなかった。風船は半径 0.02 m の球なので、
+            // 壁に接して静止すれば中心は x ≈ 0.02 に来る。
             assert!(
-                final_x <= 0.03,
+                (0.0..=0.03).contains(&final_x),
                 "D26 pass criterion (image charge qualitative): charged balloon should be \
-                 pulled to the wall by the image charge force: final_x={final_x}"
+                 pulled to the wall by the image charge force and *stay* against it \
+                 (0 <= x <= 0.03, sphere radius 0.02): final_x={final_x}"
             );
         }
 
@@ -5766,6 +5773,30 @@ mod tests {
             "閉じたスイッチはLED分岐を順方向バイアスすべき: led_on={led_on}"
         );
 
+        // **電源電流が物理的に妥当な範囲にあること**(QA不具合 3)。
+        // 以前はLED枝に直列抵抗が無く、閉じたスイッチのオン抵抗だけが 9V 源と
+        // ダイオードの間にあったため、順方向のダイオードが電源を短絡して
+        // −7.875×10⁶ A が流れていた。**この検証が無かったので誰も気付かなかった**
+        // ——分圧・放電・スイッチ開閉はどれも節点電圧だけを見ており、
+        // 短絡電流はどの assert にも掛からなかった。
+        // 470Ω の電流制限抵抗を入れた今は、分圧枝 3 mA + LED 枝 ≈ 18 mA。
+        let source_current = world
+            .circuit()
+            .expect("回路ドメインが有効")
+            .source_current(0);
+        assert!(
+            source_current.abs() < 0.1,
+            "LED枝は電流制限抵抗で保護されるべき(短絡していない): \
+             source_current={source_current} A"
+        );
+        // ダイオードの順方向電圧が Si ダイオードとして妥当な範囲に落ちること
+        // (`n_vt`=0.02585 と `saturation_current`=1e-12 で 18 mA なら約 0.6 V)。
+        let diode_forward = world.circuit_probe(5).expect("回路ドメインが有効");
+        assert!(
+            (0.3..=1.0).contains(&diode_forward),
+            "ダイオードの順方向電圧が妥当な範囲にあるべき: diode_forward={diode_forward} V"
+        );
+
         // `Command::SetSwitch`でスイッチを開く。`switches`配列の登録順が
         // `switch_index`になる(`SwitchJson`のdoc参照)ので、唯一のスイッチは0番。
         world.push_command(crate::Command::SetSwitch {
@@ -5807,7 +5838,9 @@ mod tests {
         // プローブ経由でも同じ値が読めること(ギャラリーのProbe Graphsが
         // 見せているのはこちらの経路)。
         let result = run_headless_scenario(json, 6).expect("valid scenario JSON");
-        assert_eq!(result.probe_histories.len(), 5);
+        // 6本: CircuitV[2]/[3]/[4]/[5]・CircuitCurrent[0]・NodeTemp[0]
+        // (V[5] は不具合 3 の修正でダイオードの順方向電圧を見るために追加)。
+        assert_eq!(result.probe_histories.len(), 6);
         let probed_v3 = *result.probe_histories[1].last().expect("履歴が空でない");
         assert!(
             (probed_v3 - measured_v3).abs() < 1e-12,

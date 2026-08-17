@@ -5,6 +5,8 @@
     { "extends": "木材(松)", "name": "d26-foam", "density": 30.0 }
   ],
   "bodies": [
+    { "shape": { "plane": { "normal": [1, 0, 0], "d": 0 } }, "type": "static",
+      "material": "コンクリート", "name": "wall" },
     { "shape": { "sphere": { "radius": 0.02 } }, "material": "d26-foam",
       "position": [0.2, 0, 0], "name": "balloon" }
   ],
