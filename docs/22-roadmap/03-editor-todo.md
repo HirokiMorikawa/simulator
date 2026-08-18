@@ -900,3 +900,70 @@ UIで自由に物体・環境を編集し、複雑なシナリオを組んで検
     `PointSource`で浮力が中心から外向き、を追加。`sim_mechanics`にも埋め込み
     経路の同3種を追加。`scenes/*.json`43件の`state_hash`が$t=0$と120step後の
     両方で移行前と完全一致することを確認済み(検証用ハーネスは使い捨て)。
+- [x] 汎用ECSコアを実装し、プローブドメインを実移行する(D2)
+  **上の「汎用ECS/プラグイン機構」評価の結論(着手条件不成立)を覆すものではない**
+  ——ドキュメント+スキーマ方式で表現できない要件は依然として一度も出てきていない。
+  本増分は別の設計判断(D2)として着手した: `World`の`Option<T>`ドメインスロットが
+  増分のたびに線形に太っていくアグリゲート構造そのものを、汎用ストレージ+クエリへ
+  置き換えられるかを実地で検証する。
+  - **ECSコア**: `crates/sim-world/src/ecs.rs`(新規モジュール、`sim-world`に内包
+    ——`orchestrator`と同じ理由で別crateにはしない)。`Entity`(世代付きindex、
+    `sim_core::BodyId`と同型)+`spawn`/`despawn`、型別コンポーネントストレージ
+    (`insert`/`remove`/`get`/`get_mut`、内部は`entity.index`で引く疎な
+    `Vec<Option<T>>`)、クエリ(`iter::<T>`/`iter_mut::<T>`/`query2::<A,B>`、
+    常に`entity.index`昇順——決定論のため`HashMap`反復順には依存しない)、
+    `Schedule<Ctx>`(`FnMut(&mut EcsWorld, &mut Ctx)`を登録順に走らせるだけの
+    薄いランナー、並列スケジューラは無し)。外部クレートは使わず`std::any::
+    {Any, TypeId}`のみで自己実装(方針どおり)。単体テスト10本
+    (世代不一致で古いハンドルが新しい占有者を指さないことの明示的検証を含む、
+    `ecs::tests`参照)。
+  - **実移行先はプローブ(`Probe`/`ProbeTarget`、`World::add_probe`等)**。
+    候補だった剛体運動状態(`sim_mechanics::RigidBodySet`)ではなくこちらを
+    選んだ理由: 剛体側は衝突検出・ジョイント・Coupling・wasm数値アクセサ
+    (`body_position_at_f32`等)が`sim-mechanics`crate内部の生indexへ密結合しており、
+    移行が`sim-world`の外まで波及する大改修になる。プローブは`World`内で完結し
+    (`state_hash`にも一切含まれない)、かつ「多数の均質な独立インスタンスを毎step
+    同じロジックで処理する」という最もECSに素直な形をしていた。
+  - **何を変えたか**: `World`の`probes: Vec<Probe>`を`probes_ecs: ecs::EcsWorld`+
+    `probe_entities: Vec<ecs::Entity>`(公開ハンドル`usize`→`Entity`の対応)へ
+    差し替えた。各プローブは1エンティティ+`Probe`コンポーネント1つ(`target`と
+    `history`を1個にまとめたまま)——`World::probe`が`&Probe`をそのまま返す
+    既存の公開シグネチャを保つため、`ProbeTarget`/`history`を別コンポーネントへは
+    分割していない(複数コンポーネントクエリ自体の能力は`ecs`モジュールの単体
+    テストで別途検証済み)。`step()`末尾の毎stepサンプルは`ecs::Schedule`に登録した
+    システム1つ(`iter_mut::<Probe>()`で引いて`history`へ書き込む)として実行する
+    ——値の採取(`sample_probe_target`、熱・天体等の他ドメインを読む)は`&mut
+    self.probes_ecs`と両立しないため、採取(不変借用)→システム実行(可変借用)の
+    2段階構成は移行前と同じ形を保った。
+  - **公開API・シーンJSON・wasm境界は無変更**: `add_probe`/`probe`/
+    `probe_history_len`/`probe_count`/`probe_history_bytes_estimate`は
+    シグネチャ・挙動とも一切変えていない(内部表現だけの置き換え)。プローブには
+    削除経路が無い(`add_probe`のみ、`remove_probe`は存在しない)ため、
+    公開ハンドル(`usize`、追加順)と`Entity.index`は常に一致し続ける。
+  - **決定論の検証**: `cargo test --workspace`(全crate、`sim-world`246件+
+    `editor_acceptance`2件含め0 failed)、特に`state_hash`/往復系のテスト——
+    `tests::determinism_same_scenario_twice_matches_hash`・
+    `tests::determinism_snapshot_restore_replay_matches_uninterrupted_run`・
+    `demos::tests::d8_scattered_spheres_with_same_seed_reproduce_identical_state_hash`・
+    `export::tests::mechanics_round_trip_preserves_state_hash_immediately_and_after_stepping`・
+    `export::tests::json_round_trip_via_serde_preserves_state_hash`・
+    `editor_acceptance::d24_car_scene_survives_save_load_replay_with_matching_state_hash`
+    ——を移行前と変わらず個別に確認した。加えてプローブ固有のテスト
+    (`tests::probe_body_pos_y_samples_falling_box_every_step`・
+    `tests::probe_history_bytes_estimate_sums_every_probe`・
+    `tests::probe_history_keeps_every_sample_far_past_the_old_fixed_capacity`・
+    `scenario::tests::add_scenario_probes_registers_probes_matching_scenario_order`)
+    も無変更で緑。`cargo fmt --all -- --check`・
+    `cargo clippy --workspace --all-targets -- -D warnings`も緑。`wasm-pack build`+
+    `demo`の`npm run build`(`tsc --noEmit && vite build`)も成功——wasm境界は
+    `World`の公開APIしか呼ばないため無変更で通った。Playwright e2e
+    (`npm run test:e2e`)はブラウザバイナリが本環境に未キャッシュで、
+    ダウンロードがプロキシ越しに進まなかったため未実行(スキップ、上記の
+    Rust側テスト+TS型検査+wasmビルド成功で代替の確認とした)。
+  - **意図的にやらなかったこと**: 残り10ドメイン(mechanics・thermal・em・astro・
+    circuit・gas・conduction_rod・sph・grid_fluid・grid_fluid_3d・soft_body・
+    quantum_1d/2d・brownian・kinetic_gas・ising・fdtd)は`Option<T>`スロットの
+    ままで一切変更していない。joint/coupling(`Vec<Joint>`/`Vec<Box<dyn
+    Coupling>>`)も対象外。次に移行するなら剛体運動状態が最有力候補だが、
+    上記の理由で`sim-mechanics`crate内部まで踏み込む大改修になる——各流体/量子/
+    統計ドメインの状態も同様にコンポーネント化できるが、いずれも本増分の対象外。

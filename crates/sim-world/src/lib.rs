@@ -53,6 +53,8 @@
 //! `step()`の自動走査対象ではなく、呼び出し側が
 //! `apply_coupling`/`conduction_rod_mut().step(dt)`を明示的に呼んで状態を進める。
 
+pub mod ecs;
+
 mod demos;
 mod export;
 mod integration_scenarios;
@@ -564,8 +566,28 @@ pub struct World {
     /// 適用済みコマンドの記録(`step_count`と対、リプレイ検証用、設計§2「記録されリプレイ
     /// 可能」)。
     command_log: Vec<(u64, Command)>,
-    /// 登録済みプローブ(`Probe`のdoc参照)。`step()`末尾で毎step全プローブをサンプルする。
-    probes: Vec<Probe>,
+    /// 登録済みプローブの実体(**D2 汎用ECS移行増分**、`ecs`モジュールdoc参照)。
+    /// 以前はここが単なる`Vec<Probe>`だった——プローブは「多数の均質な独立インスタンスを
+    /// 毎step同じロジックで処理する」という、`World`の中で最もECSに素直に載る対象
+    /// だったため、`Vec<T>`+手書きループのアグリゲート構造をECSへ置き換える最初の
+    /// 実移行先に選んだ(選定理由の全体は`ecs`モジュールdoc参照——剛体運動状態
+    /// (`sim_mechanics::RigidBodySet`)も候補だったが、衝突検出・ジョイント・
+    /// Coupling・wasm数値アクセサが生indexで密結合しており本増分のスコープを
+    /// 大幅に超える)。各プローブは1エンティティ+`Probe`コンポーネント1つ
+    /// (`target`と採取済み`history`を1個にまとめたまま)として持つ——
+    /// `World::probe`が`&Probe`をそのまま返す既存の公開シグネチャを保つため、
+    /// `ProbeTarget`/`history`を別コンポーネントへ分割はしていない(ECSコア自体の
+    /// 複数コンポーネントクエリ能力は`ecs`モジュールの単体テストで別途検証済み)。
+    /// `step()`末尾で毎step全プローブをサンプルする(`ecs::Schedule`経由の
+    /// システムとして実装、該当箇所のdoc参照)。
+    probes_ecs: ecs::EcsWorld,
+    /// `add_probe`が返す公開ハンドル(`usize`)→`probes_ecs`側の世代付き`Entity`の対応。
+    /// プローブには削除経路が無く(`probe_history_len`等のdoc「削除経路が無いため
+    /// 到達しない想定」参照)本数が減ることが無いので、この対応は常に
+    /// 「index i の要素はi番目に登録されたプローブ」という以前の`Vec<Probe>`の
+    /// 添字とビット単位で一致する——`probe`/`probe_count`等の外部から見た挙動は
+    /// 移行前と完全に同一(内部表現だけの変更)。
+    probe_entities: Vec<ecs::Entity>,
     /// `Command::Grab`が作った`BallJoint`の、剛体index→`mechanics.ball_joints`
     /// indexの対応(`Command::MoveGrab`/`Release`が同じ剛体を再度参照するために使う、
     /// `Command`のdoc参照)。1剛体につき同時に1つのgrabのみを想定する(再`Grab`は
@@ -804,7 +826,8 @@ impl World {
             removed: Vec::new(),
             pending_commands: Vec::new(),
             command_log: Vec::new(),
-            probes: Vec::new(),
+            probes_ecs: ecs::EcsWorld::new(),
+            probe_entities: Vec::new(),
             grab_joints: std::collections::HashMap::new(),
             event_log: sim_math::RingBuffer::new(EVENT_LOG_CAPACITY),
             couplings: Vec::new(),
@@ -884,7 +907,7 @@ impl World {
 
     /// 登録済みプローブの本数(`append_author_metadata`の`probe_offset`に使う)。
     pub fn probe_count(&self) -> usize {
-        self.probes.len()
+        self.probe_entities.len()
     }
 
     /// 現在のレジーム(設計docs/20-integration/06-regime-switching.md §2)。
@@ -976,21 +999,27 @@ impl World {
     /// **容量引数は取らない**(`Probe`のdoc参照)——履歴は可変長で、
     /// 切り詰めは起こらない。
     pub fn add_probe(&mut self, target: ProbeTarget) -> usize {
-        self.probes.push(Probe {
-            target,
-            history: Vec::new(),
-        });
-        self.probes.len() - 1
+        let entity = self.probes_ecs.spawn();
+        self.probes_ecs.insert(
+            entity,
+            Probe {
+                target,
+                history: Vec::new(),
+            },
+        );
+        self.probe_entities.push(entity);
+        self.probe_entities.len() - 1
     }
 
     pub fn probe(&self, handle: usize) -> Option<&Probe> {
-        self.probes.get(handle)
+        let entity = *self.probe_entities.get(handle)?;
+        self.probes_ecs.get::<Probe>(entity)
     }
 
     /// 指定プローブの蓄積済みサンプル数(`Probe::len`の素通し、
     /// 未登録ハンドルなら`None`)。
     pub fn probe_history_len(&self, handle: usize) -> Option<usize> {
-        self.probes.get(handle).map(|p| p.len())
+        self.probe(handle).map(|p| p.len())
     }
 
     /// 全プローブ履歴が占めるメモリの概算[byte](`f64`×総サンプル数)。
@@ -1001,7 +1030,11 @@ impl World {
     /// **自分で決めた軟らかい上限**に近づいたら警告できる——
     /// `World`側が勝手に捨てることは無い。
     pub fn probe_history_bytes_estimate(&self) -> usize {
-        self.probes.iter().map(|p| p.len()).sum::<usize>() * std::mem::size_of::<f64>()
+        self.probes_ecs
+            .iter::<Probe>()
+            .map(|(_, p)| p.len())
+            .sum::<usize>()
+            * std::mem::size_of::<f64>()
     }
 
     /// `target`が指す観測量の現在値を読む(`step()`末尾の毎stepサンプルと同じロジック)。
@@ -2112,19 +2145,37 @@ impl World {
             .record(total, ENERGY_SCALE_FLOOR);
         self.clock.advance();
 
-        // 登録済み全プローブを毎stepサンプルする(設計§2.1「測って遊ぶの中心機能」)。
-        // まず不変借用でサンプル値を集め(`self.probes.iter()`と`self.sample_probe_target`
-        // はどちらも共有借用なので同時に成立する)、その後で可変借用に切り替えて
-        // `history`へ積む(`self`全体への不変・可変借用が重ならないようにするため2段階
-        // にしている)。
+        // 登録済み全プローブを毎stepサンプルする(設計§2.1「測って遊ぶの中心機能」、
+        // **D2 汎用ECS移行増分**でECS(`probes_ecs`)ベースの実装へ差し替えた)。
+        // まず不変借用でサンプル値を集める(`self.probes_ecs.iter::<Probe>()`と
+        // `self.sample_probe_target`はどちらも共有借用なので同時に成立する。
+        // `iter::<Probe>()`は`Entity.index`昇順で返す——`probe_entities`が
+        // 追加順のindexをそのまま並べているのと同じ順序なので、以前の
+        // `self.probes.iter()`と1対1で一致し、`samples`の並びが変わらない)。
+        // その後、ECS側の`Schedule`にシステムを1つ登録して走らせ、`history`へ積む
+        // ——「クエリで対象を引いて可変更新する」という更新自体をECSの
+        // `System`/`Schedule`機構(`ecs`モジュールdoc参照)へ委ねる。値の採取
+        // (`sample_probe_target`)は`self`全体(熱・天体等の他ドメイン)を読む必要が
+        // あり`&mut self.probes_ecs`と両立しないため、採取と書き込みを1つの
+        // システムにまとめられない(前段で不変借用のうちに値だけ集め、後段の
+        // システムは集めた値をキュー越しに受け取るだけにする——`self`全体への
+        // 不変・可変借用が重ならないようにする2段階構成は移行前と同じ)。
         let samples: Vec<f64> = self
-            .probes
-            .iter()
-            .map(|p| self.sample_probe_target(p.target))
+            .probes_ecs
+            .iter::<Probe>()
+            .map(|(_, p)| self.sample_probe_target(p.target))
             .collect();
-        for (probe, sample) in self.probes.iter_mut().zip(samples) {
-            probe.history.push(sample);
-        }
+        let mut pending: std::collections::VecDeque<f64> = samples.into_iter().collect();
+        let mut probe_sampling: ecs::Schedule<std::collections::VecDeque<f64>> =
+            ecs::Schedule::new();
+        probe_sampling.add_system(|ecs_world: &mut ecs::EcsWorld, pending| {
+            for (_, probe) in ecs_world.iter_mut::<Probe>() {
+                if let Some(sample) = pending.pop_front() {
+                    probe.history.push(sample);
+                }
+            }
+        });
+        probe_sampling.run(&mut self.probes_ecs, &mut pending);
     }
 
     /// 直近の記帳残差(設計 docs/21-verification/02-conservation-laws.md §2)。
