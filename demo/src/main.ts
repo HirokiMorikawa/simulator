@@ -1179,6 +1179,180 @@ function readNumber(world: WasmWorld, kind: string, arg = ""): number {
   return Number(world.read_component(kind, arg));
 }
 
+/// `component_schema`が返す`apply`側スキーマの構造(`crates/sim-wasm/src/
+/// component_schema.rs`の`ComponentFieldSchema`/`ComponentKindSchema`と1:1)。
+/// Add Joint / Add Coupling フォームをこのスキーマから生成する(B11/B12〜B15、
+/// 「Add Joint / Add Coupling をスキーマ駆動フォームにする」)。
+///
+/// **これが無かった間の縮約(実害)**: 以前はAdd Joint(5種)・Add
+/// Coupling(16種)とも「Body A/B・Anchor A/B・Axis・Param 1〜6」という
+/// 単一の汎用フォームを全kindで共有し、選択中kindにとって各欄が実際に
+/// 何を意味するかは`title`属性のツールチップにしか書かれていなかった
+/// (`add_wheel_joint`の`Param 1`は`rest_length`、`add_hinge_motor_joint`の
+/// `Param 1`は`theta_target[rad]`、ホバーしなければ分からない)。
+/// `apply_component`側は`component_schema`(Task#9)で既に`_impl`の実引数と
+/// 1:1のフィールド名・型・単位・既定値を返せるようになっていたので、
+/// フロントエンドをそこへ繋ぎ直すのがこの増分。
+type ApplyFieldType = "f64" | "usize" | "i32" | "string" | "bool";
+type ApplyFieldSchema = {
+  name: string;
+  type: ApplyFieldType;
+  unit: string | null;
+  default: number | string | boolean | null;
+  nullable: boolean;
+  min: number | null;
+  max: number | null;
+};
+type ApplyKindSchema = { kind: string; fields: ApplyFieldSchema[] };
+
+/// `component_schema`はRustコード自体(`apply_component_impl`の`match kind`)
+/// から導かれる静的な表であり、worldの実行状態には依存しない——Inspector
+/// 再描画のたびに`JSON.parse`をやり直さないよう、初回結果をモジュール
+/// スコープへキャッシュする。
+let applySchemaCache: ApplyKindSchema[] | null = null;
+function applySchema(world: WasmWorld): ApplyKindSchema[] {
+  if (!applySchemaCache) {
+    const parsed = JSON.parse(world.component_schema()) as {
+      apply: ApplyKindSchema[];
+    };
+    applySchemaCache = parsed.apply;
+  }
+  return applySchemaCache;
+}
+
+/// `kind`名(`add_distance_joint`等)からそのフィールドスキーマを引く。
+/// `component_schema_covers_every_apply_kind`(lib.rsのネイティブテスト)が
+/// 「スキーマに載る全kindが`apply_component_impl`のディスパッチに実在する
+/// こと」を守っているので、ここで見付からないのは呼び出し側(このファイル)の
+/// kind名の綴りミスだけである。
+function applyKindSchema(world: WasmWorld, kind: string): ApplyKindSchema {
+  const found = applySchema(world).find((entry) => entry.kind === kind);
+  if (!found) {
+    throw new Error(`component_schema に kind="${kind}" が無い(呼び出し側の綴りミス)`);
+  }
+  return found;
+}
+
+/// フィールドの初期UI値。**スキーマの`default`(「省略時に渡る値」)を
+/// そのまま初期表示に使うと踏む罠が2つある**(このフォームは常に全
+/// フィールドを送るので「省略」自体は起きないが、初期値としては不適切):
+///
+/// ① 先頭の剛体引数(`body_a`/`body`/`chassis`)は選択中ボディを既定に
+/// したい(以前のBody Aの挙動をそのまま踏襲)。
+/// ② `body_b`(nullableなi32、負値がワールド固定点のセンチネル)は
+/// スキーマの既定`0`のまま出すと「省略すると床に繋がる」という罠を
+/// 初期表示自体が体現してしまう——ワールド固定点`-1`を初期値にする
+/// (以前のBody Bの挙動をそのまま踏襲)。
+///
+/// この2つ以外は素直にスキーマの`default`を使う。
+function initialApplyFieldValue(
+  field: ApplyFieldSchema,
+  selectedBodyIndex: number,
+): number | string | boolean {
+  if (field.type === "i32" && field.name === "body_b") return -1;
+  if (
+    field.type === "usize" &&
+    (field.name === "body_a" || field.name === "body" || field.name === "chassis")
+  ) {
+    return selectedBodyIndex;
+  }
+  if (field.default !== null) return field.default;
+  switch (field.type) {
+    case "string":
+      return "";
+    case "bool":
+      return false;
+    default:
+      return 0;
+  }
+}
+
+function applyFieldInputId(prefix: string, field: ApplyFieldSchema): string {
+  return `${prefix}-field-${field.name}`;
+}
+
+/// スキーマ1フィールドぶんの入力欄HTML。ラベルは`name`そのもの(+単位・
+/// 値域・センチネルの注記)——「どのkindで何を意味するか」がラベルだけで
+/// 分かるようにする(以前の`title`ツールチップだけに頼る構成をやめる)。
+function renderApplyField(
+  prefix: string,
+  field: ApplyFieldSchema,
+  selectedBodyIndex: number,
+): string {
+  const escape = (text: string) =>
+    text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const id = applyFieldInputId(prefix, field);
+  const unitSuffix = field.unit ? ` [${field.unit}]` : "";
+  const rangeSuffix =
+    field.min !== null || field.max !== null
+      ? ` (${field.min ?? "-∞"}〜${field.max ?? "∞"})`
+      : "";
+  const nullableSuffix = field.nullable ? " ※負値/特定値がセンチネル" : "";
+  const label = `${escape(field.name)}${unitSuffix}${rangeSuffix}${nullableSuffix}`;
+  const initial = initialApplyFieldValue(field, selectedBodyIndex);
+  if (field.type === "bool") {
+    return (
+      `<div class="inspector-field"><label>` +
+      `<input type="checkbox" id="${id}" ${initial ? "checked" : ""} /> ${label}` +
+      `</label></div>`
+    );
+  }
+  if (field.type === "string") {
+    return (
+      `<div class="inspector-field"><span>${label}</span>` +
+      `<input type="text" id="${id}" value="${escape(String(initial))}" /></div>`
+    );
+  }
+  const step = field.type === "f64" ? "0.1" : "1";
+  const min = field.type === "usize" ? 0 : field.min;
+  return (
+    `<div class="inspector-field"><span>${label}</span>` +
+    `<input type="number" id="${id}" step="${step}"` +
+    `${min !== null ? ` min="${min}"` : ""}` +
+    `${field.max !== null ? ` max="${field.max}"` : ""}` +
+    ` value="${initial}" /></div>`
+  );
+}
+
+/// 指定した`kind`のフィールド一覧をコンテナへ描き直す(種別セレクトの
+/// `change`イベント、および初回描画で呼ぶ)。
+function renderApplyFieldsInto(
+  container: HTMLElement,
+  prefix: string,
+  fields: ApplyFieldSchema[],
+  selectedBodyIndex: number,
+): void {
+  container.innerHTML = fields
+    .map((field) => renderApplyField(prefix, field, selectedBodyIndex))
+    .join("");
+}
+
+/// フォームの入力欄から`apply_component`へ渡すpayloadを組み立てる
+/// (フィールド名・並び順はいずれもスキーマ側が唯一の情報源——ここでは
+/// 別の対応表を持たない)。
+function readApplyFieldsFrom(
+  prefix: string,
+  fields: ApplyFieldSchema[],
+): Record<string, number | string | boolean> {
+  const payload: Record<string, number | string | boolean> = {};
+  for (const field of fields) {
+    const el = document.getElementById(
+      applyFieldInputId(prefix, field),
+    ) as HTMLInputElement | null;
+    if (!el) continue;
+    if (field.type === "bool") {
+      payload[field.name] = el.checked;
+    } else if (field.type === "string") {
+      payload[field.name] = el.value;
+    } else {
+      const n = Number(el.value);
+      const value = Number.isFinite(n) ? n : 0;
+      payload[field.name] = field.type === "f64" ? value : Math.trunc(value);
+    }
+  }
+  return payload;
+}
+
 /// HUD 用の数値整形(QA不具合 7)。**固定桁だと組み合わせシーンで HUD が
 /// 嘘をつく**——D20 の ΔT = 1.25×10⁻⁴ K は小数 2 桁固定ではまったく動かず、
 /// 「熱が伝わっていない」ように見えていた。桁数を値の大きさで切り替え、
@@ -1312,105 +1486,43 @@ function wireThrustForm(index: number): void {
   });
 }
 
-/// `renderInspectorExtraComponents`が生成した Add Joint フォームのボタンを配線する
+/// Add Jointフォームの種別セレクト値から`apply_component`のkind名への変換。
+/// `component_schema.rs`の`apply_schema`が`add_${種別}_joint`という機械的な
+/// 命名で全5種を並べているので、対応表を別に持つ必要が無い——`<option
+/// value>`はUI表示用の短い識別子、kind名はそこから導出するだけ。
+function jointApplyKind(selectValue: string): string {
+  return `add_${selectValue}_joint`;
+}
+
+/// `renderInspectorExtraComponents`が生成した Add Joint フォームを配線する
 /// (`renderInspectorFor`が`innerHTML`を張り替えるたび、フォームごと作り直されるので
 /// 毎回呼び直す——回路エディタの`renderCircuitTab`と同じ設計)。
+///
+/// **スキーマ駆動フォーム(B11)**: 種別セレクトを切り替えるたびに
+/// `component_schema`から該当kindのフィールド一覧を引き直し、入力欄を
+/// 丸ごと描き直す。以前の「Body A/B・Anchor A/B・Axis・Param 1〜6」という
+/// 全kind共通の汎用欄(意味は`title`ツールチップのみ)は無くなり、
+/// 各欄が実際のフィールド名(`length`・`rest_length`・`theta_target`等)で
+/// 出る。送信時も同じスキーマのフィールド一覧を辿ってpayloadを組み立てる
+/// ので、フィールドの並びや意味がこことRust側でずれる余地が無い。
 function wireAddJointForm(world: WasmWorld, index: number): void {
   const kindSelect = document.getElementById(
     "add-joint-kind",
   ) as HTMLSelectElement | null;
+  const fieldsContainer = document.getElementById("add-joint-fields");
   const button = document.getElementById("add-joint-button");
-  if (!kindSelect || !button) return;
-  const num = (id: string) => Number((document.getElementById(id) as HTMLInputElement | null)?.value ?? 0);
-  const int = (id: string) => Math.trunc(num(id));
+  if (!kindSelect || !fieldsContainer || !button) return;
+  const rerender = () => {
+    const fields = applyKindSchema(world, jointApplyKind(kindSelect.value)).fields;
+    renderApplyFieldsInto(fieldsContainer, "add-joint", fields, index);
+  };
+  kindSelect.addEventListener("change", rerender);
+  rerender();
   button.addEventListener("click", () => {
-    const bodyA = int("add-joint-body-a");
-    const [ax, ay, az] = [num("add-joint-ax"), num("add-joint-ay"), num("add-joint-az")];
-    const bodyB = int("add-joint-body-b");
-    const [bx, by, bz] = [num("add-joint-bx"), num("add-joint-by"), num("add-joint-bz")];
-    const [axisX, axisY, axisZ] = [
-      num("add-joint-axis-x"),
-      num("add-joint-axis-y"),
-      num("add-joint-axis-z"),
-    ];
-    const [p1, p2, p3, p4, p5, p6] = [
-      num("add-joint-p1"),
-      num("add-joint-p2"),
-      num("add-joint-p3"),
-      num("add-joint-p4"),
-      num("add-joint-p5"),
-      num("add-joint-p6"),
-    ];
+    const kind = jointApplyKind(kindSelect.value);
+    const fields = applyKindSchema(world, kind).fields;
     try {
-      switch (kindSelect.value) {
-        case "distance":
-          applyComponent(world, "add_distance_joint", {
-            body_a: bodyA,
-            ax,
-            ay,
-            az,
-            body_b: bodyB,
-            bx,
-            by,
-            bz,
-            length: p1,
-          });
-          break;
-        case "ball":
-          applyComponent(world, "add_ball_joint", {
-            body_a: bodyA,
-            ax,
-            ay,
-            az,
-            body_b: bodyB,
-            bx,
-            by,
-            bz,
-          });
-          break;
-        case "slider":
-          applyComponent(world, "add_slider_joint", {
-            body_a: bodyA,
-            ax,
-            ay,
-            az,
-            axis_x: axisX,
-            axis_y: axisY,
-            axis_z: axisZ,
-            body_b: bodyB,
-            bx,
-            by,
-            bz,
-          });
-          break;
-        case "wheel":
-          applyComponent(world, "add_wheel_joint", {
-            chassis: bodyA,
-            wheel: bodyB,
-            acx: ax,
-            acy: ay,
-            acz: az,
-            rest_length: p1,
-            frequency: p2,
-            damping_ratio: p3,
-            steer_angle: p4,
-            motor_speed: p5,
-            motor_max_torque: p6,
-          });
-          break;
-        case "hinge_motor":
-          applyComponent(world, "add_hinge_motor_joint", {
-            body: bodyA,
-            axis_x: axisX,
-            axis_y: axisY,
-            axis_z: axisZ,
-            theta_target: p1,
-            kp: p2,
-            kd: p3,
-            torque_max: p4,
-          });
-          break;
-      }
+      applyComponent(world, kind, readApplyFieldsFrom("add-joint", fields));
     } catch (err) {
       window.alert(`Joint の追加に失敗しました: ${String(err)}`);
       return;
@@ -1419,179 +1531,42 @@ function wireAddJointForm(world: WasmWorld, index: number): void {
   });
 }
 
-/// `renderInspectorExtraComponents`が生成した Add Coupling フォームのボタンを
-/// 配線する(`wireAddJointForm`と同じ設計)。
+/// Add Couplingフォームの種別セレクト値から`apply_component`のkind名への
+/// 変換。`jointApplyKind`と同じく`add_${種別}_coupling`という機械的な命名が
+/// 全16種で成り立つ(`component_schema.rs`の`apply_schema`参照)ので、
+/// 対応表を別に持つ必要が無い。
+function couplingApplyKind(selectValue: string): string {
+  return `add_${selectValue}_coupling`;
+}
+
+/// `renderInspectorExtraComponents`が生成した Add Coupling フォームを
+/// 配線する(`wireAddJointForm`と同じ設計、B12〜B15)。
+///
+/// 以前は16種のkindを`switch`文で手書きし、`add-coupling-axis-*`/
+/// `add-coupling-p1`〜`p6`という共通の汎用欄を種別ごとに読み替えていた
+/// (`add_phase_change_morph_coupling`ではAxis欄が`melting_temperature`等の
+/// 材質パラメータへ、`add_convection_link_coupling`ではAxis欄が流体物性値へ
+/// 流用される、といった具合)。スキーマ駆動化した今は`applyKindSchema`が
+/// 返すフィールド名がそのまま入力欄のラベルと送信payloadのキーになるので、
+/// この読み替えの発生源だった`switch`文自体が不要になった。
 function wireAddCouplingForm(world: WasmWorld, index: number): void {
   const kindSelect = document.getElementById(
     "add-coupling-kind",
   ) as HTMLSelectElement | null;
+  const fieldsContainer = document.getElementById("add-coupling-fields");
   const button = document.getElementById("add-coupling-button");
-  if (!kindSelect || !button) return;
-  const num = (id: string) =>
-    Number((document.getElementById(id) as HTMLInputElement | null)?.value ?? 0);
-  const int = (id: string) => Math.trunc(num(id));
+  if (!kindSelect || !fieldsContainer || !button) return;
+  const rerender = () => {
+    const fields = applyKindSchema(world, couplingApplyKind(kindSelect.value)).fields;
+    renderApplyFieldsInto(fieldsContainer, "add-coupling", fields, index);
+  };
+  kindSelect.addEventListener("change", rerender);
+  rerender();
   button.addEventListener("click", () => {
-    const body = int("add-coupling-body");
-    const [axisX, axisY, axisZ] = [
-      num("add-coupling-axis-x"),
-      num("add-coupling-axis-y"),
-      num("add-coupling-axis-z"),
-    ];
-    const [p1, p2, p3, p4, p5, p6] = [
-      num("add-coupling-p1"),
-      num("add-coupling-p2"),
-      num("add-coupling-p3"),
-      num("add-coupling-p4"),
-      num("add-coupling-p5"),
-      num("add-coupling-p6"),
-    ];
+    const kind = couplingApplyKind(kindSelect.value);
+    const fields = applyKindSchema(world, kind).fields;
     try {
-      switch (kindSelect.value) {
-        case "image_charge_force":
-          applyComponent(world, "add_image_charge_force_coupling", {
-            body,
-            charge: p1,
-            plane_normal_x: p2,
-            plane_normal_y: p3,
-            plane_normal_z: p4,
-            plane_d: p5,
-          });
-          break;
-        case "lorentz_force":
-          applyComponent(world, "add_lorentz_force_coupling", { body, charge: p1 });
-          break;
-        case "buoyancy_drag":
-          applyComponent(world, "add_buoyancy_drag_coupling", {
-            body,
-            water_level: p1,
-            water_density: p2,
-          });
-          break;
-        case "dissipation_to_heat":
-          applyComponent(world, "add_dissipation_to_heat_coupling", {
-            thermal_node: Math.trunc(p1),
-          });
-          break;
-        case "joule_heat":
-          applyComponent(world, "add_joule_heat_coupling", {
-            thermal_node: Math.trunc(p1),
-          });
-          break;
-        case "brownian_force":
-          applyComponent(world, "add_brownian_force_coupling", {
-            body,
-            radius: p1,
-            viscosity: p2,
-            thermal_node: Math.trunc(p3),
-            seed: Math.trunc(p4),
-            stream: Math.trunc(p5),
-          });
-          break;
-        case "motor_coupling":
-          applyComponent(world, "add_motor_coupling", {
-            body,
-            axis_x: axisX,
-            axis_y: axisY,
-            axis_z: axisZ,
-            voltage_source_index: Math.trunc(p1),
-            torque_constant: p2,
-          });
-          break;
-        case "induction_coupling":
-          applyComponent(world, "add_induction_coupling", {
-            body,
-            voltage_source_index: Math.trunc(p1),
-            length: p2,
-            magnetic_field: p3,
-            axis_x: axisX,
-            axis_y: axisY,
-            axis_z: axisZ,
-          });
-          break;
-        case "phase_change_morph":
-          // 材質(融点・融解潜熱・固相/液相比熱)もUIから明示的に指定する
-          // (**残タスク完遂増分**、Axisの3欄を材質の一部として流用)。
-          applyComponent(world, "add_phase_change_morph_coupling", {
-            body,
-            thermal_node: Math.trunc(p1),
-            melting_temperature: axisX,
-            latent_heat_fusion: axisY,
-            specific_heat_solid: axisZ,
-            specific_heat_liquid: p2,
-            initial_mass: p3,
-            conductance: p4,
-            initial_enthalpy: p5,
-          });
-          break;
-        case "sph_rigid":
-          applyComponent(world, "add_sph_rigid_coupling", {
-            body,
-            radius: p1,
-            boundary_points: Math.trunc(p2),
-          });
-          break;
-        case "grid_fluid_rigid":
-          applyComponent(world, "add_grid_fluid_rigid_coupling", {
-            body,
-            half_width: p1,
-            half_height: p2,
-          });
-          break;
-        case "boussinesq_buoyancy":
-          applyComponent(world, "add_boussinesq_buoyancy_coupling", {
-            thermal_node: Math.trunc(p1),
-            ambient_temperature: p2,
-            thermal_expansion_coefficient: p3,
-          });
-          break;
-        case "convection_link":
-          // 流体物性値(熱伝導率・動粘性・プラントル数)もUIから明示的に指定する
-          // (**残タスク完遂増分**、Axisの3欄を流体物性値として流用)。
-          applyComponent(world, "add_convection_link_coupling", {
-            fluid_node: Math.trunc(p1),
-            surface_node: Math.trunc(p2),
-            area: p3,
-            characteristic_length: p4,
-            mode: Math.trunc(p5),
-            fluid_thermal_conductivity: axisX,
-            kinematic_viscosity: axisY,
-            prandtl_number: axisZ,
-            thermal_expansion_coefficient: p6,
-          });
-          break;
-        case "piston_gas":
-          applyComponent(world, "add_piston_gas_coupling", {
-            body,
-            axis_x: axisX,
-            axis_y: axisY,
-            axis_z: axisZ,
-            area: p1,
-            initial_volume: p2,
-          });
-          break;
-        case "wing_lift":
-          applyComponent(world, "add_wing_lift_coupling", {
-            body,
-            wing_area: p4,
-            chord_x: axisX,
-            chord_y: axisY,
-            chord_z: axisZ,
-            span_x: p1,
-            span_y: p2,
-            span_z: p3,
-            atmosphere_density: p5,
-            atmosphere_viscosity: p6,
-          });
-          break;
-        case "magnus_lift":
-          applyComponent(world, "add_magnus_lift_coupling", {
-            body,
-            radius: p1,
-            atmosphere_density: p2,
-            atmosphere_viscosity: p3,
-          });
-          break;
-      }
+      applyComponent(world, kind, readApplyFieldsFrom("add-coupling", fields));
     } catch (err) {
       window.alert(`Coupling の追加に失敗しました: ${String(err)}`);
       return;
@@ -1955,12 +1930,19 @@ function renderInspectorExtraComponents(
   }
 
   // Add Component(**残タスク完遂の縦串①増分**、`WasmWorld::add_*_joint`
-  // 5種の薄いフォーム)。Unity風の「型ごとの専用フォーム」ではなく、
-  // 回路エディタ(`kind`セレクト+`値/値2/値3`の汎用欄)と同じ縮約——
-  // Body A/B・Anchor A/B・Axis・Param1〜6 の汎用欄をどの種別でも共通で出し、
-  // 実際に使うフィールドは`title`属性のツールチップで示す(種別ごとの
-  // 表示切替はJSの追加コストに見合わないと判断)。Body Aは選択中ボディを
-  // 既定値にする。
+  // 5種の薄いフォーム、**B11でスキーマ駆動化**)。以前はUnity風の
+  // 「型ごとの専用フォーム」を避け、回路エディタ(`kind`セレクト+
+  // `値/値2/値3`の汎用欄)と同じ縮約で「Body A/B・Anchor A/B・Axis・
+  // Param1〜6」を全種別共通の汎用欄として出し、実際に使うフィールドは
+  // `title`属性のツールチップでしか示していなかった——選んだ`kind`と
+  // 入っている数値の対応がホバーしなければ分からない状態だった。
+  //
+  // `component_schema`(Task#9)は`_impl`メソッドの実引数と1:1のフィールド
+  // 名・型・単位・既定値を返せるので、`<div id="add-joint-fields">`を
+  // 種別セレクトの`change`ごと`wireAddJointForm`が描き直す(静的マークアップ
+  // 側は種別セレクトと空のコンテナだけを持つ)。Body A相当の欄(選択中
+  // ボディを既定値にする)・Body B相当の欄(既定`-1`=ワールド固定点)の
+  // 挙動は`initialApplyFieldValue`が踏襲する。
   sections.push(`
     <div class="inspector-component" data-stacked>
       <h3>Add Joint</h3>
@@ -1970,75 +1952,43 @@ function renderInspectorExtraComponents(
           <option value="distance">Distance(距離拘束)</option>
           <option value="ball">Ball(球面拘束)</option>
           <option value="slider">Slider(1軸並進)</option>
-          <option value="wheel">Wheel(車輪、Aがシャシー・Bが車輪)</option>
-          <option value="hinge_motor">HingeMotor(1軸ヒンジ、Bは未使用)</option>
+          <option value="wheel">Wheel(車輪、chassisがシャシー・wheelが車輪)</option>
+          <option value="hinge_motor">HingeMotor(1軸ヒンジ)</option>
         </select>
       </div>
-      <div class="inspector-field">
-        <span>Body A / Anchor A</span>
-        <span class="inspector-joint-row">
-          <input type="number" id="add-joint-body-a" step="1" value="${index}" title="Body A(ボディindex)" />
-          <input type="number" id="add-joint-ax" step="0.1" value="0" title="Anchor A x" />
-          <input type="number" id="add-joint-ay" step="0.1" value="0" title="Anchor A y" />
-          <input type="number" id="add-joint-az" step="0.1" value="0" title="Anchor A z" />
-        </span>
-      </div>
-      <div class="inspector-field">
-        <span>Body B / Anchor B</span>
-        <span class="inspector-joint-row">
-          <input type="number" id="add-joint-body-b" step="1" value="-1" title="Body B(ボディindex。-1=ワールド固定点。Wheelは車輪ボディ必須、HingeMotorは未使用)" />
-          <input type="number" id="add-joint-bx" step="0.1" value="0" title="Anchor B x(HingeMotor/Wheelでは未使用)" />
-          <input type="number" id="add-joint-by" step="0.1" value="0" title="Anchor B y" />
-          <input type="number" id="add-joint-bz" step="0.1" value="0" title="Anchor B z" />
-        </span>
-      </div>
-      <div class="inspector-field">
-        <span>Axis</span>
-        <span class="inspector-joint-row">
-          <input type="number" id="add-joint-axis-x" step="0.1" value="0" title="軸x(Slider/Wheel/HingeMotorのみ)" />
-          <input type="number" id="add-joint-axis-y" step="0.1" value="1" title="軸y" />
-          <input type="number" id="add-joint-axis-z" step="0.1" value="0" title="軸z" />
-        </span>
-      </div>
-      <div class="inspector-field">
-        <span>Param 1〜3</span>
-        <span class="inspector-joint-row">
-          <input type="number" id="add-joint-p1" step="0.1" value="1" title="length(Distance)/rest_length(Wheel)/theta_target[rad](HingeMotor)" />
-          <input type="number" id="add-joint-p2" step="0.1" value="2.5" title="frequency[Hz](Wheel)/kp(HingeMotor)" />
-          <input type="number" id="add-joint-p3" step="0.1" value="0.7" title="damping_ratio(Wheel)/kd(HingeMotor)" />
-        </span>
-      </div>
-      <div class="inspector-field">
-        <span>Param 4〜6</span>
-        <span class="inspector-joint-row">
-          <input type="number" id="add-joint-p4" step="0.1" value="0" title="steer_angle[rad](Wheel)/torque_max(HingeMotor)" />
-          <input type="number" id="add-joint-p5" step="0.1" value="0" title="motor_speed[rad/s](Wheelのみ)" />
-          <input type="number" id="add-joint-p6" step="0.1" value="0" title="motor_max_torque(Wheelのみ、0なら駆動なし)" />
-        </span>
-      </div>
+      <div id="add-joint-fields"></div>
       <button id="add-joint-button">Joint を追加</button>
-      <p class="inspector-note">使うフィールドは種別により異なる(各入力のツールチップ参照)。追加は即座に反映され、Command化されない(シーン構築操作のため——設計 docs/20-integration/04-world-api.md §1)。</p>
+      <p class="inspector-note">入力欄は種別を選ぶと実引数どおりに再構成される(Wheelの<code>suspension_axis</code>/<code>axle_axis</code>は<code>WheelJoint::new</code>の既定値固定でUIに出さない——「普通の車」を作れることを優先した縮約、<code>add_wheel_joint_impl</code>のdoc参照)。追加は即座に反映され、Command化されない(シーン構築操作のため——設計 docs/20-integration/04-world-api.md §1)。</p>
     </div>
   `);
 
   // Add Coupling(**残タスク完遂の縦串②増分、8種に拡張**、
-  // `WasmWorld::add_*_coupling`の薄いフォーム)。結合14種のうち8種を対象
-  // とする——剛体参照だけで完結する3種(ImageChargeForce・LorentzForce・
-  // BuoyancyDrag)に加え、熱ノード・電圧源を**indexで参照するだけ**の5種
-  // (DissipationToHeat・JouleHeat・BrownianForce・MotorCoupling・
-  // InductionCoupling)。既定の起動シーンは熱ノード1個(index 0)・
-  // 電圧源1個(index 0)を最初から持つため、それらを参照するだけなら
-  // 対応ドメインをUIから作る手段がまだ無くても意味を持つ——ただし
-  // Add Componentで一から組んだシーン(熱・回路ドメインが無い)では、
+  // `WasmWorld::add_*_coupling`の薄いフォーム、**B12〜B15でスキーマ駆動化**)。
+  // 結合14種のうち8種を対象とする——剛体参照だけで完結する3種
+  // (ImageChargeForce・LorentzForce・BuoyancyDrag)に加え、熱ノード・電圧源を
+  // **indexで参照するだけ**の5種(DissipationToHeat・JouleHeat・
+  // BrownianForce・MotorCoupling・InductionCoupling)。既定の起動シーンは
+  // 熱ノード1個(index 0)・電圧源1個(index 0)を最初から持つため、それらを
+  // 参照するだけなら対応ドメインをUIから作る手段がまだ無くても意味を持つ
+  // ——ただしAdd Componentで一から組んだシーン(熱・回路ドメインが無い)では、
   // これらのindexが常に無効になり`Err`になる(wasm側`try_thermal_node_
   // _index`/`try_voltage_source_index`が明示的に拒否する、無言で無効な
-  // 状態になるより失敗として伝わる方を選んだ)。
+  // 状態になるより失敗として伝わる方を選んだ——このスキーマ駆動化でも
+  // クライアント側で先回りして検証しない、拒否はRust側の仕事のまま)。
   // 残り6種(PhaseChangeMorph・SphRigid・GridFluidRigid・ConvectionLink・
   // PistonGas・BoussinesqBuoyancy)も解禁済み——Settingsの「ドメイン」パネル
   // (熱ノード・格子流体・気体)と既存の「＋ 流体」(SPH)で対応ドメインを
   // 先に有効化すれば追加できる。加えてWingLift/MagnusLift(いずれも
   // BuoyancyDragの薄翼理論/マグヌス効果、縦串⑤で解禁)も同じフォームから
   // 追加できる。
+  //
+  // 以前は上記16種すべてが「Body・Axis・Param1〜6」という共通の汎用欄を
+  // 種別ごとに読み替えていた——`PhaseChangeMorph`ではAxis欄が
+  // `melting_temperature`等の材質パラメータへ、`ConvectionLink`では
+  // Axis欄が流体物性値へ流用される、という具合で、意味は`title`
+  // ツールチップの中にしか無かった。`component_schema`が`_impl`の実引数と
+  // 1:1のフィールド名を返せる以上、この読み替え自体が不要になったので
+  // `<div id="add-coupling-fields">`をJointと同じ設計で描き直す。
   sections.push(`
     <div class="inspector-component" data-stacked>
       <h3>Add Coupling</h3>
@@ -2059,40 +2009,13 @@ function renderInspectorExtraComponents(
           <option value="boussinesq_buoyancy">BoussinesqBuoyancy(温度差浮力、要熱・格子流体ドメイン)</option>
           <option value="convection_link">ConvectionLink(対流熱伝達、要熱ドメイン)</option>
           <option value="piston_gas">PistonGas(ピストン気体、要気体ドメイン)</option>
-          <option value="wing_lift">BuoyancyDrag+翼揚力(薄翼理論、Axisを翼弦に使用)</option>
-          <option value="magnus_lift">BuoyancyDrag+マグヌス揚力(回転球)</option>
+          <option value="wing_lift">WingLift(BuoyancyDrag+翼揚力、薄翼理論)</option>
+          <option value="magnus_lift">MagnusLift(BuoyancyDrag+マグヌス揚力、回転球)</option>
         </select>
       </div>
-      <div class="inspector-field">
-        <span>Body</span>
-        <input type="number" id="add-coupling-body" step="1" value="${index}" title="対象ボディのindex(DissipationToHeat/JouleHeat/BoussinesqBuoyancy/ConvectionLink/MagnusLiftは未使用——MagnusLiftはBody欄でなくAxis/Paramの並びで指定するため対象外)" />
-      </div>
-      <div class="inspector-field">
-        <span>Axis</span>
-        <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-axis-x" step="0.1" value="0" title="回転軸/レール方向x(MotorCoupling/InductionCoupling/PistonGas)/chord_local.x=翼弦(WingLift)/melting_temperature[K](PhaseChangeMorph)/fluid_thermal_conductivity[W/(m*K)](ConvectionLink)" />
-          <input type="number" id="add-coupling-axis-y" step="0.1" value="1" title="軸y / chord_local.y(WingLift)/latent_heat_fusion[J/kg](PhaseChangeMorph)/kinematic_viscosity[m^2/s](ConvectionLink)" />
-          <input type="number" id="add-coupling-axis-z" step="0.1" value="0" title="軸z / chord_local.z(WingLift)/specific_heat_solid[J/(kg*K)](PhaseChangeMorph)/prandtl_number(ConvectionLink)" />
-        </span>
-      </div>
-      <div class="inspector-field">
-        <span>Param 1〜3</span>
-        <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-p1" step="0.1" value="1e-6" title="charge[C](ImageChargeForce/LorentzForce)/water_level[m](BuoyancyDrag)/thermal_node index(DissipationToHeat/JouleHeat/PhaseChangeMorph)/radius[m](BrownianForce/SphRigid/MagnusLift)/voltage_source index(MotorCoupling/InductionCoupling)/half_width[m](GridFluidRigid)/thermal_node index=fluid_node(BoussinesqBuoyancy/ConvectionLinkのfluid_node)/area[m^2](PistonGas)/span_local.x(WingLift)" />
-          <input type="number" id="add-coupling-p2" step="0.1" value="1" title="plane_normal.x(ImageChargeForce)/water_density(BuoyancyDrag)/viscosity(BrownianForce)/torque_constant(MotorCoupling)/length[m](InductionCoupling)/specific_heat_liquid[J/(kg*K)](PhaseChangeMorph)/boundary_points(SphRigid)/half_height[m](GridFluidRigid)/ambient_temperature[K](BoussinesqBuoyancy)/thermal_node index=surface_node(ConvectionLink)/initial_volume[m^3](PistonGas)/span_local.y(WingLift)/atmosphere_density(MagnusLift)" />
-          <input type="number" id="add-coupling-p3" step="0.1" value="0" title="plane_normal.y(ImageChargeForce)/thermal_node index(BrownianForce)/magnetic_field[T](InductionCoupling)/initial_mass[kg](PhaseChangeMorph)/thermal_expansion_coefficient[1/K](BoussinesqBuoyancy)/area[m^2](ConvectionLink)/span_local.z(WingLift)/atmosphere_viscosity(MagnusLift)" />
-        </span>
-      </div>
-      <div class="inspector-field">
-        <span>Param 4〜6</span>
-        <span class="inspector-joint-row">
-          <input type="number" id="add-coupling-p4" step="0.1" value="0" title="plane_normal.z(ImageChargeForce)/seed(BrownianForce)/conductance[W/K](PhaseChangeMorph)/characteristic_length[m](ConvectionLink)/wing_area[m^2](WingLift)" />
-          <input type="number" id="add-coupling-p5" step="0.1" value="0" title="plane_d(ImageChargeForce)/stream(BrownianForce)/initial_enthalpy[J](PhaseChangeMorph、負なら融点未満の固相から開始)/mode 0-3(ConvectionLink: 0=自然対流(垂直面)/1=自然対流(球)/2=強制対流(球)/3=強制対流(平板))/atmosphere_density(WingLift)" />
-          <input type="number" id="add-coupling-p6" step="0.1" value="0" title="thermal_expansion_coefficient[1/K](ConvectionLink、0以下なら理想気体近似=省略扱い)/atmosphere_viscosity(WingLift、他は未使用)" />
-        </span>
-      </div>
+      <div id="add-coupling-fields"></div>
       <button id="add-coupling-button">Coupling を追加</button>
-      <p class="inspector-note">使うフィールドは種別により異なる(各入力のツールチップ参照)。熱ノード・電圧源を参照する5種は、対応ドメインが有効なシーン(既定の起動シーンはどちらもindex 0を1つ持つ)でのみ成功する。残り6種は対応ドメイン(熱ノード・SPH流体・格子流体・気体区画)が必要——Settingsの「ドメイン」パネル(または「＋ 流体」)で先に有効化すること。</p>
+      <p class="inspector-note">入力欄は種別を選ぶと実引数どおりに再構成される。熱ノード・電圧源を参照する5種は、対応ドメインが有効なシーン(既定の起動シーンはどちらもindex 0を1つ持つ)でのみ成功する。残り6種は対応ドメイン(熱ノード・SPH流体・格子流体・気体区画)が必要——Settingsの「ドメイン」パネル(または「＋ 流体」)で先に有効化すること。</p>
     </div>
   `);
 

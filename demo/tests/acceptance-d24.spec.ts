@@ -74,18 +74,24 @@ async function addWheelJoint(
     motorMaxTorque: number;
   },
 ) {
+  // フィールドIDは`component_schema`が返す`add_wheel_joint`の実引数名
+  // そのもの(`chassis`/`wheel`/`acx`〜`acz`/`rest_length`/`frequency`/
+  // `damping_ratio`/`steer_angle`/`motor_speed`/`motor_max_torque`、B11で
+  // スキーマ駆動フォーム化)——以前の`add-joint-body-a`/`add-joint-p1`等の
+  // 汎用ID(意味は種別ごとにtitleツールチップでしか示されなかった)は
+  // 廃止された。
   await page.selectOption("#add-joint-kind", "wheel");
-  await page.fill("#add-joint-body-a", String(opts.chassis));
-  await page.fill("#add-joint-ax", String(opts.anchor[0]));
-  await page.fill("#add-joint-ay", String(opts.anchor[1]));
-  await page.fill("#add-joint-az", String(opts.anchor[2]));
-  await page.fill("#add-joint-body-b", String(opts.wheel));
-  await page.fill("#add-joint-p1", String(opts.restLength));
-  await page.fill("#add-joint-p2", String(opts.frequency));
-  await page.fill("#add-joint-p3", String(opts.dampingRatio));
-  await page.fill("#add-joint-p4", "0");
-  await page.fill("#add-joint-p5", String(opts.motorSpeed));
-  await page.fill("#add-joint-p6", String(opts.motorMaxTorque));
+  await page.fill("#add-joint-field-chassis", String(opts.chassis));
+  await page.fill("#add-joint-field-acx", String(opts.anchor[0]));
+  await page.fill("#add-joint-field-acy", String(opts.anchor[1]));
+  await page.fill("#add-joint-field-acz", String(opts.anchor[2]));
+  await page.fill("#add-joint-field-wheel", String(opts.wheel));
+  await page.fill("#add-joint-field-rest_length", String(opts.restLength));
+  await page.fill("#add-joint-field-frequency", String(opts.frequency));
+  await page.fill("#add-joint-field-damping_ratio", String(opts.dampingRatio));
+  await page.fill("#add-joint-field-steer_angle", "0");
+  await page.fill("#add-joint-field-motor_speed", String(opts.motorSpeed));
+  await page.fill("#add-joint-field-motor_max_torque", String(opts.motorMaxTorque));
   await page.click("#add-joint-button");
 }
 

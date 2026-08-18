@@ -1059,73 +1059,88 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
   // SPHドメインは既存の「+ 流体」ボタン(スポーンパレット)で有効化する。
   await addViaMenu(page, "＋ 流体 (SPH 水塊)");
 
+  // フィールドIDは`component_schema`が返す`add_*_coupling`の実引数名
+  // そのもの(`#add-coupling-field-${name}`、B12〜B15でスキーマ駆動フォーム
+  // 化)——以前の`add-coupling-axis-*`/`add-coupling-p1`〜`p6`という
+  // 種別ごとに読み替えていた汎用IDは廃止された。
   const addCoupling = async (
     kind: string,
-    opts: {
-      body?: number;
-      axis?: [number, number, number];
-      params?: number[];
-    },
+    fields: Record<string, number | string>,
   ) => {
     await page.selectOption("#add-coupling-kind", kind);
-    if (opts.body !== undefined) {
-      await page.fill("#add-coupling-body", String(opts.body));
-    }
-    if (opts.axis) {
-      await page.fill("#add-coupling-axis-x", String(opts.axis[0]));
-      await page.fill("#add-coupling-axis-y", String(opts.axis[1]));
-      await page.fill("#add-coupling-axis-z", String(opts.axis[2]));
-    }
-    // `Array.forEach`はコールバックのawaitを待たない(並行実行される)ため、
-    // 直列に`page.fill`を呼ぶには明示的なforループが要る。
-    for (let i = 0; i < (opts.params ?? []).length; i += 1) {
-      await page.fill(`#add-coupling-p${i + 1}`, String(opts.params![i]));
+    // `Object.entries`を`Array.forEach`に渡すとコールバックのawaitを待たない
+    // (並行実行される)ため、直列に`page.fill`を呼ぶには明示的なforループが要る。
+    for (const [name, value] of Object.entries(fields)) {
+      await page.fill(`#add-coupling-field-${name}`, String(value));
     }
     await page.click("#add-coupling-button");
   };
 
   // ① PhaseChangeMorph: body=Box_1, thermal_node=1(新設)、材質は氷/水
   // (melting_temperature=273.15K/latent_heat_fusion=334000/specific_heat_solid=
-  // 2100、いずれもAxis欄)、specific_heat_liquid=4186、initial_mass=1kg、
-  // conductance=10W/K、initial_enthalpy=-50000J(融点未満の固相から開始)。
-  // 材質もUIから明示的に指定できること自体が「縮約させない」の検証点
-  // (**残タスク完遂増分**)。
+  // 2100)、specific_heat_liquid=4186、initial_mass=1kg、conductance=10W/K、
+  // initial_enthalpy=-50000J(融点未満の固相から開始)。材質もUIから明示的に
+  // 指定できること自体が「縮約させない」の検証点(**残タスク完遂増分**)。
   await addCoupling("phase_change_morph", {
     body: 1,
-    axis: [273.15, 334000, 2100],
-    params: [1, 4186, 1, 10, -50000],
+    thermal_node: 1,
+    melting_temperature: 273.15,
+    latent_heat_fusion: 334000,
+    specific_heat_solid: 2100,
+    specific_heat_liquid: 4186,
+    initial_mass: 1,
+    conductance: 10,
+    initial_enthalpy: -50000,
   });
   await expect(inspector.getByText("PhaseChangeMorph", { exact: true })).toBeVisible();
 
   // ② SphRigid: body=Box_1, radius=0.2m, boundary_points=12。
-  await addCoupling("sph_rigid", { body: 1, params: [0.2, 12] });
+  await addCoupling("sph_rigid", { body: 1, radius: 0.2, boundary_points: 12 });
   await expect(inspector.getByText("SphRigid", { exact: true })).toBeVisible();
 
   // ③ GridFluidRigid: body=Box_1, half_width=0.3m, half_height=0.3m。
-  await addCoupling("grid_fluid_rigid", { body: 1, params: [0.3, 0.3] });
+  await addCoupling("grid_fluid_rigid", {
+    body: 1,
+    half_width: 0.3,
+    half_height: 0.3,
+  });
   await expect(inspector.getByText("GridFluidRigid", { exact: true })).toBeVisible();
 
   // ④ BoussinesqBuoyancy: thermal_node=1, ambient_temperature=293.15K,
   // thermal_expansion_coefficient=3.4e-3(空気の目安値)。bodyを参照しない
   // 結合なので「Coupling (シーン全体)」に出る。
-  await addCoupling("boussinesq_buoyancy", { params: [1, 293.15, 0.0034] });
+  await addCoupling("boussinesq_buoyancy", {
+    thermal_node: 1,
+    ambient_temperature: 293.15,
+    thermal_expansion_coefficient: 0.0034,
+  });
   await expect(inspector.getByText("BoussinesqBuoyancy", { exact: true })).toBeVisible();
 
   // ⑤ ConvectionLink: fluid_node=0(既定シーンのノード), surface_node=1(新設),
   // area=0.01m^2, characteristic_length=0.05m, mode=3(強制対流・平板)、
-  // 流体物性値(空気の目安値、Axis欄)もUIから明示的に指定する
-  // (**残タスク完遂増分**、`ConvectionLink::default()`固定ではないことの検証点)。
+  // 流体物性値(空気の目安値)もUIから明示的に指定する(**残タスク完遂増分**、
+  // `ConvectionLink::default()`固定ではないことの検証点)。
   await addCoupling("convection_link", {
-    axis: [0.026, 1.5e-5, 0.71],
-    params: [0, 1, 0.01, 0.05, 3, 0],
+    fluid_node: 0,
+    surface_node: 1,
+    area: 0.01,
+    characteristic_length: 0.05,
+    mode: 3,
+    fluid_thermal_conductivity: 0.026,
+    kinematic_viscosity: 1.5e-5,
+    prandtl_number: 0.71,
+    thermal_expansion_coefficient: 0,
   });
   await expect(inspector.getByText("ConvectionLink", { exact: true })).toBeVisible();
 
   // ⑥ PistonGas: body=Box_1, axis=(0,1,0), area=0.01m^2, initial_volume=0.001m^3。
   await addCoupling("piston_gas", {
     body: 1,
-    axis: [0, 1, 0],
-    params: [0.01, 0.001],
+    axis_x: 0,
+    axis_y: 1,
+    axis_z: 0,
+    area: 0.01,
+    initial_volume: 0.001,
   });
   await expect(inspector.getByText("PistonGas", { exact: true })).toBeVisible();
 
@@ -1151,28 +1166,33 @@ test("縦串⑤(飛行機の物理): 翼揚力/マグヌス揚力をUIから追�
   await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
   const inspector = page.locator("#inspector-body");
 
-  // ① WingLift: body=Box_1, chord_local=(1,0,0)(Axis欄), span_local=(0,0,1),
+  // フィールドIDは`component_schema`が返す`add_*_coupling`の実引数名
+  // そのもの(B12〜B15でスキーマ駆動フォーム化、上のPhaseChangeMorph等と
+  // 同じ形)。
+
+  // ① WingLift: body=Box_1, chord_local=(1,0,0), span_local=(0,0,1),
   // wing_area=2m^2, atmosphere_density=1.225, atmosphere_viscosity=1.81e-5。
   await page.selectOption("#add-coupling-kind", "wing_lift");
-  await page.fill("#add-coupling-body", "1");
-  await page.fill("#add-coupling-axis-x", "1");
-  await page.fill("#add-coupling-axis-y", "0");
-  await page.fill("#add-coupling-axis-z", "0");
-  await page.fill("#add-coupling-p1", "0");
-  await page.fill("#add-coupling-p2", "0");
-  await page.fill("#add-coupling-p3", "1");
-  await page.fill("#add-coupling-p4", "2");
-  await page.fill("#add-coupling-p5", "1.225");
-  await page.fill("#add-coupling-p6", "1.81e-5");
+  await page.fill("#add-coupling-field-body", "1");
+  await page.fill("#add-coupling-field-chord_x", "1");
+  await page.fill("#add-coupling-field-chord_y", "0");
+  await page.fill("#add-coupling-field-chord_z", "0");
+  await page.fill("#add-coupling-field-span_x", "0");
+  await page.fill("#add-coupling-field-span_y", "0");
+  await page.fill("#add-coupling-field-span_z", "1");
+  await page.fill("#add-coupling-field-wing_area", "2");
+  await page.fill("#add-coupling-field-atmosphere_density", "1.225");
+  await page.fill("#add-coupling-field-atmosphere_viscosity", "1.81e-5");
   await page.click("#add-coupling-button");
   await expect(inspector.getByText("BuoyancyDrag", { exact: true }).first()).toBeVisible();
 
-  // ② MagnusLift: body=Box_1, radius=0.3, atmosphere_density=1.225,
-  // atmosphere_viscosity=1.81e-5。
+  // ② MagnusLift: body=Box_1(種別を切り替えても選択中ボディが既定値のまま
+  // 再セットされる、`initialApplyFieldValue`のdoc参照)、radius=0.3,
+  // atmosphere_density=1.225, atmosphere_viscosity=1.81e-5。
   await page.selectOption("#add-coupling-kind", "magnus_lift");
-  await page.fill("#add-coupling-p1", "0.3");
-  await page.fill("#add-coupling-p2", "1.225");
-  await page.fill("#add-coupling-p3", "1.81e-5");
+  await page.fill("#add-coupling-field-radius", "0.3");
+  await page.fill("#add-coupling-field-atmosphere_density", "1.225");
+  await page.fill("#add-coupling-field-atmosphere_viscosity", "1.81e-5");
   await page.click("#add-coupling-button");
   await expect(inspector.getByText("BuoyancyDrag", { exact: true })).toHaveCount(2);
 
