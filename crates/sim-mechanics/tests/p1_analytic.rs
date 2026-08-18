@@ -3,7 +3,7 @@
 //! ユニットテストではなく crate 公開 API 経由の統合テスト(World 層が無い Phase A 時点の代替)。
 
 use sim_core::{Event, EventQueue, Material, MaterialDb, PairOverride, Solver, SolverContext};
-use sim_fluid::{Atmosphere, StaticWaterRegion};
+use sim_fluid::{Atmosphere, FluidRegion};
 use sim_math::{BallisticIntegrator, Quat, SimRng, Vec3};
 use sim_mechanics::{BodyType, DragModel, MechanicsSolver, RigidBodyDesc, Shape};
 
@@ -479,7 +479,7 @@ fn f4_cube_waterline_depth_matches_density_ratio() {
     let body = buoyancy_test_material(&mut materials, ratio * water_density);
 
     let mut solver = MechanicsSolver::new(9.80665);
-    solver.water = Some(StaticWaterRegion::new(0.0, water_density));
+    solver.fluids = vec![FluidRegion::new(0.0, water_density)];
 
     let half = 0.5; // 一辺 1m
     let side = 2.0 * half;
@@ -517,7 +517,7 @@ fn f5_floating_body_heave_period_matches_analytic_formula() {
     let body = buoyancy_test_material(&mut materials, ratio * water_density);
 
     let mut solver = MechanicsSolver::new(9.80665);
-    solver.water = Some(StaticWaterRegion::new(0.0, water_density));
+    solver.fluids = vec![FluidRegion::new(0.0, water_density)];
 
     let half = 0.5;
     let side = 2.0 * half;

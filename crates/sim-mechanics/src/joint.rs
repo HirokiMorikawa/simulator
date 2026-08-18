@@ -118,8 +118,15 @@ fn apply_impulse(bodies: &mut RigidBodySet, body: usize, impulse: Vec3, r: Vec3,
 }
 
 /// body ローカルのアンカー点をワールド座標へ。`(ワールド座標, 重心からのオフセット r)`。
+///
+/// `anchor_local` は**形状のローカル系**(=作者が図面上で指定する座標系)の点。
+/// 一方 `r` は角運動量の腕なので**重心基準**でなければならない。群11で両者が
+/// 分離されたため、ここで `anchor_local - center_of_mass` の差し引きを行う
+/// (`RigidBodySet` の型doc参照)。重心オフセットが 0 の形状
+/// (Sphere/Box/Capsule)では移行前と完全に一致する。
 fn world_anchor(bodies: &RigidBodySet, body: usize, anchor_local: Vec3) -> (Vec3, Vec3) {
-    let r = bodies.rotation[body].to_mat3().mul_vec(anchor_local);
+    let from_com = anchor_local - bodies.center_of_mass[body];
+    let r = bodies.rotation[body].to_mat3().mul_vec(from_com);
     (bodies.position[body] + r, r)
 }
 
@@ -537,7 +544,13 @@ pub struct SliderJoint {
     /// `body_b` が `Some` ならそのローカル座標、`None` ならワールド座標(固定点)。
     pub anchor_b: Vec3,
     /// 生成時点の相対回転(角度0の基準)。`SliderJoint::new`で自動算出する。
-    reference_relative_rotation: Quat,
+    ///
+    /// **`pub`である理由**: この値は`body_a`/`body_b`の"現在の"回転からは復元できない
+    /// (生成後にどちらかが回転していれば基準がずれる)。`World → Scenario`逆写像
+    /// (`sim-world::export`)が実行中のジョイントをそのまま書き戻すには、この基準を
+    /// 明示的に読み出して`JointJson::Slider::reference_relative_rotation`として
+    /// 保存する必要がある(`from_raw`のdoc参照)。
+    pub reference_relative_rotation: Quat,
     /// `true`なら解決対象から除外する(`BallJoint::disabled`と同じ理由)。
     pub disabled: bool,
 }
@@ -556,13 +569,34 @@ impl SliderJoint {
     ) -> SliderJoint {
         let rot_a = bodies.rotation[body_a];
         let rot_b = body_b.map(|b| bodies.rotation[b]).unwrap_or(Quat::IDENTITY);
+        SliderJoint::from_raw(
+            body_a,
+            anchor_a,
+            axis_a,
+            body_b,
+            anchor_b,
+            rot_b.mul(rot_a.conjugate()),
+        )
+    }
+
+    /// `reference_relative_rotation`を明示指定して`SliderJoint`を組み立てる
+    /// (`World → Scenario`逆写像が、生成時点の姿勢ではなく**保存されていた基準**を
+    /// そのまま復元するために使う。`new`はこの関数の薄いラッパー)。
+    pub fn from_raw(
+        body_a: usize,
+        anchor_a: Vec3,
+        axis_a: Vec3,
+        body_b: Option<usize>,
+        anchor_b: Vec3,
+        reference_relative_rotation: Quat,
+    ) -> SliderJoint {
         SliderJoint {
             body_a,
             anchor_a,
             axis_a,
             body_b,
             anchor_b,
-            reference_relative_rotation: rot_b.mul(rot_a.conjugate()),
+            reference_relative_rotation,
             disabled: false,
         }
     }

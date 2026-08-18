@@ -28,8 +28,15 @@
 //!   だったが、群9で**圧力ポアソンの側で Solid 面を Neumann として扱い、Solid セルを
 //!   未知数から外す**形(設計§4.4)へ変えた。`pressure_force_on_solid` も
 //!   Solid–Fluid 面の一般の面積分 $\mathbf{F}=-\sum p\,\hat{n}\,h$ になった。
-//!   `GridSolidBox` は既存の`sim_coupling::GridFluidRigid`結合のために残してあり、
-//!   `step`の冒頭でセル種別へラスタライズされる。
+//!
+//! **固体表現を`cell_type`へ一本化した**: 移行前は上記のセル種別に加えて
+//! `solid: Option<GridSolidBox>`(単一矩形)という**第二の固体表現**を併せ持ち、
+//! `sim_coupling::GridFluidRigid`だけがそちらを使っていた。二重表現は
+//! 「どちらが勝つか」の規則が暗黙になる(`set_solid_cells`が`solid`を`None`へ倒し、
+//! `step`の冒頭が`solid`からセル種別を再ラスタライズして上書きし返す)ため、
+//! `GridSolidBox`ごと削除して**セル種別を唯一の真実**にした。矩形剛体を敷きたい側は
+//! `set_solid_cells`に矩形判定の閉包を渡す(`GridFluidRigid`がそうしている)。
+//! 3D版(`GridFluid3D`)は最初からこの形で、2Dがそれに揃った。
 //!
 //! **残る縮約**: 3D化は引き続き未実装(`GridFluid3D`は群9-4)。`CellType`に `Empty`
 //! (自由表面)は持たない——この縮約実装は閉領域/流路の非圧縮流に限っており、自由表面は
@@ -42,18 +49,6 @@
 
 use sim_core::{Approximation, EnergyBreakdown, Solver, SolverContext, StateHasher};
 use sim_math::Vec3;
-
-/// 単一の矩形剛体をマスキング方式(cut-cell法ではない、`sim_fluid::GridFluidRigidBox2D`
-/// (X2)と同じ縮約手法)で格子に埋め込む。`sim_coupling::GridFluidRigid`(設計
-/// docs/20-integration/01-coupling-matrix.md §3「P3: 格子流体 ⇔ 剛体(ボクセル化境界・
-/// 圧力積分)」)が、`World`のmechanicsボディの位置・速度から毎stepこの値を書き換える。
-#[derive(Clone, Copy)]
-pub struct GridSolidBox {
-    pub center: (f64, f64),
-    pub half_width: f64,
-    pub half_height: f64,
-    pub velocity: Vec3,
-}
 
 /// 境界条件(**群7で追加**、モジュールdoc参照)。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -95,12 +90,8 @@ pub struct GridFluid2D {
     pub vorticity_confinement_epsilon: f64,
     /// 境界条件(**群7で追加**、モジュールdoc参照)。
     boundary: GridBoundary,
-    /// `GridFluidRigid`結合用の単一剛体マスク。`None`なら固体無し。
-    /// `set_solid_box`(設定と同時に`cell_type`/`solid_velocity`へラスタライズする)
-    /// でのみ書き換える——既存の結合コードのための後方互換経路(モジュールdoc参照)。
-    /// 任意形状を使うときは`set_solid_cells`を呼ぶ(そちらは`solid`を`None`にする)。
-    solid: Option<GridSolidBox>,
     /// セル種別(**群9で追加**、モジュールdoc参照)。長さ`nx*ny`。
+    /// **固体の唯一の表現**(モジュールdoc「固体表現を`cell_type`へ一本化した」参照)。
     cell_type: Vec<CellType>,
     /// Solidセルの速度 [m/s](Fluidセルでは未使用)。長さ`nx*ny`。
     solid_velocity: Vec<Vec3>,
@@ -126,7 +117,6 @@ impl GridFluid2D {
             density: 1.0,
             kinematic_viscosity: 0.0,
             vorticity_confinement_epsilon: 0.0,
-            solid: None,
             cell_type: vec![CellType::Fluid; nx * ny],
             solid_velocity: vec![Vec3::ZERO; nx * ny],
             last_pressure: vec![0.0; nx * ny],
@@ -138,9 +128,11 @@ impl GridFluid2D {
     /// `f(x, y)` がその点の固体速度を返せばそのセルは `Solid`、`None` なら `Fluid`。
     /// 判定はセル中心 $((i+\frac12)h,(j+\frac12)h)$ で行う(セル単位のラスタライズ、
     /// cut-cell法ではない縮約——半端に切れたセルは丸ごと Solid か Fluid になる)。
-    /// `solid`(単一矩形の後方互換経路)はクリアされる。
+    ///
+    /// **固体を設定する唯一の入口**(モジュールdoc参照)。矩形剛体を毎step敷き直す
+    /// `sim_coupling::GridFluidRigid`もこの経路を通る——全セル走査のコストは、
+    /// 移行前の`set_solid_box`が内部で回していた矩形ラスタライズと同じ $O(n_x n_y)$。
     pub fn set_solid_cells(&mut self, f: impl Fn(f64, f64) -> Option<Vec3>) {
-        self.solid = None;
         for j in 0..self.ny {
             for i in 0..self.nx {
                 let x = (i as f64 + 0.5) * self.h;
@@ -160,6 +152,39 @@ impl GridFluid2D {
         }
     }
 
+    /// セル種別の生配列(長さ`nx*ny`、行優先 `i + nx*j`)。
+    /// **生状態スナップショット(`sim_world`の`raw_state`)のために公開する**——
+    /// `set_solid_cells`はセル中心を引数に取る閉包でしか固体を書けず、
+    /// 時間発展後の任意形状マスクを後から再現する手段が無かった
+    /// (閉包を「復元」することはできない)。`state_hash`はこの配列を含むため、
+    /// 読み書きの両方が要る。
+    pub fn cell_type(&self) -> &[CellType] {
+        &self.cell_type
+    }
+
+    /// Solidセルの速度の生配列(長さ`nx*ny`)。`cell_type`と対で使う。
+    pub fn solid_velocity(&self) -> &[Vec3] {
+        &self.solid_velocity
+    }
+
+    /// 固体境界の状態(セル種別・固体速度)を生値のまま丸ごと入れ替える
+    /// (**生状態スナップショットのために追加**、`cell_type`のdoc参照)。
+    /// `set_solid_cells`は閉包でしか固体を書けず、時間発展後の任意形状マスクを
+    /// 後から再現できない(閉包は「復元」できない)ため、再計算を一切せずに
+    /// 書き込むこの経路を別に持つ。
+    ///
+    /// 長さが`nx*ny`と異なる配列は無視する(壊れたスナップショットで格子を
+    /// 壊さないための防御——呼び出し側の`sim_world::scenario`が長さを検証する)。
+    pub fn set_raw_solid_state(&mut self, cell_type: Vec<CellType>, solid_velocity: Vec<Vec3>) {
+        let n = self.nx * self.ny;
+        if cell_type.len() == n {
+            self.cell_type = cell_type;
+        }
+        if solid_velocity.len() == n {
+            self.solid_velocity = solid_velocity;
+        }
+    }
+
     /// セル種別(読み取り)。範囲外は `Fluid` 扱い(周期境界では`wrap`される)。
     pub fn cell_type_at(&self, i: i64, j: i64) -> CellType {
         self.cell_type[self.idx(i, j)]
@@ -171,48 +196,6 @@ impl GridFluid2D {
 
     fn has_solid(&self) -> bool {
         self.cell_type.contains(&CellType::Solid)
-    }
-
-    /// 単一矩形の固体マスクを設定する(後方互換経路、`solid`フィールドのdoc参照)。
-    /// 設定と同時にセル種別へラスタライズするので、`step`を呼ぶ前でも
-    /// `pressure_force_on_solid`が正しい面を選べる。
-    pub fn set_solid_box(&mut self, solid: Option<GridSolidBox>) {
-        self.solid = solid;
-        match solid {
-            Some(_) => self.rasterize_solid_box(),
-            None => {
-                for k in 0..self.cell_type.len() {
-                    self.cell_type[k] = CellType::Fluid;
-                    self.solid_velocity[k] = Vec3::ZERO;
-                }
-            }
-        }
-    }
-
-    /// 設定されている単一矩形の固体マスク(後方互換経路)。
-    pub fn solid_box(&self) -> Option<GridSolidBox> {
-        self.solid
-    }
-
-    /// `solid`(単一矩形)をセル種別へラスタライズする(後方互換経路、モジュールdoc参照)。
-    fn rasterize_solid_box(&mut self) {
-        let Some(solid) = self.solid else {
-            return;
-        };
-        for j in 0..self.ny {
-            for i in 0..self.nx {
-                let x = (i as f64 + 0.5) * self.h;
-                let y = (j as f64 + 0.5) * self.h;
-                let idx = i + self.nx * j;
-                if Self::is_solid_at(&solid, x, y) {
-                    self.cell_type[idx] = CellType::Solid;
-                    self.solid_velocity[idx] = solid.velocity;
-                } else {
-                    self.cell_type[idx] = CellType::Fluid;
-                    self.solid_velocity[idx] = Vec3::ZERO;
-                }
-            }
-        }
     }
 
     /// 境界条件を差し替える(**群7で追加**、モジュールdoc参照)。`Channel`にすると
@@ -423,11 +406,6 @@ impl GridFluid2D {
                 self.v[idx] += coeff * lap_v;
             }
         }
-    }
-
-    fn is_solid_at(solid: &GridSolidBox, x: f64, y: f64) -> bool {
-        (x - solid.center.0).abs() < solid.half_width
-            && (y - solid.center.1).abs() < solid.half_height
     }
 
     /// Solid セルに触れる面の法線速度を固体の速度に一致させる(設計§4.4
@@ -794,7 +772,6 @@ impl GridFluid2D {
     /// 固体面の速度矯正は投影の前後両方に適用する(投影前は境界条件として、投影後は
     /// 丸め誤差で漏れた分の再矯正——`GridFluidRigidBox2D::step`と同じ理由)。
     pub fn step(&mut self, dt: f64) {
-        self.rasterize_solid_box();
         self.advect_velocity(dt);
         self.apply_vorticity_confinement(dt, self.vorticity_confinement_epsilon);
         if self.kinematic_viscosity > 0.0 {
@@ -854,23 +831,11 @@ impl Solver for GridFluid2D {
             hasher.write_f64(self.u[i]);
             hasher.write_f64(self.v[i]);
         }
-        // `solid`は次stepの挙動に影響する状態(`last_pressure`と異なり、次stepの冒頭で
-        // 再計算される派生値ではない)なのでハッシュに含める(決定論replayの一部)。
-        match self.solid {
-            Some(solid) => {
-                hasher.write_u64(1);
-                hasher.write_f64(solid.center.0);
-                hasher.write_f64(solid.center.1);
-                hasher.write_f64(solid.half_width);
-                hasher.write_f64(solid.half_height);
-                hasher.write_f64(solid.velocity.x);
-                hasher.write_f64(solid.velocity.y);
-                hasher.write_f64(solid.velocity.z);
-            }
-            None => hasher.write_u64(0),
-        }
-        // 任意形状の固体境界(**群9**)。`solid`(単一矩形)を使わず`set_solid_cells`で
-        // 直接設定された場合はこちらだけが状態を持つので、同様にハッシュへ含める。
+        // 固体境界(**群9**)。セル種別が固体の唯一の表現なので、これだけをハッシュに
+        // 含める(`last_pressure`と異なり次stepの冒頭で再計算される派生値ではなく、
+        // 次stepの挙動に影響する状態なので決定論replayの一部)。移行前は単一矩形
+        // `solid`の有無マーカーも書いていたが、冗長な第二表現ごと削除した
+        // (モジュールdoc「固体表現を`cell_type`へ一本化した」参照)。
         for k in 0..self.cell_type.len() {
             hasher.write_u64(if self.cell_type[k] == CellType::Solid {
                 1
@@ -945,6 +910,25 @@ impl Solver for GridFluid2D {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 軸並行矩形を`set_solid_cells`で敷くテスト用ヘルパ。移行前の`set_solid_box`と
+    /// **同じ内外判定**(セル中心が半幅・半高より真に内側)を使うので、固体表現を
+    /// `cell_type`へ一本化しても既存テストの期待値をそのまま使い回せる。
+    fn set_solid_box_for_test(
+        fluid: &mut GridFluid2D,
+        center: (f64, f64),
+        half_width: f64,
+        half_height: f64,
+        velocity: Vec3,
+    ) {
+        fluid.set_solid_cells(|x, y| {
+            if (x - center.0).abs() < half_width && (y - center.1).abs() < half_height {
+                Some(velocity)
+            } else {
+                None
+            }
+        });
+    }
 
     /// F9: 投影後発散 — 任意の(非零発散の)速度場を1回投影すると|∇·u| < 1e-6になること
     /// (docs/21-verification/01-analytic-tests.md F9)。
@@ -1124,12 +1108,7 @@ mod tests {
         }
         // box_center=(2.0,2.0), half=0.75 => セル中心 x=1.75,2.25 (i=3,4) が箱内、
         // i_left=2, i_right=5(y方向も同型でj_below=2, j_above=5)。
-        fluid.set_solid_box(Some(GridSolidBox {
-            center: (2.0, 2.0),
-            half_width: 0.75,
-            half_height: 0.75,
-            velocity: Vec3::ZERO,
-        }));
+        set_solid_box_for_test(&mut fluid, (2.0, 2.0), 0.75, 0.75, Vec3::ZERO);
 
         let force = fluid.pressure_force_on_solid().expect("solid is set");
         assert!(
@@ -1160,12 +1139,7 @@ mod tests {
             fluid.u[i] = 0.3;
         }
         let solid_velocity = Vec3::new(1.5, -2.0, 0.0);
-        fluid.set_solid_box(Some(GridSolidBox {
-            center: (2.0, 2.0),
-            half_width: 0.75,
-            half_height: 0.75,
-            velocity: solid_velocity,
-        }));
+        set_solid_box_for_test(&mut fluid, (2.0, 2.0), 0.75, 0.75, solid_velocity);
 
         fluid.step(0.001);
 
@@ -1229,12 +1203,13 @@ mod tests {
             inflow_speed: inflow,
         });
         // 流路の中ほどに矩形障害物を置く。
-        fluid.set_solid_box(Some(GridSolidBox {
-            center: (nx as f64 * h * 0.35, ny as f64 * h * 0.5),
-            half_width: 2.0 * h,
-            half_height: 3.0 * h,
-            velocity: Vec3::ZERO,
-        }));
+        set_solid_box_for_test(
+            &mut fluid,
+            (nx as f64 * h * 0.35, ny as f64 * h * 0.5),
+            2.0 * h,
+            3.0 * h,
+            Vec3::ZERO,
+        );
 
         for _ in 0..400 {
             fluid.step(0.002);

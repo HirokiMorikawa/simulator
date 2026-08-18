@@ -21,7 +21,7 @@
 use crate::body::{collision_filter_allows, BodyType, RigidBodySet};
 use crate::gjk::{conservative_advancement_hit, ConvexShape};
 use crate::shape::Shape;
-use sim_math::{Transform, Vec3};
+use sim_math::Vec3;
 
 /// 弾丸級判定のしきい値係数(設計§4.6「$\alpha=0.5$固定」)。
 const ALPHA: f64 = 0.5;
@@ -42,7 +42,10 @@ pub fn apply_speculative_contacts(bodies: &mut RigidBodySet, dt: f64) {
         if vel.length() * dt <= ALPHA * radius {
             continue; // 弾丸級でない(設計§4.6の決定的判定、状態の関数のみで実行時適応なし)
         }
-        let center = bodies.position[i];
+        // 球の重心オフセットは常にゼロなので `position[i]` と同じだが、
+        // 「幾何は `shape_transform` 経由」の規約に揃えておく
+        // (`RigidBodySet` の型doc参照)。
+        let center = bodies.shape_transform(i).position;
 
         for j in 0..n {
             if bodies.body_type[j] == BodyType::Dynamic {
@@ -54,10 +57,7 @@ pub fn apply_speculative_contacts(bodies: &mut RigidBodySet, dt: f64) {
                     clamp_approach_velocity(bodies, i, normal, gap, dt);
                 }
                 Shape::Box { half_extents } => {
-                    let xf = Transform {
-                        position: bodies.position[j],
-                        rotation: bodies.rotation[j],
-                    };
+                    let xf = bodies.shape_transform(j);
                     let local = xf.inverse().apply_point(center);
                     let clamped = Vec3::new(
                         local.x.clamp(-half_extents.x, half_extents.x),
@@ -158,14 +158,11 @@ impl CcdShape {
 fn ccd_shape_of(bodies: &RigidBodySet, i: usize) -> Option<CcdShape> {
     match *bodies.shape_of(i) {
         Shape::Sphere { radius } => Some(CcdShape::Sphere {
-            center: bodies.position[i],
+            center: bodies.shape_transform(i).position,
             radius,
         }),
         Shape::Box { half_extents } => {
-            let xf = Transform {
-                position: bodies.position[i],
-                rotation: bodies.rotation[i],
-            };
+            let xf = bodies.shape_transform(i);
             let mut corners = Vec::with_capacity(8);
             for sx in [-1.0, 1.0] {
                 for sy in [-1.0, 1.0] {

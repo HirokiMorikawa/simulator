@@ -244,6 +244,19 @@ impl Circuit {
         self.num_nodes
     }
 
+    /// ノードを`count`個追加し、追加した最初のノード番号を返す(**群10で追加**、
+    /// `add_dc_motor`のdoc「内部ノードは2つ要る」参照)。自由配線回路エディタが
+    /// DCモーターを追加する際、内部ノード(巻線の等価回路が要る)をユーザーに
+    /// 意識させず自動的に確保するために使う——`Circuit::new`はノード数を
+    /// 構築時に固定する設計だが、これだけは唯一「後から増える」必要がある
+    /// (他の素子はすべて既存ノード間を繋ぐだけ)。
+    pub fn add_nodes(&mut self, count: usize) -> usize {
+        let first = self.num_nodes;
+        self.num_nodes += count;
+        self.last_node_voltage.resize(self.num_nodes, 0.0);
+        first
+    }
+
     /// `(a, b, resistance)`。
     pub fn resistors(&self) -> &[(usize, usize, f64)] {
         &self.resistors
@@ -272,6 +285,20 @@ impl Circuit {
     /// `(a, b, closed)`。インデックスが`set_switch_closed`の引数と対応する。
     pub fn switches(&self) -> &[(usize, usize, bool)] {
         &self.switches
+    }
+
+    /// コンデンサの現在の端子間電圧(後退Eulerコンパニオンモデルの履歴項、
+    /// `add_capacitor`の`initial_voltage`と同じ量)。`World → Scenario`逆写像が
+    /// 「今の充電状態」を`CapacitorJson::initial_voltage`として書き戻すのに使う
+    /// ——これが無いと保存のたびにコンデンサが放電済み(0V)にリセットされる。
+    pub fn capacitor_voltage(&self, index: usize) -> f64 {
+        self.capacitor_voltage[index]
+    }
+
+    /// インダクタの現在の枝電流(`inductor_current`版、`add_inductor`の
+    /// `initial_current`と同じ量)。
+    pub fn inductor_current(&self, index: usize) -> f64 {
+        self.inductor_current[index]
     }
 
     /// `node`が現在の回路のノード数を超える場合は0を返す(パニックしない)。

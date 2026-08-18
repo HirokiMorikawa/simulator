@@ -81,27 +81,49 @@ body {
 #toolbar {
   grid-area: toolbar;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  gap: 8px 16px;
   padding: 4px 10px;
-  overflow: visible;
+  /* QA不具合1: 内容幅がウィンドウ幅を超えると `Settings`/`Scene`/`Layout`/
+     状態ハッシュ表示に到達できなくなっていた(`overflow: visible`のため、
+     はみ出した分は画面外へ切れるだけで、横スクロールでも救えなかった)。
+     この行の高さはグリッド側が`auto`(`style.css`冒頭の`grid-template-rows`
+     参照)なので、`flex-wrap: wrap`で複数行に折り返せば全コントロールが
+     必ず画面内に収まる——横スクロールは狭い画面での保険として残す。 */
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .toolbar-group {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* 幅が足りないとき`toolbar-group`自体が潰れてラベルの折り返しを誘発しない
+     よう、自然幅を保つ(下の「ラベルを折り返さない」と対で効く)。 */
+  flex-shrink: 0;
 }
 
 .toolbar-spacer {
   flex: 1;
+  /* 中身が無いスペーサーなので縮んでよい(むしろ縮んで欲しい)——
+     `flex-shrink: 0`を継承させないため、他の`toolbar-group`とは別に明示する。 */
+  min-width: 0;
+}
+
+#toolbar button,
+#toolbar select,
+#toolbar label,
+#toolbar span {
+  /* ラベルを折り返さない(群2)。折り返すとツールバーが数行ぶんの高さに
+     膨れ、1文字ずつ縦に並んで読めなくなる(QA不具合1、「時間倍率」ラベルで
+     実際に発生した——`label`/`span`には元々このルールが効いていなかった)。 */
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 #toolbar button,
 #toolbar select {
-  /* ラベルを折り返さない(群2)。折り返すとツールバーが数行ぶんの高さに
-     膨れ、1文字ずつ縦に並んで読めなくなる。 */
-  white-space: nowrap;
   background: #2a2a2a;
   color: #eee;
   border: 1px solid #3a3a3a;
@@ -131,10 +153,36 @@ body {
   grid-area: hierarchy;
 }
 
+/* Hierarchy検索欄(D3「Unityパリティ」増分)。大量のボディを持つシーンで
+   目的の行を探す手段が無かった監査結果への対応。 */
+.hierarchy-search {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 4px 10px 6px;
+  padding: 3px 6px;
+  background: #1c1c1c;
+  border: 1px solid #333;
+  border-radius: 3px;
+  color: #ddd;
+  font-size: 0.9em;
+}
+.hierarchy-search:focus {
+  outline: none;
+  border-color: #567;
+}
+
 .tree {
   list-style: none;
   margin: 0;
   padding: 0 10px 10px;
+}
+
+/* 検索中は折り畳み状態を無視してすべての枝を開く(一致した行が畳まれた
+   枝の中に埋もれて見えなくなるのを防ぐ)。個々の行の表示/非表示自体は
+   JS側が`<li>`ごとの`style.display`で制御する(このルールはネストした
+   `<ul>`だけを強制的に開く)。 */
+#hierarchy-tree.hierarchy-filtering .tree-nested {
+  display: block !important;
 }
 
 .tree li {
@@ -318,6 +366,72 @@ body {
   image-rendering: pixelated;
   object-fit: contain;
   background: #111;
+}
+
+/* **スケッチパネル(D1)**。`#field-panel` と同じ「Scene View の中に浮かべる
+   小さなパネル」の作りだが、右下は場のパネルが使うので**左下**に置く
+   (両方同時に出るシーンでも重ならない)。 */
+#sketch-panel {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: #1a1a1acc;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 6px 8px 8px;
+  z-index: 3;
+}
+#sketch-panel[hidden] {
+  display: none;
+}
+#sketch-panel h2 {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #9ab;
+  margin: 0;
+}
+.sketch-hint {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #888;
+}
+.sketch-status {
+  font-size: 11px;
+  font-family: monospace;
+  color: #cc9;
+}
+.sketch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+.sketch-row select,
+.sketch-row input {
+  flex: 1;
+  min-width: 0;
+}
+.sketch-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.sketch-buttons button {
+  flex: 1 1 auto;
+  font-size: 11px;
+}
+/* 「押し出し」は最終操作なので目立たせる(Add Joint フォームの主ボタンと同じ扱い)。 */
+#btn-sketch-extrude {
+  background: #3a5a8a;
+  border-color: #4a7ac0;
+  color: #fff;
 }
 
 /* 実効時間倍率(群2)。指定値に届かないとき赤くする。 */
@@ -537,6 +651,15 @@ body {
   color: #eee;
 }
 
+/* QA不具合9: グラフに時刻の目盛りが無く、どこが何秒なのか画面から分から
+   なかった。表示中の系列が覆う時間範囲(古い側〜新しい側)をテキストで
+   出す(`updateProbeGraph`のdoc参照)。 */
+.probe-time-range {
+  margin-left: auto;
+  font-family: monospace;
+  color: #778;
+}
+
 #probe-canvas {
   flex: 1;
   width: 100%;
@@ -673,8 +796,64 @@ body {
   text-align: right;
 }
 
+/* Add Joint フォーム(残タスク完遂の縦串①増分)。Body/Anchor/Axis/Param の
+   数値入力を1行に収める、軸別スケール入力と同じ見た目。 */
+.inspector-joint-row {
+  display: flex;
+  gap: 3px;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.inspector-joint-row > input {
+  width: 44px;
+  min-width: 0;
+  background: #1b1b1b;
+  color: #ddd;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 1px 3px;
+  font-size: 11px;
+  font-family: inherit;
+  text-align: right;
+}
+
 /* Gizmo 座標系トグル(群2)。Local のとき色を変えて状態を見せる。 */
 #btn-gizmo-space[data-space="local"] {
   background: #3a4a6a;
   color: #cde;
+}
+
+/* 検証タブ(残タスク完遂の縦串④増分)。パラメータ掃引の結果テーブル・
+   probe履歴の重ね書きグラフ。 */
+.validation-results-table {
+  border-collapse: collapse;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.validation-results-table th,
+.validation-results-table td {
+  border: 1px solid #3a3a3a;
+  padding: 2px 6px;
+  text-align: right;
+}
+.validation-chart {
+  margin-top: 8px;
+  background: #14141a;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+}
+.validation-chart-legend {
+  margin-top: 4px;
+  font-size: 11px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.validation-chart-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 2px;
+  border-radius: 2px;
+  vertical-align: middle;
 }

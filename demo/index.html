@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- ファビコンを明示する(QA不具合 8)。宣言が無いとブラウザが既定で
+         `/favicon.ico` を取りに行き、起動のたびに Console の Errors タブへ
+         404 が 1 件積まれて本物のエラーを見つけにくくしていた。
+         `public/` 配下なので dev / preview / build のどれでも同じ URL で出る。 -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>物理エンジン統合エディタ</title>
   </head>
   <body>
@@ -34,6 +39,10 @@
           <button id="btn-tool-rotate" title="回転ツール (E)">E 回転</button>
           <button id="btn-tool-scale" title="スケールツール (R)">R 拡縮</button>
           <button id="btn-tool-select" title="選択のみ (Q)">Q 選択</button>
+          <!-- スケッチツール(D1)。他の4つと同じ排他トグルの一員なので、
+               同じ toolbar-group に並べる。選ぶと Scene View 左下に
+               スケッチパネルが開く。 -->
+          <button id="btn-tool-sketch" title="スケッチツール (S): 地面(y=0)に多角形を描き、ブーリアン合成して押し出す">S スケッチ</button>
           <button
             id="btn-gizmo-space"
             title="Gizmo の座標系を World / Local で切り替える (X)"
@@ -66,6 +75,8 @@
           <button id="btn-spawn-sphere" hidden>+ 球</button>
           <button id="btn-spawn-box" hidden>+ 箱</button>
           <button id="btn-spawn-capsule" hidden>+ カプセル</button>
+          <button id="btn-spawn-compound" hidden title="複合形状(L字、Box×2の子)——Shape::Compoundを実際にUIから作れる経路">+ 複合形状(L字)</button>
+          <button id="btn-spawn-convex-mesh" hidden title="凸包メッシュ(立方体の8頂点)——Shape::ConvexMeshを実際にUIから作れる経路。接触判定は未実装(すり抜ける)">+ 凸包メッシュ</button>
           <button id="btn-derive-material" hidden>材料派生</button>
           <button id="btn-spawn-pendulum" hidden>+ 振り子</button>
           <button id="btn-spawn-motor" hidden>+ モーター</button>
@@ -110,14 +121,139 @@
           <label><input type="checkbox" id="toggle-heater" /> ヒーター</label>
             <h4>物理パラメータ</h4>
             <label>重力 [m/s²] <input type="number" id="input-gravity" step="0.1" min="0" /></label>
+            <label>重力の向き x,y,z(正規化される)
+              <span class="inspector-scale-fields">
+                <input type="number" id="input-gravity-direction-x" step="0.1" value="0" />
+                <input type="number" id="input-gravity-direction-y" step="0.1" value="-1" />
+                <input type="number" id="input-gravity-direction-z" step="0.1" value="0" />
+              </span>
+            </label>
+            <p class="settings-note">重力の向きが影響するのは自由体への直接の重力積分のみ——浮力・大気抗力の向きは水域モデルが水平面固定なため変わらない(既知の制約)。</p>
             <label>dt [s] <input type="number" id="input-dt" step="0.001" min="0.0001" /></label>
             <p class="settings-note">dt の変更はリプレイの再現性に影響するため Edit モードのみ。</p>
+            <h4>環境(大気・水域)</h4>
+            <label><input type="checkbox" id="toggle-atmosphere" /> 大気を有効化</label>
+            <label>密度 [kg/m³] <input type="number" id="input-atmosphere-density" step="0.01" min="0" value="1.225" /></label>
+            <label>動粘性 [m²/s] <input type="number" id="input-atmosphere-viscosity" step="0.0000001" min="0" value="0.0000148" /></label>
+            <label>風 x,y,z [m/s]
+              <span class="inspector-scale-fields">
+                <input type="number" id="input-wind-x" step="0.1" value="0" />
+                <input type="number" id="input-wind-y" step="0.1" value="0" />
+                <input type="number" id="input-wind-z" step="0.1" value="0" />
+              </span>
+            </label>
+            <label>高度 [m](ISA標準大気から密度を計算) <input type="number" id="input-isa-altitude" step="100" value="0" /></label>
+            <button id="btn-apply-isa-density" title="国際標準大気(対流圏近似)の高度依存密度を密度欄へ書き込む">ISA密度を計算</button>
+            <label><input type="checkbox" id="toggle-water" /> 静的水域を有効化</label>
+            <label>水位 [m] <input type="number" id="input-water-level" step="0.1" value="0" /></label>
+            <label>水密度 [kg/m³] <input type="number" id="input-water-density" step="1" min="0" value="1000" /></label>
+            <p class="settings-note">大気・水域は`BuoyancyDrag`結合(Inspectorの Add Coupling)を持つ剛体にのみ効く。設定はEditモード・Playモードどちらでも即座に反映される。</p>
+            <h4>ドメイン(熱ノード・格子流体・気体)</h4>
+            <p class="settings-note">Add Couplingの残り6種(PhaseChangeMorph/SphRigid/GridFluidRigid/BoussinesqBuoyancy/ConvectionLink/PistonGas)は、参照するドメインが有効なシーンでのみ追加できる。ここで先にドメインを作る(冪等——複数回押しても壊れない)。</p>
+            <label>温度 [K] <input type="number" id="input-new-thermal-node-temperature" step="1" value="293.15" /></label>
+            <label>熱容量 [J/K] <input type="number" id="input-new-thermal-node-heat-capacity" step="1" min="0" value="100" /></label>
+            <button id="btn-add-thermal-node" title="熱ノードを1個追加する(熱ドメインが無効なら周囲温度293.15Kで自動的に有効化する)">熱ノードを追加</button>
+            <span id="thermal-node-count-display"></span>
+            <button id="btn-enable-grid-fluid" title="格子流体(2D)ドメインを既定パラメータで有効化する(GridFluidRigid/BoussinesqBuoyancyが必要とする)">格子流体ドメインを有効化</button>
+            <button id="btn-enable-gas" title="気体区画を既定パラメータ(空気1mol・1L・常温)で有効化する(PistonGasが必要とする)">気体ドメインを有効化</button>
+            <h4>量子ドメイン(プリセット)</h4>
+            <p class="settings-note">シーンJSONの<code>raw_state</code>は任意の波動関数・ポテンシャルを保存できるが、構築レシピ(ガウス波束・矩形障壁・調和振動子)はスキーマから撤去済み——ここはエディタ限定のプリセット計算で、ガウス波束を生成しシーンJSONと同じ生配列としてWorldへ渡す。原子単位(ℏ=mₑ=1)。</p>
+            <h5>1D</h5>
+            <label>グリッド点数 n(2の冪、FFTの制約)
+              <select id="select-quantum1d-n">
+                <option value="64">64</option>
+                <option value="128">128</option>
+                <option value="256" selected>256</option>
+                <option value="512">512</option>
+                <option value="1024">1024</option>
+              </select>
+            </label>
+            <label>格子間隔 dx [a.u.] <input type="number" id="input-quantum1d-dx" step="0.01" min="0.0001" value="0.1" /></label>
+            <label>波束中心 x0 [a.u.] <input type="number" id="input-quantum1d-x0" step="0.5" value="6.4" /></label>
+            <label>波束の広がり σ [a.u.] <input type="number" id="input-quantum1d-sigma" step="0.1" min="0.0001" value="1.0" /></label>
+            <label>初期運動量 k0 [a.u.] <input type="number" id="input-quantum1d-k0" step="0.5" value="3.0" /></label>
+            <label>ポテンシャル
+              <select id="select-quantum1d-potential">
+                <option value="zero">なし(自由粒子)</option>
+                <option value="barrier">矩形障壁</option>
+                <option value="well">矩形井戸</option>
+                <option value="harmonic">調和振動子</option>
+              </select>
+            </label>
+            <div data-quantum1d-potential="barrier well">
+              <label>高さ(障壁)/深さ(井戸) V0 [a.u.] <input type="number" id="input-quantum1d-v0" step="0.5" min="0" value="5.0" /></label>
+              <label>幅 [a.u.] <input type="number" id="input-quantum1d-width" step="0.1" min="0" value="2.0" /></label>
+              <label>中心位置 [a.u.] <input type="number" id="input-quantum1d-center" step="0.5" value="12.8" /></label>
+            </div>
+            <div data-quantum1d-potential="harmonic">
+              <label>角振動数 ω [a.u.] <input type="number" id="input-quantum1d-omega" step="0.1" min="0.0001" value="1.0" /></label>
+            </div>
+            <button id="btn-add-quantum-1d" title="ガウス波束+選択したポテンシャルで量子ドメイン(1D)を有効化する(既に有効なら生状態を丸ごと置き換える)">量子ドメイン(1D)を追加</button>
+            <h5>2D</h5>
+            <label>グリッド点数 nx
+              <select id="select-quantum2d-nx">
+                <option value="32">32</option>
+                <option value="64" selected>64</option>
+                <option value="128">128</option>
+                <option value="256">256</option>
+              </select>
+            </label>
+            <label>グリッド点数 ny
+              <select id="select-quantum2d-ny">
+                <option value="32">32</option>
+                <option value="64" selected>64</option>
+                <option value="128">128</option>
+                <option value="256">256</option>
+              </select>
+            </label>
+            <label>格子間隔 dx,dy [a.u.]
+              <span class="inspector-scale-fields">
+                <input type="number" id="input-quantum2d-dx" step="0.01" min="0.0001" value="0.2" />
+                <input type="number" id="input-quantum2d-dy" step="0.01" min="0.0001" value="0.2" />
+              </span>
+            </label>
+            <label>波束中心 x0,y0 [a.u.]
+              <span class="inspector-scale-fields">
+                <input type="number" id="input-quantum2d-x0" step="0.5" value="2.0" />
+                <input type="number" id="input-quantum2d-y0" step="0.5" value="6.4" />
+              </span>
+            </label>
+            <label>波束の広がり σx,σy [a.u.]
+              <span class="inspector-scale-fields">
+                <input type="number" id="input-quantum2d-sigma-x" step="0.1" min="0.0001" value="1.0" />
+                <input type="number" id="input-quantum2d-sigma-y" step="0.1" min="0.0001" value="3.0" />
+              </span>
+            </label>
+            <label>初期運動量 k0 [a.u.] <input type="number" id="input-quantum2d-k0" step="0.5" value="3.0" /></label>
+            <label>ポテンシャル
+              <select id="select-quantum2d-potential">
+                <option value="zero">なし(自由粒子)</option>
+                <option value="double_slit">二重スリット</option>
+                <option value="harmonic">調和振動子</option>
+              </select>
+            </label>
+            <div data-quantum2d-potential="double_slit">
+              <label>壁の高さ V0 [a.u.] <input type="number" id="input-quantum2d-v0" step="1" min="0" value="60.0" /></label>
+              <label>スリット幅 [a.u.] <input type="number" id="input-quantum2d-slit-width" step="0.1" min="0" value="0.7" /></label>
+              <label>スリット間隔 [a.u.] <input type="number" id="input-quantum2d-slit-separation" step="0.1" min="0" value="2.0" /></label>
+              <p class="settings-note">壁はグリッド中央のx列1本(<code>ix=nx/2</code>)、y方向中央を挟んで対称に2本のスリットを開ける(<code>scenes/d27-double-slit.json</code>と同じ構成)。</p>
+            </div>
+            <div data-quantum2d-potential="harmonic">
+              <label>角振動数 ω [a.u.] <input type="number" id="input-quantum2d-omega" step="0.1" min="0.0001" value="1.0" /></label>
+            </div>
+            <button id="btn-add-quantum-2d" title="2Dガウス波束+選択したポテンシャルで量子ドメイン(2D)を有効化する(既に有効なら生状態を丸ごと置き換える)">量子ドメイン(2D)を追加</button>
             <h4>グリッド</h4>
             <label>スナップ [m] <input type="number" id="input-grid-snap" step="0.01" min="0" value="0.1" /></label>
             <h4>決定論</h4>
             <label>PRNG シード <input type="number" id="input-seed" step="1" min="0" value="0" disabled /></label>
             <p class="settings-note">シードは World 構築時に決まるため、変更にはシーン再読み込みが要る。</p>
           </div>
+          <button
+            id="btn-new-scene"
+            title="床だけの空シーンへ切り替える(回路・熱ドメインの実演セットアップを含まない、まっさらな開始状態)"
+          >
+            🆕 新規シーン
+          </button>
           <label for="select-scene">Scene</label>
           <select id="select-scene"><option value="">(既定シーン)</option></select>
           <label for="select-layout">Layout</label>
@@ -136,6 +272,13 @@
 
       <aside id="hierarchy" class="panel">
         <h2>Hierarchy</h2>
+        <input
+          id="hierarchy-search"
+          type="text"
+          class="hierarchy-search"
+          placeholder="検索…"
+          title="ラベルで絞り込み(折り畳まれた枝も自動的に開く)"
+        />
         <ul id="hierarchy-tree" class="tree"></ul>
       </aside>
 
@@ -152,6 +295,35 @@
         <section id="field-panel" hidden>
           <h2 id="field-title">場</h2>
           <canvas id="field-canvas"></canvas>
+        </section>
+        <!-- **スケッチパネル(D1)**。スケッチツール(S)を選んでいる間だけ開く。
+             Scene View の中に置くのは `field-panel` と同じ理由——作図中に
+             視線を 3D ビューポートから外させないため。 -->
+        <section id="sketch-panel" hidden>
+          <h2>スケッチ → 押し出し</h2>
+          <p class="sketch-hint">
+            地面(y=0)を左クリックで頂点を追加。最初の点をもう一度クリックするか
+            「確定」で1枚のプロファイルが閉じます。
+          </p>
+          <div id="sketch-status" class="sketch-status">プロファイル 0 枚 / 作図中の点 0</div>
+          <div class="sketch-row">
+            <label for="select-sketch-op">合成</label>
+            <select id="select-sketch-op" title="確定するプロファイルを、それまでの結果へどう合成するか(1枚目では無視されます)">
+              <option value="union">結合 (Union)</option>
+              <option value="subtract">減算 (Subtract)</option>
+              <option value="intersect">交差 (Intersect)</option>
+            </select>
+          </div>
+          <div class="sketch-row">
+            <label for="input-sketch-depth">深さ [m]</label>
+            <input id="input-sketch-depth" type="number" min="0.01" step="0.05" value="0.5" />
+          </div>
+          <div class="sketch-buttons">
+            <button id="btn-sketch-confirm" title="作図中の点列を閉じて1枚のプロファイルとして確定する (Enter)">確定</button>
+            <button id="btn-sketch-undo-point" title="作図中の最後の点を取り消す (Backspace)">1点戻す</button>
+            <button id="btn-sketch-extrude" title="確定済みプロファイルを合成して押し出し、剛体としてスポーンする">押し出し</button>
+            <button id="btn-sketch-clear" title="スケッチを全部捨てる">クリア</button>
+          </div>
         </section>
       </main>
 
@@ -195,6 +367,7 @@
             <input type="checkbox" id="toggle-probe-log" /> 対数軸
           </label>
           <button id="btn-probe-csv" title="表示中の全系列の履歴をCSVでダウンロードする">CSV</button>
+          <span id="probe-time-range" class="probe-time-range"></span>
         </div>
         <canvas id="probe-canvas"></canvas>
       </section>
@@ -206,6 +379,7 @@
           <button class="project-tab" data-tab="circuit">Circuit</button>
           <button class="project-tab" data-tab="prefabs">Prefabs</button>
           <button class="project-tab" data-tab="replays">Replays</button>
+          <button class="project-tab" data-tab="validation">Validation</button>
         </div>
         <div id="project-body"></div>
       </footer>

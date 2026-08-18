@@ -260,10 +260,14 @@
   未知数から外す**形にし、`pressure_force_on_solid` も Solid–Fluid 面の一般の面積分
   $\mathbf F=-\sum p\hat n h$ に置き換えた(移行前は「矩形のバウンディングindexを
   走査する」実装で、矩形以外では正しい面を選べなかった)。
-- `GridSolidBox`(単一矩形)は`sim_coupling::GridFluidRigid`のために残したが、
-  **`pub`フィールドの直接代入から`set_solid_box`(代入と同時にラスタライズ)へ変えた**
-  ——直接代入のままだと`step`を呼ぶ前に`pressure_force_on_solid`が固体を見つけられず、
-  X2の結合テストが実際に落ちた。
+- `GridSolidBox`(単一矩形)は当初`sim_coupling::GridFluidRigid`のために残していたが、
+  **後に削除して固体表現を`cell_type`へ一本化した**——セル種別と単一矩形という
+  二重表現は「どちらが勝つか」の規則が暗黙(`set_solid_cells`が`solid`を`None`へ倒し、
+  `step`の冒頭が`solid`から再ラスタライズして上書きし返す)で、生状態スナップショットを
+  戻した直後の`step`が復元済みセル種別を潰し得るという実害もあった。
+  `GridFluidRigid`は`set_solid_cells`に矩形判定の閉包を渡す形へ移した(コストは同じ
+  $O(n_x n_y)$、かつ`step`側の重複ラスタライズが消えたぶん1step当たりの全セル走査は
+  2回から1回へ減った)。
 - シーンJSONへ `boundary` / `vorticity_confinement_epsilon` / `solids` を公開し、
   新シーン `scenes/d14b-cylinder-channel.json`(流路+円柱+渦度強化)を追加した。
   既存のD14との差がそのまま成果である: D14は周期境界+動的剛体に貼った矩形マスクでしか
@@ -886,6 +890,12 @@ Toolbarシーン選択・Circuit-focusレイアウト)と増分群F(設計項目
   (各行に「スポーン」ボタン)を持つ実装へ置き換えた。スポーンは既存の
   `spawn_sphere`/`spawn_box`をそのまま再利用するため、対応形状はsphere/box
   のみ(box は`spawn_box`自身の制約により立方体のみ、直方体は非対応)。
+  **後日この形状縮約は解消した**——`body_shape_params_f64_at`(平坦なf64配列で
+  Compound/ConvexMeshを表現できない)を`body_shape_json_at`へ統合して削除し、
+  任意の`ShapeJson`を配置する`spawn_shape_json`を新設したことで、無限平面
+  (床)を除く5形状すべてがPrefab化できる(直方体も潰れない)。詳細は
+  [03-editor-todo.md](03-editor-todo.md)「Prefab/複製の形状読み書きを
+  `ShapeJson`一本へ統合する」。
   Playwrightで、既定のBox_1をPrefab保存→一覧表示→スポーンボタンクリックで
   Hierarchyに新規`Box_2`が追加されることを確認した(最初のテストスクリプトは
   `text=スポーン`セレクタが意図した要素をクリックできず何も起きなかったが、
@@ -3194,11 +3204,13 @@ Playwrightで、位置と速さの2曲線が同一canvasに正しく重ね描き
       Scenesタブも実データ接続済み——現在のボディ一覧の表示+シーンJSON
       エクスポート、および`World::append_scenario_bodies`経由のシーンJSON
       Import(`fluids`/`probes`セクション非対応の制約あり)。Prefabsタブも
-      実データ接続済み——`sim-wasm`の`body_shape_kind_at`/
-      `body_shape_params_f64_at`で選択中ボディの形状+材質を読み取って
-      名前付きで保存し、一覧から`spawn_sphere`/`spawn_box`経由で再スポーン
-      できる(縮約実装: Body形状+材質のみ、対応形状はsphere/box(boxは
-      立方体のみ)、Joint/Circuitのプレファブ化・永続化は対象外)。
+      実データ接続済み——`sim-wasm`の`body_shape_json_at`で選択中ボディの
+      形状(`ShapeJson`)+材質を読み取って名前付きで保存し、一覧から
+      `spawn_shape_json`経由で再スポーンできる(縮約実装: Body形状+材質のみ、
+      Joint/Circuitのプレファブ化・永続化は対象外。**形状の制約は無い**——
+      当初は`body_shape_params_f64_at`の平坦なf64配列で読んで
+      `spawn_sphere`/`spawn_box`で戻していたためsphere/box(boxは立方体)
+      だけだったが、後日`ShapeJson`一本へ統合して解消した)。
       Playwrightで保存→一覧表示→再スポーンによるHierarchyへの新規ボディ
       追加を確認した。
       **群2で「Replay再生実行(replay)自体は未実装、エクスポートのみ」という

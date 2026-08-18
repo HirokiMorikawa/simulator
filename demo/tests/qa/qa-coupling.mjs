@@ -48,7 +48,7 @@ async function run(frag, steps) {
 const couplings = () =>
   page.evaluate(() =>
     window.__world
-      .coupling_info_text(-1)
+      .read_component("coupling_info_text", "-1")
       .split("\n")
       .filter((l) => l.length > 0)
       .map((l) => {
@@ -89,7 +89,7 @@ await run("d10-brake-heat", 600);
   const ps = await probes(page);
   const speed = byLabel(ps, "BodySpeed").h;
   const temp = byLabel(ps, "NodeTemp").h;
-  const mass = await page.evaluate(() => window.__world.body_mass_at(1));
+  const mass = await page.evaluate(() => Number(window.__world.read_component("body_mass_at", "1")));
   const heat = (i) => 1000.0 * (temp[i] - 293.15); // C = 1000 J/K
   // 「止まった」= スリープ閾値(SLEEP_LINEAR_THRESHOLD = 0.01 m/s)を下回った step。
   // 実際に速度が厳密な 0 になるのはスリープに入る 0.5 秒後なので、そこを止まった
@@ -149,21 +149,31 @@ await run("d19-electric-workbench", 600);
     rel(v3[idx], analytic3) < 0.03,
     `V₃(${tAt.toFixed(4)} s) = ${v3[idx].toFixed(4)} V(解析 ${analytic3.toFixed(4)} V、後退 Euler の数値減衰ぶん)`);
   // 回路 → 熱: 抵抗損失 ΣV²/R を積分した値が熱ノードの ΔT·C と一致するか。
-  // 抵抗は 1kΩ(N1–N2)・2kΩ(N2–GND)・500Ω(N3–GND)。
+  // 抵抗は 1kΩ(N1–N2)・2kΩ(N2–GND)・500Ω(N3–GND)・470Ω(N4–N5)。
+  // 470Ω は LED 枝の電流制限抵抗(不具合 3 の修正で追加)。これを足し忘れると
+  // `JouleHeat` が熱へ渡す量(全抵抗の ΣV²/R)と食い違う。
+  const v4 = byLabel(ps, "CircuitV[4]").h;
+  const v5 = byLabel(ps, "CircuitV[5]").h;
   let joule = 0;
   for (let i = 0; i < v2.length; i += 1) {
-    joule += ((9.0 - v2[i]) ** 2 / 1000.0 + v2[i] ** 2 / 2000.0 + v3[i] ** 2 / 500.0) * dt;
+    joule +=
+      ((9.0 - v2[i]) ** 2 / 1000.0 +
+        v2[i] ** 2 / 2000.0 +
+        v3[i] ** 2 / 500.0 +
+        (v4[i] - v5[i]) ** 2 / 470.0) *
+      dt;
   }
   const dT = temp.at(-1) - 293.15;
   r.check("X4-3", "回路 → 熱: 抵抗損失の積分が熱ノードの ΔT·C と一致",
     rel(dT * 1000.0, joule) < 0.02,
     `C·ΔT = ${(dT * 1000).toFixed(5)} J / ΣV²/R の積分 = ${joule.toFixed(5)} J(差 ${((dT * 1000 - joule) / joule * 100).toFixed(2)} %)`);
-  // ダイオード枝(SW0 閉 → D → GND)は 9V 源をほぼ短絡する。スイッチの
-  // オン抵抗が MA オーダーの電流を流し、その損失は JouleHeat(抵抗のみを
-  // 合計する)に入らないため、台帳にも熱ノードにも現れない。
+  // ダイオード枝(SW0 閉 → 470Ω → D → GND)。以前は直列抵抗が無く、閉じた
+  // スイッチのオン抵抗だけが 9V 源とダイオードの間にあったため −7.875×10⁶ A
+  // という物理的にありえない電流が流れていた(不具合 3)。LED の電流制限抵抗
+  // 470Ω を入れて、分圧枝 3 mA + LED 枝 ≈ 18 mA の妥当な値にした。
   r.check("X4-4", "ダイオード枝の電流が物理的に妥当な範囲にある",
     Math.abs(cur.at(-1)) < 1e3,
-    `電源電流 = ${cur.at(-1).toExponential(3)} A(スイッチ SW0 が 9V 源をダイオードへ直結して短絡している)`);
+    `電源電流 = ${cur.at(-1).toExponential(3)} A(LED 枝の電流制限抵抗 470Ω、V[5] = ${v5.at(-1).toFixed(4)} V がダイオードの順方向電圧)`);
   await shot("d19-workbench");
 }
 
@@ -186,12 +196,12 @@ await boot(page);
 await loadScene(page, "d18b-ice-melts");
 await enterPlayPaused(page);
 {
-  const before = await page.evaluate(() => window.__world.fluid_particle_count());
+  const before = await page.evaluate(() => Number(window.__world.read_component("fluid_particle_count", "")));
   await stepN(page, 10000); // dt=2 ms → 20 s(融解の潜熱を通すのにこれだけ要る)
   const after = await page.evaluate(() => ({
-    particles: window.__world.fluid_particle_count(),
-    temp: window.__world.heater_node_temperature(),
-    t: window.__world.time(),
+    particles: Number(window.__world.read_component("fluid_particle_count", "")),
+    temp: Number(window.__world.read_component("heater_node_temperature", "")),
+    t: Number(window.__world.read_component("time", "")),
   }));
   r.check("X6-1", "熱 → 相変化 → 流体: 融けた質量が SPH 粒子として湧く",
     before === 0 && after.particles > 0,
@@ -219,13 +229,18 @@ await page.reload();
 await boot(page);
 await loadScene(page, "d25-brownian");
 {
-  // 初期位置は原点ではなく 1 mm 間隔の列なので、**変位**を測るために先に控える
-  // (Inspector が読むのと同じ `body_position_at_f32` を全ボディについて回す)。
+  // 初期位置は原点ではなく 1 mm 間隔の列なので、**変位**を測るために先に控える。
+  // **f64 の読み出し(`read_component("body_position_at_f64")`)を使う**
+  // (不具合 6 の修正)。描画に使う `body_position_at_f32` は f32 なので、
+  // 粒子列の端(x = 0.299 m)での刻みが 3.0×10⁻⁸ m あり、ブラウン変位
+  // (2×10⁻⁹ m オーダー)は量子化ノイズに完全に埋もれる——以前ここで
+  // 測れていたのは物理ではなく量子化誤差だった。
   const positions = () =>
     page.evaluate(() => {
       const w = window.__world;
       const out = [];
-      for (let i = 0; i < w.body_count(); i += 1) out.push(Array.from(w.body_position_at_f32(i)));
+      for (let i = 0; i < Number(w.read_component("body_count", "")); i += 1)
+        out.push(JSON.parse(w.read_component("body_position_at_f64", String(i))));
       return out;
     });
   const p0 = await positions();
@@ -238,20 +253,21 @@ await loadScene(page, "d25-brownian");
   const v2 = await page.evaluate(() => {
     const w = window.__world;
     let sum = 0;
-    for (let i = 0; i < w.body_count(); i += 1) {
+    for (let i = 0; i < Number(w.read_component("body_count", "")); i += 1) {
       const v = w.body_velocity_at_f32(i);
       sum += v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     }
-    return sum / w.body_count();
+    return sum / Number(w.read_component("body_count", ""));
   });
   const mass = 4.3982297150257095e-15; // シーンの mass_override(ポリスチレン球 1 µm)
   const kT = 1.380649e-23 * 293.15;
   r.check("X8-1", "熱 → 力学: ブラウン力と Stokes 抵抗が等分配則 ⟨v²⟩ = 3k_BT/m で釣り合う",
     rel(v2, (3 * kT) / mass) < 0.1,
     `⟨v²⟩ = ${v2.toExponential(3)} m²/s²(解析 3k_BT/m = ${((3 * kT) / mass).toExponential(3)} m²/s²、比 ${(v2 / ((3 * kT) / mass)).toFixed(3)})`);
-  // MSD は UI からは読めない。座標は f32(`body_position_at_f32`)で公開されており、
-  // 粒子列の端(x = 0.299 m)での刻みは 3.0e-8 m。ナノメートルの変位はこの量子化
-  // ノイズに埋もれる(下の実測が解析解の 4 倍を返すのは、ノイズを測っているため)。
+  // MSD は f64 座標(`body_position_at_f64`)から計算する。**t は緩和時間
+  // τ = m/(6πηr) ≈ 2.3×10⁻⁷ s の 12 倍程度しかない**ので、純粋な拡散
+  // (6Dt)からは弾道領域ぶんのずれが残る(厳密には 6D(t − τ(1−e^(−t/τ))) で
+  // 約 8 % 小さい)。判定の許容 30 % はそれを飲み込む幅である。
   const msd =
     p1.reduce((sum, p, i) => sum + (p[0] - p0[i][0]) ** 2 + (p[1] - p0[i][1]) ** 2 + (p[2] - p0[i][2]) ** 2, 0) /
     p1.length;
@@ -260,7 +276,7 @@ await loadScene(page, "d25-brownian");
   const analytic = 6 * D * t;
   r.check("X8-2", "アンサンブル MSD が UI から読める(Stokes–Einstein の 6Dt と一致)",
     rel(msd, analytic) < 0.3,
-    `MSD(300 粒子, t=${t.toExponential(3)} s) = ${msd.toExponential(3)} m² / 解析 6Dt = ${analytic.toExponential(3)} m² — 変位 ~2 nm に対し f32 座標の刻みは端の粒子で 3.0e-8 m`);
+    `MSD(300 粒子, t=${t.toExponential(3)} s) = ${msd.toExponential(3)} m² / 解析 6Dt = ${analytic.toExponential(3)} m²(比 ${(msd / analytic).toFixed(3)}、f64 座標で測定)`);
 }
 
 // -------- X8b: 流体 × 容器(D23 注ぐ水)
@@ -302,9 +318,11 @@ await run("d26-balloon", 400);
   r.check("X10-1", "静電 → 力学: 鏡像力が風船を壁(x=0)へ引き寄せる",
     x[60] < x[0],
     `x ${x[0].toFixed(4)} → ${x[60].toFixed(4)} m(60 step 後)`);
+  // 壁は静的な Plane 剛体としてシーンに置いてある(不具合 4 の修正)。
+  // 風船は半径 0.02 m の球なので、貼りついた状態の中心は x ≈ 0.02。
   r.check("X10-2", "風船が壁に貼りつく(すり抜けて発散しない)",
     x.at(-1) > -0.05,
-    `x(400 step) = ${x.at(-1).toFixed(3)} m — 壁の剛体がシーンに無いため x=0 を通過し、以後は無重力空間を等速で飛び去る`);
+    `x(400 step) = ${x.at(-1).toFixed(3)} m(球の半径 0.02 m ぶん壁から浮いた位置で静止)`);
 }
 
 // ======================================================== Y. UI からの組み合わせ
@@ -332,13 +350,13 @@ await loadScene(page, "d19-electric-workbench");
 await enterPlayPaused(page);
 {
   await stepN(page, 120);
-  const base = await page.evaluate(() => window.__world.heater_node_temperature());
+  const base = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
   await page.locator("#btn-settings").click();
   await page.locator("#toggle-heater").check();
   await page.waitForTimeout(100);
   await stepN(page, 120);
-  const heated = await page.evaluate(() => window.__world.heater_node_temperature());
-  const dt = await page.evaluate(() => window.__world.dt());
+  const heated = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
+  const dt = await page.evaluate(() => Number(window.__world.read_component("dt", "")));
   // ヒーターは 2000 W を毎 step 注ぐ(HEATER_WATTS)。C = 1000 J/K。
   const analytic = (2000.0 * 120 * dt) / 1000.0;
   r.check("Y2-1", "Settings のヒーターが、シーン側の結合が使っている熱ノードを実際に温める",
@@ -389,10 +407,10 @@ await loadScene(page, "d19-electric-workbench");
   await addElement(1, 0, "voltage_source", 10);
   await addElement(1, 0, "resistor", 100);
   await enterPlayPaused(page);
-  const t0 = await page.evaluate(() => window.__world.heater_node_temperature());
+  const t0 = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
   await stepN(page, 240);
-  const t1 = await page.evaluate(() => window.__world.heater_node_temperature());
-  const dt = await page.evaluate(() => window.__world.dt());
+  const t1 = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
+  const dt = await page.evaluate(() => Number(window.__world.read_component("dt", "")));
   const nodeText = await page.locator("#circuit-editor-voltages").textContent();
   const analytic = (10.0 ** 2 / 100.0) * 240 * dt / 1000.0;
   r.check("Y4-1", "Circuit タブで組んだ回路の電圧が UI に出る", /Node1: 10\.000V/.test(nodeText ?? ""), `"${(nodeText ?? "").trim()}"`);
@@ -409,7 +427,7 @@ await boot(page);
   await page.locator("#btn-add").click();
   await page.getByText("＋ 流体 (SPH 水塊)").click();
   await page.waitForTimeout(200);
-  const spawned = await page.evaluate(() => window.__world.fluid_particle_count());
+  const spawned = await page.evaluate(() => Number(window.__world.read_component("fluid_particle_count", "")));
   await enterPlayPaused(page);
   const y0 = await page.evaluate(() => Array.from(window.__world.fluid_particle_positions_f32()).filter((_, i) => i % 3 === 1));
   await stepN(page, 240);
@@ -431,23 +449,37 @@ await boot(page);
   await page.locator('.project-tab[data-tab="scenes"]').click();
   await page.waitForTimeout(200);
   const before = await page.evaluate(() => ({
-    couplings: window.__world.coupling_count(),
-    bodies: window.__world.body_count(),
+    couplings: Number(window.__world.read_component("coupling_count", "")),
+    bodies: Number(window.__world.read_component("body_count", "")),
   }));
   await page.locator("#project-body input[type=file]").setInputFiles(
     new URL("../../../scenes/d10-brake-heat.json", import.meta.url).pathname,
   );
   await page.waitForTimeout(600);
   const after = await page.evaluate(() => ({
-    couplings: window.__world.coupling_count(),
-    bodies: window.__world.body_count(),
+    couplings: Number(window.__world.read_component("coupling_count", "")),
+    bodies: Number(window.__world.read_component("body_count", "")),
   }));
   r.check("Y6-1", "シーン JSON の Import で剛体は増える",
     after.bodies === before.bodies + 2,
     `body_count = ${before.bodies} → ${after.bodies}`);
-  r.check("Y6-2", "Import した JSON の `couplings` セクションも取り込まれる",
-    after.couplings > before.couplings,
-    `coupling_count = ${before.couplings} → ${after.couplings}(Import は bodies/probes のみを取り込み、couplings・thermal・circuit は捨てる)`);
+  // **Import は今も `couplings`/`thermal` を取り込まない**(不具合 5 は
+  // 「黙って落とす」のをやめる修正で、全面対応はしていない——Import は実行中の
+  // ワールドへの「追加」であり、`couplings` が参照する熱ノード/回路ノードの
+  // 番号体系を既存ワールドへ足すには番号の再割り当てという設計判断が要る)。
+  // したがってここで守るのは「落としたことがユーザーに伝わる」こと。
+  const skipped = JSON.parse(
+    await page.evaluate(() => window.__world.read_component("last_import_skipped_sections", "")),
+  );
+  const statusText = (await page.locator("#scene-import-status").textContent()) ?? "";
+  const reported =
+    skipped.includes("couplings") &&
+    skipped.includes("thermal") &&
+    /couplings/.test(statusText) &&
+    /thermal/.test(statusText);
+  r.check("Y6-2", "Import が取り込まなかったセクションをユーザーへ申告する",
+    reported && after.couplings === before.couplings,
+    `落としたセクション = [${skipped.join(", ")}]、UI 表示 = "${statusText.trim()}"(coupling_count = ${before.couplings} → ${after.couplings})`);
 }
 
 // -------- Y7: Timeline の巻き戻しが結合先ドメインの状態も戻すか
@@ -457,14 +489,14 @@ await boot(page);
 await run("d19-electric-workbench", 600);
 {
   const history = (await probes(page)).find((p) => p.label.includes("NodeTemp")).h;
-  const hot = await page.evaluate(() => window.__world.heater_node_temperature());
+  const hot = await page.evaluate(() => Number(window.__world.read_component("heater_node_temperature", "")));
   await page.locator("#timeline-scrubber").fill("1"); // fill は input イベントを出す
   await page.waitForTimeout(300);
   const rewound = await page.evaluate(() => ({
-    t: window.__world.time(),
-    step: Number(window.__world.step_count()),
-    temp: window.__world.heater_node_temperature(),
-    v: window.__world.circuit_node_voltage(3), // RC 放電の途中電圧
+    t: Number(window.__world.read_component("time", "")),
+    step: Number(window.__world.read_component("step_count", "")),
+    temp: Number(window.__world.read_component("heater_node_temperature", "")),
+    v: Number(window.__world.read_component("circuit_node_voltage", "3")), // RC 放電の途中電圧
   }));
   const expected = history[rewound.step - 1];
   r.check("Y7-1", "Timeline のスクラブで熱ドメインの状態も一緒に巻き戻る",

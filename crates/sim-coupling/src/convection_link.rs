@@ -229,7 +229,12 @@ impl Coupling for ConvectionLink {
             None if self.mode.is_natural() => 0.0,
             None => return,
         };
-        let gravity = world.mechanics.gravity;
+        // 自然対流のレイリー数が使う$g$。**正直な限界(重力場の抽象化増分)**:
+        // 自然対流の相関式は「一様な鉛直重力」を前提とする経験式なので、
+        // 位置依存の`GravityField::acceleration_at`ではなくスカラー縮約
+        // `gravity()`を読む。非`Uniform`な場では0.0が返り、レイリー数が0=
+        // 自然対流なしへ縮退する(`MechanicsSolver::gravity`のdoc参照)。
+        let gravity = world.mechanics.gravity();
         let Some(thermal) = &mut world.thermal else {
             return;
         };

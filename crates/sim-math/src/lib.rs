@@ -25,7 +25,7 @@ pub use integrators::{
 };
 pub use particles::{ParticleSet, SpatialHash};
 pub use pcg::{pcg, PcgResult, Preconditioner};
-pub use random::SimRng;
+pub use random::{SimRng, SimRngState};
 pub use ring_buffer::RingBuffer;
 
 use std::ops::{Add, Mul, Neg, Sub};
@@ -398,6 +398,68 @@ impl Mat3 {
             m: [[0.0, -v.z, v.y], [v.z, 0.0, -v.x], [-v.y, v.x, 0.0]],
         }
     }
+
+    /// 各成分をスカラー倍する。複合剛体の慣性テンソルを質量比で重み付けして
+    /// 足し合わせる用途(`sim_mechanics::Shape::unit_mass_inertia_tensor`)で使う。
+    pub fn scale(self, s: f64) -> Mat3 {
+        let mut m = self.m;
+        for row in m.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell *= s;
+            }
+        }
+        Mat3 { m }
+    }
+
+    /// 外積(直積)$a\,b^\top$。慣性テンソルの平行軸定理
+    /// (`parallel_axis_term`)を組むための素材。
+    pub fn outer(a: Vec3, b: Vec3) -> Mat3 {
+        Mat3 {
+            m: [
+                [a.x * b.x, a.x * b.y, a.x * b.z],
+                [a.y * b.x, a.y * b.y, a.y * b.z],
+                [a.z * b.x, a.z * b.y, a.z * b.z],
+            ],
+        }
+    }
+
+    /// 平行軸定理(Huygens–Steiner)の移動項 $|d|^2 E - d\,d^\top$
+    /// (**単位質量あたり**——質量倍は呼び出し側の責務)。
+    /// 重心まわりの慣性テンソルに足すと、重心から `d` だけ離れた点まわりの
+    /// 慣性テンソルになる。対角成分だけを見ると
+    /// $(d_y^2+d_z^2,\;d_x^2+d_z^2,\;d_x^2+d_y^2)$ という見慣れた形になり、
+    /// 非対角成分 $-d_i d_j$ が「部品が軸からずれて配置されている」ことによる
+    /// 慣性乗積を表す。
+    pub fn parallel_axis_term(d: Vec3) -> Mat3 {
+        Mat3::from_diagonal(Vec3::new(d.length_sq(), d.length_sq(), d.length_sq()))
+            - Mat3::outer(d, d)
+    }
+}
+
+impl Add for Mat3 {
+    type Output = Mat3;
+    fn add(self, rhs: Mat3) -> Mat3 {
+        let mut m = self.m;
+        for (i, row) in m.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell += rhs.m[i][j];
+            }
+        }
+        Mat3 { m }
+    }
+}
+
+impl Sub for Mat3 {
+    type Output = Mat3;
+    fn sub(self, rhs: Mat3) -> Mat3 {
+        let mut m = self.m;
+        for (i, row) in m.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell -= rhs.m[i][j];
+            }
+        }
+        Mat3 { m }
+    }
 }
 
 /// 剛体変換(回転→平行移動の順で適用)。スケールは持たない。
@@ -579,6 +641,50 @@ mod tests {
             let via_cross = a.cross(b);
             assert!((via_skew - via_cross).length() < 1e-9);
         }
+    }
+
+    /// 平行軸定理の移動項 $|d|^2E - dd^\top$ が、対角成分では見慣れた
+    /// $(d_y^2+d_z^2,\dots)$ に、非対角成分では $-d_id_j$ になること。
+    /// あわせて「軸上に置いた質点」で解析解と照合する——$d=(L,0,0)$ の
+    /// 単位質量の質点は $I=\mathrm{diag}(0,L^2,L^2)$(x軸まわりは腕が無いので0)。
+    #[test]
+    fn parallel_axis_term_matches_the_closed_form() {
+        let d = Vec3::new(0.3, -0.7, 1.1);
+        let t = Mat3::parallel_axis_term(d);
+        assert!((t.m[0][0] - (d.y * d.y + d.z * d.z)).abs() < 1e-15);
+        assert!((t.m[1][1] - (d.x * d.x + d.z * d.z)).abs() < 1e-15);
+        assert!((t.m[2][2] - (d.x * d.x + d.y * d.y)).abs() < 1e-15);
+        assert!((t.m[0][1] - (-d.x * d.y)).abs() < 1e-15);
+        assert!((t.m[1][2] - (-d.y * d.z)).abs() < 1e-15);
+        // 対称行列であること(慣性テンソルの必要条件)。
+        for (i, j) in [(0usize, 1usize), (0, 2), (1, 2)] {
+            assert!((t.m[i][j] - t.m[j][i]).abs() < 1e-15);
+        }
+
+        // 軸上の質点。
+        let l = 2.5;
+        let axis = Mat3::parallel_axis_term(Vec3::new(l, 0.0, 0.0));
+        assert!(axis.m[0][0].abs() < 1e-15);
+        assert!((axis.m[1][1] - l * l).abs() < 1e-15);
+        assert!((axis.m[2][2] - l * l).abs() < 1e-15);
+    }
+
+    /// `Mat3` の加減算とスカラー倍が成分ごとの素直な演算であること。
+    #[test]
+    fn mat3_add_sub_scale_are_componentwise() {
+        let a = Mat3::from_diagonal(Vec3::new(1.0, 2.0, 3.0));
+        let b = Mat3::outer(Vec3::new(1.0, 1.0, 1.0), Vec3::new(1.0, 1.0, 1.0));
+        let sum = a + b;
+        assert!((sum.m[0][0] - 2.0).abs() < 1e-15);
+        assert!((sum.m[0][1] - 1.0).abs() < 1e-15);
+        let back = sum - b;
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!((back.m[i][j] - a.m[i][j]).abs() < 1e-15);
+            }
+        }
+        let doubled = a.scale(2.0);
+        assert!((doubled.m[2][2] - 6.0).abs() < 1e-15);
     }
 
     /// `integrate_angular_velocity` を n 分割して合成 → 解析回転

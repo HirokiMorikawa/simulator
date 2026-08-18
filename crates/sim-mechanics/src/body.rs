@@ -105,9 +105,28 @@ impl RigidBodyDesc {
 }
 
 /// 剛体状態の SoA コンテナ。設計 §3。
+///
+/// ## `position` は「重心」、形状のローカル原点とは別(群11で分離)
+///
+/// 移行前は「ローカル原点 = 重心 = 回転の中心」という単一点が3役を兼ねており、
+/// 重心がローカル原点からずれる形状(部品を非対称配置した`Compound`など)は
+/// 原理的に扱えなかった。群11でこれを分離し:
+///
+/// - `position[i]` は**重心のワールド座標**。運動方程式($v\mathrel{+}=F/m\,dt$、
+///   $\omega\mathrel{+}=I^{-1}\tau\,dt$)も、接触・ジョイントの腕ベクトル $r$ も
+///   すべてこの点を基準にする——つまり**ソルバ側のコードは一切変わらない**
+///   (`joint::world_anchor`のdocが以前から「重心からのオフセット r」と書いて
+///   いたとおりの意味論に、実体がようやく追いついた)。
+/// - `center_of_mass[i]` は**形状のローカル系での重心位置**。形状のローカル原点を
+///   ワールドへ復元するのに使う(`shape_transform`)。
+///
+/// `Sphere`/`Box`/`Capsule`/`Plane` はローカル原点まわりに対称なので
+/// `center_of_mass[i] == Vec3::ZERO` であり、**これらしか使わない既存シーンの
+/// 挙動は数値まで完全に不変**。
 #[derive(Clone)]
 pub struct RigidBodySet {
     // 状態(毎ステップ更新)
+    /// **重心**のワールド座標(型doc「`position` は「重心」」参照)。
     pub position: Vec<Vec3>,
     pub frame: Vec<FrameId>,
     pub rotation: Vec<Quat>,
@@ -118,6 +137,12 @@ pub struct RigidBodySet {
     pub torque_accum: Vec<Vec3>,
     // 定数(生成時に確定)
     pub inv_mass: Vec<f64>,
+    /// **形状のローカル系での重心**(型doc参照)。ローカル原点まわりに対称な
+    /// 形状では `Vec3::ZERO`。`shape_transform`/`origin_position` が
+    /// `position[i]`(=重心)との相互変換に使う。
+    pub center_of_mass: Vec<Vec3>,
+    /// **重心まわり**のローカル慣性テンソルの逆行列
+    /// (`Shape::unit_mass_inertia_tensor` の規約に合わせる)。
     pub inv_inertia_local: Vec<Mat3>,
     pub inv_inertia_world: Vec<Mat3>,
     pub body_type: Vec<BodyType>,
@@ -148,6 +173,7 @@ impl RigidBodySet {
             force_accum: Vec::new(),
             torque_accum: Vec::new(),
             inv_mass: Vec::new(),
+            center_of_mass: Vec::new(),
             inv_inertia_local: Vec::new(),
             inv_inertia_world: Vec::new(),
             body_type: Vec::new(),
@@ -173,6 +199,38 @@ impl RigidBodySet {
 
     pub fn shape_of(&self, index: usize) -> &Shape {
         self.shapes.get(self.shape[index])
+    }
+
+    /// **形状のローカル原点**のワールド座標。`position[i]`(=重心)から
+    /// 重心オフセットを引き戻したもの(型doc「`position` は「重心」」参照)。
+    ///
+    /// 「このボディはどこにあるか」をユーザー・エディタ・シーン保存へ見せる
+    /// ときはこちらを使う——`RigidBodyDesc::transform.position` で指定した
+    /// 点と同じ意味になるため、往復(生成→読み出し)が恒等になる。
+    pub fn origin_position(&self, index: usize) -> Vec3 {
+        self.position[index] - self.rotation[index].rotate(self.center_of_mass[index])
+    }
+
+    /// **形状を配置するためのワールド変換**(ローカル原点 + 姿勢)。
+    /// narrowphase・レイキャスト・オーバーラップ判定・描画など、
+    /// 「形状の幾何」を扱う側はすべてこれを使う。
+    ///
+    /// 一方、運動方程式・接触の腕ベクトル・ジョイントの腕ベクトルは
+    /// `position[i]`(=重心)を基準にする。**幾何は原点基準・力学は重心基準**、
+    /// という役割分担がこの型の設計の要。
+    pub fn shape_transform(&self, index: usize) -> Transform {
+        Transform {
+            position: self.origin_position(index),
+            rotation: self.rotation[index],
+        }
+    }
+
+    /// 形状のローカル原点が `origin` に来るように `position[i]`(=重心)を
+    /// 動かす。テレポート・エディタのGizmo移動・シーン読み込みなど、
+    /// 「ユーザーが指定した位置へ置く」経路のための setter
+    /// (`origin_position` の逆)。
+    pub fn set_origin_position(&mut self, index: usize, origin: Vec3) {
+        self.position[index] = origin + self.rotation[index].rotate(self.center_of_mass[index]);
     }
 
     /// 質量(inv_mass の逆数、静的/キネマティックは 0)。
@@ -204,17 +262,25 @@ impl RigidBodySet {
         };
 
         let inv_inertia_local = if is_dynamic && mass > 0.0 {
-            let diag = desc.shape.unit_mass_inertia_diagonal().scale(mass);
-            Mat3::from_diagonal(diag)
+            desc.shape
+                .unit_mass_inertia_tensor()
+                .scale(mass)
                 .inverse()
                 .unwrap_or(Mat3::from_diagonal(Vec3::ZERO))
         } else {
             Mat3::from_diagonal(Vec3::ZERO)
         };
 
+        // `desc.transform.position` は**形状のローカル原点**の指定
+        // (作者が「ここに置く」と書いた点)。追跡するのは重心なので、
+        // 姿勢で回した重心オフセットぶんだけずらして保持する(型doc参照)。
+        // 重心オフセットが 0 の形状(Sphere/Box/Capsule/Plane)では
+        // `desc.transform.position` そのものになり、移行前と完全に一致する。
+        let center_of_mass = desc.shape.center_of_mass();
         let shape_handle = self.shapes.insert(desc.shape);
 
-        self.position.push(desc.transform.position);
+        self.position
+            .push(desc.transform.position + desc.transform.rotation.rotate(center_of_mass));
         self.frame.push(FrameId::ROOT);
         self.rotation.push(desc.transform.rotation);
         self.linear_velocity.push(desc.linear_velocity);
@@ -222,6 +288,7 @@ impl RigidBodySet {
         self.force_accum.push(Vec3::ZERO);
         self.torque_accum.push(Vec3::ZERO);
         self.inv_mass.push(inv_mass);
+        self.center_of_mass.push(center_of_mass);
         self.inv_inertia_local.push(inv_inertia_local);
         self.inv_inertia_world
             .push(inv_inertia_local.similarity(desc.transform.rotation.to_mat3()));
@@ -252,6 +319,11 @@ impl RigidBodySet {
     /// 干渉状態で固まってしまう。形状変更は静止仮定を無効化する明らかな
     /// イベントなので、`still_time`/`asleep`をリセットして次stepで確実に
     /// 再評価させる。
+    ///
+    /// **形状のローカル原点は動かさない**(群11)。形状を差し替えると重心
+    /// オフセットが変わりうるので、追跡している`position[i]`(=重心)のほうを
+    /// 付け替える——そうしないと「Scale Gizmo を引いたらボディが横に飛ぶ」
+    /// ことになる。ユーザーが掴んでいるのは形状であって重心ではない。
     pub fn set_shape(&mut self, index: usize, shape: Shape, materials: &MaterialDb) {
         let material = materials.get(self.material[index]);
         let mass = shape.volume().unwrap_or(0.0) * material.density;
@@ -262,8 +334,9 @@ impl RigidBodySet {
             0.0
         };
         self.inv_inertia_local[index] = if is_dynamic && mass > 0.0 {
-            let diag = shape.unit_mass_inertia_diagonal().scale(mass);
-            Mat3::from_diagonal(diag)
+            shape
+                .unit_mass_inertia_tensor()
+                .scale(mass)
                 .inverse()
                 .unwrap_or(Mat3::from_diagonal(Vec3::ZERO))
         } else {
@@ -271,6 +344,10 @@ impl RigidBodySet {
         };
         self.inv_inertia_world[index] =
             self.inv_inertia_local[index].similarity(self.rotation[index].to_mat3());
+        // 旧形状の原点位置を保ったまま、新形状の重心オフセットへ張り替える。
+        let origin = self.origin_position(index);
+        self.center_of_mass[index] = shape.center_of_mass();
+        self.set_origin_position(index, origin);
         self.shape[index] = self.shapes.insert(shape);
         self.still_time[index] = 0.0;
         self.asleep[index] = false;
@@ -283,11 +360,10 @@ impl RigidBodySet {
         let is_dynamic = matches!(self.body_type[index], BodyType::Dynamic);
         if is_dynamic && mass > 0.0 {
             self.inv_mass[index] = 1.0 / mass;
-            let diag = self
+            self.inv_inertia_local[index] = self
                 .shape_of(index)
-                .unit_mass_inertia_diagonal()
-                .scale(mass);
-            self.inv_inertia_local[index] = Mat3::from_diagonal(diag)
+                .unit_mass_inertia_tensor()
+                .scale(mass)
                 .inverse()
                 .unwrap_or(Mat3::from_diagonal(Vec3::ZERO));
         } else {

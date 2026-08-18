@@ -44,6 +44,10 @@ pub struct FdtdSim2D {
 struct Pml {
     /// 吸収層の厚さ[セル]。
     layers: usize,
+    /// 設計上の目標反射率 $R_0$(`with_pml`の引数)。**係数表そのものではなく
+    /// 係数表を作るための入力**を保持する——生状態スナップショット
+    /// (`sim_world::scenario::PmlJson`)がPMLを同じ係数で組み直すために要る。
+    target_reflection: f64,
     /// $E_z$の分離成分。`ez = ezx + ezy`が常に成り立つ。
     ezx: Vec<f64>,
     ezy: Vec<f64>,
@@ -137,6 +141,7 @@ impl Pml {
 
         Pml {
             layers,
+            target_reflection,
             ezx: vec![0.0; nx * ny],
             ezy: vec![0.0; nx * ny],
             ca_x,
@@ -203,6 +208,41 @@ impl FdtdSim2D {
         self.pml.as_ref().map_or(0, |p| p.layers)
     }
 
+    /// PMLの目標反射率 $R_0$(`with_pml`に渡した値、無効なら`None`)。
+    /// **生状態スナップショットのために公開する**——`layers`だけでは係数表を
+    /// 組み直せない(`Pml::build`は`sigma_max`をこの値から決める)。
+    pub fn pml_target_reflection(&self) -> Option<f64> {
+        self.pml.as_ref().map(|p| p.target_reflection)
+    }
+
+    /// PMLの分離場成分 $(E_{zx}, E_{zy})$ の生配列(どちらも長さ`nx*ny`、無効なら
+    /// `None`)。`ez_raw`と同じ理由で公開する——**`ez`だけ戻しても分離成分が
+    /// 半分ずつの人工的な分配になり、次stepからPML層内の減衰の効き方が変わる**。
+    /// $E_z = E_{zx} + E_{zy}$ が常に成り立つ(`step_dt_pml`が毎step再構成する)。
+    pub fn pml_split_fields(&self) -> Option<(&[f64], &[f64])> {
+        self.pml.as_ref().map(|p| (&p.ezx[..], &p.ezy[..]))
+    }
+
+    /// PMLの分離場成分を生値のまま入れ替える(`pml_split_fields`の逆、
+    /// **`set_raw_fields`の後に**呼ぶ——あちらは`ez`から半分ずつの分配へ
+    /// 同期させてしまうため)。
+    ///
+    /// PMLが無効、または長さが合わない場合は**何もせず`false`を返す**
+    /// (`set_raw_fields`と同じ防御方針。シーンJSONはユーザーが書くデータであり、
+    /// 不正入力でプロセスを落としてよい相手ではない)。
+    pub fn set_pml_split_fields(&mut self, ezx: Vec<f64>, ezy: Vec<f64>) -> bool {
+        let n = self.nx * self.ny;
+        let Some(pml) = &mut self.pml else {
+            return false;
+        };
+        if ezx.len() != n || ezy.len() != n {
+            return false;
+        }
+        pml.ezx = ezx;
+        pml.ezy = ezy;
+        true
+    }
+
     pub fn nx(&self) -> usize {
         self.nx
     }
@@ -226,6 +266,51 @@ impl FdtdSim2D {
         if let Some(pml) = &mut self.pml {
             pml.ezx[idx] = 0.5 * v;
             pml.ezy[idx] = 0.5 * v;
+        }
+    }
+
+    /// $E_z$ の生配列(長さ`nx*ny`、`i + nx*j`)。
+    /// **生状態スナップショット(`sim_world`の`raw_state`)のために公開する**——
+    /// `ez(i,j)`は1点ずつしか読めず、`state_hash`が含む`hx`/`hy`(半ステップずれた
+    /// 磁場、leapfrogの片割れ)には読み書きの口すら無かった。**Ezだけ戻しても
+    /// 磁場が全ゼロでは次のstepから波形が変わる**ため、3配列すべてが要る。
+    pub fn ez_raw(&self) -> &[f64] {
+        &self.ez
+    }
+
+    /// $H_x$ の生配列(長さ`nx*(ny-1)`)。`ez_raw`のdoc参照。
+    pub fn hx_raw(&self) -> &[f64] {
+        &self.hx
+    }
+
+    /// $H_y$ の生配列(長さ`(nx-1)*ny`)。`ez_raw`のdoc参照。
+    pub fn hy_raw(&self) -> &[f64] {
+        &self.hy
+    }
+
+    /// 場を生値のまま丸ごと入れ替える(**生状態スナップショットのために追加**、
+    /// `ez_raw`のdoc参照)。長さが合わない配列は無視する(防御)。
+    ///
+    /// PML有効時は`set_ez`と同じく分離成分を半分ずつに同期させる
+    /// (`ez = ezx + ezy` の不変条件を保てばよい)。**分離成分そのものを戻したい
+    /// 場合は続けて`set_pml_split_fields`を呼ぶこと**——半分ずつの分配は
+    /// 不変条件こそ満たすが元の分配とは別物で、次stepからPML層内の減衰の
+    /// 効き方が変わる(`sim_world::scenario::FdtdPmlRawStateJson`がこの経路を使う)。
+    pub fn set_raw_fields(&mut self, ez: Vec<f64>, hx: Vec<f64>, hy: Vec<f64>) {
+        if ez.len() == self.nx * self.ny {
+            if let Some(pml) = &mut self.pml {
+                for (idx, &value) in ez.iter().enumerate() {
+                    pml.ezx[idx] = 0.5 * value;
+                    pml.ezy[idx] = 0.5 * value;
+                }
+            }
+            self.ez = ez;
+        }
+        if hx.len() == self.nx * (self.ny - 1) {
+            self.hx = hx;
+        }
+        if hy.len() == (self.nx - 1) * self.ny {
+            self.hy = hy;
         }
     }
 

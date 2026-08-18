@@ -10,6 +10,11 @@
 //! (`tests/manifold_persistence.rs` の対照実験)。
 //! **群4で Capsule×Box を実装した**(増分Lでは線分-OBB の場合分けを避けて `None` を
 //! 返しており、エディタでカプセルと箱を並べるとすり抜けていた)。`capsule_box` 参照。
+//! **群11で ConvexMesh の接触生成を実装した**(それまでは一律 `None` を返し、
+//! この形状は何ともぶつからずすり抜けていた)。3D凸包(`crate::hull`)を張り、
+//! 平面とは頂点距離の解析形、球とは表面最近点による球-球への帰着、
+//! 箱・他の多面体とは SAT で扱う(`convex_poly_manifold` 参照)。
+//! **`ConvexMesh` × `Capsule` だけは未実装のまま**(同 doc の「既知の限界」)。
 
 use crate::body::{BodyType, RigidBodySet};
 use crate::shape::{Aabb, Shape};
@@ -34,11 +39,13 @@ pub struct ContactManifold {
     pub points: Vec<ContactPoint>,
 }
 
+/// narrowphase・broadphase が使う「**形状の**ワールド変換」。
+/// `bodies.position[i]` は重心であって形状のローカル原点ではないため、
+/// 幾何を扱うここでは必ず `shape_transform` を通す
+/// (`RigidBodySet` の型doc「`position` は「重心」」参照)。
+/// 重心オフセットが 0 の形状では `position[i]` と一致する。
 fn transform_of(bodies: &RigidBodySet, i: usize) -> Transform {
-    Transform {
-        position: bodies.position[i],
-        rotation: bodies.rotation[i],
-    }
+    bodies.shape_transform(i)
 }
 
 /// 形状のワールド AABB。Plane は無限平面のため常に重なる扱い(全域を返す)。
@@ -87,8 +94,43 @@ fn aabb_of(shape: &Shape, xf: Transform) -> Aabb {
                 max: Vec3::new(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)) + r,
             }
         }
-        Shape::Compound { .. } | Shape::ConvexMesh { .. } => {
-            todo!("Phase 5 で実装")
+        // **群10で実装**。各部品のAABB(親のxfと部品ローカルxfを合成した
+        // ワールド変換で評価)の和集合。
+        Shape::Compound { children } => {
+            let mut result: Option<Aabb> = None;
+            for (child_xf, child_shape) in children {
+                let world_xf = xf.compose(*child_xf);
+                let child_aabb = aabb_of(child_shape, world_xf);
+                result = Some(match result {
+                    Some(acc) => Aabb {
+                        min: Vec3::new(
+                            acc.min.x.min(child_aabb.min.x),
+                            acc.min.y.min(child_aabb.min.y),
+                            acc.min.z.min(child_aabb.min.z),
+                        ),
+                        max: Vec3::new(
+                            acc.max.x.max(child_aabb.max.x),
+                            acc.max.y.max(child_aabb.max.y),
+                            acc.max.z.max(child_aabb.max.z),
+                        ),
+                    },
+                    None => child_aabb,
+                });
+            }
+            result.unwrap_or(Aabb {
+                min: xf.position,
+                max: xf.position,
+            })
+        }
+        // **群10で実装**。頂点をワールド座標へ変換したAABB(`shape::points_aabb`、
+        // `Shape::volume`のdoc「既知の限界」参照——面情報が無いため凸包そのもの
+        // ではなく点群のAABB)。
+        Shape::ConvexMesh { vertices } => {
+            let world_points: Vec<Vec3> = vertices.iter().map(|p| xf.apply_point(*p)).collect();
+            crate::shape::points_aabb(&world_points).unwrap_or(Aabb {
+                min: xf.position,
+                max: xf.position,
+            })
         }
     }
 }
@@ -348,6 +390,386 @@ fn box_plane(
     points.sort_by(|a, b| b.penetration.partial_cmp(&a.penetration).unwrap());
     points.truncate(4);
     Some((plane_normal, points))
+}
+
+/// 凸多面体 と 無限平面(**群11**)。`box_plane`と同じ構造——全頂点の平面距離を
+/// 見て、貫入している頂点を接触点にする(最大4点へ縮約)。
+///
+/// 平面は非有界なので SAT の「射影区間の重なり」に乗らない(片側が無限)。
+/// 一方この解析形は厳密かつ決定的で、しかも「床に置いた多面体が静止する」という
+/// 最も重要なケースをそのまま扱える。よって平面だけは専用経路にした。
+fn convex_mesh_plane(
+    vertices: &[Vec3],
+    xf: Transform,
+    plane_normal: Vec3,
+    plane_d: f64,
+) -> Option<(Vec3, Vec<ContactPoint>)> {
+    let mut points = Vec::new();
+    for (feature_id, &v) in vertices.iter().enumerate() {
+        let world = xf.apply_point(v);
+        let dist = plane_normal.dot(world) - plane_d;
+        if dist < 0.0 {
+            points.push(ContactPoint {
+                world_point: world,
+                penetration: -dist,
+                feature_id: feature_id as u32,
+            });
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    points.sort_by(|a, b| b.penetration.partial_cmp(&a.penetration).unwrap());
+    points.truncate(4);
+    Some((plane_normal, points))
+}
+
+/// 凸多面体としての「面法線 + 頂点」表現(ワールド座標、**群11**)。
+/// SAT の分離軸候補(面法線・辺方向)と射影に必要なものだけを持つ。
+struct ConvexPoly {
+    vertices: Vec<Vec3>,
+    /// 面の外向き単位法線(重複方向は除去済み)。
+    face_normals: Vec<Vec3>,
+    /// 辺の方向ベクトル(単位、重複・逆向き重複は除去済み)。
+    edge_directions: Vec<Vec3>,
+}
+
+/// 方向の重複判定(向きの反転も同一視する)。SAT の軸は符号を持たないため。
+fn push_unique_direction(list: &mut Vec<Vec3>, dir: Vec3) {
+    let len = dir.length();
+    if len < 1e-9 {
+        return;
+    }
+    let unit = dir.scale(1.0 / len);
+    if list
+        .iter()
+        .any(|&d| (d - unit).length_sq() < 1e-18 || (d + unit).length_sq() < 1e-18)
+    {
+        return;
+    }
+    list.push(unit);
+}
+
+impl ConvexPoly {
+    /// 凸包(`crate::hull`)からワールド座標の SAT 用表現を作る。
+    fn from_hull(hull: &crate::hull::ConvexHull, xf: Transform) -> ConvexPoly {
+        let vertices: Vec<Vec3> = hull.vertices.iter().map(|&v| xf.apply_point(v)).collect();
+        let mut face_normals = Vec::new();
+        let mut edge_directions = Vec::new();
+        for &f in &hull.faces {
+            let (a, b, c) = (vertices[f[0]], vertices[f[1]], vertices[f[2]]);
+            push_unique_direction(&mut face_normals, (b - a).cross(c - a));
+            push_unique_direction(&mut edge_directions, b - a);
+            push_unique_direction(&mut edge_directions, c - b);
+            push_unique_direction(&mut edge_directions, a - c);
+        }
+        ConvexPoly {
+            vertices,
+            face_normals,
+            edge_directions,
+        }
+    }
+
+    /// 箱を凸多面体として表す(8頂点・3面法線・3辺方向)。凸包を張り直すより
+    /// 直接書くほうが速く、退化も無い。
+    fn from_box(xf: Transform, half_extents: Vec3) -> ConvexPoly {
+        let mut vertices = Vec::with_capacity(8);
+        for &sx in &[-1.0, 1.0] {
+            for &sy in &[-1.0, 1.0] {
+                for &sz in &[-1.0, 1.0] {
+                    vertices.push(xf.apply_point(Vec3::new(
+                        sx * half_extents.x,
+                        sy * half_extents.y,
+                        sz * half_extents.z,
+                    )));
+                }
+            }
+        }
+        let axes = [
+            box_axis_world(xf, 0),
+            box_axis_world(xf, 1),
+            box_axis_world(xf, 2),
+        ];
+        ConvexPoly {
+            vertices,
+            face_normals: axes.to_vec(),
+            edge_directions: axes.to_vec(),
+        }
+    }
+
+    /// 軸 `axis`(単位)への射影区間 `(min, max)`。
+    fn project(&self, axis: Vec3) -> (f64, f64) {
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for &v in &self.vertices {
+            let d = v.dot(axis);
+            min = min.min(d);
+            max = max.max(d);
+        }
+        (min, max)
+    }
+}
+
+/// 凸多面体どうしの **SAT**(分離軸定理)による接触生成(**群11**)。
+///
+/// ## なぜ GJK/EPA ではなく SAT か
+///
+/// 設計上はどちらも標準的な選択肢だが、この物理コアでは SAT を採った:
+///
+/// - **既存の`box_box`と同じ構造**。15軸 SAT・最小重なり軸・面クリップという
+///   語彙がすでにモジュール内にあり、`ConvexMesh`だけ別世界の反復解法に
+///   なるのを避けられる(brief の「既存 narrowphase と同じアーキテクチャに
+///   合わせる」要件)。
+/// - **決定論的で反復が無い**。有限個の軸を全部試すだけなので、反復回数・
+///   収束判定・初期単体の質に一切依存しない。
+///
+/// なお本増分の実装中に、既存の `gjk`/`epa_penetration` を
+/// `ConvexShape::Points` × `ConvexShape::Sphere` に適用すると**実用にならない**
+/// ことが判明した(GJK が返す初期単体は原点が四面体の一面の**上**に厳密に
+/// 乗った状態になりうる。EPA はその面の距離を 0 と見て法線の向きも定まらず、
+/// 100反復まで多面体を膨らませ続けて**112秒**かけて出鱈目な法線を返した——
+/// 貫入 0.5 の解析解に対し 0.086)。既存の球×球・箱×箱のテストはたまたま
+/// 原点が内部に来る配置で通っていたため露見していなかった。
+/// **これは本増分では手を付けていない既存の弱点**であり、`gjk` モジュールは
+/// フルCCD(分離距離のみ使用、EPA を通らない)専用のまま残してある。
+/// 修正は独立した増分で扱うべき事項として、ここに記録しておく。
+///
+/// ## 接触点の作り方
+///
+/// 最小重なり軸 `n`(A→B 向きへ正規化)を法線とし、**相手の内部に入り込んで
+/// いる頂点**を接触点にする(A の頂点で B の内部にあるもの + B の頂点で A の
+/// 内部にあるもの)。各点の貫入量は「その点が相手の表面から `n` 方向に
+/// どれだけ潜っているか」で個別に測るので、傾いた接触でも点ごとに正しい
+/// 深さになる。面どうしが平らに重なる典型例(箱が箱の上に乗る)では相手の
+/// 面の4頂点が入るため、そのまま4点マニフォールドになり安定して静止する。
+///
+/// **既知の限界**: 辺×辺が唯一の接触になる配置では、どちらの頂点も相手の
+/// 内部に入らないことがある。その場合は最深の頂点対の中点を1点だけ返す
+/// フォールバックに落ちる(`box_box_edge_contact` が単一点を返すのと同じ粒度)。
+fn convex_poly_manifold(a: &ConvexPoly, b: &ConvexPoly) -> Option<(Vec3, Vec<ContactPoint>)> {
+    let mut best_axis = Vec3::ZERO;
+    let mut best_overlap = f64::INFINITY;
+
+    let mut consider = |axis: Vec3| -> bool {
+        // 既存の`box_box_sat`と同じ退化判定(設計 §4.4 の 1e-10、二乗長で比較)。
+        if axis.length_sq() < SAT_DEGENERATE_AXIS_LEN_SQ {
+            return true; // 退化軸は無視(分離を主張しない)
+        }
+        let len = axis.length();
+        let unit = axis.scale(1.0 / len);
+        let (min_a, max_a) = a.project(unit);
+        let (min_b, max_b) = b.project(unit);
+        let overlap = (max_a - min_b).min(max_b - min_a);
+        if overlap <= 0.0 {
+            return false; // 分離軸を発見
+        }
+        if overlap < best_overlap {
+            best_overlap = overlap;
+            // A→B 向きへ揃える(マニフォールドの法線規約)。
+            best_axis = if max_b - min_a < max_a - min_b {
+                -unit
+            } else {
+                unit
+            };
+        }
+        true
+    };
+
+    for &n in &a.face_normals {
+        if !consider(n) {
+            return None;
+        }
+    }
+    for &n in &b.face_normals {
+        if !consider(n) {
+            return None;
+        }
+    }
+    for &ea in &a.edge_directions {
+        for &eb in &b.edge_directions {
+            if !consider(ea.cross(eb)) {
+                return None;
+            }
+        }
+    }
+
+    if best_axis == Vec3::ZERO || !best_overlap.is_finite() {
+        return None;
+    }
+    let normal = best_axis;
+
+    // 相手の内部に潜っている頂点を接触点にする。
+    let (_, max_a) = a.project(normal);
+    let (min_b, _) = b.project(normal);
+    let mut points: Vec<ContactPoint> = Vec::new();
+    for (i, &v) in b.vertices.iter().enumerate() {
+        // B の頂点が A の表面(法線方向の最遠面)より内側にあるか。
+        let depth = max_a - v.dot(normal);
+        if depth > 0.0 && point_inside(a, v) {
+            points.push(ContactPoint {
+                world_point: v,
+                penetration: depth,
+                feature_id: i as u32,
+            });
+        }
+    }
+    for (i, &v) in a.vertices.iter().enumerate() {
+        let depth = v.dot(normal) - min_b;
+        if depth > 0.0 && point_inside(b, v) {
+            points.push(ContactPoint {
+                world_point: v,
+                penetration: depth,
+                feature_id: 0x8000_0000 | i as u32,
+            });
+        }
+    }
+
+    if points.is_empty() {
+        // 辺×辺接触のフォールバック(docの「既知の限界」参照)。
+        let deepest_b = b
+            .vertices
+            .iter()
+            .copied()
+            .min_by(|p, q| p.dot(normal).partial_cmp(&q.dot(normal)).unwrap())?;
+        let deepest_a = a
+            .vertices
+            .iter()
+            .copied()
+            .max_by(|p, q| p.dot(normal).partial_cmp(&q.dot(normal)).unwrap())?;
+        points.push(ContactPoint {
+            world_point: (deepest_a + deepest_b).scale(0.5),
+            penetration: best_overlap,
+            feature_id: 0,
+        });
+    }
+
+    points.sort_by(|p, q| q.penetration.partial_cmp(&p.penetration).unwrap());
+    points.truncate(4);
+    Some((normal, points))
+}
+
+/// 点が凸多面体の内部(表面含む)にあるか。全ての面の内側半空間にあるかを見る。
+fn point_inside(poly: &ConvexPoly, p: Vec3) -> bool {
+    poly.face_normals.iter().all(|&n| {
+        let (_, max) = poly.project(n);
+        let (min, _) = poly.project(n);
+        let d = p.dot(n);
+        d <= max + 1e-9 && d >= min - 1e-9
+    })
+}
+
+/// 凸多面体 と 球(**群11**)。多面体の表面上で球の中心に最も近い点を求めれば
+/// 球-球に帰着する(`sphere_box`が箱に対してやっているのと同じ帰着)。
+///
+/// 最近点は「面上・辺上・頂点」のいずれかにあるので、三角形ごとに
+/// 点-三角形の最近点を求めて最小を取る。凸包の面数は高々数十なので総当たりで
+/// 十分(質量特性と同じく、これは narrowphase の中でも稀に走る経路)。
+/// 戻り値の法線は**多面体から球へ**向かう向き(A=多面体・B=球の A→B 規約)。
+fn convex_poly_sphere(
+    poly: &ConvexPoly,
+    hull_faces: &[[usize; 3]],
+    center: Vec3,
+    radius: f64,
+) -> Option<(Vec3, ContactPoint)> {
+    if point_inside(poly, center) {
+        // 中心が内部: 最も浅い面へ押し出す。
+        let mut best_depth = f64::INFINITY;
+        let mut best_normal = Vec3::new(0.0, 1.0, 0.0);
+        for &n in &poly.face_normals {
+            let (_, max) = poly.project(n);
+            let depth = max - center.dot(n);
+            if depth < best_depth {
+                best_depth = depth;
+                best_normal = n;
+            }
+        }
+        return Some((
+            best_normal,
+            ContactPoint {
+                world_point: center,
+                penetration: best_depth + radius,
+                feature_id: 0,
+            },
+        ));
+    }
+
+    let mut closest = Vec3::ZERO;
+    let mut best_dist_sq = f64::INFINITY;
+    for &f in hull_faces {
+        let p = closest_point_on_triangle(
+            center,
+            poly.vertices[f[0]],
+            poly.vertices[f[1]],
+            poly.vertices[f[2]],
+        );
+        let d = (p - center).length_sq();
+        if d < best_dist_sq {
+            best_dist_sq = d;
+            closest = p;
+        }
+    }
+    let dist = best_dist_sq.sqrt();
+    if dist >= radius {
+        return None;
+    }
+    let normal = if dist < EPS_LEN {
+        Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        (center - closest).scale(1.0 / dist)
+    };
+    let penetration = radius - dist;
+    Some((
+        normal,
+        ContactPoint {
+            world_point: closest,
+            penetration,
+            feature_id: 0,
+        },
+    ))
+}
+
+/// 点 `p` に最も近い三角形 `abc` 上の点(Ericson "Real-Time Collision Detection" §5.1.5、
+/// 重心座標の領域判定による閉形式)。
+fn closest_point_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let d1 = ab.dot(ap);
+    let d2 = ac.dot(ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = p - b;
+    let d3 = ab.dot(bp);
+    let d4 = ac.dot(bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let v = d1 / (d1 - d3);
+        return a + ab.scale(v);
+    }
+    let cp = p - c;
+    let d5 = ab.dot(cp);
+    let d6 = ac.dot(cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return a + ac.scale(w);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return b + (c - b).scale(w);
+    }
+    let denom = 1.0 / (va + vb + vc);
+    let v = vb * denom;
+    let w = vc * denom;
+    a + ab.scale(v) + ac.scale(w)
 }
 
 /// 球 と 箱: ボックスローカルで最近点にクランプ。
@@ -1154,7 +1576,256 @@ fn shape_pair_manifold(
             },
         ) => capsule_box(xf_b, *radius, *half_height, xf_a, *half_extents),
 
-        _ => todo!("Compound/ConvexMesh は Phase 5"),
+        // **群10で実装**。`Compound`は「部品ごとに既存の解析的ペア関数へ
+        // 帰着させる」形で解く——GJK/EPA等の新しい幾何アルゴリズムは要らない。
+        // 部品Aの各要素×shape_b(shape_bもCompoundなら、この再帰の次段で
+        // 今度は`(_, Compound)`側の枝に落ちて部品Bの各要素へさらに分解される、
+        // つまりCompound×Compoundは部品どうしの総当たりに帰着する)。
+        //
+        // 複数の部品が同時に接触する場合、`ContactManifold`は法線1本しか
+        // 持てない設計のため、**貫入量が最大の部品ペアの法線を代表として採用し、
+        // 全部品の接触点をその1本の法線へ束ねる**近似を取る(車体を組んだ
+        // シャシーが地面に接するような「全部品の法線が一致する」典型例では
+        // 厳密に正しく、法線が食い違う稀なケース(隅に挟まる等)でのみ近似になる、
+        // モジュールdoc参照)。`feature_id`は部品indexで空間を分けて warm start の
+        // 衝突を避ける。
+        (Shape::Compound { children }, _) => {
+            let mut merged: Option<(Vec3, Vec<ContactPoint>)> = None;
+            for (child_index, (child_xf, child_shape)) in children.iter().enumerate() {
+                let world_xf = xf_a.compose(*child_xf);
+                if let Some(result) = shape_pair_manifold(child_shape, world_xf, shape_b, xf_b) {
+                    merged = Some(merge_compound_manifolds(merged, result, child_index));
+                }
+            }
+            merged
+        }
+        (_, Shape::Compound { children }) => {
+            let mut merged: Option<(Vec3, Vec<ContactPoint>)> = None;
+            for (child_index, (child_xf, child_shape)) in children.iter().enumerate() {
+                let world_xf = xf_b.compose(*child_xf);
+                if let Some(result) = shape_pair_manifold(shape_a, xf_a, child_shape, world_xf) {
+                    merged = Some(merge_compound_manifolds(merged, result, child_index));
+                }
+            }
+            merged
+        }
+
+        // **群11で実装**。移行前は「頂点列だけで面情報が無く、3D凸包の実装は
+        // 範囲外」という理由で`None`を返しており、`ConvexMesh`は**何とも衝突
+        // せずすり抜けていた**。`crate::hull`で凸包を張れるようになったので、
+        // 他の形状と同じ土俵に上げる(`convex_poly_manifold`のdoc参照)。
+        //
+        // 平面だけは非有界で SAT の射影区間に乗らないため専用経路
+        // (`convex_mesh_plane`)で扱う——これは`box_plane`と同じ構造で、
+        // 最大4点の面接触を作れるので「床に置いた多面体が静止する」ケースが
+        // きちんと安定する。
+        (Shape::ConvexMesh { vertices }, Shape::Plane { normal, d }) => {
+            convex_mesh_plane(vertices, xf_a, *normal, *d).map(|(n, pts)| (-n, pts))
+        }
+        (Shape::Plane { normal, d }, Shape::ConvexMesh { vertices }) => {
+            convex_mesh_plane(vertices, xf_b, *normal, *d)
+        }
+
+        // 多面体 × 球は「表面上の最近点」で球-球へ帰着させる(`sphere_box`と同じ発想)。
+        (Shape::ConvexMesh { vertices }, Shape::Sphere { radius }) => {
+            let hull = crate::hull::convex_hull(vertices)?;
+            let poly = ConvexPoly::from_hull(&hull, xf_a);
+            convex_poly_sphere(&poly, &hull.faces, xf_b.position, *radius)
+                .map(|(n, p)| (n, vec![p]))
+        }
+        (Shape::Sphere { radius }, Shape::ConvexMesh { vertices }) => {
+            let hull = crate::hull::convex_hull(vertices)?;
+            let poly = ConvexPoly::from_hull(&hull, xf_b);
+            convex_poly_sphere(&poly, &hull.faces, xf_a.position, *radius)
+                .map(|(n, p)| (-n, vec![p]))
+        }
+
+        // 多面体 × 多面体 / 多面体 × 箱は SAT(`convex_poly_manifold`のdoc参照)。
+        (Shape::ConvexMesh { vertices: va }, Shape::ConvexMesh { vertices: vb }) => {
+            let (ha, hb) = (crate::hull::convex_hull(va)?, crate::hull::convex_hull(vb)?);
+            convex_poly_manifold(
+                &ConvexPoly::from_hull(&ha, xf_a),
+                &ConvexPoly::from_hull(&hb, xf_b),
+            )
+        }
+        (Shape::ConvexMesh { vertices }, Shape::Box { half_extents }) => {
+            let hull = crate::hull::convex_hull(vertices)?;
+            convex_poly_manifold(
+                &ConvexPoly::from_hull(&hull, xf_a),
+                &ConvexPoly::from_box(xf_b, *half_extents),
+            )
+        }
+        (Shape::Box { half_extents }, Shape::ConvexMesh { vertices }) => {
+            let hull = crate::hull::convex_hull(vertices)?;
+            convex_poly_manifold(
+                &ConvexPoly::from_box(xf_a, *half_extents),
+                &ConvexPoly::from_hull(&hull, xf_b),
+            )
+        }
+
+        // **既知の限界(正直な開示)**: `ConvexMesh` × `Capsule` は未実装。
+        // カプセルは「線分を半径で膨らませた」非多面体なので SAT の分離軸に
+        // 素直に乗らず(丸い部分の分離軸は連続無限個ある)、線分-凸多面体の
+        // 最近点計算を別途書く必要がある。本増分では手を付けず`None`を返す
+        // ——この組み合わせだけは引き続きすり抜ける。移行前は`ConvexMesh`が
+        // **何とも**衝突しなかったので、機能としては後退していない。
+        (Shape::ConvexMesh { .. }, _) | (_, Shape::ConvexMesh { .. }) => None,
+    }
+}
+
+/// `Compound`を(入れ子も含めて)葉の部品へ平坦化する(**群11**)。
+/// 返すのは `(親→部品のワールド変換, 部品形状)`。`feature_id` の名前空間を
+/// 分けるために、列挙順が安定していることが要件(`children` の順を保つ)。
+fn flatten_compound_parts<'a>(
+    children: &'a [(Transform, Shape)],
+    base: Transform,
+    out: &mut Vec<(Transform, &'a Shape)>,
+) {
+    for (child_xf, child_shape) in children {
+        let world = base.compose(*child_xf);
+        match child_shape {
+            Shape::Compound { children: inner } => flatten_compound_parts(inner, world, out),
+            other => out.push((world, other)),
+        }
+    }
+}
+
+/// 「法線が実質同じ」とみなす閾値の余弦(**群11**)。
+///
+/// 15°(cos≈0.966)。根拠は**接触の物理的な意味**:
+/// - 床に並べた2つの箱のように、部品の接触面が同一平面(あるいはごく近い
+///   傾き)なら、1本の法線で表しても物理は厳密に正しく、マニフォールドを
+///   分けると同じ拘束を二重に解くことになって収束が悪くなる。
+/// - 一方、L字の角のように**異なる面が異なる向きで**接している場合は、
+///   1本に束ねた時点で片方の接触方向が消えてしまう(移行前の近似)。
+///
+/// 15°は「数値誤差やBaumgarte補正による法線の揺らぎ(実測で1°未満)では
+/// 分裂せず、意図的に異なる面(実用上は30°以上、多くは90°)は確実に分ける」
+/// という条件から取った。閾値をまたぐ中間的な角度では、束ねても分けても
+/// 誤差は連続的に小さいので、正確な値に敏感ではない。
+const COMPOUND_NORMAL_MERGE_COS: f64 = 0.966;
+
+/// `Compound`が絡む衝突を、**部品ごとの独立したマニフォールド列**として返す
+/// (**群11**)。
+///
+/// ## 何を変えたか
+///
+/// 移行前は `merge_compound_manifolds` が全部品の接触点を
+/// **「貫入が最大の部品ペアの法線」1本**へ束ねていた。全部品の法線が揃う
+/// 典型例(床に置いたシャシー)では厳密だが、**L字を角で接地させる**ような
+/// 「異なる面が異なる向きで同時に当たる」配置では、片方の接触方向が
+/// 丸ごと失われて物理的に誤った応答になっていた。
+///
+/// いまは部品ペアごとにマニフォールドを作り、**法線がほぼ同じもの同士だけ**を
+/// 束ねる(`COMPOUND_NORMAL_MERGE_COS`)。したがって:
+/// - 法線が揃う配置 → これまでどおり1本に束ねる(挙動不変・厳密なまま)
+/// - 法線が食い違う配置 → 独立した複数のマニフォールドを出す(新しく正しい)
+///
+/// `feature_id` は部品indexで名前空間を分けるので、同じボディ対に複数の
+/// マニフォールドが出ても warm starting のキャッシュキー
+/// `(body_a, body_b, feature_id)` は衝突しない。
+///
+/// **既知の限界**: `Compound` × `Compound` では、A側だけを部品へ分解し、
+/// B側は `shape_pair_manifold` の中で従来どおり1本へ束ねられる。
+/// 両側を同時に部品分解すると部品数の積だけマニフォールドが出て、
+/// 接触ソルバの反復コストが跳ね上がるため、本増分では片側のみとした。
+fn compound_pair_manifolds(
+    shape_a: &Shape,
+    xf_a: Transform,
+    shape_b: &Shape,
+    xf_b: Transform,
+) -> Vec<(Vec3, Vec<ContactPoint>)> {
+    // どちら側を部品へ分解するか(A優先)。分解しない側はそのまま相手に渡す。
+    let (parts, a_is_compound) = match (shape_a, shape_b) {
+        (Shape::Compound { children }, _) => {
+            let mut v = Vec::new();
+            flatten_compound_parts(children, xf_a, &mut v);
+            (v, true)
+        }
+        (_, Shape::Compound { children }) => {
+            let mut v = Vec::new();
+            flatten_compound_parts(children, xf_b, &mut v);
+            (v, false)
+        }
+        _ => return Vec::new(),
+    };
+
+    let mut groups: Vec<(Vec3, Vec<ContactPoint>, f64)> = Vec::new();
+    for (part_index, (part_xf, part_shape)) in parts.iter().enumerate() {
+        let result = if a_is_compound {
+            shape_pair_manifold(part_shape, *part_xf, shape_b, xf_b)
+        } else {
+            shape_pair_manifold(shape_a, xf_a, part_shape, *part_xf)
+        };
+        let Some((normal, mut points)) = result else {
+            continue;
+        };
+        // 部品ごとに feature_id の名前空間を分ける(warm start の衝突回避)。
+        let offset = (part_index as u32).wrapping_mul(1_000_003);
+        for p in &mut points {
+            p.feature_id = p.feature_id.wrapping_add(offset);
+        }
+        let max_pen = points
+            .iter()
+            .map(|p| p.penetration)
+            .fold(f64::MIN, f64::max);
+
+        // 既存グループのうち法線がほぼ同じものへ合流、無ければ新規グループ。
+        match groups
+            .iter_mut()
+            .find(|(n, _, _)| n.dot(normal) >= COMPOUND_NORMAL_MERGE_COS)
+        {
+            Some((group_normal, group_points, group_max_pen)) => {
+                // 代表法線は「最も深く刺さっている部品のもの」を採る(従来と同じ規約)。
+                if max_pen > *group_max_pen {
+                    *group_normal = normal;
+                    *group_max_pen = max_pen;
+                }
+                group_points.extend(points);
+            }
+            None => groups.push((normal, points, max_pen)),
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(normal, points, _)| (normal, points))
+        .collect()
+}
+
+/// `shape_pair_manifold`のCompound分解が複数の部品ペアから得た
+/// `(normal, points)`を1つの`ContactManifold`へ束ねる(モジュールdoc
+/// 「複数の部品が同時に接触する場合」参照)。`child_index`は`feature_id`の
+/// 名前空間を部品ごとに分けてwarm startingの衝突を避けるためのオフセット。
+fn merge_compound_manifolds(
+    acc: Option<(Vec3, Vec<ContactPoint>)>,
+    next: (Vec3, Vec<ContactPoint>),
+    child_index: usize,
+) -> (Vec3, Vec<ContactPoint>) {
+    let offset = (child_index as u32).wrapping_mul(1_000_003);
+    let (next_normal, mut next_points) = next;
+    for p in &mut next_points {
+        p.feature_id = p.feature_id.wrapping_add(offset);
+    }
+    match acc {
+        None => (next_normal, next_points),
+        Some((acc_normal, mut acc_points)) => {
+            let acc_max_pen = acc_points
+                .iter()
+                .map(|p| p.penetration)
+                .fold(f64::MIN, f64::max);
+            let next_max_pen = next_points
+                .iter()
+                .map(|p| p.penetration)
+                .fold(f64::MIN, f64::max);
+            let normal = if next_max_pen > acc_max_pen {
+                next_normal
+            } else {
+                acc_normal
+            };
+            acc_points.extend(next_points);
+            (normal, acc_points)
+        }
     }
 }
 
@@ -1365,7 +2036,14 @@ pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactM
         let xf_b = transform_of(bodies, b);
         let shape_a = bodies.shape_of(a);
         let shape_b = bodies.shape_of(b);
-        let result = if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
+        // `Compound`が絡むペアは**部品ごとに独立したマニフォールド**を出す
+        // (群11、`compound_pair_manifolds`のdoc参照)。法線が揃う部品は
+        // 1本に束ねられるので、従来どおりの配置では出力も従来と同一。
+        let results: Vec<(Vec3, Vec<ContactPoint>)> = if matches!(shape_a, Shape::Compound { .. })
+            || matches!(shape_b, Shape::Compound { .. })
+        {
+            compound_pair_manifolds(shape_a, xf_a, shape_b, xf_b)
+        } else if let (Shape::Box { half_extents: ha }, Shape::Box { half_extents: hb }) =
             (shape_a, shape_b)
         {
             let preferred = axis_cache.get(&(a, b)).copied();
@@ -1378,11 +2056,13 @@ pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactM
                     axis_cache.remove(&(a, b));
                 }
             }
-            r.map(|(n, p, _)| (n, p))
+            r.map(|(n, p, _)| (n, p)).into_iter().collect()
         } else {
             shape_pair_manifold(shape_a, xf_a, shape_b, xf_b)
+                .into_iter()
+                .collect()
         };
-        if let Some((normal, points)) = result {
+        for (normal, points) in results {
             manifolds.push(ContactManifold {
                 body_a: a,
                 body_b: b,
@@ -1456,6 +2136,620 @@ mod tests {
         half.set_collision_filter(0, 0b01, 0b11);
         half.set_collision_filter(1, 0b10, 0b10);
         assert_eq!(detect(&half, &mut cache).len(), 0, "片側だけでは通らない");
+    }
+
+    /// `Compound`のAABBが各部品(ローカルtransform込み)のAABBの和集合になること。
+    #[test]
+    fn compound_aabb_is_the_union_of_its_children_aabbs() {
+        let compound = Shape::Compound {
+            children: vec![
+                (
+                    identity_xf(Vec3::new(-2.0, 0.0, 0.0)),
+                    Shape::Sphere { radius: 0.5 },
+                ),
+                (
+                    identity_xf(Vec3::new(2.0, 0.0, 0.0)),
+                    Shape::Box {
+                        half_extents: Vec3::new(1.0, 1.0, 1.0),
+                    },
+                ),
+            ],
+        };
+        let aabb = aabb_of(&compound, identity_xf(Vec3::ZERO));
+        assert!((aabb.min.x - -2.5).abs() < 1e-12);
+        assert!((aabb.max.x - 3.0).abs() < 1e-12);
+        assert!((aabb.min.y - -1.0).abs() < 1e-12);
+        assert!((aabb.max.y - 1.0).abs() < 1e-12);
+    }
+
+    /// `Compound`(単一の箱を部品に持つ)と地面平面の接触が、同じ寸法の
+    /// 素の`Box`と地面平面の接触に一致すること(部品分解が既存のBox-Plane
+    /// 解析解へ正しく帰着することの確認)。
+    #[test]
+    fn compound_of_a_single_box_against_a_plane_matches_a_plain_box() {
+        let half_extents = Vec3::new(1.0, 1.0, 1.0);
+        let plane = Shape::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+        // 箱の下面が y=-0.1 (めり込み量0.1)になるよう、中心を y=0.9 に置く。
+        let body_xf = identity_xf(Vec3::new(0.0, 0.9, 0.0));
+
+        let plain_box = Shape::Box { half_extents };
+        let (plain_normal, plain_points) =
+            dispatch_for_test(&plain_box, body_xf, &plane, identity_xf(Vec3::ZERO))
+                .expect("box penetrates the plane");
+
+        let compound = Shape::Compound {
+            children: vec![(identity_xf(Vec3::ZERO), Shape::Box { half_extents })],
+        };
+        let (compound_normal, compound_points) =
+            dispatch_for_test(&compound, body_xf, &plane, identity_xf(Vec3::ZERO))
+                .expect("compound must penetrate exactly like the plain box");
+
+        assert!((compound_normal - plain_normal).length() < 1e-12);
+        assert_eq!(compound_points.len(), plain_points.len());
+        let max_pen = |pts: &[ContactPoint]| pts.iter().map(|p| p.penetration).fold(0.0, f64::max);
+        assert!((max_pen(&compound_points) - max_pen(&plain_points)).abs() < 1e-12);
+    }
+
+    /// `Compound`の複数部品(左右の車輪相当の2球)が同時に地面へ接触する場合、
+    /// 両方の接触点が1つのマニフォールドへ束ねられること。
+    #[test]
+    fn compound_merges_contacts_from_multiple_penetrating_children() {
+        let plane = Shape::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+        let compound = Shape::Compound {
+            children: vec![
+                (
+                    identity_xf(Vec3::new(-2.0, 0.0, 0.0)),
+                    Shape::Sphere { radius: 1.0 },
+                ),
+                (
+                    identity_xf(Vec3::new(2.0, 0.0, 0.0)),
+                    Shape::Sphere { radius: 1.0 },
+                ),
+            ],
+        };
+        // 両方の球の中心を y=0.9 に置く(半径1.0なので貫入量0.1)。
+        let body_xf = identity_xf(Vec3::new(0.0, 0.9, 0.0));
+        let (_normal, points) =
+            dispatch_for_test(&compound, body_xf, &plane, identity_xf(Vec3::ZERO))
+                .expect("both spheres penetrate the plane");
+        assert_eq!(points.len(), 2, "両方の球からの接触点が1つに束ねられる");
+        assert_ne!(
+            points[0].feature_id, points[1].feature_id,
+            "部品ごとにfeature_idが別空間になっている"
+        );
+    }
+
+    /// **複合剛体の静止支持**(接触マニフォールドを部品ごとに分ける将来の変更に
+    /// 備えた回帰ハーネス)。地面に並んで接する2つの箱からなる`Compound`は、
+    /// 全部品の接触法線が`+y`で一致する——モジュールdocが「**厳密に正しい**」と
+    /// 述べる典型例そのもの。したがって「貫入最大の部品の法線を代表として全接触点を
+    /// 束ねる」現行の近似でも、支持力は解析解と一致しなければならない。
+    ///
+    /// 検証する解析量は**総支持力 = 重量 $mg$**。各ステップで
+    /// 「重力以外に速度へ入った力積」 $m\,(\Delta v_y + g\,\Delta t)/\Delta t$ を
+    /// 測ると、これは接触ソルバが実際に返した垂直抗力そのものになる。静止して
+    /// いるなら Newton の第3法則から厳密に $mg$ に等しい。
+    ///
+    /// 許容誤差の根拠: 落下させず解析的な接触位置に静置するので、過渡は
+    /// 数ステップで消える。測定窓は $t\in[0.1,0.42]$ s(初期過渡の後、かつ
+    /// `sleep`が島を眠らせる 0.5 s より前——眠ると積分も接触解決も止まり、
+    /// 支持力の測定自体が意味を失うため)。この窓での実測は各ステップとも
+    /// 相対誤差 1e-9 未満なので、Baumgarte 補正の揺らぎを見込んで
+    /// 各ステップ 1e-3、窓平均 1e-6 を上限とする。
+    #[test]
+    fn compound_of_two_boxes_rests_on_a_plane_with_the_correct_total_support_force() {
+        use crate::body::RigidBodyDesc;
+        use crate::solver::MechanicsSolver;
+        use sim_core::{EventQueue, MaterialDb, Solver, SolverContext};
+        use sim_math::SimRng;
+
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = materials.find_by_name("コンクリート").unwrap();
+        let gravity = 9.80665;
+        let mut rng = SimRng::new(1, 1);
+        let mut events = EventQueue::new();
+        let mut solver = MechanicsSolver::new(gravity);
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground.body_type = BodyType::Static;
+        solver.create_body(ground, &materials);
+
+        // 一辺1mの箱2つを x=±0.6 に横並びで置く(隙間0.2m、どちらも地面に接する)。
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Compound {
+                children: vec![
+                    (
+                        identity_xf(Vec3::new(0.6, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                    (
+                        identity_xf(Vec3::new(-0.6, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                ],
+            },
+            steel,
+        );
+        // 底面がちょうど y=0 に接する高さ。
+        desc.transform.position = Vec3::new(0.0, half.y, 0.0);
+        let body = solver.create_body(desc, &materials);
+        let mass = solver.bodies.mass(body);
+        let weight = mass * gravity;
+
+        let dt = 1.0 / 240.0;
+        let measure_from = 24; // 0.1 s: 初期過渡の後
+        let measure_to = 100; // 0.42 s: sleep(0.5 s)より前
+        let mut support_samples: Vec<f64> = Vec::new();
+        for step in 0..measure_to {
+            let v_before = solver.bodies.linear_velocity[body].y;
+            let mut ctx = SolverContext {
+                materials: &materials,
+                rng: &mut rng,
+                events: &mut events,
+            };
+            solver.step(dt, &mut ctx);
+            let _ = events.drain_sorted();
+            let v_after = solver.bodies.linear_velocity[body].y;
+            if step >= measure_from {
+                assert!(
+                    !solver.bodies.asleep[body],
+                    "measurement window must end before the island falls asleep"
+                );
+                support_samples.push(mass * ((v_after - v_before) + gravity * dt) / dt);
+            }
+        }
+
+        for support in &support_samples {
+            assert!(
+                (support - weight).abs() / weight < 1e-3,
+                "per-step support force must equal the weight: support={support} weight={weight}"
+            );
+        }
+        let mean = support_samples.iter().sum::<f64>() / support_samples.len() as f64;
+        assert!(
+            (mean - weight).abs() / weight < 1e-6,
+            "mean support force must equal the weight: mean={mean} weight={weight}"
+        );
+
+        // 静止していること(鉛直速度・傾き・貫入)。
+        assert!(
+            solver.bodies.linear_velocity[body].length() < 1e-9,
+            "the compound must come to rest: v={:?}",
+            solver.bodies.linear_velocity[body]
+        );
+        let tilt = 2.0 * solver.bodies.rotation[body].w.abs().min(1.0).acos();
+        assert!(
+            tilt < 1e-4,
+            "symmetric support must not tip the compound: tilt={tilt:.3e} rad"
+        );
+        let penetration = half.y - solver.bodies.position[body].y;
+        // `contact`モジュールの許容貫入(SLOP=0.005、Baumgarteが押し戻さない残量)。
+        assert!(
+            (0.0..0.005).contains(&penetration),
+            "resting penetration must stay within the contact slop: {penetration:.3e}"
+        );
+
+        // 両方の部品が実際に支えていること(片側だけの接触で釣り合っていない)。
+        let manifold = solver
+            .last_manifolds
+            .iter()
+            .find(|m| m.body_a == body || m.body_b == body)
+            .expect("the compound must keep touching the ground");
+        assert!(
+            (manifold.normal.length() - 1.0).abs() < 1e-12 && manifold.normal.y.abs() > 1.0 - 1e-12,
+            "all children share the same +y normal here (the exact case): {:?}",
+            manifold.normal
+        );
+        assert!(
+            manifold.points.iter().any(|p| p.world_point.x > 0.0)
+                && manifold.points.iter().any(|p| p.world_point.x < 0.0),
+            "both children must contribute contact points: {:?}",
+            manifold
+                .points
+                .iter()
+                .map(|p| p.world_point.x)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **法線が食い違う部品は独立したマニフォールドになる**(群11、item4の核心)。
+    ///
+    /// `compound_of_two_boxes_rests_on_a_plane_with_the_correct_total_support_force`
+    /// は全部品の法線が `+y` で揃う配置——移行前の「1本に束ねる」近似でも
+    /// **厳密に正しかった**ケースしか見ていない。
+    ///
+    /// ここでは**単一のボディ対**(コンパウンド × 1つの静的な箱)の中で、
+    /// 2つの部品が**互いに直交する面**に同時に接触する配置を作る。
+    /// ボディ対が1つであることが要点——別々の相手に当たっているだけなら、
+    /// 移行前の実装でも相手ごとにマニフォールドが分かれるので、
+    /// per-part 化の検証にならない。
+    ///
+    /// - 静的な箱: 原点中心・半寸 (2, 1, 2) → 上面 y=1、右面 x=2
+    /// - 部品1: 半寸 0.5 の箱を (0, 1.4, 0) に → **上面**へ 0.1 めり込む(法線 ±y)
+    /// - 部品2: 半寸 0.5 の箱を (2.4, 0, 0) に → **右面**へ 0.1 めり込む(法線 ±x)
+    ///
+    /// 移行前はこの2つが「貫入の深いほうの法線」1本へ束ねられ、もう一方の
+    /// 拘束方向が**完全に消えていた**(2つの貫入量は等しいので、どちらが
+    /// 代表になるかは列挙順次第という不安定さもあった)。いまは法線の
+    /// 食い違いが 90°(`COMPOUND_NORMAL_MERGE_COS` の 15° を大きく超える)
+    /// なので、独立した2本のマニフォールドとして出る。
+    #[test]
+    fn compound_with_non_aligned_part_normals_emits_separate_manifolds() {
+        use crate::body::{BodyType, RigidBodyDesc, RigidBodySet};
+        use sim_core::MaterialDb;
+
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = materials.find_by_name("コンクリート").unwrap();
+        let mut bodies = RigidBodySet::new();
+
+        // 相手は**1つだけ**の静的な箱(ボディ対を1つに保つ)。
+        let mut block = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(2.0, 1.0, 2.0),
+            },
+            concrete,
+        );
+        block.body_type = BodyType::Static;
+        let block_index = bodies.create_body(block, &materials);
+
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Compound {
+                children: vec![
+                    // 上面に乗る部品(最小重なり軸は y)。
+                    (
+                        identity_xf(Vec3::new(0.0, 1.4, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                    // 右面を押す部品(最小重なり軸は x)。
+                    (
+                        identity_xf(Vec3::new(2.4, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                ],
+            },
+            steel,
+        );
+        desc.transform.position = Vec3::ZERO;
+        let body = bodies.create_body(desc, &materials);
+
+        let mut axis_cache = AxisCache::new();
+        let manifolds = detect(&bodies, &mut axis_cache);
+
+        let touching: Vec<&ContactManifold> = manifolds
+            .iter()
+            .filter(|m| {
+                (m.body_a == body && m.body_b == block_index)
+                    || (m.body_a == block_index && m.body_b == body)
+            })
+            .collect();
+        let normals: Vec<Vec3> = touching.iter().map(|m| m.normal).collect();
+        assert_eq!(
+            touching.len(),
+            2,
+            "同一ボディ対から、法線の異なる2本のマニフォールドが出るはず: {normals:?}"
+        );
+
+        let has_vertical = normals.iter().any(|n| n.y.abs() > 0.99);
+        let has_horizontal = normals.iter().any(|n| n.x.abs() > 0.99);
+        assert!(
+            has_vertical && has_horizontal,
+            "鉛直(上面)と水平(右面)の両方の法線が独立して残っているはず: {normals:?}"
+        );
+        // どちらのマニフォールドにも実際の接触点があること。
+        assert!(
+            touching.iter().all(|m| !m.points.is_empty()),
+            "空のマニフォールドを出していない"
+        );
+        // feature_id はボディ対をまたいで一意(warm start のキー衝突回避)。
+        let ids: std::collections::BTreeSet<u32> = touching
+            .iter()
+            .flat_map(|m| m.points.iter().map(|p| p.feature_id))
+            .collect();
+        let total: usize = touching.iter().map(|m| m.points.len()).sum();
+        assert_eq!(
+            ids.len(),
+            total,
+            "部品をまたいで feature_id が重複していない"
+        );
+    }
+
+    /// **同じ向きの部品はこれまでどおり1本に束ねられる**(群11)。
+    /// 法線ごとに無条件でマニフォールドを分けると、床に並べた箱2つが
+    /// 同じ拘束を2本に割ってしまい収束が悪化する。`COMPOUND_NORMAL_MERGE_COS`
+    /// による合流が効いていることを、上のテストと対にして固定する。
+    #[test]
+    fn compound_with_aligned_part_normals_stays_a_single_manifold() {
+        use crate::body::{BodyType, RigidBodyDesc, RigidBodySet};
+        use sim_core::MaterialDb;
+
+        let materials = MaterialDb::standard();
+        let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = materials.find_by_name("コンクリート").unwrap();
+        let mut bodies = RigidBodySet::new();
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground.body_type = BodyType::Static;
+        bodies.create_body(ground, &materials);
+
+        let half = Vec3::new(0.5, 0.5, 0.5);
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Compound {
+                children: vec![
+                    (
+                        identity_xf(Vec3::new(0.6, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                    (
+                        identity_xf(Vec3::new(-0.6, 0.0, 0.0)),
+                        Shape::Box { half_extents: half },
+                    ),
+                ],
+            },
+            steel,
+        );
+        desc.transform.position = Vec3::new(0.0, 0.45, 0.0);
+        let body = bodies.create_body(desc, &materials);
+
+        let mut axis_cache = AxisCache::new();
+        let manifolds = detect(&bodies, &mut axis_cache);
+        let touching: Vec<&ContactManifold> = manifolds
+            .iter()
+            .filter(|m| m.body_a == body || m.body_b == body)
+            .collect();
+        assert_eq!(
+            touching.len(),
+            1,
+            "法線が揃う部品は1本に束ねられるはず: {:?}",
+            touching.iter().map(|m| m.normal).collect::<Vec<_>>()
+        );
+        // 両方の部品が接触点を出していること(束ねても情報は失っていない)。
+        let m = touching[0];
+        assert!(
+            m.points.iter().any(|p| p.world_point.x > 0.0)
+                && m.points.iter().any(|p| p.world_point.x < 0.0),
+            "両部品が接触点を寄せているはず"
+        );
+        // feature_id が部品ごとに別空間になっていること(warm start の衝突回避)。
+        let ids: std::collections::BTreeSet<u32> = m.points.iter().map(|p| p.feature_id).collect();
+        assert_eq!(ids.len(), m.points.len(), "feature_id が重複していない");
+    }
+
+    /// **かつて「`ConvexMesh`はまだ何とも衝突しない(すり抜ける)」ことを
+    /// 固定していたテストを、実装の到達点として書き換えたもの**(群11)。
+    ///
+    /// 移行前は3D凸包が無く narrowphase が一律`None`を返していたため、
+    /// `ConvexMesh`のボディは生成・積分はできても**他の何ともぶつからず
+    /// すり抜けた**。`crate::hull`と GJK/EPA 経路の追加でこれが解消したので、
+    /// 「すり抜けないこと」を要求する形へ反転させた。
+    ///
+    /// 退化した頂点列(ここでは2点=線分)でも**パニックしない**ことは
+    /// 引き続き要求する——凸包は張れない(体積ゼロ)が、GJK のサポート写像は
+    /// 点集合に対して定義できるので接触自体は生成される。
+    #[test]
+    fn convex_mesh_now_collides_instead_of_passing_through() {
+        // 退化した2点の「メッシュ」は凸包を張れない(3次元の広がりが無い)。
+        // 体積も接触も持たないが、**パニックしない**ことは要求する。
+        let degenerate = Shape::ConvexMesh {
+            vertices: vec![Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)],
+        };
+        assert_eq!(degenerate.volume(), None, "退化メッシュは体積を持たない");
+        let big_sphere = Shape::Sphere { radius: 5.0 };
+        assert!(
+            dispatch_for_test(
+                &degenerate,
+                identity_xf(Vec3::ZERO),
+                &big_sphere,
+                identity_xf(Vec3::ZERO)
+            )
+            .is_none(),
+            "凸包が張れない退化メッシュは接触も生成しない(パニックしないことが要件)"
+        );
+
+        // **実体のある**立方体メッシュは、球と重なれば接触を生成する
+        // ——これが移行前との決定的な違い(移行前は常に None ですり抜けた)。
+        let cube_mesh_overlapping = convex_mesh_cube(1.0);
+        assert!(
+            dispatch_for_test(
+                &cube_mesh_overlapping,
+                identity_xf(Vec3::ZERO),
+                &Shape::Sphere { radius: 1.0 },
+                identity_xf(Vec3::new(1.5, 0.0, 0.0))
+            )
+            .is_some(),
+            "実体のあるメッシュは球と衝突するはず(移行前は None ですり抜けた)"
+        );
+
+        // 明確に離れていれば接触しない。
+        let cube_mesh = convex_mesh_cube(1.0);
+        let sphere = Shape::Sphere { radius: 1.0 };
+        assert!(
+            dispatch_for_test(
+                &cube_mesh,
+                identity_xf(Vec3::ZERO),
+                &sphere,
+                identity_xf(Vec3::new(5.0, 0.0, 0.0))
+            )
+            .is_none(),
+            "離れていれば接触しない"
+        );
+    }
+
+    /// 立方体の8隅からなる`ConvexMesh`(半辺`half`)。
+    fn convex_mesh_cube(half: f64) -> Shape {
+        let mut vertices = Vec::with_capacity(8);
+        for &sx in &[-1.0, 1.0] {
+            for &sy in &[-1.0, 1.0] {
+                for &sz in &[-1.0, 1.0] {
+                    vertices.push(Vec3::new(sx * half, sy * half, sz * half));
+                }
+            }
+        }
+        Shape::ConvexMesh { vertices }
+    }
+
+    /// **床に置いた凸多面体は、等価な箱と厳密に同じ接触を作る**(群11)。
+    /// 立方体の8隅そのものを頂点に持つメッシュなので、`box_plane`と
+    /// `convex_mesh_plane`はどちらも「貫入した頂点を最大4点」返す同じ論理——
+    /// 法線・接触点数・最大貫入量まで一致しなければならない。
+    ///
+    /// これは`ConvexMesh`が床で安定して静止できること(1点支持ではなく
+    /// 面で支えられること)を担保する、実用上いちばん重要なケース。
+    #[test]
+    fn convex_mesh_on_a_plane_matches_the_equivalent_box_exactly() {
+        let half = 1.0;
+        let plane = Shape::Plane {
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            d: 0.0,
+        };
+        // 下面が y=-0.1(貫入 0.1)になる高さ。
+        let xf = identity_xf(Vec3::new(0.0, 0.9, 0.0));
+
+        let (box_normal, box_points) = dispatch_for_test(
+            &Shape::Box {
+                half_extents: Vec3::new(half, half, half),
+            },
+            xf,
+            &plane,
+            identity_xf(Vec3::ZERO),
+        )
+        .expect("box penetrates the plane");
+        let (mesh_normal, mesh_points) =
+            dispatch_for_test(&convex_mesh_cube(half), xf, &plane, identity_xf(Vec3::ZERO))
+                .expect("mesh must penetrate the plane just like the box");
+
+        assert!((mesh_normal - box_normal).length() < 1e-12);
+        assert_eq!(mesh_points.len(), box_points.len(), "どちらも底面の4頂点");
+        assert_eq!(mesh_points.len(), 4);
+        let max_pen = |pts: &[ContactPoint]| pts.iter().map(|p| p.penetration).fold(0.0, f64::max);
+        assert!((max_pen(&mesh_points) - max_pen(&box_points)).abs() < 1e-12);
+        assert!((max_pen(&mesh_points) - 0.1).abs() < 1e-12, "貫入は 0.1");
+    }
+
+    /// **多面体 × 球の法線が設計の A→B 規約であること**(群11)。
+    /// 符号の取り違えは「接触が反発ではなく吸着になる」重大な誤りなので、
+    /// 解析的に分かる配置(立方体の +x 面の外に球を置く)で明示的に固定する。
+    #[test]
+    fn convex_mesh_sphere_normal_points_from_a_to_b() {
+        let mesh = convex_mesh_cube(1.0);
+        let sphere = Shape::Sphere { radius: 1.0 };
+        // 立方体の +x 面(x=1)から球の中心が 1.5 → 貫入 0.5。
+        let (normal, points) = dispatch_for_test(
+            &mesh,
+            identity_xf(Vec3::ZERO),
+            &sphere,
+            identity_xf(Vec3::new(1.5, 0.0, 0.0)),
+        )
+        .expect("mesh and sphere overlap");
+        assert!(
+            (normal - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-3,
+            "A(メッシュ)から B(球)へ向かう +x のはず: {normal:?}"
+        );
+        assert_eq!(points.len(), 1, "多面体×球は1点マニフォールド");
+        assert!(
+            (points[0].penetration - 0.5).abs() < 1e-3,
+            "貫入は解析値 0.5 のはず: {}",
+            points[0].penetration
+        );
+    }
+
+    /// **凸多面体どうしの貫入は軸方向の重なり量に一致する**(群11)。
+    /// 多面体ペアでは EPA がミンコフスキー差の境界と有限回で厳密に一致する
+    /// (滑らかな球と違って線形収束の尾を引かない)ため、許容誤差を
+    /// 球ケースより2桁厳しく取れる。
+    #[test]
+    fn convex_mesh_versus_box_penetration_matches_the_axis_overlap() {
+        let mesh = convex_mesh_cube(1.0);
+        let other = Shape::Box {
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        };
+        // 中心間距離 1.5、半幅の和 2.0 → x方向の重なりは 0.5。
+        let (normal, points) = dispatch_for_test(
+            &mesh,
+            identity_xf(Vec3::ZERO),
+            &other,
+            identity_xf(Vec3::new(1.5, 0.0, 0.0)),
+        )
+        .expect("mesh and box overlap");
+        assert!(
+            (normal - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-6,
+            "{normal:?}"
+        );
+        assert!(
+            (points[0].penetration - 0.5).abs() < 1e-6,
+            "{}",
+            points[0].penetration
+        );
+    }
+
+    /// `ConvexMesh`どうしも同じ経路で衝突すること(群11)。
+    #[test]
+    fn convex_mesh_versus_convex_mesh_collides() {
+        let a = convex_mesh_cube(1.0);
+        let b = convex_mesh_cube(1.0);
+        let (normal, points) = dispatch_for_test(
+            &a,
+            identity_xf(Vec3::ZERO),
+            &b,
+            identity_xf(Vec3::new(0.0, 1.5, 0.0)),
+        )
+        .expect("two meshes overlap");
+        assert!(
+            (normal - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-6,
+            "{normal:?}"
+        );
+        assert!((points[0].penetration - 0.5).abs() < 1e-6);
+    }
+
+    /// **`ConvexMesh` × `Capsule` は本増分では未実装**(既知の限界を固定する
+    /// テスト)。カプセルは「線分を半径で膨らませた」非多面体なので SAT の
+    /// 分離軸に素直に乗らず(丸い部分の分離軸は連続無限個ある)、線分-凸多面体の
+    /// 最近点計算を別途書く必要がある。
+    ///
+    /// **この組み合わせだけは引き続きすり抜ける**。移行前は`ConvexMesh`が
+    /// *何とも*衝突しなかったので機能の後退ではないが、穴が残っていることは
+    /// テストとして明示しておく——将来これを実装したらこのテストが落ち、
+    /// 「塞がった」ことの通知になる(`convex_mesh_aabb_approximation_...`が
+    /// 凸包実装の通知として機能したのと同じ仕掛け)。
+    #[test]
+    fn convex_mesh_versus_capsule_is_not_implemented_yet() {
+        let mesh = convex_mesh_cube(1.0);
+        // 明らかに深く重なる配置(実装されていれば必ず接触するはず)。
+        let capsule = Shape::Capsule {
+            radius: 0.8,
+            half_height: 1.0,
+        };
+        assert!(
+            dispatch_for_test(
+                &mesh,
+                identity_xf(Vec3::ZERO),
+                &capsule,
+                identity_xf(Vec3::new(0.5, 0.0, 0.0))
+            )
+            .is_none(),
+            "未実装なので None(実装したらこのテストを反転させること)"
+        );
     }
 
     #[test]

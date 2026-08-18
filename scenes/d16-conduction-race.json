@@ -2,12 +2,14 @@
   "name": "d16-conduction-race",
   "world": { "gravity": 9.80665, "dt": 1.0 },
   "conduction_rod": {
-    "node_count": 41,
-    "length": 1.0,
-    "initial_temperature": 0.0,
-    "material": "銅",
-    "boundary_left": 100.0,
-    "boundary_right": 0.0
+    "raw_state": {
+      "conductivity": null,
+      "cross_section_area": 1.0,
+      "dx": 0.025,
+      "temperature": "AAAAAAAAWUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "thermal_diffusivity": 0.00011624536178107607,
+      "volumetric_heat_capacity": null
+    }
   },
   "probes": [
     { "rod_temp": 20 },

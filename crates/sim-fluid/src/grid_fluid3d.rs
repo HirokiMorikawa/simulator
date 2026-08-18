@@ -449,6 +449,33 @@ impl GridFluid3D {
         }
     }
 
+    /// セル種別の生配列(長さ`nx*ny*nz`、`i + nx*(j + ny*k)`)。
+    /// 2D版の `GridFluid2D::cell_type` と同じ理由で公開する
+    /// (**生状態スナップショット(`sim_world`の`raw_state`)のため**、
+    /// `set_solid_cells`の閉包は復元できない)。
+    pub fn cell_type(&self) -> &[CellType] {
+        &self.cell_type
+    }
+
+    /// Solidセルの速度の生配列(長さ`nx*ny*nz`)。`cell_type`と対で使う。
+    pub fn solid_velocity(&self) -> &[Vec3] {
+        &self.solid_velocity
+    }
+
+    /// 固体境界の状態(セル種別・固体速度)を生値のまま入れ替える
+    /// (2D版の `GridFluid2D::set_raw_solid_state` と同じ。3Dは単一矩形マスクの
+    /// 後方互換経路(`solid`)を持たないので引数は2つ)。
+    /// 長さが`nx*ny*nz`と異なる配列は無視する(防御)。
+    pub fn set_raw_solid_state(&mut self, cell_type: Vec<CellType>, solid_velocity: Vec<Vec3>) {
+        let n = self.nx * self.ny * self.nz;
+        if cell_type.len() == n {
+            self.cell_type = cell_type;
+        }
+        if solid_velocity.len() == n {
+            self.solid_velocity = solid_velocity;
+        }
+    }
+
     fn flat(&self, i: usize, j: usize, k: usize) -> usize {
         i + self.nx * (j + self.ny * k)
     }

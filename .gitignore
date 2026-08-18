@@ -16,3 +16,6 @@ demo/test-results/
 
 # Python(scripts/ のヘルパを import して試した際に生成される)
 __pycache__/
+
+# Claude Code のローカル作業用ディレクトリ(サブエージェント用worktree等)
+.claude/

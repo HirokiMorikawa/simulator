@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+import { addViaMenu, collectPageErrors, waitForWorld } from "./helpers";
 
 // 統合エディタのスモークテスト(増分D2)。これまで各増分で手動実行してきた
 // Playwright 確認を、CI で毎回回るテストとして資産化したもの。
@@ -9,33 +10,11 @@ import { expect, test, type Page } from "@playwright/test";
 // ——実際、増分3-3・B2・B3 で見つかったバグ(heater_node_temperature の unwrap、
 // Circuit::node_voltage の範囲外、ボディ0個シーンでの render ループ崩壊)は
 // いずれもこの層でしか踏めない種類だった。
-
-/** ページ全体で発生した未捕捉例外を集める。favicon の 404 は除外する。 */
-function collectPageErrors(page: Page): string[] {
-  const errors: string[] = [];
-  page.on("pageerror", (e) => errors.push(String(e)));
-  return errors;
-}
-
-/** wasm 初期化を待つ(Hierarchy にボディが並ぶまで)。 */
-async function waitForWorld(page: Page) {
-  await expect(page.locator("#hierarchy-tree .tree-selectable").first()).toBeVisible({
-    timeout: 30_000,
-  });
-}
-
-
-/**
- * ツールバーの「＋ 追加」メニューから項目を選ぶ(群2)。
- * スポーン系8個のボタンはツールバーを3行ぶんの高さに膨らませていたため
- * 1つのメニューへ畳んだ。個々のボタンは `hidden` で DOM に残してあるが、
- * **`hidden` な要素は Playwright からクリックできない**ので、テストも
- * 実ユーザーと同じくメニュー経由で操作する。
- */
-async function addViaMenu(page: Page, label: string) {
-  await page.click("#btn-add");
-  await page.locator("#context-menu button", { hasText: label }).first().click();
-}
+//
+// `collectPageErrors`/`waitForWorld`/`addViaMenu` は `./helpers` へ切り出した
+// (Playwright は *.spec.ts 同士の import を許さないため、縦串①の受け入れ
+// テスト(acceptance-d24.spec.ts)と共有するにはテストファイルでない
+// モジュールに置く必要があった)。
 
 test("起動して wasm が初期化され、既定シーンが Hierarchy と HUD に現れる", async ({ page }) => {
   const errors = collectPageErrors(page);
@@ -103,6 +82,10 @@ test("剛体を持たないシーン(D9 熱のみ)を読み込んでも描画ル
   await expect(page.locator("#hud")).toContainText("t =");
 
   await page.click("#btn-mode-play");
+  // QA不具合5の修正でPlayモードに入った直後は`playing`が真になり、⏭は
+  // 一時停止中のみ有効になった(Unityの Step と同じ意味論)。停止してから
+  // stepを使う。
+  await page.click("#btn-play");
   await page.click("#btn-step");
   await page.click("#btn-step");
   expect(errors).toEqual([]);
@@ -244,10 +227,15 @@ test("D19(電気工作台)を読み込むと Circuit タブと Hierarchy が実�
 
   // HUD は分圧点(node2)の電圧を出す。E5 の解析解は 9V * 2k/(1k+2k) = 6.000V。
   // **読み込み直後は 0.000 V**——回路は`step()`で初めて解かれるため、1step進める。
+  //
+  // 表記が `circuit V = ...` から **`circuit V[2] = ...`** に変わっているのは
+  // QA不具合7の修正による。HUD は固定のノード番号ではなく**シーンが宣言した
+  // プローブ**を読むようになり、どのノードを表示しているかを併記する
+  // (D19 の `probes` 先頭が `circuit_node_voltage: 2` なのでノード 2)。
   await page.click("#btn-mode-play");
   await page.click("#btn-play"); // 一時停止(`setMode`が既に再生を始めている)
   await page.click("#btn-step");
-  await expect(page.locator("#hud")).toContainText("circuit V = 6.000 V");
+  await expect(page.locator("#hud")).toContainText("circuit V[2] = 6.0000 V");
 
   // Hierarchy の Circuits サブツリーに実際の素子が並ぶ(葉ノードで検証する
   // ——"Circuits" の li は入れ子の ul を含むため exact 一致しない)。
@@ -256,12 +244,17 @@ test("D19(電気工作台)を読み込むと Circuit タブと Hierarchy が実�
   await expect(hierarchy.getByText("R: N1 – N2 1000 Ω", { exact: true })).toBeVisible();
   await expect(hierarchy.getByText("C: N3 – GND 0.001 F", { exact: true })).toBeVisible();
   await expect(hierarchy.getByText("SW0: N1 – N4 (閉)", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("D: N4 → GND", { exact: true })).toBeVisible();
+  // ダイオードは N4 直結から **470Ω の電流制限抵抗を挟んだ N5** へ移した
+  // (QA不具合3: 直列抵抗が無く 9V 源をダイオードが短絡して −7.875×10⁶ A が
+  // 流れていた)。
+  await expect(hierarchy.getByText("R: N4 – N5 470 Ω", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("D: N5 → GND", { exact: true })).toBeVisible();
 
   // Circuit タブ本体も同じ実素子を出し、**固定デモ回路の嘘の数字は消えている**。
   await page.click('.project-tab[data-tab="circuit"]');
   const topology = page.locator("#project-body .circuit-topology");
-  await expect(topology).toContainText("回路の素子(実際に配線されているもの、7件)");
+  // 7件 → 8件: QA不具合3の修正で LED 枝へ電流制限抵抗 470Ω を足したぶん。
+  await expect(topology).toContainText("回路の素子(実際に配線されているもの、8件)");
   await expect(topology).toContainText("R: N1 – N2 1000 Ω");
   await expect(topology).not.toContainText("100Ω");
   await expect(topology).not.toContainText("10V 電源");
@@ -515,6 +508,26 @@ test("群2: カメラ操作・ツール切替ショートカット・Settings �
   // dt は Edit モードでのみ変更できる(決定論を守るため)。
   await expect(page.locator("#input-dt")).toBeEnabled();
 
+  // ③b 重力の向き(残タスク完遂増分、レビュー指摘「見送らず対応すること」への
+  // 対応)。既定は下向き(0,-1,0)、x欄だけ変えて+x向きに変更できること。
+  await expect(page.locator("#input-gravity-direction-x")).toHaveValue("0.000");
+  await expect(page.locator("#input-gravity-direction-y")).toHaveValue("-1.000");
+  await page.fill("#input-gravity-direction-x", "1");
+  await page.locator("#input-gravity-direction-x").dispatchEvent("change");
+  await page.fill("#input-gravity-direction-y", "0");
+  await page.locator("#input-gravity-direction-y").dispatchEvent("change");
+  await page.locator("#input-gravity-direction-y").blur();
+  await page.waitForTimeout(200);
+  const direction = await page.evaluate(() => {
+    const w = (window as unknown as { __world: { read_component: (kind: string, arg: string) => string } })
+      .__world;
+    return JSON.parse(w.read_component("gravity_direction", "")) as number[];
+  });
+  expect(direction[0]).toBeCloseTo(1.0, 3);
+  expect(direction[1]).toBeCloseTo(0.0, 3);
+  expect(direction[2]).toBeCloseTo(0.0, 3);
+  await expect(page.locator("#input-gravity-direction-x")).toHaveValue("1.000");
+
   expect(errors).toEqual([]);
 });
 
@@ -651,6 +664,106 @@ test("群2: Hierarchy の折り畳み・Materials サブツリー・N step 送�
   expect(errors).toEqual([]);
 });
 
+test("D3「Unityパリティ」増分: Hierarchy検索・Shift範囲選択・Ctrl+A/Escape", async ({
+  page,
+}) => {
+  // 監査で見つかった具体的な欠落3件——①ボディ数が多いシーンでHierarchyから
+  // 目的の行を探す手段が無い、②Ctrl/Cmdクリックのトグルはあるが標準の
+  // Shift範囲選択が無い、③範囲選択・トグルと対になる全選択(Ctrl+A)/
+  // 選択解除(Escape)が無い——への対応をまとめて確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // D8散乱: 床(floor) + 球50個(s0..s49) = 51体。検索・範囲選択・全選択の
+  // どれも既定シーン(2体)では意味のある確認にならないため、この増分G1の
+  // 最大シーンへ切り替える。
+  await page.selectOption("#select-scene", "d8-scatter.json");
+  const rows = page.locator("#hierarchy-tree .tree-body");
+  await expect(rows).toHaveCount(51);
+  const visibleRows = page.locator("#hierarchy-tree .tree-body:visible");
+
+  // ① 検索: "floor" は1件だけに絞られる。
+  const search = page.locator("#hierarchy-search");
+  await search.fill("floor");
+  await expect(visibleRows).toHaveCount(1);
+  await expect(visibleRows.first()).toHaveText("floor");
+
+  // "s1" は s1 本体 + s10〜s19 の計11件にマッチする。
+  await search.fill("s1");
+  await expect(visibleRows).toHaveCount(11);
+
+  // 検索欄を空にすると全件へ戻る。
+  await search.fill("");
+  await expect(visibleRows).toHaveCount(51);
+
+  // ② Shiftクリックの範囲選択: floor(nth 0)の次のs0(nth 1)をクリックして
+  // 起点にし、s2(nth 3)をShiftクリックすると s0/s1/s2 の3件が選択される
+  // ——右クリックメニューの「複製 (N件)」表示(既存の複数選択と同じ経路)で
+  // 件数を確認する。範囲内(s1、nth 2)を右クリックすれば選択がそのまま
+  // 保たれる(選択外の行を右クリックした場合はそこだけへ選択が移る、
+  // 既存の右クリックメニューの仕様)。
+  await rows.nth(1).click();
+  await rows.nth(3).click({ modifiers: ["Shift"] }); // Inspectorの主選択はs2(nth 3)になる。
+  await rows.nth(2).click({ button: "right" });
+  await expect(page.locator("#context-menu")).toContainText("複製 (3件)");
+  await page.keyboard.press("Escape"); // メニューを閉じる(複数選択は主選択1件へ戻る)。
+
+  // ③ Ctrl+A: 現存する51体すべてが複数選択に入る。主選択(nth 3のs2)を
+  // そのまま右クリックすれば「選択外→単独選択に戻す」経路を踏まずに
+  // 件数を確認できる。
+  await page.keyboard.press("Control+a");
+  await rows.nth(3).click({ button: "right" });
+  await expect(page.locator("#context-menu")).toContainText("複製 (51件)");
+
+  // ④ Escape: メニューを閉じるだけでなく、複数選択もInspector表示中の1件
+  // (主選択=s2)へ戻す——同じ行(nth 3)を右クリックし直すと件数サフィックスが
+  // 消える。
+  await page.keyboard.press("Escape");
+  await rows.nth(3).click({ button: "right" });
+  await expect(page.locator("#context-menu button", { hasText: "複製" }).first()).toHaveText(
+    "複製",
+  );
+  await page.keyboard.press("Escape");
+
+  expect(errors).toEqual([]);
+});
+
+test("D3「Unityパリティ」増分: 失敗がConsoleのErrorsタブへも残る", async ({ page }) => {
+  // 監査で見つかった具体的な欠落: ConsoleのErrorsタブ(HTML側には元から
+  // 存在する)は`drain_events_text`が`"errors"`レベルを一切出さないため
+  // 常に空で、失敗は`window.alert`の一度きりのモーダルでしか伝わらなかった。
+  // Validationタブの「値を1つ以上指定してください」を、UIから確実に踏める
+  // 失敗経路として使う——**空欄のままではこの分岐に落ちない**ことに注意
+  // (`"".split(",").map(Number)`は`[0]`になり`Number.isFinite`を満たすため、
+  // 数値へ変換できないテキストを入れて初めて0件まで絞り込まれる)。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  let alertMessage: string | null = null;
+  page.on("dialog", (d) => {
+    alertMessage = d.message();
+    d.accept();
+  });
+
+  await page.click('.project-tab[data-tab="validation"]');
+  await expect(page.locator("#validation-base-json")).toBeVisible();
+  await page.locator('input[title*="パラメータの値"]').fill("abc,def");
+  await page.click('button:has-text("スイープを実行")');
+
+  await expect.poll(() => alertMessage).toContain("値を1つ以上指定してください");
+
+  // 同じメッセージがConsoleのErrorsタブへも残っている(モーダルを閉じた後も
+  // 見返せる)。
+  await page.click('.console-tab[data-tab="errors"]');
+  await expect(
+    page.locator("#console-log li", { hasText: "値を1つ以上指定してください" }),
+  ).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
 test("群2: 単一ファイル Export(シーン+Replay+Bookmark)", async ({ page }) => {
   // 設計 §6「保存・共有: シーンJSON+Replay+ブックマークを単一ファイルとして
   // エクスポート」。これまで3つは別々のファイルで、ブックマーク一覧は
@@ -743,6 +856,63 @@ test("群3: 量子・統計・FDTD がギャラリーに載り、場のパネル
   // 場のパネルは対象ドメインが無いシーンでは畳まれる(常に居座らない)。
   await page.click('.scene-gallery-list button[data-scene-file="d4-box-stack.json"]');
   await expect(fieldPanel).toBeHidden();
+
+  expect(errors).toEqual([]);
+});
+
+test("B9: エディタから量子ドメイン(1D/2D)をプリセットで新規追加できる", async ({ page }) => {
+  // 上の「群3」テストはギャラリーシーン(既に量子ドメインを持つraw_state)を
+  // 読み込む経路しか確認していなかった——量子1D/2Dは`enable_grid_fluid_2d_domain`
+  // 等と違い、エディタから**新規に置く**手段自体が無かった(`crates/sim-world/
+  // src/scenario.rs`のモジュールdoc「構築レシピを畳んだ」経緯参照)。ここでは
+  // Settingsの「量子ドメイン(プリセット)」フォーム(ガウス波束+ポテンシャル
+  // プリセットをTypeScript側で計算し、`enable_quantum_1d_domain`/
+  // `enable_quantum_2d_domain`へ渡す新経路)を実際に叩いて、場のパネルに
+  // それぞれの密度分布が描かれることを確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const fieldPanel = page.locator("#field-panel");
+  const fieldTitle = page.locator("#field-title");
+
+  await page.click("#btn-settings");
+
+  // --- 1D: 調和振動子ポテンシャル ---
+  await page.selectOption("#select-quantum1d-n", "128");
+  await page.fill("#input-quantum1d-dx", "0.1");
+  await page.fill("#input-quantum1d-x0", "6.4");
+  await page.fill("#input-quantum1d-sigma", "1.0");
+  await page.fill("#input-quantum1d-k0", "0");
+  await page.selectOption("#select-quantum1d-potential", "harmonic");
+  await page.fill("#input-quantum1d-omega", "1.0");
+  await page.click("#btn-add-quantum-1d");
+  await page.click("#btn-settings"); // ポップオーバーを閉じる。
+  await expect(fieldPanel).toBeVisible();
+  await expect(fieldTitle).toContainText("量子 1D");
+  await expect(fieldTitle).toContainText("格子 128 点");
+
+  // --- 2D: 二重スリット(D27と同じ構成、`quantum2dDoubleSlitPotential`のdoc参照)。
+  // 場のパネルは2Dを優先して描く(`updateFieldPanel`のdoc「優先順位を固定する」)ので、
+  // 2Dを有効化した時点でタイトルが1Dから切り替わることも合わせて確認する。
+  await page.click("#btn-settings"); // 再度開く。
+  await page.selectOption("#select-quantum2d-nx", "64");
+  await page.selectOption("#select-quantum2d-ny", "64");
+  await page.fill("#input-quantum2d-dx", "0.2");
+  await page.fill("#input-quantum2d-dy", "0.2");
+  await page.fill("#input-quantum2d-x0", "2.0");
+  await page.fill("#input-quantum2d-y0", "6.4");
+  await page.fill("#input-quantum2d-sigma-x", "1.0");
+  await page.fill("#input-quantum2d-sigma-y", "3.0");
+  await page.fill("#input-quantum2d-k0", "3.0");
+  await page.selectOption("#select-quantum2d-potential", "double_slit");
+  await page.fill("#input-quantum2d-v0", "60.0");
+  await page.fill("#input-quantum2d-slit-width", "0.7");
+  await page.fill("#input-quantum2d-slit-separation", "2.0");
+  await page.click("#btn-add-quantum-2d");
+  await page.click("#btn-settings"); // ポップオーバーを閉じる。
+  await expect(fieldTitle).toContainText("量子 2D");
+  await expect(fieldTitle).toContainText("64×64");
 
   expect(errors).toEqual([]);
 });
@@ -877,6 +1047,481 @@ test("Console のイベント行クリックで発生源ボディが選択され
   await contactEntry.click();
   // 接触は 床(0) と 箱(1) の間で起きるので、先頭のボディが選択される。
   await expect(page.locator("#inspector-body")).toContainText("Ground");
+
+  expect(errors).toEqual([]);
+});
+
+test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシュがUIから作れ、走らせても複製してもクラッシュしない", async ({
+  page,
+}) => {
+  // レビュー指摘(「UIから作る経路がないから」を許容せず作る前提で進める、
+  // 「テスト不能」を縮約とせずあるべき姿を実装する)への対応。`spawn_compound_l_shape`/
+  // `spawn_convex_mesh_cube`(Rust側)を「＋ 追加」メニュー経由で実際にUIから
+  // 呼び、Hierarchy に現れること・N step 送りでクラッシュしないこと(=描画・
+  // 物理の両方が実際に動くこと)・複製でも壊れないことまで確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const rowCount = () => page.locator("#hierarchy-tree .tree-body").count();
+
+  // ① ツールバー「＋ 追加」メニューから複合形状(L字)を追加。
+  const before = await rowCount();
+  await addViaMenu(page, "＋ 複合形状 (L字)");
+  await page.waitForTimeout(100);
+  expect(await rowCount()).toBe(before + 1);
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("Compound_");
+
+  // ② 同じく凸包メッシュを追加。
+  await addViaMenu(page, "＋ 凸包メッシュ");
+  await page.waitForTimeout(100);
+  expect(await rowCount()).toBe(before + 2);
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("ConvexMesh_");
+
+  // ③ Scene View の右クリックメニューからも同じ2形状を配置できる
+  // (ツールバーのボタンとメニューの両方が同じ `spawnShapeAt` を共有する設計、
+  // 「群2」の既存パターンと同じ)。
+  const canvas = page.locator("canvas").first();
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.3, { button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  await page
+    .locator("#context-menu button", { hasText: "ここに複合形状(L字)を配置" })
+    .click();
+  await page.waitForTimeout(100);
+  expect(await rowCount()).toBe(before + 3);
+
+  await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.3, { button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  await page.locator("#context-menu button", { hasText: "ここに凸包メッシュを配置" }).click();
+  await page.waitForTimeout(100);
+  expect(await rowCount()).toBe(before + 4);
+
+  // ④ N step 送りでシミュレーションを実際に進める——描画(carrier mesh /
+  // ConvexGeometry)と物理(Compoundの衝突・ConvexMeshのAABB近似)の両方が
+  // 例外を出さずに動くこと(「テスト不能」への直接の反証)。
+  // `⏭`はEditモード or 再生中は無効(Unity の Step と同じ意味論)——
+  // Playへ入ってから一時停止する(既存の「増分G2」テストと同じ手順)。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.fill("#input-step-count", "60");
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
+
+  // ⑤ Hierarchy 右クリックで複合形状を複製できる(`body_shape_json_at`
+  // 経由で実際の形状を読み直してメッシュを再構築する経路、スポーン時の
+  // 既定形状だと決め打ちしない)。
+  const compoundRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Compound_" }).first();
+  await compoundRow.click({ button: "right" });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  const beforeDuplicate = await rowCount();
+  await page.locator("#context-menu button", { hasText: "複製" }).first().click();
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBeGreaterThan(beforeDuplicate);
+
+  expect(errors).toEqual([]);
+});
+
+test("Prefab: 複合形状/凸包メッシュをプレハブ化して再スポーンできる", async ({
+  page,
+}) => {
+  // **形状の読み書きを`ShapeJson`1本へ統合した増分の受け入れテスト**。
+  // それ以前のPrefabは`body_shape_params_f64_at`(平坦なf64配列)で寸法を
+  // 読み、`spawn_sphere`/`spawn_box`という固定レシピのスポナーで戻す作り
+  // だったため、**Compound/ConvexMeshのボディは「プレハブ化」を押しても
+  // 黙って何も起きなかった**(`captureBody`が球/箱以外を`null`で弾く)。
+  // `body_shape_json_at`↔`spawn_shape_json`の対に載せ替えた今、両形状が
+  // キャプチャ→再スポーンまで往復することを実UI経由で確かめる。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const rowCount = () => page.locator("#hierarchy-tree .tree-body").count();
+
+  // ① プレハブ化の元になるボディを2つ作る(複合形状と凸包メッシュ)。
+  await addViaMenu(page, "＋ 複合形状 (L字)");
+  await page.waitForTimeout(100);
+  await addViaMenu(page, "＋ 凸包メッシュ");
+  await page.waitForTimeout(100);
+
+  // ② Hierarchy 右クリック →「プレハブ化」。旧実装ではここで
+  //    「この形状はPrefab化できません」のalertが出て登録されなかった。
+  for (const label of ["Compound_", "ConvexMesh_"]) {
+    const row = page.locator("#hierarchy-tree .tree-body", { hasText: label }).first();
+    await row.click({ button: "right" });
+    await expect(page.locator("#context-menu")).toBeVisible();
+    await page.locator("#context-menu button", { hasText: "プレハブ化" }).click();
+    await page.waitForTimeout(100);
+  }
+
+  // ③ Project ドロワーの Prefabs タブに2件とも並ぶ(表示ラベルの形状名は
+  //    `body_shape_kind_at`が返す種別名)。
+  await page.click('.project-tab[data-tab="prefabs"]');
+  const projectBody = page.locator("#project-body");
+  await expect(projectBody).toContainText("compound");
+  await expect(projectBody).toContainText("convex_mesh");
+
+  // ④ 2件とも「スポーン」でき、Hierarchy の行が実際に増える
+  //    (=`spawn_shape_json`がキャプチャした形状を復元できている)。
+  const beforeSpawn = await rowCount();
+  const spawnButtons = projectBody.locator("li button", { hasText: "スポーン" });
+  await expect(spawnButtons).toHaveCount(2);
+  await spawnButtons.nth(0).click();
+  await spawnButtons.nth(1).click();
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBe(beforeSpawn + 2);
+  // 復元されたボディのラベルは形状から引かれる(`shape_label_prefix`)ので、
+  // 「球として戻ってきた」等の取り違えはラベルで検出できる。
+  await expect(page.locator("#hierarchy-tree")).toContainText("Compound_");
+  await expect(page.locator("#hierarchy-tree")).toContainText("ConvexMesh_");
+
+  // ⑤ 再スポーンしたボディを実際に走らせてもクラッシュしない(描画・物理の
+  //    両方が復元後の形状で動くこと)。`⏭`はPlayへ入ってからでないと無効。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.fill("#input-step-count", "60");
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
+
+  expect(errors).toEqual([]);
+});
+
+test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体/気体ドメインを要するもの)がUIから追加できる", async ({
+  page,
+}) => {
+  // レビュー指摘(「やり遂げて欲しい」「対応できていますか？出来ていなければ
+  // 対応して」)への対応。PhaseChangeMorph/SphRigid/GridFluidRigid/
+  // BoussinesqBuoyancy/ConvectionLink/PistonGasは、参照する熱ノード・SPH流体・
+  // 格子流体・気体区画をUIから作る手段が無く追加できなかった
+  // (`docs/22-roadmap/03-editor-todo.md`に明記していた既知の欠落)。
+  // Settingsの「ドメイン」パネル(新設)でこれらを先に有効化し、
+  // Add Couplingフォームで6種すべてが実際に追加できることを確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // Box_1 を選択する(Inspector の Add Coupling フォームを開くため)。
+  await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
+  const inspector = page.locator("#inspector-body");
+
+  // ---- ドメインをSettingsから有効化する ----
+  await page.click("#btn-settings");
+  // 熱ノードを1個追加(既定シーンのindex 0とは別、新設ノードはindex 1)。
+  await page.click("#btn-add-thermal-node");
+  await expect(page.locator("#thermal-node-count-display")).toContainText("2");
+  await page.click("#btn-enable-grid-fluid");
+  await page.click("#btn-enable-gas");
+  await page.click("#btn-settings"); // ポップオーバーを閉じる。
+
+  // SPHドメインは既存の「+ 流体」ボタン(スポーンパレット)で有効化する。
+  await addViaMenu(page, "＋ 流体 (SPH 水塊)");
+
+  // フィールドIDは`component_schema`が返す`add_*_coupling`の実引数名
+  // そのもの(`#add-coupling-field-${name}`、B12〜B15でスキーマ駆動フォーム
+  // 化)——以前の`add-coupling-axis-*`/`add-coupling-p1`〜`p6`という
+  // 種別ごとに読み替えていた汎用IDは廃止された。
+  const addCoupling = async (
+    kind: string,
+    fields: Record<string, number | string>,
+  ) => {
+    await page.selectOption("#add-coupling-kind", kind);
+    // `Object.entries`を`Array.forEach`に渡すとコールバックのawaitを待たない
+    // (並行実行される)ため、直列に`page.fill`を呼ぶには明示的なforループが要る。
+    for (const [name, value] of Object.entries(fields)) {
+      await page.fill(`#add-coupling-field-${name}`, String(value));
+    }
+    await page.click("#add-coupling-button");
+  };
+
+  // ① PhaseChangeMorph: body=Box_1, thermal_node=1(新設)、材質は氷/水
+  // (melting_temperature=273.15K/latent_heat_fusion=334000/specific_heat_solid=
+  // 2100)、specific_heat_liquid=4186、initial_mass=1kg、conductance=10W/K、
+  // initial_enthalpy=-50000J(融点未満の固相から開始)。材質もUIから明示的に
+  // 指定できること自体が「縮約させない」の検証点(**残タスク完遂増分**)。
+  await addCoupling("phase_change_morph", {
+    body: 1,
+    thermal_node: 1,
+    melting_temperature: 273.15,
+    latent_heat_fusion: 334000,
+    specific_heat_solid: 2100,
+    specific_heat_liquid: 4186,
+    initial_mass: 1,
+    conductance: 10,
+    initial_enthalpy: -50000,
+  });
+  await expect(inspector.getByText("PhaseChangeMorph", { exact: true })).toBeVisible();
+
+  // ② SphRigid: body=Box_1, radius=0.2m, boundary_points=12。
+  await addCoupling("sph_rigid", { body: 1, radius: 0.2, boundary_points: 12 });
+  await expect(inspector.getByText("SphRigid", { exact: true })).toBeVisible();
+
+  // ③ GridFluidRigid: body=Box_1, half_width=0.3m, half_height=0.3m。
+  await addCoupling("grid_fluid_rigid", {
+    body: 1,
+    half_width: 0.3,
+    half_height: 0.3,
+  });
+  await expect(inspector.getByText("GridFluidRigid", { exact: true })).toBeVisible();
+
+  // ④ BoussinesqBuoyancy: thermal_node=1, ambient_temperature=293.15K,
+  // thermal_expansion_coefficient=3.4e-3(空気の目安値)。bodyを参照しない
+  // 結合なので「Coupling (シーン全体)」に出る。
+  await addCoupling("boussinesq_buoyancy", {
+    thermal_node: 1,
+    ambient_temperature: 293.15,
+    thermal_expansion_coefficient: 0.0034,
+  });
+  await expect(inspector.getByText("BoussinesqBuoyancy", { exact: true })).toBeVisible();
+
+  // ⑤ ConvectionLink: fluid_node=0(既定シーンのノード), surface_node=1(新設),
+  // area=0.01m^2, characteristic_length=0.05m, mode=3(強制対流・平板)、
+  // 流体物性値(空気の目安値)もUIから明示的に指定する(**残タスク完遂増分**、
+  // `ConvectionLink::default()`固定ではないことの検証点)。
+  await addCoupling("convection_link", {
+    fluid_node: 0,
+    surface_node: 1,
+    area: 0.01,
+    characteristic_length: 0.05,
+    mode: 3,
+    fluid_thermal_conductivity: 0.026,
+    kinematic_viscosity: 1.5e-5,
+    prandtl_number: 0.71,
+    thermal_expansion_coefficient: 0,
+  });
+  await expect(inspector.getByText("ConvectionLink", { exact: true })).toBeVisible();
+
+  // ⑥ PistonGas: body=Box_1, axis=(0,1,0), area=0.01m^2, initial_volume=0.001m^3。
+  await addCoupling("piston_gas", {
+    body: 1,
+    axis_x: 0,
+    axis_y: 1,
+    axis_z: 0,
+    area: 0.01,
+    initial_volume: 0.001,
+  });
+  await expect(inspector.getByText("PistonGas", { exact: true })).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
+test("縦串⑤(飛行機の物理): 翼揚力/マグヌス揚力をUIから追加でき、操縦面の舵角を実行時に変更できる", async ({
+  page,
+}) => {
+  // レビュー指摘(「これについては、コア変更してもオッケー」)を受けて実装。
+  // `sim_coupling::BuoyancyDrag::lift`(薄翼理論+マグヌス効果)は物理コア側に
+  // 既に実装済みだったが、Add Couplingフォームでは`None`固定で到達できな
+  // かった——WingLift/MagnusLiftとして解禁する。さらに、Coupling registryは
+  // 元々「追加のみ・実行時パラメータ変更不可」だったため、飛行中に操縦面
+  // (エルロン・エレベーター・ラダー)の舵角を変える手段が無かった——
+  // `Coupling::set_scalar_param`(`CouplingParam::ControlSurfaceDeflection`)+
+  // `Command::SetCouplingParam`という新しい書き換え経路を追加し、Inspectorの
+  // Coupling行に出る「操縦面舵角」欄から実際に操作できることを確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
+  const inspector = page.locator("#inspector-body");
+
+  // フィールドIDは`component_schema`が返す`add_*_coupling`の実引数名
+  // そのもの(B12〜B15でスキーマ駆動フォーム化、上のPhaseChangeMorph等と
+  // 同じ形)。
+
+  // ① WingLift: body=Box_1, chord_local=(1,0,0), span_local=(0,0,1),
+  // wing_area=2m^2, atmosphere_density=1.225, atmosphere_viscosity=1.81e-5。
+  await page.selectOption("#add-coupling-kind", "wing_lift");
+  await page.fill("#add-coupling-field-body", "1");
+  await page.fill("#add-coupling-field-chord_x", "1");
+  await page.fill("#add-coupling-field-chord_y", "0");
+  await page.fill("#add-coupling-field-chord_z", "0");
+  await page.fill("#add-coupling-field-span_x", "0");
+  await page.fill("#add-coupling-field-span_y", "0");
+  await page.fill("#add-coupling-field-span_z", "1");
+  await page.fill("#add-coupling-field-wing_area", "2");
+  await page.fill("#add-coupling-field-atmosphere_density", "1.225");
+  await page.fill("#add-coupling-field-atmosphere_viscosity", "1.81e-5");
+  await page.click("#add-coupling-button");
+  await expect(inspector.getByText("BuoyancyDrag", { exact: true }).first()).toBeVisible();
+
+  // ② MagnusLift: body=Box_1(種別を切り替えても選択中ボディが既定値のまま
+  // 再セットされる、`initialApplyFieldValue`のdoc参照)、radius=0.3,
+  // atmosphere_density=1.225, atmosphere_viscosity=1.81e-5。
+  await page.selectOption("#add-coupling-kind", "magnus_lift");
+  await page.fill("#add-coupling-field-radius", "0.3");
+  await page.fill("#add-coupling-field-atmosphere_density", "1.225");
+  await page.fill("#add-coupling-field-atmosphere_viscosity", "1.81e-5");
+  await page.click("#add-coupling-button");
+  await expect(inspector.getByText("BuoyancyDrag", { exact: true })).toHaveCount(2);
+
+  // ③ 操縦面舵角欄がWingLift/MagnusLiftの両方(いずれもBuoyancyDrag)の行に
+  // 出ており、値を変更してもクラッシュしないこと(MagnusLiftには効かない
+  // ——`set_scalar_param`が`false`を返して無言で無視される、モジュールdoc
+  // 参照——が、それ自体はエラーにならない)。
+  const deflectionInputs = page.locator('input[id^="coupling-deflection-"]');
+  await expect(deflectionInputs).toHaveCount(2);
+  await deflectionInputs.nth(0).fill("15");
+  await deflectionInputs.nth(0).dispatchEvent("change");
+  await deflectionInputs.nth(1).fill("-10");
+  await deflectionInputs.nth(1).dispatchEvent("change");
+
+  // ④ N step進めても(舵角適用込みで)クラッシュしないこと。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.fill("#input-step-count", "30");
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
+
+  expect(errors).toEqual([]);
+});
+
+test("検証タブ: 合格基準がシーンJSONスキーマ(pass_criteria)へ往復する", async ({ page }) => {
+  // **残タスク完遂増分**(レビュー指摘「勝手に対象外にするのは禁止令発令中！！！」
+  // への対応): 合格基準(probe index・比較演算子・しきい値)は`Scenario::
+  // pass_criteria`としてシーンJSONスキーマの一部になった。このタブがBase scene
+  // JSONの`pass_criteria`をフォームへ読み込み、「基準をシーンJSONへ書き込む」で
+  // フォームの内容を逆にJSONへ書き戻せることを確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  await page.click('.project-tab[data-tab="validation"]');
+  const baseJsonArea = page.locator("#validation-base-json");
+  await expect(baseJsonArea).toBeVisible();
+
+  const probeIndexInput = page.locator('input[title*="probe index"]');
+  const thresholdInputForRead = page.locator('input[title="合格基準のしきい値(probeの最終値と比較する)"]');
+
+  // ① Base scene JSONへ直接`pass_criteria`を貼り付けて`change`イベントを
+  // 発火させると(テキストエリアを手で編集/貼り付けした状況の再現)、
+  // フォームの3フィールドへ反映される。
+  const seeded = await baseJsonArea.inputValue();
+  const seededObj = JSON.parse(seeded);
+  seededObj.pass_criteria = [{ probe_index: 3, operator: "le", threshold: 2.5 }];
+  await baseJsonArea.fill(JSON.stringify(seededObj));
+  await baseJsonArea.dispatchEvent("change");
+  await expect(probeIndexInput).toHaveValue("3");
+  await expect(thresholdInputForRead).toHaveValue("2.5");
+
+  // ② フォームの値を変更してから書き込みボタンを押すと、Base scene JSONの
+  // `pass_criteria`が更新される。
+  await probeIndexInput.fill("5");
+  await thresholdInputForRead.fill("7.25");
+  await page.click('button:has-text("基準をシーンJSONへ書き込む")');
+
+  const written = JSON.parse(await baseJsonArea.inputValue());
+  expect(written.pass_criteria).toHaveLength(1);
+  expect(written.pass_criteria[0].probe_index).toBe(5);
+  expect(written.pass_criteria[0].threshold).toBe(7.25);
+
+  expect(errors).toEqual([]);
+});
+
+test("D1: スケッチ→押し出しで剛体をUIから作れ、走らせてもクラッシュしない", async ({
+  page,
+}) => {
+  // D1(スケッチ・押し出し)の受け入れテスト。既存の「複合形状(L字)/凸包
+  // メッシュがUIから作れ…」テストと同じ形で、**UIの操作だけ**で新しい形状
+  // JSONタグ(`mesh`)を通した剛体が実際に作れることを確認する。
+  //
+  // ここが守るのは配線の健全性(ツール切替 → 構築平面へのレイキャスト →
+  // 確定 → wasmの`sketch_extrude_shape_json` → `spawn_shape_json` →
+  // Hierarchy/描画)。ブーリアン合成そのものの数値的な正しさは Rust 側の
+  // 解析的なテスト(`sim_mechanics::sketch`)が担保しており、ここでは重ねない。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const rowCount = () => page.locator("#hierarchy-tree .tree-body").count();
+  const before = await rowCount();
+
+  // ① スケッチツールへ切り替えるとパネルが開く(他のツールでは閉じている)。
+  await expect(page.locator("#sketch-panel")).toBeHidden();
+  await page.click("#btn-tool-sketch");
+  await expect(page.locator("#sketch-panel")).toBeVisible();
+
+  const canvas = page.locator("canvas").first();
+  const box = (await canvas.boundingBox())!;
+  // 構築平面は地面(y=0)。画面の下半分は必ず地面に当たる(既定カメラは
+  // (6,4,10) から (0,1.5,0) を見下ろしている)。**画面左下は避ける**
+  // ——スケッチパネル自体がそこに浮いており、重なった座標のクリックは
+  // キャンバスではなくパネルへ吸われて頂点が置かれない。
+  const clickAt = async (fx: number, fy: number) => {
+    await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy);
+    await page.waitForTimeout(30);
+  };
+
+  // ② 地面を4回クリックして四角形の点列を作る。
+  for (const [fx, fy] of [
+    [0.5, 0.58],
+    [0.72, 0.58],
+    [0.72, 0.78],
+    [0.5, 0.78],
+  ] as [number, number][]) {
+    await clickAt(fx, fy);
+  }
+  await expect(page.locator("#sketch-status")).toContainText("作図中の点 4");
+
+  // ③ 「確定」で1枚のプロファイルになる。
+  await page.click("#btn-sketch-confirm");
+  await expect(page.locator("#sketch-status")).toContainText(
+    "プロファイル 1 枚",
+  );
+  await expect(page.locator("#sketch-status")).toContainText("作図中の点 0");
+
+  // ④ 深さを指定して押し出すと、Hierarchy にボディが1つ増える。形状は
+  //    `mesh`タグ → Rust側の近似凸分解 → ConvexMesh(凸)か Compound(凹)。
+  await page.fill("#input-sketch-depth", "0.4");
+  await page.click("#btn-sketch-extrude");
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBe(before + 1);
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText(
+    /ConvexMesh_|Compound_/,
+  );
+  // 押し出した後はスケッチが片付いている。
+  await expect(page.locator("#sketch-status")).toContainText(
+    "プロファイル 0 枚",
+  );
+
+  // ⑤ **ブーリアン(減算)**: 土台の四角形を確定 → 「減算」に切り替え、その
+  //    内側に小さい四角形を描いて押し出す。断面に穴が空くので、分解結果は
+  //    必ず Compound(凸パーツ複数)になる——`mesh`タグが`convex_mesh`と
+  //    違う意味を持つ(面情報から凹みが復元される)ことがUI経由で分かる。
+  for (const [fx, fy] of [
+    [0.52, 0.55],
+    [0.88, 0.55],
+    [0.88, 0.8],
+    [0.52, 0.8],
+  ] as [number, number][]) {
+    await clickAt(fx, fy);
+  }
+  await page.click("#btn-sketch-confirm");
+  await page.selectOption("#select-sketch-op", "subtract");
+  for (const [fx, fy] of [
+    [0.63, 0.63],
+    [0.77, 0.63],
+    [0.77, 0.72],
+    [0.63, 0.72],
+  ] as [number, number][]) {
+    await clickAt(fx, fy);
+  }
+  await expect(page.locator("#sketch-status")).toContainText(
+    "プロファイル 1 枚 / 作図中の点 4",
+  );
+  // 「押し出し」は描きかけの点列を自動で確定してから走る。
+  await page.click("#btn-sketch-extrude");
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBe(before + 2);
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText(
+    "Compound_",
+  );
+
+  // ⑥ 実際に走らせる——押し出したメッシュが物理(接触生成・質量特性)と
+  //    描画の両方で例外を出さずに動くこと。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.fill("#input-step-count", "60");
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
 
   expect(errors).toEqual([]);
 });

@@ -100,7 +100,7 @@ export async function enterPlayPaused(page) {
   await page.waitForTimeout(120);
   return await page.evaluate(() => ({
     playButton: document.getElementById("btn-play").textContent,
-    step: Number(window.__world.step_count()),
+    step: Number(window.__world.read_component("step_count", "")),
   }));
 }
 
@@ -119,8 +119,8 @@ export function probes(page) {
   return page.evaluate(() => {
     const w = window.__world;
     const out = [];
-    for (let i = 0; i < w.imported_probe_count(); i += 1) {
-      out.push({ label: w.imported_probe_label_at(i), h: Array.from(w.imported_probe_history_f64(i)) });
+    for (let i = 0; i < Number(w.read_component("imported_probe_count", "")); i += 1) {
+      out.push({ label: w.read_component("imported_probe_label_at", String(i)), h: Array.from(w.imported_probe_history_f64(i)) });
     }
     return out;
   });
@@ -128,11 +128,11 @@ export function probes(page) {
 
 export function worldState(page) {
   return page.evaluate(() => ({
-    t: window.__world.time(),
-    step: Number(window.__world.step_count()),
-    dt: window.__world.dt(),
-    hash: window.__world.state_hash(),
-    residual: window.__world.energy_residual(),
+    t: Number(window.__world.read_component("time", "")),
+    step: Number(window.__world.read_component("step_count", "")),
+    dt: Number(window.__world.read_component("dt", "")),
+    hash: window.__world.read_component("state_hash", ""),
+    residual: Number(window.__world.read_component("energy_residual", "")),
   }));
 }
 

@@ -43,25 +43,38 @@
 //! ——`step()`は「pre 相(全結合)→ 全ドメインsub-step → post 相(全結合)」の順に走る。
 //! 各結合がどちらの相に載るかは`sim-coupling`側の実装が決める(既定は post、
 //! 各モジュールdoc参照)。登録済み`Coupling`(`add_coupling`)を
-//! 自動適用するレジストリも実装済み(`couplings`フィールド、`apply_coupling`のdoc参照)。シーンJSON`couplings`セクションからの自動解決・排他結合検査
-//! (`sim-coupling::validate_exclusive_couplings`)との接続は未実装(`scenario`モジュール
-//! doc参照)。`quantum`/`statistical`は
+//! 自動適用するレジストリも実装済み(`couplings`フィールド、`apply_coupling`のdoc参照)。
+//! シーンJSON`couplings`セクションからの自動解決・排他結合検査
+//! (`sim-coupling::validate_exclusive_couplings`)も`from_scenario`に接続済み
+//! (`scenario`モジュールdoc参照)。`quantum`/`statistical`は
 //! 専用シーンでのみ有効化する設計方針のため見送る。`gas`
 //! (`sim_thermal::GasCompartment`、断熱圧縮の`PistonGas`結合が使う)・`conduction_rod`
 //! (`sim_thermal::ConductionRod1D`、D16「熱伝導レース」が使う)は`Solver`を実装しない —
 //! `step()`の自動走査対象ではなく、呼び出し側が
 //! `apply_coupling`/`conduction_rod_mut().step(dt)`を明示的に呼んで状態を進める。
 
+pub mod ecs;
+
 mod demos;
+mod export;
 mod integration_scenarios;
 mod orchestrator;
 mod overlap;
+mod raw_bytes;
 mod raycast;
 mod scenario;
 
+pub use export::{shape_to_shape_json, to_scenario};
+pub use raw_bytes::{
+    decode_base64, decode_bool_bitpacked_base64, decode_f64_le_base64, decode_i8_base64,
+    decode_vec3_le_base64, encode_base64, encode_bool_bitpacked_base64, encode_f64_le_base64,
+    encode_f64_le_base64_finite, encode_i8_base64, encode_vec3_le_base64, RawBytesError,
+};
 pub use scenario::{
-    run_headless_scenario, BodyScenarioDesc, HeadlessRunResult, MaterialOverride,
-    PredictionPromptJson, Scenario, SceneError, ShapeJson, WorldScenarioOptions,
+    build_quantum_1d_wave_from_raw, build_quantum_2d_wave_from_raw, run_headless_scenario,
+    shape_json_to_shape, BodyScenarioDesc, CompoundChildJson, HeadlessRunResult, MaterialOverride,
+    PassCriterionJson, PassCriterionOperator, PhaseChangeOverrideJson, PredictionPromptJson,
+    Scenario, SceneError, ShapeJson, WorldScenarioOptions,
 };
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};
@@ -172,6 +185,38 @@ pub enum Command {
     /// を設定する。broadphase で双方向 AND を取るため、片側の変更だけで
     /// ペアを落とせる。
     SetCollisionFilter { body: BodyId, group: u32, mask: u32 },
+    /// 登録済みCoupling(`World::couplings()`が返す`CouplingInfo::index`)へ
+    /// 実行時パラメータを設定する(**残タスク完遂の縦串⑤増分**、操縦面の
+    /// 舵角変更が最初の用途)。Coupling registryは元々「追加のみ・実行時
+    /// パラメータ変更不可」だったため、この Command がその唯一の書き換え経路。
+    /// 範囲外indexや対応しないパラメータは無言で無視する(他のCommandの
+    /// `is_valid`ガードと同じ「無効な入力は無視する」方針)。
+    SetCouplingParam {
+        coupling_index: usize,
+        param: sim_coupling::CouplingParam,
+        value: f64,
+    },
+    /// 重力場(`sim_mechanics::GravityField`)を差し替える(**重力場の抽象化増分**)。
+    ///
+    /// **なぜCommandにしたか**: 重力の変更は以降の全stepの結果を変える。
+    /// `command_log()`に残らない変更は、同じシーン・同じseed・同じログから
+    /// 再生しても軌跡が一致しない——**黙ってリプレイされない変更は決定論のバグ**
+    /// である(モジュールdoc「実行中の変更はcreate系と本コマンドの2経路のみ」)。
+    ///
+    /// **既存の状況を正直に書いておく**: 移行前から存在する
+    /// `MechanicsSolver::set_gravity`/`set_gravity_direction`への直接呼び出し
+    /// (`World::set_environment`と`sim-wasm`の`set_gravity`/
+    /// `set_gravity_direction` kind)は**Commandを経由せず即時に効き、
+    /// この`command_log()`には残らない**。現状それらの記録を担っているのは
+    /// フロントエンド側の別台帳(`demo/src/main.ts`の`CommandLogEntry::
+    /// SetGravity`/`SetGravityDirection`、Replayタブが読む)であり、
+    /// **物理コアだけを使う経路(ヘッドレス実行・Rust APIの直接利用)では
+    /// 記録されない**という穴が残っている。本増分ではそこには手を付けていない
+    /// ——Command化すると適用が1step遅れる挙動変更になり、既にその即時性に
+    /// 依存している既存フロントエンド(本増分の対象外)を壊すため。
+    /// 新しい経路(`sim-wasm`の`push_set_gravity_field` kind)だけが、
+    /// フロントエンドに依存せず物理コア側で記録される。
+    SetGravityField { field: sim_mechanics::GravityField },
 }
 
 /// `World::energy_report`の1ドメイン分(**群3で追加**、`energy_report`のdoc参照)。
@@ -318,6 +363,7 @@ pub enum JointKind {
     Distance,
     Ball,
     Slider,
+    Wheel,
     HingeMotor,
 }
 
@@ -327,6 +373,7 @@ impl JointKind {
             JointKind::Distance => "DistanceJoint",
             JointKind::Ball => "BallJoint",
             JointKind::Slider => "SliderJoint",
+            JointKind::Wheel => "WheelJoint",
             JointKind::HingeMotor => "HingeMotorPd",
         }
     }
@@ -351,11 +398,13 @@ pub struct JointInfo {
     pub body_b: Option<usize>,
     pub anchor_a: Vec3,
     pub anchor_b: Vec3,
-    /// 軸を持つ種別(Slider/HingeMotor)のみ`Some`。
+    /// 軸を持つ種別(Slider/HingeMotor/Wheel、Wheelは操舵反映前の`axle_axis`)
+    /// のみ`Some`。
     pub axis: Option<Vec3>,
-    /// `DistanceJoint`の拘束長。
+    /// `DistanceJoint`の拘束長、または`WheelJoint`のサスペンション自然長。
     pub length: Option<f64>,
-    /// モータの目標角(`HingeMotorPd`のみ)。
+    /// モータの目標角(`HingeMotorPd`)、または`WheelJoint`のモータ角速度
+    /// (`motor_max_torque > 0`の時のみ`Some`、駆動なしの車輪では`None`)。
     pub motor_target: Option<f64>,
     /// 無効化されているか(`BallJoint::disabled`)。
     pub disabled: bool,
@@ -382,18 +431,40 @@ pub struct CouplingInfo {
     pub voltage_sources: Vec<usize>,
 }
 
-/// 任意の観測量を毎stepサンプルして`history`(`RingBuffer`)に積む軽量プローブ
+/// 任意の観測量を毎stepサンプルして`history`に積む軽量プローブ
 /// (設計docs/20-integration/04-world-api.md §2.1「測って遊ぶの中心機能」)。
+///
+/// **履歴は可変長(切り詰めない)**。以前は固定容量の`RingBuffer`
+/// (`DEFAULT_PROBE_CAPACITY`、600 → QA不具合9で6000へ拡大)で、容量を超えると
+/// **無言で先頭が捨てられて**いた。窓を広げてもこれは先延ばしにしかならない
+/// ——長時間走らせれば必ず当たるし、当たったことは呼び出し側に一切通知されず、
+/// 「グラフの左端が実は0秒ではない」という形で静かに誤読を生む。
+/// **測ったデータを黙って捨てない**ほうを不変条件に選び、上限を外した。
+///
+/// 代わりに使用量を問い合わせる口を用意してある(`Probe::len`・
+/// `World::probe_history_bytes_estimate`)。呼び出し側(将来のフロントエンド)は
+/// これを見て自分で決めた軟らかい上限に近づいたら警告を出せる——
+/// **こちら側で勝手に上限を課したり捨てたりはしない**。
 #[derive(Clone)]
 pub struct Probe {
     pub target: ProbeTarget,
-    history: sim_math::RingBuffer<f64>,
+    history: Vec<f64>,
 }
 
 impl Probe {
     /// 古い順(サンプル順)の観測履歴。
     pub fn history(&self) -> impl Iterator<Item = &f64> {
         self.history.iter()
+    }
+
+    /// 蓄積済みサンプル数(= このプローブが登録されてからの`step()`回数)。
+    /// `World::probe_history_bytes_estimate`の内訳を見たい呼び出し側が使う。
+    pub fn len(&self) -> usize {
+        self.history.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.history.is_empty()
     }
 }
 
@@ -483,14 +554,40 @@ pub struct World {
     ledger: Option<EnergyLedger>,
     /// `BodyId` の世代管理(`RigidBodySet` のインデックスに対応、モジュールdoc参照)。
     generations: Vec<u32>,
+    /// `remove_body`で削除済みのスロットか(`generations`と対、`body_ids()`が
+    /// 生存ボディだけを列挙するのに使う)。`RigidBodySet`のスロット自体は
+    /// `remove_body`のdoc参照の通り解放されない(`BodyType::Static`化+遠方退避)ため、
+    /// 座標だけからは削除済みかどうかを判別できない——`World → Scenario`逆写像
+    /// (`export`モジュール)が削除済みの亡霊ボディを書き出さないために追加した。
+    removed: Vec<bool>,
     /// `push_command`で積まれ、次`step()`の先頭で適用されるコマンドの待ち行列
     /// (`Command`のdoc参照)。
     pending_commands: Vec<Command>,
     /// 適用済みコマンドの記録(`step_count`と対、リプレイ検証用、設計§2「記録されリプレイ
     /// 可能」)。
     command_log: Vec<(u64, Command)>,
-    /// 登録済みプローブ(`Probe`のdoc参照)。`step()`末尾で毎step全プローブをサンプルする。
-    probes: Vec<Probe>,
+    /// 登録済みプローブの実体(**D2 汎用ECS移行増分**、`ecs`モジュールdoc参照)。
+    /// 以前はここが単なる`Vec<Probe>`だった——プローブは「多数の均質な独立インスタンスを
+    /// 毎step同じロジックで処理する」という、`World`の中で最もECSに素直に載る対象
+    /// だったため、`Vec<T>`+手書きループのアグリゲート構造をECSへ置き換える最初の
+    /// 実移行先に選んだ(選定理由の全体は`ecs`モジュールdoc参照——剛体運動状態
+    /// (`sim_mechanics::RigidBodySet`)も候補だったが、衝突検出・ジョイント・
+    /// Coupling・wasm数値アクセサが生indexで密結合しており本増分のスコープを
+    /// 大幅に超える)。各プローブは1エンティティ+`Probe`コンポーネント1つ
+    /// (`target`と採取済み`history`を1個にまとめたまま)として持つ——
+    /// `World::probe`が`&Probe`をそのまま返す既存の公開シグネチャを保つため、
+    /// `ProbeTarget`/`history`を別コンポーネントへ分割はしていない(ECSコア自体の
+    /// 複数コンポーネントクエリ能力は`ecs`モジュールの単体テストで別途検証済み)。
+    /// `step()`末尾で毎step全プローブをサンプルする(`ecs::Schedule`経由の
+    /// システムとして実装、該当箇所のdoc参照)。
+    probes_ecs: ecs::EcsWorld,
+    /// `add_probe`が返す公開ハンドル(`usize`)→`probes_ecs`側の世代付き`Entity`の対応。
+    /// プローブには削除経路が無く(`probe_history_len`等のdoc「削除経路が無いため
+    /// 到達しない想定」参照)本数が減ることが無いので、この対応は常に
+    /// 「index i の要素はi番目に登録されたプローブ」という以前の`Vec<Probe>`の
+    /// 添字とビット単位で一致する——`probe`/`probe_count`等の外部から見た挙動は
+    /// 移行前と完全に同一(内部表現だけの変更)。
+    probe_entities: Vec<ecs::Entity>,
     /// `Command::Grab`が作った`BallJoint`の、剛体index→`mechanics.ball_joints`
     /// indexの対応(`Command::MoveGrab`/`Release`が同じ剛体を再度参照するために使う、
     /// `Command`のdoc参照)。1剛体につき同時に1つのgrabのみを想定する(再`Grab`は
@@ -527,6 +624,12 @@ pub struct World {
     /// Astroレジーム分岐が毎step終端でこの設定を見て閾値判定する。切替が起きると`None`に
     /// 戻し(1回のみ発火、再トリガ防止)、以後は通常のLocalレジーム挙動に戻る。
     auto_regime_switch: Option<AutoRegimeSwitchConfig>,
+    /// **著者向けメタデータ**(`Scenario::prediction_prompts`/`pass_criteria`、
+    /// `author_metadata`アクセサのdoc参照)。**物理には一切影響しない**——
+    /// `step()`も`state_hash()`もこの2つに触れない。シーンJSONから読み込んだ値を
+    /// そのまま抱えておくためだけの場所である。
+    prediction_prompts: Vec<scenario::PredictionPromptJson>,
+    pass_criteria: Vec<scenario::PassCriterionJson>,
 }
 
 /// `World::configure_auto_regime_switch`が使う自動切替の設定(モジュールdoc「全ドメイン
@@ -552,7 +655,10 @@ pub struct AutoRegimeSwitchConfig {
 }
 
 /// `event_log`の容量(設計は`subscribe`/`drain_events`の容量を規定しないため、
-/// `Probe`の`DEFAULT_PROBE_CAPACITY`(`scenario`モジュール)と同オーダーの値を採用)。
+/// UIが1フレームで捌ける件数の同オーダーの値を採用)。**`Probe`の履歴とは
+/// 事情が違う**——あちらは「測ったデータ」なので切り詰めをやめた(`Probe`の
+/// doc参照)が、こちらは通知であり、消費されなかった古い通知を無限に
+/// 溜め続ける意味は無い。
 const EVENT_LOG_CAPACITY: usize = 1024;
 
 const STREAM_DIAG: u64 = 0;
@@ -592,6 +698,104 @@ fn run_domain_substeps<S: Solver>(
     capped
 }
 
+/// UIのAdd Component(設計docs/23-frontend/01-editor.md §1.3)や
+/// `sim-wasm`のschema/read/apply(統合エディタ実装計画、縦串①)が任意の
+/// ジョイントを追加するための記述(設計 docs/20-integration/04-world-api.md
+/// §2 `create_joint(desc: JointDesc) -> JointId`)。`scenario::JointJson`と
+/// 同じ5種だが、名前解決を経ず`BodyId`を直接使う点が違う——シーンJSON読み込み
+/// (`from_scenario`)は文字列名からボディを引く必要があるが、実行中の
+/// Inspector・wasm境界は既に`BodyId`を持っているため、名前解決を経由させる
+/// 必要が無い。
+#[derive(Clone, Debug)]
+pub enum JointDesc {
+    Distance {
+        body_a: BodyId,
+        anchor_a: Vec3,
+        body_b: Option<BodyId>,
+        anchor_b: Vec3,
+        length: f64,
+    },
+    Ball {
+        body_a: BodyId,
+        anchor_a: Vec3,
+        body_b: Option<BodyId>,
+        anchor_b: Vec3,
+    },
+    Slider {
+        body_a: BodyId,
+        anchor_a: Vec3,
+        axis: Vec3,
+        body_b: Option<BodyId>,
+        anchor_b: Vec3,
+    },
+    Wheel {
+        chassis: BodyId,
+        wheel: BodyId,
+        anchor_chassis: Vec3,
+        rest_length: f64,
+        suspension_axis: Vec3,
+        axle_axis: Vec3,
+        frequency: f64,
+        damping_ratio: f64,
+        steer_angle: f64,
+        motor_speed: f64,
+        motor_max_torque: f64,
+    },
+    HingeMotor {
+        body: BodyId,
+        axis: Vec3,
+        /// `None`なら現在の`body`の姿勢を基準に取る(`HingeMotorPd::new`と同じ)。
+        reference_rotation: Option<sim_math::Quat>,
+        theta_target: f64,
+        kp: f64,
+        kd: f64,
+        torque_max: f64,
+        limit: Option<(f64, f64)>,
+    },
+}
+
+/// 環境(重力・大気・水域・周囲温度)をまとめて記述する(設計
+/// docs/20-integration/04-world-api.md §2「重力ベクトル・大気・水域・
+/// 周囲温度を`EnvironmentDesc`として第一級にする」)。
+///
+/// **レビュー指摘(「見送らず対応すること」)を受けて重力の向き
+/// (`gravity_direction`)も追加した**——`sim_mechanics::MechanicsSolver::
+/// gravity_direction`のdocが示すとおり、影響範囲は自由体への直接の重力
+/// 積分とポテンシャルエネルギー計算のみ(浮力・大気抗力は向きに依存しない、
+/// `sim-fluid`crateの水面モデルが水平面固定であることに由来する既存の
+/// 制約で、本増分の対象外)。
+///
+/// **重力場の抽象化増分**: `gravity_field`を追加した。`Some`ならそちらが
+/// 優先され、`None`なら従来どおり`gravity`+`gravity_direction`から一様場を
+/// 組み立てる——シーンJSONの`world.gravity_field`と**まったく同じ優先規則**
+/// (`scenario::WorldScenarioOptions::gravity_field`参照)。表現が二重になるが、
+/// 既存の呼び出し側が`gravity`/`gravity_direction`だけを読み書きし続けられる
+/// ことを優先した。`environment()`は常に`gravity_field: Some(..)`を埋めるので、
+/// 読んでそのまま書き戻す往復では非一様な場も無損失で保たれる。
+///
+/// **流体領域の一般化に伴い`Copy`ではなくなった**——`fluids`が`Vec`になったため。
+#[derive(Clone, Debug)]
+pub struct EnvironmentDesc {
+    /// 重力の大きさ [m/s^2](非`Uniform`な場では0.0、
+    /// `sim_mechanics::MechanicsSolver::gravity`のdoc参照)。
+    /// `gravity_field`が`Some`のときは無視される。
+    pub gravity: f64,
+    /// 重力の向き(単位ベクトルとして正規化される、既定は下向き`(0,-1,0)`)。
+    /// `gravity_field`が`Some`のときは無視される。
+    pub gravity_direction: sim_math::Vec3,
+    /// 重力場そのもの(`sim_mechanics::GravityField`)。`Some`なら
+    /// `gravity`/`gravity_direction`より優先する(構造体docの優先規則)。
+    pub gravity_field: Option<sim_mechanics::GravityField>,
+    pub atmosphere: Option<sim_fluid::Atmosphere>,
+    /// 流体領域一覧(`sim_mechanics::MechanicsSolver::fluids`をそのまま写す)。
+    /// **移行前は`water: Option<StaticWaterRegion>`**で、水域は高々1つだった。
+    /// `set_environment`はこの`Vec`で丸ごと置き換える(空なら水域なし)。
+    pub fluids: Vec<sim_fluid::FluidRegion>,
+    /// `None`なら熱ドメインが無効(`enable_thermal`未呼び出し)、または
+    /// 変更しない。
+    pub ambient_temperature: Option<f64>,
+}
+
 impl World {
     pub fn new(options: WorldOptions) -> World {
         World {
@@ -619,16 +823,91 @@ impl World {
             events: EventQueue::new(),
             ledger: None,
             generations: Vec::new(),
+            removed: Vec::new(),
             pending_commands: Vec::new(),
             command_log: Vec::new(),
-            probes: Vec::new(),
+            probes_ecs: ecs::EcsWorld::new(),
+            probe_entities: Vec::new(),
             grab_joints: std::collections::HashMap::new(),
             event_log: sim_math::RingBuffer::new(EVENT_LOG_CAPACITY),
             couplings: Vec::new(),
             time_regime: sim_astro::TimeRegime::Local { steps_per_frame: 1 },
             frames: sim_core::FrameTree::new(),
             auto_regime_switch: None,
+            prediction_prompts: Vec::new(),
+            pass_criteria: Vec::new(),
         }
+    }
+
+    /// 予測→実験ミニパネルのヒント(`Scenario::prediction_prompts`)。
+    ///
+    /// **なぜ`World`が持つのか**: この2つ(と`pass_criteria`)は長らく
+    /// 「`from_scenario`は読まない・`to_scenario`は常に空を返す」だった。
+    /// つまり**エディタでシーンを保存するたびに消えていた**——手で
+    /// `pass_criteria`を書いたシーンを読み込み、`export_scene_json`で書き戻すと
+    /// 検証タブの合格基準が丸ごと落ちる。物理に影響しないことと、
+    /// 実行時状態として保持しなくてよいことは別の話である。
+    ///
+    /// **物理から完全に隔離されている**: `step()`はこのフィールドを読まないし、
+    /// `state_hash()`にも混ざらない(決定論replayに影響しない)。`Clone`
+    /// (=`snapshot`/`restore`)には素直について回る。
+    pub fn prediction_prompts(&self) -> &[scenario::PredictionPromptJson] {
+        &self.prediction_prompts
+    }
+
+    /// 検証タブの合格基準(`Scenario::pass_criteria`)。`prediction_prompts`の
+    /// doc参照(同じ扱い)。
+    pub fn pass_criteria(&self) -> &[scenario::PassCriterionJson] {
+        &self.pass_criteria
+    }
+
+    /// 著者向けメタデータを差し替える(`prediction_prompts`のdoc参照)。
+    /// `World::append_scenario_bodies`がシーンJSONから読んだ値を入れるほか、
+    /// エディタが編集した結果を書き戻す口としても使う。
+    pub fn set_author_metadata(
+        &mut self,
+        prediction_prompts: Vec<scenario::PredictionPromptJson>,
+        pass_criteria: Vec<scenario::PassCriterionJson>,
+    ) {
+        self.prediction_prompts = prediction_prompts;
+        self.pass_criteria = pass_criteria;
+    }
+
+    /// 著者向けメタデータを末尾へ追加する(`append_scenario_bodies`が使う——
+    /// あちらは実行中ワールドへの「追加」なので、既存のシーンのメタデータを
+    /// 消してはならない)。
+    ///
+    /// `probe_index`は**取り込むシーンの`probes`配列内の位置**なので、
+    /// 既に登録済みのプローブ本数(`probe_offset`)ぶんずらしてから積む——
+    /// `add_scenario_probes`が同じオフセットで末尾へ追加するため、これで
+    /// 両者の指す先が一致する。新規構築(`from_scenario`、プローブ0本)なら
+    /// オフセット0で恒等になり、往復は無損失である。
+    pub fn append_author_metadata(
+        &mut self,
+        prediction_prompts: &[scenario::PredictionPromptJson],
+        pass_criteria: &[scenario::PassCriterionJson],
+        probe_offset: usize,
+    ) {
+        for p in prediction_prompts {
+            self.prediction_prompts
+                .push(scenario::PredictionPromptJson {
+                    question: p.question.clone(),
+                    probe_index: p.probe_index + probe_offset,
+                    expected_value: p.expected_value,
+                });
+        }
+        for c in pass_criteria {
+            self.pass_criteria.push(scenario::PassCriterionJson {
+                probe_index: c.probe_index + probe_offset,
+                operator: c.operator,
+                threshold: c.threshold,
+            });
+        }
+    }
+
+    /// 登録済みプローブの本数(`append_author_metadata`の`probe_offset`に使う)。
+    pub fn probe_count(&self) -> usize {
+        self.probe_entities.len()
     }
 
     /// 現在のレジーム(設計docs/20-integration/06-regime-switching.md §2)。
@@ -703,7 +982,9 @@ impl World {
 
         if self.is_valid(config.local_body) {
             let index = config.local_body.index as usize;
-            self.mechanics.bodies.position[index] = local_position;
+            self.mechanics
+                .bodies
+                .set_origin_position(index, local_position);
             self.mechanics.bodies.linear_velocity[index] = local_velocity;
             self.mechanics.bodies.still_time[index] = 0.0;
             self.mechanics.bodies.asleep[index] = false;
@@ -714,16 +995,46 @@ impl World {
 
     /// プローブを登録する(`Probe`のdoc参照)。返すハンドルは`probe`/`probe_history`が
     /// 使う(現時点では単なるベクタindex、`Vec`が縮まないため安定)。
-    pub fn add_probe(&mut self, target: ProbeTarget, capacity: usize) -> usize {
-        self.probes.push(Probe {
-            target,
-            history: sim_math::RingBuffer::new(capacity),
-        });
-        self.probes.len() - 1
+    ///
+    /// **容量引数は取らない**(`Probe`のdoc参照)——履歴は可変長で、
+    /// 切り詰めは起こらない。
+    pub fn add_probe(&mut self, target: ProbeTarget) -> usize {
+        let entity = self.probes_ecs.spawn();
+        self.probes_ecs.insert(
+            entity,
+            Probe {
+                target,
+                history: Vec::new(),
+            },
+        );
+        self.probe_entities.push(entity);
+        self.probe_entities.len() - 1
     }
 
     pub fn probe(&self, handle: usize) -> Option<&Probe> {
-        self.probes.get(handle)
+        let entity = *self.probe_entities.get(handle)?;
+        self.probes_ecs.get::<Probe>(entity)
+    }
+
+    /// 指定プローブの蓄積済みサンプル数(`Probe::len`の素通し、
+    /// 未登録ハンドルなら`None`)。
+    pub fn probe_history_len(&self, handle: usize) -> Option<usize> {
+        self.probe(handle).map(|p| p.len())
+    }
+
+    /// 全プローブ履歴が占めるメモリの概算[byte](`f64`×総サンプル数)。
+    ///
+    /// **上限を課さない代わりの観測手段**(`Probe`のdoc参照)。
+    /// `Vec`の予約分(容量-長さ)は数えない概算だが、桁を誤らせるほどの差は
+    /// 出ない(`Vec`の伸長は倍々なので最悪2倍)。呼び出し側はこれを見て
+    /// **自分で決めた軟らかい上限**に近づいたら警告できる——
+    /// `World`側が勝手に捨てることは無い。
+    pub fn probe_history_bytes_estimate(&self) -> usize {
+        self.probes_ecs
+            .iter::<Probe>()
+            .map(|(_, p)| p.len())
+            .sum::<usize>()
+            * std::mem::size_of::<f64>()
     }
 
     /// `target`が指す観測量の現在値を読む(`step()`末尾の毎stepサンプルと同じロジック)。
@@ -984,6 +1295,25 @@ impl World {
                         // フィルタ変更で新たに触れるようになった相手を拾うため、
                         // 静止仮定を解除する(`set_shape` と同じ理由)。
                         self.mechanics.bodies.asleep[body.index as usize] = false;
+                    }
+                }
+                Command::SetCouplingParam {
+                    coupling_index,
+                    param,
+                    value,
+                } => {
+                    if let Some(coupling) = self.couplings.get_mut(coupling_index) {
+                        coupling.set_scalar_param(param, value);
+                    }
+                }
+                Command::SetGravityField { field } => {
+                    // 重力が変われば、静止仮定で眠っている剛体も動き出しうる。
+                    // `SetCollisionFilter`等と同じ理由で全Dynamic剛体を起こす
+                    // (起こさないと`sleep::update_sleep_state`が力適用・速度積分
+                    // ごと止めたままになり、新しい重力場が効かない)。
+                    self.mechanics.set_gravity_field(field);
+                    for i in 0..self.mechanics.bodies.len() {
+                        self.mechanics.bodies.asleep[i] = false;
                     }
                 }
             }
@@ -1274,6 +1604,26 @@ impl World {
         &mut self.clock
     }
 
+    /// 中央PRNG(`rng`フィールド)の**現在の内部状態**
+    /// (`sim_math::SimRngState`のdoc参照)。
+    ///
+    /// **なぜ`seed`ではないのか**: `WorldOptions::seed`は`SimRng::new`が状態へ
+    /// 畳み込んだ時点で失われ、`World`はどこにも保持していない。`state_hash`は
+    /// PRNGを含まないので決定論replayの一致には効かないが、**エクスポート→
+    /// 再インポート後も同じ乱数列を続けたい**(ブラウン運動・気体分子運動論の
+    /// 衝突判定など、`SolverContext::rng`を引くドメインを含むシーン)場合は
+    /// 種ではなく**今のストリーム位置**を戻す必要がある。
+    /// `Scenario::rng_state`がこの値を書き出す。
+    pub fn rng_state(&self) -> sim_math::SimRngState {
+        self.rng.raw_state()
+    }
+
+    /// 中央PRNGの内部状態を差し替える(`rng_state`の逆、`Scenario::rng_state`の
+    /// 復元経路が使う)。
+    pub fn set_rng_state(&mut self, state: sim_math::SimRngState) {
+        self.rng.set_raw_state(state);
+    }
+
     /// 全ドメインが読む物性データベース(設計 §1.1.5)。`create_body` に渡す
     /// `MaterialId` の解決に使う。
     pub fn materials(&self) -> &MaterialDb {
@@ -1302,6 +1652,7 @@ impl World {
             "RigidBodySet is expected to only grow (no slot reuse yet, module doc)"
         );
         self.generations.push(0);
+        self.removed.push(false);
         BodyId {
             index: index as u32,
             generation: 0,
@@ -1326,6 +1677,22 @@ impl World {
             && self.generations[id.index as usize] == id.generation
     }
 
+    /// `id`が現在の`World`でまだ生存しているか(`is_valid`の公開版)。
+    ///
+    /// **なぜ要るか**: `sim-wasm::WasmWorld`は`BodyId`をフロント向けの安定
+    /// index(`self.bodies: Vec<SpawnedBodyMeta>`の位置)へ対応付けて保持するが、
+    /// Timeline の巻き戻し(`restore_snapshot`、`World::restore`のdoc参照)は
+    /// `self.inner`だけを過去の`World`へ差し替え、`self.bodies`はそのまま残す。
+    /// そのため「巻き戻した時点より後に作られたボディ」を指す`BodyId`が
+    /// `self.bodies`側には生き続ける——これを`is_valid`で確認せずに
+    /// `mechanics().bodies.position[id.index as usize]`のような生indexアクセスを
+    /// すると、`generations`(延いては`RigidBodySet`の各`Vec`)がその`index`より
+    /// 短くなっていて**範囲外パニック**になる(wasmのパニックはモジュール全体を
+    /// 使用不能にする、`try_body_id_at`のdoc参照)。
+    pub fn is_body_alive(&self, id: BodyId) -> bool {
+        self.is_valid(id)
+    }
+
     /// ボディを削除する。世代カウンタをインクリメントし、以後この `id` (と古い世代の
     /// 再利用)へのアクセスは `None` になる(設計の不変条件)。下層の `RigidBodySet`
     /// スロット自体はまだ真に解放されない(モジュールdoc参照) — 無効化として
@@ -1346,6 +1713,7 @@ impl World {
         }
         let idx = id.index as usize;
         self.generations[idx] += 1;
+        self.removed[idx] = true;
         self.mechanics.bodies.body_type[idx] = BodyType::Static;
         self.mechanics.bodies.position[idx] = Vec3::new(0.0, -1.0e9, 0.0);
         self.mechanics.bodies.linear_velocity[idx] = Vec3::ZERO;
@@ -1777,19 +2145,37 @@ impl World {
             .record(total, ENERGY_SCALE_FLOOR);
         self.clock.advance();
 
-        // 登録済み全プローブを毎stepサンプルする(設計§2.1「測って遊ぶの中心機能」)。
-        // まず不変借用でサンプル値を集め(`self.probes.iter()`と`self.sample_probe_target`
-        // はどちらも共有借用なので同時に成立する)、その後で可変借用に切り替えて
-        // `history`へ積む(`self`全体への不変・可変借用が重ならないようにするため2段階
-        // にしている)。
+        // 登録済み全プローブを毎stepサンプルする(設計§2.1「測って遊ぶの中心機能」、
+        // **D2 汎用ECS移行増分**でECS(`probes_ecs`)ベースの実装へ差し替えた)。
+        // まず不変借用でサンプル値を集める(`self.probes_ecs.iter::<Probe>()`と
+        // `self.sample_probe_target`はどちらも共有借用なので同時に成立する。
+        // `iter::<Probe>()`は`Entity.index`昇順で返す——`probe_entities`が
+        // 追加順のindexをそのまま並べているのと同じ順序なので、以前の
+        // `self.probes.iter()`と1対1で一致し、`samples`の並びが変わらない)。
+        // その後、ECS側の`Schedule`にシステムを1つ登録して走らせ、`history`へ積む
+        // ——「クエリで対象を引いて可変更新する」という更新自体をECSの
+        // `System`/`Schedule`機構(`ecs`モジュールdoc参照)へ委ねる。値の採取
+        // (`sample_probe_target`)は`self`全体(熱・天体等の他ドメイン)を読む必要が
+        // あり`&mut self.probes_ecs`と両立しないため、採取と書き込みを1つの
+        // システムにまとめられない(前段で不変借用のうちに値だけ集め、後段の
+        // システムは集めた値をキュー越しに受け取るだけにする——`self`全体への
+        // 不変・可変借用が重ならないようにする2段階構成は移行前と同じ)。
         let samples: Vec<f64> = self
-            .probes
-            .iter()
-            .map(|p| self.sample_probe_target(p.target))
+            .probes_ecs
+            .iter::<Probe>()
+            .map(|(_, p)| self.sample_probe_target(p.target))
             .collect();
-        for (probe, sample) in self.probes.iter_mut().zip(samples) {
-            probe.history.push(sample);
-        }
+        let mut pending: std::collections::VecDeque<f64> = samples.into_iter().collect();
+        let mut probe_sampling: ecs::Schedule<std::collections::VecDeque<f64>> =
+            ecs::Schedule::new();
+        probe_sampling.add_system(|ecs_world: &mut ecs::EcsWorld, pending| {
+            for (_, probe) in ecs_world.iter_mut::<Probe>() {
+                if let Some(sample) = pending.pop_front() {
+                    probe.history.push(sample);
+                }
+            }
+        });
+        probe_sampling.run(&mut self.probes_ecs, &mut pending);
     }
 
     /// 直近の記帳残差(設計 docs/21-verification/02-conservation-laws.md §2)。
@@ -1826,6 +2212,21 @@ impl World {
                 voltage_sources: c.referenced_voltage_sources(),
             })
             .collect()
+    }
+
+    /// `Coupling`の生の登録列(`World → Scenario`逆写像がパラメータ込みで
+    /// 各`Coupling`を読み戻すために使う。`couplings()`が返す`CouplingInfo`は
+    /// `describe()`の人間可読文字列しか持たないため、そこからは再構成できない)。
+    pub fn couplings_raw(&self) -> &[Box<dyn sim_coupling::Coupling>] {
+        &self.couplings
+    }
+
+    /// 登録済み結合への可変アクセス(`couplings_raw`の可変版)。
+    /// `Coupling::restore_raw_state`(`sim_coupling::CouplingRawState`のdoc参照)を
+    /// `from_scenario`が呼ぶために要る——`add_coupling`はindexを返すだけで、
+    /// 積んだ後の結合へ触れる口が無かった。
+    pub fn couplings_raw_mut(&mut self) -> &mut [Box<dyn sim_coupling::Coupling>] {
+        &mut self.couplings
     }
 
     /// 全ジョイントを種別タグ付きで列挙する(**群1で追加**、`JointInfo`のdoc参照)。
@@ -1872,6 +2273,20 @@ impl World {
                 length: None,
                 motor_target: None,
                 disabled: false,
+            });
+        }
+        for (index, j) in m.wheel_joints.iter().enumerate() {
+            out.push(JointInfo {
+                index,
+                kind: JointKind::Wheel,
+                body_a: j.chassis,
+                body_b: Some(j.wheel),
+                anchor_a: j.anchor_chassis,
+                anchor_b: Vec3::ZERO,
+                axis: Some(j.axle_axis),
+                length: Some(j.rest_length),
+                motor_target: (j.motor_max_torque > 0.0).then_some(j.motor_speed),
+                disabled: j.disabled,
             });
         }
         for (index, j) in m.hinge_motors.iter().enumerate() {
@@ -2090,7 +2505,10 @@ impl World {
         if !self.is_valid(id) {
             return None;
         }
-        Some(self.mechanics.bodies.position[id.index as usize])
+        // 「ボディはどこにあるか」の答えは**形状のローカル原点**
+        // (生成時に指定した`transform.position`と同じ点)。`bodies.position`
+        // は重心なので`origin_position`を通す(群11、`RigidBodySet`型doc参照)。
+        Some(self.mechanics.bodies.origin_position(id.index as usize))
     }
 
     /// `body_position`と同じ不変条件の速度版(`Probe::BodySpeed`が読む)。
@@ -2107,6 +2525,32 @@ impl World {
             return None;
         }
         Some(self.mechanics.bodies.rotation[id.index as usize])
+    }
+
+    /// `body_position`と同じ不変条件の角速度版(`export`モジュールの
+    /// `World → Scenario`逆写像が`BodyScenarioDesc::angular_velocity`を
+    /// 読み戻すのに使う)。
+    pub fn body_angular_velocity(&self, id: BodyId) -> Option<Vec3> {
+        if !self.is_valid(id) {
+            return None;
+        }
+        Some(self.mechanics.bodies.angular_velocity[id.index as usize])
+    }
+
+    /// 現在生存している(`remove_body`されていない)全`BodyId`をindex昇順で返す
+    /// (`export`モジュールの`World → Scenario`逆写像向け。`RigidBodySet`のスロットは
+    /// 削除後も解放されない(`remove_body`のdoc参照)ため、`generations`/`removed`を
+    /// 経由しないと削除済みの亡霊ボディまで書き出してしまう)。
+    pub fn body_ids(&self) -> Vec<BodyId> {
+        self.generations
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !self.removed[*idx])
+            .map(|(idx, gen)| BodyId {
+                index: idx as u32,
+                generation: *gen,
+            })
+            .collect()
     }
 
     /// `body`のローカル座標`anchor_local`をワールド固定点`anchor_world`から
@@ -2146,16 +2590,203 @@ impl World {
     pub fn distance_joint_anchor_points(&self, joint_index: usize) -> Option<(Vec3, Vec3)> {
         let joint = self.mechanics.joints.get(joint_index)?;
         let body_a = joint.body_a;
-        let anchor_a_world = self.mechanics.bodies.position[body_a]
-            + self.mechanics.bodies.rotation[body_a].rotate(joint.anchor_a);
+        let anchor_world = |body: usize, anchor_local: Vec3| {
+            // `sim_mechanics::joint::world_anchor` と同じ式。群11でアンカーは
+            // **形状ローカル**、`position`は**重心**になったため、両者の差
+            // (`center_of_mass`)を引いてから回す。
+            let from_com = anchor_local - self.mechanics.bodies.center_of_mass[body];
+            self.mechanics.bodies.position[body]
+                + self.mechanics.bodies.rotation[body].rotate(from_com)
+        };
+        let anchor_a_world = anchor_world(body_a, joint.anchor_a);
         let anchor_b_world = match joint.body_b {
-            Some(body_b) => {
-                self.mechanics.bodies.position[body_b]
-                    + self.mechanics.bodies.rotation[body_b].rotate(joint.anchor_b)
-            }
+            Some(body_b) => anchor_world(body_b, joint.anchor_b),
             None => joint.anchor_b,
         };
         Some((anchor_a_world, anchor_b_world))
+    }
+
+    /// `JointDesc`からジョイントを1本作り、対応する種別のVec内でのindexを返す
+    /// (`JointInfo::index`・`joints_for_body`と同じ体系。種別が違えば同じ数値の
+    /// indexが重複しうるので、識別には種別と組で使うこと)。
+    ///
+    /// `add_distance_joint_to_world_point`と同じ理由で`body`の生存確認はしない
+    /// (呼び出し側——`sim-wasm`の場合は生存確認済みの`BodyId`を渡す前提、
+    /// `try_body_id_at`のdoc参照)。
+    pub fn create_joint(&mut self, desc: JointDesc) -> usize {
+        match desc {
+            JointDesc::Distance {
+                body_a,
+                anchor_a,
+                body_b,
+                anchor_b,
+                length,
+            } => {
+                let index = self.mechanics.joints.len();
+                self.mechanics
+                    .add_distance_joint(sim_mechanics::DistanceJoint {
+                        body_a: body_a.index as usize,
+                        anchor_a,
+                        body_b: body_b.map(|id| id.index as usize),
+                        anchor_b,
+                        length,
+                        disabled: false,
+                    });
+                index
+            }
+            JointDesc::Ball {
+                body_a,
+                anchor_a,
+                body_b,
+                anchor_b,
+            } => {
+                let index = self.mechanics.ball_joints.len();
+                self.mechanics.add_ball_joint(sim_mechanics::BallJoint {
+                    body_a: body_a.index as usize,
+                    anchor_a,
+                    body_b: body_b.map(|id| id.index as usize),
+                    anchor_b,
+                    disabled: false,
+                });
+                index
+            }
+            JointDesc::Slider {
+                body_a,
+                anchor_a,
+                axis,
+                body_b,
+                anchor_b,
+            } => {
+                let index = self.mechanics.slider_joints.len();
+                let joint = sim_mechanics::SliderJoint::new(
+                    &self.mechanics.bodies,
+                    body_a.index as usize,
+                    anchor_a,
+                    axis,
+                    body_b.map(|id| id.index as usize),
+                    anchor_b,
+                );
+                self.mechanics.add_slider_joint(joint);
+                index
+            }
+            JointDesc::Wheel {
+                chassis,
+                wheel,
+                anchor_chassis,
+                rest_length,
+                suspension_axis,
+                axle_axis,
+                frequency,
+                damping_ratio,
+                steer_angle,
+                motor_speed,
+                motor_max_torque,
+            } => {
+                let index = self.mechanics.wheel_joints.len();
+                let mut joint = sim_mechanics::WheelJoint::new(
+                    chassis.index as usize,
+                    wheel.index as usize,
+                    anchor_chassis,
+                    rest_length,
+                );
+                joint.suspension_axis = suspension_axis;
+                joint.axle_axis = axle_axis;
+                joint.soft.frequency = frequency;
+                joint.soft.damping_ratio = damping_ratio;
+                joint.steer_angle = steer_angle;
+                joint.motor_speed = motor_speed;
+                joint.motor_max_torque = motor_max_torque;
+                self.mechanics.wheel_joints.push(joint);
+                index
+            }
+            JointDesc::HingeMotor {
+                body,
+                axis,
+                reference_rotation,
+                theta_target,
+                kp,
+                kd,
+                torque_max,
+                limit,
+            } => {
+                let index = self.mechanics.hinge_motors.len();
+                let reference_rotation = reference_rotation
+                    .unwrap_or(self.mechanics.bodies.rotation[body.index as usize]);
+                self.mechanics.add_hinge_motor(sim_mechanics::HingeMotorPd {
+                    body: body.index as usize,
+                    axis,
+                    reference_rotation,
+                    theta_target,
+                    kp,
+                    kd,
+                    torque_max,
+                    limit,
+                    disabled: false,
+                });
+                index
+            }
+        }
+    }
+
+    /// 流体領域を1つ**追加する**(設計 docs/20-integration/04-world-api.md §2
+    /// `add_fluid_region(desc: FluidDesc) -> FluidId`)。集中定数の浮力領域
+    /// (`sim_fluid::FluidRegion`)のみを対象とする——SPH・格子流体は
+    /// `enable_sph`/`enable_grid_fluid`が別に受け持つ(モジュールdoc参照)。
+    ///
+    /// **移行前は「置き換え」だった**(`World`は水域を高々1つしか持てなかった)。
+    /// 領域が`Vec`になったので素直な追加になり、戻り値でindex(設計の`FluidId`
+    /// 相当)を返す。重なった領域の決着規則は
+    /// `sim_mechanics::MechanicsSolver::fluids`のdoc参照——**追加した順が
+    /// そのまま優先順位**になる。全消しは`clear_fluid_regions`。
+    pub fn add_fluid_region(&mut self, region: sim_fluid::FluidRegion) -> usize {
+        self.mechanics.fluids.push(region);
+        self.mechanics.fluids.len() - 1
+    }
+
+    /// 登録済みの流体領域一覧(追加順=優先順)。
+    pub fn fluid_regions(&self) -> &[sim_fluid::FluidRegion] {
+        &self.mechanics.fluids
+    }
+
+    /// 流体領域を全て取り除く。
+    pub fn clear_fluid_regions(&mut self) {
+        self.mechanics.fluids.clear();
+    }
+
+    /// 現在の環境設定を`EnvironmentDesc`として読む(Inspectorの環境パネルが
+    /// 表示・編集フォームの初期値に使う)。
+    pub fn environment(&self) -> EnvironmentDesc {
+        EnvironmentDesc {
+            gravity: self.mechanics.gravity(),
+            gravity_direction: self.mechanics.gravity_direction(),
+            gravity_field: Some(self.mechanics.gravity_field()),
+            atmosphere: self.mechanics.atmosphere,
+            fluids: self.mechanics.fluids.clone(),
+            ambient_temperature: self.thermal.as_ref().map(|t| t.ambient_temperature),
+        }
+    }
+
+    /// `EnvironmentDesc`をまとめて適用する(Inspectorの環境パネルの確定操作)。
+    /// `ambient_temperature`は熱ドメインが有効な場合のみ反映する(`None`のままの
+    /// 熱ドメインを勝手に`enable_thermal`しない——ドメインの有効化は
+    /// シーン構築の責務であり、環境設定の責務ではないため)。
+    pub fn set_environment(&mut self, desc: EnvironmentDesc) {
+        // `gravity_field`が`Some`ならそれが唯一の情報源(構造体docの優先規則)。
+        // `None`のときだけ、スカラー2つから一様場を組み立てる従来の経路を通る。
+        match desc.gravity_field {
+            Some(field) => self.mechanics.set_gravity_field(field),
+            None => {
+                self.mechanics.set_gravity(desc.gravity);
+                self.mechanics.set_gravity_direction(desc.gravity_direction);
+            }
+        }
+        self.mechanics.atmosphere = desc.atmosphere;
+        self.mechanics.fluids = desc.fluids;
+        if let Some(t) = desc.ambient_temperature {
+            if let Some(thermal) = self.thermal.as_mut() {
+                thermal.ambient_temperature = t;
+            }
+        }
     }
 
     /// 直近stepで検出された接触点のワールド座標一覧(設計docs/23-frontend/
@@ -2273,8 +2904,8 @@ impl World {
     /// `Coupling`を毎stepの後に自動適用するレジストリ自体は`add_coupling`/`couplings`
     /// フィールドとして実装済み(このメソッドのdoc下部参照)。**pre/post 2相への分離も
     /// 群5で完了**(`step()`のdoc参照)。シーンJSON`couplings`セクションからの
-    /// 自動解決・排他結合検査(`sim-coupling::validate_exclusive_couplings`)との
-    /// 接続は未実装(`from_scenario`のモジュールdoc参照)。
+    /// 自動解決・排他結合検査(`sim-coupling::validate_exclusive_couplings`)も
+    /// `from_scenario`に接続済み(`scenario`モジュールdoc参照)。
     /// 本メソッドは、`add_coupling`によるレジストリ登録より前から存在する、呼び出し側が
     /// 呼び出し頻度・タイミングを明示的に管理する下位のプリミティブとして残している
     /// (統合シナリオテストの一部・レジストリ自体の内部実装が使う)。`step()`の後に
@@ -2307,8 +2938,12 @@ impl World {
     /// `apply_coupling`を呼ぶ手間を無くす、Coupling registryの縮約版(シーンJSON
     /// `couplings`セクションからの自動解決・排他結合検査との接続は後続増分、
     /// `scenario`モジュールdoc参照)。
-    pub fn add_coupling(&mut self, coupling: Box<dyn sim_coupling::Coupling>) {
+    /// 戻り値はこのCouplingの登録index(`CouplingInfo::index`と同じ並び、
+    /// `Command::SetCouplingParam`が参照するindex——**残タスク完遂の縦串⑤増分**
+    /// で追加、それまでは戻り値`()`で呼び出し側は捨てるだけだった)。
+    pub fn add_coupling(&mut self, coupling: Box<dyn sim_coupling::Coupling>) -> usize {
         self.couplings.push(coupling);
+        self.couplings.len() - 1
     }
 
     /// 全状態(clock + 有効な全ドメイン)を決定的順序(ドメイン登録順固定:
@@ -2508,6 +3143,429 @@ mod tests {
         }
         assert!(world.body_position(b).is_some());
         assert!(world.body_position(a).is_none());
+    }
+
+    /// `is_body_alive`(`sim-wasm`の`try_body_id_at`がTimeline巻き戻し後の
+    /// 生存確認に使う、モジュールdoc参照)が、スナップショットより後に作られた
+    /// ボディを正しく「もう存在しない」と判定すること。また、そのボディの
+    /// `index`が復元後の`RigidBodySet`の各`Vec`の範囲外になること(=
+    /// 生存確認をせずに生indexアクセスすると範囲外パニックになりうること)も
+    /// 確認する——`is_body_alive`がこの危険を防ぐ根拠そのもの。
+    #[test]
+    fn is_body_alive_detects_bodies_that_did_not_exist_yet_at_an_earlier_snapshot() {
+        let mut world = World::new(WorldOptions::default());
+        let a = create_falling_box(&mut world);
+        let snapshot = world.snapshot();
+
+        let b = create_falling_box(&mut world);
+        assert!(world.is_body_alive(a));
+        assert!(world.is_body_alive(b));
+
+        world.restore(&snapshot);
+
+        assert!(
+            world.is_body_alive(a),
+            "body created before the snapshot must still be alive after restore"
+        );
+        assert!(
+            !world.is_body_alive(b),
+            "body created after the snapshot must not be alive after restoring to it"
+        );
+        // これが `is_body_alive` の確認を省いて `mechanics().bodies.position\
+        // [b.index as usize]` のような生indexアクセスをすると危険な理由:
+        // 復元後の `RigidBodySet` は `b` を一度も知らないので、そのindexは
+        // 配列長の範囲外になる。
+        assert!(
+            b.index as usize >= world.mechanics().bodies.position.len(),
+            "the restored World's RigidBodySet must be shorter than the removed body's index"
+        );
+    }
+
+    /// `create_joint`が`JointDesc`の5種すべてを正しい種別のVecへ積むこと
+    /// (`World::joints()`の内省で種別・パラメータを確認する)。
+    #[test]
+    fn create_joint_adds_each_joint_desc_variant_to_its_kind() {
+        let mut world = World::new(WorldOptions::default());
+        let a = create_falling_box(&mut world);
+        let b = create_falling_box(&mut world);
+
+        world.create_joint(JointDesc::Distance {
+            body_a: a,
+            anchor_a: Vec3::ZERO,
+            body_b: Some(b),
+            anchor_b: Vec3::ZERO,
+            length: 2.0,
+        });
+        world.create_joint(JointDesc::Ball {
+            body_a: a,
+            anchor_a: Vec3::ZERO,
+            body_b: None,
+            anchor_b: Vec3::new(0.0, 5.0, 0.0),
+        });
+        world.create_joint(JointDesc::Slider {
+            body_a: a,
+            anchor_a: Vec3::ZERO,
+            axis: Vec3::new(0.0, 0.0, 1.0),
+            body_b: None,
+            anchor_b: Vec3::ZERO,
+        });
+        world.create_joint(JointDesc::Wheel {
+            chassis: a,
+            wheel: b,
+            anchor_chassis: Vec3::new(0.0, -0.3, 0.0),
+            rest_length: 0.4,
+            suspension_axis: Vec3::new(0.0, -1.0, 0.0),
+            axle_axis: Vec3::new(1.0, 0.0, 0.0),
+            frequency: 2.0,
+            damping_ratio: 0.3,
+            steer_angle: 0.1,
+            motor_speed: 1.0,
+            motor_max_torque: 10.0,
+        });
+        world.create_joint(JointDesc::HingeMotor {
+            body: a,
+            axis: Vec3::new(0.0, 1.0, 0.0),
+            reference_rotation: None,
+            theta_target: 0.5,
+            kp: 1.0,
+            kd: 0.1,
+            torque_max: 5.0,
+            limit: None,
+        });
+
+        let kinds: Vec<JointKind> = world.joints().iter().map(|j| j.kind).collect();
+        assert!(kinds.contains(&JointKind::Distance));
+        assert!(kinds.contains(&JointKind::Ball));
+        assert!(kinds.contains(&JointKind::Slider));
+        assert!(kinds.contains(&JointKind::HingeMotor));
+        assert_eq!(world.mechanics().wheel_joints.len(), 1);
+        assert_eq!(world.mechanics().wheel_joints[0].motor_speed, 1.0);
+    }
+
+    /// `add_fluid_region`が`MechanicsSolver::fluids`へ**追加**すること
+    /// (**移行前は置き換えだった**)。indexが登録順=優先順を表し、
+    /// `clear_fluid_regions`で全消しできる。
+    #[test]
+    fn add_fluid_region_appends_regions_in_registration_order() {
+        let mut world = World::new(WorldOptions::default());
+        assert_eq!(
+            world.add_fluid_region(sim_fluid::FluidRegion::new(1.0, 1000.0)),
+            0
+        );
+        assert_eq!(
+            world.add_fluid_region(sim_fluid::FluidRegion::new(2.0, 1000.0)),
+            1
+        );
+
+        let regions = world.fluid_regions();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].water_level, 1.0);
+        assert_eq!(regions[1].water_level, 2.0);
+        // `mechanics()`側と同じものを見ている。
+        assert_eq!(world.mechanics().fluids.len(), 2);
+
+        world.clear_fluid_regions();
+        assert!(world.fluid_regions().is_empty());
+    }
+
+    /// `environment`/`set_environment`が重力(大きさ・向き)・大気・水域・
+    /// 周囲温度を往復できること。向きの往復確認は**残タスク完遂増分**
+    /// (レビュー指摘「見送らず対応すること」への対応で`gravity_direction`を
+    /// 追加した際に拡張)。
+    #[test]
+    fn environment_desc_round_trips_gravity_atmosphere_water_and_ambient_temperature() {
+        let mut world = World::new(WorldOptions::default());
+        world.enable_thermal(sim_thermal::ThermalSolver::new(293.15));
+
+        let desc = EnvironmentDesc {
+            gravity: 3.71, // 火星の重力
+            gravity_direction: sim_math::Vec3::new(1.0, 0.0, 0.0),
+            // `None` = 従来のスカラー2つ経路(構造体docの優先規則)。
+            gravity_field: None,
+            atmosphere: Some(sim_fluid::Atmosphere::still(0.02, 1.1e-5)),
+            // **流体領域の一般化**: 複数領域・形状・水温をまとめて往復する。
+            fluids: vec![
+                sim_fluid::FluidRegion::new(-1.0, 1000.0),
+                sim_fluid::FluidRegion::aabb(
+                    sim_math::Vec3::new(-1.0, -2.0, -1.0),
+                    sim_math::Vec3::new(1.0, 0.5, 1.0),
+                    0.0,
+                    1200.0,
+                )
+                .with_temperature(277.0),
+            ],
+            ambient_temperature: Some(210.0),
+        };
+        world.set_environment(desc.clone());
+
+        let read_back = world.environment();
+        assert_eq!(read_back.gravity, 3.71);
+        assert_eq!(
+            read_back.gravity_direction,
+            sim_math::Vec3::new(1.0, 0.0, 0.0)
+        );
+        assert_eq!(read_back.atmosphere.unwrap().density, 0.02);
+        assert_eq!(read_back.fluids, desc.fluids);
+        assert_eq!(read_back.fluids[0].water_level, -1.0);
+        assert_eq!(read_back.fluids[1].temperature, Some(277.0));
+        assert_eq!(read_back.ambient_temperature, Some(210.0));
+        assert_eq!(world.thermal().unwrap().ambient_temperature, 210.0);
+    }
+
+    /// **重力場の抽象化増分**: `EnvironmentDesc`が`GravityField`の3種すべてを
+    /// 往復できること、そして`gravity_field: Some(..)`がスカラー2つ
+    /// (`gravity`/`gravity_direction`)より優先されること(構造体docの優先規則)。
+    #[test]
+    fn environment_desc_round_trips_every_gravity_field_kind_and_field_wins() {
+        let fields = [
+            sim_mechanics::GravityField::Uniform {
+                magnitude: 1.62, // 月の重力
+                direction: sim_math::Vec3::new(0.0, -1.0, 0.0),
+            },
+            sim_mechanics::GravityField::PointSource {
+                center: sim_math::Vec3::new(1.0, 2.0, 3.0),
+                mu: 4.0e5,
+            },
+            sim_mechanics::GravityField::Zero,
+        ];
+        for field in fields {
+            let mut world = World::new(WorldOptions::default());
+            world.set_environment(EnvironmentDesc {
+                // わざと場と矛盾する値を入れる——優先規則が効いていれば
+                // これらは無視されるはず。
+                gravity: 99.0,
+                gravity_direction: sim_math::Vec3::new(1.0, 0.0, 0.0),
+                gravity_field: Some(field),
+                atmosphere: None,
+                fluids: Vec::new(),
+                ambient_temperature: None,
+            });
+            assert_eq!(world.environment().gravity_field, Some(field));
+            assert_eq!(world.mechanics().gravity_field(), field);
+        }
+    }
+
+    /// **重力場の抽象化増分**: `Command::SetGravityField`が次stepの先頭で適用され、
+    /// `command_log()`へ記録されること(同variantのdoc「黙ってリプレイされない
+    /// 変更は決定論のバグ」)。
+    #[test]
+    fn set_gravity_field_command_applies_and_is_recorded_in_the_command_log() {
+        let mut world = World::new(WorldOptions::default());
+        let field = sim_mechanics::GravityField::PointSource {
+            center: sim_math::Vec3::ZERO,
+            mu: 3.986e14,
+        };
+        world.push_command(Command::SetGravityField { field });
+        // Commandは「次step先頭」で効く——push直後はまだ既定の一様場のまま。
+        assert!(matches!(
+            world.mechanics().gravity_field(),
+            sim_mechanics::GravityField::Uniform { .. }
+        ));
+        world.step();
+        assert_eq!(world.mechanics().gravity_field(), field);
+        assert_eq!(world.command_log().len(), 1);
+        assert_eq!(world.command_log()[0].1, Command::SetGravityField { field });
+    }
+
+    /// `Shape::Compound`の`todo!()`穴埋め(統合エディタ実装計画の縦串①)の
+    /// エンドツーエンド検証: L字形(2つの箱を組んだ)のCompoundボディを作り、
+    /// 地面(y=0の平面)へ落として`step`を回す——質量照会でパニックしない
+    /// (これがtodo!()の直接の症状だった)ことと、接触解決を経て床の上に
+    /// 静止することの両方を確認する。
+    #[test]
+    fn compound_body_can_be_created_and_settles_on_the_ground_without_panicking() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = world.materials().find_by_name("コンクリート").unwrap();
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground.body_type = BodyType::Static;
+        world.create_body(ground);
+
+        // L字形: 縦棒(0.5×2.0×0.5)+横棒(1.0×0.5×0.5、縦棒の下端に接続)。
+        let l_shape = Shape::Compound {
+            children: vec![
+                (
+                    Transform {
+                        position: Vec3::new(0.0, 0.75, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: Vec3::new(0.25, 1.0, 0.25),
+                    },
+                ),
+                (
+                    Transform {
+                        position: Vec3::new(0.25, -0.25, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: Vec3::new(0.5, 0.25, 0.25),
+                    },
+                ),
+            ],
+        };
+        let mut desc = RigidBodyDesc::dynamic(l_shape, steel);
+        desc.transform.position = Vec3::new(0.0, 5.0, 0.0);
+        // `create_body`が内部で`shape.volume()`/`unit_mass_inertia_diagonal()`を
+        // 呼ぶ——todo!()が残っていればここで即パニックしていた。
+        let body = world.create_body(desc);
+
+        // L字形は非対称なので、着地後にわずかに揺れてから静止するまで
+        // 単純な箱よりも時間がかかる(実測: 約12秒)。余裕を見て20秒回す。
+        for _ in 0..1200 {
+            world.step();
+        }
+
+        let final_speed = world.body_velocity(body).unwrap().length();
+        assert!(
+            final_speed < 0.05,
+            "10秒後には静止しているはず(速さ={final_speed})"
+        );
+
+        // **群11で期待値を意図的に更新**。
+        //
+        // 移行前はここで「静止時の本体原点は概ね y=0.5」(=横棒で直立した
+        // まま)を要求していた。しかしそれは**重心オフセットが未実装だった
+        // ことによる見かけの安定**だった:
+        //   ① 慣性テンソルをローカル原点まわりで計算していたため、真の重心
+        //      まわりの値より大きく(平行軸定理のぶん)、回転しにくかった。
+        //   ② 重力・接触力のトルクをローカル原点まわりに立てていたため、
+        //      重心が x=+0.083 にずれていることによる転倒モーメントが
+        //      そもそも発生しなかった。
+        // 群11で①②を正した結果、**4.5mの自由落下 → 剛なコンクリートでの
+        // バウンド**という高エネルギーな着地では、L字は跳ねたあと横倒しに
+        // なって静止する(実測 tilt≈1.574 rad ≒ 90°)。
+        //
+        // これが「物理が壊れた」のではなく「正しくなった」ことは、静的な
+        // つり合いを別途確認して裏付けた——解析的な静止高さ y=0.5 へそっと
+        // 置くと、L字は tilt≈1e-4 rad で直立したまま静止する
+        // (`compound_l_shape_placed_at_rest_stays_upright`)。重心 x=0.083 は
+        // 横棒の支持多角形 x∈[-0.25,0.75] の内側なので直立は安定であり、
+        // 横倒しはバウンドの動力学の結果であって静的な誤りではない。
+        //
+        // したがってここでは姿勢に依存しない不変量——**形状の最下点が床の
+        // 上に乗っていること**——だけを要求する。
+        let lowest = lowest_world_y_of_compound(&world, body);
+        assert!(
+            (-0.01..0.05).contains(&lowest),
+            "姿勢によらず形状の最下点が床に接しているはず(最下点y={lowest})"
+        );
+    }
+
+    /// 複合剛体のワールド空間での最下点の y。姿勢に依存しない「床に乗っている」
+    /// 判定に使う(部品はすべて`Box`前提の簡易版、テスト専用)。
+    fn lowest_world_y_of_compound(world: &World, body: BodyId) -> f64 {
+        let bodies = &world.mechanics().bodies;
+        let idx = body.index as usize;
+        let xf = bodies.shape_transform(idx);
+        let Shape::Compound { children } = bodies.shape_of(idx) else {
+            panic!("expected a compound shape");
+        };
+        let mut lowest = f64::INFINITY;
+        for (child_xf, child) in children {
+            let Shape::Box { half_extents } = child else {
+                continue;
+            };
+            let world_child = xf.compose(*child_xf);
+            for sx in [-1.0, 1.0] {
+                for sy in [-1.0, 1.0] {
+                    for sz in [-1.0, 1.0] {
+                        let corner = world_child.apply_point(Vec3::new(
+                            sx * half_extents.x,
+                            sy * half_extents.y,
+                            sz * half_extents.z,
+                        ));
+                        lowest = lowest.min(corner.y);
+                    }
+                }
+            }
+        }
+        lowest
+    }
+
+    /// **複合剛体の静的つり合い**(群11、重心オフセット導入の裏付け)。
+    ///
+    /// L字形の重心は x=+0.0833 にずれるが、これは接地する横棒の支持多角形
+    /// x∈[-0.25,0.75] の**内側**なので、直立姿勢は静的に安定でなければ
+    /// ならない。解析的な静止高さ(横棒の底面 y=-0.5 が床に接する = 原点 y=0.5)
+    /// へ初速ゼロで置き、そのまま直立して静止し続けることを確認する。
+    ///
+    /// これは`compound_body_can_be_created_and_settles_on_the_ground_without_panicking`
+    /// が高所落下で横倒しになることの対照実験——「静的には安定、動的な
+    /// バウンドでのみ転ぶ」ことを示し、転倒が実装の誤りでないことを固定する。
+    #[test]
+    fn compound_l_shape_placed_at_rest_stays_upright() {
+        let mut world = World::new(WorldOptions::default());
+        let steel = world.materials().find_by_name("鋼(炭素鋼)").unwrap();
+        let concrete = world.materials().find_by_name("コンクリート").unwrap();
+
+        let mut ground = RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            concrete,
+        );
+        ground.body_type = BodyType::Static;
+        world.create_body(ground);
+
+        let l_shape = Shape::Compound {
+            children: vec![
+                (
+                    Transform {
+                        position: Vec3::new(0.0, 0.75, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: Vec3::new(0.25, 1.0, 0.25),
+                    },
+                ),
+                (
+                    Transform {
+                        position: Vec3::new(0.25, -0.25, 0.0),
+                        rotation: sim_math::Quat::IDENTITY,
+                    },
+                    Shape::Box {
+                        half_extents: Vec3::new(0.5, 0.25, 0.25),
+                    },
+                ),
+            ],
+        };
+        // 重心がローカル原点からずれていること(=このテストが意味を持つこと)。
+        let com = l_shape.center_of_mass();
+        assert!(
+            (com.x - 0.0833333333333333).abs() < 1e-12 && (com.y - 0.4166666666666667).abs() < 1e-9,
+            "L字の重心は解析値 (1/12, 5/12, 0) のはず: {com:?}"
+        );
+
+        let mut desc = RigidBodyDesc::dynamic(l_shape, steel);
+        // 横棒の底面(本体原点から-0.5)がちょうど床に接する高さ。
+        desc.transform.position = Vec3::new(0.0, 0.5, 0.0);
+        let body = world.create_body(desc);
+
+        for _ in 0..600 {
+            world.step();
+        }
+
+        let idx = body.index as usize;
+        let rotation = world.mechanics().bodies.rotation[idx];
+        let tilt = 2.0 * rotation.w.abs().min(1.0).acos();
+        assert!(
+            tilt < 1e-2,
+            "支持多角形の内側に重心があるので直立は安定のはず: tilt={tilt:.3e} rad"
+        );
+        let final_y = world.body_position(body).unwrap().y;
+        assert!(
+            (final_y - 0.5).abs() < 0.01,
+            "解析的な静止高さ y=0.5 のままのはず(y={final_y})"
+        );
     }
 
     /// 未知(存在しない index)の`BodyId`も`None`(パニックしない)。
@@ -3106,7 +4164,7 @@ mod tests {
     /// 確認する(圧力積分によるマスキング手法自体の定量的な物理的妥当性は
     /// `sim_fluid::GridFluidRigidBox2D`(X2)の既存テストが既に検証済みなので、ここでは
     /// `World`のCouplingレジストリ経由での配線 — mechanicsボディの位置・速度が
-    /// `grid_fluid`の`solid`マスクに反映され、圧力反力がボディに戻ってくること — を
+    /// `grid_fluid`のセル種別マスクに反映され、圧力反力がボディに戻ってくること — を
     /// 定性的に確認する、`SphRigid`実装検証時に確立した「動的な定量検証はSPH/格子流体
     /// 特有の縁効果に弱い」という教訓を踏まえた判断)。
     #[test]
@@ -3138,7 +4196,46 @@ mod tests {
         )));
 
         let x_before = world.body_position(body).unwrap().x;
-        for _ in 0..20 {
+
+        // まず1step進めて、固体マスクが剛体位置へ追従していることを確認する。固体表現は
+        // `cell_type`へ一本化されたので、移行前のように`solid_box()`で矩形を読み戻すの
+        // ではなく、**Solidセルのx範囲の中心**が剛体のx位置と一致することを見る。
+        //
+        // 20step後ではなくここで見るのは、この軽い剛体(質量0.02kg)が一様流に押されて
+        // **格子の外**(x≈76、格子は 0..1.6)まで飛んでいくため——外に出た後は
+        // ラスタライズされるセルが1つも無く、マスク追従の主張が空になる。
+        // (移行前の`solid_box()`は「セルを1つも塗らなくても矩形は保持される」ので、
+        // 20step後でも読み戻せてしまい、この検査は事実上空振りしていた。)
+        world.step();
+        {
+            let grid = world.grid_fluid().unwrap();
+            let body_pos = world.body_position(body).unwrap();
+            let mut solid_x: Vec<f64> = Vec::new();
+            for j in 0..grid.ny {
+                for i in 0..grid.nx {
+                    if grid.cell_type()[i + grid.nx * j] == sim_fluid::CellType::Solid {
+                        solid_x.push((i as f64 + 0.5) * grid.h);
+                    }
+                }
+            }
+            assert!(
+                !solid_x.is_empty(),
+                "GridFluidRigid should have rasterized the body into Solid cells: \
+                 body_pos={body_pos:?}"
+            );
+            let min_x = solid_x.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max_x = solid_x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let center_x = 0.5 * (min_x + max_x);
+            assert!(
+                (center_x - body_pos.x).abs() < grid.h,
+                "solid cells should be centered on the body's x position: \
+                 center_x={center_x} body_pos.x={} h={}",
+                body_pos.x,
+                grid.h
+            );
+        }
+
+        for _ in 0..19 {
             world.step();
         }
         let x_after = world.body_position(body).unwrap().x;
@@ -3153,26 +4250,13 @@ mod tests {
             vx_after.is_finite() && vx_after > 0.0,
             "body's x-velocity should be finite and positive (downstream): vx_after={vx_after}"
         );
-
-        let solid = world
-            .grid_fluid()
-            .unwrap()
-            .solid_box()
-            .expect("GridFluidRigid should have set the solid mask by now");
-        let body_pos = world.body_position(body).unwrap();
-        assert!(
-            (solid.center.0 - body_pos.x).abs() < 1e-9,
-            "solid mask should track the body's x position: solid.center.0={} body_pos.x={}",
-            solid.center.0,
-            body_pos.x
-        );
     }
 
     /// `BuoyancyDrag`をレジストリ経由(`add_coupling`)で剛体に接続し、`demos.rs`のD6
     /// (F4部分、密度比0.6の直立直方体)と同じ釣り合い喫水深さの近傍で有界に留まる
-    /// ことを確認する(既存の`MechanicsSolver.water`埋め込み経路(D6が使う)と同じ
-    /// 物理式(`sim_fluid::{submerged_box_axis_aligned, buoyancy_force}`)を使うが、
-    /// `mechanics_mut().water`は設定しない独立経路)。
+    /// ことを確認する(既存の`MechanicsSolver.fluids`埋め込み経路(D6が使う)と同じ
+    /// 物理式(`sim_fluid::{submerged_box_below_plane, buoyancy_force}`)を使うが、
+    /// `mechanics_mut().fluids`は設定しない独立経路)。
     ///
     /// D6のF4部分は埋め込み経路(`apply_forces`内でmechanicsの各sub-stepごとに
     /// 浮力を再評価)のため実質的に減衰項なしでも密着した釣り合いに留まるが、この
@@ -3222,7 +4306,7 @@ mod tests {
 
         world.add_coupling(Box::new(sim_coupling::BuoyancyDrag {
             body_index: box_id.index as usize,
-            water: Some(sim_fluid::StaticWaterRegion::new(0.0, water_density)),
+            water: Some(sim_fluid::FluidRegion::new(0.0, water_density)),
             atmosphere: None,
             lift: None,
         }));
@@ -4168,12 +5252,13 @@ mod tests {
 
     /// `Probe`(設計docs/20-integration/04-world-api.md §2.1「測って遊ぶの中心機能」):
     /// `BodyPosY`が箱の自由落下を毎stepサンプルし、履歴が単調減少することを確認する。
-    /// リングバッファの容量制限(古いサンプルが捨てられること)も併せて検証する。
+    /// **step数ぶんのサンプルが1つも欠けずに残る**ことも併せて見る(履歴は可変長、
+    /// `Probe`のdoc参照)。
     #[test]
-    fn probe_body_pos_y_samples_falling_box_every_step_within_ring_buffer_capacity() {
+    fn probe_body_pos_y_samples_falling_box_every_step() {
         let mut world = World::new(WorldOptions::default());
         let box_id = create_falling_box(&mut world);
-        let handle = world.add_probe(ProbeTarget::BodyPosY(box_id), 10);
+        let handle = world.add_probe(ProbeTarget::BodyPosY(box_id));
 
         for _ in 0..30 {
             world.step();
@@ -4181,8 +5266,7 @@ mod tests {
 
         let probe = world.probe(handle).unwrap();
         let history: Vec<f64> = probe.history().copied().collect();
-        // 容量10なので30step分のうち最新10個だけが残る。
-        assert_eq!(history.len(), 10);
+        assert_eq!(history.len(), 30, "30step分がそのまま残る(切り詰めない)");
         // 単調減少(自由落下、接触前)。
         for pair in history.windows(2) {
             assert!(
@@ -4195,6 +5279,73 @@ mod tests {
         assert!((history.last().unwrap() - final_y).abs() < 1e-12);
     }
 
+    /// **旧・固定容量(`DEFAULT_PROBE_CAPACITY`=6000)を大きく超えても1サンプルも
+    /// 失われないこと**。以前はここで先頭が無言に捨てられ、「グラフの左端が実は
+    /// 0秒ではない」という形で静かに誤読を生んでいた(`Probe`のdoc参照)。
+    ///
+    /// 判定は本数だけでなく**先頭のサンプルが残っているか**まで見る——
+    /// リングバッファに戻ると真っ先に消えるのがそこだからである。
+    #[test]
+    fn probe_history_keeps_every_sample_far_past_the_old_fixed_capacity() {
+        const OLD_FIXED_CAPACITY: usize = 6000;
+        const STEPS: usize = 10_000;
+
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        let handle = world.add_probe(ProbeTarget::BodyPosY(box_id));
+
+        // 1step目のサンプル(切り詰めが起きれば最初に失われる値)を控えておく。
+        world.step();
+        let first_sample = *world.probe(handle).unwrap().history().next().unwrap();
+
+        for _ in 1..STEPS {
+            world.step();
+        }
+
+        // 旧容量を超える長さで走らせていること(この関係が崩れたらこのテストは
+        // 何も検証していない)。定数どうしの比較なのでコンパイル時に見る。
+        const _: () = assert!(STEPS > OLD_FIXED_CAPACITY);
+
+        let probe = world.probe(handle).unwrap();
+        assert_eq!(
+            probe.len(),
+            STEPS,
+            "旧容量({OLD_FIXED_CAPACITY})を超えても切り詰めない"
+        );
+        assert_eq!(probe.history().count(), STEPS);
+        assert_eq!(
+            *probe.history().next().unwrap(),
+            first_sample,
+            "先頭のサンプルが残っていること(リングバッファなら最初に消える値)"
+        );
+
+        // メモリ使用量の問い合わせ口(上限を課さない代わりの観測手段)。
+        assert_eq!(world.probe_history_len(handle), Some(STEPS));
+        assert_eq!(world.probe_history_len(handle + 1), None);
+        assert_eq!(
+            world.probe_history_bytes_estimate(),
+            STEPS * std::mem::size_of::<f64>()
+        );
+    }
+
+    /// `probe_history_bytes_estimate`が**全プローブの合計**であること。
+    #[test]
+    fn probe_history_bytes_estimate_sums_every_probe() {
+        let mut world = World::new(WorldOptions::default());
+        let box_id = create_falling_box(&mut world);
+        world.add_probe(ProbeTarget::BodyPosY(box_id));
+        world.add_probe(ProbeTarget::BodySpeed(box_id));
+        assert_eq!(world.probe_history_bytes_estimate(), 0);
+
+        for _ in 0..50 {
+            world.step();
+        }
+        assert_eq!(
+            world.probe_history_bytes_estimate(),
+            2 * 50 * std::mem::size_of::<f64>()
+        );
+    }
+
     /// `ProbeTarget::LedgerKinetic`・`StateHashDigest`が無効なindex/id無しでも
     /// パニックせず妥当な値をサンプルすることを確認する(常時有効なmechanicsドメイン
     /// のみに依存するターゲット)。
@@ -4202,8 +5353,8 @@ mod tests {
     fn probe_ledger_kinetic_and_state_hash_digest_sample_without_panicking() {
         let mut world = World::new(WorldOptions::default());
         create_falling_box(&mut world);
-        let kinetic_handle = world.add_probe(ProbeTarget::LedgerKinetic, 5);
-        let hash_handle = world.add_probe(ProbeTarget::StateHashDigest, 5);
+        let kinetic_handle = world.add_probe(ProbeTarget::LedgerKinetic);
+        let hash_handle = world.add_probe(ProbeTarget::StateHashDigest);
 
         for _ in 0..5 {
             world.step();
