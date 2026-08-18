@@ -2055,6 +2055,84 @@ fn array_to_vec3(a: [f64; 3]) -> Vec3 {
     Vec3::new(a[0], a[1], a[2])
 }
 
+/// `Quantum1dRawStateJson`(base64+LE)から`sim_quantum::WaveFunction1D`を組み立てる。
+/// `from_scenario_with_body_ids`の`quantum_1d`分岐が使う検証(2の冪・長さ一致)そのもの
+/// を切り出したもの——**`sim_wasm`のプリセットUI(`enable_quantum_1d_domain`)が
+/// シーンJSON経路と全く同じ検証を通るようにするため**`pub`にして再エクスポートする
+/// (呼び出し元が2つに増えても検証ロジックが1本のまま保てる)。
+pub fn build_quantum_1d_wave_from_raw(
+    psi_re_b64: &str,
+    psi_im_b64: &str,
+    v_b64: &str,
+    dx: f64,
+) -> Result<sim_quantum::WaveFunction1D, SceneError> {
+    let psi_re = decode_f64_field("quantum_1d.raw_state.psi_re", psi_re_b64)?;
+    let psi_im = decode_f64_field("quantum_1d.raw_state.psi_im", psi_im_b64)?;
+    let v = decode_f64_field("quantum_1d.raw_state.v", v_b64)?;
+    let n = psi_re.len();
+    if !n.is_power_of_two() {
+        return Err(SceneError::InvalidValue(format!(
+            "quantum_1d.raw_state.psi_re の長さは2の冪(FFTの制約)、got {n}"
+        )));
+    }
+    if psi_im.len() != n || v.len() != n {
+        return Err(SceneError::InvalidValue(format!(
+            "quantum_1d.raw_state: psi_re/psi_im/v の長さが揃っていない \
+             ({n}/{}/{})",
+            psi_im.len(),
+            v.len()
+        )));
+    }
+    let mut wave = sim_quantum::WaveFunction1D::new(n, dx);
+    wave.psi = psi_re
+        .iter()
+        .zip(psi_im.iter())
+        .map(|(re, im)| sim_math::Complex64::new(*re, *im))
+        .collect();
+    wave.v = v;
+    Ok(wave)
+}
+
+/// `Quantum2dRawStateJson`(base64+LE)から`sim_quantum::WaveFunction2D`を組み立てる。
+/// `build_quantum_1d_wave_from_raw`の2D版、理由も同じ。
+#[allow(clippy::too_many_arguments)]
+pub fn build_quantum_2d_wave_from_raw(
+    psi_re_b64: &str,
+    psi_im_b64: &str,
+    v_b64: &str,
+    nx: usize,
+    ny: usize,
+    dx: f64,
+    dy: f64,
+) -> Result<sim_quantum::WaveFunction2D, SceneError> {
+    if !nx.is_power_of_two() || !ny.is_power_of_two() {
+        return Err(SceneError::InvalidValue(
+            "quantum_2d.raw_state.nx/ny must be powers of two (FFT constraint)".to_string(),
+        ));
+    }
+    let n = nx * ny;
+    let psi_re = decode_f64_field("quantum_2d.raw_state.psi_re", psi_re_b64)?;
+    let psi_im = decode_f64_field("quantum_2d.raw_state.psi_im", psi_im_b64)?;
+    let v = decode_f64_field("quantum_2d.raw_state.v", v_b64)?;
+    if psi_re.len() != n || psi_im.len() != n || v.len() != n {
+        return Err(SceneError::InvalidValue(format!(
+            "quantum_2d.raw_state: psi_re/psi_im/v の長さが nx*ny={n} と一致しない \
+             ({}/{}/{})",
+            psi_re.len(),
+            psi_im.len(),
+            v.len()
+        )));
+    }
+    let mut wave = sim_quantum::WaveFunction2D::new(nx, ny, dx, dy);
+    wave.psi = psi_re
+        .iter()
+        .zip(psi_im.iter())
+        .map(|(re, im)| sim_math::Complex64::new(*re, *im))
+        .collect();
+    wave.v = v;
+    Ok(wave)
+}
+
 /// `GravityFieldJson` → `sim_mechanics::GravityField`。
 /// `Uniform`の`direction`の正規化は`MechanicsSolver::set_gravity_field`が
 /// 引き受けるので、ここでは配列→`Vec3`の写像だけを行う。
@@ -2740,60 +2818,21 @@ impl World {
         // D25/D27–D32 が「ドメイン自体が存在しない」として滞留していた。
         if let Some(q) = &scenario.quantum_1d {
             let raw = &q.raw_state;
-            let psi_re = decode_f64_field("quantum_1d.raw_state.psi_re", &raw.psi_re)?;
-            let psi_im = decode_f64_field("quantum_1d.raw_state.psi_im", &raw.psi_im)?;
-            let v = decode_f64_field("quantum_1d.raw_state.v", &raw.v)?;
-            let n = psi_re.len();
-            if !n.is_power_of_two() {
-                return Err(SceneError::InvalidValue(format!(
-                    "quantum_1d.raw_state.psi_re の長さは2の冪(FFTの制約)、got {n}"
-                )));
-            }
-            if psi_im.len() != n || v.len() != n {
-                return Err(SceneError::InvalidValue(format!(
-                    "quantum_1d.raw_state: psi_re/psi_im/v の長さが揃っていない \
-                     ({n}/{}/{})",
-                    psi_im.len(),
-                    v.len()
-                )));
-            }
-            let mut wave = sim_quantum::WaveFunction1D::new(n, raw.dx);
-            wave.psi = psi_re
-                .iter()
-                .zip(psi_im.iter())
-                .map(|(re, im)| sim_math::Complex64::new(*re, *im))
-                .collect();
-            wave.v = v;
+            let wave = build_quantum_1d_wave_from_raw(&raw.psi_re, &raw.psi_im, &raw.v, raw.dx)?;
             world.enable_quantum_1d(wave);
         }
 
         if let Some(q) = &scenario.quantum_2d {
             let raw = &q.raw_state;
-            if !raw.nx.is_power_of_two() || !raw.ny.is_power_of_two() {
-                return Err(SceneError::InvalidValue(
-                    "quantum_2d.raw_state.nx/ny must be powers of two (FFT constraint)".to_string(),
-                ));
-            }
-            let n = raw.nx * raw.ny;
-            let psi_re = decode_f64_field("quantum_2d.raw_state.psi_re", &raw.psi_re)?;
-            let psi_im = decode_f64_field("quantum_2d.raw_state.psi_im", &raw.psi_im)?;
-            let v = decode_f64_field("quantum_2d.raw_state.v", &raw.v)?;
-            if psi_re.len() != n || psi_im.len() != n || v.len() != n {
-                return Err(SceneError::InvalidValue(format!(
-                    "quantum_2d.raw_state: psi_re/psi_im/v の長さが nx*ny={n} と一致しない \
-                     ({}/{}/{})",
-                    psi_re.len(),
-                    psi_im.len(),
-                    v.len()
-                )));
-            }
-            let mut wave = sim_quantum::WaveFunction2D::new(raw.nx, raw.ny, raw.dx, raw.dy);
-            wave.psi = psi_re
-                .iter()
-                .zip(psi_im.iter())
-                .map(|(re, im)| sim_math::Complex64::new(*re, *im))
-                .collect();
-            wave.v = v;
+            let wave = build_quantum_2d_wave_from_raw(
+                &raw.psi_re,
+                &raw.psi_im,
+                &raw.v,
+                raw.nx,
+                raw.ny,
+                raw.dx,
+                raw.dy,
+            )?;
             world.enable_quantum_2d(wave);
         }
 

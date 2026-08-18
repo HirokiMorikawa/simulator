@@ -89,6 +89,11 @@ pub enum WasmError {
     /// ——`sim_world::to_scenario`のdoc参照。下の`ScenarioSerializeFailed`が
     /// `serde_json`側の失敗であるのに対し、こちらは書き出す前の中身の異常である。
     ScenarioExport(sim_world::SceneError),
+    /// `enable_quantum_1d_domain`/`enable_quantum_2d_domain`——プリセットUIが
+    /// 組み立てた`psi_re`/`psi_im`/`v`が`sim_world::build_quantum_{1d,2d}_wave_from_raw`
+    /// の検証(2の冪長・配列長一致)を通らない。シーンJSON経路と同じ`SceneError`を
+    /// そのまま保持する(上の5変種と同じ理由)。
+    QuantumRawStateInvalid(sim_world::SceneError),
 
     // --- serde_jsonのシリアライズ/デシリアライズ失敗(`serde_json::Error`は
     // `PartialEq`を持たないため、`Display`済みの文字列で保持する) ---
@@ -200,7 +205,8 @@ impl std::fmt::Display for WasmError {
             | WasmError::AppendScenarioBodies(e)
             | WasmError::ScenarioProbes(e)
             | WasmError::HeadlessRun(e)
-            | WasmError::ScenarioExport(e) => write!(f, "{e:?}"),
+            | WasmError::ScenarioExport(e)
+            | WasmError::QuantumRawStateInvalid(e) => write!(f, "{e:?}"),
 
             WasmError::ShapeSerializeFailed(e) => write!(f, "failed to serialize shape: {e}"),
             WasmError::ShapeParseFailed(e) => write!(f, "failed to parse shape json: {e}"),
@@ -2955,6 +2961,22 @@ impl WasmWorld {
                 self.enable_gas_compartment_impl();
                 Ok("{}".to_string())
             }
+            "enable_quantum_1d_domain" => {
+                self.enable_quantum_1d_domain_impl(&s("psi_re"), &s("psi_im"), &s("v"), f("dx"))?;
+                Ok("{}".to_string())
+            }
+            "enable_quantum_2d_domain" => {
+                self.enable_quantum_2d_domain_impl(
+                    &s("psi_re"),
+                    &s("psi_im"),
+                    &s("v"),
+                    u("nx"),
+                    u("ny"),
+                    f("dx"),
+                    f("dy"),
+                )?;
+                Ok("{}".to_string())
+            }
             "add_sph_rigid_coupling" => {
                 self.add_sph_rigid_coupling_impl(u("body"), f("radius"), u("boundary_points"))?;
                 Ok("{}".to_string())
@@ -3978,6 +4000,50 @@ impl WasmWorld {
                 gas: sim_thermal::GasSpecies::AIR,
             });
         }
+    }
+
+    /// 量子ドメイン(1D)をプリセットUI由来の生状態で有効化する——エディタの
+    /// 「＋ 量子ドメイン」フォーム(`demo/src/main.ts`)がガウス波束・ポテンシャル形状
+    /// をTypeScript側で計算し、`psi_re`/`psi_im`/`v`(いずれも
+    /// `raw_bytes::encode_f64_le_base64_finite`と同じLE+base64)として渡してくる。
+    ///
+    /// **検証はシーンJSON経路と完全に同じ**(`sim_world::build_quantum_1d_wave_from_raw`
+    /// を直接呼ぶ——2の冪長・配列長一致のチェックをここで再実装すると、シーンJSON側の
+    /// 検証が変わったときにここだけ取り残される)。`enable_grid_fluid_2d_domain_impl`と
+    /// 違って**冪等ではなく常に上書きする**——こちらは呼び出しごとに異なるプリセット
+    /// (パラメータ違い)を渡す前提の操作であり、「既に有効なら何もしない」と
+    /// 「フォームの値を反映する」が両立しないため(`World::enable_quantum_1d`のdoc
+    /// 参照、単に`Option`を差し替えるだけで元々冪等性を持たない)。
+    fn enable_quantum_1d_domain_impl(
+        &mut self,
+        psi_re: &str,
+        psi_im: &str,
+        v: &str,
+        dx: f64,
+    ) -> Result<(), WasmError> {
+        let wave = sim_world::build_quantum_1d_wave_from_raw(psi_re, psi_im, v, dx)
+            .map_err(WasmError::QuantumRawStateInvalid)?;
+        self.inner.enable_quantum_1d(wave);
+        Ok(())
+    }
+
+    /// `enable_quantum_1d_domain_impl`の2D版。`nx`/`ny`は2の冪(FFTの制約、
+    /// `build_quantum_2d_wave_from_raw`が検証する)。
+    #[allow(clippy::too_many_arguments)]
+    fn enable_quantum_2d_domain_impl(
+        &mut self,
+        psi_re: &str,
+        psi_im: &str,
+        v: &str,
+        nx: usize,
+        ny: usize,
+        dx: f64,
+        dy: f64,
+    ) -> Result<(), WasmError> {
+        let wave = sim_world::build_quantum_2d_wave_from_raw(psi_re, psi_im, v, nx, ny, dx, dy)
+            .map_err(WasmError::QuantumRawStateInvalid)?;
+        self.inner.enable_quantum_2d(wave);
+        Ok(())
     }
 
     /// Add Coupling——`sim_coupling::SphRigid`の薄い写像。D23(注ぐ水)向け。
@@ -7153,7 +7219,7 @@ mod tests {
         // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
         // 足したらこの数と`component_schema`の表の両方を更新すること**——
         // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
-        const APPLY_KIND_COUNT: usize = 74;
+        const APPLY_KIND_COUNT: usize = 76;
         assert_eq!(
             entries.len(),
             APPLY_KIND_COUNT,
@@ -8607,5 +8673,279 @@ mod tests {
             include_str!("../../../scenes/d35-orbital-insertion.json"),
             4,
         );
+    }
+
+    /// **量子ドメインのプリセットUI経路(B9)**: `demo/src/main.ts`のプリセット関数が
+    /// TypeScript側で計算するのと同じ式(`WaveFunction1D::set_gaussian_wave_packet`
+    /// と同じガウス波束、調和振動子ポテンシャル$V(x)=\frac12\omega^2(x-x_c)^2$)を
+    /// ここでも複製し、base64+LEでエンコードした`payload`を`apply_component`経由で
+    /// 送る——**エディタが実際に送るのと同じ形のJSON**が`enable_quantum_1d_domain`を
+    /// 通ることと、そのノルム・ポテンシャルが式どおりに復元されることを確認する。
+    #[test]
+    fn enable_quantum_1d_domain_accepts_a_normalized_gaussian_wave_packet_and_harmonic_potential() {
+        let n: usize = 64;
+        let dx = 0.1;
+        let center = n as f64 * dx * 0.5;
+        let sigma = 0.5;
+        let k0 = 2.0;
+        let omega = 1.0;
+
+        let mut psi_re = vec![0.0; n];
+        let mut psi_im = vec![0.0; n];
+        for i in 0..n {
+            let x = i as f64 * dx;
+            let envelope = (-(x - center).powi(2) / (4.0 * sigma * sigma)).exp();
+            psi_re[i] = envelope * (k0 * x).cos();
+            psi_im[i] = envelope * (k0 * x).sin();
+        }
+        // Σ|ψ|²dx=1になるよう正規化(`WaveFunction1D::set_gaussian_wave_packet`と
+        // 同じ離散ノルム規約、モジュールdoc「構築レシピ」の§規約1参照)。
+        let norm_before: f64 = psi_re
+            .iter()
+            .zip(psi_im.iter())
+            .map(|(re, im)| re * re + im * im)
+            .sum::<f64>()
+            * dx;
+        let scale = 1.0 / norm_before.sqrt();
+        for value in psi_re.iter_mut().chain(psi_im.iter_mut()) {
+            *value *= scale;
+        }
+
+        let mut v = vec![0.0; n];
+        for (i, v_i) in v.iter_mut().enumerate() {
+            let x = i as f64 * dx - center;
+            *v_i = 0.5 * omega * omega * x * x;
+        }
+
+        let payload = serde_json::json!({
+            "psi_re": sim_world::encode_f64_le_base64_finite(&psi_re).unwrap(),
+            "psi_im": sim_world::encode_f64_le_base64_finite(&psi_im).unwrap(),
+            "v": sim_world::encode_f64_le_base64_finite(&v).unwrap(),
+            "dx": dx,
+        })
+        .to_string();
+
+        let mut world = new_world();
+        assert!(
+            world.inner.quantum_1d().is_none(),
+            "quantum_1d must not be enabled before the preset call"
+        );
+        world
+            .apply_component_impl("enable_quantum_1d_domain", &payload)
+            .expect("a valid preset payload must enable the quantum_1d domain");
+
+        let wave = world
+            .inner
+            .quantum_1d()
+            .expect("quantum_1d domain must be enabled after enable_quantum_1d_domain");
+        assert_eq!(wave.len(), n);
+        assert!((wave.norm() - 1.0).abs() < 1e-9, "norm={}", wave.norm());
+        for i in [0usize, n / 4, n / 2, 3 * n / 4, n - 1] {
+            let x = i as f64 * dx - center;
+            let expected = 0.5 * omega * omega * x * x;
+            assert!(
+                (wave.v[i] - expected).abs() < 1e-9,
+                "i={i} v={} expected={expected}",
+                wave.v[i]
+            );
+        }
+    }
+
+    /// 2D版(B9)——`WaveFunction2D::set_gaussian_wave_packet`と同じ2Dガウス波束、
+    /// ポテンシャルは`scenes/d27-double-slit.json`と同じ二重スリット障壁(壁の高さ・
+    /// スリット2本の幅と間隔)を複製する。ノルムと、障壁/スリット位置でのポテンシャル
+    /// 値が期待どおりであることを確認する。
+    #[test]
+    fn enable_quantum_2d_domain_accepts_a_normalized_wave_packet_and_double_slit_potential() {
+        let nx: usize = 64;
+        let ny: usize = 64;
+        let dx = 0.1;
+        let dy = 0.1;
+        let x0 = 1.0;
+        let y0 = ny as f64 * dy * 0.5;
+        let sigma_x = 0.5;
+        let sigma_y = 2.0;
+        let k0 = 3.0;
+
+        let mut psi_re = vec![0.0; nx * ny];
+        let mut psi_im = vec![0.0; nx * ny];
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let x = ix as f64 * dx;
+                let y = iy as f64 * dy;
+                let envelope = (-(x - x0).powi(2) / (4.0 * sigma_x * sigma_x)
+                    - (y - y0).powi(2) / (4.0 * sigma_y * sigma_y))
+                    .exp();
+                let idx = iy * nx + ix;
+                psi_re[idx] = envelope * (k0 * x).cos();
+                psi_im[idx] = envelope * (k0 * x).sin();
+            }
+        }
+        let norm_before: f64 = psi_re
+            .iter()
+            .zip(psi_im.iter())
+            .map(|(re, im)| re * re + im * im)
+            .sum::<f64>()
+            * dx
+            * dy;
+        let scale = 1.0 / norm_before.sqrt();
+        for value in psi_re.iter_mut().chain(psi_im.iter_mut()) {
+            *value *= scale;
+        }
+
+        // 二重スリット障壁: x方向1セル厚の壁、y方向に2本の隙間(`scenes/
+        // d27-double-slit.json`と同じ構成、`sim_quantum::schrodinger2d`のQ6テスト
+        // 参照)。
+        let barrier_ix = nx / 2;
+        let v0 = 60.0;
+        let slit_half_width = 3.0 * dy;
+        let slit_separation = 10.0 * dy;
+        let mut v = vec![0.0; nx * ny];
+        for iy in 0..ny {
+            let y = iy as f64 * dy - y0;
+            let in_slit1 = (y - slit_separation * 0.5).abs() < slit_half_width;
+            let in_slit2 = (y + slit_separation * 0.5).abs() < slit_half_width;
+            if !in_slit1 && !in_slit2 {
+                v[iy * nx + barrier_ix] = v0;
+            }
+        }
+
+        let payload = serde_json::json!({
+            "psi_re": sim_world::encode_f64_le_base64_finite(&psi_re).unwrap(),
+            "psi_im": sim_world::encode_f64_le_base64_finite(&psi_im).unwrap(),
+            "v": sim_world::encode_f64_le_base64_finite(&v).unwrap(),
+            "nx": nx,
+            "ny": ny,
+            "dx": dx,
+            "dy": dy,
+        })
+        .to_string();
+
+        let mut world = new_world();
+        world
+            .apply_component_impl("enable_quantum_2d_domain", &payload)
+            .expect("a valid preset payload must enable the quantum_2d domain");
+
+        let wave = world
+            .inner
+            .quantum_2d()
+            .expect("quantum_2d domain must be enabled after enable_quantum_2d_domain");
+        assert_eq!(wave.nx, nx);
+        assert_eq!(wave.ny, ny);
+        assert!((wave.norm() - 1.0).abs() < 1e-9, "norm={}", wave.norm());
+
+        // 障壁の壁部分は`v0`、スリットの隙間はゼロ。
+        assert_eq!(wave.v[barrier_ix], v0);
+        let slit1_iy = (y0 + slit_separation * 0.5) / dy;
+        assert_eq!(wave.v[slit1_iy as usize * nx + barrier_ix], 0.0);
+    }
+
+    /// 非2の冪グリッドは`WasmError::QuantumRawStateInvalid`として明示的に`Err`を
+    /// 返し、パニックしない(タスク仕様「invalid grid sizes ... are rejected with
+    /// a clear error rather than panicking or silently truncating」)。検証は
+    /// `sim_world::build_quantum_1d_wave_from_raw`——シーンJSON経路
+    /// (`from_scenario_with_body_ids`)と全く同じ関数を通る。
+    #[test]
+    fn enable_quantum_1d_domain_rejects_a_non_power_of_two_grid_size_without_panicking() {
+        let n = 100; // 2の冪ではない
+        let zeros = vec![0.0; n];
+        let payload = serde_json::json!({
+            "psi_re": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+            "psi_im": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+            "v": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+            "dx": 0.1,
+        })
+        .to_string();
+
+        let mut world = new_world();
+        assert_err_matches!(
+            world.apply_component_impl("enable_quantum_1d_domain", &payload),
+            WasmError::QuantumRawStateInvalid(sim_world::SceneError::InvalidValue(_))
+        );
+        assert!(
+            world.inner.quantum_1d().is_none(),
+            "a rejected preset must not leave a partially-built domain behind"
+        );
+    }
+
+    /// 2D版——`nx`は2の冪だが`ny`がそうでない、という片方だけ壊れたケースも
+    /// 弾かれることを確認する(`build_quantum_2d_wave_from_raw`は両方を検証する)。
+    #[test]
+    fn enable_quantum_2d_domain_rejects_a_non_power_of_two_ny_without_panicking() {
+        let nx = 64;
+        let ny = 100; // 2の冪ではない
+        let zeros = vec![0.0; nx * ny];
+        let payload = serde_json::json!({
+            "psi_re": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+            "psi_im": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+            "v": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+            "nx": nx,
+            "ny": ny,
+            "dx": 0.1,
+            "dy": 0.1,
+        })
+        .to_string();
+
+        let mut world = new_world();
+        assert_err_matches!(
+            world.apply_component_impl("enable_quantum_2d_domain", &payload),
+            WasmError::QuantumRawStateInvalid(sim_world::SceneError::InvalidValue(_))
+        );
+        assert!(world.inner.quantum_2d().is_none());
+    }
+
+    /// 配列長が食い違うペイロード(`psi_re`と`v`の長さが違う)も、2の冪長チェックを
+    /// 通過した後の2段目の検証で弾かれる(`build_quantum_1d_wave_from_raw`の
+    /// 「psi_re/psi_im/vの長さが揃っていない」分岐)。
+    #[test]
+    fn enable_quantum_1d_domain_rejects_mismatched_array_lengths_without_panicking() {
+        let n = 64;
+        let psi = vec![0.0; n];
+        let mismatched_v = vec![0.0; n / 2];
+        let payload = serde_json::json!({
+            "psi_re": sim_world::encode_f64_le_base64_finite(&psi).unwrap(),
+            "psi_im": sim_world::encode_f64_le_base64_finite(&psi).unwrap(),
+            "v": sim_world::encode_f64_le_base64_finite(&mismatched_v).unwrap(),
+            "dx": 0.1,
+        })
+        .to_string();
+
+        let mut world = new_world();
+        assert_err_matches!(
+            world.apply_component_impl("enable_quantum_1d_domain", &payload),
+            WasmError::QuantumRawStateInvalid(sim_world::SceneError::InvalidValue(_))
+        );
+    }
+
+    /// `enable_quantum_1d_domain`/`enable_quantum_2d_domain`は`enable_grid_fluid_
+    /// 2d_domain`と違って**冪等ではない**——呼ぶたびに渡された生状態で上書きする
+    /// (`enable_quantum_1d_domain_impl`のdoc参照)。2回目の呼び出しが1回目と違う
+    /// グリッド長を渡しても、古い状態を引きずらず新しい状態にきれいに置き換わる
+    /// ことを確認する。
+    #[test]
+    fn enable_quantum_1d_domain_overwrites_a_previously_enabled_domain_with_a_different_size() {
+        let make_payload = |n: usize, dx: f64| {
+            let zeros = vec![0.0; n];
+            serde_json::json!({
+                "psi_re": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+                "psi_im": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+                "v": sim_world::encode_f64_le_base64_finite(&zeros).unwrap(),
+                "dx": dx,
+            })
+            .to_string()
+        };
+
+        let mut world = new_world();
+        world
+            .apply_component_impl("enable_quantum_1d_domain", &make_payload(32, 0.2))
+            .expect("first preset call must succeed");
+        assert_eq!(world.inner.quantum_1d().unwrap().len(), 32);
+
+        world
+            .apply_component_impl("enable_quantum_1d_domain", &make_payload(128, 0.05))
+            .expect("second preset call must succeed and replace the domain");
+        let wave = world.inner.quantum_1d().unwrap();
+        assert_eq!(wave.len(), 128);
+        assert_eq!(wave.dx, 0.05);
     }
 }

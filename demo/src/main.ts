@@ -1179,6 +1179,414 @@ function readNumber(world: WasmWorld, kind: string, arg = ""): number {
   return Number(world.read_component(kind, arg));
 }
 
+// ---------------------------------------------------------------------------
+// 量子ドメイン(1D/2D)の追加プリセット(**B9「エディタのUIプリセットとして
+// 残す」**)。
+//
+// `crates/sim-world/src/scenario.rs`のモジュールdocが説明するとおり、シーンJSON
+// スキーマからは「よく使う3形」を列挙する構築レシピ(ガウス波束・矩形障壁・
+// 調和振動子)が撤去され、`raw_state`(任意の波動関数・ポテンシャルの生配列)だけが
+// 唯一の表現になった——持続する状態にとっては表現力で上回る正しい判断だが、副作用と
+// して「D27/D28のようなよく使うテキストブック的初期条件をエディタから手軽に置く
+// 手段」も一緒に消えた(手でpsi_re/psi_im/vをbase64エンコードして書く以外に量子
+// ドメインを新規作成する経路が無い)。
+//
+// ここでは撤去された構築レシピと同じ発想(ガウス波束+ポテンシャル3〜4形)を
+// **エディタ側だけのプリセット**として復活させる。計算は全てTypeScript側で行い、
+// 結果の生配列を`enable_quantum_1d_domain`/`enable_quantum_2d_domain`
+// (`apply_component`の新kind、`crates/sim-wasm/src/lib.rs`)へ渡すだけ——シーン
+// JSONスキーマには一切触れない(スキーマが`raw_state`だけを唯一の真として保つ設計
+// はそのまま)。
+// ---------------------------------------------------------------------------
+
+/// f64配列をLE(リトルエンディアン)+base64(RFC 4648 §4、標準アルファベット)へ
+/// 符号化する。`crates/sim-world/src/raw_bytes.rs`の`encode_f64_le_base64`と同じ
+/// 表現(長さヘッダ等のフレーミングは無い、素のバイト列)——量子ドメインのプリセット
+/// が唯一の呼び出し元。外部パッケージを増やさない方針(README「依存が実質ゼロ」)の
+/// もと、`btoa`(ブラウザ組み込み)の上に手で組む。
+function encodeF64LeBase64(values: readonly number[]): string {
+  const bytes = new Uint8Array(values.length * 8);
+  const view = new DataView(bytes.buffer);
+  values.forEach((value, i) => view.setFloat64(i * 8, value, true));
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+/// 1Dガウス波束 $\psi(x)=\exp[-(x-x_0)^2/(4\sigma^2)+ik_0x]$、離散ノルム
+/// $\sum_i|\psi_i|^2dx=1$へ正規化する(`sim_quantum::WaveFunction1D::
+/// set_gaussian_wave_packet`と同じ式・同じ規約、格子点は$x_i=i\cdot dx$)。
+function quantum1dGaussianWavePacket(
+  n: number,
+  dx: number,
+  x0: number,
+  sigma: number,
+  k0: number,
+): { psiRe: number[]; psiIm: number[] } {
+  const psiRe = new Array<number>(n);
+  const psiIm = new Array<number>(n);
+  for (let i = 0; i < n; i += 1) {
+    const x = i * dx;
+    const envelope = Math.exp(-((x - x0) ** 2) / (4 * sigma * sigma));
+    psiRe[i] = envelope * Math.cos(k0 * x);
+    psiIm[i] = envelope * Math.sin(k0 * x);
+  }
+  let norm = 0;
+  for (let i = 0; i < n; i += 1) norm += psiRe[i] * psiRe[i] + psiIm[i] * psiIm[i];
+  norm *= dx;
+  const scale = 1 / Math.sqrt(norm);
+  for (let i = 0; i < n; i += 1) {
+    psiRe[i] *= scale;
+    psiIm[i] *= scale;
+  }
+  return { psiRe, psiIm };
+}
+
+/// 1Dの矩形ポテンシャル。`height`に正の値を渡せば障壁、負の値を渡せば井戸になる
+/// (符号は呼び出し側が決める)。中心`center`・幅`width`はいずれも[a.u.]。
+function quantum1dRectangularPotential(
+  n: number,
+  dx: number,
+  height: number,
+  width: number,
+  center: number,
+): number[] {
+  const v = new Array<number>(n).fill(0);
+  const lo = center - width / 2;
+  const hi = center + width / 2;
+  for (let i = 0; i < n; i += 1) {
+    const x = i * dx;
+    if (x >= lo && x < hi) v[i] = height;
+  }
+  return v;
+}
+
+/// 1D調和振動子ポテンシャル $V(x)=\frac12\omega^2(x-x_c)^2$。
+function quantum1dHarmonicPotential(
+  n: number,
+  dx: number,
+  omega: number,
+  center: number,
+): number[] {
+  const v = new Array<number>(n);
+  for (let i = 0; i < n; i += 1) {
+    const x = i * dx - center;
+    v[i] = 0.5 * omega * omega * x * x;
+  }
+  return v;
+}
+
+/// 2Dガウス波束(`sim_quantum::WaveFunction2D::set_gaussian_wave_packet`と同じ式、
+/// +x方向へ運動量$k_0$)。行優先(`index = iy*nx+ix`、`Quantum2dRawStateJson`の
+/// docと同じ規約)。
+function quantum2dGaussianWavePacket(
+  nx: number,
+  ny: number,
+  dx: number,
+  dy: number,
+  x0: number,
+  y0: number,
+  sigmaX: number,
+  sigmaY: number,
+  k0: number,
+): { psiRe: number[]; psiIm: number[] } {
+  const psiRe = new Array<number>(nx * ny);
+  const psiIm = new Array<number>(nx * ny);
+  for (let iy = 0; iy < ny; iy += 1) {
+    const y = iy * dy;
+    for (let ix = 0; ix < nx; ix += 1) {
+      const x = ix * dx;
+      const envelope = Math.exp(
+        -((x - x0) ** 2) / (4 * sigmaX * sigmaX) - ((y - y0) ** 2) / (4 * sigmaY * sigmaY),
+      );
+      const idx = iy * nx + ix;
+      psiRe[idx] = envelope * Math.cos(k0 * x);
+      psiIm[idx] = envelope * Math.sin(k0 * x);
+    }
+  }
+  let norm = 0;
+  for (let i = 0; i < psiRe.length; i += 1) norm += psiRe[i] * psiRe[i] + psiIm[i] * psiIm[i];
+  norm *= dx * dy;
+  const scale = 1 / Math.sqrt(norm);
+  for (let i = 0; i < psiRe.length; i += 1) {
+    psiRe[i] *= scale;
+    psiIm[i] *= scale;
+  }
+  return { psiRe, psiIm };
+}
+
+/// 2D二重スリット障壁(`scenes/d27-double-slit.json`と同じ構成——x方向1格子点厚の
+/// 壁を`ix=nx/2`に置き、y方向中心を挟んで対称な幅`slitWidth`のスリットを2本開ける、
+/// 中心間隔`slitSeparation`)。
+function quantum2dDoubleSlitPotential(
+  nx: number,
+  ny: number,
+  dy: number,
+  height: number,
+  slitWidth: number,
+  slitSeparation: number,
+): number[] {
+  const v = new Array<number>(nx * ny).fill(0);
+  const barrierIx = Math.floor(nx / 2);
+  const yCenter = (ny * dy) / 2;
+  for (let iy = 0; iy < ny; iy += 1) {
+    const y = iy * dy - yCenter;
+    const inSlit1 = Math.abs(y - slitSeparation / 2) < slitWidth / 2;
+    const inSlit2 = Math.abs(y + slitSeparation / 2) < slitWidth / 2;
+    if (!inSlit1 && !inSlit2) v[iy * nx + barrierIx] = height;
+  }
+  return v;
+}
+
+/// 2D調和振動子ポテンシャル $V(x,y)=\frac12\omega^2[(x-c_x)^2+(y-c_y)^2]$。
+function quantum2dHarmonicPotential(
+  nx: number,
+  ny: number,
+  dx: number,
+  dy: number,
+  omega: number,
+  cx: number,
+  cy: number,
+): number[] {
+  const v = new Array<number>(nx * ny);
+  for (let iy = 0; iy < ny; iy += 1) {
+    const y = iy * dy - cy;
+    for (let ix = 0; ix < nx; ix += 1) {
+      const x = ix * dx - cx;
+      v[iy * nx + ix] = 0.5 * omega * omega * (x * x + y * y);
+    }
+  }
+  return v;
+}
+
+/// 2の冪のグリッドサイズだけを許す(select要素の`<option>`が既に2の冪しか
+/// 提示しないが、タスク仕様「enforce/round in the UI ... rather than accepting
+/// arbitrary integers that would fail Rust-side validation」に沿って呼び出し側でも
+/// 明示的に検証する)。
+function isPowerOfTwo(n: number): boolean {
+  return Number.isInteger(n) && n > 0 && (n & (n - 1)) === 0;
+}
+
+/// 量子ドメイン(1D/2D)の「＋追加」フォームを配線する(**B9**)。Add Joint/Add
+/// Coupling(B11〜B15)と違って`component_schema`駆動ではない——ここのプリセット
+/// 計算(ガウス波束・ポテンシャル形状)はシーンJSONスキーマに存在しない、エディタ
+/// 限定の変換だからである(モジュール冒頭のdoc参照)。設定ポップオーバー内の静的
+/// フォーム(`demo/index.html`)を直接読み書きするだけの薄い配線に留める。
+///
+/// `enable_grid_fluid_2d_domain`と違って**冪等ではない**——ボタンを押すたびに
+/// フォームの現在値で生状態を丸ごと置き換える(`sim-wasm`側`enable_quantum_1d_
+/// domain_impl`のdocと同じ理由)。
+///
+/// **`world`を値ではなく`getWorld`(取得関数)で受け取る**: `setUpSceneView`は
+/// ギャラリーシーンを読み込むたび`let world`変数を丸ごと差し替える
+/// (`world = WasmWorld.from_scene_json(json)`)。この配線自体は`btn-enable-grid-
+/// fluid`と同じくシーン読み込み時に1回しか呼ばれないため、`world`をそのまま値で
+/// 受け取って閉包すると、シーン切り替え後もボタンが**差し替え前の破棄済み
+/// `WasmWorld`**へ向かって送信し続けてしまう。クリック時に`getWorld()`を呼び直す
+/// ことで、常にその時点の現在の`world`を参照する。
+function wireAddQuantumDomainForms(getWorld: () => WasmWorld): void {
+  // --- 1D ---
+  const nSelect = document.getElementById("select-quantum1d-n") as HTMLSelectElement | null;
+  const dxInput = document.getElementById("input-quantum1d-dx") as HTMLInputElement | null;
+  const x0Input = document.getElementById("input-quantum1d-x0") as HTMLInputElement | null;
+  const sigmaInput = document.getElementById("input-quantum1d-sigma") as HTMLInputElement | null;
+  const k0Input = document.getElementById("input-quantum1d-k0") as HTMLInputElement | null;
+  const potential1dSelect = document.getElementById(
+    "select-quantum1d-potential",
+  ) as HTMLSelectElement | null;
+  const v0Input = document.getElementById("input-quantum1d-v0") as HTMLInputElement | null;
+  const widthInput = document.getElementById("input-quantum1d-width") as HTMLInputElement | null;
+  const centerInput = document.getElementById(
+    "input-quantum1d-center",
+  ) as HTMLInputElement | null;
+  const omega1dInput = document.getElementById(
+    "input-quantum1d-omega",
+  ) as HTMLInputElement | null;
+  const add1dButton = document.getElementById("btn-add-quantum-1d");
+
+  const updateVisibility1d = () => {
+    const preset = potential1dSelect?.value ?? "zero";
+    document.querySelectorAll<HTMLElement>("[data-quantum1d-potential]").forEach((el) => {
+      el.hidden = !(el.dataset.quantum1dPotential ?? "").split(" ").includes(preset);
+    });
+  };
+  potential1dSelect?.addEventListener("change", updateVisibility1d);
+  updateVisibility1d();
+
+  add1dButton?.addEventListener("click", () => {
+    const n = Number(nSelect?.value ?? 256);
+    const dx = Number(dxInput?.value ?? 0.1);
+    const x0 = Number(x0Input?.value ?? 0);
+    const sigma = Number(sigmaInput?.value ?? 1);
+    const k0 = Number(k0Input?.value ?? 0);
+    if (!isPowerOfTwo(n)) {
+      window.alert("グリッド点数 n は2の冪(64/128/256/512/1024)から選んでください。");
+      return;
+    }
+    if (!Number.isFinite(dx) || dx <= 0 || !Number.isFinite(sigma) || sigma <= 0) {
+      window.alert("dx・σ には正の有限値を入力してください。");
+      return;
+    }
+    const { psiRe, psiIm } = quantum1dGaussianWavePacket(n, dx, x0, sigma, k0);
+    const preset = potential1dSelect?.value ?? "zero";
+    const center = Number(centerInput?.value ?? (n * dx) / 2);
+    let v: number[];
+    switch (preset) {
+      case "barrier":
+        v = quantum1dRectangularPotential(
+          n,
+          dx,
+          Number(v0Input?.value ?? 0),
+          Number(widthInput?.value ?? 0),
+          center,
+        );
+        break;
+      case "well":
+        v = quantum1dRectangularPotential(
+          n,
+          dx,
+          -Math.abs(Number(v0Input?.value ?? 0)),
+          Number(widthInput?.value ?? 0),
+          center,
+        );
+        break;
+      case "harmonic":
+        v = quantum1dHarmonicPotential(n, dx, Number(omega1dInput?.value ?? 1), center);
+        break;
+      default:
+        v = new Array(n).fill(0);
+    }
+    try {
+      applyComponent(getWorld(), "enable_quantum_1d_domain", {
+        psi_re: encodeF64LeBase64(psiRe),
+        psi_im: encodeF64LeBase64(psiIm),
+        v: encodeF64LeBase64(v),
+        dx,
+      });
+    } catch (err) {
+      window.alert(`量子ドメイン(1D)の追加に失敗しました: ${String(err)}`);
+    }
+  });
+
+  // --- 2D ---
+  const nxSelect = document.getElementById("select-quantum2d-nx") as HTMLSelectElement | null;
+  const nySelect = document.getElementById("select-quantum2d-ny") as HTMLSelectElement | null;
+  const dx2dInput = document.getElementById("input-quantum2d-dx") as HTMLInputElement | null;
+  const dy2dInput = document.getElementById("input-quantum2d-dy") as HTMLInputElement | null;
+  const x02dInput = document.getElementById("input-quantum2d-x0") as HTMLInputElement | null;
+  const y02dInput = document.getElementById("input-quantum2d-y0") as HTMLInputElement | null;
+  const sigmaX2dInput = document.getElementById(
+    "input-quantum2d-sigma-x",
+  ) as HTMLInputElement | null;
+  const sigmaY2dInput = document.getElementById(
+    "input-quantum2d-sigma-y",
+  ) as HTMLInputElement | null;
+  const k02dInput = document.getElementById("input-quantum2d-k0") as HTMLInputElement | null;
+  const potential2dSelect = document.getElementById(
+    "select-quantum2d-potential",
+  ) as HTMLSelectElement | null;
+  const v02dInput = document.getElementById("input-quantum2d-v0") as HTMLInputElement | null;
+  const slitWidthInput = document.getElementById(
+    "input-quantum2d-slit-width",
+  ) as HTMLInputElement | null;
+  const slitSeparationInput = document.getElementById(
+    "input-quantum2d-slit-separation",
+  ) as HTMLInputElement | null;
+  const omega2dInput = document.getElementById(
+    "input-quantum2d-omega",
+  ) as HTMLInputElement | null;
+  const add2dButton = document.getElementById("btn-add-quantum-2d");
+
+  const updateVisibility2d = () => {
+    const preset = potential2dSelect?.value ?? "zero";
+    document.querySelectorAll<HTMLElement>("[data-quantum2d-potential]").forEach((el) => {
+      el.hidden = !(el.dataset.quantum2dPotential ?? "").split(" ").includes(preset);
+    });
+  };
+  potential2dSelect?.addEventListener("change", updateVisibility2d);
+  updateVisibility2d();
+
+  add2dButton?.addEventListener("click", () => {
+    const nx = Number(nxSelect?.value ?? 64);
+    const ny = Number(nySelect?.value ?? 64);
+    const dx = Number(dx2dInput?.value ?? 0.2);
+    const dy = Number(dy2dInput?.value ?? 0.2);
+    const x0 = Number(x02dInput?.value ?? 0);
+    const y0 = Number(y02dInput?.value ?? (ny * dy) / 2);
+    const sigmaX = Number(sigmaX2dInput?.value ?? 1);
+    const sigmaY = Number(sigmaY2dInput?.value ?? 1);
+    const k0 = Number(k02dInput?.value ?? 0);
+    if (!isPowerOfTwo(nx) || !isPowerOfTwo(ny)) {
+      window.alert("グリッド点数 nx/ny は2の冪(32/64/128/256)から選んでください。");
+      return;
+    }
+    if (
+      !Number.isFinite(dx) ||
+      dx <= 0 ||
+      !Number.isFinite(dy) ||
+      dy <= 0 ||
+      !Number.isFinite(sigmaX) ||
+      sigmaX <= 0 ||
+      !Number.isFinite(sigmaY) ||
+      sigmaY <= 0
+    ) {
+      window.alert("dx・dy・σx・σy には正の有限値を入力してください。");
+      return;
+    }
+    const { psiRe, psiIm } = quantum2dGaussianWavePacket(
+      nx,
+      ny,
+      dx,
+      dy,
+      x0,
+      y0,
+      sigmaX,
+      sigmaY,
+      k0,
+    );
+    const preset = potential2dSelect?.value ?? "zero";
+    let v: number[];
+    switch (preset) {
+      case "double_slit":
+        v = quantum2dDoubleSlitPotential(
+          nx,
+          ny,
+          dy,
+          Number(v02dInput?.value ?? 0),
+          Number(slitWidthInput?.value ?? 0),
+          Number(slitSeparationInput?.value ?? 0),
+        );
+        break;
+      case "harmonic":
+        v = quantum2dHarmonicPotential(
+          nx,
+          ny,
+          dx,
+          dy,
+          Number(omega2dInput?.value ?? 1),
+          (nx * dx) / 2,
+          (ny * dy) / 2,
+        );
+        break;
+      default:
+        v = new Array(nx * ny).fill(0);
+    }
+    try {
+      applyComponent(getWorld(), "enable_quantum_2d_domain", {
+        psi_re: encodeF64LeBase64(psiRe),
+        psi_im: encodeF64LeBase64(psiIm),
+        v: encodeF64LeBase64(v),
+        nx,
+        ny,
+        dx,
+        dy,
+      });
+    } catch (err) {
+      window.alert(`量子ドメイン(2D)の追加に失敗しました: ${String(err)}`);
+    }
+  });
+}
+
 /// `component_schema`が返す`apply`側スキーマの構造(`crates/sim-wasm/src/
 /// component_schema.rs`の`ComponentFieldSchema`/`ComponentKindSchema`と1:1)。
 /// Add Joint / Add Coupling フォームをこのスキーマから生成する(B11/B12〜B15、
@@ -3954,6 +4362,7 @@ async function setUpSceneView(
   document.getElementById("btn-enable-gas")?.addEventListener("click", () => {
     applyComponent(world, "enable_gas_compartment", {});
   });
+  wireAddQuantumDomainForms(() => world);
 
   /// グリッドスナップ幅 [m](設計 §1.2「グリッド・スナップ(既定 10 cm、変更可)」)。
   /// 0 ならスナップしない。Gizmo ドラッグの位置決めに使う。

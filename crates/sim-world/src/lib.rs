@@ -69,10 +69,10 @@ pub use raw_bytes::{
     encode_f64_le_base64_finite, encode_i8_base64, encode_vec3_le_base64, RawBytesError,
 };
 pub use scenario::{
-    run_headless_scenario, shape_json_to_shape, BodyScenarioDesc, CompoundChildJson,
-    HeadlessRunResult, MaterialOverride, PassCriterionJson, PassCriterionOperator,
-    PhaseChangeOverrideJson, PredictionPromptJson, Scenario, SceneError, ShapeJson,
-    WorldScenarioOptions,
+    build_quantum_1d_wave_from_raw, build_quantum_2d_wave_from_raw, run_headless_scenario,
+    shape_json_to_shape, BodyScenarioDesc, CompoundChildJson, HeadlessRunResult, MaterialOverride,
+    PassCriterionJson, PassCriterionOperator, PhaseChangeOverrideJson, PredictionPromptJson,
+    Scenario, SceneError, ShapeJson, WorldScenarioOptions,
 };
 
 use sim_core::{EnergyLedger, EventQueue, MaterialDb, Solver, SolverContext, StateHasher};

@@ -405,6 +405,30 @@ pub fn apply_schema() -> Vec<ComponentKindSchema> {
         // 引数を取らないドメイン有効化(冪等)。
         kind("enable_grid_fluid_2d_domain", vec![]),
         kind("enable_gas_compartment", vec![]),
+        // 量子ドメイン(1D/2D)のプリセットUI経由での有効化(エディタ側のみで完結する
+        // プリセット計算、`crates/sim-world/src/scenario.rs`のモジュールdoc
+        // 「構築レシピを畳んだ」参照)。`psi_re`/`psi_im`/`v`は`raw_bytes::
+        // encode_f64_le_base64_finite`と同じLE+base64文字列(シーンJSONの
+        // `Quantum{1d,2d}RawStateJson`と同一表現)。`dx`/`dy`は原子単位
+        // (ℏ=mₑ=1、`sim_quantum`モジュールdoc)。上の2つと違い**冪等ではない**
+        // ——呼ぶたびに渡された生状態で上書きする(`enable_quantum_1d_domain_impl`
+        // のdoc参照)。
+        kind(
+            "enable_quantum_1d_domain",
+            vec![s("psi_re"), s("psi_im"), s("v"), f("dx", "a.u.")],
+        ),
+        kind(
+            "enable_quantum_2d_domain",
+            vec![
+                s("psi_re"),
+                s("psi_im"),
+                s("v"),
+                u("nx"),
+                u("ny"),
+                f("dx", "a.u."),
+                f("dy", "a.u."),
+            ],
+        ),
         kind(
             "add_sph_rigid_coupling",
             vec![u("body"), f("radius", "m"), u("boundary_points")],

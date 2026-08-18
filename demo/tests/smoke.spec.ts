@@ -760,6 +760,63 @@ test("群3: 量子・統計・FDTD がギャラリーに載り、場のパネル
   expect(errors).toEqual([]);
 });
 
+test("B9: エディタから量子ドメイン(1D/2D)をプリセットで新規追加できる", async ({ page }) => {
+  // 上の「群3」テストはギャラリーシーン(既に量子ドメインを持つraw_state)を
+  // 読み込む経路しか確認していなかった——量子1D/2Dは`enable_grid_fluid_2d_domain`
+  // 等と違い、エディタから**新規に置く**手段自体が無かった(`crates/sim-world/
+  // src/scenario.rs`のモジュールdoc「構築レシピを畳んだ」経緯参照)。ここでは
+  // Settingsの「量子ドメイン(プリセット)」フォーム(ガウス波束+ポテンシャル
+  // プリセットをTypeScript側で計算し、`enable_quantum_1d_domain`/
+  // `enable_quantum_2d_domain`へ渡す新経路)を実際に叩いて、場のパネルに
+  // それぞれの密度分布が描かれることを確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const fieldPanel = page.locator("#field-panel");
+  const fieldTitle = page.locator("#field-title");
+
+  await page.click("#btn-settings");
+
+  // --- 1D: 調和振動子ポテンシャル ---
+  await page.selectOption("#select-quantum1d-n", "128");
+  await page.fill("#input-quantum1d-dx", "0.1");
+  await page.fill("#input-quantum1d-x0", "6.4");
+  await page.fill("#input-quantum1d-sigma", "1.0");
+  await page.fill("#input-quantum1d-k0", "0");
+  await page.selectOption("#select-quantum1d-potential", "harmonic");
+  await page.fill("#input-quantum1d-omega", "1.0");
+  await page.click("#btn-add-quantum-1d");
+  await page.click("#btn-settings"); // ポップオーバーを閉じる。
+  await expect(fieldPanel).toBeVisible();
+  await expect(fieldTitle).toContainText("量子 1D");
+  await expect(fieldTitle).toContainText("格子 128 点");
+
+  // --- 2D: 二重スリット(D27と同じ構成、`quantum2dDoubleSlitPotential`のdoc参照)。
+  // 場のパネルは2Dを優先して描く(`updateFieldPanel`のdoc「優先順位を固定する」)ので、
+  // 2Dを有効化した時点でタイトルが1Dから切り替わることも合わせて確認する。
+  await page.click("#btn-settings"); // 再度開く。
+  await page.selectOption("#select-quantum2d-nx", "64");
+  await page.selectOption("#select-quantum2d-ny", "64");
+  await page.fill("#input-quantum2d-dx", "0.2");
+  await page.fill("#input-quantum2d-dy", "0.2");
+  await page.fill("#input-quantum2d-x0", "2.0");
+  await page.fill("#input-quantum2d-y0", "6.4");
+  await page.fill("#input-quantum2d-sigma-x", "1.0");
+  await page.fill("#input-quantum2d-sigma-y", "3.0");
+  await page.fill("#input-quantum2d-k0", "3.0");
+  await page.selectOption("#select-quantum2d-potential", "double_slit");
+  await page.fill("#input-quantum2d-v0", "60.0");
+  await page.fill("#input-quantum2d-slit-width", "0.7");
+  await page.fill("#input-quantum2d-slit-separation", "2.0");
+  await page.click("#btn-add-quantum-2d");
+  await page.click("#btn-settings"); // ポップオーバーを閉じる。
+  await expect(fieldTitle).toContainText("量子 2D");
+  await expect(fieldTitle).toContainText("64×64");
+
+  expect(errors).toEqual([]);
+});
+
 test("群3: ソフトボディと天体が Scene View に描かれる", async ({ page }) => {
   // **D13(ロープ)・D34–D36(天体)は Scene View に何も描かれていなかった**
   // ——どちらも `RigidBodySet` の剛体ではないのでメッシュ同期の対象外だった。
