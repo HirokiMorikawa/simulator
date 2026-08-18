@@ -4,6 +4,7 @@ import { ConvexGeometry } from "three/examples/jsm/geometries/ConvexGeometry.js"
 import init, {
   WasmWorld,
   run_headless_scenario_json,
+  sketch_extrude_shape_json,
 } from "../pkg/sim_wasm.js";
 import "./style.css";
 
@@ -527,7 +528,18 @@ type ImportedShapeJson =
         }[];
       };
     }
-  | { convex_mesh: { vertices: [number, number, number][] } };
+  | { convex_mesh: { vertices: [number, number, number][] } }
+  // **`mesh`はD1(スケッチ・押し出し)で追加**。`convex_mesh`と違い面情報
+  // (`triangles`)を持つ、**入力専用**のタグ(`sim_world::ShapeJson::Mesh`の
+  // doc参照)。Rust側は読み込み時に近似凸分解へ通すため`body_shape_json_at`が
+  // これを返すことは無い——ここで受け取るのは
+  // ①スケッチ押し出しがその場で組み立てたJSON、②手書きのシーンJSON、の2つ。
+  | {
+      mesh: {
+        vertices: [number, number, number][];
+        triangles: [number, number, number][];
+      };
+    };
 type ImportedBodyJson = { shape: ImportedShapeJson };
 // 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5)向け。
 // `sim_world::scenario::PredictionPromptJson`のJSON表現と同じ形(物理には
@@ -4014,19 +4026,33 @@ async function setUpSceneView(
   });
 
   // **ツール状態(群2)**。設計 §1.2 の W/E/R/Q に対応する。
-  type GizmoTool = "translate" | "rotate" | "scale" | "none";
+  //
+  // **`"sketch"`(S)はD1で追加**。既存の4つと同じ排他トグルの一員にした
+  // ——Scene View のクリックが「選択」ではなく「頂点を置く」に変わるのは
+  // まさにツールの切り替えであり、別建てのモードを増やすと W/E/R/Q との
+  // 排他関係を二重に管理することになる。Gizmo の表示条件は
+  // `gizmoTool === "translate"` 等の等値比較なので、変種が増えても
+  // スケッチ中は3つとも自動的に隠れる(追加の分岐が要らない)。
+  type GizmoTool = "translate" | "rotate" | "scale" | "none" | "sketch";
   let gizmoTool: GizmoTool = "translate";
   const toolButtons = new Map<GizmoTool, HTMLButtonElement>();
+  /// スケッチツールの出入りでパネルの開閉とプレビュー描画を切り替える
+  /// (実体はスケッチ機能の配線が済んだ後で差し込まれる、`*Ref`の既存パターン)。
+  const sketchToolRef: { current: ((active: boolean) => void) | null } = {
+    current: null,
+  };
   function setGizmoTool(tool: GizmoTool) {
     gizmoTool = tool;
     for (const [t, button] of toolButtons)
       button.classList.toggle("active", t === tool);
+    sketchToolRef.current?.(tool === "sketch");
   }
   for (const [id, tool] of [
     ["btn-tool-translate", "translate"],
     ["btn-tool-rotate", "rotate"],
     ["btn-tool-scale", "scale"],
     ["btn-tool-select", "none"],
+    ["btn-tool-sketch", "sketch"],
   ] as [string, GizmoTool][]) {
     const button = document.getElementById(id) as HTMLButtonElement | null;
     if (!button) continue;
@@ -4423,6 +4449,20 @@ async function setUpSceneView(
         break;
       case "q":
         setGizmoTool("none");
+        break;
+      case "s":
+        // スケッチツール(D1)。W/E/R/Q と同じ排他トグル。
+        setGizmoTool("sketch");
+        break;
+      case "enter":
+        // スケッチ中のみ意味を持つ(作図中の点列を1枚のプロファイルとして
+        // 確定する)。他のツールでは何もせずブラウザ既定へ委ねる。
+        if (gizmoTool !== "sketch") return;
+        document.getElementById("btn-sketch-confirm")?.click();
+        break;
+      case "backspace":
+        if (gizmoTool !== "sketch") return;
+        document.getElementById("btn-sketch-undo-point")?.click();
         break;
       case "f":
         // 選択中のボディへカメラを寄せる(Unityの F と同じ)。
@@ -5784,6 +5824,21 @@ async function setUpSceneView(
   });
 
   renderer.domElement.addEventListener("pointerup", () => {
+    // **スケッチツール中はクリック選択を行わない(D1)**。左クリックは
+    // 「頂点を置く」に割り当てられており、選択が同時に走るとクリックの
+    // たびに Inspector が別のボディへ飛んで作図に集中できない
+    // (頂点を置く処理そのものは、下で登録するスケッチ専用リスナが担う)。
+    // ドラッグによるカメラ操作は OrbitControls 側でそのまま効く。
+    if (gizmoTool === "sketch") {
+      isDragging = false;
+      dragMode = null;
+      dragStartScreen = null;
+      pointerDownHit = null;
+      pointerDownGizmoAxis = null;
+      pointerDownRotationAxis = null;
+      pointerDownScaleHit = false;
+      return;
+    }
     if (isDragging) {
       if (dragMode === "grab") {
         applyComponent(world, "push_release", { body_index: grabbedBodyIndex });
@@ -6208,6 +6263,38 @@ async function setUpSceneView(
           isPlane: false,
         };
       }
+    }
+    if (shape && "mesh" in shape) {
+      // **D1(スケッチ・押し出し)で追加**。`convex_mesh`と違い面情報を
+      // 持っているので、凸包を計算し直さず**三角形をそのまま描く**
+      // ——スケッチで作った切り欠きや穴が見た目にも残る(凸包で描くと
+      // 埋まってしまい、物理(近似凸分解)と見た目が食い違う)。
+      const { vertices, triangles } = shape.mesh;
+      const positions = new Float32Array(triangles.length * 9);
+      let w = 0;
+      for (const [a, b, c] of triangles) {
+        for (const vi of [a, b, c]) {
+          const v = vertices[vi] ?? [0, 0, 0];
+          positions[w++] = v[0];
+          positions[w++] = v[1];
+          positions[w++] = v[2];
+        }
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      // インデックスを展開して三角形ごとに頂点を複製してあるので、
+      // 面法線がそのまま出る(フラットシェーディングで角が立つ)。
+      geometry.computeVertexNormals();
+      return {
+        mesh: new THREE.Mesh(
+          geometry,
+          new THREE.MeshStandardMaterial({
+            color: 0xffcc66,
+            flatShading: true,
+          }),
+        ),
+        isPlane: false,
+      };
     }
     console.warn(
       `未知の形状(${shape ? Object.keys(shape).join(",") : "undefined"})を検出——0.3mの球で代用します。`,
@@ -7063,6 +7150,260 @@ async function setUpSceneView(
         title: "材質はツールバーの材質セレクタで切り替えます",
       },
     ]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // **スケッチ → ブーリアン合成 → 押し出し(D1)**
+  // ---------------------------------------------------------------------------
+  //
+  // CADの標準的な作図手順を Scene View に載せる。ユーザーは構築平面に
+  // 閉じた多角形(プロファイル)を描き、複数枚を和/差/積で合成し、深さを
+  // 与えて押し出す。出来た角柱メッシュは`{"mesh":{vertices,triangles}}`
+  // という**新しい形状JSONタグ**になり、既存の汎用スポナー
+  // `spawn_shape_json`(=シーンJSONと同じ`shape_json_to_shape`)を通って
+  // `Shape::from_triangle_mesh`(近似凸分解)へ流れ、当たり判定・質量特性を
+  // 持つ本物の剛体になる。
+  //
+  // ## 構築平面は「地面 y=0」に固定する
+  //
+  // 既存のスポーンパレットが右クリック位置を決めるのに使っているのと
+  // **同じ平面**(`groundPlane`)・**同じグリッドスナップ**(`snapToGrid`)を
+  // 使う。ここを別の平面(カメラ正対など)にすると、同じ Scene View の中で
+  // 「クリックした場所」の意味が操作ごとに変わってしまう。
+  // 平面の向きをユーザーが変えられるようにするのは対象外(下記「縮約」)。
+  //
+  // ## 幾何計算はRust側(`sketch_extrude_shape_json`)
+  //
+  // 多角形ブーリアン・耳刈り・穴のブリッジは数値的に厄介なので、
+  // ネイティブの`cargo test`で解析的に固定できるRust側へ置いた
+  // (`sim_mechanics::sketch`)。wasm呼び出しは**「押し出し」1回につき1回**
+  // だけで、点を置くたびには走らない——作図中のプレビューは点列を線で
+  // 結ぶだけなので、TypeScript 側だけで完結する。
+  //
+  // ## 意図的な縮約
+  //
+  // - **押し出し方向は+y固定**(構築平面の法線)。傾けたい場合は作った後に
+  //   Rotate Gizmo で回す。
+  // - **3Dメッシュ同士のブーリアン(CSG)は行わない**。合成は押し出し前の
+  //   2D断面に対してのみ(`sim_mechanics::sketch`のモジュールdoc参照)。
+  const sketchPanel = document.getElementById("sketch-panel") as HTMLElement;
+  const sketchStatus = document.getElementById("sketch-status") as HTMLElement;
+  const sketchOpSelect = document.getElementById(
+    "select-sketch-op",
+  ) as HTMLSelectElement;
+  const sketchDepthInput = document.getElementById(
+    "input-sketch-depth",
+  ) as HTMLInputElement;
+
+  type SketchProfile = { op: string; points: [number, number][] };
+  /// 確定済みのプロファイル(先頭が土台、2枚目以降が自分の`op`で効く)。
+  const sketchProfiles: SketchProfile[] = [];
+  /// 作図中の点列(構築平面上の`[x, z]`)。
+  let sketchPoints: [number, number][] = [];
+
+  // プレビュー用のオブジェクト。確定済み(緑)と作図中(黄)を描き分ける。
+  const SKETCH_PREVIEW_Y = 0.01; // 地面とZ-fightingしない程度に浮かせる。
+  const sketchPreviewGroup = new THREE.Group();
+  sketchPreviewGroup.visible = false;
+  scene.add(sketchPreviewGroup);
+
+  function clearSketchPreview() {
+    for (const child of [...sketchPreviewGroup.children]) {
+      sketchPreviewGroup.remove(child);
+      const disposable = child as THREE.Line | THREE.Mesh;
+      disposable.geometry?.dispose();
+    }
+  }
+
+  function addSketchOutline(
+    points: [number, number][],
+    color: number,
+    closed: boolean,
+  ) {
+    if (points.length < 2) return;
+    const vertices = points.map(
+      ([x, z]) => new THREE.Vector3(x, SKETCH_PREVIEW_Y, z),
+    );
+    if (closed) vertices.push(vertices[0].clone());
+    const geometry = new THREE.BufferGeometry().setFromPoints(vertices);
+    sketchPreviewGroup.add(
+      new THREE.Line(geometry, new THREE.LineBasicMaterial({ color })),
+    );
+  }
+
+  /// 頂点の位置を小さな点で示す(線だけだと1点目・2点目が見えない)。
+  function addSketchVertexMarkers(points: [number, number][], color: number) {
+    if (points.length === 0) return;
+    const geometry = new THREE.BufferGeometry().setFromPoints(
+      points.map(([x, z]) => new THREE.Vector3(x, SKETCH_PREVIEW_Y, z)),
+    );
+    sketchPreviewGroup.add(
+      new THREE.Points(
+        geometry,
+        new THREE.PointsMaterial({ color, size: 8, sizeAttenuation: false }),
+      ),
+    );
+  }
+
+  function refreshSketch() {
+    clearSketchPreview();
+    for (const profile of sketchProfiles) {
+      // 減算は赤系、それ以外は緑系——どの枚が何をするのかを色で示す。
+      const color = profile.op === "subtract" ? 0xff6655 : 0x55dd88;
+      addSketchOutline(profile.points, color, true);
+      addSketchVertexMarkers(profile.points, color);
+    }
+    addSketchOutline(sketchPoints, 0xffdd55, false);
+    addSketchVertexMarkers(sketchPoints, 0xffdd55);
+    sketchStatus.textContent = `プロファイル ${sketchProfiles.length} 枚 / 作図中の点 ${sketchPoints.length}`;
+  }
+
+  /// スケッチツールの出入り(`setGizmoTool`から呼ばれる)。
+  sketchToolRef.current = (active: boolean) => {
+    sketchPanel.hidden = !active;
+    sketchPreviewGroup.visible = active;
+    if (active) refreshSketch();
+  };
+
+  /// 作図中の点列を1枚のプロファイルとして確定する。3点未満なら何もしない。
+  function confirmSketchProfile(): boolean {
+    if (sketchPoints.length < 3) return false;
+    sketchProfiles.push({
+      // 1枚目は土台なので`op`に意味は無い(Rust側も先頭では無視する)。
+      op: sketchProfiles.length === 0 ? "union" : sketchOpSelect.value,
+      points: sketchPoints,
+    });
+    sketchPoints = [];
+    refreshSketch();
+    return true;
+  }
+
+  document
+    .getElementById("btn-sketch-confirm")!
+    .addEventListener("click", () => {
+      if (!confirmSketchProfile()) {
+        window.alert("プロファイルを閉じるには3点以上が要ります。");
+      }
+    });
+  document
+    .getElementById("btn-sketch-undo-point")!
+    .addEventListener("click", () => {
+      sketchPoints.pop();
+      refreshSketch();
+    });
+  document.getElementById("btn-sketch-clear")!.addEventListener("click", () => {
+    sketchProfiles.length = 0;
+    sketchPoints = [];
+    refreshSketch();
+  });
+
+  document
+    .getElementById("btn-sketch-extrude")!
+    .addEventListener("click", () => {
+      // 描きかけの点列が3点以上あるなら、押し忘れとみなして自動で確定する
+      // ——「確定を押していなかったせいで最後の1枚が消える」のは、
+      // 手順を1つ増やすだけの価値が無い失敗の仕方である。
+      confirmSketchProfile();
+      if (sketchProfiles.length === 0) {
+        window.alert(
+          "押し出すプロファイルがありません(地面をクリックして3点以上の多角形を描いてください)。",
+        );
+        return;
+      }
+      const depth = Number(sketchDepthInput.value);
+      let result: {
+        shape: ImportedShapeJson;
+        origin: [number, number];
+        rest_height: number;
+        profile_area: number;
+        volume: number;
+      };
+      try {
+        result = JSON.parse(
+          sketch_extrude_shape_json(
+            JSON.stringify({ depth, profiles: sketchProfiles }),
+          ),
+        );
+      } catch (err) {
+        window.alert(`押し出しに失敗しました: ${String(err)}`);
+        return;
+      }
+      let bodyIndex: number;
+      try {
+        // **既存の汎用スポナーをそのまま使う**——`mesh`タグを解釈するのは
+        // Rust側の`shape_json_to_shape`1箇所だけで、スポーン経路は
+        // Prefab/複製と完全に共通になる。
+        bodyIndex = applyComponent(world, "spawn_shape_json", {
+          shape_json: JSON.stringify(result.shape),
+          x: result.origin[0],
+          y: result.rest_height,
+          z: result.origin[1],
+          material_name: spawnMaterialSelect.value,
+        }).index as number;
+      } catch (err) {
+        window.alert(`スポーンに失敗しました: ${String(err)}`);
+        return;
+      }
+      // 見た目は**押し出した三角形そのもの**で描く(`meshFromShapeJson`の
+      // `mesh`分岐)。Rust側が保持しているのは分解後の凸パーツなので、
+      // 読み直すと切り欠きが凸パーツの和として近似された形になる——
+      // 描画は元のメッシュを使う方が忠実である。
+      addSpawnedMesh(bodyIndex, meshFromShapeJson(result.shape).mesh);
+      selectBody(bodyIndex);
+      // 作り終えたスケッチは片付ける(同じ断面をもう一度置きたいことより、
+      // 次の形を描き始めたいことの方が多い)。
+      sketchProfiles.length = 0;
+      sketchPoints = [];
+      refreshSketch();
+    });
+
+  // Scene View の左クリックで頂点を置く。右クリック(スポーンパレット)と
+  // 同じく、**押した位置と離した位置の差**でドラッグ(カメラ操作)と
+  // クリックを分ける——OrbitControls の左ドラッグ回転をそのまま残したまま、
+  // 「動かさずに離した」ときだけ頂点を置く。
+  const sketchGroundHit = new THREE.Vector3();
+  let sketchDownScreen: { x: number; y: number } | null = null;
+  renderer.domElement.addEventListener("pointerdown", (event) => {
+    if (gizmoTool !== "sketch" || event.button !== 0) return;
+    sketchDownScreen = { x: event.clientX, y: event.clientY };
+  });
+  renderer.domElement.addEventListener("pointercancel", (event) => {
+    if (event.button === 0) sketchDownScreen = null;
+  });
+  renderer.domElement.addEventListener("pointerup", (event) => {
+    if (gizmoTool !== "sketch" || event.button !== 0) return;
+    const down = sketchDownScreen;
+    sketchDownScreen = null;
+    if (!down) return;
+    if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > DRAG_THRESHOLD_PX)
+      return; // カメラを回しただけ。
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointerNdc, camera);
+    if (!raycaster.ray.intersectPlane(groundPlane, sketchGroundHit)) return;
+    const x = snapToGrid(sketchGroundHit.x);
+    const z = snapToGrid(sketchGroundHit.z);
+    // **始点をもう一度クリックしたらループを閉じる**(CADの標準的な操作)。
+    // 判定はワールド距離ではなく画面上の距離で行う——カメラが遠いほど
+    // 1ピクセルの表すワールド距離は大きくなるので、見た目どおりの
+    // 「始点の上でクリックした」が成立する。
+    if (sketchPoints.length >= 3) {
+      const [sx, sz] = sketchPoints[0];
+      const start = projectToScreen(
+        new THREE.Vector3(sx, SKETCH_PREVIEW_Y, sz),
+      );
+      const CLOSE_LOOP_PX = 12;
+      if (
+        Math.hypot(event.clientX - start.x, event.clientY - start.y) <=
+        CLOSE_LOOP_PX
+      ) {
+        confirmSketchProfile();
+        return;
+      }
+    }
+    sketchPoints.push([x, z]);
+    refreshSketch();
   });
 
   // **材料派生(増分L)**。シーンJSONの`materials[].extends`と同じ仕組みを

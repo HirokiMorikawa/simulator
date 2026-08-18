@@ -107,6 +107,10 @@ pub enum WasmError {
     ScenarioSerializeFailed(String),
     /// `run_headless_scenario_json`の結果シリアライズ失敗。
     HeadlessResultSerializeFailed(String),
+    /// `sketch_extrude_shape_json`が受け取ったリクエストJSONが読めない
+    /// (**D1(スケッチ・押し出し)で追加**)。`ShapeParseFailed`と同じく
+    /// JS側が組み立てた文字列がそのまま渡ってくるため**実際に踏める**。
+    SketchRequestParseFailed(String),
 
     // --- index範囲外(いずれも「JS側から渡ってくる値」であり、生indexアクセスに
     // 使う前に必ずここで弾く。`try_body_id_at`のdoc参照) ---
@@ -170,6 +174,15 @@ pub enum WasmError {
     UnknownBodyType(String),
     /// `push_set_gravity_field`——uniform/point_source/zero以外の`kind`名。
     UnknownGravityFieldKind,
+    /// `sketch_extrude_shape_json`——union/subtract/intersect以外のブーリアン演算名
+    /// (**D1で追加**)。
+    UnknownBooleanOp(String),
+    /// `sketch_extrude_shape_json`——押し出す断面が無い(妥当なスケッチが
+    /// 1枚も無い、またはブーリアン合成の結果が空になった)。
+    SketchProfileEmpty,
+    /// `sketch_extrude_shape_json`——断面はあるが押し出せない(深さが正の
+    /// 有限値でない、三角形分割が1枚も作れない)。
+    SketchExtrudeFailed,
 
     // --- 対象に対してその操作が成り立たない ---
     /// 床(index 0)は削除できない。
@@ -213,6 +226,9 @@ impl std::fmt::Display for WasmError {
             WasmError::ScenarioSerializeFailed(e) => write!(f, "failed to serialize scenario: {e}"),
             WasmError::HeadlessResultSerializeFailed(e) => {
                 write!(f, "failed to serialize result: {e}")
+            }
+            WasmError::SketchRequestParseFailed(e) => {
+                write!(f, "failed to parse sketch request json: {e}")
             }
 
             WasmError::BodyIndexOutOfRange { index, count } => {
@@ -300,6 +316,21 @@ impl std::fmt::Display for WasmError {
             WasmError::UnknownGravityFieldKind => write!(
                 f,
                 "unknown gravity field kind (expected uniform/point_source/zero)"
+            ),
+            // スケッチ系の3つは**ユーザーの操作にそのまま起因する**(描き方が
+            // 悪ければ普通に踏む)ので、他のwasm内部エラーと違って日本語で
+            // 「次に何をすればよいか」まで書く——`CannotRemoveFloor`と同じ方針。
+            WasmError::UnknownBooleanOp(op) => write!(
+                f,
+                "未知のブーリアン演算「{op}」(union/subtract/intersect のいずれか)"
+            ),
+            WasmError::SketchProfileEmpty => write!(
+                f,
+                "押し出せる断面がありません(閉じたスケッチが1枚も無いか、ブーリアン合成の結果が空になりました)"
+            ),
+            WasmError::SketchExtrudeFailed => write!(
+                f,
+                "押し出しに失敗しました(深さは正の値を指定してください)"
             ),
 
             WasmError::CannotRemoveFloor => write!(f, "床は削除できません(シーンの基準面)"),
@@ -5316,6 +5347,151 @@ fn run_headless_scenario_json_impl(json: &str, steps: u32) -> Result<String, Was
         .map_err(|e| WasmError::HeadlessResultSerializeFailed(e.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// スケッチ・押し出し(D1)
+// ---------------------------------------------------------------------------
+
+/// エディタのスケッチ1枚(構築平面上の点列 + 直前までの結果との合成方法)。
+///
+/// `points`は構築平面上の`[x, z]`(**構築平面は地面 y=0**——既存の
+/// スポーンパレットのクリック位置決めと同じ平面、`main.ts`側のdoc参照)。
+/// `op`は`"union"`/`"subtract"`/`"intersect"`で、**リストの最初の1枚では
+/// 無視される**(合成相手がまだ無いため)。
+#[derive(serde::Deserialize)]
+struct SketchProfileJson {
+    #[serde(default)]
+    op: String,
+    points: Vec<[f64; 2]>,
+}
+
+/// `sketch_extrude_shape_json`の入力。
+#[derive(serde::Deserialize)]
+struct SketchExtrudeRequestJson {
+    profiles: Vec<SketchProfileJson>,
+    depth: f64,
+}
+
+/// `sketch_extrude_shape_json`の出力。
+///
+/// `shape`はそのまま`apply_component("spawn_shape_json", …)`の`shape_json`へ
+/// 渡せる`ShapeJson`。通常は新タグ`mesh`1つだが、**断面に穴があるときは
+/// `mesh`を子に持つ`compound`**になる(`sim_mechanics::extrude_region`が
+/// 穴を通る線で切り分けたパーツをそのまま子にする、下記`_impl`のコメント参照)。
+/// `origin`/`rest_height`は「描いたとおりの
+/// 位置に、地面へちょうど載る高さで置く」ための配置情報で、
+/// スポーン位置は`(origin[0], rest_height, origin[1])`になる
+/// (`sim_mechanics::extrude_region`が重心を原点へ寄せる規約と対になっている)。
+#[derive(serde::Serialize)]
+struct SketchExtrudeResultJson {
+    shape: sim_world::ShapeJson,
+    origin: [f64; 2],
+    rest_height: f64,
+    /// 押し出し前の断面積[m²](UIの確認表示用)。
+    profile_area: f64,
+    /// 出来上がった角柱の体積[m³](= `profile_area * depth`)。
+    volume: f64,
+}
+
+/// **スケッチ→ブーリアン合成→押し出し**を1回のwasm呼び出しで行い、
+/// 出来たメッシュを`ShapeJson`(タグ`mesh`、穴があれば`mesh`の`compound`)
+/// として返す(D1)。
+///
+/// ## なぜRust側に置いたか
+///
+/// 幾何の数値的に厄介な部分(多角形ブーリアンの交点計算・内外判定・
+/// 縫い合わせ、耳刈り、穴のブリッジ)を**1箇所にまとめ、ネイティブの
+/// `cargo test`で解析的に固定できる**ため(`sim_mechanics::sketch`の
+/// テスト群)。TypeScript側に置くと同じ幾何をPlaywright越しにしか
+/// 検証できず、面積・体積の数値が合っているかを解析解と突き合わせる
+/// 回帰テストが書けない。
+///
+/// **wasm往復のコストは問題にならない**——この呼び出しは「押し出し」
+/// ボタン1回につき1回だけで、スケッチ編集中(点を置くたび)には走らない。
+/// 描画プレビューはTypeScript側が点列をそのまま線で結ぶだけで済む。
+///
+/// wasm-bindgenへ露出する薄い殻——実体は`sketch_extrude_shape_json_impl`側。
+#[wasm_bindgen]
+pub fn sketch_extrude_shape_json(request_json: &str) -> Result<String, JsValue> {
+    sketch_extrude_shape_json_impl(request_json).map_err(JsValue::from)
+}
+
+/// `sketch_extrude_shape_json`の実体(ネイティブテスト可能な
+/// `Result<_, WasmError>`版)。
+fn sketch_extrude_shape_json_impl(request_json: &str) -> Result<String, WasmError> {
+    let request: SketchExtrudeRequestJson = serde_json::from_str(request_json)
+        .map_err(|e| WasmError::SketchRequestParseFailed(e.to_string()))?;
+
+    // 各スケッチを妥当なCCWループへ正規化し、順に合成する。最初の1枚が
+    // 土台で、2枚目以降が自分の`op`で土台へ効く(CADの作図順そのまま)。
+    let mut region: Vec<sim_mechanics::Loop2> = Vec::new();
+    let mut combined_any = false;
+    for profile in &request.profiles {
+        let Some(outline) = sim_mechanics::normalize_loop(&profile.points) else {
+            // 面積を持たないスケッチ(点が2つ以下・全点が共線)は黙って捨てる
+            // ——描きかけの点列がUI側で紛れ込んでも操作が止まらないようにする。
+            continue;
+        };
+        if !combined_any {
+            region = vec![outline];
+            combined_any = true;
+            continue;
+        }
+        let op = match profile.op.as_str() {
+            "subtract" => sim_mechanics::BooleanOp::Subtract,
+            "intersect" => sim_mechanics::BooleanOp::Intersect,
+            "union" | "" => sim_mechanics::BooleanOp::Union,
+            other => return Err(WasmError::UnknownBooleanOp(other.to_string())),
+        };
+        region = sim_mechanics::polygon_boolean(&region, &[outline], op);
+        if region.is_empty() {
+            // 「重なっていない図形の積」のように、合成結果が空になることは
+            // 正当に起きる。押し出す面が無いことをそのままユーザーへ返す。
+            return Err(WasmError::SketchProfileEmpty);
+        }
+    }
+    if !combined_any {
+        return Err(WasmError::SketchProfileEmpty);
+    }
+
+    let centroid = sim_mechanics::region_centroid(&region).ok_or(WasmError::SketchProfileEmpty)?;
+    let parts = sim_mechanics::extrude_region(&region, request.depth)
+        .ok_or(WasmError::SketchExtrudeFailed)?;
+
+    let to_mesh_json = |part: &sim_mechanics::ExtrudedMesh| sim_world::ShapeJson::Mesh {
+        vertices: part.vertices.iter().map(|v| [v.x, v.y, v.z]).collect(),
+        triangles: part.triangles.clone(),
+    };
+    // **穴の無い断面(大多数)は`mesh`1つ**。穴があると`extrude_region`が
+    // 穴を通る線で切り分けたパーツを返すので、それらを`compound`の子として
+    // まとめる(`sim_mechanics::sketch::split_into_hole_free_regions`のdoc参照
+    // ——1つのメッシュに繋ぐと近似凸分解から見た配置が元と同じになり、
+    // 穴が塞がってしまう)。子はすべて同じローカル原点なので変換は恒等。
+    let shape = if parts.len() == 1 {
+        to_mesh_json(&parts[0])
+    } else {
+        sim_world::ShapeJson::Compound {
+            children: parts
+                .iter()
+                .map(|part| sim_world::CompoundChildJson {
+                    position: [0.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    shape: Box::new(to_mesh_json(part)),
+                })
+                .collect(),
+        }
+    };
+
+    let profile_area = sim_mechanics::region_area(&region);
+    let result = SketchExtrudeResultJson {
+        shape,
+        origin: centroid,
+        rest_height: request.depth * 0.5,
+        profile_area,
+        volume: profile_area * request.depth,
+    };
+    serde_json::to_string(&result).map_err(|e| WasmError::ShapeSerializeFailed(e.to_string()))
+}
+
 /// **2026-07-27の監査で追加**: このcrate(JS/WASM境界、1280行)にテストが
 /// 1本も無かった(Rustワークスペース最大の未テスト面)ため、Q5(wasm境界の
 /// パニック除去)の作業とあわせて最小限のユニットテストを追加する。
@@ -7681,6 +7857,235 @@ mod tests {
                 "存在しない材質",
             ),
             WasmError::UnknownMaterial("存在しない材質".to_string()),
+        );
+    }
+
+    /// D1(スケッチ・押し出し)のテスト用: 軸並行な長方形のスケッチ点列。
+    fn sketch_rect(x0: f64, z0: f64, x1: f64, z1: f64) -> String {
+        format!("[[{x0},{z0}],[{x1},{z0}],[{x1},{z1}],[{x0},{z1}]]")
+    }
+
+    /// **D1**: スケッチ→ブーリアン合成→押し出しが、期待どおりの断面積・体積を
+    /// 持つ`mesh`タグの形状JSONを返すこと。
+    ///
+    /// 2m角の正方形から、その右上に1m²だけ重なる正方形を引く(=L字、3 m²)。
+    /// 凸包で近似していたら 4 m² になってしまう数値なので、**押し出しが
+    /// 凹みを保っている**ことがこの1つの数字で分かる。
+    #[test]
+    fn sketch_extrude_subtract_produces_a_mesh_shape_with_the_concave_area() {
+        let request = format!(
+            r#"{{"depth":0.5,"profiles":[
+                {{"op":"union","points":{}}},
+                {{"op":"subtract","points":{}}}
+            ]}}"#,
+            sketch_rect(0.0, 0.0, 2.0, 2.0),
+            sketch_rect(1.0, 1.0, 3.0, 3.0)
+        );
+        let result_json = sketch_extrude_shape_json_impl(&request).expect("押し出せる");
+        let result: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+
+        assert!(
+            (result["profile_area"].as_f64().unwrap() - 3.0).abs() < 1e-9,
+            "4-1=3 m²(実際: {})",
+            result["profile_area"]
+        );
+        assert!((result["volume"].as_f64().unwrap() - 1.5).abs() < 1e-9);
+        // 地面へちょうど載る高さ = 深さの半分(`extrude_region`が重心を
+        // ローカル原点へ寄せる規約と対になっている)。
+        assert!((result["rest_height"].as_f64().unwrap() - 0.25).abs() < 1e-12);
+
+        // 形状は新タグ`mesh`で、`ShapeJson`として読み直せる。
+        let shape_json = serde_json::to_string(&result["shape"]).unwrap();
+        assert!(
+            shape_json.starts_with(r#"{"mesh":"#),
+            "新しいJSONタグは`mesh`(実際: {})",
+            &shape_json[..shape_json.len().min(40)]
+        );
+        let parsed: sim_world::ShapeJson =
+            serde_json::from_str(&shape_json).expect("ShapeJsonとして読める");
+        assert!(matches!(parsed, sim_world::ShapeJson::Mesh { .. }));
+    }
+
+    /// **D1**: `mesh`形状JSONが`spawn_shape_json`(=シーンJSONと同じ
+    /// `shape_json_to_shape`)を通って**実際に物理を持つ剛体になる**こと。
+    ///
+    /// 1. 質量が「断面積 × 深さ × 密度」に一致する(=`Shape::from_triangle_mesh`
+    ///    の近似凸分解が凹みを保った質量特性を返している)。凸包で近似して
+    ///    しまうと 4/3 倍に過大評価されるので、この比較は実際に効く。
+    /// 2. 床の上に置いて60step走らせても沈まない・落ちない(=接触生成まで
+    ///    通っている。`Compound`へ分解された場合も`Compound`のnarrowphaseに
+    ///    そのまま乗る)。
+    #[test]
+    fn mesh_shape_json_spawns_a_rigid_body_with_the_concave_mass_and_rests_on_the_floor() {
+        // **`new_world()`ヘルパは使えない**——あちらは`gravity`に負値
+        // (-9.80665)を渡しており、`WorldOptions::gravity`は「下向きの大きさ」
+        // なので実際には**上向き**の重力になる(既存テストはどれも落下の
+        // 向きを見ていないため露見していなかった)。床に載ることを見る
+        // このテストだけは正しい向きの重力で世界を作る。
+        let mut world = WasmWorld::new(9.80665, 1.0 / 60.0, 5.0);
+
+        // 密度の基準: 体積1 m³ の箱の質量がそのまま密度[kg/m³]になる。
+        let reference = world
+            .spawn_shape_json_impl(
+                r#"{"box":{"half":[0.5,0.5,0.5]}}"#,
+                20.0,
+                20.0,
+                20.0,
+                "コンクリート",
+            )
+            .expect("箱はスポーンできる");
+        let density = world.body_mass_at_impl(reference).unwrap();
+
+        let request = format!(
+            r#"{{"depth":0.5,"profiles":[
+                {{"op":"union","points":{}}},
+                {{"op":"subtract","points":{}}}
+            ]}}"#,
+            sketch_rect(0.0, 0.0, 2.0, 2.0),
+            sketch_rect(1.0, 1.0, 3.0, 3.0)
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(&sketch_extrude_shape_json_impl(&request).unwrap()).unwrap();
+        let shape_json = serde_json::to_string(&result["shape"]).unwrap();
+        let rest_height = result["rest_height"].as_f64().unwrap();
+
+        // **床から0.5m浮かせて落とす**——最初から接地させて置くと「接触が
+        // 一度も生成されていないのに、たまたま動かなかっただけ」でも通って
+        // しまう。落として静止するところまで見れば接触生成を実際に踏む。
+        let drop_height = rest_height + 0.5;
+        let index = world
+            .spawn_shape_json_impl(&shape_json, -12.0, drop_height, -12.0, "コンクリート")
+            .expect("meshタグの形状JSONがスポーンできる");
+
+        // ① 質量。近似凸分解のパーツはわずかに重なりうる(`decompose`の
+        //    モジュールdoc)ので5%の余裕を持たせるが、凸包近似の 2.0 m³
+        //    (=+33%)とは明確に区別できる幅にしてある。
+        let mass = world.body_mass_at_impl(index).unwrap();
+        let expected = 1.5 * density;
+        assert!(
+            (mass / expected - 1.0).abs() < 0.05,
+            "L字断面(3 m²)×深さ0.5m = 1.5 m³ 相当の質量のはず\
+             (期待 {expected:.1} kg、実際 {mass:.1} kg、凸包近似なら {:.1} kg)",
+            2.0 * density
+        );
+
+        // ② 床の上で静止する。1step目で崩れる形状(接触が生成されず
+        //    すり抜ける、逆に沈む)なら、この高さ比較で必ず落ちる。
+        for _ in 0..180 {
+            world.step();
+        }
+        let y = world.body_position_at_f64_impl(index).unwrap()[1];
+        assert!(
+            (y - rest_height).abs() < 0.05,
+            "0.5m落として床にちょうど載るはず(期待 {rest_height:.3} m、実際 {y:.3} m)"
+        );
+    }
+
+    /// **D1**: 穴の空く減算(内側にすっぽり入る四角形を引く)は、`mesh`を子に
+    /// 持つ`compound`として返り、スポーンすると**穴のぶんだけ軽い**剛体になる。
+    ///
+    /// 穴あき断面を1つのメッシュとして渡すと近似凸分解が働かず穴が塞がる
+    /// (`sim_mechanics::sketch::split_into_hole_free_regions`のdoc)。ここは
+    /// その回避がwasm境界を越えて効いていることの確認である。
+    #[test]
+    fn sketch_extrude_with_a_hole_returns_a_compound_of_mesh_parts() {
+        let mut world = WasmWorld::new(9.80665, 1.0 / 60.0, 5.0);
+        let reference = world
+            .spawn_shape_json_impl(
+                r#"{"box":{"half":[0.5,0.5,0.5]}}"#,
+                30.0,
+                30.0,
+                30.0,
+                "コンクリート",
+            )
+            .unwrap();
+        let density = world.body_mass_at_impl(reference).unwrap();
+
+        // 外形 4×4 m² から中央の 1×1 m² を引く → 15 m²、深さ0.2m → 3 m³。
+        let request = format!(
+            r#"{{"depth":0.2,"profiles":[
+                {{"points":{}}},
+                {{"op":"subtract","points":{}}}
+            ]}}"#,
+            sketch_rect(0.0, 0.0, 4.0, 4.0),
+            sketch_rect(1.5, 1.5, 2.5, 2.5)
+        );
+        let result: serde_json::Value =
+            serde_json::from_str(&sketch_extrude_shape_json_impl(&request).unwrap()).unwrap();
+        assert!(
+            (result["profile_area"].as_f64().unwrap() - 15.0).abs() < 1e-9,
+            "16-1=15 m²"
+        );
+        let children = result["shape"]["compound"]["children"]
+            .as_array()
+            .expect("穴あき断面は compound で返る");
+        assert!(children.len() >= 2, "穴を通る線で切り分けられている");
+        assert!(
+            children.iter().all(|c| c["shape"]["mesh"].is_object()),
+            "子はいずれも`mesh`タグ(=それぞれが近似凸分解を通る)"
+        );
+
+        let index = world
+            .spawn_shape_json_impl(
+                &serde_json::to_string(&result["shape"]).unwrap(),
+                -20.0,
+                result["rest_height"].as_f64().unwrap(),
+                -20.0,
+                "コンクリート",
+            )
+            .expect("compound of mesh がスポーンできる");
+        let mass = world.body_mass_at_impl(index).unwrap();
+        assert!(
+            (mass / (3.0 * density) - 1.0).abs() < 0.02,
+            "15 m² × 0.2 m = 3 m³ 相当の質量のはず(穴が塞がると 3.2 m³ 相当。\
+             期待 {:.1} kg、実際 {mass:.1} kg)",
+            3.0 * density
+        );
+    }
+
+    /// **D1**: スケッチ押し出しのErrパス。いずれもユーザーの操作から素直に
+    /// 踏めるので、`WasmError`の変種まで固定しておく。
+    #[test]
+    fn sketch_extrude_reports_distinct_errors_for_each_bad_input() {
+        assert_err_matches!(
+            sketch_extrude_shape_json_impl("{ this is not json"),
+            WasmError::SketchRequestParseFailed(_)
+        );
+        // 閉じたスケッチが1枚も無い(点2つは多角形にならない)。
+        assert_err_is(
+            sketch_extrude_shape_json_impl(
+                r#"{"depth":0.5,"profiles":[{"points":[[0,0],[1,0]]}]}"#,
+            ),
+            WasmError::SketchProfileEmpty,
+        );
+        // 重なっていない2枚の積 → 断面が空になる。
+        let disjoint = format!(
+            r#"{{"depth":0.5,"profiles":[{{"points":{}}},{{"op":"intersect","points":{}}}]}}"#,
+            sketch_rect(0.0, 0.0, 1.0, 1.0),
+            sketch_rect(5.0, 5.0, 6.0, 6.0)
+        );
+        assert_err_is(
+            sketch_extrude_shape_json_impl(&disjoint),
+            WasmError::SketchProfileEmpty,
+        );
+        // 未知の演算名。
+        let unknown = format!(
+            r#"{{"depth":0.5,"profiles":[{{"points":{}}},{{"op":"xor","points":{}}}]}}"#,
+            sketch_rect(0.0, 0.0, 1.0, 1.0),
+            sketch_rect(0.5, 0.5, 1.5, 1.5)
+        );
+        assert_err_is(
+            sketch_extrude_shape_json_impl(&unknown),
+            WasmError::UnknownBooleanOp("xor".to_string()),
+        );
+        // 深さ0(押し出す厚みが無い)。
+        let flat = format!(
+            r#"{{"depth":0.0,"profiles":[{{"points":{}}}]}}"#,
+            sketch_rect(0.0, 0.0, 1.0, 1.0)
+        );
+        assert_err_is(
+            sketch_extrude_shape_json_impl(&flat),
+            WasmError::SketchExtrudeFailed,
         );
     }
 

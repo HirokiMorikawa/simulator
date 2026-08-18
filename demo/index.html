@@ -39,6 +39,10 @@
           <button id="btn-tool-rotate" title="回転ツール (E)">E 回転</button>
           <button id="btn-tool-scale" title="スケールツール (R)">R 拡縮</button>
           <button id="btn-tool-select" title="選択のみ (Q)">Q 選択</button>
+          <!-- スケッチツール(D1)。他の4つと同じ排他トグルの一員なので、
+               同じ toolbar-group に並べる。選ぶと Scene View 左下に
+               スケッチパネルが開く。 -->
+          <button id="btn-tool-sketch" title="スケッチツール (S): 地面(y=0)に多角形を描き、ブーリアン合成して押し出す">S スケッチ</button>
           <button
             id="btn-gizmo-space"
             title="Gizmo の座標系を World / Local で切り替える (X)"
@@ -284,6 +288,35 @@
         <section id="field-panel" hidden>
           <h2 id="field-title">場</h2>
           <canvas id="field-canvas"></canvas>
+        </section>
+        <!-- **スケッチパネル(D1)**。スケッチツール(S)を選んでいる間だけ開く。
+             Scene View の中に置くのは `field-panel` と同じ理由——作図中に
+             視線を 3D ビューポートから外させないため。 -->
+        <section id="sketch-panel" hidden>
+          <h2>スケッチ → 押し出し</h2>
+          <p class="sketch-hint">
+            地面(y=0)を左クリックで頂点を追加。最初の点をもう一度クリックするか
+            「確定」で1枚のプロファイルが閉じます。
+          </p>
+          <div id="sketch-status" class="sketch-status">プロファイル 0 枚 / 作図中の点 0</div>
+          <div class="sketch-row">
+            <label for="select-sketch-op">合成</label>
+            <select id="select-sketch-op" title="確定するプロファイルを、それまでの結果へどう合成するか(1枚目では無視されます)">
+              <option value="union">結合 (Union)</option>
+              <option value="subtract">減算 (Subtract)</option>
+              <option value="intersect">交差 (Intersect)</option>
+            </select>
+          </div>
+          <div class="sketch-row">
+            <label for="input-sketch-depth">深さ [m]</label>
+            <input id="input-sketch-depth" type="number" min="0.01" step="0.05" value="0.5" />
+          </div>
+          <div class="sketch-buttons">
+            <button id="btn-sketch-confirm" title="作図中の点列を閉じて1枚のプロファイルとして確定する (Enter)">確定</button>
+            <button id="btn-sketch-undo-point" title="作図中の最後の点を取り消す (Backspace)">1点戻す</button>
+            <button id="btn-sketch-extrude" title="確定済みプロファイルを合成して押し出し、剛体としてスポーンする">押し出し</button>
+            <button id="btn-sketch-clear" title="スケッチを全部捨てる">クリア</button>
+          </div>
         </section>
       </main>
 

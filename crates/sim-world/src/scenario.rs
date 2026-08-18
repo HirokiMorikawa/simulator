@@ -627,6 +627,27 @@ pub enum ShapeJson {
     ConvexMesh {
         vertices: Vec<[f64; 3]>,
     },
+    /// **任意の(凹みを含みうる)三角形メッシュ**(D1「スケッチ・押し出し」で追加)。
+    /// `triangles`は各三角形の頂点index3つ組(**外向き**の巻き順、
+    /// `sim_mechanics::hull`と同じ規約)。
+    ///
+    /// **入力専用の変種である**——読み込み時に`Shape::from_triangle_mesh`
+    /// (近似凸分解、`sim_mechanics::decompose`)を通り、結果は`ConvexMesh`
+    /// (元から実質凸だった場合)または`ConvexMesh`の子を持つ`Compound`
+    /// (凹んでいた場合)になる。したがって逆方向(`export::shape_to_shape_json`)が
+    /// この変種を produce することは無い。
+    ///
+    /// **その非対称は意図的**。`Shape`が実際に保持しているのは分解後の凸パーツ
+    /// 集合であって元の三角形メッシュではない(分解は不可逆で、面情報は
+    /// `Shape`側に残らない)。書き出しが`Compound`/`ConvexMesh`になるのは
+    /// 「嘘をつかずに実物を書く」ことであり、`mesh`として書き戻せば
+    /// 読み直しのたびに分解をやり直す(=同じシーンJSONの往復で形状が
+    /// 変わりうる)ことになる。`ConvexMesh`が「頂点だけを渡す用途の型」で
+    /// あるのと同じく、`mesh`は「面情報つきで作りたい人が書く用途のタグ」である。
+    Mesh {
+        vertices: Vec<[f64; 3]>,
+        triangles: Vec<[usize; 3]>,
+    },
 }
 
 /// `ShapeJson::Compound`の子1つ(ローカル位置・回転+形状)。
@@ -2257,6 +2278,31 @@ pub fn shape_json_to_shape(json: &ShapeJson) -> Shape {
         ShapeJson::ConvexMesh { vertices } => Shape::ConvexMesh {
             vertices: vertices.iter().map(|v| array_to_vec3(*v)).collect(),
         },
+        // **D1(スケッチ・押し出し)で追加**。ここが`Shape::from_triangle_mesh`
+        // (近似凸分解)の唯一の入口——シーンJSONからも、`spawn_shape_json`
+        // (エディタのスケッチ押し出し)からも、同じこの1行を通る
+        // (`ShapeJson::Mesh`のdoc参照)。
+        ShapeJson::Mesh {
+            vertices,
+            triangles,
+        } => {
+            // **範囲外の頂点indexを持つ三角形は捨てる**。`Shape::from_triangle_mesh`
+            // (と`sim_mechanics::decompose`)は`vertices[i]`で生アクセスするため、
+            // 壊れたJSONがそのまま届くとwasm境界でパニックする——シーンJSONも
+            // `spawn_shape_json`のペイロードも**外から来る文字列**であり、
+            // 「wasm境界でパニックさせない」という既存方針(`WasmError`のdoc)の
+            // 対象そのものである。捨てた結果三角形が0枚になっても、頂点だけの
+            // 入力として凸包へフォールバックするだけで落ちない。
+            let n = vertices.len();
+            Shape::from_triangle_mesh(
+                vertices.iter().map(|v| array_to_vec3(*v)).collect(),
+                triangles
+                    .iter()
+                    .filter(|t| t.iter().all(|&i| i < n))
+                    .copied()
+                    .collect(),
+            )
+        }
     }
 }
 
@@ -6538,6 +6584,107 @@ mod tests {
         );
         let round_tripped: ShapeJson = serde_json::from_str(&json).unwrap();
         assert!(matches!(round_tripped, ShapeJson::ConvexMesh { .. }));
+    }
+
+    /// **D1(スケッチ・押し出し)**: 新しい`mesh`タグがシーンJSONから読め、
+    /// `Shape::from_triangle_mesh`(近似凸分解)を通ること。
+    ///
+    /// 立方体(=既に凸)は分解されず`ConvexMesh`のまま。L字断面を押し出した
+    /// 凹プリズムは`Compound`へ分解される——**`mesh`タグが`convex_mesh`タグと
+    /// 違う意味を持つことの証明**であり、頂点だけでなく面情報(`triangles`)を
+    /// 渡すからこそ凹みが保たれることを示す。
+    ///
+    /// 凹メッシュは手書きせず`sim_mechanics::extrude_region`で作る——
+    /// エディタのスケッチ押し出しが実際に通る経路そのものなので、
+    /// ここが「フロントエンドが組み立てるJSON」の代表になる。
+    #[test]
+    fn mesh_shape_json_tag_routes_through_the_convex_decomposition() {
+        fn mesh_shape_json(vertices: &[sim_math::Vec3], triangles: &[[usize; 3]]) -> String {
+            serde_json::to_string(&ShapeJson::Mesh {
+                vertices: vertices.iter().map(|v| [v.x, v.y, v.z]).collect(),
+                triangles: triangles.to_vec(),
+            })
+            .unwrap()
+        }
+
+        // ① 正方形断面の押し出し(=箱、既に凸)。
+        let square = vec![vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]];
+        let parts = sim_mechanics::extrude_region(&square, 0.4).unwrap();
+        assert_eq!(parts.len(), 1, "穴が無いのでパーツは1つ");
+        let json = mesh_shape_json(&parts[0].vertices, &parts[0].triangles);
+        assert!(
+            json.starts_with(r#"{"mesh":"#),
+            "JSONタグは`mesh`: {json:.40}"
+        );
+        let parsed: ShapeJson = serde_json::from_str(&json).expect("meshタグが読める");
+        assert!(matches!(parsed, ShapeJson::Mesh { .. }));
+        let box_like = shape_json_to_shape(&parsed);
+        assert!(
+            matches!(box_like, Shape::ConvexMesh { .. }),
+            "既に凸なメッシュは分解されない: {box_like:?}"
+        );
+        assert!(
+            (box_like.volume().unwrap() - 0.4).abs() < 1e-9,
+            "1 m² × 0.4 m = 0.4 m³"
+        );
+
+        // ② L字断面(3 m²)の押し出し。凸包扱いなら 3.5 m² 相当になってしまう。
+        let l_shape = vec![vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 2.0],
+            [0.0, 2.0],
+        ]];
+        let parts = sim_mechanics::extrude_region(&l_shape, 0.5).unwrap();
+        assert_eq!(parts.len(), 1, "L字に穴は無い");
+        let parsed: ShapeJson =
+            serde_json::from_str(&mesh_shape_json(&parts[0].vertices, &parts[0].triangles))
+                .unwrap();
+        let shape = shape_json_to_shape(&parsed);
+        assert!(
+            matches!(shape, Shape::Compound { .. }),
+            "凹んだメッシュは凸パーツへ分解される: {shape:?}"
+        );
+        let volume = shape.volume().unwrap();
+        assert!(
+            (volume - 1.5).abs() < 1e-6,
+            "3 m² × 0.5 m = 1.5 m³(凸包なら 1.75 m³。実際: {volume})"
+        );
+
+        // ③ 逆方向(`export::shape_to_shape_json`)は`mesh`を produce しない
+        //    ——`Shape`が保持しているのは分解後の凸パーツだから
+        //    (`ShapeJson::Mesh`のdoc「その非対称は意図的」)。
+        let written = crate::shape_to_shape_json(&shape);
+        assert!(
+            !matches!(written, ShapeJson::Mesh { .. }),
+            "書き出しは実物(Compound/ConvexMesh)であって`mesh`ではない"
+        );
+    }
+
+    /// **回帰テスト**: 範囲外の頂点indexを持つ`mesh`(壊れた・悪意ある入力)で
+    /// パニックしないこと。`Shape::from_triangle_mesh`は`vertices[i]`で生
+    /// アクセスするので、フィルタが無ければここで即パニックする
+    /// ——シーンJSONも`spawn_shape_json`のペイロードも外から来る文字列であり、
+    /// 「wasm境界でパニックさせない」既存方針の対象そのものである。
+    #[test]
+    fn mesh_shape_json_with_out_of_range_indices_does_not_panic() {
+        let json = r#"{"mesh":{
+            "vertices":[[0,0,0],[1,0,0],[0,1,0],[0,0,1]],
+            "triangles":[[0,1,2],[0,1,99],[7,8,9],[0,2,3]]
+        }}"#;
+        let parsed: ShapeJson = serde_json::from_str(json).unwrap();
+        let shape = shape_json_to_shape(&parsed);
+        // 生き残った三角形は2枚だけなので閉じた立体にはならないが、
+        // 頂点群の凸包(四面体)として扱えるので体積は持つ。
+        assert!(matches!(shape, Shape::ConvexMesh { .. }), "{shape:?}");
+        assert!(shape.volume().is_some_and(|v| v > 0.0));
+
+        // 三角形が全滅しても落ちない(頂点だけの入力＝凸包へのフォールバック)。
+        let all_bad = r#"{"mesh":{"vertices":[[0,0,0]],"triangles":[[5,6,7]]}}"#;
+        let parsed: ShapeJson = serde_json::from_str(all_bad).unwrap();
+        let _ = shape_json_to_shape(&parsed);
     }
 
     /// **残タスク完遂増分**(レビュー指摘「見送らず対応すること」への対応):

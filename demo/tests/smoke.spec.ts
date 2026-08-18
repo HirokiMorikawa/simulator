@@ -1315,3 +1315,113 @@ test("検証タブ: 合格基準がシーンJSONスキーマ(pass_criteria)へ�
 
   expect(errors).toEqual([]);
 });
+
+test("D1: スケッチ→押し出しで剛体をUIから作れ、走らせてもクラッシュしない", async ({
+  page,
+}) => {
+  // D1(スケッチ・押し出し)の受け入れテスト。既存の「複合形状(L字)/凸包
+  // メッシュがUIから作れ…」テストと同じ形で、**UIの操作だけ**で新しい形状
+  // JSONタグ(`mesh`)を通した剛体が実際に作れることを確認する。
+  //
+  // ここが守るのは配線の健全性(ツール切替 → 構築平面へのレイキャスト →
+  // 確定 → wasmの`sketch_extrude_shape_json` → `spawn_shape_json` →
+  // Hierarchy/描画)。ブーリアン合成そのものの数値的な正しさは Rust 側の
+  // 解析的なテスト(`sim_mechanics::sketch`)が担保しており、ここでは重ねない。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  const rowCount = () => page.locator("#hierarchy-tree .tree-body").count();
+  const before = await rowCount();
+
+  // ① スケッチツールへ切り替えるとパネルが開く(他のツールでは閉じている)。
+  await expect(page.locator("#sketch-panel")).toBeHidden();
+  await page.click("#btn-tool-sketch");
+  await expect(page.locator("#sketch-panel")).toBeVisible();
+
+  const canvas = page.locator("canvas").first();
+  const box = (await canvas.boundingBox())!;
+  // 構築平面は地面(y=0)。画面の下半分は必ず地面に当たる(既定カメラは
+  // (6,4,10) から (0,1.5,0) を見下ろしている)。**画面左下は避ける**
+  // ——スケッチパネル自体がそこに浮いており、重なった座標のクリックは
+  // キャンバスではなくパネルへ吸われて頂点が置かれない。
+  const clickAt = async (fx: number, fy: number) => {
+    await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy);
+    await page.waitForTimeout(30);
+  };
+
+  // ② 地面を4回クリックして四角形の点列を作る。
+  for (const [fx, fy] of [
+    [0.5, 0.58],
+    [0.72, 0.58],
+    [0.72, 0.78],
+    [0.5, 0.78],
+  ] as [number, number][]) {
+    await clickAt(fx, fy);
+  }
+  await expect(page.locator("#sketch-status")).toContainText("作図中の点 4");
+
+  // ③ 「確定」で1枚のプロファイルになる。
+  await page.click("#btn-sketch-confirm");
+  await expect(page.locator("#sketch-status")).toContainText(
+    "プロファイル 1 枚",
+  );
+  await expect(page.locator("#sketch-status")).toContainText("作図中の点 0");
+
+  // ④ 深さを指定して押し出すと、Hierarchy にボディが1つ増える。形状は
+  //    `mesh`タグ → Rust側の近似凸分解 → ConvexMesh(凸)か Compound(凹)。
+  await page.fill("#input-sketch-depth", "0.4");
+  await page.click("#btn-sketch-extrude");
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBe(before + 1);
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText(
+    /ConvexMesh_|Compound_/,
+  );
+  // 押し出した後はスケッチが片付いている。
+  await expect(page.locator("#sketch-status")).toContainText(
+    "プロファイル 0 枚",
+  );
+
+  // ⑤ **ブーリアン(減算)**: 土台の四角形を確定 → 「減算」に切り替え、その
+  //    内側に小さい四角形を描いて押し出す。断面に穴が空くので、分解結果は
+  //    必ず Compound(凸パーツ複数)になる——`mesh`タグが`convex_mesh`と
+  //    違う意味を持つ(面情報から凹みが復元される)ことがUI経由で分かる。
+  for (const [fx, fy] of [
+    [0.52, 0.55],
+    [0.88, 0.55],
+    [0.88, 0.8],
+    [0.52, 0.8],
+  ] as [number, number][]) {
+    await clickAt(fx, fy);
+  }
+  await page.click("#btn-sketch-confirm");
+  await page.selectOption("#select-sketch-op", "subtract");
+  for (const [fx, fy] of [
+    [0.63, 0.63],
+    [0.77, 0.63],
+    [0.77, 0.72],
+    [0.63, 0.72],
+  ] as [number, number][]) {
+    await clickAt(fx, fy);
+  }
+  await expect(page.locator("#sketch-status")).toContainText(
+    "プロファイル 1 枚 / 作図中の点 4",
+  );
+  // 「押し出し」は描きかけの点列を自動で確定してから走る。
+  await page.click("#btn-sketch-extrude");
+  await page.waitForTimeout(200);
+  expect(await rowCount()).toBe(before + 2);
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText(
+    "Compound_",
+  );
+
+  // ⑥ 実際に走らせる——押し出したメッシュが物理(接触生成・質量特性)と
+  //    描画の両方で例外を出さずに動くこと。
+  await page.click("#btn-mode-play");
+  await page.click("#btn-play");
+  await page.fill("#input-step-count", "60");
+  await page.click("#btn-step");
+  await page.waitForTimeout(300);
+
+  expect(errors).toEqual([]);
+});

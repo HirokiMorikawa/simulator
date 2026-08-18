@@ -342,6 +342,72 @@ body {
   background: #111;
 }
 
+/* **スケッチパネル(D1)**。`#field-panel` と同じ「Scene View の中に浮かべる
+   小さなパネル」の作りだが、右下は場のパネルが使うので**左下**に置く
+   (両方同時に出るシーンでも重ならない)。 */
+#sketch-panel {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: #1a1a1acc;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 6px 8px 8px;
+  z-index: 3;
+}
+#sketch-panel[hidden] {
+  display: none;
+}
+#sketch-panel h2 {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #9ab;
+  margin: 0;
+}
+.sketch-hint {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #888;
+}
+.sketch-status {
+  font-size: 11px;
+  font-family: monospace;
+  color: #cc9;
+}
+.sketch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+}
+.sketch-row select,
+.sketch-row input {
+  flex: 1;
+  min-width: 0;
+}
+.sketch-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.sketch-buttons button {
+  flex: 1 1 auto;
+  font-size: 11px;
+}
+/* 「押し出し」は最終操作なので目立たせる(Add Joint フォームの主ボタンと同じ扱い)。 */
+#btn-sketch-extrude {
+  background: #3a5a8a;
+  border-color: #4a7ac0;
+  color: #fff;
+}
+
 /* 実効時間倍率(群2)。指定値に届かないとき赤くする。 */
 #timescale-effective {
   font-variant-numeric: tabular-nums;

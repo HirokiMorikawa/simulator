@@ -20,6 +20,7 @@ mod gjk;
 mod hull;
 mod joint;
 mod shape;
+mod sketch;
 mod sleep;
 mod soft_body;
 mod solver;
@@ -36,6 +37,10 @@ pub use gjk::{
 };
 pub use joint::{BallJoint, DistanceJoint, HingeMotorPd, SliderJoint, SoftParams, WheelJoint};
 pub use shape::{Aabb, Shape};
+pub use sketch::{
+    extrude_region, flatten_region, loop_signed_area, normalize_loop, polygon_boolean, region_area,
+    region_centroid, triangulate_region, BooleanOp, ExtrudedMesh, Loop2, Point2,
+};
 pub use soft_body::{
     rope, tetrahedron_volume, BendingConstraint, DistanceConstraint, SoftBody, VolumeConstraint,
     DEFAULT_DAMPING, DEFAULT_ITERATIONS, DEFAULT_SUBSTEPS,
