@@ -664,6 +664,106 @@ test("群2: Hierarchy の折り畳み・Materials サブツリー・N step 送�
   expect(errors).toEqual([]);
 });
 
+test("D3「Unityパリティ」増分: Hierarchy検索・Shift範囲選択・Ctrl+A/Escape", async ({
+  page,
+}) => {
+  // 監査で見つかった具体的な欠落3件——①ボディ数が多いシーンでHierarchyから
+  // 目的の行を探す手段が無い、②Ctrl/Cmdクリックのトグルはあるが標準の
+  // Shift範囲選択が無い、③範囲選択・トグルと対になる全選択(Ctrl+A)/
+  // 選択解除(Escape)が無い——への対応をまとめて確認する。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  // D8散乱: 床(floor) + 球50個(s0..s49) = 51体。検索・範囲選択・全選択の
+  // どれも既定シーン(2体)では意味のある確認にならないため、この増分G1の
+  // 最大シーンへ切り替える。
+  await page.selectOption("#select-scene", "d8-scatter.json");
+  const rows = page.locator("#hierarchy-tree .tree-body");
+  await expect(rows).toHaveCount(51);
+  const visibleRows = page.locator("#hierarchy-tree .tree-body:visible");
+
+  // ① 検索: "floor" は1件だけに絞られる。
+  const search = page.locator("#hierarchy-search");
+  await search.fill("floor");
+  await expect(visibleRows).toHaveCount(1);
+  await expect(visibleRows.first()).toHaveText("floor");
+
+  // "s1" は s1 本体 + s10〜s19 の計11件にマッチする。
+  await search.fill("s1");
+  await expect(visibleRows).toHaveCount(11);
+
+  // 検索欄を空にすると全件へ戻る。
+  await search.fill("");
+  await expect(visibleRows).toHaveCount(51);
+
+  // ② Shiftクリックの範囲選択: floor(nth 0)の次のs0(nth 1)をクリックして
+  // 起点にし、s2(nth 3)をShiftクリックすると s0/s1/s2 の3件が選択される
+  // ——右クリックメニューの「複製 (N件)」表示(既存の複数選択と同じ経路)で
+  // 件数を確認する。範囲内(s1、nth 2)を右クリックすれば選択がそのまま
+  // 保たれる(選択外の行を右クリックした場合はそこだけへ選択が移る、
+  // 既存の右クリックメニューの仕様)。
+  await rows.nth(1).click();
+  await rows.nth(3).click({ modifiers: ["Shift"] }); // Inspectorの主選択はs2(nth 3)になる。
+  await rows.nth(2).click({ button: "right" });
+  await expect(page.locator("#context-menu")).toContainText("複製 (3件)");
+  await page.keyboard.press("Escape"); // メニューを閉じる(複数選択は主選択1件へ戻る)。
+
+  // ③ Ctrl+A: 現存する51体すべてが複数選択に入る。主選択(nth 3のs2)を
+  // そのまま右クリックすれば「選択外→単独選択に戻す」経路を踏まずに
+  // 件数を確認できる。
+  await page.keyboard.press("Control+a");
+  await rows.nth(3).click({ button: "right" });
+  await expect(page.locator("#context-menu")).toContainText("複製 (51件)");
+
+  // ④ Escape: メニューを閉じるだけでなく、複数選択もInspector表示中の1件
+  // (主選択=s2)へ戻す——同じ行(nth 3)を右クリックし直すと件数サフィックスが
+  // 消える。
+  await page.keyboard.press("Escape");
+  await rows.nth(3).click({ button: "right" });
+  await expect(page.locator("#context-menu button", { hasText: "複製" }).first()).toHaveText(
+    "複製",
+  );
+  await page.keyboard.press("Escape");
+
+  expect(errors).toEqual([]);
+});
+
+test("D3「Unityパリティ」増分: 失敗がConsoleのErrorsタブへも残る", async ({ page }) => {
+  // 監査で見つかった具体的な欠落: ConsoleのErrorsタブ(HTML側には元から
+  // 存在する)は`drain_events_text`が`"errors"`レベルを一切出さないため
+  // 常に空で、失敗は`window.alert`の一度きりのモーダルでしか伝わらなかった。
+  // Validationタブの「値を1つ以上指定してください」を、UIから確実に踏める
+  // 失敗経路として使う——**空欄のままではこの分岐に落ちない**ことに注意
+  // (`"".split(",").map(Number)`は`[0]`になり`Number.isFinite`を満たすため、
+  // 数値へ変換できないテキストを入れて初めて0件まで絞り込まれる)。
+  const errors = collectPageErrors(page);
+  await page.goto("/");
+  await waitForWorld(page);
+
+  let alertMessage: string | null = null;
+  page.on("dialog", (d) => {
+    alertMessage = d.message();
+    d.accept();
+  });
+
+  await page.click('.project-tab[data-tab="validation"]');
+  await expect(page.locator("#validation-base-json")).toBeVisible();
+  await page.locator('input[title*="パラメータの値"]').fill("abc,def");
+  await page.click('button:has-text("スイープを実行")');
+
+  await expect.poll(() => alertMessage).toContain("値を1つ以上指定してください");
+
+  // 同じメッセージがConsoleのErrorsタブへも残っている(モーダルを閉じた後も
+  // 見返せる)。
+  await page.click('.console-tab[data-tab="errors"]');
+  await expect(
+    page.locator("#console-log li", { hasText: "値を1つ以上指定してください" }),
+  ).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
 test("群2: 単一ファイル Export(シーン+Replay+Bookmark)", async ({ page }) => {
   // 設計 §6「保存・共有: シーンJSON+Replay+ブックマークを単一ファイルとして
   // エクスポート」。これまで3つは別々のファイルで、ブックマーク一覧は

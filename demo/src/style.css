@@ -153,10 +153,36 @@ body {
   grid-area: hierarchy;
 }
 
+/* Hierarchy検索欄(D3「Unityパリティ」増分)。大量のボディを持つシーンで
+   目的の行を探す手段が無かった監査結果への対応。 */
+.hierarchy-search {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 4px 10px 6px;
+  padding: 3px 6px;
+  background: #1c1c1c;
+  border: 1px solid #333;
+  border-radius: 3px;
+  color: #ddd;
+  font-size: 0.9em;
+}
+.hierarchy-search:focus {
+  outline: none;
+  border-color: #567;
+}
+
 .tree {
   list-style: none;
   margin: 0;
   padding: 0 10px 10px;
+}
+
+/* 検索中は折り畳み状態を無視してすべての枝を開く(一致した行が畳まれた
+   枝の中に埋もれて見えなくなるのを防ぐ)。個々の行の表示/非表示自体は
+   JS側が`<li>`ごとの`style.display`で制御する(このルールはネストした
+   `<ul>`だけを強制的に開く)。 */
+#hierarchy-tree.hierarchy-filtering .tree-nested {
+  display: block !important;
 }
 
 .tree li {

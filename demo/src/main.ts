@@ -148,6 +148,34 @@ type ConsoleDiagnosticsRef = {
 
 type SelectBodyRef = { current: ((index: number) => void) | null };
 
+// **エラーの永続表示(D3「Unityパリティ」増分)**。ConsoleのErrorsタブ
+// (HTML側には元から存在する4タブの1つ)は、`drain_events_text`が返す
+// `SolverDiagnostics`由来のイベントしか流し込んでおらず、その中に`"errors"`
+// レベルへ分類される種別が1つも無い(`FuseBlown`/`SolverDiverged`/
+// `JointBroken`はいずれも`"warnings"`、他は`"info"`——`setUpConsole`の`append`
+// 直前のコメント参照)ため**常に空**だった。一方、Add Joint/Add Coupling・
+// シーン読み込み・押し出し・材料派生などの失敗は`window.alert`の
+// 一度きりのモーダルでしか伝わらず、閉じた瞬間に消えて後から見返せない
+// (監査で発見した具体的な欠落——candidate gap「Console/log panel for
+// warnings-errors」)。`window.alert`自体は即時のフィードバックとして
+// 有用なので取り除かず、**Consoleへも同じメッセージを残す**形で埋める。
+//
+// `reportError`はモジュールスコープの自由関数(`wireAddJointForm`等、
+// `main()`の外で定義される多数の関数から個別の引数を足さず直接呼びたい)
+// なので、`JumpToStepRef`と同じ「world/Console構築より前に定義される関数から
+// 呼べるよう、可変の参照変数越しに後から実体を配線する」構成を取る。ただし
+// こちらは値を1個(関数)持つだけで済むため、他のRef群のような
+// `{ current }`型は使わずモジュール変数そのものにした。
+let consoleErrorAppend: ((message: string) => void) | null = null;
+
+/// 失敗をユーザーへ即時に伝え(`window.alert`)、かつConsoleのErrorsタブへ
+/// 恒久的に残す(`consoleErrorAppend`未配線の間——起動直後の一瞬——は
+/// 後者を静かにスキップする)。
+function reportError(message: string): void {
+  consoleErrorAppend?.(message);
+  window.alert(message);
+}
+
 /// **Inspector の編集ハンドラ(群2)**。設計 docs/23-frontend/01-editor.md §1.3 は
 /// 「各 Component は World API の `Desc` 型と 1:1 対応。**編集は次ステップ先頭で
 /// Command として適用される**(実行中は編集ロック — §4)」と定めているが、
@@ -787,6 +815,15 @@ const collapsedHierarchyGroups = new Set<string>();
 /// 複製/削除がまとめて効く)。Inspector には最後にクリックしたものを出す。
 const hierarchyMultiSelection = new Set<number>();
 
+/// **Shift クリックの範囲選択の起点(D3「Unityパリティ」増分)**。監査で
+/// 見つかった具体的な欠落——Ctrl/Cmd クリックのトグルは既にあったが、Unity の
+/// Hierarchy(および大半のファイルマネージャ)が備える「Shift クリックで
+/// 直前のクリック位置から今クリックした行までを一括選択」が無かった。
+/// `hierarchyMultiSelection`と同じくツリー再構築(world差し替え)をまたいで
+/// 持たせる——シーンを切り替えても直前にクリックした行番号自体に意味は
+/// 無くなるため実害は無く、モジュール外の状態を増やさないほうが単純。
+let hierarchyRangeAnchor: number | null = null;
+
 function setUpHierarchy(
   world: WasmWorld,
   onSelect: (index: number) => void,
@@ -866,13 +903,29 @@ function setUpHierarchy(
     // 「ボディが何体あるか」を数えるにはこちらを使う。
     item.classList.add("tree-selectable", "tree-body");
     item.addEventListener("click", (event) => {
-      // Ctrl/Cmd クリックで追加選択・解除(設計 §1.1「複数選択可」)。
-      if (event.ctrlKey || event.metaKey) {
+      // Shift クリックで範囲選択(D3「Unityパリティ」増分)。起点
+      // (`hierarchyRangeAnchor`)から今クリックした行までの実在ボディ行
+      // (削除済みでnullの行は除く)をまとめて選択に加える。Ctrl/Cmd を
+      // 併用すると既存の選択へ加算(標準的な意味論)、単独なら選択を
+      // 置き換える。起点が無い(初回クリック)場合は単純選択にフォールバック。
+      if (event.shiftKey && hierarchyRangeAnchor !== null) {
+        if (!(event.ctrlKey || event.metaKey)) hierarchyMultiSelection.clear();
+        const lo = Math.min(hierarchyRangeAnchor, i);
+        const hi = Math.max(hierarchyRangeAnchor, i);
+        for (let k = lo; k <= hi; k++) {
+          if (items[k]) hierarchyMultiSelection.add(k);
+        }
+        // 起点は動かさない(標準のExplorer挙動——続けてShiftクリックすると
+        // 同じ起点からの範囲に置き換わる)。
+      } else if (event.ctrlKey || event.metaKey) {
+        // Ctrl/Cmd クリックで追加選択・解除(設計 §1.1「複数選択可」)。
         if (hierarchyMultiSelection.has(i)) hierarchyMultiSelection.delete(i);
         else hierarchyMultiSelection.add(i);
+        hierarchyRangeAnchor = i;
       } else {
         hierarchyMultiSelection.clear();
         hierarchyMultiSelection.add(i);
+        hierarchyRangeAnchor = i;
       }
       highlight(i);
       onSelect(i);
@@ -1097,6 +1150,58 @@ function setUpHierarchy(
 
   root.appendChild(bodies);
   tree.appendChild(root);
+
+  // **検索/絞り込み(D3「Unityパリティ」増分)**。監査で見つかった具体的な
+  // 欠落——ボディ数が多いシーン(散乱球群等)でHierarchyから目的の行を
+  // 探す手段が無かった。ツリーの構造(Bodies/Joints/Frames/Circuits/Probes/
+  // Materialsでそれぞれ行の組み立て方が違う)に依存しないよう、DOM上の
+  // `<li>`をすべて舐めて「自身の直接のテキスト」が一致するか、子孫に一致が
+  // あるかだけで判定する汎用フィルタにした(セクションごとの専用ロジックを
+  // 増やさない)。
+  const searchInput = document.getElementById(
+    "hierarchy-search",
+  ) as HTMLInputElement | null;
+  function applyHierarchyFilter(query: string) {
+    const q = query.trim().toLowerCase();
+    const active = q.length > 0;
+    tree.classList.toggle("hierarchy-filtering", active);
+    const allLis = Array.from(tree.querySelectorAll<HTMLLIElement>("li"));
+    if (!active) {
+      // 折り畳み状態(`collapsedHierarchyGroups`)を管理しているのは各グループの
+      // 開閉トグルが直接触る`contents.style.display`(`<ul>`側)であって、ここで
+      // 触っているのは`<li>`側の`display`だけなので、消すだけで元の折り畳み
+      // 表示へ戻る。
+      allLis.forEach((li) => li.style.removeProperty("display"));
+      return;
+    }
+    // 文書順(親→子)で得られる配列を逆順に辿ることで、子から先に可視判定を
+    // 終わらせてから親の「子孫に一致があるか」を見られるようにする。
+    for (let k = allLis.length - 1; k >= 0; k--) {
+      const li = allLis[k];
+      const ownText = Array.from(li.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent ?? "")
+        .join("")
+        .toLowerCase();
+      const hasVisibleChild = Array.from(li.children).some(
+        (child) =>
+          child.tagName === "UL" &&
+          Array.from(child.children).some(
+            (c) => (c as HTMLElement).style.display !== "none",
+          ),
+      );
+      li.style.display = ownText.includes(q) || hasVisibleChild ? "" : "none";
+    }
+  }
+  if (searchInput) {
+    applyHierarchyFilter(searchInput.value);
+    // `addEventListener`だと`setUpHierarchy`が呼ばれるたび(スポーン/複製/
+    // 削除のたびに再構築される)ハンドラが積み重なる——`<input>`自体はツリーの
+    // 外にありツリー再構築(`tree.innerHTML = ""`)を生き延びるため。代入は
+    // 前回分を置き換えるだけなので安全。
+    searchInput.oninput = () => applyHierarchyFilter(searchInput.value);
+  }
+
   return highlight;
 }
 
@@ -1432,11 +1537,11 @@ function wireAddQuantumDomainForms(getWorld: () => WasmWorld): void {
     const sigma = Number(sigmaInput?.value ?? 1);
     const k0 = Number(k0Input?.value ?? 0);
     if (!isPowerOfTwo(n)) {
-      window.alert("グリッド点数 n は2の冪(64/128/256/512/1024)から選んでください。");
+      reportError("グリッド点数 n は2の冪(64/128/256/512/1024)から選んでください。");
       return;
     }
     if (!Number.isFinite(dx) || dx <= 0 || !Number.isFinite(sigma) || sigma <= 0) {
-      window.alert("dx・σ には正の有限値を入力してください。");
+      reportError("dx・σ には正の有限値を入力してください。");
       return;
     }
     const { psiRe, psiIm } = quantum1dGaussianWavePacket(n, dx, x0, sigma, k0);
@@ -1476,7 +1581,7 @@ function wireAddQuantumDomainForms(getWorld: () => WasmWorld): void {
         dx,
       });
     } catch (err) {
-      window.alert(`量子ドメイン(1D)の追加に失敗しました: ${String(err)}`);
+      reportError(`量子ドメイン(1D)の追加に失敗しました: ${String(err)}`);
     }
   });
 
@@ -1529,7 +1634,7 @@ function wireAddQuantumDomainForms(getWorld: () => WasmWorld): void {
     const sigmaY = Number(sigmaY2dInput?.value ?? 1);
     const k0 = Number(k02dInput?.value ?? 0);
     if (!isPowerOfTwo(nx) || !isPowerOfTwo(ny)) {
-      window.alert("グリッド点数 nx/ny は2の冪(32/64/128/256)から選んでください。");
+      reportError("グリッド点数 nx/ny は2の冪(32/64/128/256)から選んでください。");
       return;
     }
     if (
@@ -1542,7 +1647,7 @@ function wireAddQuantumDomainForms(getWorld: () => WasmWorld): void {
       !Number.isFinite(sigmaY) ||
       sigmaY <= 0
     ) {
-      window.alert("dx・dy・σx・σy には正の有限値を入力してください。");
+      reportError("dx・dy・σx・σy には正の有限値を入力してください。");
       return;
     }
     const { psiRe, psiIm } = quantum2dGaussianWavePacket(
@@ -1594,7 +1699,7 @@ function wireAddQuantumDomainForms(getWorld: () => WasmWorld): void {
         dy,
       });
     } catch (err) {
-      window.alert(`量子ドメイン(2D)の追加に失敗しました: ${String(err)}`);
+      reportError(`量子ドメイン(2D)の追加に失敗しました: ${String(err)}`);
     }
   });
 }
@@ -1944,7 +2049,7 @@ function wireAddJointForm(world: WasmWorld, index: number): void {
     try {
       applyComponent(world, kind, readApplyFieldsFrom("add-joint", fields));
     } catch (err) {
-      window.alert(`Joint の追加に失敗しました: ${String(err)}`);
+      reportError(`Joint の追加に失敗しました: ${String(err)}`);
       return;
     }
     renderInspectorFor(world, index);
@@ -1988,7 +2093,7 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
     try {
       applyComponent(world, kind, readApplyFieldsFrom("add-coupling", fields));
     } catch (err) {
-      window.alert(`Coupling の追加に失敗しました: ${String(err)}`);
+      reportError(`Coupling の追加に失敗しました: ${String(err)}`);
       return;
     }
     renderInspectorFor(world, index);
@@ -3313,7 +3418,7 @@ function setUpProjectDrawer(
       try {
         baseJsonArea.value = validationBaseJsonRef.current?.() ?? "";
       } catch (err) {
-        window.alert(`シーンの読み込みに失敗しました: ${String(err)}`);
+        reportError(`シーンの読み込みに失敗しました: ${String(err)}`);
       }
       loadCriteriaFromBaseJson();
     });
@@ -3405,7 +3510,7 @@ function setUpProjectDrawer(
       try {
         obj = JSON.parse(baseJsonArea.value) as Record<string, unknown>;
       } catch (err) {
-        window.alert(`Base scene JSONが不正です: ${String(err)}`);
+        reportError(`Base scene JSONが不正です: ${String(err)}`);
         return;
       }
       obj.pass_criteria = [
@@ -3464,7 +3569,7 @@ function setUpProjectDrawer(
       try {
         baseObj = JSON.parse(baseJsonArea.value);
       } catch (err) {
-        window.alert(`Base scene JSONが不正です: ${String(err)}`);
+        reportError(`Base scene JSONが不正です: ${String(err)}`);
         return;
       }
       const path = pathInput.value.trim();
@@ -3475,7 +3580,7 @@ function setUpProjectDrawer(
       const steps = Math.max(1, Math.trunc(Number(stepsInput.value) || 1));
       const probeIndex = Math.max(0, Math.trunc(Number(probeIndexInput.value) || 0));
       if (values.length === 0) {
-        window.alert("値を1つ以上指定してください(カンマ区切り)。");
+        reportError("値を1つ以上指定してください(カンマ区切り)。");
         return;
       }
 
@@ -4216,7 +4321,7 @@ async function setUpSceneView(
       applyComponent(world, "set_dt", { dt: value });
       pushCommandLog(world, { kind: "SetDt", dt: value });
     } catch (err) {
-      window.alert(`dt の変更に失敗しました: ${String(err)}`);
+      reportError(`dt の変更に失敗しました: ${String(err)}`);
     }
   });
 
@@ -4376,7 +4481,7 @@ async function setUpSceneView(
         ?.value ?? 100,
     );
     if (!Number.isFinite(temperature) || !Number.isFinite(heatCapacity) || heatCapacity <= 0) {
-      window.alert("温度・熱容量には正しい数値を入力してください(熱容量は正の値)。");
+      reportError("温度・熱容量には正しい数値を入力してください(熱容量は正の値)。");
       return;
     }
     applyComponent(world, "add_thermal_node", { temperature, heat_capacity: heatCapacity });
@@ -4412,6 +4517,9 @@ async function setUpSceneView(
   // 右クリックメニューに既に存在するので、対応するボタンの`.click()`を
   // 呼ぶだけで済む(無効化されたボタンへの`.click()`は実ブラウザでは
   // 発火しないため、モードガードは既存のクリックハンドラ側にそのまま乗る)。
+  // **D3「Unityパリティ」増分でCtrl+A(全選択)・Escape(複数選択解除)を追加**
+  // ——Hierarchyの複数選択(Ctrl/Cmdクリックのトグル・Shiftクリックの範囲選択)
+  // と対になる標準操作が無かった監査結果への対応。
   window.addEventListener("keydown", (event) => {
     const target = event.target as HTMLElement | null;
     if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
@@ -4430,6 +4538,22 @@ async function setUpSceneView(
             hierarchyActionsRef.current?.duplicate(selectedBodyIndex);
           }
           break;
+        case "a": {
+          // **全選択(D3「Unityパリティ」増分)**。監査で見つかった具体的な
+          // 欠落——Shift範囲選択と対になる標準の全選択が無かった。Inspector側
+          // (`selectedBodyIndex`)は変えず、Hierarchyの複数選択集合
+          // (`hierarchyMultiSelection`、右クリックの複製/削除がまとめて効く
+          // 対象)へ現存する(削除済みでない)ボディ全件を入れる。
+          const bodyCount = readNumber(world, "body_count");
+          hierarchyMultiSelection.clear();
+          for (let i = 0; i < bodyCount; i++) {
+            if (world.read_component("body_is_removed_at", String(i)) !== "true") {
+              hierarchyMultiSelection.add(i);
+            }
+          }
+          highlightHierarchy(selectedBodyIndex);
+          break;
+        }
         default:
           return; // 他のCtrl/Cmd組み合わせはブラウザ既定の動作へ委ねる。
       }
@@ -4483,6 +4607,14 @@ async function setUpSceneView(
         // QA不具合7: `title`とREADMEは実装済みと書いていたが、keydownの
         // switchに`x`のcaseが無く実際には効かなかった(ボタンクリックのみ有効)。
         setGizmoSpace(gizmoSpace === "world" ? "local" : "world");
+        break;
+      case "escape":
+        // **複数選択の解除(D3「Unityパリティ」増分)**。Ctrl+A(全選択)と
+        // 対になる標準操作。Inspectorに出ている1件(`selectedBodyIndex`)は
+        // 変えず、そこだけの単一選択へ戻す。
+        hierarchyMultiSelection.clear();
+        if (hasSelectedBody()) hierarchyMultiSelection.add(selectedBodyIndex);
+        highlightHierarchy(selectedBodyIndex);
         break;
       default:
         return;
@@ -7000,7 +7132,7 @@ async function setUpSceneView(
       const captured = prefabRef.current?.captureBody(index);
       if (!captured) {
         // 残る唯一の非対応は無限平面(床、`captureBody`のdoc参照)。
-        window.alert("この形状はPrefab化できません(無限平面(床)は対象外)");
+        reportError("この形状はPrefab化できません(無限平面(床)は対象外)");
         return;
       }
       prefabSaveRef.current?.({
@@ -7282,7 +7414,7 @@ async function setUpSceneView(
     .getElementById("btn-sketch-confirm")!
     .addEventListener("click", () => {
       if (!confirmSketchProfile()) {
-        window.alert("プロファイルを閉じるには3点以上が要ります。");
+        reportError("プロファイルを閉じるには3点以上が要ります。");
       }
     });
   document
@@ -7305,7 +7437,7 @@ async function setUpSceneView(
       // 手順を1つ増やすだけの価値が無い失敗の仕方である。
       confirmSketchProfile();
       if (sketchProfiles.length === 0) {
-        window.alert(
+        reportError(
           "押し出すプロファイルがありません(地面をクリックして3点以上の多角形を描いてください)。",
         );
         return;
@@ -7325,7 +7457,7 @@ async function setUpSceneView(
           ),
         );
       } catch (err) {
-        window.alert(`押し出しに失敗しました: ${String(err)}`);
+        reportError(`押し出しに失敗しました: ${String(err)}`);
         return;
       }
       let bodyIndex: number;
@@ -7341,7 +7473,7 @@ async function setUpSceneView(
           material_name: spawnMaterialSelect.value,
         }).index as number;
       } catch (err) {
-        window.alert(`スポーンに失敗しました: ${String(err)}`);
+        reportError(`スポーンに失敗しました: ${String(err)}`);
         return;
       }
       // 見た目は**押し出した三角形そのもの**で描く(`meshFromShapeJson`の
@@ -7434,7 +7566,7 @@ async function setUpSceneView(
         spawnMaterialSelect.appendChild(option);
         spawnMaterialSelect.value = name;
       } catch (err) {
-        window.alert(`材料派生に失敗しました: ${String(err)}`);
+        reportError(`材料派生に失敗しました: ${String(err)}`);
       }
     });
 
@@ -8226,6 +8358,10 @@ function main() {
     selectBodyRef,
     consoleDiagnosticsRef,
   );
+  // `reportError`(モジュール自由関数)からConsoleのErrorsタブへ書けるように
+  // する(`errors::`プレフィクスは`append`の`level::message`分割規約に従う、
+  // `consoleErrorAppend`のdoc参照)。
+  consoleErrorAppend = (message) => appendConsoleEntries(`errors::${message}`);
   const materialsRef: MaterialsRef = { current: null };
   const circuitRef: CircuitRef = { current: null };
   const sceneExportRef: SceneExportRef = { current: null };
