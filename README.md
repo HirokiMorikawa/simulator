@@ -1,154 +1,115 @@
 # simulator
 
-現実の物理法則を Rust で実装し、ブラウザ上で動かして遊べる物理シミュレータ。
+**現実の物理法則を、ブラウザ上で組み立てて、動かして、確かめられる物理シミュレータ。**
 
 [![CI](https://github.com/HirokiMorikawa/simulator/actions/workflows/ci.yml/badge.svg)](https://github.com/HirokiMorikawa/simulator/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](https://www.rust-lang.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](#対応プラットフォーム)
 
-## 目次
-
-- [概要](#概要)
-- [特徴](#特徴)
-- [必要環境](#必要環境)
-- [インストール](#インストール)
-- [使い方](#使い方)
-- [ドキュメント](#ドキュメント)
-- [開発](#開発)
-- [コントリビュート](#コントリビュート)
-- [ライセンス](#ライセンス)
+![統合エディタ](docs/assets/editor.png)
 
 ## 概要
 
-重力落下、流体、熱、電磁気、量子力学、天体の軌道運動など、幅広い物理現象を Rust で実装したシミュレーションエンジン。物理計算部分は WebAssembly にコンパイルされ、ブラウザ上の統合エディタからオブジェクトを配置・編集し、シミュレーションを再生しながら結果を確認できる。
+物を落とす、水を注ぐ、熱を伝える、回路に電気を流す、惑星を回す——そうした現象を、ひとつの世界の中に並べて動かせるシミュレータです。物理エンジン本体は Rust で書かれ、WebAssembly にコンパイルされてブラウザ上で動きます。
 
-教科書通りの解析解と結果を突き合わせるテストを備えており、「見た目それっぽい」ではなく実際に正しい物理計算になっているかを検証できることを重視している。
+同種のツールと違うのは、**答え合わせができる**ことです。落下時間は $t=\sqrt{2h/g}$ と一致するか。水柱の底の圧力は $\rho g h$ になるか。閉じた系のエネルギーは保存するか。こうした「教科書の答え」と計算結果を突き合わせる自動テストが 900 件以上あり、見た目がそれらしいかどうかではなく、実際に正しいかどうかで品質を測っています。
 
-## 特徴
+## 目次
 
-- **多様な物理現象を1つの世界でシミュレート** — 剛体の衝突・流体・熱伝導・電磁気回路・量子力学・天体軌道などを組み合わせて1つのシーンに配置できる。
-- **正しさの検証** — 数百件の自動テストが、解析的に解ける物理問題の答えと計算結果を比較して合否を判定する。
-- **再現性のある計算** — 同じビルド上では、同じ入力から常にビット単位で同じ結果が得られる。リプレイや共有、回帰テストがしやすい([設計](docs/20-integration/02-determinism-replay.md)。OS をまたぐ場合は、各OSの数学関数ライブラリの丸めが異なるため許容誤差での一致を保証する)。
-- **ブラウザ上の統合エディタ** — オブジェクトの配置・編集、再生/一時停止、値のグラフ表示などをブラウザ上で行える。
-- **物理ベースレンダリング対応** — 光の伝搬を物理的に計算するパストレーサーを同梱しており、静止画のレンダリングにも使える。
-- **外部依存が少ない** — 数値計算まわりの主要な処理を自前実装しており、依存ライブラリを最小限に抑えている。
+- [クイックスタート](#クイックスタート)
+- [できること](#できること)
+- [ドキュメント](#ドキュメント)
+- [開発](#開発)
+- [コントリビュート](#コントリビュート)
 
-## 必要環境
+## クイックスタート
 
-事前に用意するのは次の2つだけ。残りの依存(`wasm32-unknown-unknown` ターゲット、wasm-pack、npm パッケージ)はセットアップコマンドが自動で揃える。
-
-| 要件 | 補足 |
-|---|---|
-| [Rust](https://www.rust-lang.org/tools/install) | rustup 経由での導入を推奨。使用するバージョンとターゲットは `rust-toolchain.toml` が宣言しており自動で適用される |
-| [Node.js](https://nodejs.org/) 22 以上 | ブラウザデモのビルドと起動に必要。nvm 利用時はリポジトリ直下で `nvm use` |
-
-### 対応プラットフォーム
-
-Linux / macOS / Windows で動作する。物理エンジン本体は OS 依存のコードを含まない。
-
-いずれの OS でも CI がセットアップからブラウザでの起動確認までを検証している。
-
-| OS | CI で検証している範囲 |
-|---|---|
-| Linux | ビルド・テスト・ブラウザ E2E |
-| macOS | セットアップ・ビルド・テスト・ブラウザ E2E |
-| Windows | セットアップ・ビルド・テスト・ブラウザ E2E |
-
-## インストール
+事前に必要なのは [Rust](https://www.rust-lang.org/tools/install) と [Node.js](https://nodejs.org/) 22 以上の2つだけです。
 
 ```bash
 git clone https://github.com/HirokiMorikawa/simulator.git
 cd simulator
 cargo xtask setup
-```
-
-`cargo xtask setup` が、wasm-pack の導入 → 物理エンジンの WebAssembly ビルド → デモの依存取得までをまとめて行う。3つのOSで同じコマンドが使える(初回は wasm-pack のビルドに数分かかる)。
-
-完了したらデモを起動する。
-
-```bash
 cargo xtask dev
 ```
 
-Vite が表示する URL をブラウザで開くとエディタが立ち上がる。
+表示された URL をブラウザで開くとエディタが立ち上がります。
 
-<details>
-<summary>用意されているコマンド</summary>
+`cargo xtask setup` が、ビルドツールの導入から WebAssembly のビルド、依存パッケージの取得までをまとめて行います。初回は数分かかります。
+
+### 対応プラットフォーム
+
+Linux / macOS / Windows で動作します。物理エンジン本体は OS 依存のコードを含んでおらず、いずれの OS でも CI がセットアップからブラウザでの起動確認までを検証しています。
+
+### 用意されているコマンド
 
 | コマンド | 内容 |
 |---|---|
-| `cargo xtask setup` | セットアップ一式(wasm-pack導入 → wasmビルド → npm ci) |
-| `cargo xtask build-wasm` | 物理エンジンを WebAssembly へビルドし `demo/pkg` に出力 |
-| `cargo xtask dev` | ブラウザデモを起動(未セットアップなら不足分を自動で補う) |
-| `cargo xtask check` | CI と同じチェック(fmt / clippy / test) |
+| `cargo xtask setup` | セットアップ一式 |
+| `cargo xtask dev` | ブラウザデモを起動 |
+| `cargo xtask build-wasm` | WebAssembly をビルド |
+| `cargo xtask check` | フォーマット・静的解析・テスト |
 
-</details>
+## できること
 
-<details>
-<summary>手動でセットアップする場合</summary>
+### 幅広い物理をひとつの世界で
 
-`cargo xtask setup` は下記と同等のことを行っている。個別に実行することもできる。
+力学・流体・熱・電磁気・量子・統計・天体を扱えます。それぞれ独立に動かすこともできますし、領域をまたぐ現象も計算されます——ブレーキの摩擦が熱に変わる、氷が融けて水になる、コイルを回すと発電する、といったつながりです。
 
-```bash
-# 1. wasm-pack を導入する(バージョンは crates/xtask/src/main.rs で固定)
-cargo install wasm-pack --version 0.13.1 --locked
+<img src="docs/assets/quantum.png" alt="2次元シュレディンガー方程式による二重スリット実験" width="100%">
 
-# 2. WebAssembly をビルドする
-#    demo/src/main.ts が demo/pkg を直接 import するため、デモのビルド・起動より
-#    先に必ず通す必要がある
-wasm-pack build crates/sim-wasm --target web --out-dir ../../demo/pkg
+<p align="center"><sub>二重スリットを通した電子波の干渉縞</sub></p>
 
-# 3. デモの依存を取得して起動する
-cd demo
-npm ci
-npm run dev
-```
+### 検証済みのデモが 43 本
 
-`wasm32-unknown-unknown` ターゲットは `rust-toolchain.toml` により rustup が自動で導入するため、`rustup target add` は不要。
+エディタのギャラリーから選ぶだけで動かせる検証用シーンが 43 本あります。それぞれに「何が起きれば正しいのか」という合否基準が付いています。
 
-</details>
+| シーン | 内容 |
+|---|---|
+| **落下時計** | 落下時間が解析解と一致するか |
+| **積み木** | 箱を積んで崩す |
+| **煙と渦** | 角柱が乱す流れ |
+| **注ぐ水** | 容器に水を注ぐ |
+| **電気工作台** | 回路をその場で配線する |
+| **氷が水になる** | 融解して流体に変わる |
+| **二重スリット** | 電子波の干渉 |
+| **スイングバイ** | 探査機が惑星の重力で加速する |
+| **車の実験場** | タイヤと車体の挙動 |
+| **再突入** | 大気圏への突入 |
 
-## 使い方
+### ブラウザ上で編集できる
 
-エディタでは、あらかじめ用意された検証用シーン([scenes/](scenes/))を選んで再生したり、オブジェクトを自分で配置してシミュレーションを試すことができる。シーンは JSON ファイルとして保存・読み込みでき、物理パラメータ(重力・材料・初期位置など)を直接編集することも可能。
+オブジェクトを配置し、材質や初期速度を変え、再生して結果を見る——という一連の作業がブラウザで完結します。時間を巻き戻したり、任意の値をグラフに出して CSV で書き出したりもできます。シーンは JSON として保存・共有できます。
 
-Rust から直接エンジンを呼び出すこともできる。
+### 何度やっても同じ結果になる
+
+同じビルド上では、同じ入力から常にビット単位で同じ結果が得られます。「さっきの現象をもう一度」「パラメータだけ変えて比較」が確実にできるので、リプレイや不具合の再現、回帰テストの土台になっています。
+
+### コマンドラインからも使える
+
+ブラウザを介さず、Rust のライブラリとして直接呼び出すこともできます。
 
 ```rust
-use sim_world::{run_headless_scenario, World, WorldOptions};
+use sim_world::run_headless_scenario;
 
-// シーン JSON をヘッドレスで実行し、結果を取得する
 let json = std::fs::read_to_string("scenes/d1-free-fall.json")?;
 let result = run_headless_scenario(&json, 600)?;
-
-// あるいは World を直接組み立てて使う
-let mut world = World::new(WorldOptions::default());
-world.step();
 ```
 
 ## ドキュメント
 
-より詳しい設計や各物理領域の実装方針は [docs/](docs/) にまとめている。入口は [docs/README.md](docs/README.md)。
+設計と各物理領域の詳細は [docs/](docs/) にまとめています。63 の文書があり、入口は [docs/README.md](docs/README.md) です。
 
 ## 開発
 
 ```bash
-# フォーマット・静的解析・テストをまとめて実行する
-cargo xtask check
-
-# デモアプリのビルド・E2Eテスト
-cd demo
-npm run build
-npm run test:e2e
+cargo xtask check   # フォーマット・静的解析・テスト
 ```
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) が push・PR ごとに同じチェックを自動実行する。macOS と Windows では `cargo xtask setup` を起点に、README と同じ手順でセットアップしてデモが起動するところまでを検証している。
-
-Playwright のスモークテストが守るのは「起動し、wasm が初期化され、主要な操作でクラッシュしない」という配線の健全性である。物理の正しさは Rust 側の解析解テストが担保する。
+デモアプリ側のビルドと E2E テストは `demo/` で `npm run build` / `npm run test:e2e` を実行します。[CI](.github/workflows/ci.yml) が push と Pull Request ごとに同じ検証を 3 つの OS で自動実行します。
 
 ## コントリビュート
 
-Issue / Pull Request を歓迎する。PR を送る際は CI が通ることを確認し、物理計算に関する変更には対応するテストを添えてほしい。
+Issue / Pull Request を歓迎します。
 
-## ライセンス
-
-本リポジトリには現時点でライセンスファイルが含まれていない。ライセンスを追加する場合は `LICENSE` ファイルをリポジトリ直下に置き、本セクションを更新すること。
+物理の挙動に関わる変更には、対応するテストを添えてください。このプロジェクトでは「動いているように見える」ことと「正しい」ことを分けて扱っており、後者を担保しているのがテストです。
