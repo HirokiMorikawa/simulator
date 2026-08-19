@@ -4617,8 +4617,25 @@ impl WasmWorld {
                 }
             }
         }
-        // 側壁4面(床の1段上から、水塊がすべて収まる高さまで)。
-        let wall_top = n + layers;
+        // 側壁4面(床の1段上から、**着水の飛沫が収まる高さ**まで)。
+        //
+        // 以前は `n + layers`(= 6Δx、y=+0.5)で「水塊がすべて収まる高さ」しか
+        // 無かった。ところがこのシーンで実際に起きるのは貫通ではなく**射出**で、
+        // 着水の過圧縮で弾かれた粒子が縁を越え、容器の外側へ落ちていた
+        // (実測: y=+0.80 ≒ 9Δx まで上がり、壁の footprint 内にいながら
+        // 上端 y=+0.5 を飛び越していた)。
+        //
+        // この余裕の無さが、プラットフォーム間で結果が変わっていた原因である。
+        // 力学の step 経路には `sin`/`cos`/`exp`/`atan2` が多数あり、これらは
+        // Rust std が各OSの libm へ委譲するため IEEE-754 の保証が及ばず 1 ULP
+        // 差が出る。その差が「縁を越えるか越えないか」を分けていた
+        // (Linux/macOS では収まり、Windows では 1 粒子が越えていた)。
+        //
+        // 初期位置へ相対摂動を与えて 48 回ずつ漏れを掃引した実測:
+        //   壁高 6Δx : 摂動 1e-6 で 28/48 失敗
+        //   壁高 12Δx: 摂動 1e-15〜1e-6 のいずれでも 0/48
+        // 飛沫の到達高さ(≒3n Δx)を覆う `3n + layers` を採る。
+        let wall_top = 3 * n + layers;
         for iy in 1..=wall_top {
             for ix in lo..=hi {
                 for iz in lo..=hi {
@@ -8181,6 +8198,72 @@ mod tests {
             sph.position.len(),
             floor_y - 2.0 * dx,
         );
+    }
+
+    /// 上のテストは**ある1つの初期条件**で漏れないことしか見ていない。ところが
+    /// このシーンで実際に起きた失敗は「Linux と macOS では緑、Windows だけ赤」
+    /// というプラットフォーム依存だった。原因は力学の step 経路にある
+    /// `sin`/`cos`/`exp`/`atan2` で、Rust std はこれらを各OSの libm へ委譲し、
+    /// IEEE-754 はこれらに正確な丸めを要求していないため 1 ULP の差が正当に出る。
+    /// その差が数百ステップで増幅し、着水の飛沫が容器の縁を「越えるか越えないか」
+    /// を分けていた。**単一の初期条件を回すテストでは原理的に検出できない**。
+    ///
+    /// そこで初期位置へ微小な相対摂動を与え、**どの初期条件でも容器から粒子が
+    /// 失われない**という、余裕そのものを見る。摂動 1e-6 は倍精度の丸め差より
+    /// はるかに大きいので、OS差の上界として機能する。
+    ///
+    /// この判定は較正済みで、壁が低かった頃(`wall_top = n + layers`)は摂動 1e-6
+    /// で48回中28回落ち、飛沫を覆う高さ(`3n + layers`)にしてからは48回中0回になる
+    /// ——つまり本テストは旧実装をきちんと落とす。
+    #[test]
+    fn spawned_fluid_block_stays_in_its_container_under_tiny_perturbations() {
+        let dx: f64 = 0.1;
+        let floor_y = -dx;
+        let escape_y = floor_y - 2.0 * dx;
+        // 相対摂動の幅。倍精度の丸め(~1e-16)よりはるかに大きく取る。
+        let perturb = 1e-6;
+
+        for seed in 1..=6u64 {
+            let mut world = new_world();
+            world.spawn_fluid_block_impl();
+
+            // 決定論的な xorshift で ±perturb の相対摂動を与える(壁時計非依存)。
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+            };
+            {
+                let sph = world.inner.sph_mut().expect("SPHドメインが有効");
+                for p in sph.position.iter_mut() {
+                    *p = Vec3::new(
+                        p.x * (1.0 + perturb * next()),
+                        p.y * (1.0 + perturb * next()),
+                        p.z + perturb * next(),
+                    );
+                }
+            }
+
+            for _ in 0..240 {
+                world.inner.step();
+            }
+
+            let sph = world.inner.sph().expect("SPHドメインが有効");
+            let escaped: Vec<f64> = sph
+                .position
+                .iter()
+                .map(|p| p.y)
+                .filter(|y| *y < escape_y)
+                .collect();
+            assert!(
+                escaped.is_empty(),
+                "seed={seed}: {} / {} 個が容器(底 y={escape_y})から失われた: {escaped:?}",
+                escaped.len(),
+                sph.position.len(),
+            );
+        }
     }
 
     /// Import が捨てたセクションを申告すること(QA不具合5)。
