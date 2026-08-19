@@ -27,39 +27,85 @@
 
 - **多様な物理現象を1つの世界でシミュレート** — 剛体の衝突・流体・熱伝導・電磁気回路・量子力学・天体軌道などを組み合わせて1つのシーンに配置できる。
 - **正しさの検証** — 数百件の自動テストが、解析的に解ける物理問題の答えと計算結果を比較して合否を判定する。
-- **再現性のある計算** — 同じ入力からは常に同じ結果が得られる決定論的なシミュレーション。リプレイや共有、回帰テストがしやすい。
+- **再現性のある計算** — 同じビルド上では、同じ入力から常にビット単位で同じ結果が得られる。リプレイや共有、回帰テストがしやすい([設計](docs/20-integration/02-determinism-replay.md)。OS をまたぐ場合は、各OSの数学関数ライブラリの丸めが異なるため許容誤差での一致を保証する)。
 - **ブラウザ上の統合エディタ** — オブジェクトの配置・編集、再生/一時停止、値のグラフ表示などをブラウザ上で行える。
 - **物理ベースレンダリング対応** — 光の伝搬を物理的に計算するパストレーサーを同梱しており、静止画のレンダリングにも使える。
 - **外部依存が少ない** — 数値計算まわりの主要な処理を自前実装しており、依存ライブラリを最小限に抑えている。
 
 ## 必要環境
 
-| 用途 | 要件 |
+事前に用意するのは次の2つだけ。残りの依存(`wasm32-unknown-unknown` ターゲット、wasm-pack、npm パッケージ)はセットアップコマンドが自動で揃える。
+
+| 要件 | 補足 |
 |---|---|
-| 物理エンジン本体 | Rust stable |
-| WASM ビルド | `wasm32-unknown-unknown` ターゲット + [wasm-pack](https://rustwasm.github.io/wasm-pack/) |
-| ブラウザデモ | Node.js 22 |
+| [Rust](https://www.rust-lang.org/tools/install) | rustup 経由での導入を推奨。使用するバージョンとターゲットは `rust-toolchain.toml` が宣言しており自動で適用される |
+| [Node.js](https://nodejs.org/) 22 以上 | ブラウザデモのビルドと起動に必要。nvm 利用時はリポジトリ直下で `nvm use` |
+
+### 対応プラットフォーム
+
+Linux / macOS / Windows で動作する。物理エンジン本体は OS 依存のコードを含まない。
+
+いずれの OS でも CI がセットアップからブラウザでの起動確認までを検証している。
+
+| OS | CI で検証している範囲 |
+|---|---|
+| Linux | ビルド・テスト・ブラウザ E2E |
+| macOS | セットアップ・ビルド・テスト・ブラウザ E2E |
+| Windows | セットアップ・ビルド・テスト・ブラウザ E2E |
 
 ## インストール
 
 ```bash
 git clone https://github.com/HirokiMorikawa/simulator.git
 cd simulator
+cargo xtask setup
+```
 
-# 物理エンジン本体のテストを実行する
-cargo test --workspace
+`cargo xtask setup` が、wasm-pack の導入 → 物理エンジンの WebAssembly ビルド → デモの依存取得までをまとめて行う。3つのOSで同じコマンドが使える(初回は wasm-pack のビルドに数分かかる)。
 
-# WASM をビルドする(demo/pkg は .gitignore 済みのため必須)
-rustup target add wasm32-unknown-unknown
+完了したらデモを起動する。
+
+```bash
+cargo xtask dev
+```
+
+Vite が表示する URL をブラウザで開くとエディタが立ち上がる。
+
+<details>
+<summary>用意されているコマンド</summary>
+
+| コマンド | 内容 |
+|---|---|
+| `cargo xtask setup` | セットアップ一式(wasm-pack導入 → wasmビルド → npm ci) |
+| `cargo xtask build-wasm` | 物理エンジンを WebAssembly へビルドし `demo/pkg` に出力 |
+| `cargo xtask dev` | ブラウザデモを起動(未セットアップなら不足分を自動で補う) |
+| `cargo xtask check` | CI と同じチェック(fmt / clippy / test) |
+
+</details>
+
+<details>
+<summary>手動でセットアップする場合</summary>
+
+`cargo xtask setup` は下記と同等のことを行っている。個別に実行することもできる。
+
+```bash
+# 1. wasm-pack を導入する(バージョンは crates/xtask/src/main.rs で固定)
+cargo install wasm-pack --version 0.13.1 --locked
+
+# 2. WebAssembly をビルドする
+#    demo/src/main.ts が demo/pkg を直接 import するため、デモのビルド・起動より
+#    先に必ず通す必要がある
 wasm-pack build crates/sim-wasm --target web --out-dir ../../demo/pkg
 
-# ブラウザデモを起動する
+# 3. デモの依存を取得して起動する
 cd demo
 npm ci
 npm run dev
 ```
 
-Vite が表示する URL をブラウザで開くとエディタが立ち上がる。
+`wasm32-unknown-unknown` ターゲットは `rust-toolchain.toml` により rustup が自動で導入するため、`rustup target add` は不要。
+
+</details>
 
 ## 使い方
 
@@ -86,10 +132,8 @@ world.step();
 ## 開発
 
 ```bash
-# フォーマット・静的解析・テスト
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+# フォーマット・静的解析・テストをまとめて実行する
+cargo xtask check
 
 # デモアプリのビルド・E2Eテスト
 cd demo
@@ -97,7 +141,9 @@ npm run build
 npm run test:e2e
 ```
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) が push・PR ごとに同様のチェックを自動実行する。
+[.github/workflows/ci.yml](.github/workflows/ci.yml) が push・PR ごとに同じチェックを自動実行する。macOS と Windows では `cargo xtask setup` を起点に、README と同じ手順でセットアップしてデモが起動するところまでを検証している。
+
+Playwright のスモークテストが守るのは「起動し、wasm が初期化され、主要な操作でクラッシュしない」という配線の健全性である。物理の正しさは Rust 側の解析解テストが担保する。
 
 ## コントリビュート
 

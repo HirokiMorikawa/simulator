@@ -5610,10 +5610,26 @@ mod tests {
     fn run_headless_scenario_relativistic_correction_precesses_the_orbit() {
         let json = include_str!("../../../scenes/d39-relativity.json");
         // 補正セクションを丸ごと落とした対照シーン。
-        let without = json.replace(
-            ",\n    \"relativistic_correction\": { \"central_body\": 0, \"speed_of_light\": 100.0 }",
-            "",
+        //
+        // **生テキストの置換ではなく JSON として落とす**。以前は
+        // `",\n    \"relativistic_correction\": ..."` という整形済みの
+        // リテラルを `replace` していたが、これは (1) シーンJSONを整形し直すと
+        // 黙って空振りする、(2) Windows の git が CRLF でチェックアウトすると
+        // `\n` が一致せず空振りする、という二重の脆さがあった。実際 (2) で
+        // Windows の CI だけが「対照シーンの生成に失敗」で落ちた
+        // (改行コード自体は .gitattributes でも固定したが、テストが整形に
+        // 依存しないこと自体に価値がある)。
+        let mut without_value: serde_json::Value =
+            serde_json::from_str(json).expect("d39 シーンは valid JSON");
+        let removed = without_value
+            .get_mut("astro")
+            .and_then(|astro| astro.as_object_mut())
+            .and_then(|astro| astro.remove("relativistic_correction"));
+        assert!(
+            removed.is_some(),
+            "対照シーンの生成に失敗: astro.relativistic_correction が見つからない"
         );
+        let without = serde_json::to_string(&without_value).expect("再シリアライズできる");
         assert!(
             !without.contains("relativistic_correction"),
             "対照シーンの生成に失敗"

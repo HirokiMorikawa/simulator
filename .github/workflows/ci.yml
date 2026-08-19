@@ -12,6 +12,9 @@ jobs:
   native:
     name: fmt / clippy / test (native)
     runs-on: ubuntu-latest
+    # ハングした1ステップが CI を何時間も塞がないよう、ジョブ単位で上限を置く
+    # (GitHub の既定は 360 分)。実測はベンチ回帰ゲート込みで 8〜9 分。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,16 +43,18 @@ jobs:
   wasm:
     name: wasm-pack build (sim-wasm)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - name: wasm-pack build
-        run: wasm-pack build crates/sim-wasm --target web --out-dir ../../demo/pkg
+      - name: wasm ビルド
+        # wasm-pack の導入も含めて xtask に委譲する。利用者が README で叩くのと
+        # 同一の経路を CI でも通すことで、手順書とCIが乖離しないようにする。
+        # wasm-pack のバージョンは crates/xtask/src/main.rs で固定している。
+        run: cargo xtask build-wasm
       - uses: actions/upload-artifact@v4
         with:
           name: sim-wasm-pkg
@@ -59,11 +64,12 @@ jobs:
     name: demo build + Playwright smoke (Vite)
     runs-on: ubuntu-latest
     needs: wasm
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: demo/package-lock.json
       - uses: actions/download-artifact@v4
@@ -77,8 +83,15 @@ jobs:
         working-directory: demo
         run: npm run build
       - name: install Playwright chromium
+        # **`--with-deps` を使わない**。このフラグは内部で
+        # `sudo apt-get update && apt-get install` を走らせるが、これが
+        # ランナー側の事情(ミラー障害・unattended-upgrades のロック待ち)で
+        # 固まることがあり、実際に2回連続で12分以上ここから進まなくなった。
+        # ubuntu-latest のランナー画像は Chromium/Chrome を同梱しており、
+        # Chromium が要求する共有ライブラリは既に入っているので、apt を
+        # 走らせる必要がない。macOS / Windows のジョブとも同じコマンドになる。
         working-directory: demo
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: Playwright スモークテスト(フロントエンドの配線検証)
         # これまでフロントエンドのテストがCIに1本も無かった(`npm run build` =
         # `tsc --noEmit` + `vite build` のみ)。各増分で手動実行していた確認を
@@ -91,4 +104,53 @@ jobs:
         if: failure()
         with:
           name: playwright-report
+          path: demo/playwright-report
+
+  setup-cross-platform:
+    # README が「Linux / macOS / Windows で動く」と約束している以上、その約束を
+    # 検証するジョブが要る。Linux 側は上の wasm / demo ジョブが同じ経路を通るため、
+    # ここでは残る2つのOSを対象に、クリーンな環境からのセットアップを実際に走らせる。
+    name: cargo xtask setup (${{ matrix.os }})
+    strategy:
+      # 一方のOS特有の失敗で他方の結果が隠れないようにする。
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # wasm-pack をソースからビルドするぶん Linux 側より長い(実測 16 分)。
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - name: cargo xtask setup(README と同一の手順)
+        run: cargo xtask setup
+      - name: cargo test
+        run: cargo test --workspace
+      - name: npm run build(TypeScript の型検査 + Vite ビルド)
+        working-directory: demo
+        run: npm run build
+      - name: install Playwright chromium
+        # `--with-deps` は apt を走らせる Linux 専用オプションで、そもそも
+        # macOS / Windows では使えない。Linux 側もハングを避けるため外したので、
+        # 3つのOSすべてで同じコマンドになっている(demo ジョブのコメント参照)。
+        working-directory: demo
+        run: npx playwright install chromium
+      - name: Playwright スモークテスト(フロントエンドが実際に起動するか)
+        # ビルドが通ることと、ブラウザで起動して wasm が初期化されることは別問題。
+        # セットアップ手順を3OSで検証する以上、その手順のゴールである「デモが
+        # 起動して動く」ところまで見ないと検証したことにならない。
+        working-directory: demo
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-${{ matrix.os }}
           path: demo/playwright-report
