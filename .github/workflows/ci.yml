@@ -123,3 +123,19 @@ jobs:
       - name: npm run build(TypeScript の型検査 + Vite ビルド)
         working-directory: demo
         run: npm run build
+      - name: install Playwright chromium
+        # `--with-deps` は apt でシステムライブラリを入れる Linux 専用オプションで、
+        # macOS / Windows では使えない。
+        working-directory: demo
+        run: npx playwright install chromium
+      - name: Playwright スモークテスト(フロントエンドが実際に起動するか)
+        # ビルドが通ることと、ブラウザで起動して wasm が初期化されることは別問題。
+        # セットアップ手順を3OSで検証する以上、その手順のゴールである「デモが
+        # 起動して動く」ところまで見ないと検証したことにならない。
+        working-directory: demo
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-${{ matrix.os }}
+          path: demo/playwright-report

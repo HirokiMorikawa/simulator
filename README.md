@@ -45,11 +45,13 @@
 
 Linux / macOS / Windows で動作する。物理エンジン本体は OS 依存のコードを含まない。
 
-| OS | 状態 |
+いずれの OS でも CI がセットアップからブラウザでの起動確認までを検証している。
+
+| OS | CI で検証している範囲 |
 |---|---|
-| Linux | CI で検証(ビルド・テスト・ブラウザE2E) |
-| macOS | CI で検証(セットアップ・ビルド・テスト) |
-| Windows | CI で検証(セットアップ・ビルド・テスト) |
+| Linux | ビルド・テスト・ブラウザ E2E |
+| macOS | セットアップ・ビルド・テスト・ブラウザ E2E |
+| Windows | セットアップ・ビルド・テスト・ブラウザ E2E |
 
 ## インストール
 
@@ -139,7 +141,9 @@ npm run build
 npm run test:e2e
 ```
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) が push・PR ごとに同じチェックを自動実行する。CI は Linux でビルド・テスト・ブラウザE2Eを、macOS と Windows で `cargo xtask setup` を起点としたセットアップとテストを検証する。
+[.github/workflows/ci.yml](.github/workflows/ci.yml) が push・PR ごとに同じチェックを自動実行する。macOS と Windows では `cargo xtask setup` を起点に、README と同じ手順でセットアップしてデモが起動するところまでを検証している。
+
+Playwright のスモークテストが守るのは「起動し、wasm が初期化され、主要な操作でクラッシュしない」という配線の健全性である。物理の正しさは Rust 側の解析解テストが担保する。
 
 ## コントリビュート
 
