@@ -12,6 +12,9 @@ jobs:
   native:
     name: fmt / clippy / test (native)
     runs-on: ubuntu-latest
+    # ハングした1ステップが CI を何時間も塞がないよう、ジョブ単位で上限を置く
+    # (GitHub の既定は 360 分)。実測はベンチ回帰ゲート込みで 8〜9 分。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,6 +43,7 @@ jobs:
   wasm:
     name: wasm-pack build (sim-wasm)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -60,6 +64,7 @@ jobs:
     name: demo build + Playwright smoke (Vite)
     runs-on: ubuntu-latest
     needs: wasm
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -78,8 +83,15 @@ jobs:
         working-directory: demo
         run: npm run build
       - name: install Playwright chromium
+        # **`--with-deps` を使わない**。このフラグは内部で
+        # `sudo apt-get update && apt-get install` を走らせるが、これが
+        # ランナー側の事情(ミラー障害・unattended-upgrades のロック待ち)で
+        # 固まることがあり、実際に2回連続で12分以上ここから進まなくなった。
+        # ubuntu-latest のランナー画像は Chromium/Chrome を同梱しており、
+        # Chromium が要求する共有ライブラリは既に入っているので、apt を
+        # 走らせる必要がない。macOS / Windows のジョブとも同じコマンドになる。
         working-directory: demo
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: Playwright スモークテスト(フロントエンドの配線検証)
         # これまでフロントエンドのテストがCIに1本も無かった(`npm run build` =
         # `tsc --noEmit` + `vite build` のみ)。各増分で手動実行していた確認を
@@ -105,6 +117,8 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # wasm-pack をソースからビルドするぶん Linux 側より長い(実測 16 分)。
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -124,8 +138,9 @@ jobs:
         working-directory: demo
         run: npm run build
       - name: install Playwright chromium
-        # `--with-deps` は apt でシステムライブラリを入れる Linux 専用オプションで、
-        # macOS / Windows では使えない。
+        # `--with-deps` は apt を走らせる Linux 専用オプションで、そもそも
+        # macOS / Windows では使えない。Linux 側もハングを避けるため外したので、
+        # 3つのOSすべてで同じコマンドになっている(demo ジョブのコメント参照)。
         working-directory: demo
         run: npx playwright install chromium
       - name: Playwright スモークテスト(フロントエンドが実際に起動するか)
