@@ -34,32 +34,76 @@
 
 ## 必要環境
 
-| 用途 | 要件 |
+事前に用意するのは次の2つだけ。残りの依存(`wasm32-unknown-unknown` ターゲット、wasm-pack、npm パッケージ)はセットアップコマンドが自動で揃える。
+
+| 要件 | 補足 |
 |---|---|
-| 物理エンジン本体 | Rust stable |
-| WASM ビルド | `wasm32-unknown-unknown` ターゲット + [wasm-pack](https://rustwasm.github.io/wasm-pack/) |
-| ブラウザデモ | Node.js 22 |
+| [Rust](https://www.rust-lang.org/tools/install) | rustup 経由での導入を推奨。使用するバージョンとターゲットは `rust-toolchain.toml` が宣言しており自動で適用される |
+| [Node.js](https://nodejs.org/) 22 以上 | ブラウザデモのビルドと起動に必要。nvm 利用時はリポジトリ直下で `nvm use` |
+
+### 対応プラットフォーム
+
+Linux / macOS / Windows で動作する。物理エンジン本体は OS 依存のコードを含まない。
+
+| OS | 状態 |
+|---|---|
+| Linux | CI で検証(ビルド・テスト・ブラウザE2E) |
+| macOS | CI で検証(セットアップ・ビルド・テスト) |
+| Windows | CI で検証(セットアップ・ビルド・テスト) |
 
 ## インストール
 
 ```bash
 git clone https://github.com/HirokiMorikawa/simulator.git
 cd simulator
+cargo xtask setup
+```
 
-# 物理エンジン本体のテストを実行する
-cargo test --workspace
+`cargo xtask setup` が、wasm-pack の導入 → 物理エンジンの WebAssembly ビルド → デモの依存取得までをまとめて行う。3つのOSで同じコマンドが使える(初回は wasm-pack のビルドに数分かかる)。
 
-# WASM をビルドする(demo/pkg は .gitignore 済みのため必須)
-rustup target add wasm32-unknown-unknown
+完了したらデモを起動する。
+
+```bash
+cargo xtask dev
+```
+
+Vite が表示する URL をブラウザで開くとエディタが立ち上がる。
+
+<details>
+<summary>用意されているコマンド</summary>
+
+| コマンド | 内容 |
+|---|---|
+| `cargo xtask setup` | セットアップ一式(wasm-pack導入 → wasmビルド → npm ci) |
+| `cargo xtask build-wasm` | 物理エンジンを WebAssembly へビルドし `demo/pkg` に出力 |
+| `cargo xtask dev` | ブラウザデモを起動(未セットアップなら不足分を自動で補う) |
+| `cargo xtask check` | CI と同じチェック(fmt / clippy / test) |
+
+</details>
+
+<details>
+<summary>手動でセットアップする場合</summary>
+
+`cargo xtask setup` は下記と同等のことを行っている。個別に実行することもできる。
+
+```bash
+# 1. wasm-pack を導入する(バージョンは crates/xtask/src/main.rs で固定)
+cargo install wasm-pack --version 0.13.1 --locked
+
+# 2. WebAssembly をビルドする
+#    demo/src/main.ts が demo/pkg を直接 import するため、デモのビルド・起動より
+#    先に必ず通す必要がある
 wasm-pack build crates/sim-wasm --target web --out-dir ../../demo/pkg
 
-# ブラウザデモを起動する
+# 3. デモの依存を取得して起動する
 cd demo
 npm ci
 npm run dev
 ```
 
-Vite が表示する URL をブラウザで開くとエディタが立ち上がる。
+`wasm32-unknown-unknown` ターゲットは `rust-toolchain.toml` により rustup が自動で導入するため、`rustup target add` は不要。
+
+</details>
 
 ## 使い方
 
@@ -86,10 +130,8 @@ world.step();
 ## 開発
 
 ```bash
-# フォーマット・静的解析・テスト
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+# フォーマット・静的解析・テストをまとめて実行する
+cargo xtask check
 
 # デモアプリのビルド・E2Eテスト
 cd demo
@@ -97,7 +139,7 @@ npm run build
 npm run test:e2e
 ```
 
-[.github/workflows/ci.yml](.github/workflows/ci.yml) が push・PR ごとに同様のチェックを自動実行する。
+[.github/workflows/ci.yml](.github/workflows/ci.yml) が push・PR ごとに同じチェックを自動実行する。CI は Linux でビルド・テスト・ブラウザE2Eを、macOS と Windows で `cargo xtask setup` を起点としたセットアップとテストを検証する。
 
 ## コントリビュート
 

@@ -1,0 +1,11 @@
+# 開発環境の再現性のための toolchain 宣言。
+#
+# rustup はこのリポジトリ配下で cargo / rustc が実行された時点でこの宣言を
+# 自動適用する。そのため利用者が `rustup target add wasm32-unknown-unknown` を
+# 手で打つ必要がなくなり、「ターゲット追加を忘れて wasm ビルドが落ちる」という
+# セットアップ事故が構造的に起きなくなる。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

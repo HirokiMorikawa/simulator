@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# 依存ゼロ。セットアップを走らせるために依存の解決が必要、という鶏卵問題を
+# 避けるため、標準ライブラリだけで実装する。
+[dependencies]

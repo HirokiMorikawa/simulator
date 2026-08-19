@@ -46,10 +46,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - name: wasm-pack build
-        run: wasm-pack build crates/sim-wasm --target web --out-dir ../../demo/pkg
+      - name: wasm ビルド
+        # wasm-pack の導入も含めて xtask に委譲する。利用者が README で叩くのと
+        # 同一の経路を CI でも通すことで、手順書とCIが乖離しないようにする。
+        # wasm-pack のバージョンは crates/xtask/src/main.rs で固定している。
+        run: cargo xtask build-wasm
       - uses: actions/upload-artifact@v4
         with:
           name: sim-wasm-pkg
@@ -63,7 +64,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: demo/package-lock.json
       - uses: actions/download-artifact@v4
@@ -92,3 +93,33 @@ jobs:
         with:
           name: playwright-report
           path: demo/playwright-report
+
+  setup-cross-platform:
+    # README が「Linux / macOS / Windows で動く」と約束している以上、その約束を
+    # 検証するジョブが要る。Linux 側は上の wasm / demo ジョブが同じ経路を通るため、
+    # ここでは残る2つのOSを対象に、クリーンな環境からのセットアップを実際に走らせる。
+    name: cargo xtask setup (${{ matrix.os }})
+    strategy:
+      # 一方のOS特有の失敗で他方の結果が隠れないようにする。
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - name: cargo xtask setup(README と同一の手順)
+        run: cargo xtask setup
+      - name: cargo test
+        run: cargo test --workspace
+      - name: npm run build(TypeScript の型検査 + Vite ビルド)
+        working-directory: demo
+        run: npm run build

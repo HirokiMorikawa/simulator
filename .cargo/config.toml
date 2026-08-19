@@ -1,0 +1,5 @@
+# `cargo xtask <サブコマンド>` を開発用タスクランナー(crates/xtask)へ委譲する。
+# make / just / シェルスクリプトのような追加ツールを要求せず、既に必須である
+# Rust だけで Linux / macOS / Windows のいずれでも同じコマンドが動くようにする。
+[alias]
+xtask = "run --quiet --package xtask --"
