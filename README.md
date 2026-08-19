@@ -24,7 +24,15 @@
 
 ## クイックスタート
 
-事前に必要なのは [Rust](https://www.rust-lang.org/tools/install) と [Node.js](https://nodejs.org/) 22 以上の2つだけです。
+事前に必要なのは次の3つです。
+
+| 要件 | 補足 |
+|---|---|
+| [Rust](https://www.rust-lang.org/tools/install) | rustup 経由での導入を推奨 |
+| [Node.js](https://nodejs.org/) 22 以上 | ブラウザデモの実行に使います |
+| C コンパイラ | Rust がリンクに使います。Ubuntu なら `build-essential`、macOS なら `xcode-select --install`、Windows なら Visual Studio Build Tools の「C++ によるデスクトップ開発」 |
+
+C コンパイラが入っていない場合は `cargo xtask setup` が最初に検知して、お使いの環境向けの導入コマンドを提示します。
 
 ```bash
 git clone https://github.com/HirokiMorikawa/simulator.git

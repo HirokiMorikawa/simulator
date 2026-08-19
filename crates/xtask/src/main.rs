@@ -65,19 +65,22 @@ fn usage() -> String {
 fn setup() -> Result<(), String> {
     println!("セットアップを開始します(初回は wasm-pack のビルドで数分かかります)");
 
-    step(1, 5, "wasm32 ターゲットを確認");
+    step(1, 6, "C コンパイラを確認");
+    ensure_c_toolchain()?;
+
+    step(2, 6, "wasm32 ターゲットを確認");
     ensure_wasm_target();
 
-    step(2, 5, "wasm-pack を確認");
+    step(3, 6, "wasm-pack を確認");
     ensure_wasm_pack()?;
 
-    step(3, 5, "物理コアを WebAssembly へビルド");
+    step(4, 6, "物理コアを WebAssembly へビルド");
     build_wasm()?;
 
-    step(4, 5, "Node.js を確認");
+    step(5, 6, "Node.js を確認");
     ensure_node()?;
 
-    step(5, 5, "デモの依存パッケージを取得");
+    step(6, 6, "デモの依存パッケージを取得");
     npm(&["ci"], &demo_dir())?;
 
     println!("\nセットアップが完了しました。次のコマンドでデモを起動できます:");
@@ -142,6 +145,166 @@ fn check() -> Result<(), String> {
 // 前提ツールの確認と導入
 // ---------------------------------------------------------------------------
 
+/// C コンパイラ(リンカ)の有無を確認し、無ければ導入する。
+///
+/// **なぜ必要か**: Rust はリンクに C ツールチェーンを使うので、これが無いと
+/// `cargo install wasm-pack` が `linker 'cc' not found` で落ちる。cargo が出す
+/// 最後の行は `could not compile ...` という要約でしかなく、**何が足りないのか
+/// も、どう直すのかも書かれていない**。クリーンな PC で最初に踏むのがここ
+/// なので、着手前に検知して OS ごとの具体的なコマンドまで示す。
+///
+/// **なぜ黙って入れないのか**: Linux では導入に root 権限が要る。セットアップが
+/// 無断で `sudo` を打つのは、たとえ善意でもツールとして信用できない挙動になる。
+/// そこで「検知 → 正確なコマンドを提示 → 同意を取って実行」に留める。利用者から
+/// 見れば `y` を打つだけで済み、権限昇格は必ず本人の意思を経る。
+///
+/// Windows は対象外(下記 `c_compiler_present` 参照)。
+fn ensure_c_toolchain() -> Result<(), String> {
+    if c_compiler_present() {
+        println!("  C コンパイラを検出しました");
+        return Ok(());
+    }
+
+    let Some(installer) = c_toolchain_installer() else {
+        return Err(
+            "C コンパイラが見つかりません。Rust はリンクに C ツールチェーンを使うため、\n\
+             お使いのディストリビューションの方法で導入してください\n\
+             (gcc または clang と、標準 C ライブラリの開発パッケージ)"
+                .to_string(),
+        );
+    };
+
+    println!("  C コンパイラが見つかりません。Rust のリンクに必要です");
+    println!("  次のコマンドで導入できます:\n");
+    println!("      {}\n", installer.command.join(" "));
+
+    if !can_prompt() {
+        return Err(format!(
+            "上のコマンドを実行してから `cargo xtask setup` をやり直してください\n\
+             (対話端末ではないため、ここでは自動実行しません)\n\n{}",
+            installer.note
+        ));
+    }
+
+    if !ask_yes_no("  今すぐ実行しますか?")? {
+        return Err(format!(
+            "上のコマンドを実行してから `cargo xtask setup` をやり直してください\n\n{}",
+            installer.note
+        ));
+    }
+
+    let args: Vec<&str> = installer.command[1..].iter().map(|s| s.as_str()).collect();
+    run(&installer.command[0], &args, &repo_root())?;
+
+    if !c_compiler_present() {
+        return Err(format!(
+            "導入後も C コンパイラを検出できませんでした。\n{}",
+            installer.note
+        ));
+    }
+    println!("  C コンパイラを導入しました");
+    Ok(())
+}
+
+/// C コンパイラが使えるか。
+///
+/// Windows は判定しない(常に `true` を返す)。MSVC のリンカは PATH ではなく
+/// レジストリや vswhere 経由で rustc が見つけるため、PATH を探る素朴な判定では
+/// **入っているのに「無い」と誤報する**。誤報はこの機能の目的(詰まりを減らす)
+/// に反するので、Windows では検知せず、失敗時の案内文で補う
+/// (`ensure_wasm_pack` のエラーメッセージ参照)。
+fn c_compiler_present() -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    ["cc", "gcc", "clang"]
+        .iter()
+        .any(|p| probe(p, &["--version"]).is_some())
+}
+
+/// C ツールチェーンの導入コマンドと補足。
+struct CToolchainInstaller {
+    command: Vec<String>,
+    note: String,
+}
+
+/// 実行中の OS / ディストリビューションから導入コマンドを組み立てる。
+fn c_toolchain_installer() -> Option<CToolchainInstaller> {
+    let words = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+
+    if cfg!(target_os = "macos") {
+        return Some(CToolchainInstaller {
+            // Command Line Tools の導入。sudo は要らないが GUI のダイアログが出る。
+            command: words(&["xcode-select", "--install"]),
+            note: "ダイアログが出たら「インストール」を選び、完了してから \
+                   `cargo xtask setup` をやり直してください。"
+                .to_string(),
+        });
+    }
+
+    // /etc/os-release の ID / ID_LIKE からパッケージマネージャを決める
+    // (ID が派生ディストリ名でも ID_LIKE に本家が入るため両方見る)。
+    let release = std::fs::read_to_string("/etc/os-release").ok()?;
+    let field = |key: &str| -> String {
+        release
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap_or("")
+            .trim_matches(['"', '\''])
+            .to_lowercase()
+    };
+    let ids = format!("{} {}", field("ID="), field("ID_LIKE="));
+    let has = |name: &str| ids.split_whitespace().any(|id| id == name);
+
+    let command = if has("debian") || has("ubuntu") {
+        words(&["sudo", "apt-get", "install", "-y", "build-essential"])
+    } else if has("fedora") || has("rhel") || has("centos") {
+        words(&["sudo", "dnf", "install", "-y", "gcc"])
+    } else if has("arch") {
+        words(&[
+            "sudo",
+            "pacman",
+            "-S",
+            "--needed",
+            "--noconfirm",
+            "base-devel",
+        ])
+    } else if has("alpine") {
+        words(&["sudo", "apk", "add", "build-base"])
+    } else if has("suse") || has("opensuse") {
+        words(&["sudo", "zypper", "install", "-y", "gcc"])
+    } else {
+        return None;
+    };
+
+    Some(CToolchainInstaller {
+        command,
+        note: "root 権限が必要なため、パスワードを求められることがあります。".to_string(),
+    })
+}
+
+/// 対話的に尋ねてよいか(端末に繋がっていて、CI でもない)。
+fn can_prompt() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::env::var_os("CI").is_none()
+}
+
+/// y/N を尋ねる。既定は「いいえ」(空 Enter は実行しない)。
+fn ask_yes_no(question: &str) -> Result<bool, String> {
+    use std::io::Write;
+    print!("{question} [y/N] ");
+    std::io::stdout()
+        .flush()
+        .map_err(|e| format!("標準出力に書けませんでした: {e}"))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| format!("入力を読めませんでした: {e}"))?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
 /// wasm32 ターゲットの導入を試みる。
 ///
 /// `rust-toolchain.toml` の `targets` により rustup 経由なら既に入っているが、
@@ -180,7 +343,22 @@ fn ensure_wasm_pack() -> Result<(), String> {
         ],
         &repo_root(),
     )
-    .map_err(|e| format!("{e}\n\n手動で導入する場合: cargo install wasm-pack --version {WASM_PACK_VERSION} --locked"))?;
+    .map_err(|e| {
+        // ここで落ちる最頻の原因は C ツールチェーンの欠落である。Unix なら
+        // `ensure_c_toolchain` が事前に弾いているが、Windows は誤報を避けて
+        // 検知していない(同関数の doc 参照)ので、案内はここで補う。
+        let toolchain_hint = if cfg!(windows) {
+            "\n\nビルドが `link.exe` や `could not compile` で落ちている場合、\
+             C ツールチェーンが入っていない可能性が高い。Visual Studio Build Tools の\n\
+             「C++ によるデスクトップ開発」を導入してから再実行する。"
+        } else {
+            ""
+        };
+        format!(
+            "{e}\n\n手動で導入する場合: \
+             cargo install wasm-pack --version {WASM_PACK_VERSION} --locked{toolchain_hint}"
+        )
+    })?;
 
     if probe(wasm_pack_command(), &["--version"]).is_none() {
         return Err("wasm-pack の導入後も実行できません。cargo のインストール先\
