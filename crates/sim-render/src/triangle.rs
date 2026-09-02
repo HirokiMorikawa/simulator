@@ -165,7 +165,7 @@ impl TriangleMesh {
     /// 2倍なので、正規化前の外積を足すだけで面積重み付けになる。
     pub fn with_smooth_normals(mut self) -> TriangleMesh {
         let mut normals = vec![Vec3::ZERO; self.vertices.len()];
-        for tri in self.indices.chunks_exact(3) {
+        for tri in self.indices.as_chunks::<3>().0 {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             let area_vector =
                 (self.vertices[b] - self.vertices[a]).cross(self.vertices[c] - self.vertices[a]);
@@ -180,7 +180,9 @@ impl TriangleMesh {
     /// `Triangle`の列へ展開する(`Primitive`へ包んでBVHへ渡すための形)。
     pub fn triangles(&self) -> Vec<Triangle> {
         self.indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|tri| {
                 let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
                 let mut t = Triangle::new(self.vertices[a], self.vertices[b], self.vertices[c]);
@@ -250,7 +252,7 @@ impl TriangleMesh {
                 cache.insert(key, index);
                 index
             };
-            for tri in indices.chunks_exact(3) {
+            for tri in indices.as_chunks::<3>().0 {
                 let (a, b, c) = (tri[0], tri[1], tri[2]);
                 let ab = midpoint(&mut vertices, &mut midpoints, a, b);
                 let bc = midpoint(&mut vertices, &mut midpoints, b, c);
