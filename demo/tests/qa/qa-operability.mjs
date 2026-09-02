@@ -255,7 +255,12 @@ const hierarchyMenu = await page.evaluate(() => {
   return m ? Array.from(m.children).map((c) => c.textContent.trim()).filter(Boolean) : null;
 });
 r.check("C5-1", "Hierarchy 右クリックのメニュー項目", !!hierarchyMenu && hierarchyMenu.length >= 4, JSON.stringify(hierarchyMenu));
-await page.getByText("複製", { exact: false }).first().click();
+// **コンテキストメニューの中に限定して探す**。ページ全体から `getByText`
+// で拾うと、ショートカット一覧オーバーレイ(`#shortcut-overlay`、増分
+// 「UI 品質の底上げ」で追加。`hidden` だがテキストは DOM にある)の
+// 「選択中のボディを複製」に先に当たり、見えない要素をクリックしようとして
+// 固まる。押したいのは常にメニューの項目なので、そこへ限定する。
+await page.locator("#context-menu button", { hasText: "複製" }).first().click();
 await page.waitForTimeout(400);
 r.check("C5-2", "複製でボディが増える", (await page.locator("#hierarchy-tree .tree-body").count()) === bodies0 + 1,
   `${bodies0} → ${await page.locator("#hierarchy-tree .tree-body").count()} 体`);

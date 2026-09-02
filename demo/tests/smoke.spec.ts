@@ -203,8 +203,19 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
   // 剛体が無いシーンでも再生して描画ループが回ること。
   await page.click("#btn-mode-play");
   await page.waitForTimeout(800);
-  await page.click("#btn-play");
+  await page.click("#btn-play"); // 一時停止
+
+  // **`⏭` で確実に step を送る**。D36 の dt は 5 s(天体スケール)なので、
+  // 実時間の再生では 800 ms 待っても 1 step も進まない——以前ここは
+  // 「`#probe-canvas` が見えること」だけを見ており、**履歴が空でも常に
+  // 見えていた**ので実質何も確かめていなかった(空のときは空状態の文言を
+  // 出すようになって初めて表面化した)。fps に依存しない N step 送りで
+  // 履歴を作ってから見る(QA ハーネスが同じ理由で使っている手)。
+  await page.fill("#input-step-count", "20");
+  await page.click("#btn-step");
   await expect(page.locator("#probe-canvas")).toBeVisible();
+  await expect(page.locator("#probe-empty")).toBeHidden();
+  await expect(page.locator("#probe-time-range")).toContainText("t =");
 
   expect(errors).toEqual([]);
 });
@@ -741,9 +752,13 @@ test("D3「Unityパリティ」増分: 失敗がConsoleのErrorsタブへも残�
   await page.goto("/");
   await waitForWorld(page);
 
-  let alertMessage: string | null = null;
+  // **失敗の即時通知は `window.alert` からトーストへ移した**(増分「UI 品質の
+  // 底上げ」)。ブロッキングなモーダルが**出ないこと**もここで固定する
+  // ——出てしまうと Playwright の既定ハンドラが黙って dismiss して、
+  // テストだけが通る状態になり得る。
+  let blockingDialogAppeared = false;
   page.on("dialog", (d) => {
-    alertMessage = d.message();
+    blockingDialogAppeared = true;
     d.accept();
   });
 
@@ -752,9 +767,12 @@ test("D3「Unityパリティ」増分: 失敗がConsoleのErrorsタブへも残�
   await page.locator('input[title*="パラメータの値"]').fill("abc,def");
   await page.click('button:has-text("スイープを実行")');
 
-  await expect.poll(() => alertMessage).toContain("値を1つ以上指定してください");
+  await expect(page.locator(".toast")).toContainText(
+    "値を1つ以上指定してください",
+  );
+  expect(blockingDialogAppeared).toBe(false);
 
-  // 同じメッセージがConsoleのErrorsタブへも残っている(モーダルを閉じた後も
+  // 同じメッセージがConsoleのErrorsタブへも残っている(トーストが消えた後も
   // 見返せる)。
   await page.click('.console-tab[data-tab="errors"]');
   await expect(

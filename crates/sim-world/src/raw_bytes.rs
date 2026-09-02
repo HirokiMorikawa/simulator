@@ -371,8 +371,10 @@ pub fn decode_f64_le_base64(s: &str) -> Result<Vec<f64>, RawBytesError> {
     let bytes = decode_base64(s)?;
     check_alignment(bytes.len(), F64_SIZE)?;
     Ok(bytes
-        .chunks_exact(F64_SIZE)
-        .map(|c| f64::from_le_bytes(c.try_into().expect("chunks_exactが8バイトを保証する")))
+        .as_chunks::<F64_SIZE>()
+        .0
+        .iter()
+        .map(|c| f64::from_le_bytes(*c))
         .collect())
 }
 
@@ -423,12 +425,13 @@ pub fn decode_vec3_le_base64(s: &str) -> Result<Vec<[f64; 3]>, RawBytesError> {
     let bytes = decode_base64(s)?;
     check_alignment(bytes.len(), VEC3_SIZE)?;
     Ok(bytes
-        .chunks_exact(VEC3_SIZE)
+        .as_chunks::<VEC3_SIZE>()
+        .0
+        .iter()
         .map(|c| {
             let mut v = [0.0f64; 3];
-            for (slot, comp) in v.iter_mut().zip(c.chunks_exact(F64_SIZE)) {
-                *slot =
-                    f64::from_le_bytes(comp.try_into().expect("chunks_exactが8バイトを保証する"));
+            for (slot, comp) in v.iter_mut().zip(c.as_chunks::<F64_SIZE>().0) {
+                *slot = f64::from_le_bytes(*comp);
             }
             v
         })

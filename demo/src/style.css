@@ -1,41 +1,184 @@
-/* 統合エディタのドッキングレイアウト骨格。設計 docs/23-frontend/01-editor.md §1。
- * 縮約実装の理由: ドラッグによるパネルリサイズ・タブ化・切り離し(§1「リサイズ・
- * タブ化・切り離しができる」)は本増分の対象外。CSS Grid による固定比率の6パネル
- * 骨格 + 3レイアウトプリセット(Default/Physics-focus/Astro、§2の4種のうち
- * Circuit-focusは回路サブモード(§3)自体が未実装のため後続増分に残す)のみを
- * 実装する。 */
+/* 統合エディタの外観と骨格。設計 docs/23-frontend/01-editor.md §1。
+ *
+ * **構成**(上から順に読める順序に並べてある):
+ *   1. デザイントークン    — 色・余白・角丸・タイポグラフィの単一の出所
+ *   2. 基本               — reset とスクロールバー
+ *   3. レイアウト骨格      — 6パネルのグリッドとレイアウトプリセット
+ *   4. スプリッター        — パネル境界のドラッグリサイズ
+ *   5. 共通コントロール    — button / input / select / checkbox とフォーカス表示
+ *   6. パネル個別
+ *   7. オーバーレイ        — コンテキストメニュー・Settings・ショートカット表・トースト
+ *   8. ユーティリティ      — 空状態など
+ *
+ * **なぜトークンにしたか**: 以前は同じ意味の色(パネル背景・境界線・アクセント)が
+ * 40 箇所以上に個別のリテラルとして散らばっており、パネルごとに `#2a2a2a` と
+ * `#232323`、`#888` と `#999` と `#778` が混在していた。見た目の不統一そのものが
+ * 品質の問題である上、コントラストを直すのに全箇所を追う必要があった。意味の名前
+ * (`--surface-raised` / `--text-muted`)で 1 箇所に集約し、以降はここだけを触る。
+ *
+ * 縮約実装の理由: ドラッグによるパネルの**タブ化・切り離し**(設計 §1「リサイズ・
+ * タブ化・切り離しができる」)は引き続き対象外。**リサイズは本増分で実装した**
+ * (§4 スプリッター) */
+
+/* ========================================================================
+ * 1. デザイントークン
+ * ==================================================================== */
+
+:root {
+  /* ブラウザ既定の UI(スクロールバー・フォームコントロール)を暗色に揃える。 */
+  color-scheme: dark;
+
+  /* --- サーフェス(奥から手前へ) --- */
+  --surface-app: #0e1013; /* アプリ地。パネルの隙間に見える最も奥 */
+  --surface-panel: #17191d; /* パネル本体 */
+  --surface-sunken: #101215; /* 入力欄・ログなど「凹んで見える」面 */
+  --surface-raised: #23262c; /* ボタン・タブなど「浮いて見える」面 */
+  --surface-hover: #2c3037; /* 上記のホバー */
+  --surface-overlay: #1c1f24; /* ポップオーバー・メニュー */
+
+  /* --- 境界線 --- */
+  --border: #282c33; /* パネル間・区切り */
+  --border-strong: #3a3f48; /* コントロールの輪郭 */
+
+  /* --- 文字 --- */
+  --text: #e6e8ea; /* 本文 */
+  --text-muted: #a3a9b3; /* 補助。#888 だった箇所を引き上げてコントラスト 7:1 超 */
+  --text-subtle: #7d838d; /* 注記。最小でも 4.5:1 を確保する */
+
+  /* --- アクセントと状態色 --- */
+  --accent: #6cb6ff; /* 選択・リンク・フォーカス */
+  --accent-strong: #3d7fd6; /* 主ボタンの地 */
+  --accent-surface: #22303f; /* 選択行の地 */
+  --accent-border: #3c5470;
+  --danger: #ff6b6b;
+  --warn: #e8a33d;
+  --ok: #5fbf7f;
+
+  /* --- 形 --- */
+  --radius-sm: 3px;
+  --radius: 5px;
+  --radius-lg: 8px;
+
+  /* --- 余白(4px 基調) --- */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 12px;
+  --space-6: 16px;
+
+  /* --- タイポグラフィ --- */
+  --font-ui:
+    system-ui, -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans JP",
+    sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --text-xs: 10px;
+  --text-sm: 11px;
+  --text-base: 12px;
+  --text-md: 13px;
+
+  /* --- コントロールの寸法 ---
+   * **クリック目標の下限**。以前はツールバーのボタンが padding 3px で高さ 20px 弱
+   * しかなく、狙って押すのに神経を使った。24px を下限にする(デスクトップ向け
+   * ポインタ操作の実務的な下限。タッチ前提なら 44px だが、本エディタは
+   * マウス/トラックパッド前提)。 */
+  --control-h: 24px;
+  --control-h-sm: 20px;
+
+  --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.55);
+
+  /* --- モーション ---
+   * `prefers-reduced-motion` で 0s に落とす(下記)。個々の transition は
+   * この変数だけを参照するので、無効化が 1 箇所で効く。 */
+  --motion-fast: 90ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0s;
+  }
+}
+
+/* ========================================================================
+ * 2. 基本
+ * ==================================================================== */
 
 html,
 body {
   margin: 0;
   height: 100%;
-  background: #111;
-  color: #eee;
-  font-family:
-    system-ui,
-    -apple-system,
-    sans-serif;
-  font-size: 13px;
+  background: var(--surface-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
 }
 
-/* Project ドロワーの高さは CSS 変数にする(増分E3)。レイアウトプリセットと
- * ドロワーの開閉が同じ `grid-template-rows` を奪い合わないようにするため——
- * 変数にしておけば両者が独立に効く。 */
+/* パネルの中はスクロールが多いので、地の色に馴染む細いスクロールバーにする
+ * (既定の太いスクロールバーは 220px 幅の Hierarchy では内容領域を目立って削る)。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #4b515c;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ========================================================================
+ * 3. レイアウト骨格
+ * ==================================================================== */
+
+/* 列幅・行高は**すべて CSS 変数**にする(増分「UI 品質」)。理由は 2 つ:
+ *  - スプリッター(§4)がドラッグ中に `#app` のインラインスタイルとして
+ *    同じ変数を書き換えるだけで済む
+ *  - レイアウトプリセットも `grid-template-*` を丸ごと書き換えるのではなく
+ *    変数の上書きで表現でき、プリセットとドロワー開閉が同じ宣言を奪い合わない
+ *    (増分E3 で `--project-row` について踏んだ問題の一般化)
+ *
+ * 列に 2 本の細いガター列を挟むのは、スプリッターを**グリッドの一員**として
+ * 置くため(絶対配置でパネルの上に浮かせると、パネル内のスクロールバーや
+ * Scene View のポインタ操作と当たり判定を取り合う)。 */
 #app {
-  --project-row: 28px;
+  --col-left: 220px;
+  --col-right: 268px;
+  --row-timeline: auto;
+  --row-console: 160px;
+  --project-row: 30px;
+  --gutter: 5px;
+
   display: grid;
   height: 100vh;
-  grid-template-columns: 220px 1fr 260px;
-  grid-template-rows: auto 1fr auto 160px var(--project-row);
+  grid-template-columns:
+    var(--col-left) var(--gutter) minmax(160px, 1fr)
+    var(--gutter) var(--col-right);
+  grid-template-rows:
+    auto 1fr var(--row-timeline) var(--gutter) var(--row-console)
+    var(--project-row);
   grid-template-areas:
-    "toolbar   toolbar     toolbar"
-    "hierarchy sceneview   inspector"
-    "timeline  timeline    timeline"
-    "console   console     probes"
-    "project   project     project";
+    "toolbar   toolbar  toolbar   toolbar  toolbar"
+    "hierarchy gutter-l sceneview gutter-r inspector"
+    "timeline  timeline timeline  timeline timeline"
+    "gutter-h  gutter-h gutter-h  gutter-h gutter-h"
+    "console   console  console   console  probes"
+    "project   project  project   project  project";
+  gap: 1px;
+  background: var(--surface-app);
 }
 
-/* **増分E3で修正した重大なUIバグ**: 既定の `--project-row: 28px` はタブバーの
+/* **増分E3で修正した重大なUIバグ**: 既定の `--project-row` はタブバーの
  * 高さぶんしかなく、Project ドロワーの本体(Scenes/Materials/Circuit/Prefabs/
  * Replays の中身)は画面外へ押し出されて**実ユーザーには一切到達不能**だった
  * (実測: viewport 900px に対し `#project-body` の top が 903px)。タブを
@@ -45,13 +188,14 @@ body {
 }
 
 #app[data-layout="physics-focus"] {
-  grid-template-rows: auto 1fr auto 320px var(--project-row);
+  --row-console: 320px;
 }
 
 /* Astro(タイムライン重視、設計§2「Astro(タイムライン重視)」): タイムライン行を
  * 固定の大きな高さにし、その分コンソール行を縮める。 */
 #app[data-layout="astro"] {
-  grid-template-rows: auto 1fr 140px 120px var(--project-row);
+  --row-timeline: 140px;
+  --row-console: 120px;
 }
 
 /* Circuit-focus(設計§2「Circuit-focus(回路サブモード + プローブ大)」、増分E3)。
@@ -60,48 +204,231 @@ body {
  * 追うため)。Scene View は回路作業中は使わないので圧縮してよい。 */
 #app[data-layout="circuit-focus"] {
   --project-row: 360px;
-  grid-template-rows: auto 1fr auto 220px var(--project-row);
+  --row-console: 220px;
 }
 
 .panel {
-  background: #1a1a1a;
-  border: 1px solid #2a2a2a;
+  background: var(--surface-panel);
   overflow: auto;
   box-sizing: border-box;
+  /* パネルは `gap: 1px` の隙間(地の色)で分かれるので、以前のような
+   * 1px の枠線は要らない——枠線と隙間が二重に見えて線が太く濁っていた。 */
+  border: 0;
 }
 
 .panel h2 {
-  font-size: 11px;
+  font-size: var(--text-sm);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #888;
-  margin: 8px 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-subtle);
+  margin: 0;
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  /* 見出しはスクロールしても残す(Inspector の Component が増えると、今どの
+   * パネルを見ているのか分からなくなっていた)。 */
+  position: sticky;
+  top: 0;
+  background: var(--surface-panel);
+  z-index: 1;
 }
+
+/* ========================================================================
+ * 4. スプリッター(パネル境界のドラッグリサイズ)
+ * ==================================================================== */
+
+/* 設計 §1「ブラウザ 1 ページ内でリサイズ…ができる」の実体。Hierarchy /
+ * Inspector の幅と Console 行の高さを掴んで動かせる。値は localStorage に
+ * 残り、ダブルクリックで既定へ戻る(`setUpPanelSplitters`)。 */
+.splitter {
+  background: transparent;
+  position: relative;
+  z-index: 4;
+  transition: background var(--motion-fast) ease;
+}
+.splitter::after {
+  /* 掴みやすさのため、見た目の線(1px)より広い当たり判定(ガター幅)を持たせる。
+   * 視覚的な手掛かりは中央の細い線 1 本に留める(常時ハイライトすると
+   * パネル境界が主張しすぎる)。 */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+}
+.splitter:hover::after,
+.splitter[data-dragging="true"]::after {
+  background: var(--accent);
+}
+.splitter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.splitter[data-axis="x"] {
+  cursor: col-resize;
+}
+.splitter[data-axis="y"] {
+  cursor: row-resize;
+}
+#splitter-left {
+  grid-area: gutter-l;
+}
+#splitter-right {
+  grid-area: gutter-r;
+}
+#splitter-console {
+  grid-area: gutter-h;
+}
+/* ドラッグ中はテキスト選択と iframe 的な取りこぼしを止める。 */
+body[data-splitter-dragging="true"] {
+  user-select: none;
+  cursor: var(--splitter-cursor, col-resize);
+}
+
+/* ========================================================================
+ * 5. 共通コントロール
+ * ==================================================================== */
+
+/* **すべてのコントロールに効く基底**。以前は `#toolbar` と一部のパネルだけが
+ * 個別にボタンを塗っており、Project ドロワー(Scenes/Materials/Prefabs/
+ * Replays/Validation)の生成ボタンは**ブラウザ既定の明るいボタンのまま**
+ * 暗色背景の上に置かれていた。基底をここに 1 つ置き、以降は例外だけを書く。 */
+#app button,
+#app select,
+#app input,
+#app textarea {
+  font-family: inherit;
+  font-size: var(--text-base);
+  color: var(--text);
+  box-sizing: border-box;
+}
+
+#app button {
+  min-height: var(--control-h);
+  padding: 0 var(--space-4);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background var(--motion-fast) ease,
+    border-color var(--motion-fast) ease;
+}
+#app button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+#app button:active:not(:disabled) {
+  background: var(--accent-surface);
+}
+#app button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#app select {
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+#app input:not([type="checkbox"]):not([type="range"]),
+#app textarea {
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+#app textarea {
+  padding: var(--space-3);
+}
+#app input:not([type="checkbox"]):not([type="range"]):hover,
+#app select:hover {
+  border-color: #4a5057;
+}
+#app input:disabled,
+#app textarea:disabled {
+  color: var(--text-subtle);
+  cursor: default;
+}
+#app input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  cursor: pointer;
+}
+#app input[type="range"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* **キーボード操作の可視化**。以前は `:focus` のアウトラインをどこでも打ち消して
+ * おらず**ブラウザ既定に任せきり**で、暗色背景の上では既定の細い輪郭がほとんど
+ * 見えなかった(`.hierarchy-search` に至っては `outline: none` で消したうえで
+ * 代替を与えていなかった)。QA 報告書 §5 が「キーボードのみでの操作は未検証」と
+ * 書いていた領域そのもの。`:focus-visible` を使うのでマウス操作では出ない。 */
+#app :focus-visible,
+.overlay-surface :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+/* 主操作のボタン(押し出し・スイープ実行など、そのパネルの最終操作)。 */
+#app button.primary,
+#btn-sketch-extrude {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #fff;
+}
+#app button.primary:hover:not(:disabled),
+#btn-sketch-extrude:hover:not(:disabled) {
+  background: #4a8fe6;
+  border-color: #4a8fe6;
+}
+
+/* ========================================================================
+ * 6. パネル個別
+ * ==================================================================== */
+
+/* --- Toolbar --------------------------------------------------------- */
 
 #toolbar {
   grid-area: toolbar;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 16px;
-  padding: 4px 10px;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-panel);
   /* QA不具合1: 内容幅がウィンドウ幅を超えると `Settings`/`Scene`/`Layout`/
      状態ハッシュ表示に到達できなくなっていた(`overflow: visible`のため、
      はみ出した分は画面外へ切れるだけで、横スクロールでも救えなかった)。
-     この行の高さはグリッド側が`auto`(`style.css`冒頭の`grid-template-rows`
-     参照)なので、`flex-wrap: wrap`で複数行に折り返せば全コントロールが
-     必ず画面内に収まる——横スクロールは狭い画面での保険として残す。 */
+     この行の高さはグリッド側が`auto`(§3 の `grid-template-rows` 参照)なので、
+     `flex-wrap: wrap`で複数行に折り返せば全コントロールが必ず画面内に収まる
+     ——横スクロールは狭い画面での保険として残す。 */
   overflow-x: auto;
   overflow-y: hidden;
 }
 
+/* **群を視覚的に区切る**(増分「UI 品質」)。以前は 16px の間隔だけが群の
+ * 境界で、15 個以上のコントロールが 1 本の帯に並ぶと「どこまでが再生系で
+ * どこからがツール系か」が読み取れなかった。区切り線 + 小さめの間隔にすると
+ * 同じ幅により多くの意味が入る。 */
 .toolbar-group {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
+  padding-right: var(--space-3);
+  border-right: 1px solid var(--border);
   /* 幅が足りないとき`toolbar-group`自体が潰れてラベルの折り返しを誘発しない
      よう、自然幅を保つ(下の「ラベルを折り返さない」と対で効く)。 */
   flex-shrink: 0;
+}
+.toolbar-group:last-child,
+.toolbar-spacer + .toolbar-group,
+.toolbar-spacer {
+  border-right: 0;
 }
 
 .toolbar-spacer {
@@ -109,6 +436,7 @@ body {
   /* 中身が無いスペーサーなので縮んでよい(むしろ縮んで欲しい)——
      `flex-shrink: 0`を継承させないため、他の`toolbar-group`とは別に明示する。 */
   min-width: 0;
+  padding-right: 0;
 }
 
 #toolbar button,
@@ -121,33 +449,64 @@ body {
   white-space: nowrap;
   flex-shrink: 0;
 }
-
+#toolbar label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
 #toolbar button,
 #toolbar select {
-  background: #2a2a2a;
-  color: #eee;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-  padding: 3px 8px;
-  cursor: pointer;
+  padding: 0 var(--space-3);
 }
 
-#hash-display {
-  font-family: monospace;
-  cursor: pointer;
-  color: #9cf;
+/* ツールボタンの選択状態(群2、W/E/R/Q)。 */
+#toolbar button.active {
+  background: var(--accent-strong);
+  color: #fff;
+  border-color: var(--accent-strong);
 }
 
 .mode-btn.active {
-  background: #2a3a4a;
-  color: #9cf;
-  border-color: #3a4a5a;
+  background: var(--accent-surface);
+  color: var(--accent);
+  border-color: var(--accent-border);
 }
 
-#toolbar button:disabled {
-  opacity: 0.4;
-  cursor: default;
+#hash-display {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  color: var(--accent);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
 }
+#hash-display:hover {
+  background: var(--surface-raised);
+}
+
+/* 実効時間倍率(群2)。指定値に届かないとき赤くする。 */
+#timescale-effective {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  color: var(--ok);
+  min-width: 52px;
+  display: inline-block;
+}
+#timescale-effective.degraded {
+  color: var(--danger);
+  font-weight: bold;
+}
+#input-step-count {
+  width: 54px;
+}
+
+/* Gizmo 座標系トグル(群2)。Local のとき色を変えて状態を見せる。 */
+#btn-gizmo-space[data-space="local"] {
+  background: var(--accent-surface);
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+/* --- Hierarchy ------------------------------------------------------- */
 
 #hierarchy {
   grid-area: hierarchy;
@@ -157,24 +516,19 @@ body {
    目的の行を探す手段が無かった監査結果への対応。 */
 .hierarchy-search {
   display: block;
-  width: calc(100% - 20px);
-  margin: 4px 10px 6px;
-  padding: 3px 6px;
-  background: #1c1c1c;
-  border: 1px solid #333;
-  border-radius: 3px;
-  color: #ddd;
-  font-size: 0.9em;
+  width: calc(100% - var(--space-5) * 2);
+  margin: 0 var(--space-5) var(--space-3);
 }
-.hierarchy-search:focus {
-  outline: none;
-  border-color: #567;
+/* 以前はここで `outline: none` を指定して代替を用意していなかった。基底の
+   `:focus-visible` に任せ、加えて枠線も色を変える。 */
+.hierarchy-search:focus-visible {
+  border-color: var(--accent-border);
 }
 
 .tree {
   list-style: none;
   margin: 0;
-  padding: 0 10px 10px;
+  padding: 0 var(--space-5) var(--space-5);
 }
 
 /* 検索中は折り畳み状態を無視してすべての枝を開く(一致した行が畳まれた
@@ -186,7 +540,7 @@ body {
 }
 
 .tree li {
-  padding: 2px 0;
+  padding: 1px 0;
   white-space: nowrap;
 }
 
@@ -194,26 +548,40 @@ body {
   padding-left: 14px;
 }
 
+.tree .tree-group {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tree .tree-group > .tree-nested {
+  color: var(--text);
+  font-size: var(--text-base);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .tree .tree-selectable {
   cursor: pointer;
-  border-radius: 3px;
-  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  padding: 2px var(--space-3);
+  transition: background var(--motion-fast) ease;
 }
 
 .tree .tree-selectable:hover {
-  background: #232323;
+  background: var(--surface-raised);
 }
 
 .tree .tree-selectable.selected {
-  background: #2a3a4a;
-  color: #9cf;
+  background: var(--accent-surface);
+  color: var(--accent);
 }
 
 /* 複数選択(群2、設計 §1.1「複数選択可」)。主選択(Inspector に出ている
    もの)と区別できるよう淡い色にする。 */
 .tree .tree-selectable.multi-selected {
-  background: #24303a;
-  color: #8ab;
+  background: #1e262e;
+  color: #9fb3c8;
 }
 
 /* 折り畳みトグル(群2、設計 §1.1「ツリーは折り畳み可」)。 */
@@ -221,17 +589,20 @@ body {
   display: inline-block;
   width: 12px;
   cursor: pointer;
-  color: #778;
+  color: var(--text-subtle);
   user-select: none;
 }
 .tree .tree-toggle:hover {
-  color: #ccc;
+  color: var(--text);
 }
+
+/* --- Scene View ------------------------------------------------------ */
 
 #scene-view {
   grid-area: sceneview;
   position: relative;
   padding: 0;
+  overflow: hidden;
 }
 
 #scene-view-canvas-host {
@@ -245,87 +616,20 @@ body {
 
 #hud {
   position: absolute;
-  top: 8px;
-  left: 8px;
-  font-size: 12px;
+  top: var(--space-4);
+  left: var(--space-4);
+  font-size: var(--text-base);
   line-height: 1.5;
   white-space: pre;
   pointer-events: none;
-  font-family: monospace;
-}
-
-#inspector {
-  grid-area: inspector;
-}
-
-#inspector-body {
-  padding: 0 10px 10px;
-  /* スクロールは親の `.panel { overflow: auto }` が担う(ここで二重に
-     スクロールコンテナを作らない)。群1で Component が増えて内容が
-     パネル高を超えるようになったため、実際にスクロールで下端の
-     Component へ到達できることを Playwright で固定してある。 */
-}
-
-.inspector-component {
-  margin-bottom: 10px;
-  border-top: 1px solid #2a2a2a;
-  padding-top: 6px;
-}
-
-.inspector-component h3 {
-  font-size: 12px;
-  margin: 0 0 4px;
-}
-
-.inspector-field {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 1px 0;
-  color: #ccc;
-}
-
-/* 値側は折り返す(結合の説明文のように長い値が切れないように、群1で追加)。 */
-.inspector-field > span:last-child {
-  text-align: right;
-  word-break: break-word;
-  min-width: 0;
-}
-
-/* ラベル側は縮めない。 */
-.inspector-field > span:first-child {
-  flex: 0 0 auto;
-  color: #9aa;
-}
-
-/* 編集可能フィールド(群2、設計 §1.3「編集は次ステップ先頭で Command として
-   適用される」)。値側の `<span>` と同じ位置・同じ幅に収まるようにする。 */
-.inspector-field > input,
-.inspector-field > select {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 55%;
-  background: #1b1b1b;
-  color: #ddd;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-  padding: 1px 4px;
-  font-size: 11px;
-  font-family: inherit;
-  text-align: right;
-}
-.inspector-field > select {
-  text-align: left;
-}
-.inspector-field > input:disabled {
-  color: #777;
-  font-style: italic;
-}
-.inspector-note {
-  margin: 4px 0 0;
-  font-size: 10px;
-  color: #778;
-  line-height: 1.4;
+  font-family: var(--font-mono);
+  /* 明るい背景(空・床)の上でも読めるようにする。以前は素の白文字だけで、
+   * 淡色のシーンでは HUD が消えていた。 */
+  color: #eaf2ff;
+  background: rgba(8, 10, 13, 0.55);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  z-index: 1;
 }
 
 /* **場のパネル(群3)**。量子の |ψ|²・イジングのスピン格子・FDTD の Ez・
@@ -335,24 +639,29 @@ body {
    Probe Graphs が元の大きさに戻る。 */
 #field-panel {
   position: absolute;
-  right: 10px;
-  bottom: 10px;
+  right: var(--space-5);
+  bottom: var(--space-5);
   width: min(46%, 560px);
   max-height: 62%;
   display: flex;
   flex-direction: column;
-  background: #1a1a1acc;
-  border: 1px solid #2a2a2a;
-  border-radius: 4px;
-  padding: 4px 6px 6px;
+  background: rgba(23, 25, 29, 0.88);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--space-3) var(--space-4) var(--space-4);
   z-index: 2;
 }
 #field-panel h2 {
-  font-size: 11px;
+  font-size: var(--text-sm);
   text-transform: none;
   letter-spacing: 0;
-  color: #9ab;
-  margin: 0 0 4px;
+  color: var(--text-muted);
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  position: static;
+  background: none;
 }
 #field-panel[hidden] {
   display: none;
@@ -365,7 +674,8 @@ body {
      補間せず**セルの粒を残す**(スピン格子は特にそう描くのが読みやすい)。 */
   image-rendering: pixelated;
   object-fit: contain;
-  background: #111;
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
 }
 
 /* **スケッチパネル(D1)**。`#field-panel` と同じ「Scene View の中に浮かべる
@@ -373,45 +683,53 @@ body {
    (両方同時に出るシーンでも重ならない)。 */
 #sketch-panel {
   position: absolute;
-  left: 10px;
-  bottom: 10px;
-  width: 260px;
+  left: var(--space-5);
+  bottom: var(--space-5);
+  width: 264px;
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  background: #1a1a1acc;
-  border: 1px solid #2a2a2a;
-  border-radius: 4px;
-  padding: 6px 8px 8px;
+  gap: var(--space-3);
+  background: rgba(23, 25, 29, 0.92);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--space-4);
   z-index: 3;
 }
 #sketch-panel[hidden] {
   display: none;
 }
 #sketch-panel h2 {
-  font-size: 11px;
+  font-size: var(--text-sm);
   text-transform: none;
   letter-spacing: 0;
-  color: #9ab;
+  color: var(--text-muted);
   margin: 0;
+  padding: 0;
+  position: static;
+  background: none;
 }
 .sketch-hint {
   margin: 0;
-  font-size: 10px;
-  line-height: 1.4;
-  color: #888;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-subtle);
 }
 .sketch-status {
-  font-size: 11px;
-  font-family: monospace;
-  color: #cc9;
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
+  color: var(--warn);
 }
 .sketch-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  font-size: 11px;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+}
+.sketch-row label {
+  color: var(--text-muted);
 }
 .sketch-row select,
 .sketch-row input {
@@ -421,68 +739,88 @@ body {
 .sketch-buttons {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-2);
 }
 .sketch-buttons button {
   flex: 1 1 auto;
-  font-size: 11px;
-}
-/* 「押し出し」は最終操作なので目立たせる(Add Joint フォームの主ボタンと同じ扱い)。 */
-#btn-sketch-extrude {
-  background: #3a5a8a;
-  border-color: #4a7ac0;
-  color: #fff;
+  font-size: var(--text-sm);
+  padding: 0 var(--space-3);
 }
 
-/* 実効時間倍率(群2)。指定値に届かないとき赤くする。 */
-#timescale-effective {
-  font-variant-numeric: tabular-nums;
-  color: #8a8;
-  min-width: 52px;
-  display: inline-block;
-}
-#timescale-effective.degraded {
-  color: #e66;
-  font-weight: bold;
-}
-#input-step-count {
-  width: 52px;
+/* --- Inspector ------------------------------------------------------- */
+
+#inspector {
+  grid-area: inspector;
 }
 
-/* 右クリックコンテキストメニュー(群2、設計 §1.1/§1.2)。 */
-#context-menu {
-  position: fixed;
-  z-index: 1000;
-  min-width: 180px;
-  background: #232323;
-  border: 1px solid #444;
-  border-radius: 4px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
-  padding: 4px 0;
+#inspector-body {
+  padding: 0 var(--space-5) var(--space-5);
+  /* スクロールは親の `.panel { overflow: auto }` が担う(ここで二重に
+     スクロールコンテナを作らない)。群1で Component が増えて内容が
+     パネル高を超えるようになったため、実際にスクロールで下端の
+     Component へ到達できることを Playwright で固定してある。 */
+}
+
+.inspector-component {
+  margin-bottom: var(--space-5);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.inspector-component h3 {
+  font-size: var(--text-base);
+  color: var(--text);
+  margin: 0 0 var(--space-3);
+  letter-spacing: 0.02em;
+}
+
+.inspector-field {
   display: flex;
-  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-1) 0;
+  color: var(--text);
+  min-height: 22px;
 }
-#context-menu button {
-  background: none;
-  border: none;
-  color: #ddd;
+
+/* 値側は折り返す(結合の説明文のように長い値が切れないように、群1で追加)。 */
+.inspector-field > span:last-child {
+  text-align: right;
+  word-break: break-word;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ラベル側は縮めない。 */
+.inspector-field > span:first-child {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+/* 編集可能フィールド(群2、設計 §1.3「編集は次ステップ先頭で Command として
+   適用される」)。値側の `<span>` と同じ位置・同じ幅に収まるようにする。 */
+.inspector-field > input,
+.inspector-field > select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 55%;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+  text-align: right;
+}
+.inspector-field > select {
   text-align: left;
-  padding: 4px 12px;
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
 }
-#context-menu button:hover:not(:disabled) {
-  background: #3a5a8a;
+.inspector-field > input:disabled {
+  font-style: italic;
 }
-#context-menu button:disabled {
-  color: #666;
-  cursor: default;
-}
-#context-menu hr {
-  border: none;
-  border-top: 1px solid #3a3a3a;
-  margin: 4px 0;
+.inspector-note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-subtle);
+  line-height: 1.5;
 }
 
 /* 結合・ジョイントは値が長いので縦積みにする(群1)。 */
@@ -492,29 +830,118 @@ body {
 .inspector-component[data-stacked] .inspector-field > span:last-child {
   display: block;
   text-align: left;
-  padding-left: 8px;
-  color: #ccc;
+  padding-left: var(--space-4);
+  color: var(--text);
 }
+
+/* 軸別スケール入力(群2)。3つを1行に収める。
+ *
+ * **数字が読めるまで幅を与える**(増分「UI 品質の底上げ」)。以前は 46px 固定で、
+ * Position の `0.0000` が `0.C` のように途中で切れていた——編集できる欄なのに
+ * 入っている値が読めない、という状態だった。ラベルを 1 段上へ逃がし、3 欄で
+ * パネル幅を等分する(Inspector 幅 268px でも 1 欄あたり 70px 超が確保できる)。 */
+.inspector-field:has(.inspector-scale-fields),
+.inspector-field:has(.inspector-joint-row) {
+  display: block;
+}
+.inspector-field:has(.inspector-scale-fields) > span:first-child,
+.inspector-field:has(.inspector-joint-row) > span:first-child {
+  display: block;
+  margin-bottom: var(--space-1);
+}
+.inspector-scale-fields {
+  display: flex;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.inspector-scale-fields > input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+  text-align: right;
+}
+
+/* Add Joint フォーム(残タスク完遂の縦串①増分)。Body/Anchor/Axis/Param の
+   数値入力を1行に収める、軸別スケール入力と同じ見た目。 */
+.inspector-joint-row {
+  display: flex;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.inspector-joint-row > input {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+  text-align: right;
+}
+
+/* Inspector の近似バッジ(増分K)。今の挙動がどの縮約の上に乗っているかを示す。 */
+.approximation-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.approximation-badge {
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  padding: 1px var(--space-3);
+  border-radius: 999px;
+  background: #232c3d;
+  color: #c3d3ec;
+  border: 1px solid #364561;
+}
+
+/* --- Timeline -------------------------------------------------------- */
 
 #timeline {
   grid-area: timeline;
-  padding: 6px 10px;
+  padding: var(--space-3) var(--space-5);
 }
 
 .timeline-header {
   display: flex;
-  gap: 16px;
+  gap: var(--space-6);
   align-items: center;
-  font-family: monospace;
-  margin-bottom: 4px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  margin-bottom: var(--space-2);
 }
 
 .badge {
   margin-left: auto;
-  background: #2a2a2a;
-  border-radius: 3px;
-  padding: 2px 8px;
-  font-size: 11px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 1px var(--space-4);
+  font-size: var(--text-sm);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+}
+/* 今どのモードにいるのかは操作の可否を決める最重要の状態なので、色で分ける
+ * (設計 §1.4「Play モード バッジ」)。 */
+.badge[data-mode="edit"] {
+  background: var(--accent-surface);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.badge[data-mode="playing"] {
+  background: #1e3326;
+  border-color: #2f5c3f;
+  color: var(--ok);
+}
+.badge[data-mode="paused"] {
+  background: #33291a;
+  border-color: #5c4a2f;
+  color: var(--warn);
 }
 
 #timeline-scrubber {
@@ -524,131 +951,181 @@ body {
 .timeline-bookmarks {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 4px;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
 }
 
 #bookmark-label {
-  background: #2a2a2a;
-  color: #eee;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-  padding: 2px 6px;
-  width: 140px;
-}
-
-#btn-add-bookmark {
-  background: #2a2a2a;
-  color: #eee;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-  padding: 2px 8px;
-  cursor: pointer;
+  width: 150px;
 }
 
 #bookmark-list {
   display: flex;
-  gap: 4px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
 .bookmark-chip {
-  background: #2a3a4a;
-  color: #9cf;
-  border: 1px solid #3a4a5a;
-  border-radius: 3px;
-  padding: 2px 8px;
+  background: var(--accent-surface);
+  color: var(--accent);
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  padding: 0 var(--space-4);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--text-base);
 }
 
 .bookmark-chip:hover {
-  background: #35485c;
+  background: #2b3d4f;
 }
+
+/* --- Console --------------------------------------------------------- */
 
 #console-panel {
   grid-area: console;
   padding: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .console-tabs,
 .project-tabs {
   display: flex;
-  gap: 2px;
-  padding: 4px;
-  border-bottom: 1px solid #2a2a2a;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .console-tab,
 .project-tab {
   background: transparent;
-  color: #999;
-  border: none;
-  padding: 3px 8px;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  padding: 0 var(--space-4);
   cursor: pointer;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
+  min-height: var(--control-h-sm);
 }
 
-.console-tab.active,
-.project-tab.active {
-  background: #2a2a2a;
-  color: #eee;
+/* 基底(`#app button`)の hover を打ち消して、タブらしい淡い反応にする。 */
+#app .console-tab:hover:not(:disabled),
+#app .project-tab:hover:not(:disabled) {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+#app .console-tab.active,
+#app .project-tab.active {
+  background: var(--accent-surface);
+  color: var(--accent);
+  border-color: var(--accent-border);
 }
 
 #console-log {
   list-style: none;
   margin: 0;
-  padding: 4px 10px;
+  padding: var(--space-2) var(--space-4);
   overflow: auto;
-  font-family: monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  flex: 1;
+  min-height: 0;
+}
+
+#console-log li {
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+/* 重大度を色で分ける。以前はすべて同じ灰色で、200 行のログの中から
+ * エラーや警告を目で拾うのはタブを切り替えるしかなかった。 */
+#console-log li[data-level="errors"] {
+  color: var(--danger);
+}
+#console-log li[data-level="warnings"] {
+  color: var(--warn);
 }
 
 #console-log .console-entry-clickable {
   cursor: pointer;
-  border-radius: 2px;
 }
 
 #console-log .console-entry-clickable:hover {
-  background: #232323;
-  color: #9cf;
+  background: var(--surface-raised);
+  color: var(--accent);
 }
+
+/* Console の診断バッジ(増分K)。発散・CFL警告を色で即座に伝える。 */
+.console-badges {
+  margin-left: auto;
+  display: inline-flex;
+  gap: var(--space-3);
+}
+.console-badge {
+  font-size: var(--text-sm);
+  padding: 1px var(--space-3);
+  border-radius: 999px;
+  background: var(--danger);
+  color: #1a0d0d;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.console-badge[data-kind="cfl"] {
+  background: var(--warn);
+  color: #1a1206;
+}
+.console-badge[data-kind="ok"] {
+  background: var(--ok);
+  color: #0b1a10;
+}
+
+/* --- Probe Graphs ---------------------------------------------------- */
 
 #probe-graphs {
   grid-area: probes;
-  padding: 6px 10px;
+  padding: var(--space-3) var(--space-5) var(--space-4);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 #probe-graphs h2 {
-  margin: 0 0 4px;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  position: static;
 }
 
 /* Probe Graphs の対数軸トグル + CSVエクスポート(増分E1、設計§1.4)。 */
 .probe-controls {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-  font-size: 12px;
-  color: #999;
+  /* 既定のパネル幅(260px)では 3 つが収まりきらず、「対数軸」が
+     「対数 / 軸」と 2 行に割れていた。折り返しを許して行を増やす。 */
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-2);
+  font-size: var(--text-base);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.probe-controls label {
+  white-space: nowrap;
 }
 
-.probe-controls button {
-  background: #2a2a2a;
-  color: #ccc;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-  padding: 1px 8px;
+.probe-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   cursor: pointer;
 }
 
-.probe-controls button:hover {
-  background: #343434;
-  color: #eee;
+.probe-controls button {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-4);
 }
 
 /* QA不具合9: グラフに時刻の目盛りが無く、どこが何秒なのか画面から分から
@@ -656,8 +1133,8 @@ body {
    出す(`updateProbeGraph`のdoc参照)。 */
 .probe-time-range {
   margin-left: auto;
-  font-family: monospace;
-  color: #778;
+  font-family: var(--font-mono);
+  color: var(--text-subtle);
 }
 
 #probe-canvas {
@@ -666,33 +1143,78 @@ body {
   min-height: 0;
 }
 
+/* Probe Graphs は 160px しか高さが無いので、空状態の文言も詰める
+   (パネルからはみ出すと `overflow: hidden` に切られて読めなくなる)。 */
+#probe-empty {
+  padding: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* --- Project ドロワー ------------------------------------------------- */
+
 #project-drawer {
   grid-area: project;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* ドロワーが開いたときに本体がはみ出さずスクロールするようにする(増分E3)。
  * `min-height: 0` はflexアイテムが内容の最小サイズより縮めるようにする定型。 */
 #project-body {
-  padding: 4px 10px;
-  color: #888;
+  padding: var(--space-3) var(--space-5) var(--space-5);
+  color: var(--text-muted);
   flex: 1;
   min-height: 0;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+/* 縦に並べた項目を**縮ませない**。flex コンテナの子は既定で縮むので、
+   回路トポロジの `<pre>` や Validation の `<textarea>` が中身より小さく
+   潰されて末尾の行が切れていた(縦積みにした本増分で作り込んだ回帰)。 */
+#project-body > * {
+  flex-shrink: 0;
+}
+#project-body h3,
+#project-body h4 {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-base);
+  color: var(--text);
+}
+#project-body p {
+  margin: 0;
+  line-height: 1.6;
+  max-width: 78ch;
+}
+#project-body ul {
+  margin: 0;
+  padding-left: 1.2em;
+  line-height: 1.6;
+}
+#project-body a {
+  color: var(--accent);
 }
 
-.materials-table {
+.materials-table,
+.validation-results-table {
   border-collapse: collapse;
-  font-size: 12px;
-  color: #ccc;
+  font-size: var(--text-base);
+  color: var(--text);
 }
 
 .materials-table th,
-.materials-table td {
-  border: 1px solid #333;
-  padding: 2px 8px;
+.materials-table td,
+.validation-results-table th,
+.validation-results-table td {
+  border: 1px solid var(--border);
+  padding: var(--space-1) var(--space-4);
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .materials-table th:first-child,
@@ -700,160 +1222,536 @@ body {
   text-align: left;
 }
 
-.materials-table th {
-  color: #9cf;
+.materials-table th,
+.validation-results-table th {
+  color: var(--accent);
+  background: var(--surface-sunken);
+  font-weight: 600;
+}
+/* 行を交互に塗る。数値が並ぶ表では横方向の読み間違いが目に見えて減る。 */
+.materials-table tbody tr:nth-child(even),
+.validation-results-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* --- シーンギャラリー ------------------------------------------------- */
+
+/* 43 本の検証済みシーンは README が掲げる中心的な価値だが、入口は説明文の
+   ベタ書きリストで、目的の 1 本へ行くのに全体を読む必要があった。検索・
+   ドメイン絞り込み・カード表示にする(`renderScenesTab` のコメント参照)。 */
+.scene-gallery-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+}
+.scene-gallery-search {
+  flex: 1 1 auto;
+  max-width: 360px;
+}
+.scene-gallery-count {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
+}
+.scene-gallery-domains {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+#app .scene-domain-chip {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-4);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+#app .scene-domain-chip[aria-pressed="true"] {
+  background: var(--accent-surface);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.scene-gallery-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: var(--space-4);
+}
+.scene-gallery-list > li[hidden] {
+  display: none;
+}
+/* カード全体を 1 つのボタンにする——説明を読んだ位置からそのまま押せるし、
+   押す的が小さなボタン 1 個からカード 1 枚ぶんに広がる。 */
+#app .scene-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  width: 100%;
+  height: 100%;
+  text-align: left;
+  padding: var(--space-4);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  white-space: normal;
+}
+#app .scene-card:hover:not(:disabled) {
+  background: var(--surface-raised);
+  border-color: var(--accent-border);
+}
+.scene-card-title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font-size: var(--text-md);
+  color: var(--text);
+}
+.scene-card-id {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--accent);
+  font-weight: 600;
+}
+.scene-card-desc {
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.scene-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: auto;
+  padding-top: var(--space-2);
+}
+.scene-tag {
+  font-size: var(--text-xs);
+  padding: 0 var(--space-3);
+  border-radius: 999px;
+  background: #232c3d;
+  color: #c3d3ec;
+  border: 1px solid #364561;
 }
 
 .circuit-topology {
-  font-size: 12px;
-  color: #ccc;
-  background: #1a1a1a;
-  border: 1px solid #333;
-  padding: 8px;
-  margin: 0 0 8px 0;
+  font-size: var(--text-base);
+  font-family: var(--font-mono);
+  color: var(--text);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  margin: 0;
   white-space: pre;
   overflow-x: auto;
+  max-width: 100%;
 }
 
-/* Console の診断バッジ(増分K)。発散・CFL警告を色で即座に伝える。 */
-.console-badges { margin-left: auto; display: inline-flex; gap: 6px; }
-.console-badge {
-  font-size: 11px; padding: 1px 6px; border-radius: 3px;
-  background: #b33; color: #fff; white-space: nowrap;
+/* 検証タブ(残タスク完遂の縦串④増分)。パラメータ掃引の結果テーブル・
+   probe履歴の重ね書きグラフ。 */
+.validation-results-table {
+  margin-top: var(--space-3);
+  font-size: var(--text-sm);
 }
-.console-badge[data-kind="cfl"] { background: #b83; }
-.console-badge[data-kind="ok"] { background: #363; }
-
-/* Inspector の近似バッジ(増分K)。今の挙動がどの縮約の上に乗っているかを示す。 */
-.approximation-badges { display: flex; flex-wrap: wrap; gap: 4px; }
-.approximation-badge {
-  font-size: 10px; line-height: 1.4; padding: 2px 6px; border-radius: 3px;
-  background: #2c3550; color: #cdd6f4; border: 1px solid #3b4668;
+.validation-chart {
+  margin-top: var(--space-4);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.validation-chart-legend {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+.validation-chart-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: var(--space-1);
+  border-radius: 2px;
+  vertical-align: middle;
 }
 
+/* ========================================================================
+ * 7. オーバーレイ
+ * ==================================================================== */
 
-/* ツールボタンの選択状態(群2、W/E/R/Q)。 */
-#toolbar button.active {
-  background: #3a5a8a;
+/* 右クリックコンテキストメニュー(群2、設計 §1.1/§1.2)。 */
+#context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 190px;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--space-2) 0;
+  display: flex;
+  flex-direction: column;
+}
+#context-menu button {
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  text-align: left;
+  padding: 0 var(--space-5);
+  min-height: 26px;
+  font-size: var(--text-base);
+  font-family: inherit;
+  cursor: pointer;
+}
+#context-menu button:hover:not(:disabled) {
+  background: var(--accent-strong);
   color: #fff;
-  border-color: #4a7ac0;
+}
+#context-menu button:disabled {
+  color: var(--text-subtle);
+  cursor: default;
+}
+#context-menu hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: var(--space-2) 0;
 }
 
 /* Settings ポップオーバー(群2)。ツールバーの混雑を解消するため、
    常時操作しないオーバーレイ切替と物理パラメータをここへ畳む。 */
 #settings-popover {
   position: absolute;
-  top: 44px;
-  right: 12px;
+  top: 46px;
+  right: var(--space-5);
   z-index: 30;
-  width: 280px;
-  max-height: 70vh;
+  width: 300px;
+  max-height: 74vh;
   overflow-y: auto;
-  padding: 10px 12px;
-  background: #1c1c1c;
-  border: 1px solid #3a3a3a;
-  border-radius: 4px;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-2);
 }
-#settings-popover[hidden] { display: none; }
+#settings-popover[hidden] {
+  display: none;
+}
 #settings-popover h4 {
-  margin: 8px 0 2px;
-  font-size: 11px;
+  margin: var(--space-5) 0 var(--space-1);
+  font-size: var(--text-sm);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #888;
+  letter-spacing: 0.06em;
+  color: var(--text-subtle);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-2);
 }
+#settings-popover h4:first-child {
+  margin-top: 0;
+}
+#settings-popover h5 {
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+/* **1 行 1 項目から 2 段組みへ**(増分「UI 品質の底上げ」)。従来は
+ * `justify-content: space-between` の 1 行レイアウトで、
+ *   - ラベルが長い項目(「高度 [m](ISA標準大気から密度を計算)」)は入力欄が
+ *     ポップオーバーの外へ押し出されて**画面から切れていた**
+ *   - 3 軸入力(重力の向き・風)は 1 欄 40px 台まで潰れ、`-1` すら読めなかった
+ *   - チェックボックスが行の左端、文言が右端に離れ、どの文言のチェックか
+ *     目で辿る必要があった(`<label>` で結ばれてはいるので押せはする)
+ * という 3 つの問題があった。ラベルを上の段、入力を下の段に置けば全部消える。 */
 #settings-popover label {
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  font-size: var(--text-base);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+/* チェックボックスだけは横並びのまま——真偽値は四角と文言が隣り合うのが読みやすい。 */
+#settings-popover label:has(input[type="checkbox"]) {
+  flex-direction: row;
   align-items: center;
-  gap: 8px;
-  font-size: 12px;
+  gap: var(--space-3);
+  min-height: 22px;
 }
-#settings-popover input[type="number"] { width: 90px; }
-.settings-note { margin: 2px 0 0; font-size: 10px; color: #888; line-height: 1.4; }
-
-/* 軸別スケール入力(群2)。3つを1行に収める。 */
-.inspector-scale-fields {
-  display: flex;
-  gap: 3px;
-  flex: 0 1 auto;
+#settings-popover label > input[type="number"],
+#settings-popover label > select {
+  width: 100%;
+  max-width: 170px;
+}
+/* Settings の3軸入力(重力の向き・風・格子間隔)は行いっぱいに広げる。 */
+#settings-popover .inspector-scale-fields {
+  width: 100%;
+}
+#settings-popover .inspector-scale-fields > input[type="number"] {
+  flex: 1 1 0;
+  width: auto;
   min-width: 0;
 }
-.inspector-scale-fields > input {
-  width: 44px;
-  min-width: 0;
-  background: #1b1b1b;
-  color: #ddd;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-  padding: 1px 3px;
-  font-size: 11px;
-  font-family: inherit;
-  text-align: right;
+#settings-popover select {
+  max-width: 120px;
 }
-
-/* Add Joint フォーム(残タスク完遂の縦串①増分)。Body/Anchor/Axis/Param の
-   数値入力を1行に収める、軸別スケール入力と同じ見た目。 */
-.inspector-joint-row {
-  display: flex;
-  gap: 3px;
-  flex: 0 1 auto;
-  min-width: 0;
+#settings-popover button {
+  align-self: flex-start;
 }
-.inspector-joint-row > input {
-  width: 44px;
-  min-width: 0;
-  background: #1b1b1b;
-  color: #ddd;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-  padding: 1px 3px;
-  font-size: 11px;
-  font-family: inherit;
-  text-align: right;
-}
-
-/* Gizmo 座標系トグル(群2)。Local のとき色を変えて状態を見せる。 */
-#btn-gizmo-space[data-space="local"] {
-  background: #3a4a6a;
-  color: #cde;
-}
-
-/* 検証タブ(残タスク完遂の縦串④増分)。パラメータ掃引の結果テーブル・
-   probe履歴の重ね書きグラフ。 */
-.validation-results-table {
-  border-collapse: collapse;
-  margin-top: 6px;
-  font-size: 11px;
-}
-.validation-results-table th,
-.validation-results-table td {
-  border: 1px solid #3a3a3a;
-  padding: 2px 6px;
-  text-align: right;
-}
-.validation-chart {
-  margin-top: 8px;
-  background: #14141a;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-}
-.validation-chart-legend {
-  margin-top: 4px;
-  font-size: 11px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.validation-chart-swatch {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  margin-right: 2px;
+#settings-popover code {
+  font-family: var(--font-mono);
+  background: var(--surface-sunken);
   border-radius: 2px;
-  vertical-align: middle;
+  padding: 0 3px;
+}
+.settings-note {
+  margin: var(--space-1) 0 var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-subtle);
+  line-height: 1.5;
+}
+
+/* --- ショートカット一覧(? / F1)-------------------------------------- */
+
+/* 15 個以上あるキーボードショートカットは `title` 属性の中だけに書かれており、
+ * 対応するボタンへマウスを載せて 1 秒待たない限り存在すら分からなかった
+ * (`Space` / `F` / `Delete` のようにボタンを持たないものは完全に不可視)。
+ * Unity の Shortcuts ウィンドウに相当する一覧を `?` で開く。 */
+#shortcut-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 8, 10, 0.66);
+  backdrop-filter: blur(2px);
+}
+#shortcut-overlay[hidden] {
+  display: none;
+}
+.shortcut-dialog {
+  width: min(680px, 92vw);
+  max-height: 84vh;
+  overflow: auto;
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--space-6);
+}
+/* プログラムからフォーカスを当てているだけの容器なので輪郭は出さない
+   (中の操作対象へ Tab で進んだときは基底の `:focus-visible` が効く)。 */
+.shortcut-dialog:focus,
+.shortcut-dialog:focus-visible {
+  outline: none;
+}
+.shortcut-dialog h2 {
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  position: static;
+  font-size: var(--text-md);
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+  background: none;
+}
+.shortcut-dialog p {
+  margin: 0 0 var(--space-5);
+  color: var(--text-subtle);
+  font-size: var(--text-sm);
+}
+.shortcut-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-6);
+}
+.shortcut-group h3 {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-subtle);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-2);
+}
+.shortcut-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-1) 0;
+  font-size: var(--text-base);
+  color: var(--text-muted);
+}
+kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  padding: 1px var(--space-3);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* --- トースト --------------------------------------------------------- */
+
+/* 失敗の通知はこれまで `window.alert` で、**操作をブロックするモーダル**だった
+ * ——読むために必ず OK を押させ、押した瞬間に文面は消え、押すまで画面は固まる。
+ * Console の Errors タブへ残す仕組み(D3 増分)は既にあるので、即時通知の側を
+ * 非ブロッキングのトーストへ置き換える。`aria-live` で読み上げにも届く。 */
+#toast-region {
+  position: fixed;
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-4);
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  max-width: min(460px, 80vw);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--space-4) var(--space-5);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  color: var(--text);
+  animation: toast-in var(--motion-fast) ease-out;
+}
+.toast[data-kind="error"] {
+  border-left-color: var(--danger);
+}
+.toast[data-kind="success"] {
+  border-left-color: var(--ok);
+}
+.toast-message {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.toast-close {
+  flex: 0 0 auto;
+  background: none !important;
+  border: none !important;
+  color: var(--text-subtle);
+  min-height: 18px !important;
+  padding: 0 var(--space-2) !important;
+  line-height: 1;
+}
+.toast-close:hover {
+  color: var(--text);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* --- 起動オーバーレイ -------------------------------------------------- */
+
+/* wasm の取得とコンパイルには実測で 1〜3 秒かかる。その間これまでは
+ * **空のパネルが並ぶだけ**で、壊れているのか読み込み中なのか区別が付かなかった
+ * (`setUpSceneView` が例外を投げた場合も HUD に小さく出るだけだった)。 */
+#boot-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-5);
+  background: var(--surface-app);
+  color: var(--text-muted);
+  transition: opacity 200ms ease;
+}
+#boot-overlay[hidden] {
+  display: none;
+}
+#boot-overlay[data-state="ready"] {
+  opacity: 0;
+  pointer-events: none;
+}
+.boot-spinner {
+  width: 26px;
+  height: 26px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: boot-spin 800ms linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-spinner {
+    animation-duration: 2.4s;
+  }
+}
+#boot-overlay[data-state="error"] .boot-spinner {
+  display: none;
+}
+#boot-overlay[data-state="error"] .boot-message {
+  color: var(--danger);
+  max-width: 60ch;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+@keyframes boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ========================================================================
+ * 8. ユーティリティ
+ * ==================================================================== */
+
+/* 空状態。何も選ばれていない Inspector や履歴が無い Probe Graphs が
+ * **ただの空白**だったため、「壊れている」のか「まだ何もしていない」のかが
+ * 区別できなかった。次に何をすればよいかを 1 行で書く。 */
+.empty-state {
+  color: var(--text-subtle);
+  font-size: var(--text-base);
+  line-height: 1.7;
+  padding: var(--space-5) var(--space-2);
+}
+.empty-state kbd {
+  font-size: var(--text-xs);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
