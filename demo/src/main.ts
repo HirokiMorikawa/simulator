@@ -116,7 +116,493 @@ function setUpLayoutPresetSwitcher() {
   const select = document.getElementById("select-layout") as HTMLSelectElement;
   select.addEventListener("change", () => {
     app.dataset.layout = select.value;
+    // **プリセットが握る変数のインライン上書きを捨てる**。スプリッター
+    // (`setUpPanelSplitters`)は `#app` のインラインスタイルへ `--row-console`
+    // を書くが、インラインは `#app[data-layout=…]` のルールより強いので、
+    // 捨てないと「レイアウトを切り替えても Console の高さが変わらない」
+    // という無言の不具合になる(増分E3 の `--project-row` で踏んだのと同じ、
+    // 「同じ宣言を 2 つの機能が奪い合う」問題)。列幅はプリセットが触らない
+    // ので残す。
+    clearPresetOwnedPanelSizes();
   });
+}
+
+// ---------------------------------------------------------------------------
+// UI 基盤(増分「UI 品質の底上げ」)
+//
+// 設計 docs/23-frontend/01-editor.md §1 が求めていながら未実装だったもの
+// (パネルのリサイズ)と、QA 報告書 docs/reviews/2026-08-04-editor-qa.md §5 が
+// 「未検証」と明記していた領域(キーボードのみでの操作)を埋める層。
+// どれも特定のパネルに属さないので、パネル実装より前にまとめて置く。
+// ---------------------------------------------------------------------------
+
+/// **トースト通知**。失敗の即時通知はこれまで `window.alert` だった——操作を
+/// ブロックし、OK を押させ、押した瞬間に文面が消えるモーダルである。読み返す
+/// ための Console Errors タブは D3 増分で用意済みなので、即時通知の側だけを
+/// 非ブロッキングに置き換える。`#toast-region` は `aria-live="polite"` なので
+/// 読み上げにも届く(`window.alert` はフォーカスを奪う代わりに、閉じた後に
+/// 何も残さない点でスクリーンリーダー利用者にも不利だった)。
+const TOAST_TIMEOUT_MS = 8000;
+function showToast(
+  message: string,
+  kind: "error" | "success" = "error",
+): void {
+  const region = document.getElementById("toast-region");
+  if (!region) return;
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.dataset.kind = kind;
+  const text = document.createElement("div");
+  text.className = "toast-message";
+  text.textContent = message;
+  const close = document.createElement("button");
+  close.className = "toast-close";
+  close.type = "button";
+  close.setAttribute("aria-label", "通知を閉じる");
+  close.textContent = "✕";
+  close.addEventListener("click", () => toast.remove());
+  toast.append(text, close);
+  region.appendChild(toast);
+  // 積み上がりすぎないよう古いものから捨てる(連続失敗で画面が埋まらないように)。
+  while (region.children.length > 4) region.firstChild?.remove();
+  window.setTimeout(() => toast.remove(), TOAST_TIMEOUT_MS);
+}
+
+/// **起動オーバーレイ**。wasm の取得とコンパイルのあいだ「読み込み中」である
+/// ことを示し、失敗したらその場に理由を出す(従来は HUD へ小さく出るだけで、
+/// 空のパネルが並んだ画面との区別が付かなかった)。
+function markBootReady(): void {
+  const overlay = document.getElementById("boot-overlay");
+  if (!overlay) return;
+  overlay.dataset.state = "ready";
+  // フェードアウト(200ms、`style.css` の transition)を待ってから DOM から外す。
+  window.setTimeout(() => {
+    overlay.hidden = true;
+  }, 250);
+}
+function markBootFailed(message: string): void {
+  const overlay = document.getElementById("boot-overlay");
+  if (!overlay) return;
+  overlay.hidden = false;
+  overlay.dataset.state = "error";
+  const target = overlay.querySelector(".boot-message");
+  if (target) {
+    target.textContent = `物理エンジンの読み込みに失敗しました。\n${message}`;
+  }
+}
+
+/// **パネルのリサイズ**(設計 §1「ブラウザ 1 ページ内でリサイズ・タブ化・
+/// 切り離しができる」の、リサイズの部分)。
+///
+/// グリッドのガター列/行そのものを掴ませる。値は `#app` のインラインスタイルへ
+/// CSS 変数として書き、localStorage に残す。**タブ化・切り離しは引き続き対象外**
+/// ——パネルの入れ替えはグリッドエリアの静的な割り当てを崩す必要があり、
+/// 本増分の範囲を超える。
+type SplitterLimits = { min: number; max: () => number; fallback: number };
+const SPLITTER_LIMITS: Record<string, SplitterLimits> = {
+  "--col-left": { min: 150, max: () => window.innerWidth * 0.4, fallback: 220 },
+  "--col-right": { min: 190, max: () => window.innerWidth * 0.45, fallback: 268 },
+  "--row-console": { min: 80, max: () => window.innerHeight * 0.6, fallback: 160 },
+};
+/// プリセット(`#app[data-layout=…]`)が握っている変数。`setUpLayoutPresetSwitcher`
+/// はこれだけをインラインから外す。
+const PRESET_OWNED_PANEL_VARS = ["--row-console"];
+const PANEL_SIZE_STORAGE_KEY = "simulator.editor.panel-sizes";
+
+function readStoredPanelSizes(): Record<string, number> {
+  try {
+    const raw = window.localStorage.getItem(PANEL_SIZE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (key in SPLITTER_LIMITS && typeof value === "number" && value > 0) {
+        out[key] = value;
+      }
+    }
+    return out;
+    // localStorage はプライベートウィンドウ等で例外を投げ得る。保存できない
+    // ことは機能の本質ではないので黙って諦める(既定サイズで動く)。
+  } catch {
+    return {};
+  }
+}
+function writeStoredPanelSizes(sizes: Record<string, number>): void {
+  try {
+    window.localStorage.setItem(PANEL_SIZE_STORAGE_KEY, JSON.stringify(sizes));
+  } catch {
+    /* 保存できなくても操作自体は成立する。 */
+  }
+}
+function clearPresetOwnedPanelSizes(): void {
+  const app = document.getElementById("app");
+  if (!app) return;
+  const sizes = readStoredPanelSizes();
+  for (const name of PRESET_OWNED_PANEL_VARS) {
+    app.style.removeProperty(name);
+    delete sizes[name];
+  }
+  writeStoredPanelSizes(sizes);
+}
+
+function setUpPanelSplitters(): void {
+  const app = document.getElementById("app");
+  if (!app) return;
+  const stored = readStoredPanelSizes();
+
+  function setSize(name: string, px: number, persist: boolean): number {
+    const limits = SPLITTER_LIMITS[name];
+    const clamped = Math.round(
+      Math.min(Math.max(px, limits.min), Math.max(limits.max(), limits.min)),
+    );
+    app!.style.setProperty(name, `${clamped}px`);
+    if (persist) {
+      const sizes = readStoredPanelSizes();
+      sizes[name] = clamped;
+      writeStoredPanelSizes(sizes);
+    }
+    return clamped;
+  }
+  /// 今の実寸(px)。インライン上書きが無ければ CSS 側の既定を読む。
+  function currentSize(name: string): number {
+    const raw = getComputedStyle(app!).getPropertyValue(name).trim();
+    const parsed = Number.parseFloat(raw);
+    return Number.isFinite(parsed) && parsed > 0
+      ? parsed
+      : SPLITTER_LIMITS[name].fallback;
+  }
+
+  for (const [name, value] of Object.entries(stored)) setSize(name, value, false);
+
+  const splitters =
+    document.querySelectorAll<HTMLElement>(".splitter[data-var]");
+  splitters.forEach((splitter) => {
+    const name = splitter.dataset.var!;
+    if (!(name in SPLITTER_LIMITS)) return;
+    const axis = splitter.dataset.axis === "y" ? "y" : "x";
+    // 掴んだ境界の「どちら側」のパネルを伸ばすか。Inspector と Console は
+    // ガターより後ろ(右/下)にあるので、ポインタの移動方向と逆に伸びる。
+    const sign = splitter.dataset.invert === "true" ? -1 : 1;
+
+    function announce(px: number) {
+      splitter.setAttribute("aria-valuenow", String(Math.round(px)));
+      splitter.setAttribute("aria-valuemin", String(SPLITTER_LIMITS[name].min));
+      splitter.setAttribute(
+        "aria-valuemax",
+        String(Math.round(SPLITTER_LIMITS[name].max())),
+      );
+    }
+    announce(currentSize(name));
+
+    splitter.addEventListener("pointerdown", (event) => {
+      // 主ボタンのみ。右クリックで掴んだままになるのを防ぐ。
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const start = axis === "x" ? event.clientX : event.clientY;
+      const startSize = currentSize(name);
+      splitter.setPointerCapture(event.pointerId);
+      splitter.dataset.dragging = "true";
+      document.body.dataset.splitterDragging = "true";
+      document.body.style.setProperty(
+        "--splitter-cursor",
+        axis === "x" ? "col-resize" : "row-resize",
+      );
+
+      const onMove = (move: PointerEvent) => {
+        const now = axis === "x" ? move.clientX : move.clientY;
+        announce(setSize(name, startSize + (now - start) * sign, false));
+      };
+      const onUp = () => {
+        splitter.removeEventListener("pointermove", onMove);
+        splitter.removeEventListener("pointerup", onUp);
+        splitter.removeEventListener("pointercancel", onUp);
+        delete splitter.dataset.dragging;
+        delete document.body.dataset.splitterDragging;
+        document.body.style.removeProperty("--splitter-cursor");
+        // 確定時にだけ保存する(ドラッグ中に毎フレーム書くと無駄が大きい)。
+        setSize(name, currentSize(name), true);
+      };
+      splitter.addEventListener("pointermove", onMove);
+      splitter.addEventListener("pointerup", onUp);
+      splitter.addEventListener("pointercancel", onUp);
+    });
+
+    // ダブルクリックで既定へ戻す(掴み直して探るより速い、一般的な作法)。
+    splitter.addEventListener("dblclick", () => {
+      app!.style.removeProperty(name);
+      const sizes = readStoredPanelSizes();
+      delete sizes[name];
+      writeStoredPanelSizes(sizes);
+      announce(currentSize(name));
+    });
+
+    // **キーボードでも動かせる**(QA 報告書 §5「キーボードのみでの操作は未検証」)。
+    // マウスを持たない利用者にとって、ドラッグしか手段が無い操作は存在しないのと
+    // 同じになる。
+    splitter.addEventListener("keydown", (event) => {
+      const step = event.shiftKey ? 48 : 16;
+      let delta = 0;
+      if (axis === "x" && event.key === "ArrowLeft") delta = -step;
+      else if (axis === "x" && event.key === "ArrowRight") delta = step;
+      else if (axis === "y" && event.key === "ArrowUp") delta = -step;
+      else if (axis === "y" && event.key === "ArrowDown") delta = step;
+      else if (event.key === "Home") {
+        app!.style.removeProperty(name);
+        const sizes = readStoredPanelSizes();
+        delete sizes[name];
+        writeStoredPanelSizes(sizes);
+        announce(currentSize(name));
+        event.preventDefault();
+        return;
+      } else return;
+      announce(setSize(name, currentSize(name) + delta * sign, true));
+      event.preventDefault();
+    });
+  });
+}
+
+/// **ショートカット一覧**。定義を `keydown` ハンドラと同じファイルに置く
+/// (`setUpSceneView` 内のハンドラが実装、ここが一覧)。QA 不具合 7 は
+/// 「`title` と README には書いてあるが `keydown` に case が無い」という
+/// 食い違いだったので、一覧の側も同じファイルに置いて突き合わせやすくする。
+const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
+  {
+    title: "ツール",
+    items: [
+      ["W", "移動ギズモ"],
+      ["E", "回転ギズモ"],
+      ["R", "スケールギズモ"],
+      ["Q", "選択のみ(ギズモ非表示)"],
+      ["S", "スケッチツール"],
+      ["X", "ギズモ座標系を World / Local で切替"],
+    ],
+  },
+  {
+    title: "再生・時間",
+    items: [
+      ["Space", "再生 / 一時停止(Play モード)"],
+      ["F", "選択中のボディへカメラを寄せる"],
+    ],
+  },
+  {
+    title: "編集",
+    items: [
+      ["Ctrl / ⌘ + Z", "元に戻す"],
+      ["Ctrl / ⌘ + Shift + Z", "やり直す"],
+      ["Ctrl / ⌘ + Y", "やり直す"],
+      ["Ctrl / ⌘ + D", "選択中のボディを複製"],
+      ["Delete", "選択中のボディを削除"],
+    ],
+  },
+  {
+    title: "選択",
+    items: [
+      ["Ctrl / ⌘ + クリック", "Hierarchy で選択を追加・解除"],
+      ["Shift + クリック", "Hierarchy で範囲選択"],
+      ["Ctrl / ⌘ + A", "全ボディを選択"],
+      ["↑ / ↓", "Hierarchy 内を移動(パネルにフォーカス中)"],
+      ["Esc", "複数選択を解除 / メニュー・ダイアログを閉じる"],
+    ],
+  },
+  {
+    title: "スケッチ中",
+    items: [
+      ["Enter", "作図中の点列を 1 枚のプロファイルとして確定"],
+      ["Backspace", "作図中の最後の点を取り消す"],
+    ],
+  },
+  {
+    title: "パネル",
+    items: [
+      ["? / F1", "この一覧を開く / 閉じる"],
+      ["← → ↑ ↓", "スプリッターにフォーカス中はパネルの大きさを変える"],
+      ["Home", "スプリッターにフォーカス中は既定の大きさへ戻す"],
+    ],
+  },
+];
+
+function setUpShortcutOverlay(): void {
+  const overlay = document.getElementById("shortcut-overlay");
+  const columns = document.getElementById("shortcut-columns");
+  const button = document.getElementById("btn-shortcuts");
+  if (!overlay || !columns) return;
+
+  for (const group of SHORTCUT_GROUPS) {
+    const section = document.createElement("div");
+    section.className = "shortcut-group";
+    const heading = document.createElement("h3");
+    heading.textContent = group.title;
+    section.appendChild(heading);
+    for (const [keys, description] of group.items) {
+      const row = document.createElement("div");
+      row.className = "shortcut-row";
+      const kbd = document.createElement("kbd");
+      kbd.textContent = keys;
+      const text = document.createElement("span");
+      text.textContent = description;
+      row.append(text, kbd);
+      section.appendChild(row);
+    }
+    columns.appendChild(section);
+  }
+
+  let lastFocused: HTMLElement | null = null;
+  function open() {
+    lastFocused = document.activeElement as HTMLElement | null;
+    overlay!.hidden = false;
+    (overlay!.querySelector(".shortcut-dialog") as HTMLElement | null)?.focus();
+  }
+  function close() {
+    overlay!.hidden = true;
+    // 開く前にフォーカスしていた場所へ返す(キーボード利用者が迷子にならない)。
+    lastFocused?.focus?.();
+  }
+  function toggle() {
+    if (overlay!.hidden) open();
+    else close();
+  }
+
+  const dialog = overlay.querySelector(".shortcut-dialog") as HTMLElement | null;
+  dialog?.setAttribute("tabindex", "-1");
+  button?.addEventListener("click", toggle);
+  // 背景(ダイアログの外側)クリックで閉じる。
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) close();
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !overlay.hidden) {
+      close();
+      event.preventDefault();
+      return;
+    }
+    const target = event.target as HTMLElement | null;
+    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    // `?` は多くの配列で Shift + `/`。`event.key` を見れば配列差を吸収できる。
+    if (event.key === "?" || event.key === "F1") {
+      toggle();
+      event.preventDefault();
+    }
+  });
+}
+
+/// **タブのキーボード操作と `aria-selected` の同期**(Console / Project)。
+/// `role="tablist"` を名乗る以上、左右キーで移動できる必要がある(WAI-ARIA の
+/// tabs パターン)。`aria-selected` は `.active` クラスの写しなので、ここで
+/// 一括して面倒を見る——各パネルの実装は従来どおり `.active` だけを触ればよい。
+function setUpTabListKeyboardNavigation(): void {
+  for (const list of document.querySelectorAll<HTMLElement>(
+    '[role="tablist"]',
+  )) {
+    const tabs = Array.from(
+      list.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    if (tabs.length === 0) continue;
+
+    function syncSelected() {
+      for (const tab of tabs) {
+        const active = tab.classList.contains("active");
+        tab.setAttribute("aria-selected", active ? "true" : "false");
+        // ロービング tabindex: Tab キーは tablist 全体で 1 回だけ止まる。
+        tab.tabIndex = active ? 0 : -1;
+      }
+    }
+    syncSelected();
+    // 既存のクリックハンドラ(`.active` を付け替える)より後に走るので、
+    // 付け替えの結果をそのまま写せる。
+    list.addEventListener("click", syncSelected);
+
+    list.addEventListener("keydown", (event) => {
+      const index = tabs.indexOf(event.target as HTMLButtonElement);
+      if (index < 0) return;
+      let next: number | null = null;
+      if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+      else if (event.key === "ArrowLeft")
+        next = (index - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      else return;
+      tabs[next].focus();
+      tabs[next].click();
+      event.preventDefault();
+    });
+  }
+}
+
+/// **Hierarchy のキーボード操作**。ツリーは `setUpHierarchy` が world の
+/// 差し替えのたびに丸ごと作り直すので、個々の行にハンドラを付けると再構築の
+/// たびに配線し直すことになる。`#hierarchy-tree` 自体を 1 つのフォーカス対象
+/// (`tabindex="0"` + `aria-activedescendant`)にし、委譲で処理する——
+/// 作り直されても配線が生き残る。
+function setUpHierarchyKeyboardNavigation(): void {
+  const tree = document.getElementById("hierarchy-tree");
+  if (!tree) return;
+  tree.tabIndex = 0;
+
+  function visibleItems(): HTMLElement[] {
+    return Array.from(
+      tree!.querySelectorAll<HTMLElement>(".tree-selectable"),
+    ).filter((el) => el.offsetParent !== null);
+  }
+  function activeIndex(items: HTMLElement[]): number {
+    const selected = items.findIndex((el) => el.classList.contains("selected"));
+    return selected >= 0 ? selected : 0;
+  }
+  function focusItem(item: HTMLElement) {
+    if (!item.id) item.id = `hierarchy-item-${Math.random().toString(36).slice(2, 8)}`;
+    tree!.setAttribute("aria-activedescendant", item.id);
+    item.scrollIntoView({ block: "nearest" });
+  }
+
+  tree.addEventListener("keydown", (event) => {
+    const items = visibleItems();
+    if (items.length === 0) return;
+    const index = activeIndex(items);
+    let next: number | null = null;
+    if (event.key === "ArrowDown") next = Math.min(index + 1, items.length - 1);
+    else if (event.key === "ArrowUp") next = Math.max(index - 1, 0);
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    else if (event.key === "Enter" || event.key === " ") {
+      items[index].click();
+      focusItem(items[index]);
+      event.preventDefault();
+      return;
+    } else return;
+    // **選択はフォーカスに追従させる**(Unity の Hierarchy と同じ)。
+    // 上下キーで見ている対象が Inspector と Scene View にそのまま反映される。
+    items[next].click();
+    focusItem(items[next]);
+    event.preventDefault();
+  });
+}
+
+/// ツリーの行へ WAI-ARIA の意味付けをする。`setUpHierarchy` の末尾から
+/// 呼ばれ、再構築のたびに掛け直す(行の生成箇所が Bodies / Joints /
+/// Materials / Frames / Probes と 5 箇所に分かれているため、1 箇所で
+/// まとめて付けるほうが漏れない)。
+function applyHierarchyAriaRoles(tree: HTMLElement): void {
+  for (const group of tree.querySelectorAll<HTMLElement>("ul")) {
+    group.setAttribute("role", "group");
+  }
+  for (const li of tree.querySelectorAll<HTMLElement>("li")) {
+    li.setAttribute("role", "treeitem");
+    if (li.classList.contains("tree-selectable")) {
+      li.setAttribute(
+        "aria-selected",
+        li.classList.contains("selected") ? "true" : "false",
+      );
+    }
+    const nested = li.querySelector(":scope > ul");
+    if (nested) {
+      li.setAttribute(
+        "aria-expanded",
+        (nested as HTMLElement).style.display === "none" ? "false" : "true",
+      );
+    }
+  }
 }
 
 // Consoleパネル(設計docs/23-frontend/01-editor.md §1.5「SolverDiagnostics の
@@ -168,12 +654,17 @@ type SelectBodyRef = { current: ((index: number) => void) | null };
 // `{ current }`型は使わずモジュール変数そのものにした。
 let consoleErrorAppend: ((message: string) => void) | null = null;
 
-/// 失敗をユーザーへ即時に伝え(`window.alert`)、かつConsoleのErrorsタブへ
-/// 恒久的に残す(`consoleErrorAppend`未配線の間——起動直後の一瞬——は
-/// 後者を静かにスキップする)。
+/// 失敗をユーザーへ即時に伝え、かつConsoleのErrorsタブへ恒久的に残す
+/// (`consoleErrorAppend`未配線の間——起動直後の一瞬——は後者を静かにスキップする)。
+///
+/// **即時通知は `window.alert` からトーストへ移した(増分「UI 品質の底上げ」)**。
+/// `alert` は操作をブロックし、読むために必ず OK を押させ、押した瞬間に文面が
+/// 消える。連続で失敗すると数回押させられる。トーストなら操作を止めずに出せて、
+/// 8 秒で自然に消え、消えても Console Errors タブに同じ文面が残る——「即時に
+/// 気づける」と「後から見返せる」を両立させる形はこちらが正しい。
 function reportError(message: string): void {
   consoleErrorAppend?.(message);
-  window.alert(message);
+  showToast(message, "error");
 }
 
 /// **Inspector の編集ハンドラ(群2)**。設計 docs/23-frontend/01-editor.md §1.3 は
@@ -1202,7 +1693,15 @@ function setUpHierarchy(
     searchInput.oninput = () => applyHierarchyFilter(searchInput.value);
   }
 
-  return highlight;
+  applyHierarchyAriaRoles(tree);
+  // `highlight` は Scene View のピッキング等から後で呼ばれるので、選択状態の
+  // `aria-selected` もそこで掛け直す(class だけ変えて ARIA が古いままだと、
+  // 読み上げには前の選択が残る)。
+  const highlightWithAria = (index: number) => {
+    highlight(index);
+    applyHierarchyAriaRoles(tree);
+  };
+  return highlightWithAria;
 }
 
 // Inspectorパネル(設計docs/23-frontend/01-editor.md §1.3)。選択中ボディの
@@ -1223,8 +1722,9 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   const body = document.getElementById("inspector-body")!;
   if (index < 0 || index >= readNumber(world, "body_count")) {
     body.innerHTML = `
-      <div class="inspector-component">
-        <p>選択中のボディはありません(このシーンには力学ボディがありません——Probe Graphsパネルで観測してください)。</p>
+      <div class="empty-state">
+        <p>選択中のボディはありません。</p>
+        <p>このシーンには力学ボディがありません——Probe Graphs パネルや Scene View の場のパネルで観測してください。</p>
       </div>
     `;
     return;
@@ -2811,25 +3311,116 @@ function setUpProjectDrawer(
     galleryHeading.textContent =
       "シーンギャラリー(ワールドを差し替えて読み込み)";
     body.appendChild(galleryHeading);
+    // **カード + 絞り込み(増分「UI 品質の底上げ」)**。従来は 43 本を
+    // 1 行 2 段(説明文の下に「読み込み」ボタン)のベタなリストで並べており、
+    // 目的のシーンへ行くには全体をスクロールして日本語の文章を読むしかなかった
+    // ——「検証済みのデモが 43 本」は README が掲げる中心的な価値なのに、
+    // その入口が一番使いにくい状態だった。
+    //  - 検索欄: 番号(D27)・題名・説明・ドメイン名のいずれにも当たる
+    //  - ドメインのチップ: 「熱だけ見たい」に 1 クリックで応える
+    //  - カード全体がボタン: 説明を読んだ指をそのまま押せる(押す的が
+    //    小さなボタン 1 個から、カード 1 枚ぶんに広がる)
+    const manifest = sceneGalleryManifest();
+    const galleryToolbar = document.createElement("div");
+    galleryToolbar.className = "scene-gallery-toolbar";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "scene-gallery-search";
+    search.placeholder = "シーンを検索(番号・名前・説明・ドメイン)";
+    search.setAttribute("aria-label", "シーンを検索");
+    const count = document.createElement("span");
+    count.className = "scene-gallery-count";
+    galleryToolbar.append(search, count);
+    body.appendChild(galleryToolbar);
+
+    const domains = [...new Set(manifest.flatMap((e) => e.domains))].sort();
+    let activeDomain: string | null = null;
+    const chips = document.createElement("div");
+    chips.className = "scene-gallery-domains";
+    const chipButtons: HTMLButtonElement[] = [];
+    for (const domain of ["すべて", ...domains]) {
+      const chip = document.createElement("button");
+      chip.className = "scene-domain-chip";
+      chip.textContent = domain;
+      chip.setAttribute("aria-pressed", domain === "すべて" ? "true" : "false");
+      chip.addEventListener("click", () => {
+        activeDomain = domain === "すべて" ? null : domain;
+        for (const other of chipButtons) {
+          other.setAttribute(
+            "aria-pressed",
+            other === chip ? "true" : "false",
+          );
+        }
+        applyGalleryFilter();
+      });
+      chipButtons.push(chip);
+      chips.appendChild(chip);
+    }
+    body.appendChild(chips);
+
     const galleryList = document.createElement("ul");
     galleryList.className = "scene-gallery-list";
-    for (const entry of sceneGalleryManifest()) {
+    for (const entry of manifest) {
       const item = document.createElement("li");
-      const label = document.createElement("div");
-      label.textContent = `${entry.demo}: ${entry.title} — ${entry.description} [${entry.domains.join(", ")}]`;
-      item.appendChild(label);
-      const loadButton = document.createElement("button");
-      loadButton.textContent = "読み込み";
-      loadButton.dataset.sceneFile = entry.file;
-      loadButton.addEventListener("click", () => {
+      // 検索対象をあらかじめ 1 本の小文字文字列に畳んでおく(入力のたびに
+      // 43 件ぶんの結合をやり直さない)。
+      item.dataset.haystack =
+        `${entry.demo} ${entry.title} ${entry.description} ${entry.domains.join(" ")}`.toLowerCase();
+      item.dataset.domains = entry.domains.join(" ");
+      const card = document.createElement("button");
+      card.className = "scene-card";
+      card.dataset.sceneFile = entry.file;
+      card.title = `${entry.demo}: ${entry.title} を読み込む(ワールドを差し替えます)`;
+      const title = document.createElement("span");
+      title.className = "scene-card-title";
+      const id = document.createElement("span");
+      id.className = "scene-card-id";
+      id.textContent = entry.demo;
+      title.append(id, document.createTextNode(entry.title));
+      const description = document.createElement("span");
+      description.className = "scene-card-desc";
+      description.textContent = entry.description;
+      const tags = document.createElement("span");
+      tags.className = "scene-card-tags";
+      for (const domain of entry.domains) {
+        const tag = document.createElement("span");
+        tag.className = "scene-tag";
+        tag.textContent = domain;
+        tags.appendChild(tag);
+      }
+      card.append(title, description, tags);
+      card.addEventListener("click", () => {
         const json = sceneGalleryFileContent(entry.file);
         if (!json || !sceneGalleryRef.current) return;
         sceneGalleryRef.current(json);
       });
-      item.appendChild(loadButton);
+      item.appendChild(card);
       galleryList.appendChild(item);
     }
     body.appendChild(galleryList);
+
+    const emptyResult = document.createElement("p");
+    emptyResult.className = "empty-state";
+    emptyResult.textContent = "条件に合うシーンがありません。";
+    emptyResult.hidden = true;
+    body.appendChild(emptyResult);
+
+    function applyGalleryFilter() {
+      const query = search.value.trim().toLowerCase();
+      let shown = 0;
+      for (const item of Array.from(galleryList.children) as HTMLElement[]) {
+        const matchesText = !query || item.dataset.haystack!.includes(query);
+        const matchesDomain =
+          !activeDomain || item.dataset.domains!.split(" ").includes(activeDomain);
+        const visible = matchesText && matchesDomain;
+        item.hidden = !visible;
+        if (visible) shown += 1;
+      }
+      count.textContent = `${shown} / ${manifest.length} 本`;
+      emptyResult.hidden = shown > 0;
+    }
+    search.addEventListener("input", applyGalleryFilter);
+    applyGalleryFilter();
 
     const note = document.createElement("p");
     note.textContent =
@@ -3843,6 +4434,7 @@ function setUpProbeGraph(): (
     "btn-probe-csv",
   ) as HTMLButtonElement;
   const timeRangeLabel = document.getElementById("probe-time-range")!;
+  const emptyState = document.getElementById("probe-empty");
 
   // CSVボタンは「今まさに描かれている系列」を書き出す。`render()`が毎フレーム
   // 渡してくる最新の配列をここで覚えておく(描画とエクスポートで同じデータを
@@ -3850,6 +4442,8 @@ function setUpProbeGraph(): (
   let latest: ProbeSeries[] = [];
   csvButton.addEventListener("click", () => {
     if (latest.length === 0) return;
+    // 押しても何も起きないボタンは「壊れている」と読まれるので、下の
+    // `csvButton.disabled` で先に押せなくしてある。ここは念のための保険。
     const blob = new Blob([probeSeriesToCsv(latest)], {
       type: "text/csv;charset=utf-8",
     });
@@ -3863,6 +4457,17 @@ function setUpProbeGraph(): (
 
   return (series: ProbeSeries[], dt: number, currentTime: number) => {
     latest = series;
+    // **空状態**(増分「UI 品質の底上げ」)。描ける系列(サンプル 2 点以上)が
+    // 1 本も無いあいだは、黒い矩形ではなく「何をすれば線が出るか」を出す。
+    const drawable = series.filter((s) => s.history.length >= 2);
+    if (emptyState) emptyState.hidden = drawable.length > 0;
+    canvas.hidden = drawable.length === 0;
+    csvButton.disabled = drawable.length === 0;
+    if (drawable.length === 0) {
+      timeRangeLabel.textContent = "";
+      return;
+    }
+
     const useLog = logToggle.checked;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
@@ -3871,7 +4476,21 @@ function setUpProbeGraph(): (
       canvas.height = h;
     }
     ctx.clearRect(0, 0, w, h);
-    ctx.font = "11px monospace";
+    ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+    // **目盛り線**(増分「UI 品質の底上げ」)。系列ごとに独立して正規化する
+    // 設計(下記)なので共通の値軸は引けないが、**高さの 1/4 ごとの水平線**が
+    // あるだけで「どのくらい動いたか」「振動しているのか単調なのか」が
+    // 目で追えるようになる。線は地に沈む明度に抑え、データを隠さない。
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < 4; i++) {
+      const y = Math.round((h * i) / 4) + 0.5;
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+    }
+    ctx.stroke();
 
     // QA不具合9: グラフのどこが何秒なのか画面から分からず、当時のリングバッファの
     // 打ち切りと相まって「第1バウンドを数回あとの極大と取り違える」ような読み違いが
@@ -3918,14 +4537,17 @@ function setUpProbeGraph(): (
       }
       ctx.stroke();
 
-      ctx.fillStyle = s.color;
+      // 凡例は折れ線の上に重なるので、**濃い縁取りを先に引いてから**塗る
+      // (以前は素の塗りだけで、線と同系色の場所では文字が読めなかった)。
       const suffix = useLog ? " [log]" : "";
-      ctx.fillText(
-        `${s.label}: max=${max.toFixed(2)} min=${min.toFixed(2)}${suffix}`,
-        4,
-        legendY,
-      );
-      legendY += 12;
+      const legendText = `${s.label}: max=${max.toFixed(2)} min=${min.toFixed(2)}${suffix}`;
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
+      ctx.strokeText(legendText, 4, legendY);
+      ctx.fillStyle = s.color;
+      ctx.fillText(legendText, 4, legendY);
+      legendY += 13;
     }
   };
 }
@@ -8242,8 +8864,12 @@ async function setUpSceneView(
     timelineStep.textContent = `step = ${readNumber(world, "step_count").toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
     hashDisplay.title = hashFull;
+    // バッジは操作の可否を決める最重要の状態なので、文字だけでなく色でも
+    // 分ける(`style.css` の `.badge[data-mode]`)。
+    const badgeMode = mode === "edit" ? "edit" : playing ? "playing" : "paused";
     playModeBadge.textContent =
-      mode === "edit" ? "Edit" : playing ? "Playing" : "Paused";
+      badgeMode === "edit" ? "Edit" : badgeMode === "playing" ? "Playing" : "Paused";
+    playModeBadge.dataset.mode = badgeMode;
 
     if (!scrubbing) {
       const latestIndex = Math.max(readNumber(world, "snapshot_count") - 1, 0);
@@ -8257,7 +8883,16 @@ async function setUpSceneView(
     renderer.render(scene, camera);
   }
   hashDisplay.addEventListener("click", () => {
-    navigator.clipboard?.writeText(world.read_component("state_hash", "")).catch(() => {});
+    // **コピーできたことを伝える**(増分「UI 品質の底上げ」)。設計 §2 は
+    // 「クリックでフル 64 bit ハッシュをコピー」と定めているが、これまでは
+    // 押しても画面が一切変わらず、コピーされたのか押し損ねたのか分からなかった
+    // (失敗も `.catch(() => {})` で握り潰していた——権限が無い文脈では
+    // 何も起きないまま「壊れている」と読まれる)。
+    const hash = world.read_component("state_hash", "");
+    navigator.clipboard
+      ?.writeText(hash)
+      .then(() => showToast(`状態ハッシュをコピーしました: ${hash}`, "success"))
+      .catch(() => showToast("クリップボードへコピーできませんでした。", "error"));
   });
 
   let accumulator = 0;
@@ -8326,6 +8961,13 @@ async function setUpSceneView(
 
 function main() {
   setUpLayoutPresetSwitcher();
+  // UI 基盤(増分「UI 品質の底上げ」)。world より先に立ち上げる——読み込み中
+  // でもショートカット一覧は開けるし、初期化に失敗したときの通知経路(トースト)が
+  // 必要になるのはまさにその瞬間だから。
+  setUpPanelSplitters();
+  setUpShortcutOverlay();
+  setUpTabListKeyboardNavigation();
+  setUpHierarchyKeyboardNavigation();
   const updateProbeGraph = setUpProbeGraph();
   const jumpToStepRef: JumpToStepRef = { current: null };
   const selectBodyRef: SelectBodyRef = { current: null };
@@ -8416,11 +9058,16 @@ function main() {
     circuitElementsRef,
     consoleDiagnosticsRef,
     validationBaseJsonRef,
-  ).catch((err) => {
-    const hud = document.getElementById("hud");
-    if (hud) hud.textContent = `エラー: ${String(err)}`;
-    console.error(err);
-  });
+  )
+    .then(() => {
+      markBootReady();
+    })
+    .catch((err) => {
+      const hud = document.getElementById("hud");
+      if (hud) hud.textContent = `エラー: ${String(err)}`;
+      markBootFailed(String(err));
+      console.error(err);
+    });
 }
 
 main();
