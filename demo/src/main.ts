@@ -7,6 +7,7 @@ import init, {
   sketch_extrude_shape_json,
 } from "../pkg/sim_wasm.js";
 import "./style.css";
+import { setUpGuidedMode, type GuidedApi, type GuidedApiRef } from "./guided";
 
 // 統合エディタ(docs/23-frontend/01-editor.md)の骨格増分。
 //
@@ -4578,6 +4579,7 @@ async function setUpSceneView(
   circuitElementsRef: CircuitElementsRef,
   consoleDiagnosticsRef: ConsoleDiagnosticsRef,
   validationBaseJsonRef: ValidationBaseJsonRef,
+  guidedApiRef: GuidedApiRef,
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -5264,6 +5266,13 @@ async function setUpSceneView(
     renderer.setSize(w, h);
   }
   window.addEventListener("resize", resize);
+  // **器の大きさが変わったら追従する**。`window` の resize だけを見ていた頃は、
+  // スプリッターで Scene View の幅を変えても・かんたんモードと統合エディタを
+  // 切り替えても、three.js のキャンバスが前の寸法のまま引き伸ばされて表示が
+  // 歪んでいた(ウィンドウを 1px 動かすと直る、という分かりにくい症状だった)。
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => resize()).observe(host);
+  }
   resize();
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.5));
@@ -5813,7 +5822,12 @@ async function setUpSceneView(
   ///
   /// 描画対象すべてのバウンディングボックスを取り、その中心を注視点に、
   /// 対角長からカメラ距離を決める(Unity の F キーと同じ考え方)。
-  function frameCameraOnContent() {
+  /// 箱を作る部分は `contentBoundingBox` として切り出してある——
+  /// かんたんモードの追従カメラ(`updateGuidedFollowCamera`)が同じ
+  /// 「観察対象」の定義を使うため。
+  ///
+  /// 「観察対象」のバウンディングボックス。静的な床・壁は含めない(QA不具合2)。
+  function contentBoundingBox(): THREE.Box3 | null {
     const box = new THREE.Box3();
     let hasContent = false;
     const expand = (object: THREE.Object3D) => {
@@ -5837,7 +5851,12 @@ async function setUpSceneView(
     expand(gasCloud.points);
     expand(brownianCloud.points);
     expand(fluidPoints);
-    if (!hasContent) return;
+    return hasContent ? box : null;
+  }
+
+  function frameCameraOnContent() {
+    const box = contentBoundingBox();
+    if (!box) return;
     const center = box.getCenter(new THREE.Vector3());
     const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.5);
     orbit.target.copy(center);
@@ -5863,6 +5882,64 @@ async function setUpSceneView(
     camera.position.y = Math.max(camera.position.y, 0.3);
     orbit.update();
   }
+
+  /**
+   * **追従カメラ**(かんたんモード)。
+   *
+   * 読み込み時の 1 回だけ画角を合わせる従来のやり方は、**動くものを見る**という
+   * 目的に対して成立していなかった——高さ 20m から落ちる球は、読み込み直後の
+   * 球(半径 0.3m)にぴったり寄った画角から 1 秒で外へ出ていき、初めて使う人の
+   * 画面には**空のグリッドだけが残る**(実際にスクリーンショットで確認した)。
+   * 統合エディタなら自分でカメラを回して探せばよいが、それは「中を知っている
+   * 人の操作」であって、かんたんモードが引き受けるべき仕事ではない。
+   *
+   * そこで毎フレーム、観察対象と原点(床・太陽など「基準」がある場所)を
+   * 含む箱を作り、そこへゆっくり寄せる。ユーザーが自分でカメラを操作したら
+   * 追従は止める(操作を奪わない)——「カメラを戻す」で再開できる。
+   */
+  let guidedFollowCamera = false;
+  let guidedCameraSnap = false;
+  const guidedFollowTarget = new THREE.Vector3();
+  const guidedFollowDirection = new THREE.Vector3();
+  function updateGuidedFollowCamera() {
+    const box = contentBoundingBox();
+    if (!box) return;
+    // 原点を必ず含める。落下は「床(y=0)まで」、公転は「中心の星まで」が
+    // 見えて初めて現象として読めるため。
+    box.expandByPoint(new THREE.Vector3(0, 0, 0));
+    box.getCenter(guidedFollowTarget);
+    const radius = Math.max(
+      box.getSize(new THREE.Vector3()).length() * 0.5,
+      0.5,
+    );
+    // 対象の 3.6 倍まで引く。かんたんモードでは「対象が大きく映ること」より
+    // **まわりが見えること**が優先——坂を滑る箱は、坂が画面に入っていなければ
+    // 何が起きているのか分からない(倍率ではなく比で決めるのは、シーンの寸法が
+    // 1e-7 m の分子から 1e11 m の公転まで振れるため)。
+    const desired = radius * 3.6;
+    const ease = guidedCameraSnap ? 1 : 0.08;
+    guidedCameraSnap = false;
+    guidedFollowDirection.copy(camera.position).sub(orbit.target);
+    if (guidedFollowDirection.lengthSq() < 1e-12) {
+      guidedFollowDirection.set(1, 0.7, 1.2);
+    }
+    const distance = guidedFollowDirection.length();
+    guidedFollowDirection.normalize();
+    if (guidedFollowDirection.y < 0.3) {
+      guidedFollowDirection.y = 0.3;
+      guidedFollowDirection.normalize();
+    }
+    orbit.target.lerp(guidedFollowTarget, ease);
+    const nextDistance = distance + (desired - distance) * ease;
+    camera.position
+      .copy(orbit.target)
+      .addScaledVector(guidedFollowDirection, nextDistance);
+    camera.position.y = Math.max(camera.position.y, 0.3);
+  }
+  // 自分でカメラを動かしたら追従をやめる(操作を横取りしない)。
+  orbit.addEventListener("start", () => {
+    guidedFollowCamera = false;
+  });
 
   function updateGridFluidOverlay(currentWorld: WasmWorld) {
     const enabled = (
@@ -8699,7 +8776,12 @@ async function setUpSceneView(
       const series: ProbeSeries[] = [];
       for (let i = 0; i < probeCount; i++) {
         series.push({
-          label: world.read_component("imported_probe_label_at", String(i)),
+          // かんたんモードでは、グラフの凡例も人間の言葉にする
+          // (`NodeTemp[0]` ではなく「コーヒーの温度」)。指定が無いプローブは
+          // 従来どおり Rust 側の生ラベルを出す。
+          label:
+            guidedProbeLabels?.[i] ??
+            world.read_component("imported_probe_label_at", String(i)),
           color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
           // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
           // 返す(B16、`HotPathViewBuffers`のdoc参照)——このループが呼ぶたび
@@ -8878,6 +8960,7 @@ async function setUpSceneView(
     }
 
     syncSettingsInputs();
+    if (guidedFollowCamera) updateGuidedFollowCamera();
     // enableDamping を使うので毎フレーム update が要る。
     orbit.update();
     renderer.render(scene, camera);
@@ -8896,6 +8979,16 @@ async function setUpSceneView(
   });
 
   let accumulator = 0;
+  // **かんたんモードの進み方**(`guided.ts` の `setPace`)。`null` なら従来どおり
+  // 「時間倍率 × 実時間」で進める。数値が入っているときは *1 秒あたりの step 数*
+  // として扱う——シーンごとに dt が 1e-12 秒(気体分子)〜31555 秒(太陽系)と
+  // 16 桁も違い、同じ「×1」が実時間どおりにも「1 step に 4 分」にもなるため、
+  // 現象ごとに見やすい速さを倍率では指定できない(D34 は上限の ×128 でも
+  // 1 step 4 分かかり、選んでも永遠に何も起きなかった)。
+  let guidedPace: number | null = null;
+  let stepAccumulator = 0;
+  /** かんたんモードが指定するプローブの表示名(index → 名前)。 */
+  let guidedProbeLabels: Record<number, string> | null = null;
   let lastTimeMs = performance.now();
 
   function frame(nowMs: number) {
@@ -8906,17 +8999,26 @@ async function setUpSceneView(
     const playingBack = advanceLivePlayback(frameSeconds);
 
     if (!playingBack && mode === "play" && playing) {
-      accumulator += frameSeconds * timeScale;
-      let steps = 0;
       // **`DT` 定数ではなく `world.dt()` を読む(群2)**。Settings で dt を
       // 変更できるようにした結果、固定の `DT` で積算すると「dt を半分にすると
       // 時間が倍速で進む」という嘘の挙動になっていた(実装検証中に発見)。
       const dt = readNumber(world, "dt");
-      while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
+      // このフレームで進めたい step 数(`guidedPace` の doc 参照)。
+      let budget: number;
+      if (guidedPace !== null) {
+        stepAccumulator += frameSeconds * guidedPace;
+        budget = Math.floor(stepAccumulator);
+        stepAccumulator -= budget;
+      } else {
+        accumulator += frameSeconds * timeScale;
+        budget = Math.floor(accumulator / dt);
+      }
+      let steps = 0;
+      while (steps < budget && steps < MAX_STEPS_PER_FRAME) {
         if (heaterToggle.checked) applyComponent(world, "push_heat_source", { watts: HEATER_WATTS });
         applyThrustForStep();
         world.step();
-        accumulator -= dt;
+        if (guidedPace === null) accumulator -= dt;
         steps += 1;
       }
       // **実効時間倍率(群2)**。高倍率では `MAX_STEPS_PER_FRAME` に当たって
@@ -8926,7 +9028,10 @@ async function setUpSceneView(
       //  一気に進む「時間の借金」になるので、上限に当たったフレームでは
       //  余りを捨てる。)
       const capped = steps >= MAX_STEPS_PER_FRAME;
-      if (capped) accumulator = 0;
+      if (capped) {
+        accumulator = 0;
+        stepAccumulator = 0;
+      }
       updateEffectiveTimeScale(
         frameSeconds > 0 ? (steps * dt) / frameSeconds : timeScale,
         capped,
@@ -8954,6 +9059,45 @@ async function setUpSceneView(
   // 反映するまで構築時の既定値(0,0,0)のままなので、先に`render()`を1回
   // 呼んでメッシュを実際の物理状態へ同期させてからでないと、存在しない
   // (0,0,0)を対象に画角を合わせてしまう。
+  // **かんたんモード(`guided.ts`)へ渡す窓口**。意図的にこれだけに絞ってある
+  // ——シーンを読む / 進める / 止める / いまの数値を読む。ここが太ると
+  // 統合エディタとかんたんモードが互いの内部状態に依存し始め、どちらも
+  // 直せなくなる。読み込みは統合エディタのシーンギャラリーと同じ経路
+  // (`sceneGalleryRef.current`)を通す——別経路を作ると、片方だけ直った
+  // 不整合(旧ワールドのメッシュが残る等)が必ず起きる。
+  const guidedApi: GuidedApi = {
+    loadSceneJson: (json) => {
+      sceneGalleryRef.current?.(json);
+      // 読み込み直後は「いまある物」しか無いので、落下の行き先(床)まで
+      // 入る画角へ即座に合わせ直す(`updateGuidedFollowCamera` の doc 参照)。
+      guidedFollowCamera = true;
+      guidedCameraSnap = true;
+    },
+    followCamera: (enabled) => {
+      guidedFollowCamera = enabled;
+      guidedCameraSnap = enabled;
+    },
+    play: () => setMode("play"),
+    pause: () => {
+      playing = false;
+      playButton.textContent = "▶";
+    },
+    isPlaying: () => mode === "play" && playing,
+    setProbeLabels: (labels) => {
+      guidedProbeLabels = labels;
+    },
+    setPace: (stepsPerSecond) => {
+      guidedPace = stepsPerSecond;
+      stepAccumulator = 0;
+      accumulator = 0;
+    },
+    probeCount: () => readNumber(world, "imported_probe_count"),
+    probeValue: (index) =>
+      readNumber(world, "imported_probe_value_at", String(index)),
+    time: () => readNumber(world, "time"),
+  };
+  guidedApiRef.current = guidedApi;
+
   render();
   frameCameraOnContent();
   requestAnimationFrame(frame);
@@ -9019,6 +9163,13 @@ function main() {
   const sceneGalleryRef: SceneGalleryRef = { current: null };
   const circuitElementsRef: CircuitElementsRef = { current: null };
   const validationBaseJsonRef: ValidationBaseJsonRef = { current: null };
+  // かんたんモード(`guided.ts`)。`setUpSceneView`(wasm の初期化を含む)より
+  // 先に UI を組み立てておく——読み込みが終わって起動オーバーレイが消えた
+  // 瞬間に、①のカテゴリ選択が既に目の前にある状態にするため。物理側の窓口
+  // (`guidedApiRef`)が埋まるのは初期化の完了時で、それまでに選ばれた実験は
+  // 窓口が来た時点で自動的に走り出す(`guided.ts` の `pendingStart`)。
+  const guidedApiRef: GuidedApiRef = { current: null };
+  setUpGuidedMode(guidedApiRef);
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
@@ -9058,6 +9209,7 @@ function main() {
     circuitElementsRef,
     consoleDiagnosticsRef,
     validationBaseJsonRef,
+    guidedApiRef,
   )
     .then(() => {
       markBootReady();

@@ -22,7 +22,36 @@
     <!-- **トースト**。失敗の即時通知を `window.alert`(操作をブロックする
          モーダル)から置き換える置き場。`aria-live` で読み上げにも届く。 -->
     <div id="toast-region" role="status" aria-live="polite" aria-atomic="false"></div>
-    <div id="app" data-layout="default">
+    <div id="app" data-layout="default" data-ui="guided" data-guided-graph="off">
+      <!-- ================================================================
+           かんたんモード(`src/guided.ts`)。`#app[data-ui="guided"]` のときだけ
+           出る。中の仕組みを知らない人が「① 見たいものを選ぶ → ② 実験を選ぶ →
+           ③ うごかす」の3手で目的の現象に到達できるようにするための最小限の
+           操作面で、統合エディタ側の DOM には一切手を入れない。
+           ================================================================ -->
+      <header id="guided-bar" class="panel">
+        <div class="guided-bar-main">
+          <div id="guided-title" class="guided-bar-title">🔰 かんたんモード</div>
+          <div id="guided-blurb" class="guided-bar-blurb">「実験をえらぶ」から始めてください。</div>
+        </div>
+        <button id="btn-guided-choose" class="guided-bar-btn primary">① 実験をえらぶ</button>
+        <button id="btn-guided-play" class="guided-bar-btn guided-bar-play">▶ うごかす</button>
+        <button id="btn-guided-restart" class="guided-bar-btn" title="いまの設定のまま、最初からやり直す">↺ はじめから</button>
+        <div id="guided-speed" class="guided-bar-speed" role="group" aria-label="進む速さ">
+          <button data-speed="0.25" title="ゆっくり進める">🐢 ゆっくり</button>
+          <button data-speed="1" class="active" title="ちょうどよい速さ">▶ ふつう</button>
+          <button data-speed="4" title="速く進める">🐇 はやい</button>
+        </div>
+        <button id="btn-guided-graph" class="guided-bar-btn" title="下のグラフを出す/しまう">📈 グラフ</button>
+        <button id="btn-guided-camera" class="guided-bar-btn" title="対象が画面から外れたとき、追いかけるカメラに戻す">👀 カメラを戻す</button>
+        <div class="guided-bar-spacer"></div>
+        <button id="btn-guided-pro" class="guided-bar-btn" title="Unity風の統合エディタへ切り替える(いつでも戻れます)">くわしい編集画面へ →</button>
+      </header>
+      <aside id="guided-panel" class="panel">
+        <h2>ガイド</h2>
+        <div id="guided-panel-body"></div>
+      </aside>
+
       <header id="toolbar" class="panel">
         <div class="toolbar-group" id="mode-toggle">
           <button id="btn-mode-edit" class="mode-btn" title="Editモード: シーンを直接編集(シミュレーション停止)">
@@ -116,6 +145,10 @@
           >
         </div>
         <div class="toolbar-group">
+          <!-- **かんたんモードへの入口**。統合エディタは「作る人」向けの密度で
+               作られているので、見たい現象を選ぶだけの人はここから 3 ステップの
+               画面へ戻れる(選択は localStorage に残る)。 -->
+          <button id="btn-simple-mode" class="primary" title="かんたんモード: 見たい現象を3ステップで選んで動かす">🔰 かんたんモード</button>
           <button id="btn-shortcuts" aria-label="キーボードショートカット一覧" title="キーボードショートカット一覧 (?)">?</button>
           <button id="btn-settings" aria-label="Settings" title="Settings(オーバーレイ・物理パラメータ・グリッド)">⚙</button>
           <div id="settings-popover" hidden>
@@ -412,7 +445,9 @@
       </section>
 
       <section id="probe-graphs" class="panel">
-        <h2>Probe Graphs</h2>
+        <!-- 見出しはモードで言い換える(かんたんモードでは "Probe" という
+             語彙そのものが分からない)。中身は同じパネル。 -->
+        <h2><span class="label-pro">Probe Graphs</span><span class="label-guided">うごきのグラフ</span></h2>
         <div class="probe-controls">
           <label title="各系列を対数軸(|値|のlog10)で正規化する。桁の異なる量の比較に使う">
             <input type="checkbox" id="toggle-probe-log" /> 対数軸
@@ -425,8 +460,14 @@
              **ただの黒い矩形**で、プローブが無いのか壊れているのかが画面から
              読み取れなかった。次に何をすれば線が出るのかを書く。 -->
         <p id="probe-empty" class="empty-state">
-          まだ観測データがありません。<kbd>▶ Play</kbd> か <kbd>⏭</kbd> で
-          時間を進めると、シーンが宣言したプローブの履歴がここに描かれます。
+          <span class="label-pro"
+            >まだ観測データがありません。<kbd>▶ Play</kbd> か <kbd>⏭</kbd> で
+            時間を進めると、シーンが宣言したプローブの履歴がここに描かれます。</span
+          >
+          <span class="label-guided"
+            >まだデータがありません。<kbd>▶ うごかす</kbd>
+            を押すと、数値の動きがここに線で描かれます。</span
+          >
         </p>
       </section>
 
@@ -441,6 +482,16 @@
         </div>
         <div id="project-body"></div>
       </footer>
+    </div>
+    <!-- **3ステップのチューザ**(`src/guided.ts` が中身を組み立てる)。
+         ①カテゴリ → ②実験 → ③うごかす。ステップ表示は常に上に出ていて、
+         いま何手目なのか・あと何手で動くのかが分かるようにしてある。 -->
+    <div id="guided-chooser" hidden role="dialog" aria-modal="true" aria-labelledby="guided-chooser-title">
+      <div class="guided-chooser-dialog overlay-surface">
+        <h2 id="guided-chooser-title">3ステップで、見たい現象を動かす</h2>
+        <div id="guided-steps" class="guided-steps"></div>
+        <div id="guided-chooser-body" class="guided-chooser-body"></div>
+      </div>
     </div>
     <!-- **ショートカット一覧**(`?` / `F1` / ツールバーの `?`)。中身は
          `main.ts` の `SHORTCUT_GROUPS` から組み立てる——キーの割り当てを

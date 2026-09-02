@@ -21,6 +21,21 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:4173",
     trace: "on-first-retry",
+    // **既定は統合エディタ(pro)で開く**。かんたんモード(`src/guided.ts`)を
+    // 入れた際、初回訪問者は 3 ステップのチューザから始まるようにしたため、
+    // 統合エディタを検証する既存のテスト群はモードを明示しておく必要がある
+    // (実ユーザーも一度「くわしい編集画面へ」を押せば以後はこの状態になる)。
+    // かんたんモード側のテストは `guided.spec.ts` が `test.use` で空の
+    // storageState を指定し、**初めて開いた人**の状態を再現する。
+    storageState: {
+      cookies: [],
+      origins: [
+        {
+          origin: "http://127.0.0.1:4173",
+          localStorage: [{ name: "simulator.ui.mode", value: "pro" }],
+        },
+      ],
+    },
   },
   projects: [
     {
