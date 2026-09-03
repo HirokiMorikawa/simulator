@@ -57,10 +57,15 @@ async function setTransformAndBody(
   }
   await page.fill("#inspector-mass", String(mass));
   // 衝突フィルタは「上級」の折り畳みの中(ただの球にビット列が並んで面食らう、
-  // という利用者役の観察を受けて畳んだ)。開いてから触る。
-  await page.locator(".inspector-advanced").first().evaluate((el) => {
-    (el as HTMLDetailsElement).open = true;
-  });
+  // という利用者役の観察を受けて畳んだ)。開閉はアプリ側が覚えているので、
+  // **まだ閉じているときだけ**開ける——ボディごとに開き直すと、遅い実行環境
+  // (Windows ランナー)ではその往復だけでテストの持ち時間を使い切る。
+  const advanced = page.locator(".inspector-advanced").first();
+  if (!(await advanced.evaluate((el) => (el as HTMLDetailsElement).open))) {
+    await advanced.evaluate((el) => {
+      (el as HTMLDetailsElement).open = true;
+    });
+  }
   await page.fill("#inspector-collision-group", String(collisionGroup));
   await page.fill("#inspector-collision-mask", String(collisionMask));
 }
@@ -99,6 +104,12 @@ async function addWheelJoint(
   await page.fill("#add-joint-field-motor_max_torque", String(opts.motorMaxTorque));
   await page.click("#add-joint-button");
 }
+
+// 車 1 台を**UI の操作だけで**組み立てる(ボディ 5 個 + ジョイント 4 本を
+// 1 欄ずつ埋める)テスト。既定の 60 秒は速い実行環境でようやく足りる長さで、
+// Windows ランナーでは往復のわずかな遅さが積み上がって溢れる——確かめている
+// のは state_hash の一致であって速さではないので、持ち時間を明示して広げる。
+test.setTimeout(180_000);
 
 test("縦串①: D24車をUIのみで組み立てるとD24シーンJSONの実行結果とstate_hashが一致する", async ({
   page,
