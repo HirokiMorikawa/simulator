@@ -1538,10 +1538,22 @@ function setUpHierarchy(
 function renderInspectorFor(world: WasmWorld, index: number): void {
   const body = document.getElementById("inspector-body")!;
   if (index < 0 || index >= readNumber(world, "body_count")) {
-    body.innerHTML = `
+    // 「選んでいない」と「そもそも無い」は別のこと。以前はどちらでも
+    // 「このシーンには力学ボディがありません」と出していたので、ボディが
+    // 並んでいる画面でも「無い」と読めてしまった。実際の本数で言い分ける。
+    const total = readNumber(world, "body_count");
+    body.innerHTML =
+      total > 0
+        ? `
       <div class="empty-state">
-        <p>選択中のボディはありません。</p>
-        <p>このシーンには力学ボディがありません——Probe Graphs パネルや Scene View の場のパネルで観測してください。</p>
+        <p>まだ何も選んでいません。</p>
+        <p>画面の中の物をクリックするか、左の一覧から選ぶと、ここに位置・速さ・質量が出ます(${total} 個あります)。</p>
+      </div>
+    `
+        : `
+      <div class="empty-state">
+        <p>このシーンには動く物がありません。</p>
+        <p>起きていることはグラフのパネルか、場のパネルで観測してください。</p>
       </div>
     `;
     return;
@@ -4228,21 +4240,52 @@ function signedLog(v: number): number {
   return Math.sign(v) * Math.log10(1 + Math.abs(v));
 }
 
-/// 表示中の全系列をCSV文字列にする。1列目はサンプル番号
-/// (`sim_math::RingBuffer`は絶対時刻を保持しないため、時刻列は出せない——
-/// 出すなら`World`側にサンプル時刻も積む変更が要るので後続増分の対象)。
-/// 系列ごとに履歴長が違い得るので最長に合わせ、短い系列は空欄で埋める。
-function probeSeriesToCsv(series: ProbeSeries[]): string {
+/// `signedLog`の逆。対数表示のときに**目盛りへ実測値を書く**ために使う
+/// (変換後の値を書くと読み手が実測値を誤読する。`type ProbeSeries`のdoc参照)。
+function signedExp(v: number): number {
+  return Math.sign(v) * (Math.pow(10, Math.abs(v)) - 1);
+}
+
+/**
+ * 横軸に添える時刻。秒のまま出すと桁が読めない領域がある(太陽系儀は 1 step
+ * が 31555 秒で、数十万秒がすぐ並ぶ)ので、大きくなったら分/時間/日/年に
+ * 持ち替える。単位が変わっても指しているのは同じ**経過時間**。
+ */
+function formatSeconds(seconds: number): string {
+  const magnitude = Math.abs(seconds);
+  if (magnitude >= 31_557_600) return `${(seconds / 31_557_600).toFixed(2)}年`;
+  if (magnitude >= 86_400) return `${(seconds / 86_400).toFixed(2)}日`;
+  if (magnitude >= 3_600) return `${(seconds / 3_600).toFixed(2)}時間`;
+  if (magnitude >= 60) return `${(seconds / 60).toFixed(2)}分`;
+  if (magnitude >= 0.01 || magnitude === 0) return `${seconds.toFixed(2)}s`;
+  return `${seconds.toExponential(1)}s`;
+}
+
+/// 表示中の全系列をCSV文字列にする。1列目は**経過時間(秒)**。
+/// リングバッファ自体は絶対時刻を持たないので、`currentTime`(最後のサンプル
+/// の時刻)と`dt`から逆算する——グラフの横軸と同じ数え方なので、書き出した
+/// CSVと画面の折れ線は同じ時刻を指す。サンプル番号のままでは「何秒の値か」を
+/// 表計算側で計算し直す必要があり、実際にそこで詰まった。
+/// 系列ごとに履歴長が違い得るので**最新のサンプルで右端を揃え**、足りない
+/// 古い側を空欄で埋める(最後のサンプルはどの系列でも「いま」なので、
+/// 右詰めだけが時刻と辻褄が合う)。
+function probeSeriesToCsv(
+  series: ProbeSeries[],
+  dt: number,
+  currentTime: number,
+): string {
   const rows = series.reduce((m, s) => Math.max(m, s.history.length), 0);
   const escape = (s: string) =>
     /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   const lines = [
-    ["sample", ...series.map((s) => s.label)].map(escape).join(","),
+    ["time_s", ...series.map((s) => s.label)].map(escape).join(","),
   ];
   for (let i = 0; i < rows; i++) {
-    const cells = [String(i)];
+    const time = currentTime - (rows - 1 - i) * dt;
+    const cells = [String(time)];
     for (const s of series) {
-      cells.push(i < s.history.length ? String(s.history[i]) : "");
+      const at = i - (rows - s.history.length);
+      cells.push(at >= 0 && at < s.history.length ? String(s.history[at]) : "");
     }
     lines.push(cells.join(","));
   }
@@ -4276,11 +4319,13 @@ function setUpProbeGraph(): (
   // 渡してくる最新の配列をここで覚えておく(描画とエクスポートで同じデータを
   // 使うため、別経路でクエリし直して食い違うのを避ける)。
   let latest: ProbeSeries[] = [];
+  let latestDt = 0;
+  let latestTime = 0;
   csvButton.addEventListener("click", () => {
     if (latest.length === 0) return;
     // 押しても何も起きないボタンは「壊れている」と読まれるので、下の
     // `csvButton.disabled` で先に押せなくしてある。ここは念のための保険。
-    const blob = new Blob([probeSeriesToCsv(latest)], {
+    const blob = new Blob([probeSeriesToCsv(latest, latestDt, latestTime)], {
       type: "text/csv;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
@@ -4293,6 +4338,8 @@ function setUpProbeGraph(): (
 
   return (series: ProbeSeries[], dt: number, currentTime: number) => {
     latest = series;
+    latestDt = dt;
+    latestTime = currentTime;
     // **空状態**(増分「UI 品質の底上げ」)。描ける系列(サンプル 2 点以上)が
     // 1 本も無いあいだは、黒い矩形ではなく「何をすれば線が出るか」を出す。
     const drawable = series.filter((s) => s.history.length >= 2);
@@ -4314,34 +4361,65 @@ function setUpProbeGraph(): (
     ctx.clearRect(0, 0, w, h);
     ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
-    // **目盛り線**(増分「UI 品質の底上げ」)。系列ごとに独立して正規化する
-    // 設計(下記)なので共通の値軸は引けないが、**高さの 1/4 ごとの水平線**が
-    // あるだけで「どのくらい動いたか」「振動しているのか単調なのか」が
-    // 目で追えるようになる。線は地に沈む明度に抑え、データを隠さない。
+    // 下端は**時刻の目盛り帯**に譲り、折れ線はその上だけに描く。以前は
+    // キャンバス全面に描いていたので、横軸の数字を置く場所が無く「グラフの
+    // どこが何秒か」が読めなかった。
+    const AXIS_BAND = 15;
+    const plotH = Math.max(20, h - AXIS_BAND);
+
+    // 系列は**右端(=いま)で揃える**。長さが違っても最後のサンプルはどの系列
+    // でも現在時刻なので、右詰めだけが横軸の時刻と辻褄が合う(左詰めや
+    // 引き伸ばしでは、短い系列が実際とは違う時刻に描かれてしまう)。
+    const longest = series.reduce((m, s) => Math.max(m, s.history.length), 0);
+    const haveTime = longest >= 2 && dt > 0;
+    const oldestTime = currentTime - (longest - 1) * dt;
+    timeRangeLabel.textContent = haveTime
+      ? `t = ${formatSeconds(oldestTime)} 〜 ${formatSeconds(currentTime)}`
+      : "";
+
+    // **目盛り線**。系列ごとに独立して正規化する設計(下記)なので共通の値軸は
+    // 引けないが、1/4 ごとの格子があるだけで「どのくらい動いたか」「振動して
+    // いるのか単調なのか」が目で追える。線は地に沈む明度に抑え、データを隠さない。
     ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let i = 1; i < 4; i++) {
-      const y = Math.round((h * i) / 4) + 0.5;
+      const y = Math.round((plotH * i) / 4) + 0.5;
       ctx.moveTo(0, y);
       ctx.lineTo(w, y);
+      const x = Math.round((w * i) / 4) + 0.5;
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, plotH);
     }
     ctx.stroke();
 
-    // QA不具合9: グラフのどこが何秒なのか画面から分からず、当時のリングバッファの
-    // 打ち切りと相まって「第1バウンドを数回あとの極大と取り違える」ような読み違いが
-    // 実際に起きた。最長の系列を基準に、画面の左端(古い側)〜右端(新しい側、
-    // = 現在時刻)の時刻を表示する——`ProbeSeries`自体は絶対時刻を持たない
-    // (`probeSeriesToCsv`のdoc参照)ので、`currentTime`と`dt`から逆算する。
-    // **打ち切り自体は解消済み**(`sim_world::Probe`のdoc参照: 履歴は可変長に
-    // なり、古いサンプルが無言で捨てられることは無くなった)なので、この
-    // 逆算は常に「本当の開始時刻」を指す。
-    const longest = series.reduce((m, s) => Math.max(m, s.history.length), 0);
-    if (longest >= 2 && dt > 0) {
-      const oldestTime = currentTime - (longest - 1) * dt;
-      timeRangeLabel.textContent = `t = ${oldestTime.toFixed(2)}s 〜 ${currentTime.toFixed(2)}s`;
-    } else {
-      timeRangeLabel.textContent = "";
+    // 文字は折れ線や格子に重なるので、**濃い縁取りを先に引いてから**塗る
+    // (素の塗りだけだと、線と同系色の場所で文字が読めなかった)。
+    const outlined = (
+      text: string,
+      x: number,
+      y: number,
+      color: string,
+      align: CanvasTextAlign = "left",
+    ) => {
+      ctx.textAlign = align;
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = color;
+      ctx.fillText(text, x, y);
+      ctx.textAlign = "left";
+    };
+
+    // **横軸の時刻**。QA不具合9(「第1バウンドを数回あとの極大と取り違える」)
+    // は範囲の文字表示で一度潰したが、線の途中が何秒なのかは依然読めなかった。
+    // 左端(古い)・まん中・右端(いま)に実際の時刻を置く。
+    if (haveTime) {
+      const span = currentTime - oldestTime;
+      outlined(formatSeconds(oldestTime), 3, h - 3, "#8b929c");
+      outlined(formatSeconds(oldestTime + span / 2), w / 2, h - 3, "#8b929c", "center");
+      outlined(formatSeconds(currentTime), w - 3, h - 3, "#8b929c", "right");
     }
 
     let legendY = 12;
@@ -4362,12 +4440,13 @@ function setUpProbeGraph(): (
       const plotMax = Math.max(plot(min), plot(max));
       const range = plotMax - plotMin > 1e-12 ? plotMax - plotMin : 1.0;
 
+      const offset = longest - s.history.length;
       ctx.strokeStyle = s.color;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       for (let i = 0; i < s.history.length; i++) {
-        const x = (i / (s.history.length - 1)) * w;
-        const y = h - ((plot(s.history[i]) - plotMin) / range) * h;
+        const x = longest > 1 ? ((offset + i) / (longest - 1)) * w : w;
+        const y = plotH - ((plot(s.history[i]) - plotMin) / range) * plotH;
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
@@ -4375,52 +4454,46 @@ function setUpProbeGraph(): (
 
       // **1本だけのときは、縦軸に実際の目盛りを描く**。各系列を自分の範囲へ
       // 正規化して重ねる作りなので、複数本のときに共通の縦軸は引けない
-      // ——が、1本ならその写像は素直な線形で、目盛りは正確に引ける。
-      // 「線の形は分かるが値が読めない」を、読める場合には解消する。
-      if (series.length === 1 && !useLog) {
+      // ——が、1本ならその写像は一対一で、目盛りは正確に引ける。対数表示でも
+      // `signedExp`で戻せば**実測値**を書けるので、ここで軸を消さない。
+      if (series.length === 1) {
         const unit = s.unit ? ` ${s.unit}` : "";
-        ctx.textAlign = "right";
-        for (const [ratio, value] of [
-          [0, max],
-          [0.5, (max + min) / 2],
-          [1, min],
+        const back = (v: number) => (useLog ? signedExp(v) : v);
+        for (const [ratio, plotted] of [
+          [0, plotMax],
+          [0.5, (plotMax + plotMin) / 2],
+          [1, plotMin],
         ] as [number, number][]) {
-          const y = Math.min(h - 2, Math.max(10, ratio * h));
-          ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
-          ctx.lineWidth = 3;
-          const text = `${formatTickValue(value)}${unit}`;
-          ctx.strokeText(text, w - 6, y);
-          ctx.fillStyle = "#8b929c";
-          ctx.fillText(text, w - 6, y);
+          const y = Math.min(plotH - 2, Math.max(10, ratio * plotH));
+          outlined(
+            `${formatTickValue(back(plotted))}${unit}`,
+            w - 6,
+            y,
+            "#8b929c",
+            "right",
+          );
         }
-        ctx.textAlign = "left";
-      } else if (series.length > 1) {
-        // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを
-        // 明示する(黙っていると「こちらの線の方が大きい」と読まれる)。
-        const note = "各線はそれぞれの範囲に合わせて描いています";
-        ctx.textAlign = "right";
-        ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
-        ctx.lineWidth = 3;
-        ctx.strokeText(note, w - 6, h - 4);
-        ctx.fillStyle = "#6f757e";
-        ctx.fillText(note, w - 6, h - 4);
-        ctx.textAlign = "left";
       }
 
-      // 凡例は折れ線の上に重なるので、**濃い縁取りを先に引いてから**塗る
-      // (以前は素の塗りだけで、線と同系色の場所では文字が読めなかった)。
       const suffix = useLog ? " [log]" : "";
       const unitSuffix = s.unit ? ` ${s.unit}` : "";
       const legendText =
         `${s.label}: max=${max.toFixed(2)}${unitSuffix} ` +
         `min=${min.toFixed(2)}${unitSuffix}${suffix}`;
-      ctx.lineJoin = "round";
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
-      ctx.strokeText(legendText, 4, legendY);
-      ctx.fillStyle = s.color;
-      ctx.fillText(legendText, 4, legendY);
+      outlined(legendText, 4, legendY, s.color);
       legendY += 13;
+    }
+
+    // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを明示する
+    // (黙っていると「こちらの線の方が大きい」と読まれる)。凡例の直下に置くの
+    // は、下端が時刻の目盛り帯になったため。
+    if (series.filter((s) => s.history.length >= 2).length > 1) {
+      outlined(
+        "各線はそれぞれの範囲に合わせて描いています",
+        4,
+        legendY,
+        "#6f757e",
+      );
     }
   };
 }
@@ -5550,6 +5623,8 @@ async function setUpSceneView(
   // Ez 場はいずれも「格子上のスカラー場」であり、3D 空間に浮かべるより
   // 平面に色で塗るほうが読める(実際、物理の教科書もそう描く)。
   // Probe Graphs の隣に置き、対象ドメインが無効なときは畳んで場所を取らない。
+  const sceneViewElement = document.getElementById("scene-view")!;
+  const stageEmptyNote = document.getElementById("stage-empty-note");
   const fieldPanel = document.getElementById("field-panel")!;
   const fieldCanvas = document.getElementById("field-canvas") as HTMLCanvasElement;
   const fieldTitle = document.getElementById("field-title")!;
@@ -5658,6 +5733,64 @@ async function setUpSceneView(
     }
   }
 
+  /// 棒の温度分布(D16)。色の帯**だけ**では「熱がどこまで進んだか」は見えても
+  /// 何度なのかが読めないので、帯の下に**位置 → 温度の折れ線**を重ね、両端の
+  /// 目盛りを書く。範囲は実際の min/max に合わせて引き伸ばす——0〜最大で
+  /// 正規化すると、数度の差が同じ色に潰れてしまう。
+  function drawRodTemperature(values: Float32Array, min: number, max: number) {
+    if (!fieldContext) return;
+    const w = 512;
+    const h = 190;
+    const strip = 26;
+    const pad = 18;
+    fieldCanvas.width = w;
+    fieldCanvas.height = h;
+    fieldContext.fillStyle = "#111";
+    fieldContext.fillRect(0, 0, w, h);
+    const n = values.length;
+    const span = max - min > 1e-9 ? max - min : 1;
+    const at = (i: number) => (n > 1 ? (i / (n - 1)) * w : w / 2);
+
+    // 上端の帯: 棒そのものを上から見た図。
+    for (let i = 0; i < n; i += 1) {
+      const [r, g, b] = sequentialColor((values[i] - min) / span);
+      fieldContext.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      fieldContext.fillRect(Math.floor(at(i)), 0, Math.ceil(w / n) + 1, strip);
+    }
+
+    // 下段: 位置 → 温度の折れ線。
+    const top = strip + 12;
+    const bottom = h - pad;
+    fieldContext.strokeStyle = "rgba(255, 255, 255, 0.10)";
+    fieldContext.lineWidth = 1;
+    fieldContext.beginPath();
+    for (let i = 0; i <= 2; i += 1) {
+      const y = Math.round(top + ((bottom - top) * i) / 2) + 0.5;
+      fieldContext.moveTo(0, y);
+      fieldContext.lineTo(w, y);
+    }
+    fieldContext.stroke();
+    fieldContext.strokeStyle = "#ff9c6c";
+    fieldContext.lineWidth = 2;
+    fieldContext.beginPath();
+    for (let i = 0; i < n; i += 1) {
+      const y = bottom - ((values[i] - min) / span) * (bottom - top);
+      if (i === 0) fieldContext.moveTo(at(i), y);
+      else fieldContext.lineTo(at(i), y);
+    }
+    fieldContext.stroke();
+
+    fieldContext.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    fieldContext.fillStyle = "#8b929c";
+    fieldContext.textAlign = "left";
+    fieldContext.fillText(`${max.toFixed(1)} ℃`, 4, top + 10);
+    fieldContext.fillText(`${min.toFixed(1)} ℃`, 4, bottom - 2);
+    fieldContext.fillText("熱源側", 4, h - 3);
+    fieldContext.textAlign = "right";
+    fieldContext.fillText("反対の端", w - 4, h - 3);
+    fieldContext.textAlign = "left";
+  }
+
   function updateFieldPanel(currentWorld: WasmWorld) {
     if (!fieldContext) return;
     // **優先順位を固定する**(決定論的な表示)。同時に複数ドメインが載っている
@@ -5721,8 +5854,17 @@ async function setUpSceneView(
     }
     const rod = currentWorld.conduction_rod_temperatures_f32();
     if (rod.length > 0) {
-      fieldTitle.textContent = `熱伝導棒の温度分布(${rod.length} 格子点)`;
-      drawScalarField(rod, rod.length, 1, sequentialColor, "positive");
+      let min = Infinity;
+      let max = -Infinity;
+      for (let i = 0; i < rod.length; i += 1) {
+        if (rod[i] < min) min = rod[i];
+        if (rod[i] > max) max = rod[i];
+      }
+      // 題に**いま出ている値の範囲**を書く。色の帯だけでは「濃い/薄い」しか
+      // 分からず、何度なのかが読めなかった(色だけで数値を当てさせない)。
+      fieldTitle.textContent =
+        `棒の中の温度(左端が熱源、${min.toFixed(1)}〜${max.toFixed(1)} ℃)`;
+      drawRodTemperature(rod, min, max);
       fieldPanel.hidden = false;
       return;
     }
@@ -8825,6 +8967,12 @@ async function setUpSceneView(
     updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter);
     updateParticleCloud(brownianCloud, world.brownian_positions_f32(1), [0, 0, 0]);
     updateFieldPanel(world);
+    // **舞台に何も描かれないシーン**(熱伝導・量子・イジング……力学ボディが
+    // 1つも無い)では、空の 3D をそのまま見せない。案内を出し、場のパネルへ
+    // 舞台の幅を渡す(`#scene-view[data-stage-empty]`、style.css 参照)。
+    const stageEmpty = readNumber(world, "body_count") === 0;
+    sceneViewElement.dataset.stageEmpty = String(stageEmpty);
+    if (stageEmptyNote) stageEmptyNote.hidden = !stageEmpty;
 
     // **2026-07-28のD9/D34/D35増分で追加したガード**: `hasSelectedBody()`が
     // falseのとき(D9/D34/D35のように力学ボディを1つも持たないギャラリー

@@ -137,10 +137,16 @@ test("Probe Graphs の対数軸トグルと CSV エクスポートが動く(増�
   for await (const c of stream) chunks.push(c as Buffer);
   const csv = Buffer.concat(chunks).toString("utf8");
   const lines = csv.split("\n");
-  expect(lines[0]).toBe("sample,BodyPosY,BodySpeed");
+  // 1列目は**経過時間(秒)**。サンプル番号のままでは「何秒の値か」を表計算側で
+  // 計算し直す必要があった(利用者役の観察)。
+  expect(lines[0]).toBe("time_s,BodyPosY,BodySpeed");
   expect(lines.length).toBeGreaterThan(2);
-  // 2行目は sample=0 と2系列の数値。
+  // 2行目は時刻と2系列の数値。時刻は単調に増える。
   expect(lines[1].split(",")).toHaveLength(3);
+  const firstTime = Number.parseFloat(lines[1].split(",")[0]);
+  const secondTime = Number.parseFloat(lines[2].split(",")[0]);
+  expect(Number.isFinite(firstTime)).toBe(true);
+  expect(secondTime).toBeGreaterThan(firstTime);
 
   expect(errors).toEqual([]);
 });

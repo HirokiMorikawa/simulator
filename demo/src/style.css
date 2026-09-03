@@ -661,6 +661,38 @@ body {
 #field-panel[hidden] {
   display: none;
 }
+/* **舞台に描くものが無いシーンでは、場のパネルが主役**。隅の小窓のままだと
+   「棒の温度分布」が数十ピクセルの帯になり、色の違いが読めなかった。
+   3D が空いているのだから、その場所をそのまま渡す。 */
+#scene-view[data-stage-empty="true"] #field-panel {
+  inset: auto var(--space-5) var(--space-5) var(--space-5);
+  width: auto;
+  max-height: 68%;
+}
+#stage-empty-note {
+  position: absolute;
+  top: var(--space-6);
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  max-width: min(90%, 460px);
+  text-align: center;
+  line-height: 1.7;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  background: rgba(23, 25, 29, 0.88);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  pointer-events: none;
+  z-index: 2;
+}
+#stage-empty-note strong {
+  color: var(--text);
+}
+#stage-empty-note[hidden] {
+  display: none;
+}
 #field-canvas {
   flex: 1;
   min-height: 0;
@@ -937,8 +969,45 @@ body {
   color: var(--warn);
 }
 
+/* **時間をつまむ帯**。高さを指定していなかったので当たり判定が数ピクセルしか
+ * 無く、つまみを掴む以外に「この辺りへ飛ぶ」という当たり前の操作ができなかった
+ * (利用者役の観察)。溝を厚くし、つまみも指で掴める大きさにする。 */
 #timeline-scrubber {
   width: 100%;
+  height: 22px;
+  margin: var(--space-1) 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+#timeline-scrubber::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+}
+#timeline-scrubber::-moz-range-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+}
+#timeline-scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+}
+#timeline-scrubber::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
 }
 
 .timeline-bookmarks {

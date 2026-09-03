@@ -292,7 +292,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     const drawerOpen = project > projectBase;
     // グラフは 150px を切ると、線を描く場所が 60px ほどしか残らず「出したのに
     // 読めない」状態になる(実測)。用を成す最低限をここで決める。
-    const floor = { analysis: 150, timeline: 52, console: 34 };
+    // 時間の段は、帯そのものに指で掴める高さ(22px)を与えたぶんだけ厚くする
+    // ——最低限が薄いままだと、帯の下半分が段からはみ出して押せなくなる。
+    const floor = { analysis: 150, timeline: 62, console: 34 };
     const wants = { analysis, timeline, console: consoleRow };
     const reserved =
       (wants.analysis > 0 ? floor.analysis : 0) +

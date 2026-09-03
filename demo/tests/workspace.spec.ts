@@ -185,6 +185,35 @@ test("3Dに何も描かれない実験を選ぶと、グラフが見える深さ
   expect(errors).toEqual([]);
 });
 
+test("形の無い現象では、空の3Dを見せずに見る場所へ送る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "熱が棒");
+  await page.keyboard.press("Enter");
+
+  // 力学ボディが1つも無いシーン。「読み込みに失敗した」と読ませない。
+  await expect(page.locator("#stage-empty-note")).toBeVisible();
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-stage-empty",
+    "true",
+  );
+  // 場のパネルは隅の小窓ではなく、空いた舞台の幅をもらう。
+  const panel = await page.locator("#field-panel").boundingBox();
+  const stage = await page.locator("#scene-view").boundingBox();
+  expect(panel!.width).toBeGreaterThan(stage!.width * 0.7);
+  // 題に「いま何度か」が出ている(色の帯だけで数値を当てさせない)。
+  await expect(page.locator("#field-title")).toContainText("℃");
+
+  // 物のあるシーンへ移ると、案内は引っ込む。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを落とす");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#stage-empty-note")).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {
