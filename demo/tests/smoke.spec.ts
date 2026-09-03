@@ -1013,30 +1013,15 @@ test("Project ドロワーがタブクリックで開き、中身が画面内に
   // 起動直後は閉じており本体は画面外。
   expect(await insideViewport()).toBe(false);
 
+  // 開閉は行の高さのアニメーション(約 0.2 秒)を伴うので、収まるまで待つ。
   await page.click('.project-tab[data-tab="materials"]');
-  expect(await insideViewport()).toBe(true);
+  await expect.poll(insideViewport, { timeout: 5_000 }).toBe(true);
   // 中身(材質表)が実際に見えること。
   await expect(page.locator("#project-body .materials-table")).toBeVisible();
 
   // 同じタブをもう一度クリックすると閉じる。
   await page.click('.project-tab[data-tab="materials"]');
-  expect(await insideViewport()).toBe(false);
-
-  expect(errors).toEqual([]);
-});
-
-test("Circuit-focus レイアウトでドロワーが開いた状態になる(増分E3)", async ({ page }) => {
-  const errors = collectPageErrors(page);
-  await page.goto("/");
-  await waitForWorld(page);
-
-  await page.selectOption("#select-layout", "circuit-focus");
-  const visible = await page.evaluate(() => {
-    const r = document.getElementById("project-body")!.getBoundingClientRect();
-    return { inside: r.top < window.innerHeight, height: r.height };
-  });
-  expect(visible.inside).toBe(true);
-  expect(visible.height).toBeGreaterThan(200);
+  await expect.poll(insideViewport, { timeout: 5_000 }).toBe(false);
 
   expect(errors).toEqual([]);
 });

@@ -7,7 +7,7 @@ import init, {
   sketch_extrude_shape_json,
 } from "../pkg/sim_wasm.js";
 import "./style.css";
-import { setUpGuidedMode, type GuidedApi, type GuidedApiRef } from "./guided";
+import { setUpWorkspace, type WorkspaceApi, type WorkspaceApiRef } from "./workspace";
 
 // 統合エディタ(docs/23-frontend/01-editor.md)の骨格増分。
 //
@@ -112,22 +112,6 @@ const NEW_SCENE_JSON = JSON.stringify({
   ],
 });
 
-function setUpLayoutPresetSwitcher() {
-  const app = document.getElementById("app")!;
-  const select = document.getElementById("select-layout") as HTMLSelectElement;
-  select.addEventListener("change", () => {
-    app.dataset.layout = select.value;
-    // **プリセットが握る変数のインライン上書きを捨てる**。スプリッター
-    // (`setUpPanelSplitters`)は `#app` のインラインスタイルへ `--row-console`
-    // を書くが、インラインは `#app[data-layout=…]` のルールより強いので、
-    // 捨てないと「レイアウトを切り替えても Console の高さが変わらない」
-    // という無言の不具合になる(増分E3 の `--project-row` で踏んだのと同じ、
-    // 「同じ宣言を 2 つの機能が奪い合う」問題)。列幅はプリセットが触らない
-    // ので残す。
-    clearPresetOwnedPanelSizes();
-  });
-}
-
 // ---------------------------------------------------------------------------
 // UI 基盤(増分「UI 品質の底上げ」)
 //
@@ -199,174 +183,6 @@ function markBootFailed(message: string): void {
 /// CSS 変数として書き、localStorage に残す。**タブ化・切り離しは引き続き対象外**
 /// ——パネルの入れ替えはグリッドエリアの静的な割り当てを崩す必要があり、
 /// 本増分の範囲を超える。
-type SplitterLimits = { min: number; max: () => number; fallback: number };
-const SPLITTER_LIMITS: Record<string, SplitterLimits> = {
-  "--col-left": { min: 150, max: () => window.innerWidth * 0.4, fallback: 220 },
-  "--col-right": { min: 190, max: () => window.innerWidth * 0.45, fallback: 268 },
-  "--row-console": { min: 80, max: () => window.innerHeight * 0.6, fallback: 160 },
-};
-/// プリセット(`#app[data-layout=…]`)が握っている変数。`setUpLayoutPresetSwitcher`
-/// はこれだけをインラインから外す。
-const PRESET_OWNED_PANEL_VARS = ["--row-console"];
-const PANEL_SIZE_STORAGE_KEY = "simulator.editor.panel-sizes";
-
-function readStoredPanelSizes(): Record<string, number> {
-  try {
-    const raw = window.localStorage.getItem(PANEL_SIZE_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    const out: Record<string, number> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (key in SPLITTER_LIMITS && typeof value === "number" && value > 0) {
-        out[key] = value;
-      }
-    }
-    return out;
-    // localStorage はプライベートウィンドウ等で例外を投げ得る。保存できない
-    // ことは機能の本質ではないので黙って諦める(既定サイズで動く)。
-  } catch {
-    return {};
-  }
-}
-function writeStoredPanelSizes(sizes: Record<string, number>): void {
-  try {
-    window.localStorage.setItem(PANEL_SIZE_STORAGE_KEY, JSON.stringify(sizes));
-  } catch {
-    /* 保存できなくても操作自体は成立する。 */
-  }
-}
-function clearPresetOwnedPanelSizes(): void {
-  const app = document.getElementById("app");
-  if (!app) return;
-  const sizes = readStoredPanelSizes();
-  for (const name of PRESET_OWNED_PANEL_VARS) {
-    app.style.removeProperty(name);
-    delete sizes[name];
-  }
-  writeStoredPanelSizes(sizes);
-}
-
-function setUpPanelSplitters(): void {
-  const app = document.getElementById("app");
-  if (!app) return;
-  const stored = readStoredPanelSizes();
-
-  function setSize(name: string, px: number, persist: boolean): number {
-    const limits = SPLITTER_LIMITS[name];
-    const clamped = Math.round(
-      Math.min(Math.max(px, limits.min), Math.max(limits.max(), limits.min)),
-    );
-    app!.style.setProperty(name, `${clamped}px`);
-    if (persist) {
-      const sizes = readStoredPanelSizes();
-      sizes[name] = clamped;
-      writeStoredPanelSizes(sizes);
-    }
-    return clamped;
-  }
-  /// 今の実寸(px)。インライン上書きが無ければ CSS 側の既定を読む。
-  function currentSize(name: string): number {
-    const raw = getComputedStyle(app!).getPropertyValue(name).trim();
-    const parsed = Number.parseFloat(raw);
-    return Number.isFinite(parsed) && parsed > 0
-      ? parsed
-      : SPLITTER_LIMITS[name].fallback;
-  }
-
-  for (const [name, value] of Object.entries(stored)) setSize(name, value, false);
-
-  const splitters =
-    document.querySelectorAll<HTMLElement>(".splitter[data-var]");
-  splitters.forEach((splitter) => {
-    const name = splitter.dataset.var!;
-    if (!(name in SPLITTER_LIMITS)) return;
-    const axis = splitter.dataset.axis === "y" ? "y" : "x";
-    // 掴んだ境界の「どちら側」のパネルを伸ばすか。Inspector と Console は
-    // ガターより後ろ(右/下)にあるので、ポインタの移動方向と逆に伸びる。
-    const sign = splitter.dataset.invert === "true" ? -1 : 1;
-
-    function announce(px: number) {
-      splitter.setAttribute("aria-valuenow", String(Math.round(px)));
-      splitter.setAttribute("aria-valuemin", String(SPLITTER_LIMITS[name].min));
-      splitter.setAttribute(
-        "aria-valuemax",
-        String(Math.round(SPLITTER_LIMITS[name].max())),
-      );
-    }
-    announce(currentSize(name));
-
-    splitter.addEventListener("pointerdown", (event) => {
-      // 主ボタンのみ。右クリックで掴んだままになるのを防ぐ。
-      if (event.button !== 0) return;
-      event.preventDefault();
-      const start = axis === "x" ? event.clientX : event.clientY;
-      const startSize = currentSize(name);
-      splitter.setPointerCapture(event.pointerId);
-      splitter.dataset.dragging = "true";
-      document.body.dataset.splitterDragging = "true";
-      document.body.style.setProperty(
-        "--splitter-cursor",
-        axis === "x" ? "col-resize" : "row-resize",
-      );
-
-      const onMove = (move: PointerEvent) => {
-        const now = axis === "x" ? move.clientX : move.clientY;
-        announce(setSize(name, startSize + (now - start) * sign, false));
-      };
-      const onUp = () => {
-        splitter.removeEventListener("pointermove", onMove);
-        splitter.removeEventListener("pointerup", onUp);
-        splitter.removeEventListener("pointercancel", onUp);
-        delete splitter.dataset.dragging;
-        delete document.body.dataset.splitterDragging;
-        document.body.style.removeProperty("--splitter-cursor");
-        // 確定時にだけ保存する(ドラッグ中に毎フレーム書くと無駄が大きい)。
-        setSize(name, currentSize(name), true);
-      };
-      splitter.addEventListener("pointermove", onMove);
-      splitter.addEventListener("pointerup", onUp);
-      splitter.addEventListener("pointercancel", onUp);
-    });
-
-    // ダブルクリックで既定へ戻す(掴み直して探るより速い、一般的な作法)。
-    splitter.addEventListener("dblclick", () => {
-      app!.style.removeProperty(name);
-      const sizes = readStoredPanelSizes();
-      delete sizes[name];
-      writeStoredPanelSizes(sizes);
-      announce(currentSize(name));
-    });
-
-    // **キーボードでも動かせる**(QA 報告書 §5「キーボードのみでの操作は未検証」)。
-    // マウスを持たない利用者にとって、ドラッグしか手段が無い操作は存在しないのと
-    // 同じになる。
-    splitter.addEventListener("keydown", (event) => {
-      const step = event.shiftKey ? 48 : 16;
-      let delta = 0;
-      if (axis === "x" && event.key === "ArrowLeft") delta = -step;
-      else if (axis === "x" && event.key === "ArrowRight") delta = step;
-      else if (axis === "y" && event.key === "ArrowUp") delta = -step;
-      else if (axis === "y" && event.key === "ArrowDown") delta = step;
-      else if (event.key === "Home") {
-        app!.style.removeProperty(name);
-        const sizes = readStoredPanelSizes();
-        delete sizes[name];
-        writeStoredPanelSizes(sizes);
-        announce(currentSize(name));
-        event.preventDefault();
-        return;
-      } else return;
-      announce(setSize(name, currentSize(name) + delta * sign, true));
-      event.preventDefault();
-    });
-  });
-}
-
-/// **ショートカット一覧**。定義を `keydown` ハンドラと同じファイルに置く
-/// (`setUpSceneView` 内のハンドラが実装、ここが一覧)。QA 不具合 7 は
-/// 「`title` と README には書いてあるが `keydown` に case が無い」という
-/// 食い違いだったので、一覧の側も同じファイルに置いて突き合わせやすくする。
 const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
   {
     title: "ツール",
@@ -414,11 +230,11 @@ const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
     ],
   },
   {
-    title: "パネル",
+    title: "画面",
     items: [
+      ["⌘K / Ctrl+K", "実験をさがす(どこからでも)"],
+      ["[ / ]", "見る深さを浅く / 深くする(みる↔つくる)"],
       ["? / F1", "この一覧を開く / 閉じる"],
-      ["← → ↑ ↓", "スプリッターにフォーカス中はパネルの大きさを変える"],
-      ["Home", "スプリッターにフォーカス中は既定の大きさへ戻す"],
     ],
   },
 ];
@@ -4579,7 +4395,7 @@ async function setUpSceneView(
   circuitElementsRef: CircuitElementsRef,
   consoleDiagnosticsRef: ConsoleDiagnosticsRef,
   validationBaseJsonRef: ValidationBaseJsonRef,
-  guidedApiRef: GuidedApiRef,
+  workspaceApiRef: WorkspaceApiRef,
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -5267,9 +5083,9 @@ async function setUpSceneView(
   }
   window.addEventListener("resize", resize);
   // **器の大きさが変わったら追従する**。`window` の resize だけを見ていた頃は、
-  // スプリッターで Scene View の幅を変えても・かんたんモードと統合エディタを
-  // 切り替えても、three.js のキャンバスが前の寸法のまま引き伸ばされて表示が
-  // 歪んでいた(ウィンドウを 1px 動かすと直る、という分かりにくい症状だった)。
+  // 見る深さ(粒度)を変えて Scene View の器が伸び縮みしても、three.js の
+  // キャンバスが前の寸法のまま引き伸ばされて表示が歪んでいた(ウィンドウを
+  // 1px 動かすと直る、という分かりにくい症状だった)。
   if (typeof ResizeObserver !== "undefined") {
     new ResizeObserver(() => resize()).observe(host);
   }
@@ -9065,7 +8881,7 @@ async function setUpSceneView(
   // 直せなくなる。読み込みは統合エディタのシーンギャラリーと同じ経路
   // (`sceneGalleryRef.current`)を通す——別経路を作ると、片方だけ直った
   // 不整合(旧ワールドのメッシュが残る等)が必ず起きる。
-  const guidedApi: GuidedApi = {
+  const workspaceApi: WorkspaceApi = {
     loadSceneJson: (json) => {
       sceneGalleryRef.current?.(json);
       // 読み込み直後は「いまある物」しか無いので、落下の行き先(床)まで
@@ -9078,6 +8894,7 @@ async function setUpSceneView(
       guidedCameraSnap = enabled;
     },
     play: () => setMode("play"),
+    stopForEditing: () => setMode("edit"),
     pause: () => {
       playing = false;
       playButton.textContent = "▶";
@@ -9095,8 +8912,38 @@ async function setUpSceneView(
     probeValue: (index) =>
       readNumber(world, "imported_probe_value_at", String(index)),
     time: () => readNumber(world, "time"),
+    // **局所へ入る/出る**。パンくずの「全体へ戻る」は選択を解く操作なので、
+    // 負のindexを「選択なし」として受ける(ボディが1つも無いギャラリーシーンで
+    // 既に使っている状態表現と同じ、`selectedBodyIndex = -1`)。
+    selectedBody: () => selectedBodyIndex,
+    selectBody: (index) => {
+      if (index < 0) {
+        selectedBodyIndex = -1;
+        highlightHierarchy = rebuildHierarchy();
+        renderInspectorFor(world, -1);
+        return;
+      }
+      if (index < readNumber(world, "body_count")) selectBody(index);
+    },
+    bodyCount: () => readNumber(world, "body_count"),
+    bodyReadout: (index) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return null;
+      if (world.read_component("body_is_removed_at", String(index)) === "true") {
+        return null;
+      }
+      const position = world.body_position_at_f32(index);
+      const velocity = world.body_velocity_at_f32(index);
+      return {
+        label: world.read_component("body_label_at", String(index)),
+        shape: world.read_component("body_shape_label_at", String(index)),
+        material: world.read_component("body_material_label_at", String(index)),
+        mass: readNumber(world, "body_mass_at", String(index)),
+        position: [position[0], position[1], position[2]],
+        speed: Math.hypot(velocity[0], velocity[1], velocity[2]),
+      };
+    },
   };
-  guidedApiRef.current = guidedApi;
+  workspaceApiRef.current = workspaceApi;
 
   render();
   frameCameraOnContent();
@@ -9104,11 +8951,9 @@ async function setUpSceneView(
 }
 
 function main() {
-  setUpLayoutPresetSwitcher();
-  // UI 基盤(増分「UI 品質の底上げ」)。world より先に立ち上げる——読み込み中
-  // でもショートカット一覧は開けるし、初期化に失敗したときの通知経路(トースト)が
-  // 必要になるのはまさにその瞬間だから。
-  setUpPanelSplitters();
+  // UI 基盤。world より先に立ち上げる——読み込み中でもショートカット一覧は
+  // 開けるし、初期化に失敗したときの通知経路(トースト)が必要になるのは
+  // まさにその瞬間だから。
   setUpShortcutOverlay();
   setUpTabListKeyboardNavigation();
   setUpHierarchyKeyboardNavigation();
@@ -9168,8 +9013,8 @@ function main() {
   // 瞬間に、①のカテゴリ選択が既に目の前にある状態にするため。物理側の窓口
   // (`guidedApiRef`)が埋まるのは初期化の完了時で、それまでに選ばれた実験は
   // 窓口が来た時点で自動的に走り出す(`guided.ts` の `pendingStart`)。
-  const guidedApiRef: GuidedApiRef = { current: null };
-  setUpGuidedMode(guidedApiRef);
+  const workspaceApiRef: WorkspaceApiRef = { current: null };
+  setUpWorkspace(workspaceApiRef);
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
@@ -9209,7 +9054,7 @@ function main() {
     circuitElementsRef,
     consoleDiagnosticsRef,
     validationBaseJsonRef,
-    guidedApiRef,
+    workspaceApiRef,
   )
     .then(() => {
       markBootReady();

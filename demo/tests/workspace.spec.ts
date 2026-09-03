@@ -1,0 +1,205 @@
+import { expect, test, type Page } from "@playwright/test";
+import { collectPageErrors } from "./helpers";
+import { GUIDED_CATEGORIES as CATEGORIES } from "../src/catalog";
+
+// ワークスペース(`src/workspace.ts`)の E2E。
+//
+// **ここが守るもの**: 画面はひとつのまま、粒度が「大局 ⇄ 局所」に連続して
+// 動くこと。具体的には
+//   - 初めて開いた人が、空白ではなく**動いている現象**から始められる
+//   - どこからでも 1 手で開く窓(⌘K)から、打つ/選ぶで目的の現象へ届く
+//   - 見る深さのダイヤルを右へ回すほど、一覧 → グラフ → 道具が順に現れる
+//   - 全体の深さを変えずに、カード 1 枚だけ深く開ける(局所の粒度)
+//   - ひとつの対象を選ぶと文脈がそこへ寄り、「全体へ戻る」で戻れる
+//
+// 既定の storageState(`playwright.config.ts`)は深さ 3 なので、ここでは
+// **初めて開いた人**を再現するために空の storageState を使う。
+test.use({ storageState: { cookies: [], origins: [] } });
+
+async function boot(page: Page) {
+  await page.goto("/");
+  await expect(page.locator("#boot-overlay")).toBeHidden({ timeout: 30_000 });
+}
+
+/** 「経過した時間」を秒で読む(表示は桁に合わせて単位が変わる)。 */
+async function elapsedSeconds(page: Page): Promise<number> {
+  const raw = await page.locator("#readout-time").getAttribute("data-seconds");
+  return Number.parseFloat(raw ?? "0") || 0;
+}
+
+async function setGrain(page: Page, at: 0 | 1 | 2 | 3) {
+  await page.click(`.detail-stop[data-at="${at}"]`);
+}
+
+test("初めて開くと、空白ではなく動いている現象から始まる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 画面はひとつ。上にパンくずと走行、右に文脈、まん中が舞台。
+  await expect(page.locator("#commandbar")).toBeVisible();
+  await expect(page.locator("#context")).toBeVisible();
+  await expect(page.locator("#scene-view")).toBeVisible();
+  // 何を見ているかがパンくずに出ている。
+  await expect(page.locator("#crumb-experiment")).toBeVisible();
+  // すでに走っている(押させない)。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0);
+  // 何も選んでいないので「選んだもの」は出ない(内部都合の床が選ばれない)。
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("⌘K → 打つ → Enter の3手で、目的の現象が走り出す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  await page.keyboard.press("Control+k"); // ①どこからでも開く
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.fill("#palette-input", "コーヒー"); // ②絞る
+  await expect(page.locator(".palette-row").first()).toContainText("コーヒー");
+  await page.keyboard.press("Enter"); // ③選ぶ = 走り出す
+
+  await expect(page.locator("#palette")).toBeHidden();
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  await expect(page.locator("#context")).toContainText("コーヒーの温度");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+test("見る深さを右へ回すほど、道具が順に現れる(連続した粒度)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  await setGrain(page, 0);
+  await expect(page.locator("#hierarchy")).toBeHidden();
+  await expect(page.locator("#probe-graphs")).toBeHidden();
+  await expect(page.locator("#toolbar")).toBeHidden();
+  await expect(page.locator("#project-drawer")).toBeHidden();
+
+  await setGrain(page, 1);
+  await expect(page.locator("#timeline")).toBeVisible();
+  await expect(page.locator("#hierarchy")).toBeHidden();
+
+  await setGrain(page, 2);
+  await expect(page.locator("#probe-graphs")).toBeVisible();
+  await expect(page.locator("#hierarchy")).toBeVisible();
+  await expect(page.locator("#inspector")).toBeVisible();
+  await expect(page.locator("#toolbar")).toBeHidden();
+
+  await setGrain(page, 3);
+  await expect(page.locator("#toolbar")).toBeVisible();
+  await expect(page.locator("#console-panel")).toBeVisible();
+  await expect(page.locator("#project-drawer")).toBeVisible();
+
+  // 深さは覚えている(毎回入り直させない)。
+  await page.reload();
+  await expect(page.locator("#boot-overlay")).toBeHidden({ timeout: 30_000 });
+  await expect(page.locator("#toolbar")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("全体は浅いまま、カード1枚だけ深く開ける(局所の粒度)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  const knobs = page.locator('.card[data-card="knobs"]');
+  await expect(knobs).toHaveAttribute("data-expanded", "false");
+  await knobs.locator(".card-header").click();
+  await expect(knobs).toHaveAttribute("data-expanded", "true");
+  await expect(page.locator("#knob-height")).toBeVisible();
+
+  // 局所を開いても、大局は「みる」のまま——一覧やグラフは出てこない。
+  await expect(page.locator("#hierarchy")).toBeHidden();
+  await expect(page.locator("#probe-graphs")).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("ひとつの対象を選ぶと文脈がそこへ寄り、全体へ戻れる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+
+  // 一覧から実体を選ぶ(3D のクリックでも同じ状態になる)。
+  await page.locator("#hierarchy-tree .tree-body").nth(1).click();
+  await expect(page.locator("#crumb-body")).toBeVisible();
+  const focus = page.locator('.card[data-card="focus"]');
+  await expect(focus).toBeVisible();
+  await expect(focus).toContainText("かたち");
+
+  await page.click("#btn-clear-selection");
+  await expect(page.locator("#crumb-body")).toHaveCount(0);
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("つまみを動かすと、その設定でやり直す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0);
+
+  const slider = page.locator("#knob-height");
+  await slider.fill("5");
+  await slider.dispatchEvent("change");
+
+  const height = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => Number.parseFloat((await height.textContent()) ?? "99"), {
+      timeout: 10_000,
+    })
+    .toBeLessThan(6);
+  expect(errors).toEqual([]);
+});
+
+test("dt の桁が極端なシーンでも、待たずに現象が進む", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // D34(太陽系儀)は 1 step が 31555 秒。時間倍率では上限でも 1 step 4 分。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星");
+  await page.keyboard.press("Enter");
+
+  await expect
+    .poll(() => elapsedSeconds(page), { timeout: 20_000 })
+    .toBeGreaterThan(1_000_000);
+  await expect(page.locator("#readout-time")).toContainText("日");
+  expect(errors).toEqual([]);
+});
+
+test("3Dに何も描かれない実験を選ぶと、グラフが見える深さまで自動で開く", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+
+  // 選んだのに何も映らない、を残さない。
+  await expect(page.locator("#probe-graphs")).toBeVisible();
+  await expect(page.locator("#context")).toContainText("下のグラフ");
+  expect(errors).toEqual([]);
+});
+
+// カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
+for (const category of CATEGORIES) {
+  test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+
+    for (const experiment of category.experiments) {
+      await page.keyboard.press("Control+k");
+      await expect(page.locator("#palette")).toBeVisible();
+      await page.click(`.palette-row[data-experiment-id="${experiment.id}"]`);
+      await expect(page.locator("#crumb-experiment")).toContainText(experiment.title);
+      await expect
+        .poll(() => elapsedSeconds(page), { timeout: 15_000 })
+        .toBeGreaterThan(0);
+    }
+    expect(errors).toEqual([]);
+  });
+}

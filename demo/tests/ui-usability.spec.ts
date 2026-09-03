@@ -15,69 +15,6 @@ import { collectPageErrors, waitForWorld } from "./helpers";
 //      「未検証」と明記していた領域)
 //   3. 空状態と絞り込み(「何も無い」と「壊れている」を画面で区別できること)
 
-test("スプリッターで Hierarchy の幅が変わり、再読み込み後も保たれ、ダブルクリックで戻る", async ({
-  page,
-}) => {
-  const errors = collectPageErrors(page);
-  await page.goto("/");
-  await waitForWorld(page);
-
-  const width = () =>
-    page.evaluate(
-      () => document.getElementById("hierarchy")!.getBoundingClientRect().width,
-    );
-  const before = await width();
-
-  const splitter = page.locator("#splitter-left");
-  const box = (await splitter.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 2, box.y + 200);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width / 2 + 90, box.y + 200, { steps: 8 });
-  await page.mouse.up();
-
-  const dragged = await width();
-  expect(dragged).toBeGreaterThan(before + 60);
-
-  // 再読み込みしても保たれる(localStorage)。パネルの大きさは作業ごとに
-  // 決まるもので、開くたびに直すのは苦痛なので残す。
-  await page.reload();
-  await waitForWorld(page);
-  expect(await width()).toBeCloseTo(dragged, 0);
-
-  // ダブルクリックで既定へ戻る。
-  await page.locator("#splitter-left").dblclick();
-  await expect.poll(width).toBeCloseTo(before, 0);
-
-  expect(errors).toEqual([]);
-});
-
-test("スプリッターはキーボードでも動かせる(マウスを使わない操作)", async ({
-  page,
-}) => {
-  const errors = collectPageErrors(page);
-  await page.goto("/");
-  await waitForWorld(page);
-
-  const width = () =>
-    page.evaluate(
-      () => document.getElementById("inspector")!.getBoundingClientRect().width,
-    );
-  const before = await width();
-
-  await page.locator("#splitter-right").focus();
-  // Inspector はガターより右にあるので、左キーで**広がる**(`data-invert`)。
-  await page.keyboard.press("ArrowLeft");
-  await page.keyboard.press("ArrowLeft");
-  const widened = await width();
-  expect(widened).toBeGreaterThan(before);
-
-  // Home で既定へ戻る。
-  await page.keyboard.press("Home");
-  await expect.poll(width).toBeCloseTo(before, 0);
-
-  expect(errors).toEqual([]);
-});
-
 test("`?` でショートカット一覧が開き、Esc で閉じる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await page.goto("/");

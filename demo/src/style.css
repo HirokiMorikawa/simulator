@@ -91,11 +91,13 @@
    * `prefers-reduced-motion` で 0s に落とす(下記)。個々の transition は
    * この変数だけを参照するので、無効化が 1 箇所で効く。 */
   --motion-fast: 90ms;
+  --motion-slow: 180ms;
 }
 
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-fast: 0s;
+    --motion-slow: 0s;
   }
 }
 
@@ -138,82 +140,110 @@ body {
 }
 
 /* ========================================================================
- * 3. レイアウト骨格
+ * 3. レイアウト骨格 — ひとつの画面、連続する粒度
  * ==================================================================== */
 
-/* 列幅・行高は**すべて CSS 変数**にする(増分「UI 品質」)。理由は 2 つ:
- *  - スプリッター(§4)がドラッグ中に `#app` のインラインスタイルとして
- *    同じ変数を書き換えるだけで済む
- *  - レイアウトプリセットも `grid-template-*` を丸ごと書き換えるのではなく
- *    変数の上書きで表現でき、プリセットとドロワー開閉が同じ宣言を奪い合わない
- *    (増分E3 で `--project-row` について踏んだ問題の一般化)
+/* **考え方**: 画面は 1 つ。`--detail`(0〜3 の連続値、`workspace.ts` が書く)が
+ * 大局の粒度を表し、各パネルの幅・高さはその値から補間された px として
+ * JS がインライン変数に書き込む(`--col-outline` など)。CSS 側は「その幅で
+ * 並べる」ことだけを受け持つ。
  *
- * 列に 2 本の細いガター列を挟むのは、スプリッターを**グリッドの一員**として
- * 置くため(絶対配置でパネルの上に浮かせると、パネル内のスクロールバーや
- * Scene View のポインタ操作と当たり判定を取り合う)。 */
+ * **なぜ JS が px を書くのか**: 幅を CSS の clamp() で作ると、幅の実測値を
+ * 使う処理(キャンバスのリサイズ、パネルの折り返し判定)から読めない。
+ * ひとつの数(粒度)から全部の寸法が決まる、という関係をコードの 1 箇所
+ * (`applyDetail`)に閉じ込める方が、後から目盛りを足すのも簡単になる。
+ *
+ * 列: [ 一覧 | 舞台 | 文脈 ]   行: [ コマンド / 道具 / 舞台 / 時間 / グラフ / ログ / 素材 ] */
 #app {
-  --col-left: 220px;
-  --col-right: 268px;
-  --row-timeline: auto;
-  --row-console: 160px;
-  --project-row: 30px;
-  --gutter: 5px;
+  --detail: 0.6;
+  --col-outline: 0px;
+  --col-context: 300px;
+  --row-toolbar: 0px;
+  --row-timeline: 0px;
+  --row-analysis: 0px;
+  --row-console: 0px;
+  --row-project: 0px;
 
   display: grid;
   height: 100vh;
-  grid-template-columns:
-    var(--col-left) var(--gutter) minmax(160px, 1fr)
-    var(--gutter) var(--col-right);
+  grid-template-columns: var(--col-outline) minmax(0, 1fr) var(--col-context);
   grid-template-rows:
-    auto 1fr var(--row-timeline) var(--gutter) var(--row-console)
-    var(--project-row);
-  grid-template-areas:
-    "toolbar   toolbar  toolbar   toolbar  toolbar"
-    "hierarchy gutter-l sceneview gutter-r inspector"
-    "timeline  timeline timeline  timeline timeline"
-    "gutter-h  gutter-h gutter-h  gutter-h gutter-h"
-    "console   console  console   console  probes"
-    "project   project  project   project  project";
-  gap: 1px;
+    auto var(--row-toolbar) minmax(0, 1fr)
+    var(--row-timeline) var(--row-analysis) var(--row-console) var(--row-project);
   background: var(--surface-app);
+  transition:
+    grid-template-columns var(--motion-slow) ease,
+    grid-template-rows var(--motion-slow) ease;
 }
 
-/* **増分E3で修正した重大なUIバグ**: 既定の `--project-row` はタブバーの
- * 高さぶんしかなく、Project ドロワーの本体(Scenes/Materials/Circuit/Prefabs/
- * Replays の中身)は画面外へ押し出されて**実ユーザーには一切到達不能**だった
- * (実測: viewport 900px に対し `#project-body` の top が 903px)。タブを
- * クリックしたら開くようにし、開いている間は本体が入る高さを与える。 */
-#app[data-drawer="open"] {
-  --project-row: 260px;
+#commandbar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+#toolbar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+#hierarchy {
+  grid-column: 1;
+  grid-row: 3 / 6;
+}
+#scene-view {
+  grid-column: 2;
+  grid-row: 3;
+}
+#timeline {
+  grid-column: 2;
+  grid-row: 4;
+}
+#probe-graphs {
+  grid-column: 2;
+  grid-row: 5;
+}
+#context {
+  grid-column: 3;
+  grid-row: 3 / 5;
+}
+#inspector {
+  grid-column: 3;
+  grid-row: 5;
+}
+/* Inspector がまだ現れていない粒度では、文脈の柱が右列を最後まで使う
+ * ——空白の帯を作らない。 */
+#app[data-inspector="false"] #context {
+  grid-row: 3 / 6;
+}
+#console-panel {
+  grid-column: 1 / -1;
+  grid-row: 6;
+}
+#project-drawer {
+  grid-column: 1 / -1;
+  grid-row: 7;
 }
 
-#app[data-layout="physics-focus"] {
-  --row-console: 320px;
-}
-
-/* Astro(タイムライン重視、設計§2「Astro(タイムライン重視)」): タイムライン行を
- * 固定の大きな高さにし、その分コンソール行を縮める。 */
-#app[data-layout="astro"] {
-  --row-timeline: 140px;
-  --row-console: 120px;
-}
-
-/* Circuit-focus(設計§2「Circuit-focus(回路サブモード + プローブ大)」、増分E3)。
- * 回路エディタは Project ドロワーの Circuit タブにあるので、**ドロワーを常時
- * 大きく開いた状態**にし、あわせてプローブ行も広げる(回路の電圧をグラフで
- * 追うため)。Scene View は回路作業中は使わないので圧縮してよい。 */
-#app[data-layout="circuit-focus"] {
-  --project-row: 360px;
-  --row-console: 220px;
+/* 粒度が足りずに幅・高さが 0 になったパネルは、中身が漏れないように畳む。
+ * `display:none` ではなく寸法 0 + `visibility` にするのは、粒度を戻したときに
+ * 位置が飛ばない(=同じ場所から開き直す)ようにするため。 */
+#app[data-outline="false"] #hierarchy,
+#app[data-toolbar="false"] #toolbar,
+#app[data-analysis="false"] #probe-graphs,
+#app[data-console="false"] #console-panel,
+#app[data-project="false"] #project-drawer,
+#app[data-inspector="false"] #inspector,
+#app[data-timeline="false"] #timeline {
+  visibility: hidden;
+  pointer-events: none;
+  border: 0;
 }
 
 .panel {
   background: var(--surface-panel);
   overflow: auto;
   box-sizing: border-box;
-  /* パネルは `gap: 1px` の隙間(地の色)で分かれるので、以前のような
-   * 1px の枠線は要らない——枠線と隙間が二重に見えて線が太く濁っていた。 */
   border: 0;
+  min-width: 0;
+  min-height: 0;
 }
 
 .panel h2 {
@@ -223,64 +253,32 @@ body {
   color: var(--text-subtle);
   margin: 0;
   padding: var(--space-4) var(--space-5) var(--space-3);
-  /* 見出しはスクロールしても残す(Inspector の Component が増えると、今どの
-   * パネルを見ているのか分からなくなっていた)。 */
   position: sticky;
   top: 0;
   background: var(--surface-panel);
   z-index: 1;
 }
 
-/* ========================================================================
- * 4. スプリッター(パネル境界のドラッグリサイズ)
- * ==================================================================== */
+/* パネルどうしの境目は 1px の線で示す(隙間の地色ではなく)。粒度で
+ * パネルが消えるとき、隙間だけが残って見えるのを避けるため。 */
+#toolbar,
+#commandbar {
+  border-bottom: 1px solid var(--border);
+}
+#hierarchy {
+  border-right: 1px solid var(--border);
+}
+#context,
+#inspector {
+  border-left: 1px solid var(--border);
+}
+#timeline,
+#probe-graphs,
+#console-panel,
+#project-drawer {
+  border-top: 1px solid var(--border);
+}
 
-/* 設計 §1「ブラウザ 1 ページ内でリサイズ…ができる」の実体。Hierarchy /
- * Inspector の幅と Console 行の高さを掴んで動かせる。値は localStorage に
- * 残り、ダブルクリックで既定へ戻る(`setUpPanelSplitters`)。 */
-.splitter {
-  background: transparent;
-  position: relative;
-  z-index: 4;
-  transition: background var(--motion-fast) ease;
-}
-.splitter::after {
-  /* 掴みやすさのため、見た目の線(1px)より広い当たり判定(ガター幅)を持たせる。
-   * 視覚的な手掛かりは中央の細い線 1 本に留める(常時ハイライトすると
-   * パネル境界が主張しすぎる)。 */
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: var(--border);
-}
-.splitter:hover::after,
-.splitter[data-dragging="true"]::after {
-  background: var(--accent);
-}
-.splitter:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-}
-.splitter[data-axis="x"] {
-  cursor: col-resize;
-}
-.splitter[data-axis="y"] {
-  cursor: row-resize;
-}
-#splitter-left {
-  grid-area: gutter-l;
-}
-#splitter-right {
-  grid-area: gutter-r;
-}
-#splitter-console {
-  grid-area: gutter-h;
-}
-/* ドラッグ中はテキスト選択と iframe 的な取りこぼしを止める。 */
-body[data-splitter-dragging="true"] {
-  user-select: none;
-  cursor: var(--splitter-cursor, col-resize);
-}
 
 /* ========================================================================
  * 5. 共通コントロール
@@ -394,7 +392,6 @@ body[data-splitter-dragging="true"] {
 /* --- Toolbar --------------------------------------------------------- */
 
 #toolbar {
-  grid-area: toolbar;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -509,7 +506,6 @@ body[data-splitter-dragging="true"] {
 /* --- Hierarchy ------------------------------------------------------- */
 
 #hierarchy {
-  grid-area: hierarchy;
 }
 
 /* Hierarchy検索欄(D3「Unityパリティ」増分)。大量のボディを持つシーンで
@@ -599,7 +595,6 @@ body[data-splitter-dragging="true"] {
 /* --- Scene View ------------------------------------------------------ */
 
 #scene-view {
-  grid-area: sceneview;
   position: relative;
   padding: 0;
   overflow: hidden;
@@ -750,7 +745,6 @@ body[data-splitter-dragging="true"] {
 /* --- Inspector ------------------------------------------------------- */
 
 #inspector {
-  grid-area: inspector;
 }
 
 #inspector-body {
@@ -902,7 +896,6 @@ body[data-splitter-dragging="true"] {
 /* --- Timeline -------------------------------------------------------- */
 
 #timeline {
-  grid-area: timeline;
   padding: var(--space-3) var(--space-5);
 }
 
@@ -982,7 +975,6 @@ body[data-splitter-dragging="true"] {
 /* --- Console --------------------------------------------------------- */
 
 #console-panel {
-  grid-area: console;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -1086,7 +1078,6 @@ body[data-splitter-dragging="true"] {
 /* --- Probe Graphs ---------------------------------------------------- */
 
 #probe-graphs {
-  grid-area: probes;
   padding: var(--space-3) var(--space-5) var(--space-4);
   display: flex;
   flex-direction: column;
@@ -1155,7 +1146,6 @@ body[data-splitter-dragging="true"] {
 /* --- Project ドロワー ------------------------------------------------- */
 
 #project-drawer {
-  grid-area: project;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1757,464 +1747,504 @@ kbd {
 }
 
 /* ========================================================================
- * 9. かんたんモード(3ステップ)
+ * 9. コマンドバー・文脈カード・パレット(粒度の操作面)
  * ==================================================================== */
 
-/* **なぜこの一式があるか**: 統合エディタは「作る人」向けの密度(6パネル・
- * 60個以上のコントロール)で作られていて、初めて開いた人が「落ちる球が見たい」
- * だけのために踏む手数が多すぎた。ここでは同じアプリの**最初に見える画面だけ**を
- * 差し替える——3D ビューと、その横のガイド、上の操作バーの 3 つに絞り、
- * 文字は全部やさしい日本語にする。切り替えは `#app[data-ui]` 1 属性で、
- * 統合エディタ側の CSS には一切触れていない(どちらかを直すときに他方を
- * 壊さないため)。
- *
- * 寸法の考え方: かんたんモードのボタンは**エディタより一回り大きい**
- * (`--control-h` の 24px ではなく 34px)。密度より、迷わず押せることを優先する。 */
-
-#app[data-ui="guided"] {
-  --col-guide: 330px;
-  --row-guided-graph: 0px;
-
-  grid-template-columns: minmax(0, 1fr) var(--col-guide);
-  grid-template-rows: auto minmax(0, 1fr) var(--row-guided-graph);
-  grid-template-areas:
-    "guidedbar guidedbar"
-    "sceneview guide"
-    "probes    probes";
-}
-#app[data-ui="guided"][data-guided-graph="on"] {
-  --row-guided-graph: 210px;
-}
-/* グラフが主役の実験(3D には何も描かれない熱・回路・天体など)は、
- * グラフを画面の半分近くまで大きく取る。 */
-#app[data-ui="guided"][data-guided-graph="on"][data-guided-view="graph"] {
-  --row-guided-graph: 38vh;
-}
-
-/* かんたんモードで**出さない**もの(統合エディタ側の一式)。 */
-#app[data-ui="guided"] > #toolbar,
-#app[data-ui="guided"] > #hierarchy,
-#app[data-ui="guided"] > #inspector,
-#app[data-ui="guided"] > #timeline,
-#app[data-ui="guided"] > #console-panel,
-#app[data-ui="guided"] > #project-drawer,
-#app[data-ui="guided"] > .splitter {
-  display: none;
-}
-#app[data-ui="guided"][data-guided-graph="off"] > #probe-graphs {
-  display: none;
-}
-/* HUD(`t = 1.508 s` / `step = 181` / `circuit V[2] = …`)は中の仕組みを
- * 前提にした表示なので、かんたんモードでは出さない——同じ情報は右のガイドが
- * 「経過した時間」「ボールの高さ」という言葉で出している。 */
-#app[data-ui="guided"] #hud {
-  display: none;
-}
-/* モードで言い換える見出し(`.label-pro` / `.label-guided`)。 */
-.label-guided {
-  display: none;
-}
-#app[data-ui="guided"] .label-pro {
-  display: none;
-}
-#app[data-ui="guided"] .label-guided {
-  display: inline;
-}
-
-/* 統合エディタ側では、かんたんモードの一式を出さない。 */
-#app[data-ui="pro"] > #guided-bar,
-#app[data-ui="pro"] > #guided-panel {
-  display: none;
-}
-#app[data-ui="pro"] ~ #guided-chooser {
-  display: none !important;
-}
-
-#guided-bar {
-  grid-area: guidedbar;
+/* --- コマンドバー: 「どこを見ているか」「動かす」「どこまで踏み込むか」 --- */
+#commandbar {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
-  overflow: visible;
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-6);
+  padding: var(--space-3) var(--space-5);
+  background: var(--surface-panel);
+  min-height: 48px;
 }
-.guided-bar-main {
-  min-width: 190px;
-  margin-right: var(--space-2);
-}
-.guided-bar-title {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.3;
-}
-.guided-bar-blurb {
-  font-size: var(--text-base);
-  color: var(--text-muted);
-  line-height: 1.4;
-}
-.guided-bar-spacer {
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
-#app .guided-bar-btn {
-  height: 34px;
-  padding: 0 var(--space-5);
+#app #commandbar button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+#app .crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 30px;
+  padding: 0 var(--space-4);
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
   font-size: var(--text-md);
-  border-radius: var(--radius);
+  white-space: nowrap;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-#app .guided-bar-play {
-  min-width: 128px;
+#app .crumb:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+#app .crumb-root {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+}
+#app .crumb-root:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+#app .crumb-root kbd {
+  font-size: var(--text-xs);
+  color: var(--text-subtle);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+}
+#app .crumb-leaf {
+  background: var(--accent-surface);
+  border-color: var(--accent-border);
+  font-family: var(--font-mono);
+}
+.crumb-sep {
+  color: var(--text-subtle);
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 0 auto;
+}
+#app #btn-run {
+  min-width: 118px;
+  height: 32px;
+  font-size: var(--text-md);
   font-weight: 600;
   background: var(--accent-strong);
   border-color: var(--accent-border);
   color: #fff;
 }
-#app .guided-bar-play[data-playing="true"] {
+#app #btn-run[data-playing="true"] {
   background: var(--surface-raised);
   color: var(--text);
+  border-color: var(--border-strong);
 }
-#app #btn-guided-choose {
-  font-weight: 600;
+#app #btn-restart {
+  height: 32px;
 }
-.guided-bar-speed {
+.run-speed {
   display: flex;
-  gap: 1px;
 }
-#app .guided-bar-speed button {
-  height: 34px;
-  padding: 0 var(--space-4);
+#app .run-speed button {
+  height: 32px;
+  width: 34px;
+  padding: 0;
   border-radius: 0;
 }
-#app .guided-bar-speed button:first-child {
+#app .run-speed button:first-child {
   border-radius: var(--radius) 0 0 var(--radius);
 }
-#app .guided-bar-speed button:last-child {
+#app .run-speed button:last-child {
   border-radius: 0 var(--radius) var(--radius) 0;
 }
-#app .guided-bar-speed button.active {
+#app .run-speed button.active {
   background: var(--accent-surface);
   border-color: var(--accent-border);
-  color: var(--text);
 }
-#app #btn-guided-graph[data-on="true"] {
-  background: var(--accent-surface);
-  border-color: var(--accent-border);
+.run-clock {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  color: var(--text-muted);
+  min-width: 11ch;
+  text-align: right;
 }
 
-/* --- 右のガイドパネル --- */
-#guided-panel {
-  grid-area: guide;
-  padding-bottom: var(--space-6);
+/* --- 粒度のダイヤル。目盛りに名前があり、間の値も取れる --- */
+.detail-control {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: auto;
+  gap: 2px;
+  justify-items: stretch;
+  width: 268px;
 }
-#guided-panel-body {
-  padding: 0 var(--space-5) var(--space-5);
+.detail-stops {
+  display: flex;
+  justify-content: space-between;
 }
-.guided-section {
-  margin-bottom: var(--space-6);
+#app .detail-stop {
+  background: transparent;
+  border: 0;
+  padding: 0 var(--space-2);
+  height: 18px;
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
 }
-.guided-section h3 {
-  font-size: var(--text-md);
-  margin: 0 0 var(--space-3);
+#app .detail-stop:hover {
   color: var(--text);
 }
-.guided-watch {
+#app .detail-stop.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+#app #detail-dial {
+  width: 100%;
+  margin: 0;
+}
+.detail-hint {
+  font-size: var(--text-xs);
+  color: var(--text-subtle);
+  text-align: center;
+  min-height: 14px;
+}
+
+/* --- 文脈の柱(カード) --- */
+#context {
+  padding-bottom: var(--space-6);
+}
+#context-body {
+  padding: var(--space-4) var(--space-4) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+#app .card-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  width: 100%;
+  padding: var(--space-4);
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--text);
+}
+#app .card-header:hover {
+  background: var(--surface-hover);
+}
+.card-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.card-summary {
+  grid-column: 1 / -1;
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+  line-height: 1.5;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.card[data-expanded="true"] .card-summary {
+  display: none;
+}
+.card-chevron {
+  color: var(--text-subtle);
+  transition: transform var(--motion-fast) ease;
+}
+.card[data-expanded="true"] .card-chevron {
+  transform: rotate(180deg);
+}
+.card-body {
+  padding: 0 var(--space-4) var(--space-4);
+}
+.card[data-expanded="false"] .card-body {
+  display: none;
+}
+.card-where {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  background: var(--accent-surface);
+  border: 1px solid var(--accent-border);
+  font-size: var(--text-md);
+  line-height: 1.6;
+}
+.card-watch {
   margin: 0;
   padding-left: 1.1em;
   font-size: var(--text-md);
   line-height: 1.75;
   color: var(--text-muted);
 }
-.guided-watch li {
-  margin-bottom: var(--space-2);
+.card-watch li + li {
+  margin-top: var(--space-2);
 }
-.guided-where {
-  font-size: var(--text-md);
-  line-height: 1.6;
-  color: var(--text);
-  background: var(--accent-surface);
-  border: 1px solid var(--accent-border);
-  border-radius: var(--radius);
-  padding: var(--space-4);
-  margin: 0 0 var(--space-6);
-}
-.guided-readouts {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: var(--space-2) var(--space-4);
-  margin: 0;
-  font-size: var(--text-md);
-}
-.guided-readouts dt {
-  color: var(--text-muted);
-}
-.guided-readouts dd {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: var(--text-md);
-  text-align: right;
-  color: var(--text);
-}
-.guided-note {
+.card-note {
   font-size: var(--text-base);
   color: var(--text-subtle);
-  margin: 0 0 var(--space-4);
   line-height: 1.6;
+  margin: 0 0 var(--space-4);
 }
-.guided-empty {
-  font-size: var(--text-md);
-  color: var(--text-muted);
-  line-height: 1.7;
-}
-
-/* --- つまみ --- */
-.guided-knob {
-  margin-bottom: var(--space-5);
-}
-.guided-knob-label {
-  display: block;
-  font-size: var(--text-md);
-  margin-bottom: var(--space-2);
-}
-.guided-knob-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-}
-#app .guided-knob-row input[type="range"] {
-  flex: 1;
-  height: 22px;
-}
-.guided-knob-value {
-  min-width: 72px;
-  text-align: right;
-  font-family: var(--font-mono);
-  color: var(--text);
-}
-.guided-choice {
+.card-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
 }
-#app .guided-choice-btn {
+#app .card-actions button {
   height: 30px;
-  padding: 0 var(--space-4);
+}
+.readouts {
+  display: grid;
+  /* 名前の列は縮めない。値が長いときは値の側を折り返す——名前が
+   * 「か/た/ち」と縦に割れて読めなくなるのを防ぐ。 */
+  grid-template-columns: minmax(5.5em, auto) minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
   font-size: var(--text-md);
 }
-#app .guided-choice-btn.active {
-  background: var(--accent-surface);
-  border-color: var(--accent-border);
+.readouts dt {
+  color: var(--text-muted);
+}
+.readouts dd {
+  margin: 0;
+  text-align: right;
+  font-family: var(--font-mono);
   color: var(--text);
-}
-.guided-knob-hint {
-  font-size: var(--text-base);
-  color: var(--text-subtle);
-  margin: var(--space-2) 0 0;
-  line-height: 1.5;
-}
-#app .guided-again {
-  width: 100%;
-  height: 34px;
-  margin-top: var(--space-4);
+  overflow-wrap: anywhere;
 }
 
-/* --- 3ステップのチューザ(オーバーレイ) --- */
-#guided-chooser {
+/* --- つまみ --- */
+.knob + .knob {
+  margin-top: var(--space-5);
+}
+.knob-label {
+  display: block;
+  font-size: var(--text-md);
+  margin-bottom: var(--space-2);
+}
+.knob-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+#app .knob-row input[type="range"] {
+  flex: 1;
+  height: 22px;
+}
+.knob-value {
+  min-width: 70px;
+  text-align: right;
+  font-family: var(--font-mono);
+}
+.knob-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+#app .knob-choice-btn {
+  height: 28px;
+}
+#app .knob-choice-btn.active {
+  background: var(--accent-surface);
+  border-color: var(--accent-border);
+}
+.knob-hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+  line-height: 1.5;
+}
+
+.context-empty {
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+}
+.context-empty-lead {
+  font-size: var(--text-md);
+  margin: 0 0 var(--space-5);
+}
+#app .context-empty-cta {
+  width: 100%;
+  height: 40px;
+  font-size: var(--text-md);
+  font-weight: 600;
+  background: var(--accent-strong);
+  border-color: var(--accent-border);
+  color: #fff;
+}
+.context-empty-note {
+  margin: var(--space-4) 0 0;
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+  line-height: 1.6;
+}
+
+/* --- パレット(⌘K) --- */
+#palette {
   position: fixed;
   inset: 0;
-  z-index: 30;
-  background: rgba(6, 8, 11, 0.82);
+  z-index: 40;
   display: flex;
-  align-items: center;
   justify-content: center;
-  padding: var(--space-6);
+  align-items: flex-start;
+  padding: 10vh var(--space-6) var(--space-6);
+  background: rgba(6, 8, 11, 0.7);
 }
-#guided-chooser[hidden] {
+#palette[hidden] {
   display: none;
 }
-.guided-chooser-dialog {
-  width: min(1040px, 96vw);
-  max-height: 92vh;
-  overflow: auto;
-  padding: var(--space-6) var(--space-6) calc(var(--space-6) * 1.5);
+.palette-dialog {
+  width: min(760px, 96vw);
+  max-height: 76vh;
+  display: flex;
+  flex-direction: column;
   border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  gap: var(--space-4);
 }
-.guided-chooser-dialog h2 {
-  margin: 0 0 var(--space-5);
-  font-size: 18px;
+#app #palette-input,
+#palette-input {
+  width: 100%;
+  height: 44px;
+  padding: 0 var(--space-5);
+  font-size: 15px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-sizing: border-box;
 }
-.guided-steps {
+.palette-filters {
   display: flex;
-  gap: var(--space-3);
-  margin-bottom: var(--space-6);
   flex-wrap: wrap;
+  gap: var(--space-2);
 }
-#app .guided-step,
-.guided-step {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-5);
+.palette-filter {
+  height: 28px;
+  padding: 0 var(--space-4);
   border-radius: 999px;
   border: 1px solid var(--border-strong);
   background: var(--surface-raised);
   color: var(--text-muted);
   font-family: inherit;
-  font-size: var(--text-md);
+  font-size: var(--text-base);
   cursor: pointer;
 }
-.guided-step:disabled {
-  opacity: 0.45;
-  cursor: default;
+.palette-filter:hover {
+  color: var(--text);
 }
-.guided-step[data-state="current"] {
+.palette-filter.active {
   background: var(--accent-surface);
   border-color: var(--accent);
   color: var(--text);
-  font-weight: 600;
 }
-.guided-step[data-state="done"] {
-  border-color: var(--ok);
-  color: var(--text);
-}
-.guided-step-number {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--surface-app);
-  font-size: var(--text-sm);
-}
-
-.guided-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-  gap: var(--space-5);
-}
-.guided-card {
+.palette-results {
+  overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  align-items: flex-start;
-  text-align: left;
-  padding: var(--space-5);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border-strong);
-  background: var(--surface-raised);
+  gap: 2px;
+  min-height: 120px;
+}
+.palette-row {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
   color: var(--text);
   font-family: inherit;
+  text-align: left;
   cursor: pointer;
-  transition: border-color var(--motion-fast) ease, transform var(--motion-fast) ease;
 }
-.guided-card:hover {
-  border-color: var(--accent);
-  transform: translateY(-1px);
+.palette-row[data-active="true"] {
+  background: var(--accent-surface);
+  border-color: var(--accent-border);
 }
-.guided-card:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+.palette-row-icon {
+  font-size: 20px;
 }
-.guided-card-icon {
-  font-size: 26px;
-  line-height: 1.1;
+.palette-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
-.guided-card-title {
-  font-size: 15px;
+.palette-row-title {
+  font-size: var(--text-md);
   font-weight: 600;
 }
-.guided-card-blurb {
-  font-size: var(--text-md);
+.palette-row-blurb {
+  font-size: var(--text-base);
   color: var(--text-muted);
-  line-height: 1.6;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.guided-card-count {
+.palette-row-tag {
   font-size: var(--text-sm);
   color: var(--text-subtle);
+  white-space: nowrap;
 }
-#app .guided-back,
-.guided-back {
-  margin-bottom: var(--space-5);
-  padding: var(--space-3) var(--space-4);
-  background: transparent;
-  border: 0;
-  color: var(--accent);
-  font-family: inherit;
+.palette-empty {
+  color: var(--text-subtle);
   font-size: var(--text-md);
-  cursor: pointer;
-}
-.guided-confirm {
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  background: var(--surface-raised);
   padding: var(--space-6);
-  margin-bottom: var(--space-5);
+  text-align: center;
 }
-.guided-confirm-head {
-  display: flex;
-  gap: var(--space-5);
-  align-items: flex-start;
-  margin-bottom: var(--space-5);
-}
-.guided-confirm-icon {
-  font-size: 34px;
-  line-height: 1;
-}
-.guided-confirm h3 {
-  margin: 0 0 var(--space-2);
-  font-size: 17px;
-}
-.guided-confirm p {
+.palette-foot {
   margin: 0;
-  color: var(--text-muted);
-  font-size: var(--text-md);
-  line-height: 1.6;
+  font-size: var(--text-base);
+  color: var(--text-subtle);
 }
-.guided-confirm h4,
-.guided-knobs h4 {
-  font-size: var(--text-md);
-  margin: 0 0 var(--space-3);
-  color: var(--text);
-}
-.guided-chooser-body > .guided-knobs {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: var(--space-5);
-  margin-bottom: var(--space-5);
-}
-#app .guided-go,
-.guided-go {
-  width: 100%;
-  height: 56px;
-  font-size: 18px;
-  font-weight: 700;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--accent-border);
-  background: var(--accent-strong);
-  color: #fff;
-  font-family: inherit;
-  cursor: pointer;
-}
-#app .guided-go:hover,
-.guided-go:hover {
-  background: #4a8ee6;
+.palette-foot kbd {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+  margin-right: var(--space-1);
 }
 
-/* 幅の狭い画面ではガイドを下段へ回す(3D を潰さない)。 */
+/* 幅の狭い画面: 文脈の柱を下段へ回し、舞台を潰さない。 */
 @media (max-width: 900px) {
-  #app[data-ui="guided"] {
+  #app {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr) auto var(--row-guided-graph);
-    grid-template-areas:
-      "guidedbar"
-      "sceneview"
-      "guide"
-      "probes";
   }
-  #guided-panel {
-    max-height: 40vh;
-  }
-  #guided-bar {
+  #commandbar {
     flex-wrap: wrap;
+    gap: var(--space-3);
   }
+  #hierarchy,
+  #context,
+  #inspector,
+  #scene-view,
+  #timeline,
+  #probe-graphs,
+  #console-panel,
+  #project-drawer,
+  #toolbar {
+    grid-column: 1;
+  }
+  #context {
+    grid-row: 4;
+    max-height: 40vh;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}
+
+/* HUD(`t = 1.508 s` / `step = 386` / `circuit V[2] = …`)は中の仕組みを
+ * 前提にした表示。浅い粒度では出さない——同じ情報を、文脈の柱が
+ * 「経過した時間」「ボールの高さ」という言葉で出している。 */
+#app[data-grain="watch"] #hud,
+#app[data-grain="touch"] #hud {
+  display: none;
 }

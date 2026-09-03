@@ -22,34 +22,50 @@
     <!-- **トースト**。失敗の即時通知を `window.alert`(操作をブロックする
          モーダル)から置き換える置き場。`aria-live` で読み上げにも届く。 -->
     <div id="toast-region" role="status" aria-live="polite" aria-atomic="false"></div>
-    <div id="app" data-layout="default" data-ui="guided" data-guided-graph="off">
-      <!-- ================================================================
-           かんたんモード(`src/guided.ts`)。`#app[data-ui="guided"]` のときだけ
-           出る。中の仕組みを知らない人が「① 見たいものを選ぶ → ② 実験を選ぶ →
-           ③ うごかす」の3手で目的の現象に到達できるようにするための最小限の
-           操作面で、統合エディタ側の DOM には一切手を入れない。
-           ================================================================ -->
-      <header id="guided-bar" class="panel">
-        <div class="guided-bar-main">
-          <div id="guided-title" class="guided-bar-title">🔰 かんたんモード</div>
-          <div id="guided-blurb" class="guided-bar-blurb">「実験をえらぶ」から始めてください。</div>
+    <!-- ================================================================
+         **ひとつの画面**。`--detail`(0〜3 の連続値)が「大局 ⇄ 局所」の
+         濃淡を決め、パネルは幅・高さが補間されながら現れる。モードの
+         切り替えではないので、途中の濃さで止めておける。
+         ================================================================ -->
+    <div id="app" data-layout="default" data-grain="watch">
+      <header id="commandbar">
+        <!-- 左: いまどこを見ているか(パンくず)。押すと視点の粒度が変わる。 -->
+        <nav id="crumbs" class="crumbs" aria-label="いま見ているもの"></nav>
+
+        <!-- 中: 走行。粒度に関わらず常にここにある(何度も探させない)。 -->
+        <div id="transport" class="transport" role="group" aria-label="実行">
+          <button id="btn-run" class="run-main"><span aria-hidden="true">▶</span> うごかす</button>
+          <button id="btn-restart" title="いまの設定のまま、最初からやり直す">
+            <span aria-hidden="true">↺</span> はじめから
+          </button>
+          <div id="run-speed" class="run-speed" role="group" aria-label="進む速さ">
+            <button data-speed="0.25" title="ゆっくり進める">🐢</button>
+            <button data-speed="1" class="active" title="ちょうどよい速さ">▶</button>
+            <button data-speed="4" title="速く進める">🐇</button>
+          </div>
+          <div id="run-clock" class="run-clock" title="シミュレーション内の経過時間"></div>
         </div>
-        <button id="btn-guided-choose" class="guided-bar-btn primary">① 実験をえらぶ</button>
-        <button id="btn-guided-play" class="guided-bar-btn guided-bar-play">▶ うごかす</button>
-        <button id="btn-guided-restart" class="guided-bar-btn" title="いまの設定のまま、最初からやり直す">↺ はじめから</button>
-        <div id="guided-speed" class="guided-bar-speed" role="group" aria-label="進む速さ">
-          <button data-speed="0.25" title="ゆっくり進める">🐢 ゆっくり</button>
-          <button data-speed="1" class="active" title="ちょうどよい速さ">▶ ふつう</button>
-          <button data-speed="4" title="速く進める">🐇 はやい</button>
+
+        <!-- 右: 大局の粒度のダイヤル。連続値で、目盛りに名前が付いている。 -->
+        <div id="detail-control" class="detail-control">
+          <div id="detail-stops" class="detail-stops" role="group" aria-label="見る深さ"></div>
+          <input
+            id="detail-dial"
+            type="range"
+            min="0"
+            max="3"
+            step="0.05"
+            value="0.6"
+            aria-label="見る深さ(みる ↔ つくる)"
+          />
+          <div id="detail-hint" class="detail-hint"></div>
         </div>
-        <button id="btn-guided-graph" class="guided-bar-btn" title="下のグラフを出す/しまう">📈 グラフ</button>
-        <button id="btn-guided-camera" class="guided-bar-btn" title="対象が画面から外れたとき、追いかけるカメラに戻す">👀 カメラを戻す</button>
-        <div class="guided-bar-spacer"></div>
-        <button id="btn-guided-pro" class="guided-bar-btn" title="Unity風の統合エディタへ切り替える(いつでも戻れます)">くわしい編集画面へ →</button>
       </header>
-      <aside id="guided-panel" class="panel">
-        <h2>ガイド</h2>
-        <div id="guided-panel-body"></div>
+
+      <!-- 右の柱: いま見ているものの文脈。カードは大局の粒度で自動的に開き、
+           ヘッダを押せばその1枚だけ大局と無関係に開閉できる(局所の粒度)。 -->
+      <aside id="context" class="panel">
+        <div id="context-body"></div>
       </aside>
 
       <header id="toolbar" class="panel">
@@ -145,10 +161,6 @@
           >
         </div>
         <div class="toolbar-group">
-          <!-- **かんたんモードへの入口**。統合エディタは「作る人」向けの密度で
-               作られているので、見たい現象を選ぶだけの人はここから 3 ステップの
-               画面へ戻れる(選択は localStorage に残る)。 -->
-          <button id="btn-simple-mode" class="primary" title="かんたんモード: 見たい現象を3ステップで選んで動かす">🔰 かんたんモード</button>
           <button id="btn-shortcuts" aria-label="キーボードショートカット一覧" title="キーボードショートカット一覧 (?)">?</button>
           <button id="btn-settings" aria-label="Settings" title="Settings(オーバーレイ・物理パラメータ・グリッド)">⚙</button>
           <div id="settings-popover" hidden>
@@ -301,58 +313,12 @@
           </button>
           <label for="select-scene">Scene</label>
           <select id="select-scene"><option value="">(既定シーン)</option></select>
-          <label for="select-layout">Layout</label>
-          <select id="select-layout">
-            <option value="default">Default</option>
-            <option value="physics-focus">Physics-focus</option>
-            <option value="circuit-focus">Circuit-focus</option>
-            <option value="astro">Astro</option>
-          </select>
         </div>
         <div class="toolbar-group toolbar-spacer"></div>
         <div class="toolbar-group">
           <span id="hash-display" title="状態ハッシュ(クリックでコピー)">hash: --------</span>
         </div>
       </header>
-
-      <!-- **スプリッター**(設計 §1「ブラウザ 1 ページ内でリサイズ…ができる」)。
-           グリッドのガター列/行そのものを掴ませる。矢印キーでも動かせるよう
-           `tabindex` を持たせ、`role="separator"` で意味を伝える。 -->
-      <div
-        id="splitter-left"
-        class="splitter"
-        data-axis="x"
-        data-var="--col-left"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Hierarchy パネルの幅"
-        tabindex="0"
-        title="ドラッグで Hierarchy の幅を変える(ダブルクリックで既定へ戻す)"
-      ></div>
-      <div
-        id="splitter-right"
-        class="splitter"
-        data-axis="x"
-        data-var="--col-right"
-        data-invert="true"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Inspector パネルの幅"
-        tabindex="0"
-        title="ドラッグで Inspector の幅を変える(ダブルクリックで既定へ戻す)"
-      ></div>
-      <div
-        id="splitter-console"
-        class="splitter"
-        data-axis="y"
-        data-var="--row-console"
-        data-invert="true"
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label="Console / Probe Graphs 行の高さ"
-        tabindex="0"
-        title="ドラッグで Console 行の高さを変える(ダブルクリックで既定へ戻す)"
-      ></div>
 
       <aside id="hierarchy" class="panel">
         <h2>Hierarchy</h2>
@@ -445,9 +411,7 @@
       </section>
 
       <section id="probe-graphs" class="panel">
-        <!-- 見出しはモードで言い換える(かんたんモードでは "Probe" という
-             語彙そのものが分からない)。中身は同じパネル。 -->
-        <h2><span class="label-pro">Probe Graphs</span><span class="label-guided">うごきのグラフ</span></h2>
+        <h2>うごきのグラフ</h2>
         <div class="probe-controls">
           <label title="各系列を対数軸(|値|のlog10)で正規化する。桁の異なる量の比較に使う">
             <input type="checkbox" id="toggle-probe-log" /> 対数軸
@@ -460,14 +424,8 @@
              **ただの黒い矩形**で、プローブが無いのか壊れているのかが画面から
              読み取れなかった。次に何をすれば線が出るのかを書く。 -->
         <p id="probe-empty" class="empty-state">
-          <span class="label-pro"
-            >まだ観測データがありません。<kbd>▶ Play</kbd> か <kbd>⏭</kbd> で
-            時間を進めると、シーンが宣言したプローブの履歴がここに描かれます。</span
-          >
-          <span class="label-guided"
-            >まだデータがありません。<kbd>▶ うごかす</kbd>
-            を押すと、数値の動きがここに線で描かれます。</span
-          >
+          まだデータがありません。<kbd>▶ うごかす</kbd>
+          を押すと、いまの数値の動きがここに線で描かれます。
         </p>
       </section>
 
@@ -483,14 +441,24 @@
         <div id="project-body"></div>
       </footer>
     </div>
-    <!-- **3ステップのチューザ**(`src/guided.ts` が中身を組み立てる)。
-         ①カテゴリ → ②実験 → ③うごかす。ステップ表示は常に上に出ていて、
-         いま何手目なのか・あと何手で動くのかが分かるようにしてある。 -->
-    <div id="guided-chooser" hidden role="dialog" aria-modal="true" aria-labelledby="guided-chooser-title">
-      <div class="guided-chooser-dialog overlay-surface">
-        <h2 id="guided-chooser-title">3ステップで、見たい現象を動かす</h2>
-        <div id="guided-steps" class="guided-steps"></div>
-        <div id="guided-chooser-body" class="guided-chooser-body"></div>
+    <!-- **パレット**(`src/workspace.ts`)。⌘K / Ctrl+K、またはパンくず左端から
+         どこにいても 1 手で開く。打つか選ぶかで絞り、選んだ瞬間に走り出す
+         ——46 の実験という複雑さを、ひとつの入口で扱えるようにするための窓。 -->
+    <div id="palette" hidden role="dialog" aria-modal="true" aria-labelledby="palette-title">
+      <div class="palette-dialog overlay-surface">
+        <h2 id="palette-title" class="visually-hidden">実験をさがす</h2>
+        <input
+          id="palette-input"
+          type="text"
+          autocomplete="off"
+          placeholder="なにを見たい?  例: 落ちる / 水 / 熱 / 電気 / 宇宙 / 電子"
+          aria-label="実験を検索"
+        />
+        <div id="palette-filters" class="palette-filters" role="group" aria-label="分野でしぼる"></div>
+        <div id="palette-results" class="palette-results" role="listbox" aria-label="実験"></div>
+        <p class="palette-foot">
+          <kbd>↑</kbd><kbd>↓</kbd> で選び <kbd>Enter</kbd> で走り出します。<kbd>Esc</kbd> で閉じます。
+        </p>
       </div>
     </div>
     <!-- **ショートカット一覧**(`?` / `F1` / ツールバーの `?`)。中身は
