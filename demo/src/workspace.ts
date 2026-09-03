@@ -284,6 +284,12 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
    * この一本の状態で言い分ける。
    */
   let ownSceneName = "";
+  /**
+   * 保存の名前欄に**打ちかけている文字**。カードは選択が変わるたびに組み直す
+   * ので、これを持っていないと打っている途中で欄が空に戻る(CI で実際に、
+   * 名前を打った直後の保存が自動命名になった)。
+   */
+  let sceneNameDraft = "";
 
   // ---- 大局の粒度 -------------------------------------------------------------
   /**
@@ -876,7 +882,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         nameInput.type = "text";
         nameInput.id = "input-scene-name";
         nameInput.placeholder = "場面の名前";
-        nameInput.value = ownSceneName;
+        nameInput.value = sceneNameDraft || ownSceneName;
+        nameInput.addEventListener("input", () => {
+          sceneNameDraft = nameInput.value;
+        });
         const save = document.createElement("button");
         save.type = "button";
         save.id = "btn-save-scene";
@@ -888,7 +897,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           const json = api.exportSceneJson();
           if (!json) return;
           const name =
-            nameInput.value.trim() ||
+            (sceneNameDraft || nameInput.value).trim() ||
             `場面 ${new Date().toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
           const scenes = readSavedScenes().filter((entry) => entry.name !== name);
           scenes.unshift({ name, savedAt: new Date().toISOString(), json });
@@ -899,6 +908,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             return;
           }
           ownSceneName = name;
+          sceneNameDraft = name;
           try {
             localStorage.setItem(LAST_OWN_SCENE_KEY, name);
           } catch {
@@ -1002,6 +1012,15 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   }
 
   function renderContext(): void {
+    // **打っている最中に組み直されても、手が離れない**ようにする。カードは
+    // 選択が変わるたびに作り直すので、素朴に張り替えると入力中の欄から
+    // フォーカスもカーソル位置も飛ぶ(名前を打っている途中で保存が
+    // 自動命名になった、が実際に起きた)。
+    const active = document.activeElement as HTMLInputElement | null;
+    const activeId = active?.id ?? "";
+    const activeStart = active?.selectionStart ?? null;
+    const activeEnd = active?.selectionEnd ?? null;
+
     contextBody.innerHTML = "";
     readoutNodes = [];
     focusNodes = {};
@@ -1055,6 +1074,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       for (const spec of world) contextBody.appendChild(buildCard(spec));
       appendFocusCard();
       syncCards();
+      restoreFocus(activeId, activeStart, activeEnd);
       return;
     }
 
@@ -1151,6 +1171,25 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     appendFocusCard();
     contextBody.appendChild(buildCard(viewCardSpec()));
     syncCards();
+    restoreFocus(activeId, activeStart, activeEnd);
+  }
+
+  /**
+   * 組み直す前に触っていた欄へ、カーソル位置ごと手を戻す
+   * (`renderContext` の冒頭 doc 参照)。同じ id の欄が無くなっていれば何もしない。
+   */
+  function restoreFocus(id: string, start: number | null, end: number | null): void {
+    if (!id) return;
+    const next = document.getElementById(id) as HTMLInputElement | null;
+    if (!next || next === document.activeElement) return;
+    next.focus();
+    if (start !== null && end !== null && typeof next.setSelectionRange === "function") {
+      try {
+        next.setSelectionRange(start, end);
+      } catch {
+        /* range を持たない型(number 入力等)では何もしない */
+      }
+    }
   }
 
   /** 選択中の対象があれば、その 1 つに寄った文脈を足す(局所への踏み込み)。 */
