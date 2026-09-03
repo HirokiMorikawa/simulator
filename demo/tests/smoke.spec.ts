@@ -344,7 +344,9 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   await hierarchy.getByText("bob", { exact: true }).click();
   const inspector = page.locator("#inspector-body");
   // Probe セクション(シーン定義プローブ)と現在値。
-  await expect(inspector.getByText("Probe", { exact: true })).toBeVisible();
+  await expect(
+    inspector.getByText("記録している値 (Probe)", { exact: true }),
+  ).toBeVisible();
   await expect(inspector.getByText("BodyPosX(bob)", { exact: true })).toBeVisible();
   // 近似バッジ(**群1で各ソルバの自己申告へ移行**)。
   // 移行前はWorld側が「どのドメインが有効か」から推測しており、力学ソルバ自身の
@@ -370,7 +372,9 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   await waitForWorld(page);
   await addViaMenu(page, "＋ 振り子");
   await hierarchy.getByText("Pendulum", { exact: false }).first().click();
-  await expect(inspector.getByText("Joint", { exact: true })).toBeVisible();
+  await expect(
+    inspector.getByText("つなぎ目 (Joint)", { exact: true }),
+  ).toBeVisible();
 
   // ③ Console の種別タブ。既定シーンへ戻して接触を起こす。
   await page.selectOption("#select-scene", "d4-box-stack.json");
@@ -667,8 +671,12 @@ test("群2: Hierarchy の折り畳み・Materials サブツリー・N step 送�
     "title",
     /step 数上限/,
   );
+  // 表示は「実測 ×N」(実測値だと分かるように語を添えた)。
   const effective = Number(
-    (await page.locator("#timescale-effective").textContent())!.replace("×", ""),
+    (await page.locator("#timescale-effective").textContent())!.replace(
+      /[^0-9.]/g,
+      "",
+    ),
   );
   expect(effective).toBeGreaterThan(1); // 速くはなっている
   expect(effective).toBeLessThan(128); // が指定値には届かない

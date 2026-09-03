@@ -95,6 +95,13 @@ export type WorkspaceApi = {
    * 読むだけの値)。
    */
   maxSpeed: () => number;
+  /**
+   * 選んだ物の**材質を差し替える**。物理側は場面を組み直して反映するので、
+   * 走行中はできない(`false` を返す)。
+   */
+  setBodyMaterial: (index: number, materialName: string) => boolean;
+  /** 選べる材質の名前(スポーンパレットと同じ並び)。 */
+  materialNames: () => string[];
   /** 選択中の剛体(無ければ -1)。 */
   selectedBody: () => number;
   selectBody: (index: number) => void;
@@ -1135,7 +1142,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     api.selectBody(-1);
     api.setProbeLabels(null, null);
     api.setPace(null);
-    api.followCamera(true);
+    // 自分の場面は組み立てるためのものなので、カメラは追いかけない。
+    api.followCamera(false);
     // 開いた直後は**止まっている**。作る人は置いてから動かす。
     api.stopForEditing();
     closePalette();
@@ -1375,7 +1383,6 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             list.className = "readouts";
             const rows: [string, string][] = [
               ["かたち", friendlyShape(readout.shape)],
-              ["材質", readout.material],
               ["重さ", `${readout.mass.toFixed(3)} kg`],
               ["高さ", `${readout.position[1].toFixed(3)} m`],
               ["速さ", `${readout.speed.toFixed(3)} m/s`],
@@ -1390,6 +1397,50 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               focusNodes[key] = dd;
             }
             body.appendChild(list);
+
+            // **材質は、ここで選び直せる**。差し替える仕組みは前からあったが、
+            // 置き場所が Inspector の 750px 下で、目の前のこの札には文字しか
+            // 出ていなかった。「鋼で試して、次にゴムで比べる」がやりたくて
+            // ここを何度も押した人が、押せないまま諦めていた(利用者役④)。
+            const materials = api.materialNames();
+            if (materials.length > 0) {
+              const row = document.createElement("div");
+              row.className = "focus-material";
+              const label = document.createElement("label");
+              label.textContent = "材質";
+              label.htmlFor = "focus-material";
+              const select = document.createElement("select");
+              select.id = "focus-material";
+              const names = materials.includes(readout.material)
+                ? materials
+                : [readout.material, ...materials];
+              for (const name of names) {
+                const option = document.createElement("option");
+                option.value = name;
+                option.textContent = name;
+                option.selected = name === readout.material;
+                select.appendChild(option);
+              }
+              select.addEventListener("change", () => {
+                if (api.setBodyMaterial(selected, select.value)) {
+                  renderContext();
+                  return;
+                }
+                select.value = readout.material;
+                const note = document.getElementById("focus-material-note");
+                if (note) {
+                  note.textContent =
+                    "材質は、とめている間だけ変えられます(▶ を押す前に)。";
+                }
+              });
+              row.append(label, select);
+              body.appendChild(row);
+              const note = document.createElement("p");
+              note.className = "card-note";
+              note.id = "focus-material-note";
+              note.textContent = "材質を変えると、重さも密度から計算し直します。";
+              body.appendChild(note);
+            }
             const actions = document.createElement("div");
             actions.className = "card-actions";
             const follow = document.createElement("button");
@@ -1589,8 +1640,17 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         // ところ」を見に来ているので走らせ、深い粒度は**置いてから動かす**
         // ので止めておく。前の場面の走行状態を引きずると、新しく作った場面が
         // 置いた端から転がっていく。
-        if (detail < AUTORUN_BELOW) api.play();
-        else api.stopForEditing();
+        if (detail < AUTORUN_BELOW) {
+          api.play();
+          api.followCamera(true);
+        } else {
+          api.stopForEditing();
+          // **組み立てている間は、カメラを追いかけさせない**。追従カメラは
+          // 「動くものを見る」ための道具で、置いた物へ画角を合わせようとする
+          // エディタ側と毎フレーム引っ張り合いになる——置いた球が遠くの点に
+          // しか見えなかったのはこれ(利用者役④の観察)。
+          api.followCamera(false);
+        }
         renderCrumbs();
         renderContext();
         syncRun();
@@ -1690,6 +1750,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           }
           if (focusNodes["速さ"]) {
             focusNodes["速さ"].textContent = `${readout.speed.toFixed(3)} m/s`;
+          }
+          // かたちと重さも毎回書き直す。大きさを変えた直後、この札だけ古い
+          // 重さのままで、選び直すまで更新されなかった(利用者役④の観察)。
+          if (focusNodes["かたち"]) {
+            focusNodes["かたち"].textContent = friendlyShape(readout.shape);
+          }
+          if (focusNodes["重さ"]) {
+            focusNodes["重さ"].textContent = `${readout.mass.toFixed(3)} kg`;
           }
         }
       }

@@ -1601,17 +1601,17 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
       </p>
     </div>
     <div class="inspector-component">
-      <h3>Transform</h3>
+      <h3>置き場所と向き (Transform)</h3>
       <div class="inspector-field">
-        <span>Position (x,y,z)</span>
+        <span>位置 x,y,z [m]</span>
         <span class="inspector-scale-fields">
           <input type="number" id="inspector-position-x" step="0.05" value="${initialPosition[0]}" />
           <input type="number" id="inspector-position-y" step="0.05" value="${initialPosition[1]}" />
           <input type="number" id="inspector-position-z" step="0.05" value="${initialPosition[2]}" />
         </span>
       </div>
-      <div class="inspector-field"><span>Rotation</span><span id="inspector-rotation">—</span></div>
-      <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
+      <div class="inspector-field"><span>向き (Rotation)</span><span id="inspector-rotation">—</span></div>
+      <div class="inspector-field"><span>速度 x,y,z [m/s]</span><span id="inspector-velocity">—</span></div>
     </div>
     ${renderRigidBodyComponent(world, index)}
     ${renderInspectorExtraComponents(world, index)}
@@ -2484,7 +2484,7 @@ function renderRigidBodyComponent(world: WasmWorld, index: number): string {
   const massValue = mass > 0 ? mass.toPrecision(6) : "";
   return `
     <div class="inspector-component">
-      <h3>RigidBody</h3>
+      <h3>物としての性質 (RigidBody)</h3>
       <div class="inspector-field">
         <span>材質 (Material)</span>
         <select id="inspector-material">${materialOption(currentMaterial)}</select>
@@ -2702,7 +2702,7 @@ function renderInspectorExtraComponents(
       })
       .join("");
     sections.push(
-      `<div class="inspector-component" data-stacked><h3>Joint</h3>${rows}</div>`,
+      `<div class="inspector-component" data-stacked><h3>つなぎ目 (Joint)</h3>${rows}</div>`,
     );
   }
 
@@ -2717,7 +2717,7 @@ function renderInspectorExtraComponents(
       );
     }
     sections.push(
-      `<div class="inspector-component"><h3>Circuit</h3>${rows.join("")}</div>`,
+      `<div class="inspector-component"><h3>回路 (Circuit)</h3>${rows.join("")}</div>`,
     );
   }
 
@@ -2771,14 +2771,14 @@ function renderInspectorExtraComponents(
       : "");
   if (forThisBody.length > 0) {
     sections.push(
-      `<div class="inspector-component" data-stacked><h3>Coupling</h3>` +
+      `<div class="inspector-component" data-stacked><h3>はたらきかけ (Coupling)</h3>` +
         forThisBody.map(couplingRow).join("") +
         `</div>`,
     );
   }
   if (sceneWide.length > 0) {
     sections.push(
-      `<div class="inspector-component" data-stacked><h3>Coupling (シーン全体)</h3>` +
+      `<div class="inspector-component" data-stacked><h3>はたらきかけ — 場面ぜんぶ (Coupling)</h3>` +
         sceneWide.map(couplingRow).join("") +
         `</div>`,
     );
@@ -2795,7 +2795,7 @@ function renderInspectorExtraComponents(
       );
     }
     sections.push(
-      `<div class="inspector-component"><h3>Probe</h3>${rows.join("")}</div>`,
+      `<div class="inspector-component"><h3>記録している値 (Probe)</h3>${rows.join("")}</div>`,
     );
   }
 
@@ -2873,7 +2873,7 @@ function renderInspectorExtraComponents(
   // 挙動は`initialApplyFieldValue`が踏襲する。
   sections.push(`
     <div class="inspector-component" data-stacked>
-      <h3>Add Joint</h3>
+      <h3>つなぎ目を足す (Add Joint)</h3>
       <div class="inspector-field">
         <span>種別</span>
         <select id="add-joint-kind">
@@ -2919,7 +2919,7 @@ function renderInspectorExtraComponents(
   // `<div id="add-coupling-fields">`をJointと同じ設計で描き直す。
   sections.push(`
     <div class="inspector-component" data-stacked>
-      <h3>Add Coupling</h3>
+      <h3>はたらきかけを足す (Add Coupling)</h3>
       <div class="inspector-field">
         <span>種別</span>
         <select id="add-coupling-kind">
@@ -3780,13 +3780,16 @@ function setUpProjectDrawer(
     const table = document.createElement("table");
     table.className = "materials-table";
     const header = table.insertRow();
+    // 画面の他が日本語なのにここだけ英語で、`restitution` が読めないと
+    // 書かれた(利用者役④の観察)。日本語を主にして、元の語は括弧に残す
+    // ——教科書や他のソフトで探すときの手掛かりになるので消さない。
     for (const label of [
-      "Material",
-      "density [kg/m^3]",
-      "friction",
-      "restitution",
-      "specific heat [J/(kg・K)]",
-      "conductivity [W/(m・K)]",
+      "材質 (Material)",
+      "密度 [kg/m³]",
+      "摩擦 (friction)",
+      "反発 (restitution)",
+      "比熱 [J/(kg・K)]",
+      "熱伝導率 [W/(m・K)]",
     ]) {
       const th = document.createElement("th");
       th.textContent = label;
@@ -6074,12 +6077,21 @@ async function setUpSceneView(
     return hasContent ? box : null;
   }
 
-  /// その点が、いまの画角に入っているか(カメラの後ろ・画面外なら false)。
-  function isPointOnScreen(x: number, y: number, z: number): boolean {
-    const ndc = new THREE.Vector3(x, y, z).project(camera);
+  /**
+   * その大きさの物が、いまの画角で**ちゃんと見えているか**。
+   *
+   * 画面の内側に入っているだけでは足りない——実際、置いた直後の球は画面の
+   * まん中にありながら数ピクセルしかなく、移動ギズモに隠れて「何も置けて
+   * いない」ように見えた(利用者役④の観察)。距離と大きさの比も見る。
+   */
+  function isWellVisible(x: number, y: number, z: number, radius: number): boolean {
+    const point = new THREE.Vector3(x, y, z);
+    const ndc = point.clone().project(camera);
     // `project` は z > 1 でカメラの後ろ、|x|,|y| > 1 で画面の外。少し内側
     // (0.9)で判定して、隅にかろうじて映っている状態も「見えない」側に倒す。
-    return Math.abs(ndc.x) <= 0.9 && Math.abs(ndc.y) <= 0.9 && ndc.z <= 1;
+    if (Math.abs(ndc.x) > 0.9 || Math.abs(ndc.y) > 0.9 || ndc.z > 1) return false;
+    // 半径の 20 倍より遠いと、画面の高さの 1 割にも満たない粒になる。
+    return camera.position.distanceTo(point) <= Math.max(radius, 0.05) * 20;
   }
 
   function frameCameraOnContent() {
@@ -7226,7 +7238,7 @@ async function setUpSceneView(
   let cappedIndicatorFrames = 0;
   function updateEffectiveTimeScale(measured: number, capped: boolean) {
     effectiveTimeScale += (measured - effectiveTimeScale) * 0.1;
-    timescaleEffective.textContent = `×${effectiveTimeScale.toFixed(2)}`;
+    timescaleEffective.textContent = `実測 ×${effectiveTimeScale.toFixed(2)}`;
     if (capped) cappedIndicatorFrames = CAPPED_INDICATOR_HOLD_FRAMES;
     else if (cappedIndicatorFrames > 0) cappedIndicatorFrames -= 1;
     const degraded = cappedIndicatorFrames > 0;
@@ -8218,6 +8230,14 @@ async function setUpSceneView(
     z: number,
   ): number {
     const material = spawnMaterialSelect.value;
+    // 「ちゃんと見えているか」の判定に使う代表的な大きさ(`isWellVisible`)。
+    const spawnRadius = {
+      sphere: SPAWN_SPHERE_RADIUS,
+      box: SPAWN_BOX_HALF_EXTENT,
+      capsule: SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
+      compound: SPAWN_BOX_HALF_EXTENT,
+      convex_mesh: SPAWN_CONVEX_MESH_HALF,
+    }[kind];
     let bodyIndex: number;
     let mesh: THREE.Mesh;
     switch (kind) {
@@ -8293,6 +8313,10 @@ async function setUpSceneView(
         ).mesh;
         break;
     }
+    // **置いた場所へ、その場で置く**。メッシュの位置は次の `render()` が
+    // 物理から反映するまで原点のままで、画角合わせ(下)はその原点を見て
+    // しまう——置いた物が遠くの点にしか見えなかった原因(利用者役④の観察)。
+    mesh.position.set(x, y, z);
     addSpawnedMesh(bodyIndex, mesh);
     // **置いた物の動きが、そのままグラフに出る**。観測点はシーンJSONが宣言した
     // ものしか無く、自分で置いた物には一本も付かなかったので、自作の場面では
@@ -8309,7 +8333,7 @@ async function setUpSceneView(
     // 置いたのでは」と読まれた(利用者役④の観察)。画面に入っていないときだけ
     // 画角を合わせ直す——見えているのに勝手に動かすと、並べている最中の視点を
     // 奪うことになる。
-    if (!isPointOnScreen(x, y, z)) frameCameraOnContent();
+    if (!isWellVisible(x, y, z, spawnRadius)) frameCameraOnContent();
     return bodyIndex;
   }
 
@@ -9542,7 +9566,12 @@ async function setUpSceneView(
     timelineTime.textContent = `t = ${readNumber(world, "time").toFixed(3)} s`;
     timelineStep.textContent = `step = ${readNumber(world, "step_count").toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
-    hashDisplay.title = hashFull;
+    // 何のための数字か画面から分からない、と書かれた(利用者役④の観察)。
+    // 全文だけを出していたのを、意味も添える。
+    hashDisplay.title =
+      `いまの状態を短くまとめた指紋です。同じ条件で走らせれば必ず同じ値に` +
+      `なるので、「同じ結果を再現できたか」の確認に使います。` +
+      `クリックで全文をコピーします。\n${hashFull}`;
     // バッジは操作の可否を決める最重要の状態なので、文字だけでなく色でも
     // 分ける(`style.css` の `.badge[data-mode]`)。
     const badgeMode = mode === "edit" ? "edit" : playing ? "playing" : "paused";
@@ -9749,6 +9778,13 @@ async function setUpSceneView(
     },
     bodyCount: () => readNumber(world, "body_count"),
     maxSpeed: () => readNumber(world, "max_body_speed"),
+    materialNames: () => [...SPAWN_MATERIALS],
+    setBodyMaterial: (index, materialName) =>
+      patchSceneBody(index, (b) => {
+        b.material = materialName;
+        // 前の材質で計算した質量が居座らないように(密度から計算し直す)。
+        delete b.mass_override;
+      }),
     bodyReadout: (index) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return null;
       if (world.read_component("body_is_removed_at", String(index)) === "true") {

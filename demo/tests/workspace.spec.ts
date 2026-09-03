@@ -525,6 +525,47 @@ test("動く物が無い実験でも、真っ黒な3Dを説明なしに残さな
   expect(errors).toEqual([]);
 });
 
+test("選んだものの札から、材質をその場で変えられる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 目の前の札で完結する——Inspector の 750px 下まで潜らせない。
+  const select = page.locator("#focus-material");
+  await expect(select).toBeVisible();
+  const mass = () =>
+    page
+      .locator('[data-focus="重さ"]')
+      .textContent()
+      .then((t) => Number.parseFloat(t ?? "0"));
+  const steel = await mass();
+  await select.selectOption("ゴム(天然)");
+  await expect.poll(mass, { timeout: 10_000 }).toBeLessThan(steel);
+  expect(errors).toEqual([]);
+});
+
+test("置いた物は、置いた瞬間に画面で見える大きさで映る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+
+  // 置いた物のところまで画角が寄る(以前は原点を見たままで、数ピクセルの
+  // 点にしか見えなかった)。
+  const near = await page.evaluate(() => {
+    const hud = document.getElementById("hud");
+    return hud?.textContent ?? "";
+  });
+  expect(near).toContain("12.0000 m");
+  // 走らせなくても、そこに在ることが分かる。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

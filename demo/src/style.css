@@ -2412,3 +2412,21 @@ kbd {
   font-size: var(--text-xs);
   padding: var(--space-1) 0;
 }
+
+
+/* 「選んだもの」の札に置いた材質の選び直し。読み値の並びのすぐ下に、
+   同じ幅で置く(押せるものだと分かる見た目にする)。 */
+.focus-material {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.focus-material label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+#app .focus-material select {
+  flex: 1;
+  min-width: 0;
+}
