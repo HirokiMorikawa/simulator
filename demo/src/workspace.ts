@@ -95,6 +95,8 @@ export type WorkspaceApi = {
    * 読むだけの値)。
    */
   maxSpeed: () => number;
+  /** 舞台に描くものが無いか(案内を出しているのと同じ判断)。 */
+  stageIsEmpty: () => boolean;
   /**
    * 選んだ物の**材質を差し替える**。物理側は場面を組み直して反映するので、
    * 走行中はできない(`false` を返す)。
@@ -324,6 +326,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let everMoved = false;
   /** 止まっているように見えた連続フレーム数(取りこぼしと一瞬の静止を分ける)。 */
   let stillFrames = 0;
+  /** 直前のフレームで舞台が空だったか(「どこを見るか」の追いつき用)。 */
+  let lastStageEmpty: boolean | null = null;
 
   // ---- 大局の粒度 -------------------------------------------------------------
   /**
@@ -1232,8 +1236,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       build: (body) => {
         const where = document.createElement("p");
         where.className = "card-where";
-        where.textContent =
-          experiment.view === "3d"
+        // **舞台の実際と食い違わせない**。「まん中の 3D を見てください」と
+        // 書いてある隣で、舞台が「形のある物は出てきません」と言っている、
+        // という矛盾が起きていた(利用者役①の観察)。実際に何か描かれて
+        // いるかを見てから決める。
+        const stageEmpty = apiRef.current?.stageIsEmpty() ?? false;
+        where.textContent = stageEmpty
+          ? "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。"
+          : experiment.view === "3d"
             ? "👀 まん中の 3D を見てください。"
             : experiment.view === "field"
               ? "👀 3D の中に出る「場」のパネルに、波や分布が描かれます。"
@@ -1680,6 +1690,24 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       clock.textContent =
         current || api.isPlaying() ? formatDuration(seconds, scale) : "";
       clock.dataset.seconds = String(seconds);
+
+      // 「どこを見るか」は舞台の実際に従う。読み込んだ直後はまだ 1 フレームも
+      // 描いていないので、ここで追いつかせる(カードを組み立てた時点では
+      // 舞台が空かどうかまだ分からない)。
+      const stageEmptyNow = api.stageIsEmpty();
+      if (stageEmptyNow !== lastStageEmpty) {
+        lastStageEmpty = stageEmptyNow;
+        const where = document.querySelector<HTMLElement>(".card-where");
+        if (where && current) {
+          where.textContent = stageEmptyNow
+            ? "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。"
+            : current.view === "3d"
+              ? "👀 まん中の 3D を見てください。"
+              : current.view === "field"
+                ? "👀 3D の中に出る「場」のパネルに、波や分布が描かれます。"
+                : "📈 下のグラフがいちばん分かりやすい場所です。";
+        }
+      }
 
       // **もう何も動いていない**ことを見つけて、そのときの時刻を出す
       // (`settledAt` のdoc参照)。判定は「いちばん速い物の速さ」だけを見る

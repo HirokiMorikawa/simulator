@@ -516,6 +516,15 @@ pub struct WasmWorld {
     circuit_editor_motors: Vec<sim_em::MotorHandle>,
     snapshot_interval_steps: u64,
     snapshots: VecDeque<World>,
+    /// **巻き戻して眺めている位置**(`None` = 最新にいる)。
+    ///
+    /// 巻き戻した先より後のスナップショットは、そこから**進めた瞬間に**
+    /// 実際の未来ではなくなる。以前は巻き戻したその場で捨てていたが、
+    /// それだと止めたまま前後に行き来できず、スクラバを左へ引いて離すと
+    /// つまみが右端へ戻る(=動いていないように見える)ことになっていた
+    /// ——利用者役が2人続けて「マウスで動かせない」と書いた原因。
+    /// 記録は残したまま位置だけ覚えておき、実際に進めるときに切り捨てる。
+    restored_to: Option<usize>,
     bookmarks: Vec<(String, World)>,
     /// `spawn_fluid_block`を呼んだ回数(複数の水塊を並べてスポーンする際、
     /// 塊どうしが重ならないようX方向のオフセットを決めるのに使う。Hierarchyの
@@ -675,6 +684,7 @@ impl WasmWorld {
             circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
+            restored_to: None,
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
             imported_probe_handles: Vec::new(),
@@ -772,6 +782,7 @@ impl WasmWorld {
             circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
+            restored_to: None,
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
             imported_probe_handles,
@@ -4893,6 +4904,11 @@ impl WasmWorld {
     /// リングバッファへ記録する(モジュールdoc「スナップショットリングバッファ」
     /// 参照、既存の`World::snapshot`をそのまま使う)。
     pub fn step(&mut self) {
+        // 巻き戻した位置から**実際に進める**ときが、記録済みの未来を捨てる
+        // 瞬間である(`restored_to`のdoc参照)。ここから先は新しい時間の筋。
+        if let Some(index) = self.restored_to.take() {
+            self.snapshots.truncate(index + 1);
+        }
         self.inner.step();
         if self
             .inner
@@ -4929,9 +4945,12 @@ impl WasmWorld {
     }
 
     /// Timelineスクラバ操作: `index`番目のスナップショットへ巻き戻す(既存の
-    /// `World::restore`をそのまま使う)。巻き戻した時点より後のスナップショットは
-    /// もはや実際の未来を表さないため破棄する(新しいタイムラインがそこから
-    /// 再開する、設計の「直前スナップショットへの巻き戻し」と同じ発想)。
+    /// `World::restore`をそのまま使う)。
+    ///
+    /// 巻き戻した時点より後のスナップショットは、**そこから進めた瞬間に**
+    /// 実際の未来ではなくなる——破棄するのはその瞬間であって、巻き戻した
+    /// 時点ではない(`restored_to`のdoc参照)。止めたまま前後に行き来する
+    /// 操作を壊さないための区別である。
     fn restore_snapshot_impl(&mut self, index: usize) -> Result<(), WasmError> {
         // `try_snapshot_at`は`&self`(disjointでない全体借用)を取るため、
         // その戻り値を保持したまま`&mut self.inner`は取れない。フィールドへ
@@ -4945,7 +4964,9 @@ impl WasmWorld {
                 count: self.snapshots.len(),
             })?;
         self.inner.restore(snapshot);
-        self.snapshots.truncate(index + 1);
+        // ここでは捨てない——止めたまま前後に行き来できるようにする
+        // (`restored_to`のdoc参照)。捨てるのは次に進めるとき。
+        self.restored_to = Some(index);
         Ok(())
     }
 
@@ -7484,6 +7505,48 @@ mod tests {
     /// index範囲外などの別の`Err`にはなり得るが、それはkindが存在する証拠に
     /// なるので構わない)、②件数が一致すること(ディスパッチ側にだけ足された
     /// kindを検出する)、③kind名に重複が無いこと、を見る。
+    /// **止めたまま前後に行き来できる**(`restored_to`のdoc参照)。
+    ///
+    /// 以前は巻き戻したその場で後ろの記録を捨てていたため、左へ引いて離すと
+    /// つまみが右端へ戻り、利用者からは「マウスで動かせない」と見えていた。
+    /// 記録を捨てるのは**そこから進めたとき**である。
+    #[test]
+    fn restoring_a_snapshot_keeps_the_recorded_future_until_stepping_again() {
+        // dt = 0.1s なので 1s 間隔 = 10 step ごとに記録される。
+        let mut world = WasmWorld::new(-9.80665, 0.1, 50.0);
+        for _ in 0..50 {
+            world.step();
+        }
+        let recorded = world.snapshot_count_impl();
+        assert!(recorded >= 4, "記録が足りない: {recorded}");
+
+        // 巻き戻しても記録は残る——前後に行き来できる。
+        world.restore_snapshot_impl(1).expect("有効なindex");
+        assert_eq!(
+            world.snapshot_count_impl(),
+            recorded,
+            "巻き戻しただけでは記録を捨てない"
+        );
+        let back = world.read_component_impl("time", "").unwrap();
+        world
+            .restore_snapshot_impl(recorded - 1)
+            .expect("有効なindex");
+        assert_ne!(
+            world.read_component_impl("time", "").unwrap(),
+            back,
+            "先へも戻れる"
+        );
+
+        // 進めた瞬間に、そこから先の記録は実際の未来ではなくなるので捨てる。
+        world.restore_snapshot_impl(1).expect("有効なindex");
+        world.step();
+        assert_eq!(
+            world.snapshot_count_impl(),
+            2,
+            "巻き戻した位置から進めたら、そこから先は新しい時間の筋になる"
+        );
+    }
+
     #[test]
     fn component_schema_covers_every_apply_kind() {
         let schema: serde_json::Value = serde_json::from_str(&new_world().component_schema())

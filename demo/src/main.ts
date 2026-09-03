@@ -6119,7 +6119,17 @@ async function setUpSceneView(
     // なお僅かに地面下へ出るケースが残ったため、最終防衛線として絶対高さも
     // 下限クランプする(このプロジェクトの地面は常にy=0の平面、モジュールdoc
     // 「床の下に潜り込む」参照)。
-    camera.position.y = Math.max(camera.position.y, 0.3);
+    // 床の下へ潜らないための最低の高さ。ただし**対象より大きく持ち上げない**
+    // ——分子の世界(D25 は 10 µm ほどの広がり)では 0.3 m は 3 万倍も遠く、
+    // 対象が点にすらならず真っ黒になっていた(利用者役①の観察)。
+    camera.position.y = Math.max(camera.position.y, Math.min(0.3, radius * 0.5));
+    // **見る対象の大きさに合わせて、手前と奥の切り取り面も動かす**。
+    //
+    // 手前の面は 0.1 m に固定してあったので、分子の運動(D25 ブラウン運動は
+    // 半径 1 µm の粒が 10 µm ほどの範囲に散らばる)のような小さな世界では、
+    // 対象がまるごと手前の面より近くに来て**全部消える**——選んだのに真っ黒、
+    // の正体のひとつ(利用者役①の観察)。距離に対する比で決める。
+    updateClipPlanes(camera.position.distanceTo(center));
     orbit.update();
   }
 
@@ -6213,7 +6223,45 @@ async function setUpSceneView(
     camera.position
       .copy(orbit.target)
       .addScaledVector(guidedFollowDirection, nextDistance);
-    camera.position.y = Math.max(camera.position.y, 0.3);
+    // 床の下へ潜らないための最低の高さ。ただし**対象より大きく持ち上げない**
+    // ——分子の世界(D25 は 10 µm ほどの広がり)では 0.3 m は 3 万倍も遠く、
+    // 対象が点にすらならず真っ黒になっていた(利用者役①の観察)。判断には
+    // 床合わせの下限(`radius`)ではなく、**動くものの本当の大きさ**を使う。
+    camera.position.y = Math.max(
+      camera.position.y,
+      Math.min(0.3, movingRadius * 0.5),
+    );
+    updateClipPlanes(camera.position.distanceTo(orbit.target));
+    if ((window as unknown as { __dbgCam?: boolean }).__dbgCam) {
+      console.log(
+        "[dbg]",
+        JSON.stringify({
+          movingRadius,
+          radius,
+          desired,
+          target: orbit.target.toArray(),
+          cam: camera.position.toArray(),
+          near: camera.near,
+          far: camera.far,
+        }),
+      );
+    }
+  }
+
+  /**
+   * 見る対象までの距離に合わせて、手前と奥の切り取り面を動かす。
+   *
+   * 手前の面は 0.1 m に固定してあったので、分子の運動のような小さな世界では
+   * 対象がまるごと手前の面より近くに来て**全部消える**。シーンの寸法は
+   * 1e-7 m の分子から 1e11 m の公転まで振れるので、絶対値ではなく比で決める。
+   */
+  function updateClipPlanes(viewDistance: number): void {
+    const near = Math.max(viewDistance / 1000, 1e-9);
+    const far = Math.max(viewDistance * 1000, near * 1e6);
+    if (camera.near === near && camera.far === far) return;
+    camera.near = near;
+    camera.far = far;
+    camera.updateProjectionMatrix();
   }
   // 自分でカメラを動かしたら追従をやめる(操作を横取りしない)。
   orbit.addEventListener("start", () => {
@@ -7823,11 +7871,44 @@ async function setUpSceneView(
     currentPredictionPrompts = parsed.prediction_prompts ?? [];
     renderPredictionPanel();
 
+    // **見えない大きさの物は、見える大きさで描く**。
+    //
+    // D25(ブラウン運動)は半径 1 µm の粒 300 個が 0.3 m の範囲に散らばる。
+    // 実寸で描くと 1 画素にも満たず、画面は真っ黒——選んだのに何も映らない、
+    // という一番がっかりする状態になっていた(利用者役①の一番の不満)。
+    // 散らばりの 1/60 を下回る物だけ、**描画だけ**を膨らませる(物理は素の
+    // ままで、当たり判定も質量も一切変えない)。実物より大きく描いていること
+    // は実験の説明文に書く。
+    const spread = (() => {
+      let min = [Infinity, Infinity, Infinity];
+      let max = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < bodies.length; i += 1) {
+        const p = world.body_position_at_f32(i);
+        for (let a = 0; a < 3; a += 1) {
+          if (p[a] < min[a]) min[a] = p[a];
+          if (p[a] > max[a]) max[a] = p[a];
+        }
+      }
+      if (!Number.isFinite(min[0])) return 0;
+      return Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+    })();
+    const drawFloor = spread > 0 ? spread / 60 : 0;
+
     for (let bodyIndex = 0; bodyIndex < bodies.length; bodyIndex++) {
       const { mesh, isPlane } = meshFromShapeJson(bodies[bodyIndex]?.shape);
       if (isPlane) {
         addSpawnedMesh(bodyIndex, mesh);
         continue;
+      }
+      if (drawFloor > 0) {
+        mesh.geometry.computeBoundingSphere();
+        const own = mesh.geometry.boundingSphere?.radius ?? 0;
+        // 毎フレームの再適用(`render()`)と喧嘩しないよう、拡大率は
+        // Scale ギズモと同じ入れ物へ載せる。
+        if (own > 0 && own < drawFloor) {
+          currentScale.set(bodyIndex, drawFloor / own);
+          mesh.scale.setScalar(drawFloor / own);
+        }
       }
       const pos = world.body_position_at_f32(bodyIndex);
       mesh.position.set(pos[0], pos[1], pos[2]);
@@ -7863,6 +7944,30 @@ async function setUpSceneView(
       highlightHierarchy = rebuildHierarchy();
       renderInspectorFor(world, selectedBodyIndex);
     }
+    // **シーンが最初から持っている水の粒**を描けるようにする。点群は
+    // 「+ 流体」ボタンで置いたときにしか作っておらず、水を含むシーン
+    // (D23 水を注ぐ・D18b 氷が水に変わる)を読み込むと**一粒も描かれない**
+    // ままだった——選んだのに真っ黒、という一番がっかりする壊れ方をしていた
+    // (利用者役①の一番の不満)。
+    const fluidParticles = readNumber(world, "fluid_particle_count");
+    if (fluidParticles > 0) {
+      fluidPositionAttribute = new THREE.BufferAttribute(
+        new Float32Array(fluidParticles * 3),
+        3,
+      );
+      fluidGeometry.setAttribute("position", fluidPositionAttribute);
+      fluidPoints.visible = true;
+      // 位置を物理から読み切ってから画角を合わせる(でないと原点を見る)。
+      const positions = world.fluid_particle_positions_f32();
+      if (positions.length >= fluidParticles * 3) {
+        (fluidPositionAttribute.array as Float32Array).set(
+          positions.subarray(0, fluidParticles * 3),
+        );
+        fluidPositionAttribute.needsUpdate = true;
+        fluidGeometry.computeBoundingSphere();
+      }
+    }
+
     // **シーンの中身にカメラを合わせる(群3、`frameCameraOnContent`のdoc参照)**。
     // 剛体・ソフトボディ・天体・粒子群がすべて配置し終わった後に呼ぶ。
     frameCameraOnContent();
@@ -8983,18 +9088,31 @@ async function setUpSceneView(
   ) as HTMLInputElement;
   const playModeBadge = document.getElementById("play-mode-badge")!;
   let scrubbing = false;
+  /**
+   * **人が置いたつまみの位置**(`null` = 最新に追従する)。
+   *
+   * 離した瞬間に「最新へ追従」の更新がつまみを右端へ戻していたため、左へ
+   * 引いて離すと何も起きなかったように見えた(利用者役が2人続けて「マウスで
+   * 動かせない」と書いた)。止まっている間は、人が置いた場所に留まる。
+   */
+  let scrubberParked: number | null = null;
   scrubber.addEventListener("pointerdown", () => {
     scrubbing = true;
     playing = false;
     playButton.textContent = "▶";
   });
   scrubber.addEventListener("input", () => {
-    applyComponent(world, "restore_snapshot", { index: Number(scrubber.value) });
+    scrubberParked = Number(scrubber.value);
+    applyComponent(world, "restore_snapshot", { index: scrubberParked });
     render();
   });
-  scrubber.addEventListener("pointerup", () => {
+  const stopScrubbing = () => {
     scrubbing = false;
-  });
+  };
+  scrubber.addEventListener("pointerup", stopScrubbing);
+  // ドラッグ中にポインタが帯の外へ出て離されることは普通にある。要素の
+  // `pointerup` だけを見ていると、そのとき掴んだままの状態が残ってしまう。
+  window.addEventListener("pointerup", stopScrubbing);
 
   // Timelineブックマーク(設計docs/23-frontend/01-editor.md §1.4「ブックマーク:
   // 任意時点にラベル付けし、後で戻れる」)。リングバッファの退避を受けない別領域
@@ -9582,7 +9700,13 @@ async function setUpSceneView(
     if (!scrubbing) {
       const latestIndex = Math.max(readNumber(world, "snapshot_count") - 1, 0);
       scrubber.max = String(latestIndex);
-      scrubber.value = String(latestIndex);
+      // 走らせている間は最新に追従し、止めている間は人が置いた場所に留まる
+      // (`scrubberParked` のdoc参照)。
+      if (playing) scrubberParked = null;
+      const parked = scrubberParked;
+      scrubber.value = String(
+        parked === null ? latestIndex : Math.min(parked, latestIndex),
+      );
     }
 
     syncSettingsInputs();
@@ -9778,6 +9902,7 @@ async function setUpSceneView(
     },
     bodyCount: () => readNumber(world, "body_count"),
     maxSpeed: () => readNumber(world, "max_body_speed"),
+    stageIsEmpty: () => sceneViewElement.dataset.stageEmpty === "true",
     materialNames: () => [...SPAWN_MATERIALS],
     setBodyMaterial: (index, materialName) =>
       patchSceneBody(index, (b) => {

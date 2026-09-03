@@ -566,6 +566,57 @@ test("置いた物は、置いた瞬間に画面で見える大きさで映る",
   expect(errors).toEqual([]);
 });
 
+test("水と分子の実験が、舞台に実際に描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 水の粒は「+ 流体」で置いたときしか描いておらず、水を含むシーンを
+  // 読み込むと一粒も出なかった。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d23-pouring-water"]');
+  await expect(page.locator("#crumb-experiment")).toContainText("水を注ぐ");
+  await expect(page.locator("#stage-empty-note")).toBeHidden();
+
+  // 分子は実寸だと 1 画素にも満たず、真っ黒に見えていた。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d25-brownian"]');
+  await expect(page.locator("#stage-empty-note")).toBeHidden();
+  // 実物より大きく描いていることは、隠さず書く。
+  await expect(page.locator("#context")).toContainText("実物より大きく描いています");
+  expect(errors).toEqual([]);
+});
+
+test("止めている間は、時間の帯をつまんだ場所に留まる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  // スナップショットが貯まるまで走らせる。
+  await expect.poll(() => elapsedSeconds(page), { timeout: 30_000 }).toBeGreaterThan(5);
+
+  const scrubber = page.locator("#timeline-scrubber");
+  const box = (await scrubber.boundingBox())!;
+  const state = () =>
+    scrubber.evaluate((el) => ({
+      value: (el as HTMLInputElement).value,
+      max: (el as HTMLInputElement).max,
+    }));
+  const before = await state();
+  expect(Number(before.max)).toBeGreaterThan(1);
+
+  await page.mouse.move(box.x + box.width - 6, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.3, box.y + box.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+
+  const after = await state();
+  // つまみは離した場所に留まり(以前は右端へ戻っていた)、
+  expect(Number(after.value)).toBeLessThan(Number(before.value));
+  // 記録した先の時点も消えない(以前は巻き戻した瞬間に捨てていた)。
+  expect(after.max).toBe(before.max);
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {
