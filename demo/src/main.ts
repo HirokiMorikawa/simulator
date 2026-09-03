@@ -6914,8 +6914,48 @@ async function setUpSceneView(
     }
   }
 
+  /**
+   * **材質は見た目に出す**。鋼もゴムも発泡スチロールも同じオレンジでは、
+   * 「材質を変えると跳ね方が変わる」と書いてあっても、変えたことが画面から
+   * 分からない(利用者役の観察: 材質を切り替えても見た目が一切変わらない)。
+   * 物性そのものは Rust 側の材質DBが持っている。ここはその名前を、人が
+   * 見て納得する色に写すだけ。
+   */
+  const MATERIAL_COLORS: Record<string, number> = {
+    "鋼(炭素鋼)": 0x9aa3ad,
+    アルミニウム: 0xc9ced4,
+    銅: 0xc07a4a,
+    ガラス: 0x9fd3e0,
+    コンクリート: 0x8a8a80,
+    "木材(松)": 0xc08b4a,
+    "ゴム(天然)": 0x4d5359,
+    "氷(0°C)": 0xa8d8ef,
+    水: 0x4f9ad6,
+    空気: 0xd8e6f2,
+    発泡スチロール: 0xf0f0ea,
+    "人体(平均)": 0xd9a07a,
+    "PTFE(テフロン)": 0xe8e8e8,
+  };
+  function applyMaterialColor(bodyIndex: number, mesh: THREE.Object3D): void {
+    // 床や壁は「観察の対象」ではなく背景なので、材質の色は当てない——
+    // ゴムの床を黒くすると、その上のゴム球が背景に溶けて見えなくなる。
+    if (world.read_component("body_is_static_at", String(bodyIndex)) === "true") {
+      return;
+    }
+    const name = world.read_component("body_material_label_at", String(bodyIndex));
+    const color = MATERIAL_COLORS[name];
+    if (color === undefined) return;
+    mesh.traverse((object) => {
+      const target = object as THREE.Mesh;
+      if (!target.isMesh) return;
+      const material = target.material as THREE.MeshStandardMaterial;
+      if (material?.color) material.color.setHex(color);
+    });
+  }
+
   function addSpawnedMesh(bodyIndex: number, mesh: THREE.Mesh) {
     markUnsaved();
+    applyMaterialColor(bodyIndex, mesh);
     addEdgeLines(mesh);
     scene.add(mesh);
     pickables.push({ mesh, bodyIndex });
@@ -9115,6 +9155,7 @@ async function setUpSceneView(
     probeValue: (index) =>
       readNumber(world, "imported_probe_value_at", String(index)),
     time: () => readNumber(world, "time"),
+    stepSeconds: () => readNumber(world, "dt"),
     // **局所へ入る/出る**。パンくずの「全体へ戻る」は選択を解く操作なので、
     // 負のindexを「選択なし」として受ける(ボディが1つも無いギャラリーシーンで
     // 既に使っている状態表現と同じ、`selectedBodyIndex = -1`)。

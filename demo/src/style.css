@@ -1081,6 +1081,9 @@ body {
   padding: var(--space-3) var(--space-5) var(--space-4);
   display: flex;
   flex-direction: column;
+  /* 行の高さに収める。はみ出した分をスクロールで追えないまま切られると、
+   * グラフの下半分が永久に見られない(利用者役の観察)。 */
+  overflow: hidden;
   overflow: hidden;
 }
 
@@ -1854,10 +1857,6 @@ kbd {
 #app .run-speed button:last-child {
   border-radius: 0 var(--radius) var(--radius) 0;
 }
-#app .run-speed button.active {
-  background: var(--accent-surface);
-  border-color: var(--accent-border);
-}
 .run-rate {
   font-family: var(--font-mono);
   font-size: var(--text-base);
@@ -2067,9 +2066,24 @@ kbd {
 #app .knob-choice-btn {
   height: 28px;
 }
-#app .knob-choice-btn.active {
-  background: var(--accent-surface);
-  border-color: var(--accent-border);
+/* **選ばれているものは、選ばれていると分かること**。以前は地の色との差が
+ * 数ポイントしかなく、月を選んだのか地球のままなのか画面から読めなかった
+ * (利用者役の観察)。地・枠・文字の3つを同時に変え、印も付ける。 */
+#app .knob-choice-btn.active,
+#app .run-speed button.active,
+#app .palette-filter.active {
+  background: var(--accent-strong);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+#app .knob-choice-btn.active::before {
+  content: "✓ ";
+}
+#app .knob-reset {
+  width: 100%;
+  height: 30px;
+  margin-top: var(--space-5);
 }
 .knob-hint {
   margin: var(--space-2) 0 0;
@@ -2157,11 +2171,7 @@ kbd {
 .palette-filter:hover {
   color: var(--text);
 }
-.palette-filter.active {
-  background: var(--accent-surface);
-  border-color: var(--accent);
-  color: var(--text);
-}
+
 .palette-results {
   overflow: auto;
   display: flex;
@@ -2262,5 +2272,15 @@ kbd {
  * 前提にした表示。浅い粒度では出さない——同じ情報を、文脈の柱が
  * 「経過した時間」「ボールの高さ」という言葉で出している。 */
 #app:not([data-grain="build"]) #hud {
+  display: none;
+}
+
+/* 時間の帯は、粒度に応じて中身を選ぶ。
+ * 「さわる」で要るのは**いまどこにいるか**(スクラバ)だけ。ブックマークや
+ * `t = 4.079 s step = 979` のような生の表示は、行の高さを超えて中身が
+ * 切れる原因になっていた(利用者役の観察: 入力欄が下端で切れていた)。 */
+#app:not([data-grain="study"]):not([data-grain="build"]) .timeline-bookmarks,
+#app:not([data-grain="study"]):not([data-grain="build"]) #timeline-time,
+#app:not([data-grain="study"]):not([data-grain="build"]) #timeline-step {
   display: none;
 }

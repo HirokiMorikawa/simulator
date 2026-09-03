@@ -50,6 +50,8 @@ export type WorkspaceApi = {
   probeCount: () => number;
   probeValue: (index: number) => number;
   time: () => number;
+  /** 1 step の刻み [s]。時間の表示単位を決めるのに使う。 */
+  stepSeconds: () => number;
   /**
    * 走らせずに、直接編集できる状態にする(いわゆる Edit)。深い粒度で
    * 実験を読み込んだときは、**勝手に走り出さない**方が正しい——作る人は
@@ -97,7 +99,7 @@ const GRAIN_STOPS = [
 // 有無を JS が決め、幅や高さの補間は CSS が受け持つ)。
 // グラフが「開き始める」粒度と、「読める大きさになる」粒度は違う。自動で
 // 開くときは後者を使う——閾値ちょうどでは高さ 0 で、出したつもりが出ていない。
-const ANALYSIS_READABLE = 1.65;
+const ANALYSIS_READABLE = 1.3;
 
 /**
  * これより深い粒度では、実験を読み込んでも自動で走らせない。
@@ -135,9 +137,21 @@ function sceneFileContent(file: string): string | null {
  * わたる。秒で固定表示すると、気体の箱は永遠に「0.00 秒」、太陽系は
  * 「31554896.93 秒」になり、どちらも**動いていないのと区別が付かない**。
  */
-export function formatDuration(seconds: number): string {
+export function formatDuration(seconds: number, scale = 1): string {
   const t = Math.abs(seconds);
+  // **単位はシーンの時間スケールで決める**。値そのもので切り替えると、同じ
+  // 実験の途中で「958.33 ミリ秒 → 1.02 秒」と桁も単位も飛んで読みにくい
+  // (利用者役の観察)。人の尺度で進むシーン(1 step が 1e-4 秒より粗い)は
+  // 常に秒より上の単位で書き、分子や公転のように桁が離れたシーンだけ
+  // それぞれの単位系に入る。
   if (t === 0) return "0 秒";
+  if (scale >= 1e-4) {
+    if (t < 60) return `${seconds.toFixed(2)} 秒`;
+    if (t < 3600) return `${(seconds / 60).toFixed(2)} 分`;
+    if (t < 86400) return `${(seconds / 3600).toFixed(2)} 時間`;
+    if (t < 3.155e7) return `${(seconds / 86400).toFixed(2)} 日`;
+    return `${(seconds / 3.155e7).toFixed(2)} 年`;
+  }
   if (t < 1e-9) return `${(seconds * 1e12).toFixed(2)} ピコ秒`;
   if (t < 1e-6) return `${(seconds * 1e9).toFixed(2)} ナノ秒`;
   if (t < 1e-3) return `${(seconds * 1e6).toFixed(2)} マイクロ秒`;
@@ -241,8 +255,15 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     const outline =
       detail >= REVEAL.outline ? Math.max(168, grow(detail, REVEAL.outline, 0.6, 232)) : 0;
     const toolbar = grow(detail, REVEAL.toolbar, 0.4, 64);
-    let analysis = grow(detail, REVEAL.analysis, 0.6, 200);
-    let timeline = grow(detail, 0.8, 0.6, 78);
+    // グラフも一覧と同じで「読める大きさか 0 か」。グラフを出したいだけの人が、
+    // 一覧(1.6〜)まで引き連れてこないよう、読める点を一覧より手前に置く。
+    let analysis =
+      detail >= REVEAL.analysis
+        ? Math.max(150, grow(detail, REVEAL.analysis, 0.8, 210))
+        : 0;
+    // 時間の帯も「用を成す高さか 0 か」。中身(スクラバ)が入らない高さで
+    // 顔を出すと、掴めない帯が残るだけになる。
+    let timeline = detail >= 0.8 ? Math.max(56, grow(detail, 0.8, 0.6, 78)) : 0;
     let consoleRow = grow(detail, REVEAL.console, 0.6, 118);
     // Project ドロワーは「開いている」と宣言されたら、粒度に関わらず中身が
     // 入る高さを与える(タブだけ出て中身が画面外、という旧不具合の再発防止)。
@@ -263,7 +284,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     //   ② 残りを グラフ → 時間 → ログ の順に、望みの高さまで足していく。
     // 素材ドロワーを開いている間だけは、注意がそこにあるので舞台を少し譲る。
     const drawerOpen = project > projectBase;
-    const floor = { analysis: 90, timeline: 28, console: 34 };
+    // グラフは 150px を切ると、線を描く場所が 60px ほどしか残らず「出したのに
+    // 読めない」状態になる(実測)。用を成す最低限をここで決める。
+    const floor = { analysis: 150, timeline: 52, console: 34 };
     const wants = { analysis, timeline, console: consoleRow };
     const reserved =
       (wants.analysis > 0 ? floor.analysis : 0) +
@@ -276,12 +299,16 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     );
     let room = Math.max(0, window.innerHeight - outside - minStage);
 
-    analysis = wants.analysis > 0 ? Math.min(floor.analysis, room) : 0;
+    // 最低限すら入らないほど窮屈なときは、**どれかを 0 にするのではなく
+    // 全部を同じ割合で細くする**。ひとつを 0 にすると、そこにあるはずのタブや
+    // 見出しが押せなくなる(「Errors タブが押せない」で実際に踏んだ)。
+    const squeeze = reserved > 0 ? Math.min(1, room / reserved) : 1;
+    analysis = wants.analysis > 0 ? Math.round(floor.analysis * squeeze) : 0;
     room -= analysis;
-    timeline = wants.timeline > 0 ? Math.min(floor.timeline, room) : 0;
+    timeline = wants.timeline > 0 ? Math.round(floor.timeline * squeeze) : 0;
     room -= timeline;
-    consoleRow = wants.console > 0 ? Math.min(floor.console, room) : 0;
-    room -= consoleRow;
+    consoleRow = wants.console > 0 ? Math.round(floor.console * squeeze) : 0;
+    room = Math.max(0, room - consoleRow);
     const topUp = (have: number, want: number) => {
       const extra = Math.min(Math.max(0, want - have), room);
       room -= extra;
@@ -864,6 +891,19 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           note.textContent = "動かすと、その設定で最初からやり直します。";
           body.appendChild(note);
           for (const knob of experiment.knobs ?? []) body.appendChild(renderKnob(knob));
+          // **戻れること**。いじった後に元へ戻す道が無く、同じ実験を選び直す
+          // という遠回りを見つけるまで戻れなかった(利用者役の観察)。
+          const reset = document.createElement("button");
+          reset.type = "button";
+          reset.id = "btn-reset-knobs";
+          reset.className = "knob-reset";
+          reset.textContent = "はじめの設定に戻す";
+          reset.addEventListener("click", () => {
+            knobValues = defaultKnobValues(experiment);
+            reload();
+            renderContext();
+          });
+          body.appendChild(reset);
         },
       });
     }
@@ -1089,12 +1129,13 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     }
     if (api) {
       const seconds = api.time();
+      const scale = api.stepSeconds();
       const timeNode = document.getElementById("readout-time");
       if (timeNode) {
-        timeNode.textContent = formatDuration(seconds);
+        timeNode.textContent = formatDuration(seconds, scale);
         timeNode.dataset.seconds = String(seconds);
       }
-      clock.textContent = current ? formatDuration(seconds) : "";
+      clock.textContent = current ? formatDuration(seconds, scale) : "";
       clock.dataset.seconds = String(seconds);
 
       if (current) {
