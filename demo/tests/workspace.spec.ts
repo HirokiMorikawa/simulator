@@ -468,6 +468,63 @@ test("棒の材質を変えると、熱の伝わり方が実際に変わる", as
   expect(errors).toEqual([]);
 });
 
+test("グラフを指すと、その時刻の値が読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(1);
+
+  // 巻き戻しは 1 秒ごとの記録にしか飛べない。コンマ何秒の値は、細かく持って
+  // いる側(グラフ)を指して読む。
+  const canvas = page.locator("#probe-canvas");
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.5);
+  await page.waitForTimeout(300);
+
+  // 十字線と読み取り値が乗ったぶん、キャンバスの絵が変わる。
+  const before = await canvas.screenshot();
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.5);
+  await page.waitForTimeout(300);
+  const after = await canvas.screenshot();
+  expect(Buffer.compare(before, after)).not.toBe(0);
+  expect(errors).toEqual([]);
+});
+
+test("書き出した数値には単位が付いている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(1);
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#btn-probe-csv"),
+  ]);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(c as Buffer);
+  const header = Buffer.concat(chunks).toString("utf8").split("\n")[0];
+  // 画面には ℃ と出ているのにファイルは数字だけ、を残さない。
+  expect(header).toContain("[℃]");
+  expect(header.startsWith("time_s,")).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test("動く物が無い実験でも、真っ黒な3Dを説明なしに残さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  // 場のパネルすら無い(熱のノードとグラフだけの)場面でも案内は出る。
+  await expect(page.locator("#stage-empty-note")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

@@ -4360,8 +4360,16 @@ function probeSeriesToCsv(
   const rows = series.reduce((m, s) => Math.max(m, s.history.length), 0);
   const escape = (s: string) =>
     /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  // 見出しには**単位**も書く。画面には m / ℃ / V と出ているのに書き出した
+  // ファイルには数字しか無く、後から見返すと「これ ℃ だっけ K だっけ」に
+  // なると書かれた(利用者役③の観察)。
   const lines = [
-    ["time_s", ...series.map((s) => s.label)].map(escape).join(","),
+    [
+      "time_s",
+      ...series.map((s) => (s.unit ? `${s.label} [${s.unit}]` : s.label)),
+    ]
+      .map(escape)
+      .join(","),
   ];
   for (let i = 0; i < rows; i++) {
     const time = currentTime - (rows - 1 - i) * dt;
@@ -4404,6 +4412,24 @@ function setUpProbeGraph(): (
   let latest: ProbeSeries[] = [];
   let latestDt = 0;
   let latestTime = 0;
+  /**
+   * グラフの上でいま指している横位置 [px](外へ出たら null)。
+   *
+   * **なぜ要ったか**: 巻き戻しは 1 秒ごとの記録にしか飛べない(スナップ
+   * ショットの予算がそう決まっている)。一方でグラフと CSV は 1 step ごとの
+   * 細かさで値を持っている。「0.3 秒後の高さは?」に画面上で答えられないのが
+   * いちばんもどかしい、と書かれた(利用者役③の一番の不満)ので、**すでに
+   * 細かく持っている側**——グラフ——を指して読めるようにする。物理には触らず、
+   * 記録済みの値を読むだけ。
+   */
+  let hoverX: number | null = null;
+  canvas.addEventListener("mousemove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    hoverX = event.clientX - rect.left;
+  });
+  canvas.addEventListener("mouseleave", () => {
+    hoverX = null;
+  });
   csvButton.addEventListener("click", () => {
     if (latest.length === 0) return;
     // 押しても何も起きないボタンは「壊れている」と読まれるので、下の
@@ -4586,6 +4612,48 @@ function setUpProbeGraph(): (
     // は、下端が時刻の目盛り帯になったため。
     if (drawn.length > 1) {
       outlined("各線はそれぞれの範囲に合わせて描いています", 4, legendY, "#6f757e");
+      legendY += 13;
+    }
+
+    // **指した時刻の値を読む**(`hoverX` のdoc参照)。1 step ごとの細かさで
+    // 「その瞬間いくつだったか」を出す——巻き戻しの 1 秒刻みでは届かない
+    // ところを、記録済みの値を読むことで埋める。
+    if (hoverX !== null && longest >= 2 && w > 0) {
+      const ratio = Math.min(1, Math.max(0, hoverX / w));
+      const index = Math.round(ratio * (longest - 1));
+      const x = (index / (longest - 1)) * w;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, plotH);
+      ctx.stroke();
+
+      const time = haveTime ? currentTime - (longest - 1 - index) * dt : null;
+      const lines: string[] = [];
+      if (time !== null) lines.push(`t = ${formatSeconds(time)}`);
+      for (const { series: sr, plotMin, plotMax } of drawn) {
+        const at = index - (longest - sr.history.length);
+        if (at < 0 || at >= sr.history.length) continue;
+        const value = sr.history[at];
+        const range = plotMax - plotMin > 1e-12 ? plotMax - plotMin : 1;
+        const y =
+          plotH - (((useLog ? signedLog(value) : value) - plotMin) / range) * plotH;
+        ctx.fillStyle = sr.color;
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+        lines.push(
+          `${sr.label}: ${formatTickValue(value)}${sr.unit ? ` ${sr.unit}` : ""}`,
+        );
+      }
+      // 読み取り値は**いつも左**、凡例の下へ置く。右端は縦軸の目盛りが使って
+      // いるので、指の位置で左右へ振ると目盛りと重なって両方読めなくなる。
+      let y = legendY + 4;
+      for (const line of lines) {
+        outlined(line, 4, y, "#e6e9ee");
+        y += 13;
+      }
     }
   };
 }
@@ -9226,7 +9294,13 @@ async function setUpSceneView(
     // が確かに描かれているシーンにまで「形では見えません」と出て、
     // 「見えているのに?」と読まれた(利用者役①の観察)。案内を出すのは、
     // 代わりに見る場所(場のパネル)が実際にあるときだけにする。
-    const stageEmpty = contentBoundingBox() === null && !fieldPanel.hidden;
+    // 代わりに見る場所があるとき——場のパネルか、記録している観測点——だけ
+    // 案内を出す。以前は場のパネルがあるときだけだったので、コーヒーが冷める
+    // ような「熱のノードとグラフだけ」の場面では真っ黒な 3D が説明なしに
+    // 残り、「これ壊れてる?」と読まれた(利用者役③の観察)。
+    const stageEmpty =
+      contentBoundingBox() === null &&
+      (!fieldPanel.hidden || readNumber(world, "imported_probe_count") > 0);
     sceneViewElement.dataset.stageEmpty = String(stageEmpty);
     if (stageEmptyNote) stageEmptyNote.hidden = !stageEmpty;
 

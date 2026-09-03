@@ -1155,7 +1155,8 @@ export const GUIDED_CATEGORIES: Category[] = [
         blurb: "クランクを回すと電気が生まれ、抵抗が熱くなります。",
         watch: [
           "回転から電圧が生まれます(電磁誘導)。",
-          "流れた電流のぶんだけ、抵抗の温度が上がります。",
+          "流れた電流のぶんだけ、抵抗の温度がじりじり上がります。",
+          "電流の符号は向きです(発電機が押し出す向きを負に取っています)。",
           "回した力が電気になり、最後は熱になる——エネルギーの旅路です。",
         ],
         view: "graph",
@@ -1168,7 +1169,7 @@ export const GUIDED_CATEGORIES: Category[] = [
             min: 2,
             max: 30,
             step: 1,
-            unit: "回転/s",
+            unit: "rad/s",
             value: 10,
             hint: "速く回すほど高い電圧が出ます(発電量は速さに比例)。",
             apply: (scene, value) => {

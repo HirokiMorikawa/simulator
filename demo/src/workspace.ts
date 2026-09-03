@@ -1261,6 +1261,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         const settledKey = document.createElement("dt");
         settledKey.id = "readout-settled-key";
         settledKey.textContent = "動きが止まった時刻";
+        settledKey.title =
+          "いちばん速い物の速さが 0.05 m/s を下回ったまま続いた時点です" +
+          "(物理には手を加えていません——見えている値からそう読めた、というだけの表示)。";
         settledKey.hidden = true;
         const settledValue = document.createElement("dd");
         settledValue.id = "readout-settled";
@@ -1671,6 +1674,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         lastSelection = selected;
         renderCrumbs();
         renderContext();
+        // **選んだものの札は、選んだ瞬間に見えているべき**。カードが増えると
+        // 一番下へ回るので、画面の高さによっては選んでも何も起きていないように
+        // 見えた(利用者役③の観察: 900px では「選んだもの」欄が見えない)。
+        if (selected >= 0) {
+          document
+            .querySelector('.card[data-card="focus"]')
+            ?.scrollIntoView({ block: "nearest" });
+        }
       } else if (selected >= 0 && Object.keys(focusNodes).length > 0) {
         const readout = api.bodyReadout(selected);
         if (readout) {
