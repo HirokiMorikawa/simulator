@@ -65,8 +65,14 @@ export type WorkspaceApi = {
   setTethers: (tethers: { bodyIndex: number; anchor: [number, number, number] }[]) => void;
   /** 追従カメラの入り切り。 */
   followCamera: (enabled: boolean) => void;
-  /** グラフの凡例に出す表示名(プローブ番号 → 人間の言葉)。 */
-  setProbeLabels: (labels: Record<number, string> | null) => void;
+  /**
+   * グラフの凡例・目盛りに出す表示名と単位(プローブ番号 → 人間の言葉)。
+   * 単位が分かる系列だけ `units` に入れる(無ければ数だけを書く)。
+   */
+  setProbeLabels: (
+    labels: Record<number, string> | null,
+    units?: Record<number, string> | null,
+  ) => void;
   /** 選択中の剛体(無ければ -1)。 */
   selectedBody: () => number;
   selectBody: (index: number) => void;
@@ -623,6 +629,16 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     return labels;
   }
 
+  /** グラフの目盛りに添える単位。分かっているものだけ。 */
+  function probeUnitsFor(experiment: Experiment): Record<number, string> {
+    const units: Record<number, string> = {};
+    for (const readout of experiment.readouts ?? []) {
+      if (readout.derive || !readout.unit) continue;
+      units[readout.probe] = readout.unit;
+    }
+    return units;
+  }
+
   /**
    * シーンの距離拘束を「吊るし線」の指示に直す。読み込んだ JSON を持っている
    * ワークスペース側でしか作れない情報なので、ここで組み立てて渡す。
@@ -697,7 +713,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     // 選んでいない——「選んだもの: ground / 重さ 0.000 kg」が出てくるのは
     // ノイズでしかない。選択は人が対象をクリックしたときだけ起きる。
     api.selectBody(-1);
-    api.setProbeLabels(probeLabelsFor(current));
+    api.setProbeLabels(probeLabelsFor(current), probeUnitsFor(current));
     api.setPace(current.pace * speedMultiplier);
     api.followCamera(true);
     if (detail < AUTORUN_BELOW) api.play();

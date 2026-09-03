@@ -4202,9 +4202,28 @@ function setUpProjectDrawer(
 //   履歴長が異なり得る(プローブの登録タイミングが違う)ため、**最長の系列に
 //   合わせて短い系列の末尾を空欄で埋める**。Probeのリングバッファは絶対時刻を
 //   持たないため、時刻列ではなく**サンプル番号**を出す(縮約、下記doc参照)。
-type ProbeSeries = { label: string; color: string; history: Float64Array };
+type ProbeSeries = {
+  label: string;
+  color: string;
+  history: Float64Array;
+  /** 単位([m] / [m/s] / [℃] …)。目盛りと凡例に添える。無ければ付けない。 */
+  unit?: string;
+};
 
 /// 符号を保つ対数変換(symlog)。`type ProbeSeries`のdoc参照。
+/**
+ * 目盛りの数値。桁数を値の大きさで決める——`0.24000 m` のように意味の無い桁が
+ * 並ぶと、かえって読みにくい。
+ */
+function formatTickValue(value: number): string {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1000) return value.toPrecision(4);
+  if (magnitude >= 100) return value.toFixed(0);
+  if (magnitude >= 1) return value.toFixed(2);
+  if (magnitude >= 0.001) return value.toFixed(3);
+  return value.toExponential(1);
+}
+
 function signedLog(v: number): number {
   return Math.sign(v) * Math.log10(1 + Math.abs(v));
 }
@@ -4354,10 +4373,47 @@ function setUpProbeGraph(): (
       }
       ctx.stroke();
 
+      // **1本だけのときは、縦軸に実際の目盛りを描く**。各系列を自分の範囲へ
+      // 正規化して重ねる作りなので、複数本のときに共通の縦軸は引けない
+      // ——が、1本ならその写像は素直な線形で、目盛りは正確に引ける。
+      // 「線の形は分かるが値が読めない」を、読める場合には解消する。
+      if (series.length === 1 && !useLog) {
+        const unit = s.unit ? ` ${s.unit}` : "";
+        ctx.textAlign = "right";
+        for (const [ratio, value] of [
+          [0, max],
+          [0.5, (max + min) / 2],
+          [1, min],
+        ] as [number, number][]) {
+          const y = Math.min(h - 2, Math.max(10, ratio * h));
+          ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
+          ctx.lineWidth = 3;
+          const text = `${formatTickValue(value)}${unit}`;
+          ctx.strokeText(text, w - 6, y);
+          ctx.fillStyle = "#8b929c";
+          ctx.fillText(text, w - 6, y);
+        }
+        ctx.textAlign = "left";
+      } else if (series.length > 1) {
+        // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを
+        // 明示する(黙っていると「こちらの線の方が大きい」と読まれる)。
+        const note = "各線はそれぞれの範囲に合わせて描いています";
+        ctx.textAlign = "right";
+        ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
+        ctx.lineWidth = 3;
+        ctx.strokeText(note, w - 6, h - 4);
+        ctx.fillStyle = "#6f757e";
+        ctx.fillText(note, w - 6, h - 4);
+        ctx.textAlign = "left";
+      }
+
       // 凡例は折れ線の上に重なるので、**濃い縁取りを先に引いてから**塗る
       // (以前は素の塗りだけで、線と同系色の場所では文字が読めなかった)。
       const suffix = useLog ? " [log]" : "";
-      const legendText = `${s.label}: max=${max.toFixed(2)} min=${min.toFixed(2)}${suffix}`;
+      const unitSuffix = s.unit ? ` ${s.unit}` : "";
+      const legendText =
+        `${s.label}: max=${max.toFixed(2)}${unitSuffix} ` +
+        `min=${min.toFixed(2)}${unitSuffix}${suffix}`;
       ctx.lineJoin = "round";
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
@@ -8831,6 +8887,7 @@ async function setUpSceneView(
           label:
             guidedProbeLabels?.[i] ??
             world.read_component("imported_probe_label_at", String(i)),
+          unit: guidedProbeUnits?.[i],
           color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
           // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
           // 返す(B16、`HotPathViewBuffers`のdoc参照)——このループが呼ぶたび
@@ -9046,6 +9103,8 @@ async function setUpSceneView(
   let stepAccumulator = 0;
   /** かんたんモードが指定するプローブの表示名(index → 名前)。 */
   let guidedProbeLabels: Record<number, string> | null = null;
+  /** かんたんな表示名に添える単位(グラフの目盛りと凡例で使う)。 */
+  let guidedProbeUnits: Record<number, string> | null = null;
   let lastTimeMs = performance.now();
 
   function frame(nowMs: number) {
@@ -9143,8 +9202,9 @@ async function setUpSceneView(
       playButton.textContent = "▶";
     },
     isPlaying: () => mode === "play" && playing,
-    setProbeLabels: (labels) => {
+    setProbeLabels: (labels, units) => {
       guidedProbeLabels = labels;
+      guidedProbeUnits = units ?? null;
     },
     setPace: (stepsPerSecond) => {
       guidedPace = stepsPerSecond;

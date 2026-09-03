@@ -774,9 +774,12 @@ export const GUIDED_CATEGORIES: Category[] = [
         view: "graph",
         pace: 40,
         readouts: [
-          { probe: 0, label: "熱源から近い点", format: celsius() },
-          { probe: 1, label: "まん中の点", format: celsius() },
-          { probe: 2, label: "遠い点", format: celsius() },
+          // 棒の温度は**摂氏の配列**(熱源端が 100)。熱ノードの温度(ケルビン)と
+          // 同じ換算をかけると `-271.0 ℃` のような値になり、しかも文章側の
+          // 「片端を 100 ℃に保つ」と食い違う。単位は測っているものごとに違う。
+          { probe: 0, label: "熱源から近い点", unit: "℃", digits: 1 },
+          { probe: 1, label: "まん中の点", unit: "℃", digits: 1 },
+          { probe: 2, label: "遠い点", unit: "℃", digits: 1 },
         ],
       },
       {
