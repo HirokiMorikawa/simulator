@@ -3154,6 +3154,10 @@ impl WasmWorld {
                 self.set_body_rotation_at_impl(u("index"), f("x"), f("y"), f("z"), f("w"))?;
                 Ok("{}".to_string())
             }
+            "set_body_mass_at" => {
+                self.set_body_mass_at_impl(u("index"), f("mass"))?;
+                Ok("{}".to_string())
+            }
             "set_body_scale_at" => {
                 self.set_body_scale_at_impl(u("index"), f("scale"))?;
                 Ok("{}".to_string())
@@ -5148,6 +5152,33 @@ impl WasmWorld {
         Ok(())
     }
 
+    /// 質量を**その場で**変える(`set_body_position_at`等と同じ「Edit中の直接
+    /// 設定」の一員)。
+    ///
+    /// **なぜ要ったか**: 質量の変更は`Command`(`push_set_body_mass`)しか
+    /// 経路が無く、Commandは**次stepの先頭**で適用される。Editモードはstepが
+    /// 進まないので、Inspectorに質量を打ち込んでも永久に何も起きなかった
+    /// ——「10と入れたのに元の重さのまま落ちてくる」という、いちばん信用を
+    /// 失う壊れ方をしていた(利用者役の観察)。
+    ///
+    /// 適用する処理は`Command::SetBodyMass`の腕と**同一**
+    /// (`RigidBodySet::set_mass`)なので、Editで打つのとPlay中にCommandで
+    /// 送るのとで結果は変わらない。決定論とリプレイ再現性の観点でも、
+    /// 「Play中の介入はCommand」という取り決めは崩していない——これはPlayに
+    /// 入る前の初期条件づくりであり、`set_body_position_at`が既にそうである
+    /// のと同じ位置付けである。
+    fn set_body_mass_at_impl(&mut self, index: usize, mass: f64) -> Result<(), WasmError> {
+        if mass <= 0.0 || !mass.is_finite() {
+            return Err(WasmError::InvalidMass);
+        }
+        let id = self.try_body_id_at(index)?;
+        self.inner
+            .mechanics_mut()
+            .bodies
+            .set_mass(id.index as usize, mass);
+        Ok(())
+    }
+
     /// Body type を切り替える。**Dynamic へ戻すときの質量をこちら側で確保する**
     /// のが要点——`Static` 化すると `inv_mass = 0`(無限質量)になり元の質量は
     /// 復元できないため、切替前の値を読んで `Command` に載せる。
@@ -5932,6 +5963,31 @@ mod tests {
                 &format!(r#"{{"index":{body},"scale":2.0}}"#),
             )
             .expect("set_body_scale_at via apply_component must succeed");
+
+        // 質量の直接設定は**stepを挟まずに**効く(Editモードでも打った値が
+        // 反映される、`set_body_mass_at_impl`のdoc参照)。
+        world
+            .apply_component_impl(
+                "set_body_mass_at",
+                &format!(r#"{{"index":{body},"mass":7.0}}"#),
+            )
+            .expect("set_body_mass_at via apply_component must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_mass_at", &body.to_string())
+                .unwrap(),
+            7.0_f64.to_string(),
+            "set_body_mass_at must apply immediately (no step)"
+        );
+        assert!(
+            world
+                .apply_component_impl(
+                    "set_body_mass_at",
+                    &format!(r#"{{"index":{body},"mass":0.0}}"#)
+                )
+                .is_err(),
+            "set_body_mass_at must reject a non-positive mass"
+        );
 
         let result = world
             .apply_component_impl(
@@ -7412,7 +7468,7 @@ mod tests {
         // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
         // 足したらこの数と`component_schema`の表の両方を更新すること**——
         // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
-        const APPLY_KIND_COUNT: usize = 76;
+        const APPLY_KIND_COUNT: usize = 77;
         assert_eq!(
             entries.len(),
             APPLY_KIND_COUNT,

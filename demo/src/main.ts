@@ -84,6 +84,13 @@ const SPAWN_MATERIALS = [
   "ゴム(天然)",
 ];
 const SPAWN_HEIGHT = 12.0;
+/// 衝突マスクの既定値(32bit すべて 1 = すべてと当たる)。Inspector に生の
+/// 4294967295 だけが出ていて意味が読めなかったので、説明にこの定数を使う。
+const MASK_ALL = 0xffff_ffff;
+/// Inspector の「上級」欄を開いたままにしておくか。Inspector は選択や編集の
+/// たびに描き直すので、覚えておかないと**開くたびにすぐ閉じる**
+/// (押しても居着かない折り畳みは、壊れているのと区別が付かない)。
+let inspectorAdvancedOpen = false;
 /// Hierarchy 右クリック「複製」で複製体をずらす距離 [m](群2)。
 /// 同一位置に重ねると初期貫入から弾き飛ばされるため、必ず離す。
 const DUPLICATE_OFFSET_M = 0.6;
@@ -494,6 +501,13 @@ function reportError(message: string): void {
 /// 可変の参照オブジェクト越しにハンドラを配線する。
 type InspectorEditHandlers = {
   setMass(bodyIndex: number, mass: number): void;
+  /// 材質の差し替え(**利用者役④の観察**)。物理コアに「後から材質を変える」
+  /// 操作は無い(材質はボディを作るときに決まる)ので、**いまの場面を
+  /// シーン文書として書き出し、その体の材質だけを書き換えて読み直す**。
+  /// 密度が変われば質量も、反発・摩擦も、同じ読み込み経路で一貫して決まり直す
+  /// ——中途半端に一部だけ差し替えるより、理論の辻褄が合う。
+  /// 走行中(Play)は場面を組み直せないので `false` を返す。
+  setMaterial(bodyIndex: number, materialName: string): boolean;
   setBodyType(bodyIndex: number, kind: string): void;
   setCollisionFilter(bodyIndex: number, group: number, mask: number): void;
   /// 軸別スケール(群2、設計 §1.2 の Gizmo は Transform を編集する)。
@@ -1570,7 +1584,8 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
-      <div class="inspector-field"><span>Shape</span><span>${world.read_component("body_shape_label_at", String(index))}</span></div>
+      <div class="inspector-field"><span>かたち (Shape)</span><span>${world.read_component("body_shape_label_at", String(index))}</span></div>
+      <p class="inspector-note">かたちの寸法は、下の「大きさ(倍率)」で変えられます。</p>
     </div>
     <div class="inspector-component">
       <h3>Transform</h3>
@@ -1585,14 +1600,19 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
       <div class="inspector-field"><span>Rotation</span><span id="inspector-rotation">—</span></div>
       <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
       <div class="inspector-field">
-        <span>Scale (x,y,z)</span>
+        <span>大きさ(倍率) x,y,z</span>
         <span class="inspector-scale-fields">
           <input type="number" id="inspector-scale-x" min="0.01" step="0.1" value="1" />
           <input type="number" id="inspector-scale-y" min="0.01" step="0.1" value="1" />
           <input type="number" id="inspector-scale-z" min="0.01" step="0.1" value="1" />
         </span>
       </div>
-      <p class="inspector-note">軸別スケールは Box のみ(球・カプセルは形状表現に非等方の自由度が無い)。3欄を同じ値にすると等方スケールとして球にも効く。</p>
+      <p class="inspector-note">
+        <strong>いまの大きさを 1 とした倍率</strong>です(2 と入れると 2 倍)。
+        3 欄バラバラに効くのは箱だけ——球やカプセルは形そのものに縦横の
+        自由度が無いので、<strong>3 欄を同じ値</strong>にすると全体が拡大します。
+        重さは材質の密度から計算し直されます。
+      </p>
     </div>
     ${renderRigidBodyComponent(world, index)}
     ${renderInspectorExtraComponents(world, index)}
@@ -2440,37 +2460,72 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
 /// 違い、Play モード中でもリプレイ再現性と決定論が壊れない。
 function renderRigidBodyComponent(world: WasmWorld, index: number): string {
   const mass = readNumber(world, "body_mass_at", String(index));
+  const currentMaterial = world.read_component("body_material_label_at", String(index));
   const bodyType = world.read_component("body_type_at", String(index));
   const group = readNumber(world, "body_collision_group_at", String(index));
   const mask = readNumber(world, "body_collision_mask_at", String(index));
   const option = (value: string) =>
     `<option value="${value}"${value === bodyType ? " selected" : ""}>${value}</option>`;
+  // 材質は**選び直せる**。以前は文字を出すだけで、「鋼のボールをゴムに変えて
+  // 弾み方を見る」という、いちばんやりたい比べ方ができなかった(利用者役の
+  // 観察)。いま付いている材質が一覧に無い場合も落とさず先頭に出す。
+  const materialOption = (selected: string) => {
+    const names = SPAWN_MATERIALS.includes(selected)
+      ? SPAWN_MATERIALS
+      : [selected, ...SPAWN_MATERIALS];
+    return names
+      .map(
+        (name) =>
+          `<option value="${name}"${name === selected ? " selected" : ""}>${name}</option>`,
+      )
+      .join("");
+  };
   // 質量 0 は「無限質量」(Static/Kinematic)を意味するので、数値入力には
   // 出さずプレースホルダで示す——0 と表示すると「0 kg の物体」に見えてしまう。
   const massValue = mass > 0 ? mass.toPrecision(6) : "";
   return `
     <div class="inspector-component">
       <h3>RigidBody</h3>
-      <div class="inspector-field"><span>Material</span><span>${world.read_component("body_material_label_at", String(index))}</span></div>
       <div class="inspector-field">
-        <span>Mass [kg]</span>
+        <span>材質 (Material)</span>
+        <select id="inspector-material">${materialOption(currentMaterial)}</select>
+      </div>
+      <div class="inspector-field">
+        <span>重さ / Mass [kg]</span>
         <input type="number" id="inspector-mass" min="0" step="0.1"
                value="${massValue}" placeholder="∞ (無限質量)"
                ${mass > 0 ? "" : "disabled"} />
       </div>
       <div class="inspector-field">
-        <span>Body type</span>
+        <span>動き方 (Body type)</span>
         <select id="inspector-body-type">${["Dynamic", "Static", "Kinematic"].map(option).join("")}</select>
       </div>
-      <div class="inspector-field">
-        <span>Collision group</span>
-        <input type="number" id="inspector-collision-group" min="0" step="1" value="${group}" />
-      </div>
-      <div class="inspector-field">
-        <span>Collision mask</span>
-        <input type="number" id="inspector-collision-mask" min="0" step="1" value="${mask}" />
-      </div>
-      <p class="inspector-note">編集は Command としてキューに積まれ、次 step の先頭で適用されます。</p>
+      <p class="inspector-note">
+        動き方: Dynamic = 力で動く / Static = 動かない(床や壁) /
+        Kinematic = 決めた通りに動き、ぶつかられても押し返されない。
+      </p>
+      <details class="inspector-advanced" id="inspector-collision-details"${
+        inspectorAdvancedOpen ? " open" : ""
+      }>
+        <summary>ぶつかる相手を選ぶ(上級)</summary>
+        <div class="inspector-field">
+          <span>自分の組 (group)</span>
+          <input type="number" id="inspector-collision-group" min="0" step="1" value="${group}" />
+        </div>
+        <div class="inspector-field">
+          <span>ぶつかる組 (mask)</span>
+          <input type="number" id="inspector-collision-mask" min="0" step="1" value="${mask}" />
+        </div>
+        <p class="inspector-note">
+          どちらもビットの並びです。${MASK_ALL}(=すべてのビットが 1)なら
+          <strong>すべてと当たる</strong>——既定はこれ。特定の組だけをすり抜け
+          させたいときに変えます。
+        </p>
+      </details>
+      <p class="inspector-note">
+        材質・重さを変えると、その場で場面を組み直して反映します(走行中は
+        次の 1 step 先頭で効きます)。
+      </p>
     </div>
   `;
 }
@@ -2487,6 +2542,26 @@ function wireInspectorEditFields(index: number): void {
     const value = Number(massInput.value);
     if (!Number.isFinite(value) || value <= 0) return;
     handlers.setMass(index, value);
+  });
+
+  const advanced = document.getElementById(
+    "inspector-collision-details",
+  ) as HTMLDetailsElement | null;
+  advanced?.addEventListener("toggle", () => {
+    inspectorAdvancedOpen = advanced.open;
+  });
+
+  const materialSelect = document.getElementById(
+    "inspector-material",
+  ) as HTMLSelectElement | null;
+  materialSelect?.addEventListener("change", () => {
+    if (!handlers.setMaterial(index, materialSelect.value)) {
+      // 走行中は組み直せない。黙って元へ戻すと「押したのに何も起きない」に
+      // なるので、戻したうえで理由を言う。
+      // 選び直した値は、次のフレームで `updateInspectorRigidBodyFields` が
+      // 実際の材質へ戻す(嘘の表示を残さない)。
+      reportError("材質は、とめている間だけ変えられます(▶ を押す前に)。");
+    }
   });
 
   // Position の直接編集(**残タスク完遂の縦串①増分**)。Gizmo と同じく
@@ -2904,6 +2979,12 @@ function updateInspectorRigidBodyFields(world: WasmWorld, index: number): void {
     }
   }
   setIfIdle("inspector-body-type", world.read_component("body_type_at", String(index)));
+  // 材質は選び直せる欄になったので、ここでも**実際に付いている材質**へ
+  // 揃え直す。走行中に変えようとして弾かれた選択が残らないようにするため。
+  setIfIdle(
+    "inspector-material",
+    world.read_component("body_material_label_at", String(index)),
+  );
   setIfIdle(
     "inspector-collision-group",
     world.read_component("body_collision_group_at", String(index)),
@@ -6317,11 +6398,91 @@ async function setUpSceneView(
   // 毎フレーム値を読み直して表示を更新するため、実際に適用された step で
   // 表示が変わる(Playモードが止まっていれば `step` ボタンを押すまで変わらない、
   // これは「次step先頭で適用」という設計そのものが目に見えている状態)。
+  /**
+   * **いまの場面をシーン文書として取り出し、書き換えて読み直す**
+   * (利用者役④の観察: 材質を変える手段がどこにも無かった)。
+   *
+   * 物理コアに「後から材質を差し替える」操作は無い——材質はボディを作る
+   * ときに決まり、密度から質量が、反発・摩擦係数が決まる。**一部だけを
+   * 上書きすると理論の辻褄が合わなくなる**ので、シーンを書き出して該当の
+   * 体だけ書き換え、**同じ読み込み経路**で作り直す。こうすれば材質・質量・
+   * 反発は必ず互いに整合したままになる。
+   *
+   * ボディの並びは書き出しでも保たれるが、名前が一致するものを優先して
+   * 探す(削除済みの体があると添字がずれ得るため)。
+   */
+  function patchSceneBody(
+    bodyIndex: number,
+    patch: (body: Record<string, unknown>) => void,
+  ): boolean {
+    if (mode !== "edit") return false;
+    if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return false;
+    let doc: { bodies?: Record<string, unknown>[] };
+    try {
+      doc = JSON.parse(world.read_component("export_scene_json", ""));
+    } catch {
+      return false;
+    }
+    const bodies = doc.bodies;
+    if (!Array.isArray(bodies)) return false;
+    const hadFrames = readNumber(world, "frame_count");
+    const label = world.read_component("body_label_at", String(bodyIndex));
+    const target =
+      bodies.find((b) => typeof b.name === "string" && b.name === label) ??
+      bodies[bodyIndex];
+    if (!target) return false;
+    patch(target);
+    // 書き出しは名前を落として `body_0` のような連番にしてしまう。組み直した
+    // 途端に一覧の名前が全部変わっては、どれが自分の置いた物か分からなくなる
+    // ——いま画面に出ている名前をそのまま書き戻す。
+    const count = readNumber(world, "body_count");
+    for (let i = 0; i < bodies.length && i < count; i += 1) {
+      const name = world.read_component("body_label_at", String(i));
+      if (name) bodies[i].name = name;
+    }
+    // 観測点は元の一覧へ戻す(`sceneOwnProbes` のdoc参照)。
+    (doc as { probes?: unknown[] }).probes = sceneOwnProbes;
+    try {
+      sceneGalleryRef.current?.(JSON.stringify(doc));
+    } catch (err) {
+      reportError(`場面の組み直しに失敗しました: ${String(err)}`);
+      return false;
+    }
+    // 組み直しでボディは作り直されるが、並びは同じなので選び直せる。
+    if (bodyIndex < readNumber(world, "body_count")) selectBody(bodyIndex);
+    markUnsaved();
+    // 回転する座標系はシーン文書に書く場所が無い(`to_scenario` が持たない)ので、
+    // 組み直すと外れる。黙って消すのがいちばん悪いので、あったときだけ言う。
+    if (hadFrames && readNumber(world, "frame_count") < hadFrames) {
+      showToast("場面を組み直しました(回転する座標系は外れます)");
+    }
+    return true;
+  }
+
   inspectorEditRef.current = {
     setMass(bodyIndex, mass) {
       if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
+      // **とめている間は、打った値がその場で効く**。Command は次 step の先頭で
+      // 適用されるので、Edit モード(step が進まない)では打ち込んでも永久に
+      // 何も起きなかった——「10 と入れたのに元の重さのまま落ちてくる」という、
+      // いちばん信用を失う壊れ方をしていた(利用者役④の観察)。
+      // 直接設定は Position/Scale と同じ「Play に入る前の初期条件づくり」で、
+      // 適用する処理は Command の腕と同一(`set_body_mass_at_impl` のdoc参照)。
+      if (mode === "edit") {
+        applyComponent(world, "set_body_mass_at", { index: bodyIndex, mass });
+        markUnsaved();
+        return;
+      }
       applyComponent(world, "push_set_body_mass", { body_index: bodyIndex, mass });
       pushCommandLog(world, { kind: "SetBodyMass", bodyIndex, mass });
+    },
+    setMaterial(bodyIndex, materialName) {
+      return patchSceneBody(bodyIndex, (b) => {
+        b.material = materialName;
+        // 材質を選び直したのに、前の材質で計算した質量が居座っては意味が
+        // ない。密度から計算し直させる。
+        delete b.mass_override;
+      });
     },
     setBodyType(bodyIndex, kind) {
       if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
@@ -7065,6 +7226,15 @@ async function setUpSceneView(
   // ボディ数)。以後のスポーンパレット操作による「これまでのスポーン数」の
   // 基準点として使う。
   let sceneBaseBodyCount = 2;
+  /// いま読み込んでいる場面が**もともと持っていた**観測点の一覧
+  /// (`sceneGalleryRef.current` のdoc参照)。書き換えて読み直すときに、
+  /// 書き出しが足してしまう編集用の観測点を持ち込まないために使う。
+  let sceneOwnProbes: unknown[] = [];
+  /// 場面が差し替わったことをワークスペースへ知らせる先(`onSceneReplaced`)。
+  const sceneReplacedCallbacks: (() => void)[] = [];
+  /// ワークスペース自身が読み込んでいる最中か。自分の読み込みで自分へ
+  /// 「差し替わった」と通知して堂々巡りにならないようにするための札。
+  let workspaceIsLoading = false;
   /// 未保存の変更があるか(群2、`beforeunload` のdoc参照)。
   let hasUnsavedChanges = false;
   function markUnsaved() {
@@ -7453,6 +7623,15 @@ async function setUpSceneView(
     clearConsole();
     const parsed = JSON.parse(json) as ImportedScenarioJson;
     const bodies = parsed.bodies ?? [];
+    // **その場面がもともと持っていた観測点**を覚えておく。
+    //
+    // 読み込みは必ず編集用の観測点(先頭ボディの高さ・速さ)を 2 本足すので、
+    // 書き出した文書にはそれも載る。書き出し→読み直しを繰り返すと観測点が
+    // 雪だるま式に増え、グラフの凡例が同じ名前で埋まった(実測: 1 → 4 → 10
+    // → 22)。**書き換えて読み直すときは、ここで覚えた元の一覧へ戻す**。
+    sceneOwnProbes = Array.isArray((parsed as { probes?: unknown[] }).probes)
+      ? ((parsed as { probes?: unknown[] }).probes as unknown[])
+      : [];
 
     for (const mesh of bodyMeshes.values()) {
       scene.remove(mesh);
@@ -7557,6 +7736,11 @@ async function setUpSceneView(
     // **シーンの中身にカメラを合わせる(群3、`frameCameraOnContent`のdoc参照)**。
     // 剛体・ソフトボディ・天体・粒子群がすべて配置し終わった後に呼ぶ。
     frameCameraOnContent();
+    // 場面が差し替わったことを上の画面へ伝える。ワークスペース自身の読み込み
+    // (`loadSceneJson`)は既に知っているので通知しない(`workspaceIsLoading`)。
+    if (!workspaceIsLoading) {
+      for (const callback of sceneReplacedCallbacks) callback();
+    }
   };
 
   // Replay再生実行(`ReplayVerifyRef`のdoc参照)。記録済み`commandLog`を、
@@ -9331,9 +9515,38 @@ async function setUpSceneView(
   // 不整合(旧ワールドのメッシュが残る等)が必ず起きる。
   const workspaceApi: WorkspaceApi = {
     setTethers,
+    exportSceneJson: () => {
+      try {
+        const doc = JSON.parse(world.read_component("export_scene_json", "")) as {
+          bodies?: Record<string, unknown>[];
+          probes?: unknown[];
+        };
+        // 書き出しは名前を落とし、読み込みが足した編集用の観測点まで載せる。
+        // `patchSceneBody` と同じ手当てをして、**読み直しても同じ場面**になる
+        // 文書にしてから渡す。
+        const count = readNumber(world, "body_count");
+        for (let i = 0; i < (doc.bodies?.length ?? 0) && i < count; i += 1) {
+          const name = world.read_component("body_label_at", String(i));
+          if (name && doc.bodies) doc.bodies[i].name = name;
+        }
+        doc.probes = sceneOwnProbes;
+        return JSON.stringify(doc);
+      } catch (err) {
+        reportError(`場面の書き出しに失敗しました: ${String(err)}`);
+        return null;
+      }
+    },
+    onSceneReplaced: (callback) => {
+      sceneReplacedCallbacks.push(callback);
+    },
     loadSceneJson: (json) => {
       setTethers([]);
-      sceneGalleryRef.current?.(json);
+      workspaceIsLoading = true;
+      try {
+        sceneGalleryRef.current?.(json);
+      } finally {
+        workspaceIsLoading = false;
+      }
       // 読み込み直後は「いまある物」しか無いので、落下の行き先(床)まで
       // 入る画角へ即座に合わせ直す(`updateGuidedFollowCamera` の doc 参照)。
       guidedFollowCamera = true;

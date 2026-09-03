@@ -214,6 +214,92 @@ test("形の無い現象では、空の3Dを見せずに見る場所へ送る", 
   expect(errors).toEqual([]);
 });
 
+// 「つくる」の粒度——**自分で組み立てる人**が行き止まりに当たらないこと。
+// 利用者役④(粒度「つくる」)が実際に詰まった順に並べてある。
+test("自分で置いた物を、そのまま「うごかす」で落とせる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await expect(page.locator("#crumb-own-scene")).toContainText("じぶんの場面");
+
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.click("#btn-run");
+
+  // カタログの実験を選んでいなくても、パレットではなく**場面が走る**。
+  await expect(page.locator("#palette")).toBeHidden();
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+test("材質を選び直すと、重さもその材質のものになる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.locator("#hierarchy-tree .tree-body").last().click();
+
+  const mass = () =>
+    page.locator("#inspector-mass").inputValue().then((v) => Number.parseFloat(v));
+  const steel = await mass();
+  expect(steel).toBeGreaterThan(0);
+
+  await page.selectOption("#inspector-material", "ゴム(天然)");
+  await expect
+    .poll(async () => page.locator("#inspector-material").inputValue(), { timeout: 10_000 })
+    .toBe("ゴム(天然)");
+  // 密度が違えば重さも違う——選び直した材質で計算し直されている。
+  await expect.poll(mass, { timeout: 10_000 }).toBeLessThan(steel);
+
+  // 名前は連番へ作り変わらない(書き出し→読み直しで消えていた)。
+  await expect(page.locator("#hierarchy-tree")).toContainText("Sphere_1");
+  expect(errors).toEqual([]);
+});
+
+test("打ち込んだ重さが、とめている間でもその場で効く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.locator("#hierarchy-tree .tree-body").last().click();
+
+  await page.fill("#inspector-mass", "10");
+  await page.locator("#inspector-mass").dispatchEvent("change");
+  await expect
+    .poll(
+      async () => Number.parseFloat(await page.locator("#inspector-mass").inputValue()),
+      { timeout: 10_000 },
+    )
+    .toBeCloseTo(10, 3);
+  expect(errors).toEqual([]);
+});
+
+test("名前を付けて保存した場面は、開き直しても残っている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  const bodies = await page.locator("#hierarchy-tree .tree-body").count();
+
+  await page.fill("#input-scene-name", "テストの場面");
+  await page.click("#btn-save-scene");
+  await expect(page.locator(".saved-scene-open")).toContainText("テストの場面");
+  await expect(page.locator("#crumb-own-scene")).toContainText("テストの場面");
+
+  // 更新しただけで作ったものが消える、を残さない。
+  await page.reload();
+  await expect(page.locator("#boot-overlay")).toBeHidden({ timeout: 30_000 });
+  await expect(page.locator("#crumb-own-scene")).toContainText("テストの場面");
+  await expect
+    .poll(() => page.locator("#hierarchy-tree .tree-body").count(), { timeout: 15_000 })
+    .toBe(bodies);
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

@@ -56,6 +56,11 @@ async function setTransformAndBody(
     await page.fill(`#inspector-scale-${axis}`, String(value));
   }
   await page.fill("#inspector-mass", String(mass));
+  // 衝突フィルタは「上級」の折り畳みの中(ただの球にビット列が並んで面食らう、
+  // という利用者役の観察を受けて畳んだ)。開いてから触る。
+  await page.locator(".inspector-advanced").first().evaluate((el) => {
+    (el as HTMLDetailsElement).open = true;
+  });
   await page.fill("#inspector-collision-group", String(collisionGroup));
   await page.fill("#inspector-collision-mask", String(collisionMask));
 }

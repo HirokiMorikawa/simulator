@@ -73,6 +73,19 @@ export type WorkspaceApi = {
     labels: Record<number, string> | null,
     units?: Record<number, string> | null,
   ) => void;
+  /**
+   * **いまの場面をそのまま文書にする**(利用者役④の観察: 自分で組み立てた
+   * 場面を保存する手段がどこにも無く、再読み込みで跡形もなく消えた)。
+   * 走行中の状態も含めて書き出せるので、これを読み直せば続きから開ける。
+   */
+  exportSceneJson: () => string | null;
+  /**
+   * エディタ側(新規シーン・シーンギャラリー等)が場面を差し替えたときに
+   * 呼ばれる。ワークスペースが握っている「いま見ている実験」が実物と
+   * 食い違ったままになるのを防ぐためのもの——実際、新規シーンを作っても
+   * パンくずと説明カードが前の実験のままだった。
+   */
+  onSceneReplaced: (callback: () => void) => void;
   /** 選択中の剛体(無ければ -1)。 */
   selectedBody: () => number;
   selectBody: (index: number) => void;
@@ -92,6 +105,36 @@ export type WorkspaceApiRef = { current: WorkspaceApi | null };
 
 const DETAIL_KEY = "simulator.ui.detail";
 const LAST_EXPERIMENT_KEY = "simulator.ui.last-experiment";
+/// 自分で組み立てた場面の保管場所(`SavedScene[]`)。
+const SAVED_SCENES_KEY = "simulator.scenes.saved";
+/// 最後に開いていた自作の場面の名前。次に開いたときここへ戻る。
+const LAST_OWN_SCENE_KEY = "simulator.scenes.last";
+
+/** 自分で組み立てて名前を付けた場面。 */
+type SavedScene = { name: string; savedAt: string; json: string };
+
+function readSavedScenes(): SavedScene[] {
+  try {
+    const raw = localStorage.getItem(SAVED_SCENES_KEY);
+    const parsed = raw ? (JSON.parse(raw) as SavedScene[]) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedScenes(scenes: SavedScene[]): string | null {
+  try {
+    localStorage.setItem(SAVED_SCENES_KEY, JSON.stringify(scenes));
+    return null;
+  } catch (err) {
+    // 置き場が一杯なのか、そもそも使えないのかで打つ手が違う。どちらでも
+    // **ファイルに落とす道**が残っていることを言う(黙って失敗しない)。
+    return String(err).includes("Quota")
+      ? "この端末の保管場所が一杯です。いらない場面を消すか、ファイルに書き出してください。"
+      : "この端末には保存できませんでした。ファイルに書き出してください。";
+  }
+}
 
 /** 大局の粒度の目盛り。連続値だが、名前が付く位置がある。 */
 const GRAIN_STOPS = [
@@ -228,9 +271,19 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let paletteIndex = 0;
   let paletteMatches: Experiment[] = [];
   let pendingStart = false;
+  /** 物理側の起動待ちで、開けずにいる自分の場面。 */
+  let pendingOwnScene: SavedScene | null = null;
   let lastSelection = -1;
   /** カードごとの局所的な開閉。`undefined` = 大局の粒度に従う。 */
   const cardOverrides = new Map<string, boolean>();
+  /**
+   * **いま開いているのが「じぶんの場面」なら、その名前**(未保存なら "")。
+   * `current === null`(カタログの実験を選んでいない)ときは、自分で組み立て
+   * ている場面を見ている——利用者役④が新規シーンを作ってもパンくずと説明が
+   * 前の実験のままで、「自分がどこにいるのか分からない」と書いた状態を、
+   * この一本の状態で言い分ける。
+   */
+  let ownSceneName = "";
 
   // ---- 大局の粒度 -------------------------------------------------------------
   /**
@@ -440,6 +493,18 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     root.title = "46 の実験から選ぶ(⌘K / Ctrl+K)";
     root.addEventListener("click", () => openPalette());
     crumbs.appendChild(root);
+
+    if (!current) {
+      // 実験を選んでいない = 自分で組み立てている場面。名前を付けてあれば
+      // それを、まだなら「じぶんの場面」と名乗る。
+      crumbs.appendChild(separator());
+      const own = document.createElement("span");
+      own.className = "crumb crumb-own";
+      own.id = "crumb-own-scene";
+      own.textContent = `🧱 ${ownSceneName || "じぶんの場面"}`;
+      own.title = "カタログの実験ではなく、自分で組み立てている場面です";
+      crumbs.appendChild(own);
+    }
 
     if (current) {
       crumbs.appendChild(separator());
@@ -727,10 +792,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   playButton.addEventListener("click", () => {
     const api = apiRef.current;
     if (!api) return;
-    if (!current) {
-      openPalette();
-      return;
-    }
+    // **自分で組み立てた場面も、このボタンで走る**。以前はカタログの実験を
+    // 選んでいないとパレットを開いてしまい、置いたばかりの物を落とすのに
+    // 「他人の実験一覧」が出てきた(利用者役④の観察)。動かすボタンは
+    // 動かすためのものである。
     if (api.isPlaying()) api.pause();
     else api.play();
     syncRun();
@@ -753,6 +818,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       ? `<span aria-hidden="true">⏸</span> とめる`
       : `<span aria-hidden="true">▶</span> うごかす`;
     playButton.setAttribute("aria-label", playing ? "とめる" : "うごかす");
+    // 自分の場面には「やり直し」の元が無い(つまみで組み直す実験と違い、
+    // 手で置いたものは巻き戻す先が保存した場面しかない)。
     restartButton.disabled = !current;
     for (const button of speedGroup.querySelectorAll("button")) {
       button.classList.toggle(
@@ -780,6 +847,159 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
 
   let readoutNodes: { readout: NonNullable<Experiment["readouts"]>[number]; node: HTMLElement }[] = [];
   let focusNodes: Record<string, HTMLElement> = {};
+
+  /**
+   * **作ったものが消えない**ようにするカード(利用者役④の一番の不満:
+   * 「保存に相当する言葉もボタンもどこにもなく、ページを更新しただけで
+   * 自作の内容が跡形もなく消えた」)。
+   *
+   * 保存する中身は**いまの場面そのもの**(`api.exportSceneJson`)。読み直しは
+   * 実験を読むのと同じ経路を通るので、開き直した場面は同じ物理で動く。
+   * 置き場はこの端末(localStorage)と、持ち出せるファイルの 2 つ。
+   */
+  function savedScenesCard(): CardSpec {
+    return {
+      id: "my-scenes",
+      title: "この場面を保存する",
+      // 「つくる」に踏み込んだ人の道具。浅い粒度では出さない。
+      reveal: REVEAL.toolbar,
+      build: (body) => {
+        const note = document.createElement("p");
+        note.className = "card-note";
+        note.textContent =
+          "名前を付けて保存すると、次に開いたときそのまま続きから始められます。";
+        body.appendChild(note);
+
+        const row = document.createElement("div");
+        row.className = "card-actions";
+        const nameInput = document.createElement("input");
+        nameInput.type = "text";
+        nameInput.id = "input-scene-name";
+        nameInput.placeholder = "場面の名前";
+        nameInput.value = ownSceneName;
+        const save = document.createElement("button");
+        save.type = "button";
+        save.id = "btn-save-scene";
+        save.className = "primary";
+        save.textContent = "💾 保存する";
+        save.addEventListener("click", () => {
+          const api = apiRef.current;
+          if (!api) return;
+          const json = api.exportSceneJson();
+          if (!json) return;
+          const name =
+            nameInput.value.trim() ||
+            `場面 ${new Date().toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+          const scenes = readSavedScenes().filter((entry) => entry.name !== name);
+          scenes.unshift({ name, savedAt: new Date().toISOString(), json });
+          const error = writeSavedScenes(scenes);
+          if (error) {
+            status.textContent = error;
+            status.dataset.tone = "warn";
+            return;
+          }
+          ownSceneName = name;
+          try {
+            localStorage.setItem(LAST_OWN_SCENE_KEY, name);
+          } catch {
+            /* 覚えられなくても保存自体は済んでいる */
+          }
+          renderCrumbs();
+          renderContext();
+        });
+        row.append(nameInput, save);
+        body.appendChild(row);
+
+        const status = document.createElement("p");
+        status.className = "card-note";
+        status.id = "scene-save-status";
+        body.appendChild(status);
+
+        const scenes = readSavedScenes();
+        if (scenes.length > 0) {
+          const list = document.createElement("ul");
+          list.className = "saved-scenes";
+          for (const entry of scenes) {
+            const item = document.createElement("li");
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "saved-scene-open";
+            open.dataset.sceneName = entry.name;
+            open.textContent = entry.name;
+            open.title = `${new Date(entry.savedAt).toLocaleString("ja-JP")} に保存`;
+            open.addEventListener("click", () => openSavedScene(entry));
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "saved-scene-remove";
+            remove.textContent = "消す";
+            remove.setAttribute("aria-label", `${entry.name} を消す`);
+            remove.addEventListener("click", () => {
+              writeSavedScenes(readSavedScenes().filter((e) => e.name !== entry.name));
+              renderContext();
+            });
+            item.append(open, remove);
+            list.appendChild(item);
+          }
+          body.appendChild(list);
+        }
+
+        // 端末の中だけでは、消える不安は消えない。**持ち出せる形**も要る。
+        const files = document.createElement("div");
+        files.className = "card-actions";
+        const download = document.createElement("button");
+        download.type = "button";
+        download.id = "btn-scene-download";
+        download.textContent = "⬇ ファイルに書き出す";
+        download.addEventListener("click", () => {
+          const json = apiRef.current?.exportSceneJson();
+          if (!json) return;
+          const blob = new Blob([json], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const anchorElement = document.createElement("a");
+          anchorElement.href = url;
+          anchorElement.download = `${ownSceneName || "my-scene"}.json`;
+          anchorElement.click();
+          URL.revokeObjectURL(url);
+        });
+        const upload = document.createElement("input");
+        upload.type = "file";
+        upload.accept = "application/json,.json";
+        upload.id = "input-scene-file";
+        upload.addEventListener("change", async () => {
+          const file = upload.files?.[0];
+          if (!file) return;
+          const text = await file.text();
+          openSavedScene({ name: file.name.replace(/\.json$/, ""), savedAt: "", json: text });
+        });
+        files.append(download, upload);
+        body.appendChild(files);
+      },
+    };
+  }
+
+  /** 保存した場面を開く。実験を読むのと同じ経路(=同じ物理)を通す。 */
+  function openSavedScene(entry: SavedScene): void {
+    const api = apiRef.current;
+    if (!api) return;
+    current = null;
+    ownSceneName = entry.name;
+    try {
+      localStorage.setItem(LAST_OWN_SCENE_KEY, entry.name);
+    } catch {
+      /* 覚えられなくても開くことはできる */
+    }
+    api.loadSceneJson(entry.json);
+    api.selectBody(-1);
+    api.setProbeLabels(null, null);
+    api.setPace(null);
+    api.followCamera(true);
+    // 開いた直後は**止まっている**。作る人は置いてから動かす。
+    api.stopForEditing();
+    closePalette();
+    renderCrumbs();
+    renderContext();
+    syncRun();
+  }
 
   function renderContext(): void {
     contextBody.innerHTML = "";
@@ -830,6 +1050,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             body.appendChild(list);
           },
         },
+        savedScenesCard(),
       ];
       for (const spec of world) contextBody.appendChild(buildCard(spec));
       appendFocusCard();
@@ -1137,13 +1358,44 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   }
 
   // ---- 毎フレームの更新 -------------------------------------------------------
+  /// エディタ側の差し替え通知を受け取ったか(購読は物理側が立ち上がってから
+  /// 一度だけ)。
+  let sceneReplacedSubscribed = false;
+
   function tick(): void {
     const api = apiRef.current;
+    if (api && !sceneReplacedSubscribed) {
+      sceneReplacedSubscribed = true;
+      // エディタ側で場面が差し替わったら(新規シーン・シーンギャラリー)、
+      // 「いま見ている実験」を手放す。前の実験の名前と説明が残ったままだと、
+      // 自分がどこにいるのか分からなくなる(利用者役④の観察)。
+      api.onSceneReplaced(() => {
+        current = null;
+        ownSceneName = "";
+        cardOverrides.clear();
+        api.setProbeLabels(null, null);
+        api.setPace(null);
+        // 実験を読み込むときと同じ規則(`reload`)。浅い粒度は「動いている
+        // ところ」を見に来ているので走らせ、深い粒度は**置いてから動かす**
+        // ので止めておく。前の場面の走行状態を引きずると、新しく作った場面が
+        // 置いた端から転がっていく。
+        if (detail < AUTORUN_BELOW) api.play();
+        else api.stopForEditing();
+        renderCrumbs();
+        renderContext();
+        syncRun();
+      });
+    }
     if (api && pendingStart) {
       pendingStart = false;
       reload();
       renderCrumbs();
       renderContext();
+    }
+    if (api && pendingOwnScene) {
+      const scene = pendingOwnScene;
+      pendingOwnScene = null;
+      openSavedScene(scene);
     }
     if (api) {
       const seconds = api.time();
@@ -1153,7 +1405,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         timeNode.textContent = formatDuration(seconds, scale);
         timeNode.dataset.seconds = String(seconds);
       }
-      clock.textContent = current ? formatDuration(seconds, scale) : "";
+      // 自分で組み立てた場面でも、走っていれば時計は動く(以前は実験を
+      // 選んでいるときしか出さず、「動いているのかどうか」が読めなかった)。
+      clock.textContent =
+        current || api.isPlaying() ? formatDuration(seconds, scale) : "";
       clock.dataset.seconds = String(seconds);
 
       if (current) {
@@ -1220,5 +1475,20 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       }
     })();
     start(remembered ?? CATEGORIES[0].experiments[0]);
+  } else {
+    // 「つくる」で開いた人は**自分の作業机に戻ってきた**人。前に開いていた
+    // 自分の場面があれば、そこへ戻す——更新しただけで作ったものが消え、
+    // 見覚えのない別の世界に置き換わるのが、いちばん堪える体験だった
+    // (利用者役④の一番の不満)。
+    const last = (() => {
+      try {
+        return localStorage.getItem(LAST_OWN_SCENE_KEY);
+      } catch {
+        return null;
+      }
+    })();
+    const saved = last ? readSavedScenes().find((s) => s.name === last) : undefined;
+    // 物理側はまだ立ち上がっていないかもしれないので、`tick` に開かせる。
+    if (saved) pendingOwnScene = saved;
   }
 }

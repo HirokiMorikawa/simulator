@@ -2353,3 +2353,57 @@ kbd {
 #app:not([data-grain="study"]):not([data-grain="build"]) #timeline-step {
   display: none;
 }
+
+
+/* **保存した場面の一覧**(利用者役④の一番の不満「作ったものが消える」への
+   受け皿)。名前を押せば開く、右の小さなボタンで消す——1行に用は2つだけ。 */
+.saved-scenes {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.saved-scenes li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+#app .saved-scene-open {
+  flex: 1;
+  justify-content: flex-start;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#app .saved-scene-remove {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+#input-scene-name {
+  flex: 1;
+  min-width: 0;
+}
+#input-scene-file {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+#scene-save-status[data-tone="warn"] {
+  color: var(--warn, #e0b050);
+}
+/* 自分で組み立てている場面であることを、パンくずでも見分けられるように。 */
+.crumb-own {
+  color: var(--text);
+}
+/* Inspector の「上級」欄。ただの球に関節や推力の設定が並んで面食らった、
+   という観察を受けて、めったに使わないものは畳んでおく。 */
+.inspector-advanced > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  padding: var(--space-1) 0;
+}
