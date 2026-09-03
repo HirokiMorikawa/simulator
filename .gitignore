@@ -19,3 +19,7 @@ __pycache__/
 
 # Claude Code のローカル作業用ディレクトリ(サブエージェント用worktree等)
 .claude/
+
+# UI をユーザー視点で操作して確かめるための使い捨てスクリプト
+# (ペルソナ検証時に demo/ 直下へ置いて実行し、終わったら消す)
+demo/.persona*.mjs
