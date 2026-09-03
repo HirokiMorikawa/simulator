@@ -384,6 +384,90 @@ test("描かれている現象に「形では見えません」と言わない",
   expect(errors).toEqual([]);
 });
 
+test("動きが止まったら、その時刻が数値に出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 落として跳ねて止まるまで待つ。時計は回り続けるが、止まった時刻は別に出る。
+  const settled = page.locator("#readout-settled");
+  await expect(settled).toBeVisible({ timeout: 30_000 });
+  const settledSeconds = Number(await settled.getAttribute("data-seconds"));
+  expect(settledSeconds).toBeGreaterThan(0);
+  // 経過時間はそのあとも進む——「止まった時刻」と取り違えないための別欄。
+  await expect
+    .poll(() => elapsedSeconds(page), { timeout: 15_000 })
+    .toBeGreaterThan(settledSeconds);
+
+  // 回り続ける現象では出さない。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
+  await page.waitForTimeout(4000);
+  await expect(settled).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("グラフの単位が、表の数値と同じ量になっている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+
+  // 表は ℃。グラフだけ生のケルビン(300 台)では同じ量だと気付けない。
+  const readout = page.locator('#context dd[data-probe="0"]');
+  await expect.poll(async () => (await readout.textContent()) ?? "", { timeout: 15_000 })
+    .toContain("℃");
+  const shown = Number.parseFloat((await readout.textContent()) ?? "999");
+  expect(shown).toBeLessThan(150); // ケルビンなら 300 台になる
+
+  // 桁の小さい時刻も指数表記にしない。
+  await expect(page.locator("#probe-time-range")).not.toContainText("e-");
+  expect(errors).toEqual([]);
+});
+
+test("つまみが無い実験は、無いと言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 場の中身そのものが記録された状態から始まる実験には、変えるつまみが無い。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d27-double-slit"]');
+  const knobs = page.locator('.card[data-card="knobs"]');
+  await expect(knobs).toBeVisible();
+  await expect(knobs).toContainText("見るだけ");
+
+  // 逆に、つまみを足した実験では実物が出る。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
+  await expect(page.locator("#knob-material")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("棒の材質を変えると、熱の伝わり方が実際に変わる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
+
+  const near = page.locator('#context dd[data-probe="1"]');
+  await expect
+    .poll(async () => Number.parseFloat((await near.textContent()) ?? "0"), {
+      timeout: 20_000,
+    })
+    .toBeGreaterThan(5);
+
+  // 木は熱をほとんど伝えない——同じ時間でも温度が上がらない。
+  await page.click("#knob-material .knob-choice-btn:nth-child(4)");
+  await page.waitForTimeout(4000);
+  const wood = Number.parseFloat((await near.textContent()) ?? "99");
+  expect(wood).toBeLessThan(1);
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

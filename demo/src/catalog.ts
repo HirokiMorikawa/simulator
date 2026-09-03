@@ -56,6 +56,12 @@ export type Readout = {
   digits?: number;
   /** 単位変換込みの整形(例: ケルビン → ℃)。 */
   format?: (value: number) => string;
+  /**
+   * **グラフに描くときの単位**。表の数字が ℃ なのにグラフだけ生のケルビン
+   * (300 台の無単位の数)で、同じ量だと気付けなかった(利用者役②の観察)。
+   * `format` を持つ読み値は、ここで同じ変換をグラフ側にも渡す。
+   */
+  graph?: { unit: string; convert: (value: number) => number };
 };
 
 /** つまみ 1 個。`apply` がシーン JSON(パース済みオブジェクト)を直接書き換える。 */
@@ -91,9 +97,25 @@ export type SceneJson = {
     position?: number[];
     rotation?: number[];
     linear_velocity?: number[];
+    angular_velocity?: number[];
     mass_override?: number;
   }[];
   joints?: Record<string, unknown>[];
+  /** 結合(浮力・誘導・静電気…)。つまみが係数を書き換えることがある。 */
+  couplings?: Record<string, unknown>[];
+  /** 天体。つまみが速さや重さを書き換えることがある。 */
+  astro?: {
+    softening?: number;
+    bodies?: { position?: number[]; velocity?: number[]; mass?: number }[];
+    relativistic_correction?: { central_body?: number; speed_of_light?: number };
+    [key: string]: unknown;
+  };
+  /** 回路。つまみが電圧や抵抗を書き換えることがある。 */
+  circuit?: {
+    voltage_sources?: { a?: number; b?: number; voltage?: number }[];
+    resistors?: { a?: number; b?: number; resistance?: number }[];
+    [key: string]: unknown;
+  };
   thermal?: {
     ambient_temperature?: number;
     nodes?: { temperature?: number; heat_capacity?: number }[];
@@ -138,7 +160,16 @@ export type Experiment = {
    * 「いまの数値」に出さないプローブや、複数プローブから作る値のもとになった
    * プローブに名前を与えるために使う。指定が無ければ Rust 側の生ラベル。
    */
-  series?: Record<number, string>;
+  /**
+   * グラフの系列名(プローブ番号 → 表示名)。`readouts` に出さない系列にも
+   * 名前を付けるためのもの。単位と変換も添えられる——天体の位置を生の
+   * メートル(1.5e11)のまま出すと、桁が大きすぎて読めなかった
+   * (利用者役②の観察)。
+   */
+  series?: Record<
+    number,
+    string | { label: string; unit?: string; convert?: (value: number) => number }
+  >;
 };
 
 export type Category = {
@@ -245,6 +276,20 @@ const okuKm = (v: number) => `${(v / 1e11).toFixed(3)} 億 km`;
 /** 天体スケールの速さ。 */
 const kmPerSecond = (digits = 2) => (v: number) => `${(v / 1000).toFixed(digits)} km/s`;
 const hypot = (values: number[]) => Math.hypot(...values);
+
+/**
+ * 天体のつまみが掛け算をするときの**元の速さ**。つまみは「いまの何倍か」で
+ * 効くので、掛けた結果をそのまま覚えると 1 に戻しても元へ戻らなくなる
+ * (0.8 → 1.0 で 0.8 倍のまま固定される)。シーンは読み込みのたびに作り直す
+ * ので、ここが指す配列も毎回新しい。
+ */
+const BASE_VELOCITY = new WeakMap<object, number[]>();
+
+// グラフ側の単位変換。上の整形関数と**同じ量**を描くための対**(`Readout.graph`
+// のdoc参照)。表とグラフで違う単位を出すと、同じものを見ていると気付けない。
+const CELSIUS_GRAPH = { unit: "℃", convert: (v: number) => v - KELVIN };
+const OKU_KM_GRAPH = { unit: "億 km", convert: (v: number) => v / 1e11 };
+const KM_PER_SECOND_GRAPH = { unit: "km/s", convert: (v: number) => v / 1000 };
 
 // ---------------------------------------------------------------------------
 // カタログ本体。
@@ -532,6 +577,24 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
+        knobs: [
+          {
+            id: "gravity",
+            label: "重力",
+            kind: "choice",
+            options: [
+              { label: "🌍 地球", value: 9.80665 },
+              { label: "🌕 月", value: 1.62 },
+              { label: "🪐 木星", value: 24.79 },
+              { label: "🚀 無重力", value: 0 },
+            ],
+            value: 9.80665,
+            hint: "重力が弱いほど、ゆっくり落ちます。",
+            apply: (scene, value) => {
+              scene.world = { ...(scene.world ?? {}), gravity: Number(value) };
+            },
+          },
+        ],
         readouts: [{ probe: 1, label: "先頭の球の高さ", unit: "m" }],
       },
       {
@@ -547,6 +610,24 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
+        knobs: [
+          {
+            id: "gravity",
+            label: "重力",
+            kind: "choice",
+            options: [
+              { label: "🌍 地球", value: 9.80665 },
+              { label: "🌕 月", value: 1.62 },
+              { label: "🪐 木星", value: 24.79 },
+              { label: "🚀 無重力", value: 0 },
+            ],
+            value: 9.80665,
+            hint: "重力が弱いほど、ゆっくり落ちます。",
+            apply: (scene, value) => {
+              scene.world = { ...(scene.world ?? {}), gravity: Number(value) };
+            },
+          },
+        ],
         readouts: [{ probe: 0, label: "胴体の高さ", unit: "m" }],
       },
       {
@@ -561,6 +642,24 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
+        knobs: [
+          {
+            id: "gravity",
+            label: "重力",
+            kind: "choice",
+            options: [
+              { label: "🌍 地球", value: 9.80665 },
+              { label: "🌕 月", value: 1.62 },
+              { label: "🪐 木星", value: 24.79 },
+              { label: "🚀 無重力", value: 0 },
+            ],
+            value: 9.80665,
+            hint: "重力が弱いほど、ゆっくり落ちます。",
+            apply: (scene, value) => {
+              scene.world = { ...(scene.world ?? {}), gravity: Number(value) };
+            },
+          },
+        ],
         readouts: [{ probe: 0, label: "まん中の高さ", unit: "m", digits: 3 }],
       },
     ],
@@ -584,6 +683,27 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
+        knobs: [
+          {
+            id: "gravity",
+            label: "重力",
+            kind: "choice",
+            options: [
+              { label: "🌍 地球", value: 9.80665 },
+              { label: "🌕 月", value: 1.62 },
+              { label: "🪐 木星", value: 24.79 },
+            ],
+            value: 9.80665,
+            hint: "重力が弱いほど、水はゆっくり落ちて広がり方も変わります。",
+            apply: (scene, value) => {
+              scene.world = { ...(scene.world ?? {}), gravity: Number(value) };
+              // SPH は自分の重力を状態として持っているので、そちらも合わせる
+              // (世界の重力だけ変えても水は落ち方を変えない)。
+              const sph = scene.sph as { raw_state?: Record<string, unknown> } | undefined;
+              if (sph?.raw_state) sph.raw_state.gravity = Number(value);
+            },
+          },
+        ],
         readouts: [{ probe: 0, label: "水面近くの粒の高さ", unit: "m", digits: 3 }],
       },
       {
@@ -635,6 +755,26 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        knobs: [
+          {
+            id: "viscosity",
+            label: "水のねばり",
+            kind: "choice",
+            options: [
+              { label: "さらさら(水)", value: 1e-6 },
+              { label: "ふつう", value: 1e-4 },
+              { label: "とろとろ(油)", value: 1e-2 },
+            ],
+            value: 1e-4,
+            hint: "ねばるほど渦は早く消えます。さらさらなら長く回り続けます。",
+            apply: (scene, value) => {
+              const fluid = scene.grid_fluid as
+                | { raw_state?: Record<string, unknown> }
+                | undefined;
+              if (fluid?.raw_state) fluid.raw_state.kinematic_viscosity = Number(value);
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "上下の揺れの強さ", digits: 4 },
           { probe: 1, label: "平均の流れ", digits: 4 },
@@ -652,6 +792,26 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 60,
+        knobs: [
+          {
+            id: "wind",
+            label: "風の強さ",
+            kind: "range",
+            min: 0.2,
+            max: 4,
+            step: 0.2,
+            unit: "m/s",
+            value: 1,
+            hint: "強いほど煙が速く流され、渦が細かくなります。",
+            apply: (scene, value) => {
+              const fluid = scene.grid_fluid_3d as
+                | { raw_state?: { boundary?: { channel?: { inflow_speed?: number } } } }
+                | undefined;
+              const channel = fluid?.raw_state?.boundary?.channel;
+              if (channel) channel.inflow_speed = Number(value);
+            },
+          },
+        ],
       },
       {
         id: "d15-convection",
@@ -666,9 +826,26 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        knobs: [
+          {
+            id: "heat",
+            label: "あたためる強さ",
+            kind: "range",
+            min: 295,
+            max: 340,
+            step: 5,
+            unit: "K",
+            value: 300,
+            hint: "下が熱いほど強い上昇流ができます(まわりは 293 K)。",
+            apply: (scene, value) => {
+              const node = scene.thermal?.nodes?.[0];
+              if (node) node.temperature = Number(value);
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "平均の上下の流れ", digits: 4 },
-          { probe: 1, label: "熱源の温度", format: celsius() },
+          { probe: 1, label: "熱源の温度", format: celsius(), graph: CELSIUS_GRAPH },
         ],
       },
       {
@@ -684,6 +861,29 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        knobs: [
+          {
+            id: "air",
+            label: "空気の濃さ",
+            kind: "choice",
+            options: [
+              { label: "ふつうの空気", value: 1.225 },
+              { label: "山の上(半分)", value: 0.6 },
+              { label: "濃い空気(2倍)", value: 2.45 },
+              { label: "真空", value: 0 },
+            ],
+            value: 1.225,
+            hint: "空気が濃いほど、低い速さで頭打ちになります。真空では止まりません。",
+            apply: (scene, value) => {
+              const world = (scene.world ?? {}) as Record<string, unknown>;
+              const atmosphere = (world.atmosphere ?? {}) as Record<string, unknown>;
+              scene.world = {
+                ...world,
+                atmosphere: { ...atmosphere, density: Number(value) },
+              };
+            },
+          },
+        ],
         readouts: [{ probe: 0, label: "落ちる速さ", unit: "m/s" }],
       },
     ],
@@ -707,7 +907,7 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 240,
-        readouts: [{ probe: 0, label: "コーヒーの温度", format: celsius() }],
+        readouts: [{ probe: 0, label: "コーヒーの温度", format: celsius(), graph: CELSIUS_GRAPH }],
         knobs: [
           {
             id: "temperature",
@@ -755,9 +955,26 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
+        knobs: [
+          {
+            id: "speed",
+            label: "滑り出す速さ",
+            kind: "range",
+            min: 1,
+            max: 12,
+            step: 0.5,
+            unit: "m/s",
+            value: 3,
+            hint: "速いほど摩擦で捨てる運動エネルギーが増え、温度の上がり方が大きくなります。",
+            apply: (scene, value) => {
+              const body = scene.bodies?.find((b) => b.name === "brake_pad");
+              if (body) body.linear_velocity = [Number(value), 0, 0];
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "箱の速さ", unit: "m/s" },
-          { probe: 1, label: "ブレーキの温度", format: celsius(2) },
+          { probe: 1, label: "ブレーキの温度", format: celsius(2), graph: CELSIUS_GRAPH },
         ],
       },
       {
@@ -773,6 +990,29 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 40,
+        knobs: [
+          {
+            id: "material",
+            label: "棒の材質",
+            kind: "choice",
+            // 熱の伝わりやすさ(熱拡散率 [m²/s])。この実験の主題そのもの——
+            // 「金属のスプーンはすぐ熱くなり、木の柄は熱くならない」を手で試せる。
+            options: [
+              { label: "銅", value: 1.1624536178107607e-4 },
+              { label: "鉄", value: 2.3e-5 },
+              { label: "ガラス", value: 3.4e-7 },
+              { label: "木", value: 1.5e-7 },
+            ],
+            value: 1.1624536178107607e-4,
+            hint: "銅は速く、木はほとんど伝わりません(同じ時間で比べてみてください)。",
+            apply: (scene, value) => {
+              const rod = scene.conduction_rod as
+                | { raw_state?: Record<string, unknown> }
+                | undefined;
+              if (rod?.raw_state) rod.raw_state.thermal_diffusivity = Number(value);
+            },
+          },
+        ],
         readouts: [
           // 棒の温度は**摂氏の配列**(熱源端が 100)。熱ノードの温度(ケルビン)と
           // 同じ換算をかけると `-271.0 ℃` のような値になり、しかも文章側の
@@ -798,9 +1038,30 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 240,
+        knobs: [
+          {
+            id: "drink",
+            label: "飲み物の温度",
+            kind: "range",
+            min: 280,
+            max: 360,
+            step: 5,
+            unit: "K",
+            value: 350,
+            hint: "温かいほど速く融けます(273 K = 0 ℃ より下では融けません)。",
+            apply: (scene, value) => {
+              const thermal = scene.thermal as
+                | { ambient_temperature?: number; nodes?: { temperature?: number }[] }
+                | undefined;
+              if (!thermal) return;
+              thermal.ambient_temperature = Number(value);
+              if (thermal.nodes?.[0]) thermal.nodes[0].temperature = Number(value);
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "氷の高さ", unit: "m", digits: 3 },
-          { probe: 1, label: "飲み物の温度", format: celsius() },
+          { probe: 1, label: "飲み物の温度", format: celsius(), graph: CELSIUS_GRAPH },
         ],
       },
       {
@@ -815,6 +1076,23 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
+        knobs: [
+          {
+            id: "push",
+            label: "押し込む速さ",
+            kind: "range",
+            min: 0.1,
+            max: 2,
+            step: 0.1,
+            unit: "m/s",
+            value: 0.5,
+            hint: "強く押すほど深く縮み、跳ね返りも大きくなります。",
+            apply: (scene, value) => {
+              const piston = scene.bodies?.find((b) => b.name === "piston");
+              if (piston) piston.linear_velocity = [-Number(value), 0, 0];
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "ピストンの位置", unit: "m", digits: 3 },
           { probe: 1, label: "ピストンの速さ", unit: "m/s", digits: 3 },
@@ -841,6 +1119,29 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        knobs: [
+          {
+            id: "voltage",
+            label: "電池の電圧",
+            kind: "choice",
+            options: [
+              { label: "1.5 V(乾電池)", value: 1.5 },
+              { label: "3 V", value: 3 },
+              { label: "9 V", value: 9 },
+              { label: "12 V(車)", value: 12 },
+            ],
+            value: 9,
+            hint: "電圧を上げると電流も比例して増え、抵抗の発熱は電圧の 2 乗で効きます。",
+            apply: (scene, value) => {
+              const circuit = scene.circuit as
+                | { voltage_sources?: { voltage?: number }[] }
+                | undefined;
+              if (circuit?.voltage_sources?.[0]) {
+                circuit.voltage_sources[0].voltage = Number(value);
+              }
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "分圧点の電圧", unit: "V", digits: 3 },
           { probe: 1, label: "コンデンサの電圧", unit: "V", digits: 3 },
@@ -859,10 +1160,27 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        knobs: [
+          {
+            id: "crank",
+            label: "回す速さ",
+            kind: "range",
+            min: 2,
+            max: 30,
+            step: 1,
+            unit: "回転/s",
+            value: 10,
+            hint: "速く回すほど高い電圧が出ます(発電量は速さに比例)。",
+            apply: (scene, value) => {
+              const crank = scene.bodies?.find((b) => b.name === "crank");
+              if (crank) crank.angular_velocity = [0, Number(value), 0];
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "発電した電圧", unit: "V", digits: 3 },
           { probe: 1, label: "流れた電流", unit: "A", digits: 4 },
-          { probe: 2, label: "抵抗の温度", format: celsius(2) },
+          { probe: 2, label: "抵抗の温度", format: celsius(2), graph: CELSIUS_GRAPH },
         ],
       },
       {
@@ -878,6 +1196,30 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 240,
+        knobs: [
+          {
+            id: "magnet",
+            label: "磁石の強さ",
+            kind: "choice",
+            options: [
+              { label: "無し(ただの落下)", value: 0 },
+              { label: "弱い", value: 0.25 },
+              { label: "ふつう", value: 0.5 },
+              { label: "強い", value: 1 },
+              { label: "とても強い", value: 2 },
+            ],
+            value: 0.5,
+            hint: "強いほど渦電流のブレーキが効いて、ゆっくり落ちます。無しなら自由落下。",
+            apply: (scene, value) => {
+              const coupling = scene.couplings?.find(
+                (c) => (c as Record<string, unknown>).induction_coupling,
+              ) as { induction_coupling?: { magnetic_field?: number } } | undefined;
+              if (coupling?.induction_coupling) {
+                coupling.induction_coupling.magnetic_field = Number(value);
+              }
+            },
+          },
+        ],
         readouts: [{ probe: 0, label: "落ちる速さ", unit: "m/s", digits: 3 }],
       },
       {
@@ -907,6 +1249,27 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        knobs: [
+          {
+            id: "charge",
+            label: "静電気の強さ",
+            kind: "range",
+            min: 0,
+            max: 3,
+            step: 0.25,
+            unit: "×",
+            value: 1,
+            hint: "強いほど速く壁へ引き寄せられます(0 なら動きません)。",
+            apply: (scene, value) => {
+              const coupling = scene.couplings?.find(
+                (c) => (c as Record<string, unknown>).image_charge_force,
+              ) as { image_charge_force?: { charge?: number } } | undefined;
+              if (coupling?.image_charge_force) {
+                coupling.image_charge_force.charge = 1e-7 * Number(value);
+              }
+            },
+          },
+        ],
         readouts: [{ probe: 0, label: "壁からの距離", unit: "m", digits: 3 }],
       },
     ],
@@ -930,6 +1293,30 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        knobs: [
+          {
+            id: "speed",
+            label: "打ち出す速さ",
+            kind: "range",
+            min: 0.6,
+            max: 1.3,
+            step: 0.05,
+            unit: "倍",
+            value: 1,
+            hint: "1 倍がちょうど円軌道。速すぎても遅すぎても、円ではなく楕円になります。",
+            apply: (scene, value) => {
+              const astro = scene.astro as
+                | { bodies?: { velocity?: number[] }[] }
+                | undefined;
+              const moving = astro?.bodies?.[1];
+              if (!moving?.velocity) return;
+              // 元の速さを基準に掛ける(つまみを 1 に戻せば元の軌道へ戻る)。
+              const base = BASE_VELOCITY.get(moving) ?? [...moving.velocity];
+              BASE_VELOCITY.set(moving, base);
+              moving.velocity = base.map((v) => v * Number(value));
+            },
+          },
+        ],
         readouts: [
           {
             probe: 0,
@@ -937,9 +1324,13 @@ export const GUIDED_CATEGORIES: Category[] = [
             derive: hypot,
             label: "太陽からの距離",
             format: okuKm,
+            graph: OKU_KM_GRAPH,
           },
         ],
-        series: { 0: "横の位置", 1: "縦の位置" },
+        series: {
+          0: { label: "横の位置", ...OKU_KM_GRAPH },
+          1: { label: "縦の位置", ...OKU_KM_GRAPH },
+        },
       },
       {
         id: "d35-orbital-insertion",
@@ -953,6 +1344,30 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        knobs: [
+          {
+            id: "speed",
+            label: "投入する速さ",
+            kind: "range",
+            min: 0.6,
+            max: 1.3,
+            step: 0.05,
+            unit: "倍",
+            value: 1,
+            hint: "遅いほどつぶれた楕円に、速いほど外へ膨らみます。",
+            apply: (scene, value) => {
+              const astro = scene.astro as
+                | { bodies?: { velocity?: number[] }[] }
+                | undefined;
+              const moving = astro?.bodies?.[1];
+              if (!moving?.velocity) return;
+              // 元の速さを基準に掛ける(つまみを 1 に戻せば元の軌道へ戻る)。
+              const base = BASE_VELOCITY.get(moving) ?? [...moving.velocity];
+              BASE_VELOCITY.set(moving, base);
+              moving.velocity = base.map((v) => v * Number(value));
+            },
+          },
+        ],
         readouts: [
           {
             probe: 0,
@@ -960,6 +1375,7 @@ export const GUIDED_CATEGORIES: Category[] = [
             derive: hypot,
             label: "中心からの距離",
             format: okuKm,
+            graph: OKU_KM_GRAPH,
           },
           {
             probe: 2,
@@ -967,9 +1383,13 @@ export const GUIDED_CATEGORIES: Category[] = [
             derive: hypot,
             label: "速さ",
             format: kmPerSecond(),
+            graph: KM_PER_SECOND_GRAPH,
           },
         ],
-        series: { 0: "横の位置", 1: "縦の位置" },
+        series: {
+          0: { label: "横の位置", ...OKU_KM_GRAPH },
+          1: { label: "縦の位置", ...OKU_KM_GRAPH },
+        },
       },
       {
         id: "d36-swingby",
@@ -984,6 +1404,24 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 240,
+        knobs: [
+          {
+            id: "planet",
+            label: "惑星の重さ",
+            kind: "range",
+            min: 0.2,
+            max: 3,
+            step: 0.2,
+            unit: "倍",
+            value: 1,
+            hint: "重い惑星のそばを通るほど、大きく速さを借りられます。",
+            apply: (scene, value) => {
+              const astro = scene.astro as { bodies?: { mass?: number }[] } | undefined;
+              const planet = astro?.bodies?.[0];
+              if (planet) planet.mass = 1e24 * Number(value);
+            },
+          },
+        ],
         readouts: [
           {
             probe: 2,
@@ -991,6 +1429,7 @@ export const GUIDED_CATEGORIES: Category[] = [
             derive: hypot,
             label: "探査機の速さ",
             format: kmPerSecond(),
+            graph: KM_PER_SECOND_GRAPH,
           },
           {
             probe: 0,
@@ -1020,6 +1459,30 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 240,
+        knobs: [
+          {
+            id: "speed",
+            label: "突入する速さ",
+            kind: "range",
+            min: 0.6,
+            max: 1.3,
+            step: 0.05,
+            unit: "倍",
+            value: 1,
+            hint: "速いほど深く突っ込み、空気抵抗で強く減速します。",
+            apply: (scene, value) => {
+              const astro = scene.astro as
+                | { bodies?: { velocity?: number[] }[] }
+                | undefined;
+              const moving = astro?.bodies?.[1];
+              if (!moving?.velocity) return;
+              // 元の速さを基準に掛ける(つまみを 1 に戻せば元の軌道へ戻る)。
+              const base = BASE_VELOCITY.get(moving) ?? [...moving.velocity];
+              BASE_VELOCITY.set(moving, base);
+              moving.velocity = base.map((v) => v * Number(value));
+            },
+          },
+        ],
         readouts: [
           {
             probe: 2,
@@ -1027,6 +1490,7 @@ export const GUIDED_CATEGORIES: Category[] = [
             derive: hypot,
             label: "速さ",
             format: kmPerSecond(2),
+            graph: KM_PER_SECOND_GRAPH,
           },
           {
             probe: 0,
@@ -1056,6 +1520,27 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 240,
+        knobs: [
+          {
+            id: "light",
+            label: "光の速さ",
+            kind: "range",
+            min: 40,
+            max: 200,
+            step: 10,
+            unit: "(この世界での値)",
+            value: 100,
+            hint: "光が遅い世界ほど相対論の効きが強く、軌道の向きが速く回ります。",
+            apply: (scene, value) => {
+              const astro = scene.astro as
+                | { relativistic_correction?: { speed_of_light?: number } }
+                | undefined;
+              if (astro?.relativistic_correction) {
+                astro.relativistic_correction.speed_of_light = Number(value);
+              }
+            },
+          },
+        ],
         readouts: [
           {
             probe: 0,
@@ -1063,9 +1548,13 @@ export const GUIDED_CATEGORIES: Category[] = [
             derive: hypot,
             label: "中心からの距離",
             format: okuKm,
+            graph: OKU_KM_GRAPH,
           },
         ],
-        series: { 0: "横の位置", 1: "縦の位置" },
+        series: {
+          0: { label: "横の位置", ...OKU_KM_GRAPH },
+          1: { label: "縦の位置", ...OKU_KM_GRAPH },
+        },
       },
     ],
   },
@@ -1182,6 +1671,25 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
+        knobs: [
+          {
+            id: "temperature",
+            label: "水の温度",
+            kind: "range",
+            min: 250,
+            max: 360,
+            step: 10,
+            unit: "K",
+            value: 293,
+            hint: "温度が高いほど分子の蹴り方が強くなり、粒はよく動きます。",
+            apply: (scene, value) => {
+              const thermal = scene.thermal;
+              if (!thermal) return;
+              thermal.ambient_temperature = Number(value);
+              if (thermal.nodes?.[0]) thermal.nodes[0].temperature = Number(value);
+            },
+          },
+        ],
         readouts: [{ probe: 2, label: "先頭の粒子の速さ", unit: "m/s", digits: 3 }],
       },
     ],
@@ -1205,6 +1713,25 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 240,
+        knobs: [
+          {
+            id: "suspension",
+            label: "サスペンションの硬さ",
+            kind: "range",
+            min: 1,
+            max: 6,
+            step: 0.5,
+            unit: "Hz",
+            value: 2.5,
+            hint: "柔らかいほど大きく沈み、硬いほど跳ねます。",
+            apply: (scene, value) => {
+              for (const joint of scene.joints ?? []) {
+                const wheel = (joint as { wheel?: { frequency?: number } }).wheel;
+                if (wheel) wheel.frequency = Number(value);
+              }
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "進んだ距離", unit: "m", digits: 2 },
           { probe: 2, label: "車の速さ", unit: "m/s", digits: 2 },
@@ -1222,9 +1749,30 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 240,
+        knobs: [
+          {
+            id: "drink",
+            label: "まわりの温度",
+            kind: "range",
+            min: 280,
+            max: 360,
+            step: 5,
+            unit: "K",
+            value: 350,
+            hint: "温かいほど速く融けます。",
+            apply: (scene, value) => {
+              const thermal = scene.thermal as
+                | { ambient_temperature?: number; nodes?: { temperature?: number }[] }
+                | undefined;
+              if (!thermal) return;
+              thermal.ambient_temperature = Number(value);
+              if (thermal.nodes?.[0]) thermal.nodes[0].temperature = Number(value);
+            },
+          },
+        ],
         readouts: [
           { probe: 0, label: "氷の高さ", unit: "m", digits: 3 },
-          { probe: 1, label: "まわりの温度", format: celsius() },
+          { probe: 1, label: "まわりの温度", format: celsius(), graph: CELSIUS_GRAPH },
         ],
       },
     ],

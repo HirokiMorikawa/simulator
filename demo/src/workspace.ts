@@ -68,10 +68,13 @@ export type WorkspaceApi = {
   /**
    * グラフの凡例・目盛りに出す表示名と単位(プローブ番号 → 人間の言葉)。
    * 単位が分かる系列だけ `units` に入れる(無ければ数だけを書く)。
+   * `convert` は**表の数字と同じ量**をグラフにも描くための変換
+   * (ケルビン → ℃ など、`Readout.graph` のdoc参照)。
    */
   setProbeLabels: (
     labels: Record<number, string> | null,
     units?: Record<number, string> | null,
+    convert?: Record<number, (value: number) => number> | null,
   ) => void;
   /**
    * **いまの場面をそのまま文書にする**(利用者役④の観察: 自分で組み立てた
@@ -86,6 +89,12 @@ export type WorkspaceApi = {
    * パンくずと説明カードが前の実験のままだった。
    */
   onSceneReplaced: (callback: () => void) => void;
+  /**
+   * いま**いちばん速く動いている物の速さ** [m/s]。動く物が 1 つも無ければ 0。
+   * 「もう何も動いていない」を画面から言うために使う(物理には触らない、
+   * 読むだけの値)。
+   */
+  maxSpeed: () => number;
   /** 選択中の剛体(無ければ -1)。 */
   selectedBody: () => number;
   selectBody: (index: number) => void;
@@ -290,6 +299,24 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
    * 名前を打った直後の保存が自動命名になった)。
    */
   let sceneNameDraft = "";
+  /**
+   * **もう何も動いていない**と分かった時刻 [s](まだなら null)。
+   *
+   * 落ちて跳ねて止まった後も時計だけが回り続け、「着地しました」に当たる
+   * 合図が画面のどこにも無かった。数値だけを見ていると、実際より何十倍も
+   * 長い時間を「落ちるのにかかった時間」と読んでしまう——グラフを出さない
+   * 限り気付けない罠だった(利用者役②の一番の不満)。
+   *
+   * 物理には一切触らない。**見ている値からそう読めた**というだけの表示で、
+   * 判定はいちばん速い物の速さがしきい値を下回り続けたかどうかで行う。
+   */
+  let settledAt: number | null = null;
+  /** いちばん速い物の速さが、この値を下回っていれば「止まっている」と見なす [m/s]。 */
+  const SETTLED_SPEED = 0.05;
+  /** 一度は動いたか(最初から動かない場面で「止まりました」と言わないため)。 */
+  let everMoved = false;
+  /** 止まっているように見えた連続フレーム数(取りこぼしと一瞬の静止を分ける)。 */
+  let stillFrames = 0;
 
   // ---- 大局の粒度 -------------------------------------------------------------
   /**
@@ -766,7 +793,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   }
 
   function probeLabelsFor(experiment: Experiment): Record<number, string> {
-    const labels: Record<number, string> = { ...(experiment.series ?? {}) };
+    const labels: Record<number, string> = {};
+    for (const [index, entry] of Object.entries(experiment.series ?? {})) {
+      labels[Number(index)] = typeof entry === "string" ? entry : entry.label;
+    }
     for (const readout of experiment.readouts ?? []) {
       if (readout.derive) continue;
       labels[readout.probe] = readout.label;
@@ -777,11 +807,33 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   /** グラフの目盛りに添える単位。分かっているものだけ。 */
   function probeUnitsFor(experiment: Experiment): Record<number, string> {
     const units: Record<number, string> = {};
+    for (const [index, entry] of Object.entries(experiment.series ?? {})) {
+      if (typeof entry !== "string" && entry.unit) units[Number(index)] = entry.unit;
+    }
     for (const readout of experiment.readouts ?? []) {
-      if (readout.derive || !readout.unit) continue;
-      units[readout.probe] = readout.unit;
+      if (readout.derive) continue;
+      // `graph` を持つ読み値は**変換後の単位**を出す(表と同じ量を描くため)。
+      const unit = readout.graph?.unit ?? readout.unit;
+      if (unit) units[readout.probe] = unit;
     }
     return units;
+  }
+
+  /** グラフに描く前にかける変換(`Readout.graph` のdoc参照)。 */
+  function probeConvertFor(
+    experiment: Experiment,
+  ): Record<number, (value: number) => number> {
+    const convert: Record<number, (value: number) => number> = {};
+    for (const [index, entry] of Object.entries(experiment.series ?? {})) {
+      if (typeof entry !== "string" && entry.convert) {
+        convert[Number(index)] = entry.convert;
+      }
+    }
+    for (const readout of experiment.readouts ?? []) {
+      if (readout.derive || !readout.graph) continue;
+      convert[readout.probe] = readout.graph.convert;
+    }
+    return convert;
   }
 
   /**
@@ -858,8 +910,17 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     // 選んでいない——「選んだもの: ground / 重さ 0.000 kg」が出てくるのは
     // ノイズでしかない。選択は人が対象をクリックしたときだけ起きる。
     api.selectBody(-1);
-    api.setProbeLabels(probeLabelsFor(current), probeUnitsFor(current));
+    api.setProbeLabels(
+      probeLabelsFor(current),
+      probeUnitsFor(current),
+      probeConvertFor(current),
+    );
     api.setPace(current.pace * speedMultiplier);
+    // 作り直したら「止まった時刻」も忘れる(前回の結果が残っていると、
+    // 変えた条件の結果と取り違える)。
+    settledAt = null;
+    everMoved = false;
+    stillFrames = 0;
     api.followCamera(true);
     if (detail < AUTORUN_BELOW) api.play();
     else api.stopForEditing();
@@ -1195,6 +1256,16 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         timeValue.dataset.seconds = "0";
         timeValue.textContent = "0 秒";
         list.append(timeKey, timeValue);
+        // 「動きが止まった時刻」は**止まったと分かってから**現れる。最初から
+        // 空欄で置いておくと、埋まらない欄が気になって現象から目が離れる。
+        const settledKey = document.createElement("dt");
+        settledKey.id = "readout-settled-key";
+        settledKey.textContent = "動きが止まった時刻";
+        settledKey.hidden = true;
+        const settledValue = document.createElement("dd");
+        settledValue.id = "readout-settled";
+        settledValue.hidden = true;
+        list.append(settledKey, settledValue);
         for (const readout of experiment.readouts ?? []) {
           const key = document.createElement("dt");
           key.textContent = readout.label;
@@ -1207,6 +1278,27 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         body.appendChild(list);
       },
     });
+
+    if (!experiment.knobs?.length) {
+      // **つまみが無いことを、黙って隠さない**。「変えてみる」欄そのものが
+      // 消えていたので、条件を変えられない実験があるとは思わず、探し回った
+      // 末に諦めることになった(利用者役②の観察)。無いなら無いと言う。
+      specs.push({
+        id: "knobs",
+        title: "変えてみる",
+        reveal: 0.8,
+        summary: "この実験は見るだけです",
+        build: (body) => {
+          const note = document.createElement("p");
+          note.className = "card-note";
+          note.textContent =
+            "この実験に変えられるつまみはありません——場の中身そのものが" +
+            "記録された状態から始まるので、途中の条件を差し替えられないためです。" +
+            "見どころは「ここを見る」に書いてあります。";
+          body.appendChild(note);
+        },
+      });
+    }
 
     if (experiment.knobs?.length) {
       specs.push({
@@ -1434,6 +1526,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     } else {
       const group = document.createElement("div");
       group.className = "knob-choice";
+      // 範囲のつまみと同じように id で指せるようにしておく(選択肢のつまみだけ
+      // 名前が無く、テストからも人からも「そこ」を指しにくかった)。
+      group.id = `knob-${knob.id}`;
+      label.htmlFor = group.id;
       for (const option of knob.options ?? []) {
         const button = document.createElement("button");
         button.type = "button";
@@ -1521,6 +1617,37 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       clock.textContent =
         current || api.isPlaying() ? formatDuration(seconds, scale) : "";
       clock.dataset.seconds = String(seconds);
+
+      // **もう何も動いていない**ことを見つけて、そのときの時刻を出す
+      // (`settledAt` のdoc参照)。判定は「いちばん速い物の速さ」だけを見る
+      // ——止まり続けた場面(振り子・惑星)では永久に出ないし、そもそも
+      // 動く物が無い場面(熱・量子)でも出ない。
+      if (api.isPlaying()) {
+        const fastest = api.maxSpeed();
+        if (fastest > SETTLED_SPEED * 4) {
+          everMoved = true;
+          stillFrames = 0;
+          settledAt = null;
+        } else if (everMoved && fastest < SETTLED_SPEED) {
+          stillFrames += 1;
+          // 一瞬の静止(跳ね返りの頂点、衝突の瞬間)を「止まった」と
+          // 読まないだけの猶予を置く。
+          if (stillFrames > 30 && settledAt === null) settledAt = seconds;
+        } else {
+          stillFrames = 0;
+        }
+      }
+      const settledKey = document.getElementById("readout-settled-key");
+      const settledNode = document.getElementById("readout-settled");
+      if (settledKey && settledNode) {
+        const show = settledAt !== null;
+        settledKey.hidden = !show;
+        settledNode.hidden = !show;
+        if (show) {
+          settledNode.textContent = formatDuration(settledAt as number, scale);
+          settledNode.dataset.seconds = String(settledAt);
+        }
+      }
 
       if (current) {
         const count = api.probeCount();

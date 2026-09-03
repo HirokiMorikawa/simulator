@@ -4338,7 +4338,10 @@ function formatSeconds(seconds: number): string {
   if (magnitude >= 3_600) return `${(seconds / 3_600).toFixed(2)}時間`;
   if (magnitude >= 60) return `${(seconds / 60).toFixed(2)}分`;
   if (magnitude >= 0.01 || magnitude === 0) return `${seconds.toFixed(2)}s`;
-  return `${seconds.toExponential(1)}s`;
+  // 1/100 秒より短いところは**ミリ秒**で書く。指数表記(`8.3e-3s`)は
+  // 何秒なのかすぐ読めない、と書かれた(利用者役②の観察)。
+  if (magnitude >= 1e-5) return `${(seconds * 1000).toFixed(1)}ms`;
+  return `${(seconds * 1e6).toFixed(1)}µs`;
 }
 
 /// 表示中の全系列をCSV文字列にする。1列目は**経過時間(秒)**。
@@ -4568,9 +4571,12 @@ function setUpProbeGraph(): (
     for (const { series: s, min, max } of drawn) {
       const suffix = useLog ? " [log]" : "";
       const unitSuffix = s.unit ? ` ${s.unit}` : "";
+      // 桁の大きい量(天体の距離は 1.5e11 m)を `toFixed(2)` で出すと
+      // `149597047014.36` のような読めない数字が並ぶ(利用者役②の観察)。
+      // 目盛りと同じ整形にそろえる。
       const legendText =
-        `${s.label}: max=${max.toFixed(2)}${unitSuffix} ` +
-        `min=${min.toFixed(2)}${unitSuffix}${suffix}`;
+        `${s.label}: max=${formatTickValue(max)}${unitSuffix} ` +
+        `min=${formatTickValue(min)}${unitSuffix}${suffix}`;
       outlined(legendText, 4, legendY, s.color);
       legendY += 13;
     }
@@ -9293,7 +9299,14 @@ async function setUpSceneView(
           // 次のイテレーションが上書きしてしまう。`updateProbeGraph`が全系列を
           // まとめて後で描く(=ループを抜けるまで読まない)以上、ここで即座に
           // 自前のコピーへ読み切っておく必要がある。
-          history: Float64Array.from(world.imported_probe_history_f64(i)),
+          history: (() => {
+            const raw = Float64Array.from(world.imported_probe_history_f64(i));
+            const convert = guidedProbeConvert?.[i];
+            if (!convert) return raw;
+            // 表が ℃ でグラフだけ生のケルビン、という食い違いを作らない。
+            for (let k = 0; k < raw.length; k += 1) raw[k] = convert(raw[k]);
+            return raw;
+          })(),
         });
       }
       updateProbeGraph(series, readNumber(world, "dt"), readNumber(world, "time"));
@@ -9503,6 +9516,9 @@ async function setUpSceneView(
   let guidedProbeLabels: Record<number, string> | null = null;
   /** かんたんな表示名に添える単位(グラフの目盛りと凡例で使う)。 */
   let guidedProbeUnits: Record<number, string> | null = null;
+  /// グラフに描く前にかける変換(ケルビン → ℃ など)。表の数字と同じ量を
+  /// 描くために、カタログ側が読み値ごとに指定する(`Readout.graph` のdoc参照)。
+  let guidedProbeConvert: Record<number, (value: number) => number> | null = null;
   let lastTimeMs = performance.now();
 
   function frame(nowMs: number) {
@@ -9629,9 +9645,10 @@ async function setUpSceneView(
       playButton.textContent = "▶";
     },
     isPlaying: () => mode === "play" && playing,
-    setProbeLabels: (labels, units) => {
+    setProbeLabels: (labels, units, convert) => {
       guidedProbeLabels = labels;
       guidedProbeUnits = units ?? null;
+      guidedProbeConvert = convert ?? null;
     },
     setPace: (stepsPerSecond) => {
       guidedPace = stepsPerSecond;
@@ -9657,6 +9674,7 @@ async function setUpSceneView(
       if (index < readNumber(world, "body_count")) selectBody(index);
     },
     bodyCount: () => readNumber(world, "body_count"),
+    maxSpeed: () => readNumber(world, "max_body_speed"),
     bodyReadout: (index) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return null;
       if (world.read_component("body_is_removed_at", String(index)) === "true") {
