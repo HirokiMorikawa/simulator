@@ -364,6 +364,26 @@ test("材質を変えても、場面の名前と選んでいた物は変わら�
   expect(errors).toEqual([]);
 });
 
+test("描かれている現象に「形では見えません」と言わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 天体は剛体を1つも持たないが、確かに描かれている。剛体の数で判断して
+  // いたときは、見えているのに「形では見えません」と出ていた。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("惑星");
+  await expect(page.locator("#stage-empty-note")).toBeHidden();
+
+  // 棒の温度は本当に何も描かれない——こちらでは案内を出す。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "熱が棒");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#stage-empty-note")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

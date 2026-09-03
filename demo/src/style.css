@@ -1926,11 +1926,16 @@ kbd {
 #app .run-speed button:last-child {
   border-radius: 0 var(--radius) var(--radius) 0;
 }
+/* 速さの**読み取り値**。ボタンと見分けが付くよう、枠も地色も持たせず、
+   文字も一段小さく落とす(押せるものと押せないものが見た目で分かること)。 */
 .run-rate {
   font-family: var(--font-mono);
-  font-size: var(--text-base);
+  font-size: var(--text-sm);
   color: var(--text-subtle);
-  min-width: 4ch;
+  white-space: nowrap;
+  margin-left: var(--space-2);
+  cursor: default;
+  user-select: none;
 }
 .run-clock {
   font-family: var(--font-mono);

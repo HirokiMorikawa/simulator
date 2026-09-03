@@ -4502,7 +4502,19 @@ function setUpProbeGraph(): (
       outlined(formatSeconds(currentTime), w - 3, h - 3, "#8b929c", "right");
     }
 
-    let legendY = 12;
+    // **線を全部描いてから、文字を描く**。系列ごとに「線 → その凡例」の順で
+    // 描いていたときは、あとの系列の線が前の系列の凡例の上に乗り、左端の
+    // 文字が読めなくなっていた(「1段目の速さ」が「段目の速さ」に見えた
+    // ——利用者役①の観察)。文字は最後にまとめて上へ置く。
+    type Drawn = {
+      series: ProbeSeries;
+      min: number;
+      max: number;
+      plotMin: number;
+      plotMax: number;
+    };
+    const drawn: Drawn[] = [];
+
     for (const s of series) {
       if (s.history.length < 2) continue;
 
@@ -4531,30 +4543,29 @@ function setUpProbeGraph(): (
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      drawn.push({ series: s, min, max, plotMin, plotMax });
+    }
 
-      // **1本だけのときは、縦軸に実際の目盛りを描く**。各系列を自分の範囲へ
-      // 正規化して重ねる作りなので、複数本のときに共通の縦軸は引けない
-      // ——が、1本ならその写像は一対一で、目盛りは正確に引ける。対数表示でも
-      // `signedExp`で戻せば**実測値**を書けるので、ここで軸を消さない。
-      if (series.length === 1) {
-        const unit = s.unit ? ` ${s.unit}` : "";
-        const back = (v: number) => (useLog ? signedExp(v) : v);
-        for (const [ratio, plotted] of [
-          [0, plotMax],
-          [0.5, (plotMax + plotMin) / 2],
-          [1, plotMin],
-        ] as [number, number][]) {
-          const y = Math.min(plotH - 2, Math.max(10, ratio * plotH));
-          outlined(
-            `${formatTickValue(back(plotted))}${unit}`,
-            w - 6,
-            y,
-            "#8b929c",
-            "right",
-          );
-        }
+    // **1本だけのときは、縦軸に実際の目盛りを描く**。各系列を自分の範囲へ
+    // 正規化して重ねる作りなので、複数本のときに共通の縦軸は引けない
+    // ——が、1本ならその写像は一対一で、目盛りは正確に引ける。対数表示でも
+    // `signedExp`で戻せば**実測値**を書けるので、ここで軸を消さない。
+    if (drawn.length === 1) {
+      const only = drawn[0];
+      const unit = only.series.unit ? ` ${only.series.unit}` : "";
+      const back = (v: number) => (useLog ? signedExp(v) : v);
+      for (const [ratio, plotted] of [
+        [0, only.plotMax],
+        [0.5, (only.plotMax + only.plotMin) / 2],
+        [1, only.plotMin],
+      ] as [number, number][]) {
+        const y = Math.min(plotH - 2, Math.max(10, ratio * plotH));
+        outlined(`${formatTickValue(back(plotted))}${unit}`, w - 6, y, "#8b929c", "right");
       }
+    }
 
+    let legendY = 12;
+    for (const { series: s, min, max } of drawn) {
       const suffix = useLog ? " [log]" : "";
       const unitSuffix = s.unit ? ` ${s.unit}` : "";
       const legendText =
@@ -4567,13 +4578,8 @@ function setUpProbeGraph(): (
     // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを明示する
     // (黙っていると「こちらの線の方が大きい」と読まれる)。凡例の直下に置くの
     // は、下端が時刻の目盛り帯になったため。
-    if (series.filter((s) => s.history.length >= 2).length > 1) {
-      outlined(
-        "各線はそれぞれの範囲に合わせて描いています",
-        4,
-        legendY,
-        "#6f757e",
-      );
+    if (drawn.length > 1) {
+      outlined("各線はそれぞれの範囲に合わせて描いています", 4, legendY, "#6f757e");
     }
   };
 }
@@ -9205,10 +9211,16 @@ async function setUpSceneView(
     updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter);
     updateParticleCloud(brownianCloud, world.brownian_positions_f32(1), [0, 0, 0]);
     updateFieldPanel(world);
-    // **舞台に何も描かれないシーン**(熱伝導・量子・イジング……力学ボディが
-    // 1つも無い)では、空の 3D をそのまま見せない。案内を出し、場のパネルへ
-    // 舞台の幅を渡す(`#scene-view[data-stage-empty]`、style.css 参照)。
-    const stageEmpty = readNumber(world, "body_count") === 0;
+    // **舞台に何も描かれないシーン**(熱伝導・量子・イジング……)では、空の
+    // 3D をそのまま見せない。案内を出し、場のパネルへ舞台の幅を渡す
+    // (`#scene-view[data-stage-empty]`、style.css 参照)。
+    //
+    // 判断は「剛体が 0 個か」ではなく**実際に何か描かれているか**で行う。
+    // 剛体の有無で決めていたときは、天体(D34 惑星)のように剛体を持たない
+    // が確かに描かれているシーンにまで「形では見えません」と出て、
+    // 「見えているのに?」と読まれた(利用者役①の観察)。案内を出すのは、
+    // 代わりに見る場所(場のパネル)が実際にあるときだけにする。
+    const stageEmpty = contentBoundingBox() === null && !fieldPanel.hidden;
     sceneViewElement.dataset.stageEmpty = String(stageEmpty);
     if (stageEmptyNote) stageEmptyNote.hidden = !stageEmpty;
 

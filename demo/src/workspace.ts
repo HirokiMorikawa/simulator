@@ -907,7 +907,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     }
     // 速さは**数として**も出す。🐢/🐇 のボタンが凹んだことは分かっても、
     // どれくらい変わったのかは絵からは読み取れない(利用者役の観察)。
-    rate.textContent = `×${speedMultiplier}`;
+    rate.textContent = `速さ ×${speedMultiplier}`;
   }
 
   // ---- コンテキスト(カード) ----------------------------------------------------
