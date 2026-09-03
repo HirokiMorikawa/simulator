@@ -269,7 +269,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let speedMultiplier = 1;
   let filterCategory: string | null = null;
   let paletteIndex = 0;
-  let paletteMatches: Experiment[] = [];
+  let paletteMatches: PaletteEntry[] = [];
   let pendingStart = false;
   /** 物理側の起動待ちで、開けずにいる自分の場面。 */
   let pendingOwnScene: SavedScene | null = null;
@@ -582,6 +582,25 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     });
     paletteFilters.appendChild(all);
 
+    // 自分の場面があるときだけ、その絞り込みも出す(空の絞り込みは出さない)。
+    if (readSavedScenes().length > 0) {
+      const own = document.createElement("button");
+      own.type = "button";
+      own.className = "palette-filter";
+      own.id = "palette-filter-own";
+      own.dataset.categoryId = OWN_SCENES_FILTER;
+      own.textContent = "🧱 じぶんの場面";
+      own.title = "自分で組み立てて保存した場面だけを出す";
+      own.classList.toggle("active", filterCategory === OWN_SCENES_FILTER);
+      own.addEventListener("click", () => {
+        filterCategory =
+          filterCategory === OWN_SCENES_FILTER ? null : OWN_SCENES_FILTER;
+        renderFilters();
+        renderResults();
+      });
+      paletteFilters.appendChild(own);
+    }
+
     for (const category of CATEGORIES) {
       const button = document.createElement("button");
       button.type = "button";
@@ -599,23 +618,61 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     }
   }
 
-  function matches(): Experiment[] {
+  /**
+   * **⌘K からは、用意された実験と自分で保存した場面の両方へ行ける**。
+   *
+   * 以前は自分の場面がここに一切載らず、名前で検索しても「見つかりません」と
+   * 出た。上部のシーン選択にも載らないので、保存はできたのに開き直す道が
+   * 実質どこにも無く、「二度と開けないのでは」と思わせた(利用者役④の一番の
+   * 不満)。入口をひとつに保つ以上、自分の場面もこの入口から出るべきである。
+   */
+  function matches(): PaletteEntry[] {
     const query = paletteInput.value.trim().toLowerCase();
-    const result: Experiment[] = [];
+    const result: PaletteEntry[] = [];
+
+    // 自分の場面が先。数は少なく、探しているのはたいていこちらだから。
+    if (!filterCategory || filterCategory === OWN_SCENES_FILTER) {
+      for (const scene of readSavedScenes()) {
+        if (query && !scene.name.toLowerCase().includes(query)) continue;
+        result.push({ kind: "saved", scene });
+      }
+    }
+    if (filterCategory === OWN_SCENES_FILTER) return result;
+
     for (const category of CATEGORIES) {
       if (filterCategory && category.id !== filterCategory) continue;
       for (const experiment of category.experiments) {
         if (!query) {
-          result.push(experiment);
+          result.push({ kind: "experiment", experiment });
           continue;
         }
         const haystack =
           `${experiment.title} ${experiment.blurb} ${category.title} ` +
           `${experiment.watch.join(" ")} ${experiment.id}`.toLowerCase();
-        if (haystack.includes(query)) result.push(experiment);
+        if (haystack.includes(query)) result.push({ kind: "experiment", experiment });
       }
     }
     return result;
+  }
+
+  /** パレットの1行が指すもの。用意された実験か、自分で保存した場面か。 */
+  type PaletteEntry =
+    | { kind: "experiment"; experiment: Experiment }
+    | { kind: "saved"; scene: SavedScene };
+
+  /** 絞り込みの「じぶんの場面」。分野 id と衝突しない値にしてある。 */
+  const OWN_SCENES_FILTER = "__own__";
+
+  /// 場面の名前は人が付けるので、そのまま HTML へ埋めない。
+  function escapeHtml(text: string): string {
+    const box = document.createElement("span");
+    box.textContent = text;
+    return box.innerHTML;
+  }
+
+  function openEntry(entry: PaletteEntry): void {
+    if (entry.kind === "experiment") start(entry.experiment);
+    else openSavedScene(entry.scene);
   }
 
   function categoryOf(experiment: Experiment): Category | undefined {
@@ -633,21 +690,36 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       paletteResults.appendChild(empty);
       return;
     }
-    paletteMatches.forEach((experiment, index) => {
-      const category = categoryOf(experiment);
+    paletteMatches.forEach((entry, index) => {
       const row = document.createElement("button");
       row.type = "button";
       row.className = "palette-row";
-      row.dataset.experimentId = experiment.id;
       row.dataset.active = String(index === paletteIndex);
-      row.innerHTML =
-        `<span class="palette-row-icon">${experiment.icon}</span>` +
-        `<span class="palette-row-main">` +
-        `<span class="palette-row-title">${experiment.title}</span>` +
-        `<span class="palette-row-blurb">${experiment.blurb}</span>` +
-        `</span>` +
-        `<span class="palette-row-tag">${category?.icon ?? ""} ${category?.title ?? ""}</span>`;
-      row.addEventListener("click", () => start(experiment));
+      if (entry.kind === "saved") {
+        row.dataset.savedScene = entry.scene.name;
+        const when = entry.scene.savedAt
+          ? new Date(entry.scene.savedAt).toLocaleString("ja-JP")
+          : "";
+        row.innerHTML =
+          `<span class="palette-row-icon">🧱</span>` +
+          `<span class="palette-row-main">` +
+          `<span class="palette-row-title">${escapeHtml(entry.scene.name)}</span>` +
+          `<span class="palette-row-blurb">${when ? `${escapeHtml(when)} に保存` : "自分で組み立てた場面"}</span>` +
+          `</span>` +
+          `<span class="palette-row-tag">🧱 じぶんの場面</span>`;
+      } else {
+        const experiment = entry.experiment;
+        const category = categoryOf(experiment);
+        row.dataset.experimentId = experiment.id;
+        row.innerHTML =
+          `<span class="palette-row-icon">${experiment.icon}</span>` +
+          `<span class="palette-row-main">` +
+          `<span class="palette-row-title">${experiment.title}</span>` +
+          `<span class="palette-row-blurb">${experiment.blurb}</span>` +
+          `</span>` +
+          `<span class="palette-row-tag">${category?.icon ?? ""} ${category?.title ?? ""}</span>`;
+      }
+      row.addEventListener("click", () => openEntry(entry));
       row.addEventListener("mousemove", () => {
         if (paletteIndex === index) return;
         paletteIndex = index;
@@ -678,8 +750,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         ?.scrollIntoView({ block: "nearest" });
     } else if (event.key === "Enter") {
       event.preventDefault();
-      const experiment = paletteMatches[paletteIndex];
-      if (experiment) start(experiment);
+      const entry = paletteMatches[paletteIndex];
+      if (entry) openEntry(entry);
     }
   });
   palette.addEventListener("click", (event) => {

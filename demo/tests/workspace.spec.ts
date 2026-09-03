@@ -300,6 +300,70 @@ test("名前を付けて保存した場面は、開き直しても残ってい�
   expect(errors).toEqual([]);
 });
 
+test("保存した場面は、⌘K からどこにいても開き直せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.fill("#input-scene-name", "わたしの場面");
+  await page.click("#btn-save-scene");
+  await expect(page.locator("#crumb-own-scene")).toContainText("わたしの場面");
+
+  // 用意された実験へ行ってから、名前で探して戻る。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "わたし");
+  await expect(page.locator(".palette-row").first()).toContainText("わたしの場面");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-own-scene")).toContainText("わたしの場面");
+  await expect(page.locator("#palette")).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("自分で置いた物の動きが、そのままグラフと CSV に出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 置いた物には観測点が付く——用意された実験でだけグラフが出る、を残さない。
+  await page.click("#btn-run");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0.5);
+  await page.click("#btn-run");
+
+  await expect(page.locator("#probe-empty")).toBeHidden();
+  await expect(page.locator("#btn-probe-csv")).toBeEnabled();
+  await expect(page.locator("#probe-time-range")).toContainText("t =");
+  expect(errors).toEqual([]);
+});
+
+test("材質を変えても、場面の名前と選んでいた物は変わらない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.fill("#input-scene-name", "名前つきの場面");
+  await page.click("#btn-save-scene");
+
+  await page.locator("#hierarchy-tree .tree-body").last().click();
+  await page.selectOption("#inspector-material", "ゴム(天然)");
+  await expect
+    .poll(async () => page.locator("#inspector-material").inputValue(), { timeout: 10_000 })
+    .toBe("ゴム(天然)");
+
+  // 組み直しは「同じ場面の編集」であって差し替えではない。
+  await expect(page.locator("#crumb-own-scene")).toContainText("名前つきの場面");
+  await expect(page.locator('.card[data-card="focus"]')).toContainText("Sphere_1");
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

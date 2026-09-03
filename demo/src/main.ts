@@ -1585,20 +1585,6 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
       <div class="inspector-field"><span>かたち (Shape)</span><span>${world.read_component("body_shape_label_at", String(index))}</span></div>
-      <p class="inspector-note">かたちの寸法は、下の「大きさ(倍率)」で変えられます。</p>
-    </div>
-    <div class="inspector-component">
-      <h3>Transform</h3>
-      <div class="inspector-field">
-        <span>Position (x,y,z)</span>
-        <span class="inspector-scale-fields">
-          <input type="number" id="inspector-position-x" step="0.05" value="${initialPosition[0]}" />
-          <input type="number" id="inspector-position-y" step="0.05" value="${initialPosition[1]}" />
-          <input type="number" id="inspector-position-z" step="0.05" value="${initialPosition[2]}" />
-        </span>
-      </div>
-      <div class="inspector-field"><span>Rotation</span><span id="inspector-rotation">—</span></div>
-      <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
       <div class="inspector-field">
         <span>大きさ(倍率) x,y,z</span>
         <span class="inspector-scale-fields">
@@ -1613,6 +1599,19 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
         自由度が無いので、<strong>3 欄を同じ値</strong>にすると全体が拡大します。
         重さは材質の密度から計算し直されます。
       </p>
+    </div>
+    <div class="inspector-component">
+      <h3>Transform</h3>
+      <div class="inspector-field">
+        <span>Position (x,y,z)</span>
+        <span class="inspector-scale-fields">
+          <input type="number" id="inspector-position-x" step="0.05" value="${initialPosition[0]}" />
+          <input type="number" id="inspector-position-y" step="0.05" value="${initialPosition[1]}" />
+          <input type="number" id="inspector-position-z" step="0.05" value="${initialPosition[2]}" />
+        </span>
+      </div>
+      <div class="inspector-field"><span>Rotation</span><span id="inspector-rotation">—</span></div>
+      <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
     </div>
     ${renderRigidBodyComponent(world, index)}
     ${renderInspectorExtraComponents(world, index)}
@@ -5995,6 +5994,14 @@ async function setUpSceneView(
     return hasContent ? box : null;
   }
 
+  /// その点が、いまの画角に入っているか(カメラの後ろ・画面外なら false)。
+  function isPointOnScreen(x: number, y: number, z: number): boolean {
+    const ndc = new THREE.Vector3(x, y, z).project(camera);
+    // `project` は z > 1 でカメラの後ろ、|x|,|y| > 1 で画面の外。少し内側
+    // (0.9)で判定して、隅にかろうじて映っている状態も「見えない」側に倒す。
+    return Math.abs(ndc.x) <= 0.9 && Math.abs(ndc.y) <= 0.9 && ndc.z <= 1;
+  }
+
   function frameCameraOnContent() {
     const box = contentBoundingBox();
     if (!box) return;
@@ -6411,6 +6418,30 @@ async function setUpSceneView(
    * ボディの並びは書き出しでも保たれるが、名前が一致するものを優先して
    * 探す(削除済みの体があると添字がずれ得るため)。
    */
+  /**
+   * 選んだ物の高さと速さを記録し始める。**シーン文書側の観測点一覧にも足す**
+   * のが要点——足さないと、材質を変えて場面を組み直した瞬間や、保存して開き
+   * 直した瞬間に、記録だけが黙って消える(`sceneOwnProbes`のdoc参照)。
+   */
+  function addProbesForBody(bodyIndex: number): void {
+    if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
+    const name = world.read_component("body_label_at", String(bodyIndex));
+    try {
+      applyComponent(world, "add_body_probes", { index: bodyIndex });
+    } catch (err) {
+      reportError(`グラフへの記録を始められませんでした: ${String(err)}`);
+      return;
+    }
+    if (name) {
+      sceneOwnProbes = [
+        ...sceneOwnProbes,
+        { body_pos_y: name },
+        { body_speed: name },
+      ];
+    }
+    highlightHierarchy = rebuildHierarchy();
+  }
+
   function patchSceneBody(
     bodyIndex: number,
     patch: (body: Record<string, unknown>) => void,
@@ -6442,11 +6473,18 @@ async function setUpSceneView(
     }
     // 観測点は元の一覧へ戻す(`sceneOwnProbes` のdoc参照)。
     (doc as { probes?: unknown[] }).probes = sceneOwnProbes;
+    // これは**同じ場面の編集**であって差し替えではない。差し替えとして
+    // 知らせると、上の画面が「別の場面になった」と判断して名前を捨て、
+    // 選択も読み込み直後の床へ戻ってしまう(材質を変えただけで場面の名前が
+    // 消え、右の「選んだもの」が ground に化けた——利用者役④の観察)。
+    workspaceIsLoading = true;
     try {
       sceneGalleryRef.current?.(JSON.stringify(doc));
     } catch (err) {
       reportError(`場面の組み直しに失敗しました: ${String(err)}`);
       return false;
+    } finally {
+      workspaceIsLoading = false;
     }
     // 組み直しでボディは作り直されるが、並びは同じなので選び直せる。
     if (bodyIndex < readNumber(world, "body_count")) selectBody(bodyIndex);
@@ -8176,6 +8214,22 @@ async function setUpSceneView(
         break;
     }
     addSpawnedMesh(bodyIndex, mesh);
+    // **置いた物の動きが、そのままグラフに出る**。観測点はシーンJSONが宣言した
+    // ものしか無く、自分で置いた物には一本も付かなかったので、自作の場面では
+    // グラフが永久に空で CSV も押せなかった(利用者役④の観察)。
+    //
+    // 足すのは**まだ一本も観測点が無いとき**だけ。置くたびに増やすと、数個
+    // 置いた時点で凡例が読めなくなる——最初に置いた物が主役、という素直な
+    // 既定にしておき、増やしたい人は Inspector から足せるようにする。
+    if (readNumber(world, "imported_probe_count") === 0) {
+      addProbesForBody(bodyIndex);
+    }
+    // **置いた物が画面の外だと、置けたことが分からない**。既定の落下開始点は
+    // 高さ 12 m で、起動時の画角では十字の目印しか映らず「何も無いところに
+    // 置いたのでは」と読まれた(利用者役④の観察)。画面に入っていないときだけ
+    // 画角を合わせ直す——見えているのに勝手に動かすと、並べている最中の視点を
+    // 奪うことになる。
+    if (!isPointOnScreen(x, y, z)) frameCameraOnContent();
     return bodyIndex;
   }
 

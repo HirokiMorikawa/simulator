@@ -3154,6 +3154,10 @@ impl WasmWorld {
                 self.set_body_rotation_at_impl(u("index"), f("x"), f("y"), f("z"), f("w"))?;
                 Ok("{}".to_string())
             }
+            "add_body_probes" => {
+                let first = self.add_body_probes_impl(u("index"))?;
+                Ok(format!("{{\"index\":{first}}}"))
+            }
             "set_body_mass_at" => {
                 self.set_body_mass_at_impl(u("index"), f("mass"))?;
                 Ok("{}".to_string())
@@ -5152,6 +5156,26 @@ impl WasmWorld {
         Ok(())
     }
 
+    /// 指定したボディの**高さと速さを記録し始める**(観測点を2本足す)。
+    ///
+    /// **なぜ要ったか**: 観測点はシーンJSONが宣言したものしか無く、エディタで
+    /// 自分が置いた物には一本も付かなかった。そのため自分で組み立てた場面では
+    /// グラフが永久に「まだデータがありません」のままで、CSVボタンも押せない
+    /// ——用意された実験では動くだけに、壊れているとしか読めなかった
+    /// (利用者役の観察)。
+    ///
+    /// 追加した観測点は`imported_probe_handles`へ積む。シーンJSONが宣言した
+    /// ものと同じ扱いになり、既存の読み出し(`imported_probe_*`)がそのまま
+    /// 使えるためである。戻り値は最初のハンドル(高さの方)。
+    fn add_body_probes_impl(&mut self, index: usize) -> Result<usize, WasmError> {
+        let id = self.try_body_id_at(index)?;
+        let y = self.inner.add_probe(sim_world::ProbeTarget::BodyPosY(id));
+        let speed = self.inner.add_probe(sim_world::ProbeTarget::BodySpeed(id));
+        self.imported_probe_handles.push(y);
+        self.imported_probe_handles.push(speed);
+        Ok(y)
+    }
+
     /// 質量を**その場で**変える(`set_body_position_at`等と同じ「Edit中の直接
     /// 設定」の一員)。
     ///
@@ -5963,6 +5987,35 @@ mod tests {
                 &format!(r#"{{"index":{body},"scale":2.0}}"#),
             )
             .expect("set_body_scale_at via apply_component must succeed");
+
+        // 自分で置いた物にも観測点を足せる(`add_body_probes_impl`のdoc参照)。
+        let before: usize = world
+            .read_component_impl("imported_probe_count", "")
+            .unwrap()
+            .parse()
+            .unwrap();
+        world
+            .apply_component_impl("add_body_probes", &format!(r#"{{"index":{body}}}"#))
+            .expect("add_body_probes via apply_component must succeed");
+        let after: usize = world
+            .read_component_impl("imported_probe_count", "")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(after, before + 2, "高さと速さの2本が足される");
+        assert!(
+            world
+                .read_component_impl("imported_probe_label_at", &before.to_string())
+                .unwrap()
+                .starts_with("BodyPosY"),
+            "1本目は高さ"
+        );
+        assert!(
+            world
+                .apply_component_impl("add_body_probes", r#"{"index":9999}"#)
+                .is_err(),
+            "存在しないボディは弾く"
+        );
 
         // 質量の直接設定は**stepを挟まずに**効く(Editモードでも打った値が
         // 反映される、`set_body_mass_at_impl`のdoc参照)。
@@ -7468,7 +7521,7 @@ mod tests {
         // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
         // 足したらこの数と`component_schema`の表の両方を更新すること**——
         // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
-        const APPLY_KIND_COUNT: usize = 77;
+        const APPLY_KIND_COUNT: usize = 78;
         assert_eq!(
             entries.len(),
             APPLY_KIND_COUNT,
