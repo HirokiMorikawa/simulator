@@ -44,18 +44,22 @@
             <button data-speed="4" title="速く進める">🐇</button>
           </div>
           <div id="run-clock" class="run-clock" title="シミュレーション内の経過時間"></div>
+          <div id="run-rate" class="run-rate" title="いまの進む速さ">×1</div>
         </div>
 
         <!-- 右: 大局の粒度のダイヤル。連続値で、目盛りに名前が付いている。 -->
         <div id="detail-control" class="detail-control">
-          <div id="detail-stops" class="detail-stops" role="group" aria-label="見る深さ"></div>
+          <div class="detail-head">
+            <span class="detail-name">見る深さ</span>
+            <div id="detail-stops" class="detail-stops" role="group" aria-label="見る深さ"></div>
+          </div>
           <input
             id="detail-dial"
             type="range"
             min="0"
             max="3"
             step="0.05"
-            value="0.6"
+            value="1"
             aria-label="見る深さ(みる ↔ つくる)"
           />
           <div id="detail-hint" class="detail-hint"></div>

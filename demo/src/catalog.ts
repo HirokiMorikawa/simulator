@@ -410,6 +410,7 @@ export const GUIDED_CATEGORIES: Category[] = [
         readouts: [
           { probe: 2, label: "いちばん上の箱の速さ", unit: "m/s", digits: 3 },
         ],
+        series: { 0: "1 段目の速さ", 1: "2 段目の速さ" },
         knobs: [
           {
             id: "floors",
@@ -451,12 +452,37 @@ export const GUIDED_CATEGORIES: Category[] = [
         title: "ふりこ",
         blurb: "ひもで吊るしたおもりが往復します。",
         watch: [
-          "1 往復の時間は、おもりの重さではなく **ひもの長さ** で決まります。",
+          "1 往復の時間は、おもりの重さではなく「ひもの長さ」で決まります。",
           "長さ 1 m ならおよそ 2.0 秒で 1 往復。",
           "長さを 4 倍にすると、往復の時間は 2 倍になります。",
         ],
         view: "3d",
         pace: 120,
+        prepare: (scene) => {
+          // **見えないものは観察できない**。検証用の`d11`のおもりは半径 1cm で、
+          // 画面では点にしかならず「ひもで吊るしたおもり」に見えなかった
+          // (利用者役の観察: 真っ黒な画面に小さな点が一つ)。
+          //
+          // 単振り子の周期は ひもの長さ と 重力 だけで決まり、おもりの半径には
+          // 依存しない(質量は`mass_override`で 1kg に固定されている)。つまり
+          // 見える大きさに変えても、確かめたい関係は変わらない。
+          const bob = body(scene, "bob");
+          if (bob?.shape?.sphere) {
+            (bob.shape.sphere as { radius: number }).radius = 0.08;
+          }
+          // 支点。何から吊るされているのかが分からないと、往復の意味が読めない。
+          // 静的な小球なので運動には関与しない(おもりは 1m 先を回る)。
+          scene.bodies = [
+            {
+              name: "pivot",
+              shape: { sphere: { radius: 0.05 } },
+              material: "鋼(炭素鋼)",
+              type: "static",
+              position: [0, 0, 0],
+            },
+            ...(scene.bodies ?? []),
+          ];
+        },
         readouts: [
           { probe: 0, label: "おもりの横位置", unit: "m", digits: 3 },
           { probe: 1, label: "おもりの高さ", unit: "m", digits: 3 },
@@ -1427,6 +1453,13 @@ export const GUIDED_CATEGORIES: Category[] = [
             name: "sandbox-pendulum",
             world: { gravity: Number(values.gravity), dt: 1 / 240 },
             bodies: [
+              {
+                name: "pivot",
+                shape: { sphere: { radius: 0.06 } },
+                material: "鋼(炭素鋼)",
+                type: "static",
+                position: [0, 0, 0],
+              },
               {
                 shape: { sphere: { radius: 0.15 } },
                 material: "鋼(炭素鋼)",

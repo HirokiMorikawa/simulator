@@ -1858,6 +1858,12 @@ kbd {
   background: var(--accent-surface);
   border-color: var(--accent-border);
 }
+.run-rate {
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+  min-width: 4ch;
+}
 .run-clock {
   font-family: var(--font-mono);
   font-size: var(--text-md);
@@ -1873,11 +1879,22 @@ kbd {
   grid-template-columns: auto;
   gap: 2px;
   justify-items: stretch;
-  width: 268px;
+  width: 320px;
+}
+.detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+.detail-name {
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
+  white-space: nowrap;
 }
 .detail-stops {
   display: flex;
   justify-content: space-between;
+  flex: 1;
 }
 #app .detail-stop {
   background: transparent;
@@ -2244,7 +2261,6 @@ kbd {
 /* HUD(`t = 1.508 s` / `step = 386` / `circuit V[2] = …`)は中の仕組みを
  * 前提にした表示。浅い粒度では出さない——同じ情報を、文脈の柱が
  * 「経過した時間」「ボールの高さ」という言葉で出している。 */
-#app[data-grain="watch"] #hud,
-#app[data-grain="touch"] #hud {
+#app:not([data-grain="build"]) #hud {
   display: none;
 }

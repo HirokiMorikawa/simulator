@@ -5091,6 +5091,48 @@ async function setUpSceneView(
   }
   resize();
 
+  // **水面**。`fluids[].static_water` は「水位より下は浮力が働く」という
+  // モデルで、これまで**画面には何も描かれていなかった**——「浮くか沈むか」を
+  // 見に来た人の目には、真っ暗な空間に箱が浮いているだけに映る(実際に
+  // 利用者役の観察で最初に挙がった不満)。水位が設定されているあいだ、
+  // 半透明の面をその高さに置く。物理には一切関与しない、見るための面。
+  const waterPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(200, 200),
+    new THREE.MeshStandardMaterial({
+      color: 0x2f7fbf,
+      transparent: true,
+      opacity: 0.35,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  waterPlane.rotation.x = -Math.PI / 2;
+  waterPlane.visible = false;
+  waterPlane.renderOrder = 1;
+  scene.add(waterPlane);
+  /**
+   * **診断のための重ね描きは、診断しに来た人にだけ見せる**。
+   * 接触点の赤い点・力の矢印・拘束軸は、物理を確かめる人には必要だが、
+   * 現象を眺めに来た人には「この赤い点は何?」という謎でしかない
+   * (利用者役の観察: 積み木の境目の赤い点の意味が分からなかった)。
+   * 見る深さが「しらべる」以上のときだけ描く——設定のチェックはその上での
+   * 個別の切り替えとして残る。
+   */
+  function diagnosticsVisible(): boolean {
+    const grain = document.getElementById("app")?.dataset.grain;
+    return grain === "study" || grain === "build";
+  }
+
+  function updateWaterPlane(currentWorld: WasmWorld) {
+    const level = Number(currentWorld.read_component("water_level", ""));
+    if (Number.isNaN(level)) {
+      waterPlane.visible = false;
+      return;
+    }
+    waterPlane.visible = true;
+    waterPlane.position.y = level;
+  }
+
   scene.add(new THREE.AmbientLight(0xffffff, 0.5));
   const sun = new THREE.DirectionalLight(0xffffff, 1.0);
   sun.position.set(5, 10, 5);
@@ -5107,8 +5149,12 @@ async function setUpSceneView(
   scene.add(box);
 
   // 床(静的平面、`WasmWorld::new`が`BODY_INDEX_GROUND`として構築するコンクリート面)。
+  // **地面は広く取る**。20m 四方だと、45°に投げた球(40m 先へ落ちる)や
+  // 走る車がすぐ端を越えてしまい、その先が**黒い虚空**になる——落ちたのか
+  // 消えたのか分からない画面になっていた(利用者役の観察)。物理の床は無限
+  // 平面なので、見た目の方を実態へ寄せる。
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(20, 20),
+    new THREE.PlaneGeometry(400, 400),
     new THREE.MeshStandardMaterial({ color: 0x555555 }),
   );
   ground.rotation.x = -Math.PI / 2;
@@ -5125,7 +5171,7 @@ async function setUpSceneView(
   bodyMeshes.set(BODY_INDEX_GROUND, ground);
   bodyMeshes.set(BODY_INDEX_BOX, box);
 
-  const grid = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
+  const grid = new THREE.GridHelper(400, 400, 0x444444, 0x222222);
   scene.add(grid);
 
   // Scene View オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「速度ベクトル」、
@@ -5720,6 +5766,12 @@ async function setUpSceneView(
   function updateGuidedFollowCamera() {
     const box = contentBoundingBox();
     if (!box) return;
+    // 動くものだけの中心と大きさ。**対象が豆粒にならない下限**を決めるのに使う。
+    const movingCenter = box.getCenter(new THREE.Vector3());
+    const movingRadius = Math.max(
+      box.getSize(new THREE.Vector3()).length() * 0.5,
+      1e-9,
+    );
     // 原点を必ず含める。落下は「床(y=0)まで」、公転は「中心の星まで」が
     // 見えて初めて現象として読めるため。
     box.expandByPoint(new THREE.Vector3(0, 0, 0));
@@ -5728,12 +5780,37 @@ async function setUpSceneView(
       box.getSize(new THREE.Vector3()).length() * 0.5,
       0.5,
     );
-    // 対象の 3.6 倍まで引く。かんたんモードでは「対象が大きく映ること」より
-    // **まわりが見えること**が優先——坂を滑る箱は、坂が画面に入っていなければ
-    // 何が起きているのか分からない(倍率ではなく比で決めるのは、シーンの寸法が
-    // 1e-7 m の分子から 1e11 m の公転まで振れるため)。
-    const desired = radius * 3.6;
-    const ease = guidedCameraSnap ? 1 : 0.08;
+    // 対象の 3.6 倍まで引く。「対象が大きく映ること」より**まわりが見えること**を
+    // 優先する——坂を滑る箱は、坂が画面に入っていなければ何が起きているのか
+    // 分からない(倍率ではなく比で決めるのは、シーンの寸法が 1e-7 m の分子から
+    // 1e11 m の公転まで振れるため)。
+    //
+    // ただし引きすぎない。45°に投げた球は 40m 先まで飛ぶので、原点まで含めて
+    // 画角に収めると**球が豆粒になって見失う**(利用者役の観察)。動くものが
+    // 画面の高さの 2% を下回らない距離を上限にする——まわりが多少切れても、
+    // 対象が見えている方が優先。
+    const APPARENT_MIN = 60; // 画角60°で、対象が画面の約3%を占める距離の比
+    const fit = radius * 3.6;
+    const cap = Math.max(movingRadius * 6, movingRadius * APPARENT_MIN);
+    const desired = Math.min(fit, cap);
+    // **全部は入らないと決めたなら、注視点も寄せる**。距離だけ縮めて注視点を
+    // 全体の中心に置いたままだと、対象が画角の外へ出て「何も映っていない
+    // 地面」だけが残る(45°に投げた球で実際に起きた)。入り切らない度合いに
+    // 応じて、注視点を全体の中心から動くものへ寄せていく。
+    const bias = fit > 0 ? Math.min(1, desired / fit) : 1;
+    guidedFollowTarget.lerpVectors(movingCenter, guidedFollowTarget, bias);
+    // 寄せた注視点が、動くものから画角の外へ出ないようにする。全体の中心へ
+    // 引っぱられすぎると、対象が画面の端で切れる。
+    const offset = guidedFollowTarget.clone().sub(movingCenter);
+    const offsetLimit = desired * 0.3;
+    if (offset.length() > offsetLimit) {
+      guidedFollowTarget.copy(movingCenter).add(offset.setLength(offsetLimit));
+    }
+    // 対象が急に遠ざかるときは追いつきを速める(一定の緩さだと置いていかれる)。
+    const distanceNow = camera.position.distanceTo(orbit.target);
+    const chasing = desired > distanceNow * 1.25 || desired < distanceNow * 0.6;
+    const guidedCameraSnapNow = guidedCameraSnap;
+    const ease = guidedCameraSnapNow ? 1 : chasing ? 0.22 : 0.08;
     guidedCameraSnap = false;
     guidedFollowDirection.copy(camera.position).sub(orbit.target);
     if (guidedFollowDirection.lengthSq() < 1e-12) {
@@ -5745,7 +5822,15 @@ async function setUpSceneView(
       guidedFollowDirection.y = 0.3;
       guidedFollowDirection.normalize();
     }
-    orbit.target.lerp(guidedFollowTarget, ease);
+    // 注視点は、ずれが画角に対して大きいほど速く追いつく。一定の緩さだと、
+    // 秒速十数メートルで飛ぶ球に置いていかれて画面から消える(実測)。
+    const targetError = orbit.target.distanceTo(guidedFollowTarget);
+    const targetEase = guidedCameraSnapNow
+      ? 1
+      : targetError > desired * 0.2
+        ? 0.35
+        : Math.max(ease, 0.1);
+    orbit.target.lerp(guidedFollowTarget, targetEase);
     const nextDistance = distance + (desired - distance) * ease;
     camera.position
       .copy(orbit.target)
@@ -6105,8 +6190,75 @@ async function setUpSceneView(
   // THREE.Line(振り子スポーンごとに1本、`world.constraint_anchor_points_at`が
   // 返す2点を毎フレーム反映する)。
   const constraintLines = new Map<number, THREE.Line>();
+  // **吊るされているものは、吊るされて見えなければならない**。シーンJSONの
+  // `joints[].distance` は「この物体を、この点から一定距離に保つ」という拘束
+  // だが、画面には何も描かれていなかった——ふりこが「宙に浮いた2つの球」に
+  // 見えて、往復の意味が読み取れなかった(利用者役の観察)。
+  // ワークスペースが読み込んだシーンから紐の情報を受け取り、毎フレーム
+  // 「物体の位置 ↔ 支点」を結ぶ線を引く。物理には関与しない。
+  type Tether = { bodyIndex: number; anchor: [number, number, number] };
+  let tethers: Tether[] = [];
+  const tetherLines: THREE.Line[] = [];
+  function setTethers(next: Tether[]): void {
+    for (const line of tetherLines) {
+      scene.remove(line);
+      line.geometry.dispose();
+    }
+    tetherLines.length = 0;
+    tethers = next;
+    for (const _ of tethers) {
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(),
+          new THREE.Vector3(),
+        ]),
+        new THREE.LineBasicMaterial({ color: 0xd9d2c4 }),
+      );
+      scene.add(line);
+      tetherLines.push(line);
+    }
+  }
+  function updateTethers(currentWorld: WasmWorld): void {
+    const count = readNumber(currentWorld, "body_count");
+    tethers.forEach((tether, i) => {
+      const line = tetherLines[i];
+      if (!line) return;
+      if (tether.bodyIndex < 0 || tether.bodyIndex >= count) {
+        line.visible = false;
+        return;
+      }
+      const position = currentWorld.body_position_at_f32(tether.bodyIndex);
+      const attribute = line.geometry.attributes
+        .position as THREE.BufferAttribute;
+      attribute.setXYZ(0, position[0], position[1], position[2]);
+      attribute.setXYZ(1, tether.anchor[0], tether.anchor[1], tether.anchor[2]);
+      attribute.needsUpdate = true;
+      line.geometry.computeBoundingSphere();
+      line.visible = true;
+    });
+  }
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
+  // **触れるものは、触れると分かるようにする**。3D の中の物体は選べるのに、
+  // 見た目は他と同じで押せるかどうかが分からなかった(利用者役の観察: 惑星を
+  // クリックしても何も起きず、触れる/触れないの区別が最後まで付かなかった)。
+  // 指させるものの上ではカーソルを変える——押せることを、押す前に伝える。
+  let hoverCursorFrame = 0;
+  function updateHoverCursor(event: PointerEvent): void {
+    // ポインタ移動は毎フレーム何度も来るので、間引く(見た目には差が出ない)。
+    const now = performance.now();
+    if (now - hoverCursorFrame < 60) return;
+    hoverCursorFrame = now;
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hit = raycaster.intersectObjects(
+      pickables.map((p) => p.mesh),
+      false,
+    );
+    renderer.domElement.style.cursor = hit.length > 0 ? "pointer" : "";
+  }
   const dragPlane = new THREE.Plane();
   const dragPlaneHit = new THREE.Vector3();
   const cameraDirection = new THREE.Vector3();
@@ -6263,7 +6415,10 @@ async function setUpSceneView(
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
-    if (!dragStartScreen) return;
+    if (!dragStartScreen) {
+      updateHoverCursor(event);
+      return;
+    }
     const dx = event.clientX - dragStartScreen.x;
     const dy = event.clientY - dragStartScreen.y;
     if (!isDragging) {
@@ -6724,8 +6879,44 @@ async function setUpSceneView(
     return { x: Math.cos(angle) * radius, z: Math.sin(angle) * radius };
   }
 
+  /**
+   * **稜線を足す**。同じ材質の箱を積むと、隙間も影の差も出ないため
+   * 「3 段の積み木」が 1 本の柱にしか見えない(利用者役の観察)。面の境目に
+   * 細い線を重ねると、積み上がっていることがひと目で分かる。球には付けない
+   * (経線・緯線が出てうるさいだけになる)。
+   */
+  function addEdgeLines(root: THREE.Object3D): void {
+    // 複合形状は複数の子メッシュで出来ている(凸包メッシュのように
+    // ジオメトリを持たない入れ物のこともある)。持っているものにだけ足す
+    // ——ここで例外が出ると**スポーンそのものが失敗する**ので、形は問わない。
+    const targets: THREE.Mesh[] = [];
+    root.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (mesh.isMesh && mesh.geometry) targets.push(mesh);
+    });
+    for (const mesh of targets) {
+      const kind = mesh.geometry.type;
+      if (kind === "SphereGeometry" || kind === "PlaneGeometry") continue;
+      // 頂点を持たないジオメトリ(入れ物だけのメッシュ)には稜線を作れない。
+      // ここで例外を投げると**スポーンごと失敗する**ので、必ず確かめる。
+      const positions = mesh.geometry.attributes?.position;
+      if (!positions || positions.count === 0) continue;
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(mesh.geometry, 25),
+        new THREE.LineBasicMaterial({
+          color: 0x1a1a1a,
+          transparent: true,
+          opacity: 0.55,
+        }),
+      );
+      edges.name = "edges";
+      mesh.add(edges);
+    }
+  }
+
   function addSpawnedMesh(bodyIndex: number, mesh: THREE.Mesh) {
     markUnsaved();
+    addEdgeLines(mesh);
     scene.add(mesh);
     pickables.push({ mesh, bodyIndex });
     bodyMeshes.set(bodyIndex, mesh);
@@ -6815,8 +7006,10 @@ async function setUpSceneView(
     if (shape && "plane" in shape) {
       const [nx, ny, nz] = shape.plane.normal;
       const normal = new THREE.Vector3(nx, ny, nz).normalize();
+      // 無限平面の見た目。20m 四方だと、遠くまで飛ぶ/走るものが端を越えて
+      // その先が黒い虚空になる(利用者役の観察)。物理は無限なので広く描く。
       const mesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(20, 20),
+        new THREE.PlaneGeometry(400, 400),
         new THREE.MeshStandardMaterial({
           color: 0x777755,
           side: THREE.DoubleSide,
@@ -8389,7 +8582,7 @@ async function setUpSceneView(
       fy: NUDGE_FORCE_NEWTONS,
       fz: 0.0,
     });
-    if (forceOverlayToggle.checked) {
+    if (forceOverlayToggle.checked && diagnosticsVisible()) {
       const p = world.body_position_at_f32(selectedBodyIndex);
       showForceOverlay(
         new THREE.Vector3(p[0], p[1], p[2]),
@@ -8477,7 +8670,7 @@ async function setUpSceneView(
     }
 
     for (const [bodyIndex, line] of constraintLines) {
-      if (!constraintOverlayToggle.checked) {
+      if (!constraintOverlayToggle.checked || !diagnosticsVisible()) {
         line.visible = false;
         continue;
       }
@@ -8494,7 +8687,7 @@ async function setUpSceneView(
       line.visible = true;
     }
 
-    if (frameOverlayToggle.checked) {
+    if (frameOverlayToggle.checked && diagnosticsVisible()) {
       for (const [frameIndex, helper] of frameAxesHelpers) {
         // `frame_world_position_f32`/`frame_world_rotation_f32`はいずれも
         // Wasmメモリを直接指す一時的なビューを返す(B16、`HotPathViewBuffers`の
@@ -8649,7 +8842,7 @@ async function setUpSceneView(
       velocityArrow.visible = false;
     }
 
-    if (contactOverlayToggle.checked) {
+    if (contactOverlayToggle.checked && diagnosticsVisible()) {
       const contactPoints = world.contact_points_f32();
       const count = Math.min(
         contactPoints.length / 3,
@@ -8672,7 +8865,9 @@ async function setUpSceneView(
     }
 
     forceArrow.visible =
-      forceOverlayToggle.checked && performance.now() < forceOverlayHideAtMs;
+      forceOverlayToggle.checked &&
+      diagnosticsVisible() &&
+      performance.now() < forceOverlayHideAtMs;
 
     // **ツール切替(群2で追加)**: 設計 §1.2「W(移動)/E(回転)/R(スケール)/
     // Q(選択のみ)」。以前は3つのギズモを**同時に**表示していたため、
@@ -8751,13 +8946,17 @@ async function setUpSceneView(
         `heater T[${node}] = ${formatHudNumber(sceneTemperature)} K` +
         (delta === 0 ? "" : ` (Δ ${delta > 0 ? "+" : ""}${formatHudNumber(delta)})`);
     }
+    // 値の無い行(そのシーンに回路や熱ノードが無い)は出さない——「circuit V = —」
+    // が並ぶだけで、何が測れているのかが読み取れなくなる。
     hud.textContent = [
       `t = ${readNumber(world, "time").toFixed(3)} s`,
       `step = ${readNumber(world, "step_count").toString()}`,
       `y = ${selectedBodyValid ? inspectorPosition.y.toFixed(4) : "—"} m`,
       circuitLine,
       temperatureLine,
-    ].join("\n");
+    ]
+      .filter((line) => !line.endsWith("= —"))
+      .join("\n");
     timelineTime.textContent = `t = ${readNumber(world, "time").toFixed(3)} s`;
     timelineStep.textContent = `step = ${readNumber(world, "step_count").toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
@@ -8776,6 +8975,8 @@ async function setUpSceneView(
     }
 
     syncSettingsInputs();
+    updateWaterPlane(world);
+    updateTethers(world);
     if (guidedFollowCamera) updateGuidedFollowCamera();
     // enableDamping を使うので毎フレーム update が要る。
     orbit.update();
@@ -8882,7 +9083,9 @@ async function setUpSceneView(
   // (`sceneGalleryRef.current`)を通す——別経路を作ると、片方だけ直った
   // 不整合(旧ワールドのメッシュが残る等)が必ず起きる。
   const workspaceApi: WorkspaceApi = {
+    setTethers,
     loadSceneJson: (json) => {
+      setTethers([]);
       sceneGalleryRef.current?.(json);
       // 読み込み直後は「いまある物」しか無いので、落下の行き先(床)まで
       // 入る画角へ即座に合わせ直す(`updateGuidedFollowCamera` の doc 参照)。

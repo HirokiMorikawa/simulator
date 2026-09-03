@@ -56,6 +56,11 @@ export type WorkspaceApi = {
    * 置いてから動かす。
    */
   stopForEditing: () => void;
+  /**
+   * 「この物体は、この点から吊るされている」を線で描く指示。
+   * シーンJSONの距離拘束から作る(物理には関与しない、見るための線)。
+   */
+  setTethers: (tethers: { bodyIndex: number; anchor: [number, number, number] }[]) => void;
   /** 追従カメラの入り切り。 */
   followCamera: (enabled: boolean) => void;
   /** グラフの凡例に出す表示名(プローブ番号 → 人間の言葉)。 */
@@ -166,12 +171,13 @@ function el<T extends HTMLElement>(id: string): T {
 function readStoredDetail(): number {
   try {
     const raw = localStorage.getItem(DETAIL_KEY);
-    if (raw === null) return 0.6; // 初見は「みる」寄り。ただし 0 ではない——
-    // つまみの存在(さわれること)が視界に入っている方が、次の一手が見える。
+    // 初見は「さわる」から。現象が動いているのが見え、かつ**自分で変えられる**
+    // ことがつまみとして目に入る位置。ここから浅くも深くも回せる。
+    if (raw === null) return 1;
     const value = Number.parseFloat(raw);
-    return Number.isFinite(value) ? Math.min(3, Math.max(0, value)) : 0.6;
+    return Number.isFinite(value) ? Math.min(3, Math.max(0, value)) : 1;
   } catch {
-    return 0.6;
+    return 1;
   }
 }
 
@@ -189,6 +195,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   const playButton = el<HTMLButtonElement>("btn-run");
   const restartButton = el<HTMLButtonElement>("btn-restart");
   const clock = el<HTMLDivElement>("run-clock");
+  const rate = el<HTMLDivElement>("run-rate");
   const speedGroup = el<HTMLDivElement>("run-speed");
   const commandbar = el<HTMLElement>("commandbar");
 
@@ -228,7 +235,11 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       380,
       Math.max(272, Math.round(272 + detail * 36)),
     );
-    const outline = grow(detail, REVEAL.outline, 0.6, 232);
+    // 一覧の柱は「使える幅」か 0 か。数十 px で顔を出すと、文字が 1 文字ずつ
+    // 折り返された読めない帯になる(利用者役の観察で実際に出た)。
+    // 段の高さと同じ考え方——出すなら用を成す大きさで出す。
+    const outline =
+      detail >= REVEAL.outline ? Math.max(168, grow(detail, REVEAL.outline, 0.6, 232)) : 0;
     const toolbar = grow(detail, REVEAL.toolbar, 0.4, 64);
     let analysis = grow(detail, REVEAL.analysis, 0.6, 200);
     let timeline = grow(detail, 0.8, 0.6, 78);
@@ -331,6 +342,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     button.textContent = stop.label;
     button.title = stop.hint;
     button.addEventListener("click", () => applyDetail(stop.at));
+    // どれを選ぶと何が起きるのかを、**選ぶ前に**読めるようにする。
+    // (選んで初めて説明が出るのでは、初めての人には選びようがない)
+    button.addEventListener("mouseenter", () => {
+      dialHint.textContent = stop.hint;
+    });
+    button.addEventListener("mouseleave", () => {
+      dialHint.textContent = nearestStop(detail).hint;
+    });
     dialStops.appendChild(button);
   }
   dial.addEventListener("input", () => applyDetail(Number(dial.value)));
@@ -577,6 +596,28 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     return labels;
   }
 
+  /**
+   * シーンの距離拘束を「吊るし線」の指示に直す。読み込んだ JSON を持っている
+   * ワークスペース側でしか作れない情報なので、ここで組み立てて渡す。
+   */
+  function tethersOf(scene: SceneJson) {
+    const bodies = scene.bodies ?? [];
+    const result: { bodyIndex: number; anchor: [number, number, number] }[] = [];
+    for (const joint of scene.joints ?? []) {
+      const distance = (joint as { distance?: { body_a?: string; anchor_b?: number[] } })
+        .distance;
+      if (!distance?.body_a) continue;
+      const index = bodies.findIndex((b) => b.name === distance.body_a);
+      if (index < 0) continue;
+      const anchor = distance.anchor_b ?? [0, 0, 0];
+      result.push({
+        bodyIndex: index,
+        anchor: [anchor[0] ?? 0, anchor[1] ?? 0, anchor[2] ?? 0],
+      });
+    }
+    return result;
+  }
+
   function sceneJsonFor(experiment: Experiment): string | null {
     if (experiment.build) return JSON.stringify(experiment.build(knobValues));
     if (!experiment.file) return null;
@@ -623,6 +664,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     const json = sceneJsonFor(current);
     if (!json) return;
     api.loadSceneJson(json);
+    api.setTethers(tethersOf(JSON.parse(json) as SceneJson));
     // 読み込み直後は**何も選ばれていない**状態から始める。エディタ側は内部
     // 都合で先頭のボディ(たいてい床)を選ぶが、利用者から見れば自分では
     // 選んでいない——「選んだもの: ground / 重さ 0.000 kg」が出てくるのは
@@ -673,6 +715,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         Number((button as HTMLElement).dataset.speed) === speedMultiplier,
       );
     }
+    // 速さは**数として**も出す。🐢/🐇 のボタンが凹んだことは分かっても、
+    // どれくらい変わったのかは絵からは読み取れない(利用者役の観察)。
+    rate.textContent = `×${speedMultiplier}`;
   }
 
   // ---- コンテキスト(カード) ----------------------------------------------------
@@ -753,7 +798,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     specs.push({
       id: "watch",
       title: "ここを見る",
-      reveal: 0.5,
+      // どの粒度でも開いている。「どこを見ればいいか」は、いちばん浅い
+      // 見方をしている人にこそ必要な情報だから。
+      reveal: 0,
       summary: experiment.watch[0],
       build: (body) => {
         const where = document.createElement("p");
@@ -807,7 +854,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       specs.push({
         id: "knobs",
         title: "変えてみる",
-        reveal: 1,
+        // 目盛り「さわる」(1.0)に届く手前から開く——ダイヤルが「さわる」と
+        // 言っているのにつまみが畳まれている、という食い違いを作らない。
+        reveal: 0.8,
         summary: experiment.knobs.map((k) => k.label).join(" / "),
         build: (body) => {
           const note = document.createElement("p");
