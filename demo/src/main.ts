@@ -3422,8 +3422,11 @@ function setUpProjectDrawer(
     body.appendChild(list);
 
     const importNote = document.createElement("p");
+    // 内部の型名(`sim_world::Scenario`)や「ヘッドレスランナー」がそのまま
+    // 出ていて、何を言っているのか分からないと書かれた(利用者役④の観察)。
     importNote.textContent =
-      "シーンJSON(sim_world::Scenarioスキーマ、ヘッドレスランナー・D1–D43のテストと同じ形式)を読み込み、現在のシーンへボディを追加する。";
+      "場面のファイル(.json)を読み込んで、いまの場面へ物を足します。" +
+      "書き出したファイルや、用意された実験のファイルが使えます。";
     body.appendChild(importNote);
 
     const importInput = document.createElement("input");

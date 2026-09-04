@@ -793,6 +793,55 @@ test("時間の単位が、画面のどこでも同じ", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+test("用意された実験に足したものも、名前を付けて取っておける", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  // 以前は「自分の場面」のときしか保存の口が無く、実験に物を足した人は
+  // 取っておく場所を見つけられないまま別の実験へ移り、戻れなくなった。
+  await page.fill("#input-scene-name", "ぶつける実験");
+  await page.click("#btn-save-scene");
+  await expect(page.locator(".saved-scene-open")).toContainText("ぶつける実験");
+
+  // 別の実験へ寄り道してから、⌘K で戻ってこられる。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "跳ね");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("跳ね");
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ぶつける");
+  await expect(page.locator(".palette-row").first()).toContainText("ぶつける実験");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-own-scene")).toContainText("ぶつける実験");
+  expect(errors).toEqual([]);
+});
+
+test("大きさの表示と重さが噛み合う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  // 内部表記は半分の長さなので、`Box(0.4000, …)` の箱が 4019 kg になり
+  // 「表示と重さが合わない」と読まれた。人が言う一辺の長さで書く。
+  const shape = page.locator('[data-focus="かたち"]');
+  await expect(shape).toContainText("0.80 × 0.80 × 0.80 m");
+
+  // 一辺 0.8m の鋼(密度 7850)は約 4019 kg——数と重さが噛み合う。
+  const mass = Number.parseFloat(
+    (await page.locator('[data-focus="重さ"]').textContent()) ?? "0",
+  );
+  expect(mass).toBeGreaterThan(3900);
+  expect(mass).toBeLessThan(4100);
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

@@ -251,7 +251,29 @@ function friendlyShape(raw: string): string {
     convexmesh: "凸包メッシュ",
     convex_mesh: "凸包メッシュ",
   };
-  return names[head] ?? raw;
+  const name = names[head];
+  if (!name) return raw;
+
+  // **人が言う「大きさ」で書く**。内部表記は箱なら半分の長さ、球なら半径を
+  // 出すので、`Box(0.4000, …)` の箱が 4019 kg になり「表示と重さが合わない、
+  // バグでは」と読まれた(利用者役④の観察)。箱は一辺、球は直径にして、
+  // 数と重さが素直に噛み合うようにする。
+  const numbers = [...raw.matchAll(/-?\d+(?:\.\d+)?/g)].map((m) => Number(m[0]));
+  const meters = (v: number) => `${v.toFixed(2)} m`;
+  if (head === "box" && numbers.length >= 3) {
+    // 単位は最後に一度だけ(「0.80 m × 0.80 m × 0.80 m」はくどい)。
+    return `${name} ${numbers
+      .slice(0, 3)
+      .map((half) => (half * 2).toFixed(2))
+      .join(" × ")} m`;
+  }
+  if (head === "sphere" && numbers.length >= 1) {
+    return `${name}(直径 ${meters(numbers[0] * 2)})`;
+  }
+  if (head === "capsule" && numbers.length >= 2) {
+    return `${name}(太さ ${meters(numbers[0] * 2)}・長さ ${meters(numbers[1] * 2)})`;
+  }
+  return name;
 }
 
 function el<T extends HTMLElement>(id: string): T {
@@ -1373,6 +1395,11 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
 
     for (const spec of specs) contextBody.appendChild(buildCard(spec));
     appendFocusCard();
+    // **用意された実験の上に組み立てた場合も保存できる**。以前は「自分の場面」
+    // (実験を選んでいない状態)のときしか保存の口を出しておらず、実験に物を
+    // 足して衝突させた人が、それを取っておく場所を見つけられなかった
+    // ——そのまま ⌘K で別の実験へ行き、戻る道が無くなった(利用者役④の観察)。
+    contextBody.appendChild(buildCard(savedScenesCard()));
     contextBody.appendChild(buildCard(viewCardSpec()));
     syncCards();
     restoreFocus(activeId, activeStart, activeEnd);
