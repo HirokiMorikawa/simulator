@@ -478,6 +478,8 @@ struct HotPathViewBuffers {
     conduction_rod_temperatures: Vec<f32>,
     /// `fluid_particle_positions_f32`用。
     fluid_particle_positions: Vec<f32>,
+    /// `fluid_boundary_positions_f32`用。
+    fluid_boundary_positions: Vec<f32>,
     /// `y_probe_history_f64`用。
     y_probe_history: Vec<f64>,
     /// `speed_probe_history_f64`用。
@@ -4716,6 +4718,29 @@ impl WasmWorld {
             );
         }
         // SAFETY: `quantum_1d_density_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
+    }
+
+    /// **境界粒子**の位置をフラットな`[x0,y0,z0,...]`(f32)で返す。
+    ///
+    /// 水を受け止めている器は、これまで**画面のどこにも描かれていなかった**
+    /// ——「水のかたまりが落ちて、容器に溜まります」と書いてある隣で、真っ暗な
+    /// 空間に水色の塊が浮いているだけに見えた(利用者役①の観察)。器は物理側に
+    /// 境界粒子として実在するので、その位置をそのまま渡して描けるようにする。
+    /// 読み出すだけで、計算には一切触らない。
+    ///
+    /// 規約は`fluid_particle_positions_f32`と同じ(一時的なビュー)。
+    pub fn fluid_boundary_positions_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.fluid_boundary_positions;
+        buf.clear();
+        if let Some(sph) = self.inner.sph() {
+            buf.extend(
+                sph.boundary_position
+                    .iter()
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+            );
+        }
+        // SAFETY: `fluid_particle_positions_f32`と同じ。
         unsafe { Float32Array::view(buf) }
     }
 

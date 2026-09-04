@@ -1096,6 +1096,72 @@ test("用意された実験に足した物は、その場面の大きさで出�
   expect(errors).toEqual([]);
 });
 
+test("水を注ぐ実験は、受け止める器も描く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d23-pouring-water"]');
+  await page.waitForTimeout(3000);
+
+  // 「水のかたまりが落ちて、容器に溜まります」と書いてある隣で、真っ暗な空間に
+  // 水色の塊が浮いているだけに見えた——器は物理側に境界粒子として在るのに、
+  // 画面に描いていなかった(利用者役①)。
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-fluid-boundary",
+    "true",
+  );
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-stage-empty",
+    "false",
+  );
+  expect(errors).toEqual([]);
+});
+
+test("グラフがまだ出ていない濃さでは、グラフを見ろと言わない", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+  await page.waitForTimeout(2000);
+
+  // 「まん中の 3D と、下のグラフの両方に出ます」と書いてある下は真っ黒だった
+  // ——「みる」ではグラフを出していないため(利用者役①)。
+  const where = page.locator(".card-where");
+  await expect(where).toContainText("ダイヤル");
+  await setGrain(page, 2);
+  await expect(where).toContainText("下のグラフ");
+  expect(errors).toEqual([]);
+});
+
+test("数値は、途中で折り返さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d12-ragdoll"]');
+
+  // 「6.72 秒」が「6.7 / 2 / 秒」と三行に割れていた(利用者役①)。名前の列が
+  // 長いぶんを値の列から奪っていたため。
+  await expect
+    .poll(
+      async () =>
+        await page.evaluate(() => {
+          const dds = [
+            ...document.querySelectorAll("#context .readouts dd"),
+          ] as HTMLElement[];
+          if (dds.length === 0) return -1;
+          return Math.max(...dds.map((d) => d.getBoundingClientRect().height));
+        }),
+      { timeout: 15_000 },
+    )
+    .toBeLessThan(28);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

@@ -2102,22 +2102,25 @@ kbd {
 }
 .readouts {
   display: grid;
-  /* 名前の列は縮めない。値が長いときは値の側を折り返す——名前が
-   * 「か/た/ち」と縦に割れて読めなくなるのを防ぐ。 */
-  grid-template-columns: minmax(5.5em, auto) minmax(0, 1fr);
+  /* **値は折り返さない**。名前の列を `auto` にしていたので、「ほぼ止まった
+   * 時刻(0.05 m/s 以下)」のような長い名前が値の列を押し潰し、「6.72 秒」が
+   * 「6.7 / 2 / 秒」と三行に割れていた(利用者役①の観察)。数字は一目で
+   * 読めることがすべてなので、幅は値の側に譲り、名前の方を折り返す。 */
+  grid-template-columns: minmax(0, 1fr) max-content;
   gap: var(--space-2) var(--space-4);
   margin: 0;
   font-size: var(--text-md);
 }
 .readouts dt {
   color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 .readouts dd {
   margin: 0;
   text-align: right;
   font-family: var(--font-mono);
   color: var(--text);
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 /* --- つまみ --- */

@@ -338,7 +338,10 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   // ① Toolbar のシーン選択ドロップダウン: ドロワーを開かずにシーンを差し替える。
   await page.selectOption("#select-scene", "d19-electric-workbench.json");
   const hierarchy = page.locator("#hierarchy-tree");
-  await expect(hierarchy.getByText("CircuitV[2]", { exact: true })).toBeVisible();
+  // 生の名前(`CircuitV[2]`)ではなく、画面のほかの場所と同じ日本語で並ぶ。
+  await expect(
+    hierarchy.getByText("つなぎ目の電圧(2)", { exact: true }),
+  ).toBeVisible();
 
   // ② Inspector の追加 Component。D19 は剛体を持たないので、まず剛体のある
   //    シーンへ切り替えてからボディを選ぶ。

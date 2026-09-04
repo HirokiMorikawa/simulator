@@ -372,6 +372,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let stillFrames = 0;
   /** 直前のフレームで舞台が空だったか(「どこを見るか」の追いつき用)。 */
   let lastStageEmpty: boolean | null = null;
+  /** 直前に出した「ここを見る」の一行(同じなら書き直さない)。 */
+  let lastWhereText = "";
   /** 「舞台が空」と決めるまでに、空のまま待つフレーム数(60fps でおよそ半秒)。 */
   const STAGE_EMPTY_FRAMES = 30;
   let stageEmptyFrames = 0;
@@ -933,14 +935,22 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
    * 何か映っているなら、まず 3D を指す。
    */
   function stageWhereText(experiment: Experiment, stageEmpty: boolean): string {
+    // **いま画面に出ているものだけを指す**。グラフがまだ出ていない濃さで
+    // 「下のグラフを見てください」と書いてあって、下は真っ黒のまま——という
+    // 食い違いが起きていた(利用者役①の観察)。出ていないなら、出し方を言う。
+    const graphOnScreen = detail >= REVEAL.analysis;
     if (stageEmpty) {
-      return "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。";
+      return graphOnScreen
+        ? "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。"
+        : "📈 舞台には形のある物が出ません。右のパネルの数値を見てください(右上のダイヤルを右へ回すと、グラフも出ます)。";
     }
     if (experiment.view === "field") {
       return "👀 3D の中に出る「場」のパネルに、波や分布が描かれます。";
     }
     if (experiment.view === "graph") {
-      return "👀 まん中の 3D と、下のグラフの両方に出ます。";
+      return graphOnScreen
+        ? "👀 まん中の 3D と、下のグラフの両方に出ます。"
+        : "👀 まん中の 3D を見てください(右上のダイヤルを右へ回すと、下にグラフも出ます)。";
     }
     return "👀 まん中の 3D を見てください。";
   }
@@ -973,6 +983,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     // 上げた分を持ち越さない(`chosenDetail` の doc 参照)。
     if (detail !== chosenDetail) applyDetail(chosenDetail, false, false);
     lastStageEmpty = null;
+    lastWhereText = "";
     stageEmptyFrames = 0;
     reload();
     renderCrumbs();
@@ -1923,12 +1934,16 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       // 本当に空だと決める。
       stageEmptyFrames = api.stageIsEmpty() ? stageEmptyFrames + 1 : 0;
       const stageEmptyNow = stageEmptyFrames > STAGE_EMPTY_FRAMES;
+      // 文面は濃さでも変わる(`stageWhereText` の doc)ので、舞台の空き具合
+      // だけでなく**文そのもの**が変わったかで書き直す。
+      const whereNow = current ? stageWhereText(current, stageEmptyNow) : "";
+      if (whereNow !== lastWhereText) {
+        lastWhereText = whereNow;
+        const where = document.querySelector<HTMLElement>(".card-where");
+        if (where) where.textContent = whereNow;
+      }
       if (stageEmptyNow !== lastStageEmpty) {
         lastStageEmpty = stageEmptyNow;
-        const where = document.querySelector<HTMLElement>(".card-where");
-        if (where && current) {
-          where.textContent = stageWhereText(current, stageEmptyNow);
-        }
         // 舞台に形のある物が**出てこない**と分かったときだけ、グラフが読める
         // 濃さまで開く——「選んだのに何も映らない」を残さないため。実験の表に
         // ついた `view` ではなく舞台の実際で決めるので、3D に何か映る実験で

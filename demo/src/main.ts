@@ -4474,7 +4474,11 @@ function friendlyProbeLabel(raw: string): string {
     [/^NodeTemp/, "温度"],
     [/^RodTemp/, "棒の温度"],
     [/^CircuitCurrent/, "電流"],
+    // Rust 側が出す生の名前は `CircuitV[4]`(`CircuitNodeVoltage` ではない)。
+    // 取りこぼしていたので、電気の実験の凡例だけがコード風の名前で並んでいた
+    // (利用者役①の観察)。
     [/^CircuitNodeVoltage/, "電圧"],
+    [/^CircuitV\b/, "つなぎ目の電圧"],
     [/^GridFluidMeanV/, "流れの速さ(平均)"],
     [/^GridFluidRmsV/, "流れの速さ(実効値)"],
     [/^QuantumNorm/, "波の総量"],
@@ -4518,6 +4522,7 @@ function unitForProbeLabel(raw: string): string | undefined {
     [/^RodTemp/, "℃"],
     [/^CircuitCurrent/, "A"],
     [/^CircuitNodeVoltage/, "V"],
+    [/^CircuitV\b/, "V"],
     [/^GridFluid(Mean|Rms)V/, "m/s"],
     [/^GasTemperature/, "K"],
     [/^GasPressure/, "Pa"],
@@ -4824,8 +4829,35 @@ function setUpProbeGraph(): (
       }
     }
 
+    // **凡例がグラフを埋め尽くさないようにする**。
+    //
+    // 1 系列 1 行で max/min まで書いていたので、系列が 6 本ある電気の実験を
+    // 浅い濃さ(グラフ帯が 88 px)で開くと、凡例だけで帯を使い切り、肝心の
+    // 折れ線が読めなかった(利用者役①の観察)。入り切らないときは、名前だけを
+    // 横に流す。数値はグラフを指せば読める(`hoverX` の doc 参照)。
+    const LEGEND_LINE = 13;
+    const compactLegend = (drawn.length + 1) * LEGEND_LINE > plotH * 0.55;
     let legendY = 12;
+    if (compactLegend) {
+      let x = 4;
+      for (const { series: s, flatY } of drawn) {
+        const text = `${s.label}${flatY !== null ? "(一定)" : ""}`;
+        const width = ctx.measureText(text).width + 12;
+        if (x + width > w - 4) {
+          x = 4;
+          legendY += LEGEND_LINE;
+        }
+        outlined(text, x, legendY, s.color);
+        x += width;
+      }
+      legendY += LEGEND_LINE;
+      if (drawn.length > 1) {
+        outlined("各線はそれぞれの範囲に合わせて描いています", 4, legendY, "#6f757e");
+        legendY += LEGEND_LINE;
+      }
+    }
     for (const { series: s, min, max, flatY } of drawn) {
+      if (compactLegend) break;
       // 一定値の線はまん中に引く(`plotY` の doc)。高さを値と読み違えない
       // よう、凡例でそう言っておく。
       const suffix =
@@ -4844,7 +4876,7 @@ function setUpProbeGraph(): (
     // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを明示する
     // (黙っていると「こちらの線の方が大きい」と読まれる)。凡例の直下に置くの
     // は、下端が時刻の目盛り帯になったため。
-    if (drawn.length > 1) {
+    if (!compactLegend && drawn.length > 1) {
       outlined("各線はそれぞれの範囲に合わせて描いています", 4, legendY, "#6f757e");
       legendY += 13;
     }
@@ -5885,6 +5917,30 @@ async function setUpSceneView(
   fluidPoints.visible = false;
   scene.add(fluidPoints);
   let fluidPositionAttribute: THREE.BufferAttribute | null = null;
+
+  /**
+   * **水を受け止めている器**(境界粒子)。
+   *
+   * 「水のかたまりが落ちて、容器に溜まります」と書いてある隣で、真っ暗な空間に
+   * 水色の塊が浮いているだけに見えた——器は物理側に境界粒子として実在するのに、
+   * 画面のどこにも描かれていなかった(利用者役①の観察)。水より暗い色で、水の
+   * 邪魔をせずに「どこに溜まるのか」だけが分かるように置く。物理には触らない。
+   */
+  const fluidBoundaryGeometry = new THREE.BufferGeometry();
+  const fluidBoundaryPoints = new THREE.Points(
+    fluidBoundaryGeometry,
+    // 器は**中の水が見える**濃さにする(詰まった粒で塗り潰すと、溜まって
+    // いく様子が器の壁に隠れてしまう)。
+    new THREE.PointsMaterial({
+      color: 0x8c9aa8,
+      size: 0.045,
+      transparent: true,
+      opacity: 0.45,
+      depthWrite: false,
+    }),
+  );
+  fluidBoundaryPoints.visible = false;
+  scene.add(fluidBoundaryPoints);
 
   // **格子流体の速度場オーバーレイ(増分L)**。セルごとに`ArrowHelper`を作ると
   // 数百オブジェクトになるので、**1本の`LineSegments`**で全ベクトルを描く
@@ -8236,6 +8292,7 @@ async function setUpSceneView(
     commandLog.length = 0;
     fluidPositionAttribute = null;
     fluidPoints.visible = false;
+    fluidBoundaryPoints.visible = false;
     circuitFreeWiringState.active = true;
     circuitSwitchToggle.disabled = true;
 
@@ -8367,7 +8424,25 @@ async function setUpSceneView(
         fluidPositionAttribute.needsUpdate = true;
         fluidGeometry.computeBoundingSphere();
       }
+      // 器も一緒に描く(`fluidBoundaryPoints` の doc 参照)。境界粒子は
+      // 動かないので、読み込みのときに一度だけ置けばよい。
+      const boundary = world.fluid_boundary_positions_f32();
+      if (boundary.length >= 3) {
+        fluidBoundaryGeometry.setAttribute(
+          "position",
+          new THREE.BufferAttribute(new Float32Array(boundary), 3),
+        );
+        fluidBoundaryGeometry.computeBoundingSphere();
+        fluidBoundaryPoints.visible = true;
+      } else {
+        fluidBoundaryPoints.visible = false;
+      }
+    } else {
+      fluidBoundaryPoints.visible = false;
     }
+    // 器を描いているかどうかは、舞台の状態として外から読めるようにしておく
+    // (`data-stage-empty` と同じ扱い)。
+    sceneViewElement.dataset.fluidBoundary = String(fluidBoundaryPoints.visible);
 
     // **シーンの中身にカメラを合わせる(群3、`frameCameraOnContent`のdoc参照)**。
     // 剛体・ソフトボディ・天体・粒子群がすべて配置し終わった後に呼ぶ。
