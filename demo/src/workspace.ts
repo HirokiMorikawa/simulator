@@ -313,6 +313,15 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
 
   // ---- 状態 -----------------------------------------------------------------
   let detail = readStoredDetail();
+  /**
+   * **人が自分で選んだ濃さ**。
+   *
+   * 「みる」にしても、実験を選び直すたびに「さわる」へ戻ってしまっていた
+   * (利用者役①の観察)。舞台に何も映らない実験でグラフが読める濃さまで
+   * 上げたあと、その値がそのまま**人の選択として居座って**いたため。上げるの
+   * は一時的な足し算にして、次に実験を選んだらここへ戻す。
+   */
+  let chosenDetail = detail;
   let current: Experiment | null = null;
   let knobValues: Record<string, string | number> = {};
   let speedMultiplier = 1;
@@ -359,6 +368,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let stillFrames = 0;
   /** 直前のフレームで舞台が空だったか(「どこを見るか」の追いつき用)。 */
   let lastStageEmpty: boolean | null = null;
+  /** 「舞台が空」と決めるまでに、空のまま待つフレーム数(60fps でおよそ半秒)。 */
+  const STAGE_EMPTY_FRAMES = 30;
+  let stageEmptyFrames = 0;
 
   // ---- 大局の粒度 -------------------------------------------------------------
   /**
@@ -370,8 +382,16 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     return Math.round(t * to);
   }
 
-  function applyDetail(next: number, persist = true): void {
+  /**
+   * 画面の濃さを変える。
+   *
+   * `byPerson` が真なら、**人が自分で選んだ濃さ**(`chosenDetail`)も更新する。
+   * 実験の都合で一時的に上げるとき(舞台に何も映らない場面)は偽で呼ぶ——
+   * そうしないと、一度そういう実験を開いただけで「みる」に戻れなくなる。
+   */
+  function applyDetail(next: number, persist = true, byPerson = true): void {
     detail = Math.min(3, Math.max(0, next));
+    if (byPerson) chosenDetail = detail;
     app.style.setProperty("--detail", detail.toFixed(3));
     app.dataset.grain = nearestStop(detail).key;
 
@@ -516,10 +536,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     dialStops.appendChild(button);
   }
   dial.addEventListener("input", () => applyDetail(Number(dial.value)));
-  window.addEventListener("resize", () => applyDetail(detail, false));
+  window.addEventListener("resize", () => applyDetail(detail, false, false));
   // Project ドロワー(素材・回路・リプレイ)の開閉は、粒度とは別の局所的な
   // 操作。開いたら行の高さを与え直す必要があるので、属性の変化を見る。
-  new MutationObserver(() => applyDetail(detail, false)).observe(app, {
+  new MutationObserver(() => applyDetail(detail, false, false)).observe(app, {
     attributes: true,
     attributeFilter: ["data-drawer"],
   });
@@ -900,6 +920,27 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     return result;
   }
 
+  /**
+   * 「ここを見る」の一行。**舞台の実際**を先に見て決める。
+   *
+   * `view` は実験の表につけた札にすぎず、実際とずれることがある——「惑星が
+   * 太陽を回る」は `graph` と書いてあるのに、3D では惑星が回っていて、画面は
+   * 「下のグラフを見てください」と案内していた(利用者役①の観察)。舞台に
+   * 何か映っているなら、まず 3D を指す。
+   */
+  function stageWhereText(experiment: Experiment, stageEmpty: boolean): string {
+    if (stageEmpty) {
+      return "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。";
+    }
+    if (experiment.view === "field") {
+      return "👀 3D の中に出る「場」のパネルに、波や分布が描かれます。";
+    }
+    if (experiment.view === "graph") {
+      return "👀 まん中の 3D と、下のグラフの両方に出ます。";
+    }
+    return "👀 まん中の 3D を見てください。";
+  }
+
   function sceneJsonFor(experiment: Experiment): string | null {
     if (experiment.build) return JSON.stringify(experiment.build(knobValues));
     if (!experiment.file) return null;
@@ -924,12 +965,11 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       /* 記憶できなくても動作には影響しない */
     }
     closePalette();
-    // 3D に何も描かれない実験では、グラフが見える粒度まで自動的に開く——
-    // 「選んだのに何も映らない」を残さないため。粒度を**下げる**ことはしない
-    // (人が選んだ濃さを勝手に薄くしない)。
-    if (experiment.view !== "3d" && detail < ANALYSIS_READABLE) {
-      applyDetail(ANALYSIS_READABLE);
-    }
+    // 実験を選び直したら、**人が自分で選んだ濃さ**へ戻す。前の実験の都合で
+    // 上げた分を持ち越さない(`chosenDetail` の doc 参照)。
+    if (detail !== chosenDetail) applyDetail(chosenDetail, false, false);
+    lastStageEmpty = null;
+    stageEmptyFrames = 0;
     reload();
     renderCrumbs();
     renderContext();
@@ -1297,13 +1337,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         // という矛盾が起きていた(利用者役①の観察)。実際に何か描かれて
         // いるかを見てから決める。
         const stageEmpty = apiRef.current?.stageIsEmpty() ?? false;
-        where.textContent = stageEmpty
-          ? "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。"
-          : experiment.view === "3d"
-            ? "👀 まん中の 3D を見てください。"
-            : experiment.view === "field"
-              ? "👀 3D の中に出る「場」のパネルに、波や分布が描かれます。"
-              : "📈 下のグラフがいちばん分かりやすい場所です。";
+        where.textContent = stageWhereText(experiment, stageEmpty);
         body.appendChild(where);
         const list = document.createElement("ul");
         list.className = "card-watch";
@@ -1805,18 +1839,33 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       // 「どこを見るか」は舞台の実際に従う。読み込んだ直後はまだ 1 フレームも
       // 描いていないので、ここで追いつかせる(カードを組み立てた時点では
       // 舞台が空かどうかまだ分からない)。
-      const stageEmptyNow = api.stageIsEmpty();
+      // 読み込んだ直後の 1〜2 フレームは、まだ何も描いていないので**どの場面でも
+      // 空に見える**。その一瞬を真に受けると、3D がちゃんと映る実験でも濃さが
+      // 勝手に上がってしまい、「みる」に留まれなかった(実測で、選ぶ実験に
+      // よって上がったり上がらなかったりした)。しばらく空のままのときだけ、
+      // 本当に空だと決める。
+      stageEmptyFrames = api.stageIsEmpty() ? stageEmptyFrames + 1 : 0;
+      const stageEmptyNow = stageEmptyFrames > STAGE_EMPTY_FRAMES;
       if (stageEmptyNow !== lastStageEmpty) {
         lastStageEmpty = stageEmptyNow;
         const where = document.querySelector<HTMLElement>(".card-where");
         if (where && current) {
-          where.textContent = stageEmptyNow
-            ? "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。"
-            : current.view === "3d"
-              ? "👀 まん中の 3D を見てください。"
-              : current.view === "field"
-                ? "👀 3D の中に出る「場」のパネルに、波や分布が描かれます。"
-                : "📈 下のグラフがいちばん分かりやすい場所です。";
+          where.textContent = stageWhereText(current, stageEmptyNow);
+        }
+        // 舞台に形のある物が**出てこない**と分かったときだけ、グラフが読める
+        // 濃さまで開く——「選んだのに何も映らない」を残さないため。実験の表に
+        // ついた `view` ではなく舞台の実際で決めるので、3D に何か映る実験で
+        // 濃さが勝手に上がることはない(利用者役①の観察)。これは人の選択
+        // ではないので `chosenDetail` は動かさない。
+        // 「場」の実験(二重スリットなど)は、形のある物こそ無いものの、
+        // **3D の中の場のパネルに絵が出ている**。見に行く先がそこにある以上、
+        // グラフのために濃さを上げる必要はない(上げると「みる」に留まれない)。
+        if (
+          stageEmptyNow &&
+          current?.view !== "field" &&
+          detail < ANALYSIS_READABLE
+        ) {
+          applyDetail(ANALYSIS_READABLE, false, false);
         }
       }
 
@@ -1940,7 +1989,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   }
 
   // ---- 起動 -------------------------------------------------------------------
-  applyDetail(detail, false);
+  applyDetail(detail, false, false);
   renderCrumbs();
   renderContext();
   syncRun();

@@ -821,6 +821,62 @@ test("用意された実験に足したものも、名前を付けて取って�
   expect(errors).toEqual([]);
 });
 
+test("「みる」を選んだら、実験を選び直しても「みる」のまま", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  // 「みる」にしても、実験を選ぶたびに「さわる」へ戻っていた——見るだけの
+  // 人が実験ひとつごとにダイヤルを押し直す羽目になっていた(利用者役①)。
+  const grain = () =>
+    page.evaluate(() => document.getElementById("app")!.dataset.grain);
+  const openExperiment = async (id: string) => {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1200);
+  };
+
+  // 3D に物が映る実験は、いくつ選び直しても「みる」のまま。
+  for (const id of ["d34-solar-system", "d12-ragdoll", "d6-floating"]) {
+    await openExperiment(id);
+    expect(await grain()).toBe("watch");
+  }
+
+  // 舞台に形のある物が出ない実験だけは、グラフが読める濃さまで開く。
+  await openExperiment("d9-cooling-coffee");
+  await expect
+    .poll(grain, { timeout: 10_000 })
+    .not.toBe("watch");
+
+  // それでも、次に 3D の実験へ移れば「みる」へ戻る(上げたのは一時的)。
+  await openExperiment("d1-free-fall");
+  await expect.poll(grain, { timeout: 10_000 }).toBe("watch");
+  expect(errors).toEqual([]);
+});
+
+test("3D を引っぱっても、選んだものの札が勝手に開かない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.waitForTimeout(1500);
+
+  // 画面の大半を占める床の上でドラッグすると、視点が回らずに床が「選んだ
+  // もの」として開いていた——見回そうとしただけで材質や座標の欄が出てきた
+  // (利用者役①)。動かせない物の上の引っぱりは、視点回しに譲る。
+  const box = (await page.locator("#scene-view canvas").first().boundingBox())!;
+  const startX = box.x + box.width / 2;
+  const startY = box.y + box.height * 0.85;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  for (let i = 1; i <= 12; i += 1) {
+    await page.mouse.move(startX + i * 14, startY - i * 2);
+  }
+  await page.mouse.up();
+  await page.waitForTimeout(500);
+  await expect(page.locator("#focus-material")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

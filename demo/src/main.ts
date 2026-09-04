@@ -5558,6 +5558,11 @@ async function setUpSceneView(
   );
   waterPlane.rotation.x = -Math.PI / 2;
   waterPlane.visible = false;
+  // 水面にも方眼を塗る(`paintFloorGrid` は下で定義)。塗らないと、画面が
+  // 一面の青になるだけで**どこが水面なのか分からない**——箱が浮いている感じ
+  // がまったく出なかった(利用者役①の観察)。線が入ると、面として奥行きが
+  // 見え、箱がその面のどこに、どれだけ沈んでいるかが読める。
+  paintFloorGrid(waterPlane.material as THREE.MeshStandardMaterial);
   waterPlane.renderOrder = 1;
   scene.add(waterPlane);
   /**
@@ -5621,8 +5626,57 @@ async function setUpSceneView(
   bodyMeshes.set(BODY_INDEX_GROUND, ground);
   bodyMeshes.set(BODY_INDEX_BOX, box);
 
-  const grid = new THREE.GridHelper(400, 400, 0x444444, 0x222222);
-  scene.add(grid);
+  /**
+   * **床に方眼を描く**(1 マス 1 m)。
+   *
+   * 床は一色に塗りつぶされた広がりで、球が落ちているのか止まっているのか、
+   * どれくらいの大きさの世界なのかが画面からは読めなかった(利用者役①の
+   * 観察:「背景が単色にしか見えず、高さもスケール感も伝わらない」)。
+   *
+   * 別のメッシュ(`THREE.GridHelper`)を床と同じ y=0 に重ねる手は使わない
+   * ——奥行きの分解能が「近 = 視距離/1000、遠 = 視距離×1000」と広いため、
+   * 手前では床が勝ち、遠くでは方眼が勝つ、という**距離で見え方が変わる**
+   * 描画になっていた(実測。描く順や深さ比べを切っても直らない)。床その
+   * ものの色として塗れば、重ね合わせの問題は起きようがない。
+   *
+   * 1 マスが 1 画素を切るほど遠く(あるいは分子のように小さな世界)では、
+   * 線が潰れて面が白く濁るので、そのぶん薄める。方眼が見えないだけで、
+   * 妙な模様は出ない。
+   */
+  function paintFloorGrid(material: THREE.MeshStandardMaterial): void {
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vFloorWorldPos;",
+        )
+        .replace(
+          "#include <begin_vertex>",
+          "#include <begin_vertex>\nvFloorWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;",
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vFloorWorldPos;",
+        )
+        .replace(
+          "#include <dithering_fragment>",
+          [
+            "#include <dithering_fragment>",
+            "{",
+            "  vec2 cell = vFloorWorldPos.xz;",
+            "  vec2 width = fwidth(cell);",
+            "  vec2 toLine = abs(fract(cell - 0.5) - 0.5) / max(width, vec2(1e-6));",
+            "  float line = 1.0 - min(min(toLine.x, toLine.y), 1.0);",
+            "  float perCell = 1.0 / max(max(width.x, width.y), 1e-6);",
+            "  float fade = clamp((perCell - 2.0) / 6.0, 0.0, 1.0);",
+            "  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.78, 0.80, 0.82), line * 0.5 * fade);",
+            "}",
+          ].join("\n"),
+        );
+    };
+  }
+  paintFloorGrid(ground.material as THREE.MeshStandardMaterial);
 
   // Scene View オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「速度ベクトル」、
   // 切替可)の最小デモ: 選択中ボディの速度ベクトルを矢印で表示する。縮約実装の
@@ -6307,11 +6361,30 @@ async function setUpSceneView(
    */
   let guidedFollowCamera = false;
   let guidedCameraSnap = false;
+  /**
+   * **場面が始まったときの広がり**。
+   *
+   * 追従は「いま動いている物」の箱で画角を決めていた。ところが落ちた球が
+   * 床で止まると、その箱は球ひとつ(半径 0.3 m)まで縮む——カメラは 2.4 m
+   * まで寄り、画面は**のっぺりした床一色**になって、20 m 落ちてきたことも、
+   * どれくらいの大きさの世界なのかも消えてしまう(利用者役①の観察:
+   * 「背景が単色にしか見えず、高さもスケール感も伝わらない」)。
+   *
+   * 始まりの広がりを覚えておいて箱に含めれば、**現象が起きた場所**が画角に
+   * 残る。寄りすぎの上限(`cap`)はそのままなので、対象が豆粒になることは
+   * ない。物理には触れない、見え方だけの話。
+   */
+  let guidedSceneStartBox: THREE.Box3 | null = null;
+  let guidedSceneStartPending = false;
   const guidedFollowTarget = new THREE.Vector3();
   const guidedFollowDirection = new THREE.Vector3();
   function updateGuidedFollowCamera() {
     const box = contentBoundingBox();
     if (!box) return;
+    if (guidedSceneStartPending) {
+      guidedSceneStartPending = false;
+      guidedSceneStartBox = box.clone();
+    }
     // 動くものだけの中心と大きさ。**対象が豆粒にならない下限**を決めるのに使う。
     const movingCenter = box.getCenter(new THREE.Vector3());
     const movingRadius = Math.max(
@@ -6321,6 +6394,8 @@ async function setUpSceneView(
     // 原点を必ず含める。落下は「床(y=0)まで」、公転は「中心の星まで」が
     // 見えて初めて現象として読めるため。
     box.expandByPoint(new THREE.Vector3(0, 0, 0));
+    // 始まりの広がりも含める(`guidedSceneStartBox` の doc 参照)。
+    if (guidedSceneStartBox) box.union(guidedSceneStartBox);
     box.getCenter(guidedFollowTarget);
     const radius = Math.max(
       box.getSize(new THREE.Vector3()).length() * 0.5,
@@ -6368,8 +6443,16 @@ async function setUpSceneView(
     }
     const distance = guidedFollowDirection.length();
     guidedFollowDirection.normalize();
+    // 仰角は**帯**で押さえる。下限は床の下に潜らないため。上限が無かったので、
+    // 場面によっては 45° ほぼ真上から見下ろす画になり、地平線が画角の外へ
+    // 出て**空が一切映らない**——落ちているのか止まっているのかが画面から
+    // 消えていた(利用者役①の観察)。0.42(約 25°)なら、縦画角 50° の
+    // 上端に地平線が残り、地面と空の境が必ず見える。
     if (guidedFollowDirection.y < 0.3) {
       guidedFollowDirection.y = 0.3;
+      guidedFollowDirection.normalize();
+    } else if (guidedFollowDirection.y > 0.42) {
+      guidedFollowDirection.y = 0.42;
       guidedFollowDirection.normalize();
     }
     // 注視点は、ずれが画角に対して大きいほど速く追いつく。一定の緩さだと、
@@ -7217,15 +7300,36 @@ async function setUpSceneView(
         undoButton.disabled = mode !== "edit";
         redoButton.disabled = true;
       } else {
-        if (mode !== "play" || !pointerDownHit) return;
+        // ここまで来たドラッグは、**掴む**か、**視点を回す**かのどちらか。
+        //
+        // 動かせない物(床・壁)は掴んでも物理的に何も起きない。それでも掴み
+        // 扱いにしていたので、画面のほとんどを占める床の上でドラッグすると
+        // 視点が回らず、代わりに床が「選んだもの」として開いていた——3D を
+        // ぐるっと見回そうとしただけで、材質や座標の欄が出てくる
+        // (利用者役①の観察:「ドラッグしても視点が回らず、専門的なパネルが
+        // 開く」)。掴めない物の上のドラッグは、そのまま視点回しへ譲る。
+        const hit = pointerDownHit;
+        const picked = hit?.picked.bodyIndex ?? -1;
+        const grabbable =
+          mode === "play" &&
+          hit !== null &&
+          picked >= 0 &&
+          world.read_component("body_is_static_at", String(picked)) !== "true";
+        if (!grabbable || hit === null) {
+          // 視点を動かすための引っぱりなので、離したときのクリック選択にも
+          // 落とさない(閾値を越えたぶんだけ捨てる。押して離すだけの選択は
+          // そのまま効く)。
+          pointerDownHit = null;
+          return;
+        }
         isDragging = true;
         dragMode = "grab";
-        grabbedBodyIndex = pointerDownHit.picked.bodyIndex;
+        grabbedBodyIndex = picked;
         selectBody(grabbedBodyIndex);
         camera.getWorldDirection(cameraDirection);
         dragPlane.setFromNormalAndCoplanarPoint(
           cameraDirection,
-          pointerDownHit.worldPoint,
+          hit.worldPoint,
         );
         // `body_position_at_f32`はWasmメモリを直接指す一時的なビューを返す
         // (B16、`HotPathViewBuffers`のdoc参照)。下の`applyComponent`が挟む
@@ -7774,6 +7878,11 @@ async function setUpSceneView(
         }),
       );
       mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+      // 水平な床には方眼を塗る(`paintFloorGrid` の doc 参照)。壁など
+      // 横向きの面には塗らない。
+      if (normal.y > 0.9) {
+        paintFloorGrid(mesh.material as THREE.MeshStandardMaterial);
+      }
       mesh.position.copy(normal.multiplyScalar(shape.plane.d));
       return { mesh, isPlane: true };
     }
@@ -10045,6 +10154,8 @@ async function setUpSceneView(
       // 入る画角へ即座に合わせ直す(`updateGuidedFollowCamera` の doc 参照)。
       guidedFollowCamera = true;
       guidedCameraSnap = true;
+      guidedSceneStartBox = null;
+      guidedSceneStartPending = true;
     },
     followCamera: (enabled) => {
       guidedFollowCamera = enabled;
