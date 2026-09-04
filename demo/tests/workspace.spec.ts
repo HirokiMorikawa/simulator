@@ -925,9 +925,11 @@ test("3D を引っぱっても、選んだものの札が勝手に開かない",
   // 画面の大半を占める床の上でドラッグすると、視点が回らずに床が「選んだ
   // もの」として開いていた——見回そうとしただけで材質や座標の欄が出てきた
   // (利用者役①)。動かせない物の上の引っぱりは、視点回しに譲る。
+  // 引っぱり始めは**画面の隅の床**にする。まん中は落ちてくる物が通るので、
+  // そこを掴むのは「動かせる物を掴む」という別の機能(そちらは選んで正しい)。
   const box = (await page.locator("#scene-view canvas").first().boundingBox())!;
-  const startX = box.x + box.width / 2;
-  const startY = box.y + box.height * 0.85;
+  const startX = box.x + box.width * 0.12;
+  const startY = box.y + box.height * 0.88;
   await page.mouse.move(startX, startY);
   await page.mouse.down();
   for (let i = 1; i <= 12; i += 1) {
