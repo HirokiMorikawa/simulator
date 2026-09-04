@@ -480,6 +480,8 @@ struct HotPathViewBuffers {
     fluid_particle_positions: Vec<f32>,
     /// `fluid_boundary_positions_f32`用。
     fluid_boundary_positions: Vec<f32>,
+    /// `grid_fluid_3d_smoke_points_f32`用。
+    grid_fluid_3d_smoke: Vec<f32>,
     /// `y_probe_history_f64`用。
     y_probe_history: Vec<f64>,
     /// `speed_probe_history_f64`用。
@@ -1514,6 +1516,45 @@ impl WasmWorld {
             }
         }
         out
+    }
+
+    /// 3D格子流体の**煙**を、点群として返す。
+    ///
+    /// 1 点あたり 4 要素 `[x, y, z, 濃さ]`。`stride` でセルを間引き、`threshold`
+    /// 以下の薄いセルは飛ばす(全セルを返すと数万点になり、ほとんどが空気)。
+    ///
+    /// **なぜ要ったか**: 「煙が流れる(3D)」は 3D の舞台が最初から最後まで
+    /// 真っ暗だった——剛体も粒子も無く、煙は格子の中の数値としてしか存在して
+    /// いなかったため。「まん中の 3D を見てください」と案内している隣で何も
+    /// 映らない、という一番がっかりする画面になっていた(利用者役③の観察)。
+    /// 濃さをそのまま渡して、点として描けるようにする。読み出すだけで、計算には
+    /// 触らない。
+    pub fn grid_fluid_3d_smoke_points_f32(
+        &mut self,
+        stride: usize,
+        threshold: f32,
+    ) -> Float32Array {
+        let buf = &mut self.view_buffers.grid_fluid_3d_smoke;
+        buf.clear();
+        if let Some(grid) = self.inner.grid_fluid_3d() {
+            let step = stride.max(1);
+            for k in (0..grid.nz).step_by(step) {
+                for j in (0..grid.ny).step_by(step) {
+                    for i in (0..grid.nx).step_by(step) {
+                        let density = grid.smoke_density[i + grid.nx * (j + grid.ny * k)] as f32;
+                        if density <= threshold || !density.is_finite() {
+                            continue;
+                        }
+                        buf.push(((i as f64 + 0.5) * grid.h) as f32);
+                        buf.push(((j as f64 + 0.5) * grid.h) as f32);
+                        buf.push(((k as f64 + 0.5) * grid.h) as f32);
+                        buf.push(density);
+                    }
+                }
+            }
+        }
+        // SAFETY: `fluid_particle_positions_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// 3D格子流体ドメインの概要(**群9で追加**)。無ければ空文字列。

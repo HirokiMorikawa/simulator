@@ -4760,17 +4760,28 @@ function setUpProbeGraph(): (
       flatY: number | null,
     ) => {
       if (flatY !== null) return flatY;
-      return plotH - ((value - plotMin) / (plotMax - plotMin)) * plotH;
+      const span = plotMax - plotMin;
+      if (!(span > 0)) return plotH / 2;
+      return plotH - ((value - plotMin) / span) * plotH;
     };
-    const isFlat = (s: ProbeSeries) => {
-      if (s.history.length < 2) return false;
+    // **「同じ値」かどうかは、桁に対して見る**。差の絶対値で見ていたので、
+    // インクの広がり(1.5e-22 → 1.9e-17)のように**桁が 5 つも動いている**系列
+    // まで「ずっと同じ値」と言い、まん中の一直線に潰していた(利用者役③の
+    // 観察)。値の大きさに対する比で判定する。
+    const flatSpan = (s: ProbeSeries) => {
       let lo = Infinity;
       let hi = -Infinity;
       for (const v of s.history) {
         if (v < lo) lo = v;
         if (v > hi) hi = v;
       }
-      return hi - lo <= 1e-12;
+      return { lo, hi };
+    };
+    const isFlat = (s: ProbeSeries) => {
+      if (s.history.length < 2) return false;
+      const { lo, hi } = flatSpan(s);
+      const scale = Math.max(Math.abs(lo), Math.abs(hi));
+      return hi - lo <= Math.max(scale * 1e-9, Number.MIN_VALUE);
     };
     const flatCount = series.filter(isFlat).length;
     const flatGap = Math.min(16, plotH / (flatCount + 1));
@@ -4792,10 +4803,9 @@ function setUpProbeGraph(): (
       const plot = (v: number) => (useLog ? signedLog(v) : v);
       const plotMin = Math.min(plot(min), plot(max));
       const plotMax = Math.max(plot(min), plot(max));
-      const flatY =
-        plotMax - plotMin <= 1e-12
-          ? plotH / 2 + (flatSeen++ - (flatCount - 1) / 2) * flatGap
-          : null;
+      const flatY = isFlat(s)
+        ? plotH / 2 + (flatSeen++ - (flatCount - 1) / 2) * flatGap
+        : null;
 
       const offset = longest - s.history.length;
       ctx.strokeStyle = s.color;
@@ -5942,6 +5952,61 @@ async function setUpSceneView(
   fluidBoundaryPoints.visible = false;
   scene.add(fluidBoundaryPoints);
 
+  /**
+   * **3D の煙**。
+   *
+   * 「煙が流れる(3D)」は、剛体も粒子も持たず、煙は格子の中の数値としてしか
+   * 存在していなかった——舞台は最初から最後まで真っ暗で、「まん中の 3D を見て
+   * ください」と案内している隣に何も映らなかった(利用者役③の観察)。濃いセル
+   * だけを点として描く。濃さは点の色の明るさに載せる。物理には触らない。
+   */
+  const smokeGeometry = new THREE.BufferGeometry();
+  const smokePoints = new THREE.Points(
+    smokeGeometry,
+    new THREE.PointsMaterial({
+      size: 0.03,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+    }),
+  );
+  smokePoints.visible = false;
+  scene.add(smokePoints);
+  /** 煙の点を作り直す(セル数が変わり得るので毎回張り直す)。 */
+  function updateSmokeOverlay(currentWorld: WasmWorld): void {
+    const raw = currentWorld.grid_fluid_3d_smoke_points_f32(1, 0.01);
+    const count = Math.floor(raw.length / 4);
+    if (count === 0) {
+      smokePoints.visible = false;
+      sceneViewElement.dataset.smoke = "false";
+      return;
+    }
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    let peak = 0;
+    for (let n = 0; n < count; n += 1) {
+      const d = raw[n * 4 + 3];
+      if (d > peak) peak = d;
+    }
+    const scale = peak > 0 ? 1 / peak : 1;
+    for (let n = 0; n < count; n += 1) {
+      positions[n * 3] = raw[n * 4];
+      positions[n * 3 + 1] = raw[n * 4 + 1];
+      positions[n * 3 + 2] = raw[n * 4 + 2];
+      // 薄いところも見えるように、濃さは 0.35 から上へ効かせる。
+      const tone = 0.35 + 0.65 * Math.min(1, raw[n * 4 + 3] * scale);
+      colors[n * 3] = tone;
+      colors[n * 3 + 1] = tone;
+      colors[n * 3 + 2] = tone;
+    }
+    smokeGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    smokeGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    smokeGeometry.computeBoundingSphere();
+    smokePoints.visible = true;
+    sceneViewElement.dataset.smoke = "true";
+  }
+
   // **格子流体の速度場オーバーレイ(増分L)**。セルごとに`ArrowHelper`を作ると
   // 数百オブジェクトになるので、**1本の`LineSegments`**で全ベクトルを描く
   // (頂点2つで1本の線分。矢じりは付けない縮約——密なベクトル場では矢じりが
@@ -6429,6 +6494,7 @@ async function setUpSceneView(
     expand(gasCloud.points);
     expand(brownianCloud.points);
     expand(fluidPoints);
+    expand(smokePoints);
     // **動く物がひとつも無いときは、固定の物で画角を決める**。
     //
     // ここで null を返していたので、自分で置いた物を Static(固定)にした
@@ -9900,6 +9966,7 @@ async function setUpSceneView(
     // LineSegmentsの頂点バッファへ直接書き込む(セルごとに`ArrowHelper`を
     // 作ると数百オブジェクトになるため、1本のジオメトリで描く)。
     updateGridFluidOverlay(world);
+    updateSmokeOverlay(world);
 
     // **群3で追加したドメインの描画**。それまで Scene View に一切現れず
     // Probe Graphs でしか観測できなかった(ソフトボディ・天体)、あるいは

@@ -867,7 +867,9 @@ export const GUIDED_CATEGORIES: Category[] = [
           },
         ],
         readouts: [
-          { probe: 0, label: "平均の上下の流れ", digits: 4 },
+          // 単位が抜けていて、グラフの凡例には m/s が付いている隣で数字だけが
+          // 並んでいた(利用者役③の観察)。
+          { probe: 0, label: "平均の上下の流れ", unit: "m/s", digits: 4 },
           { probe: 1, label: "熱源の温度", format: celsius(), graph: CELSIUS_GRAPH },
         ],
       },
@@ -1558,6 +1560,10 @@ export const GUIDED_CATEGORIES: Category[] = [
           "ニュートン力学だけなら、楕円の向きは動かないはずです。",
           "一般相対論の補正を入れると、ゆっくり回ります(近日点移動)。",
           "水星で実際に観測され、相対論の証拠になった現象です。",
+          // 距離を「億 km」で書いていたので、実際は 0.5 前後で動いている値が
+          // 「0.000 億 km」に潰れ、しらべる人には何も読めなかった(利用者役③の
+          // 観察)。この場面は縮尺を落とした模型なので、そう書いて素の値を出す。
+          "この場面は縮尺を落とした模型です(光の速さも 100)。距離や速さは、その世界での値としてお読みください。",
         ],
         view: "graph",
         pace: 240,
@@ -1588,13 +1594,12 @@ export const GUIDED_CATEGORIES: Category[] = [
             probes: [0, 1],
             derive: hypot,
             label: "中心からの距離",
-            format: okuKm,
-            graph: OKU_KM_GRAPH,
+            digits: 3,
           },
         ],
         series: {
-          0: { label: "横の位置", ...OKU_KM_GRAPH },
-          1: { label: "縦の位置", ...OKU_KM_GRAPH },
+          0: { label: "横の位置" },
+          1: { label: "縦の位置" },
         },
       },
     ],

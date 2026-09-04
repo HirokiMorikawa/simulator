@@ -222,6 +222,23 @@ function sceneFileContent(file: string): string | null {
  * わたる。秒で固定表示すると、気体の箱は永遠に「0.00 秒」、太陽系は
  * 「31554896.93 秒」になり、どちらも**動いていないのと区別が付かない**。
  */
+/**
+ * 数値をパネルに書く形にする。
+ *
+ * `toFixed` だけで書いていたので、インクの広がり(1.5e-22 → 1.9e-17)や天体の
+ * 距離のように**桁が離れた量**が、動いているのに「0.0000」のまま止まって見えた
+ * (利用者役③の観察)。書いた桁に何も現れない値と、桁が多すぎて読めない値は、
+ * 指数で書く。
+ */
+export function readoutNumber(value: number, digits: number): string {
+  if (!Number.isFinite(value)) return "—";
+  const abs = Math.abs(value);
+  if (abs !== 0 && (abs < 0.5 * 10 ** -digits || abs >= 1e7)) {
+    return value.toExponential(2);
+  }
+  return value.toFixed(digits);
+}
+
 export function formatDuration(seconds: number, scale = 1): string {
   const t = Math.abs(seconds);
   // **単位はシーンの時間スケールで決める**。値そのもので切り替えると、同じ
@@ -2021,7 +2038,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               ? "もう在りません"
               : readout.format
                 ? readout.format(value)
-                : `${value.toFixed(readout.digits ?? 2)}${readout.unit ? ` ${readout.unit}` : ""}`;
+                : `${readoutNumber(value, readout.digits ?? 2)}${readout.unit ? ` ${readout.unit}` : ""}`;
         }
       }
 

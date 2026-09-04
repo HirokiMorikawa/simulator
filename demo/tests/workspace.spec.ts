@@ -1216,6 +1216,70 @@ test("数値は、途中で折り返さない", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+test("真空にしても、落ちる速さが数値で出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d7-terminal"]');
+  await page.waitForTimeout(1500);
+  await page.click("#knob-air button:has-text('真空')");
+
+  // 密度 0 では Re=0 → Cd=24/Re=∞ となり、抗力が NaN になって速さが数値で
+  // なくなっていた(利用者役③)。真空なら抗力ゼロ、つまり素の自由落下。
+  const speedNode = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(
+      async () => Number.parseFloat((await speedNode.textContent()) ?? "NaN"),
+      { timeout: 20_000 },
+    )
+    .toBeGreaterThan(10);
+
+  // 自由落下 v = g t と噛み合う。
+  const seconds = await elapsedSeconds(page);
+  const speed = Number.parseFloat((await speedNode.textContent()) ?? "NaN");
+  expect(speed).toBeGreaterThan(9.0 * seconds - 3);
+  expect(speed).toBeLessThan(9.81 * seconds + 3);
+  expect(errors).toEqual([]);
+});
+
+test("3D の煙が、舞台に描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d14c-smoke-3d"]');
+
+  // 煙は格子の中の数値としてしか存在せず、舞台は最初から最後まで真っ暗だった
+  // ——「まん中の 3D を見てください」と案内している隣で何も映らなかった
+  // (利用者役③)。
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-smoke",
+    "true",
+    { timeout: 20_000 },
+  );
+  expect(errors).toEqual([]);
+});
+
+test("桁の離れた値が、0 に潰れない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d31-diffusion-ink"]');
+
+  // 実際は 1.5e-22 → 1.9e-17 と 5 桁動いているのに、パネルは「0.0000」の
+  // まま止まって見えた(利用者役③)。
+  await expect
+    .poll(
+      async () =>
+        (await page.locator('#context dd[data-probe="0"]').textContent()) ?? "",
+      { timeout: 20_000 },
+    )
+    .toMatch(/e[+-]?\d/);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
