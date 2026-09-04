@@ -7,7 +7,12 @@ import init, {
   sketch_extrude_shape_json,
 } from "../pkg/sim_wasm.js";
 import "./style.css";
-import { setUpWorkspace, type WorkspaceApi, type WorkspaceApiRef } from "./workspace";
+import {
+  formatDuration,
+  setUpWorkspace,
+  type WorkspaceApi,
+  type WorkspaceApiRef,
+} from "./workspace";
 
 // 統合エディタ(docs/23-frontend/01-editor.md)の骨格増分。
 //
@@ -4360,35 +4365,41 @@ function signedExp(v: number): number {
 }
 
 /**
- * 横軸に添える時刻。秒のまま出すと桁が読めない領域がある(太陽系儀は 1 step
- * が 31555 秒で、数十万秒がすぐ並ぶ)ので、大きくなったら分/時間/日/年に
- * 持ち替える。単位が変わっても指しているのは同じ**経過時間**。
- */
-/**
  * **軸ぜんぶを同じ単位で書くための整形**。
  *
- * 目盛りごとに `formatSeconds` を呼ぶと、左端が「8.77時間」で右端が「149.37日」
+ * 目盛りごとに単位を選ぶと、左端が「8.77時間」で右端が「149.37日」
  * のように**1本の軸に別々の単位**が並ぶ(利用者役③の観察)。軸の単位はいちばん
  * 大きい値で決めて、全部の目盛りをその単位で書く。
  */
-function timeAxisFormatter(maxSeconds: number): (seconds: number) => string {
-  const magnitude = Math.abs(maxSeconds);
+function timeAxisFormatter(
+  maxSeconds: number,
+  stepSeconds: number,
+): (seconds: number) => string {
+  const t = Math.abs(maxSeconds);
+  // 単位の切れ目は `formatDuration`(右パネルの「経過した時間」)と同じにする。
+  // 別々に決めていたときは、同じ画面に「373.00 ピコ秒」と「0.4ns」が並んだ
+  // (利用者役③の観察)。人の尺度で進むシーンが秒より下へ落ちない規則も同じ。
+  const human = stepSeconds >= 1e-4;
   const pick: [number, string] =
-    magnitude >= 31_557_600
-      ? [31_557_600, "年"]
-      : magnitude >= 86_400
-        ? [86_400, "日"]
-        : magnitude >= 3_600
-          ? [3_600, "時間"]
-          : magnitude >= 60
+    t >= 3.155e7
+      ? [3.155e7, "年"]
+      : t >= 86400
+        ? [86400, "日"]
+        : t >= 3600
+          ? [3600, "時間"]
+          : t >= 60
             ? [60, "分"]
-            : magnitude >= 0.01 || magnitude === 0
-              ? [1, "s"]
-              : magnitude >= 1e-5
-                ? [1e-3, "ms"]
-                : [1e-6, "µs"];
+            : human || t >= 1
+              ? [1, "秒"]
+              : t >= 1e-3
+                ? [1e-3, "ミリ秒"]
+                : t >= 1e-6
+                  ? [1e-6, "マイクロ秒"]
+                  : t >= 1e-9
+                    ? [1e-9, "ナノ秒"]
+                    : [1e-12, "ピコ秒"];
   const [scale, unit] = pick;
-  return (seconds: number) => `${(seconds / scale).toFixed(2)}${unit}`;
+  return (seconds: number) => `${(seconds / scale).toFixed(2)} ${unit}`;
 }
 
 /**
@@ -4442,18 +4453,34 @@ function friendlyProbeLabel(raw: string): string {
   return raw;
 }
 
-function formatSeconds(seconds: number): string {
-  const magnitude = Math.abs(seconds);
-  if (magnitude >= 31_557_600) return `${(seconds / 31_557_600).toFixed(2)}年`;
-  if (magnitude >= 86_400) return `${(seconds / 86_400).toFixed(2)}日`;
-  if (magnitude >= 3_600) return `${(seconds / 3_600).toFixed(2)}時間`;
-  if (magnitude >= 60) return `${(seconds / 60).toFixed(2)}分`;
-  if (magnitude >= 0.01 || magnitude === 0) return `${seconds.toFixed(2)}s`;
-  // 1/100 秒より短いところは**ミリ秒**で書く。指数表記(`8.3e-3s`)は
-  // 何秒なのかすぐ読めない、と書かれた(利用者役②の観察)。
-  if (magnitude >= 1e-5) return `${(seconds * 1000).toFixed(1)}ms`;
-  return `${(seconds * 1e6).toFixed(1)}µs`;
+/**
+ * 生の観測点の名前から**単位**を決める。カタログが単位を与えていない系列は
+ * 凡例に数字だけが並び、隣の系列には単位が付いている、という不揃いになって
+ * いた(利用者役③の観察: 「高さ(chassis): max=0.750 min=0.531」だけ単位なし)。
+ */
+function unitForProbeLabel(raw: string): string | undefined {
+  const UNITS: [RegExp, string][] = [
+    [/^BodyPos[XY]/, "m"],
+    [/^BodySpeed/, "m/s"],
+    [/^AstroPos[XY]/, "m"],
+    [/^AstroVel[XY]/, "m/s"],
+    [/^SoftBodyPos[XY]/, "m"],
+    [/^SphParticlePosY/, "m"],
+    [/^SphParticleDensity/, "kg/m³"],
+    [/^NodeTemp/, "K"],
+    [/^RodTemp/, "℃"],
+    [/^CircuitCurrent/, "A"],
+    [/^CircuitNodeVoltage/, "V"],
+    [/^GridFluid(Mean|Rms)V/, "m/s"],
+    [/^GasTemperature/, "K"],
+    [/^GasPressure/, "Pa"],
+    [/^BrownianMsd/, "m²"],
+    [/^LedgerKinetic/, "J"],
+  ];
+  for (const [pattern, unit] of UNITS) if (pattern.test(raw)) return unit;
+  return undefined;
 }
+
 
 /// 表示中の全系列をCSV文字列にする。1列目は**経過時間(秒)**。
 /// リングバッファ自体は絶対時刻を持たないので、`currentTime`(最後のサンプル
@@ -4595,6 +4622,7 @@ function setUpProbeGraph(): (
     const oldestTime = currentTime - (longest - 1) * dt;
     const rangeTime = timeAxisFormatter(
       Math.max(Math.abs(currentTime), Math.abs(oldestTime)),
+      dt,
     );
     timeRangeLabel.textContent = haveTime
       ? `t = ${rangeTime(oldestTime)} 〜 ${rangeTime(currentTime)}`
@@ -4641,7 +4669,10 @@ function setUpProbeGraph(): (
     if (haveTime) {
       const span = currentTime - oldestTime;
       // 目盛りは**軸ぜんぶで同じ単位**にする(`timeAxisFormatter` のdoc参照)。
-      const axisTime = timeAxisFormatter(Math.max(Math.abs(currentTime), Math.abs(oldestTime)));
+      const axisTime = timeAxisFormatter(
+        Math.max(Math.abs(currentTime), Math.abs(oldestTime)),
+        dt,
+      );
       outlined(axisTime(oldestTime), 3, h - 3, "#8b929c");
       outlined(axisTime(oldestTime + span / 2), w / 2, h - 3, "#8b929c", "center");
       outlined(axisTime(currentTime), w - 3, h - 3, "#8b929c", "right");
@@ -4747,7 +4778,14 @@ function setUpProbeGraph(): (
 
       const time = haveTime ? currentTime - (longest - 1 - index) * dt : null;
       const lines: string[] = [];
-      if (time !== null) lines.push(`t = ${formatSeconds(time)}`);
+      // 指した時刻も軸と同じ単位で書く(別々に決めると同じ画面で単位がばらつく)。
+      if (time !== null) {
+        const hoverTime = timeAxisFormatter(
+          Math.max(Math.abs(currentTime), Math.abs(oldestTime)),
+          dt,
+        );
+        lines.push(`t = ${hoverTime(time)}`);
+      }
       for (const { series: sr, plotMin, plotMax } of drawn) {
         const at = index - (longest - sr.history.length);
         if (at < 0 || at >= sr.history.length) continue;
@@ -9640,7 +9678,11 @@ async function setUpSceneView(
             friendlyProbeLabel(
               world.read_component("imported_probe_label_at", String(i)),
             ),
-          unit: guidedProbeUnits?.[i],
+          unit:
+            guidedProbeUnits?.[i] ??
+            unitForProbeLabel(
+              world.read_component("imported_probe_label_at", String(i)),
+            ),
           color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
           // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
           // 返す(B16、`HotPathViewBuffers`のdoc参照)——このループが呼ぶたび
@@ -9818,7 +9860,10 @@ async function setUpSceneView(
     // 公転では「t = 10318451.296 s」と桁が読めなかった——右の「経過した時間」
     // が「1.61 マイクロ秒」「117.97 日」と出ている隣で、単位がばらばらだった
     // (利用者役①の観察)。同じ言葉にそろえる。
-    timelineTime.textContent = `t = ${formatSeconds(readNumber(world, "time"))}`;
+    timelineTime.textContent = `t = ${formatDuration(
+      readNumber(world, "time"),
+      readNumber(world, "dt"),
+    )}`;
     timelineStep.textContent = `step = ${readNumber(world, "step_count").toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
     // 何のための数字か画面から分からない、と書かれた(利用者役④の観察)。

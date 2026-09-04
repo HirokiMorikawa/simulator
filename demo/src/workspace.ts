@@ -1467,8 +1467,12 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               const note = document.createElement("p");
               note.className = "card-note";
               note.id = "focus-material-note";
+              // 場面が重さを直接決めていることがある(D24 の車体は 600 kg
+              // 固定)。それを知らずに「鋼なのに密度が合わない」と読まれた
+              // ので、いまの重さの出どころも書いておく(利用者役③の観察)。
               note.textContent =
-                "材質を変えると、重さも密度から計算し直し、場面を最初から組み直します。";
+                "いまの重さは場面が直接決めていることがあります。材質を選び直すと、" +
+                "そこからは密度で計算し直し、場面を最初から組み直します。";
               body.appendChild(note);
             }
 
@@ -1622,7 +1626,15 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       input.min = String(knob.min ?? 0);
       input.max = String(knob.max ?? 10);
       input.step = String(knob.step ?? 1);
+      // **帯が指す値と、中身の値をずらさない**。範囲入力は目盛りに乗らない値を
+      // 表示のときに丸めるので、既定値が目盛りから外れていると「帯は 75 を
+      // 指しているのに、シミュレーションは 77 で走っている」という食い違いが
+      // 起きる(利用者役③の観察)。表示された値を、そのまま中身にも書き戻す。
       input.value = String(knobValues[knob.id] ?? knob.value);
+      const snapped = Number(input.value);
+      if (Number.isFinite(snapped) && knobValues[knob.id] !== snapped) {
+        knobValues[knob.id] = snapped;
+      }
       input.id = `knob-${knob.id}`;
       label.htmlFor = input.id;
       const output = document.createElement("output");

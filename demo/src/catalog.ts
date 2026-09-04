@@ -920,7 +920,10 @@ export const GUIDED_CATEGORIES: Category[] = [
             max: 95,
             step: 5,
             unit: "℃",
-            value: 77,
+            // 目盛りは 40 から 5 きざみ。**目盛りに乗る値**を既定にする——
+            // 77 にしていたときは、帯が 75 を指しているのに中身は 77 のままで、
+            // 書き出した数値と設定表示が食い違った(利用者役③の一番の不満)。
+            value: 75,
             hint: "何度から始めても、行き着く先は部屋の温度です。",
             apply: (scene, value) => {
               const node = scene.thermal?.nodes?.[0];
@@ -1694,7 +1697,8 @@ export const GUIDED_CATEGORIES: Category[] = [
             max: 360,
             step: 10,
             unit: "K",
-            value: 293,
+            // 250 から 10 きざみの目盛りに乗る値にする(上と同じ理由)。
+            value: 290,
             hint: "温度が高いほど分子の蹴り方が強くなり、粒はよく動きます。",
             apply: (scene, value) => {
               const thermal = scene.thermal;

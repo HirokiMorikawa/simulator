@@ -672,7 +672,10 @@ test("見えている物が選べない場面では、その理由を言う", as
 
   // 横軸は**軸ぜんぶで同じ単位**(左端が「時間」で右端が「日」になっていた)。
   const range = (await page.locator("#probe-time-range").textContent()) ?? "";
-  const units = [...range.matchAll(/[0-9.]+(年|日|時間|分|s|ms|µs)/g)].map((m) => m[1]);
+  // 単位の書き方は右パネルの「経過した時間」と同じ日本語(空白を挟む)。
+  const units = [
+    ...range.matchAll(/[0-9.]+\s*(年|日|時間|分|秒|ミリ秒|マイクロ秒|ナノ秒|ピコ秒)/g),
+  ].map((m) => m[1]);
   expect(units.length).toBe(2);
   expect(units[0]).toBe(units[1]);
   expect(errors).toEqual([]);
@@ -735,12 +738,58 @@ test("グラフに、プログラムの変数名を出さない", async ({ page 
 
   // 時間の表示も、右の「経過した時間」と同じ言葉にそろえる。
   await page.keyboard.press("Control+k");
-  await page.click('.palette-row[data-experiment-id="d25-brownian"]');
+  await page.click('.palette-row[data-experiment-id="d30-gas-box"]');
   await expect
     .poll(async () => (await page.locator("#timeline-time").textContent()) ?? "", {
       timeout: 15_000,
     })
-    .toContain("µs");
+    .toContain("ピコ秒");
+  expect(errors).toEqual([]);
+});
+
+test("つまみが指す値と、走っている値が食い違わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+
+  // 範囲入力は目盛りに乗らない既定値を表示のときに丸める。帯が 75 を指して
+  // いるのに中身は 77 のまま、という食い違いを残さない。
+  const shown = Number(await page.locator("#knob-temperature").inputValue());
+  await expect
+    .poll(
+      async () =>
+        Number.parseFloat(
+          (await page.locator('#context dd[data-probe="0"]').textContent()) ?? "0",
+        ),
+      { timeout: 15_000 },
+    )
+    .toBeLessThanOrEqual(shown + 0.5);
+  expect(errors).toEqual([]);
+});
+
+test("時間の単位が、画面のどこでも同じ", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d30-gas-box"]');
+
+  // 右は「373.00 ピコ秒」なのに下とグラフ軸は「0.4ns」、が起きていた。
+  const unitOf = (text: string) =>
+    text.match(/(年|日|時間|分|秒|ミリ秒|マイクロ秒|ナノ秒|ピコ秒)/)?.[1];
+  await expect
+    .poll(async () => (await page.locator("#timeline-time").textContent()) ?? "", {
+      timeout: 15_000,
+    })
+    .toContain("ピコ秒");
+  const elapsed = (await page.locator("#readout-time").textContent()) ?? "";
+  const timeline = (await page.locator("#timeline-time").textContent()) ?? "";
+  const range = (await page.locator("#probe-time-range").textContent()) ?? "";
+  expect(unitOf(timeline)).toBe(unitOf(elapsed));
+  expect(unitOf(range)).toBe(unitOf(elapsed));
   expect(errors).toEqual([]);
 });
 
