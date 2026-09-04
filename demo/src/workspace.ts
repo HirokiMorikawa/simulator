@@ -184,6 +184,15 @@ const ANALYSIS_READABLE = 1.3;
  */
 const AUTORUN_BELOW = 2.5;
 
+/**
+ * **場から退いた剛体の目印**。
+ *
+ * 消えた物(融け切った氷など)は、内部では `y = -1e9 m` の遠方へ退避させられる。
+ * その値を数字として出すと「-1,000,000,000.000 m」になり、壊れた画面にしか
+ * 見えない(利用者役②の観察)。この桁に達したら、値ではなく状態として書く。
+ */
+const RETIRED_BODY_MAGNITUDE = 1e8;
+
 const REVEAL = {
   analysis: 1.2, // グラフ
   outline: 1.6, // シーンの一覧
@@ -2002,9 +2011,17 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           }
           const values = sources.map((i) => api.probeValue(i));
           const value = readout.derive ? readout.derive(values) : values[0];
-          node.textContent = readout.format
-            ? readout.format(value)
-            : `${value.toFixed(readout.digits ?? 2)}${readout.unit ? ` ${readout.unit}` : ""}`;
+          // **無くなった物の値は、数字として出さない**。融け切った氷のように
+          // 場から退いた剛体は、内部では遠く(-1e9 m)へ退避させられる。その値が
+          // そのまま「氷の高さ -1,000,000,000.000 m」と出て、壊れたとしか読め
+          // なかった(利用者役②の観察)。退避先の桁に達した値は、そう言う。
+          node.textContent = !Number.isFinite(value)
+            ? "—"
+            : Math.abs(value) >= RETIRED_BODY_MAGNITUDE
+              ? "もう在りません"
+              : readout.format
+                ? readout.format(value)
+                : `${value.toFixed(readout.digits ?? 2)}${readout.unit ? ` ${readout.unit}` : ""}`;
         }
       }
 

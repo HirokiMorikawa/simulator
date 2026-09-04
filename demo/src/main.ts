@@ -6571,7 +6571,12 @@ async function setUpSceneView(
     // 1cm の磁石が落ちるだけの場面(D21)は数ピクセルの点にしかならず「ほぼ
     // 真っ暗」と書かれた(利用者役①の観察)。35 なら約5%——まわりが見える
     // ことは保ちつつ、対象が点にならない線として実測で選んだ。
-    const APPARENT_MIN = 35;
+    // 35 では、走り続ける車のように**対象と原点が離れていく**場面で、対象が
+    // 画面の高さの 3% ほどの点にしかならなかった(利用者役②の観察:「車が画面
+    // の端の小さな点になっていて、まともに見えない」)。16 なら画面の高さの
+    // 6〜7% ——まわりが見えることは保ちつつ、何が走っているのか分かる大きさ。
+    // 全体が入る場面では `fit` の方が小さいので、この上限は効かない。
+    const APPARENT_MIN = 16;
     const fit = radius * 3.6;
     const cap = Math.max(movingRadius * 6, movingRadius * APPARENT_MIN);
     const desired = Math.min(fit, cap);

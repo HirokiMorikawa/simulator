@@ -644,6 +644,58 @@ test("つまみは、壊れた結果しか出ない値を渡さない", async ({
   expect(errors).toEqual([]);
 });
 
+test("つまみの端でも、数値が発散しない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d17-piston"]');
+
+  // 2.0 m/s まで押せたときは気体がほぼ 0 まで潰れて圧力が発散し、位置が
+  // -5.4e7 m、速さが 2.1e7 m/s という壊れた数字になった(利用者役②)。
+  const knob = page.locator("#knob-push");
+  await expect(knob).toHaveAttribute("max", "1.5");
+  await knob.fill("1.5");
+  await knob.dispatchEvent("change");
+  await page.waitForTimeout(6000);
+  const values = await page.locator("#context .readouts dd").allTextContents();
+  for (const text of values) {
+    const n = Number.parseFloat(text.replace(/[^0-9.eE+-]/g, ""));
+    if (Number.isFinite(n)) expect(Math.abs(n)).toBeLessThan(1e5);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("無くなった物の値を、壊れた数字で出さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d18b-ice-melts"]');
+  await page.waitForTimeout(800);
+
+  // 融け切った氷は内部で遠方(-1e9 m)へ退避する。その値がそのまま
+  // 「氷の高さ -1,000,000,000.000 m」と出ていた(利用者役②)。
+  await page.evaluate(() => {
+    const r = document.querySelector<HTMLInputElement>(
+      '.knob input[type="range"]',
+    );
+    if (!r) return;
+    r.value = r.max;
+    r.dispatchEvent(new Event("input", { bubbles: true }));
+    r.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.click('button:has-text("はやい")');
+  await expect
+    .poll(
+      async () =>
+        (await page.locator("#context .readouts").textContent()) ?? "",
+      { timeout: 40_000 },
+    )
+    .toContain("もう在りません");
+  expect(errors).toEqual([]);
+});
+
 test("時間の帯には、何をするものか書いてある", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
