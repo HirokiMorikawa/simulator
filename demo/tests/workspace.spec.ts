@@ -790,6 +790,16 @@ test("時間の単位が、画面のどこでも同じ", async ({ page }) => {
   const range = (await page.locator("#probe-time-range").textContent()) ?? "";
   expect(unitOf(timeline)).toBe(unitOf(elapsed));
   expect(unitOf(range)).toBe(unitOf(elapsed));
+
+  // まだ 1 step も進んでいない瞬間でも食い違わない。「0 秒」と決め打ちして
+  // いたので、開いた直後だけ右が「0 秒」・下が「0.00 ピコ秒」になっていた
+  // (遅い機械の CI で実際に踏んだ)。
+  await page.click("#btn-restart");
+  await expect
+    .poll(async () => (await page.locator("#readout-time").textContent()) ?? "", {
+      timeout: 10_000,
+    })
+    .toContain("ピコ秒");
   expect(errors).toEqual([]);
 });
 

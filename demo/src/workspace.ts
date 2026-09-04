@@ -220,22 +220,26 @@ export function formatDuration(seconds: number, scale = 1): string {
   // (利用者役の観察)。人の尺度で進むシーン(1 step が 1e-4 秒より粗い)は
   // 常に秒より上の単位で書き、分子や公転のように桁が離れたシーンだけ
   // それぞれの単位系に入る。
-  if (t === 0) return "0 秒";
+  // **0 のときも、その場面の単位で書く**。「0 秒」と決め打ちしていたので、
+  // 分子の場面(ピコ秒で進む)を開いた瞬間だけ、右の「経過した時間」が
+  // 「0 秒」、下の時間の帯が「0.00 ピコ秒」と食い違って見えた。値からは
+  // 単位を選べないので、そのときは**時間の刻み**から選ぶ。
+  const pick = t === 0 ? Math.abs(scale) : t;
   if (scale >= 1e-4) {
-    if (t < 60) return `${seconds.toFixed(2)} 秒`;
-    if (t < 3600) return `${(seconds / 60).toFixed(2)} 分`;
-    if (t < 86400) return `${(seconds / 3600).toFixed(2)} 時間`;
-    if (t < 3.155e7) return `${(seconds / 86400).toFixed(2)} 日`;
+    if (pick < 60) return `${seconds.toFixed(2)} 秒`;
+    if (pick < 3600) return `${(seconds / 60).toFixed(2)} 分`;
+    if (pick < 86400) return `${(seconds / 3600).toFixed(2)} 時間`;
+    if (pick < 3.155e7) return `${(seconds / 86400).toFixed(2)} 日`;
     return `${(seconds / 3.155e7).toFixed(2)} 年`;
   }
-  if (t < 1e-9) return `${(seconds * 1e12).toFixed(2)} ピコ秒`;
-  if (t < 1e-6) return `${(seconds * 1e9).toFixed(2)} ナノ秒`;
-  if (t < 1e-3) return `${(seconds * 1e6).toFixed(2)} マイクロ秒`;
-  if (t < 1) return `${(seconds * 1e3).toFixed(2)} ミリ秒`;
-  if (t < 60) return `${seconds.toFixed(2)} 秒`;
-  if (t < 3600) return `${(seconds / 60).toFixed(2)} 分`;
-  if (t < 86400) return `${(seconds / 3600).toFixed(2)} 時間`;
-  if (t < 3.155e7) return `${(seconds / 86400).toFixed(2)} 日`;
+  if (pick < 1e-9) return `${(seconds * 1e12).toFixed(2)} ピコ秒`;
+  if (pick < 1e-6) return `${(seconds * 1e9).toFixed(2)} ナノ秒`;
+  if (pick < 1e-3) return `${(seconds * 1e6).toFixed(2)} マイクロ秒`;
+  if (pick < 1) return `${(seconds * 1e3).toFixed(2)} ミリ秒`;
+  if (pick < 60) return `${seconds.toFixed(2)} 秒`;
+  if (pick < 3600) return `${(seconds / 60).toFixed(2)} 分`;
+  if (pick < 86400) return `${(seconds / 3600).toFixed(2)} 時間`;
+  if (pick < 3.155e7) return `${(seconds / 86400).toFixed(2)} 日`;
   return `${(seconds / 3.155e7).toFixed(2)} 年`;
 }
 
@@ -1305,7 +1309,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             const value = document.createElement("dd");
             value.id = "readout-time";
             value.dataset.seconds = "0";
-            value.textContent = "0 秒";
+            // 最初の一枚から、その場面の単位で書く(`formatDuration` の doc)。
+            value.textContent = formatDuration(0, apiRef.current?.stepSeconds() ?? 1);
             list.append(key, value);
             body.appendChild(list);
           },
@@ -1362,7 +1367,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         const timeValue = document.createElement("dd");
         timeValue.id = "readout-time";
         timeValue.dataset.seconds = "0";
-        timeValue.textContent = "0 秒";
+        timeValue.textContent = formatDuration(0, apiRef.current?.stepSeconds() ?? 1);
         list.append(timeKey, timeValue);
         // 「動きが止まった時刻」は**止まったと分かってから**現れる。最初から
         // 空欄で置いておくと、埋まらない欄が気になって現象から目が離れる。
