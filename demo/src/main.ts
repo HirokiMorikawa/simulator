@@ -9364,6 +9364,7 @@ async function setUpSceneView(
   // スナップショット予算」既定1s間隔・リングバッファN=8面)。ドラッグ中
   // (`scrubbing`)は`render()`側からスクラバのmax/valueを触らない——そうしないと
   // 毎フレームの「最新に追従」更新がユーザーのドラッグ位置を上書きしてしまう。
+  const timelineHint = document.getElementById("timeline-hint");
   const scrubber = document.getElementById(
     "timeline-scrubber",
   ) as HTMLInputElement;
@@ -9992,8 +9993,26 @@ async function setUpSceneView(
     playModeBadge.dataset.mode = badgeMode;
 
     if (!scrubbing) {
-      const latestIndex = Math.max(readNumber(world, "snapshot_count") - 1, 0);
+      const snapshotCount = readNumber(world, "snapshot_count");
+      const latestIndex = Math.max(snapshotCount - 1, 0);
       scrubber.max = String(latestIndex);
+      // **どこまで戻れるのかを書く**。記録は 1 秒ごとの直近 8 個しか残らない
+      // ので、帯の左端は 0 秒ではなく「いちばん古い記録」。それを言わずに
+      // いたので、帯の 3 割の位置を押したのに 9 秒が出る、位置と時刻が
+      // 対応していない、と読まれた(利用者役②の観察)。実際に戻れる範囲を
+      // そのまま出せば、位置と時刻は素直に結びつく。
+      if (timelineHint) {
+        timelineHint.textContent =
+          snapshotCount > 1
+            ? `⏪ つまむと ${formatDuration(
+                readNumber(world, "snapshot_time_at", "0"),
+                readNumber(world, "dt"),
+              )} 〜 ${formatDuration(
+                readNumber(world, "snapshot_time_at", String(latestIndex)),
+                readNumber(world, "dt"),
+              )} のあいだへ戻せます`
+            : "⏪ つまむと、記録した時点へ戻せます";
+      }
       // 走らせている間は最新に追従し、止めている間は人が置いた場所に留まる
       // (`scrubberParked` のdoc参照)。
       if (playing) scrubberParked = null;

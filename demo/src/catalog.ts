@@ -213,8 +213,19 @@ function gravityKnob(): Knob {
   };
 }
 
-/** 材質。反発・摩擦・密度がまとめて変わるので、体感の差が大きい。 */
-function materialKnob(bodyName: string, label = "材質"): Knob {
+/**
+ * 材質。反発・摩擦・密度がまとめて変わるので、体感の差が大きい。
+ *
+ * `initial` は**その場面がもともと持っている材質**を渡すこと。つまみの初期値は
+ * 読み込みのたびに場面へ書き戻されるので、ここが場面と食い違うと、開いた瞬間に
+ * 材質が入れ替わる——「ゴムの球を落として、跳ね返る高さを見ます」と書いてある
+ * 実験が、鋼の球で始まっていた(利用者役②の観察)。
+ */
+function materialKnob(
+  bodyName: string,
+  label = "材質",
+  initial = "鋼(炭素鋼)",
+): Knob {
   return {
     id: "material",
     label,
@@ -227,7 +238,7 @@ function materialKnob(bodyName: string, label = "材質"): Knob {
       { label: "🫧 発泡スチロール", value: "発泡スチロール" },
       { label: "🥫 アルミ", value: "アルミニウム" },
     ],
-    value: "鋼(炭素鋼)",
+    value: initial,
     hint: "重さ・跳ね返り・すべりやすさが一度に変わります。",
     apply: (scene, value) => {
       const target = body(scene, bodyName);
@@ -317,7 +328,7 @@ export const GUIDED_CATEGORIES: Category[] = [
         pace: 120,
         prepare: addGround,
         readouts: [{ probe: 0, label: "ボールの高さ", unit: "m" }],
-        knobs: [heightKnob("clock", 20), gravityKnob()],
+        knobs: [heightKnob("ball", 20), gravityKnob()],
       },
       {
         id: "d3-bounce",
@@ -333,7 +344,7 @@ export const GUIDED_CATEGORIES: Category[] = [
         view: "3d",
         pace: 240,
         readouts: [{ probe: 0, label: "ボールの高さ", unit: "m" }],
-        knobs: [heightKnob("ball", 2), materialKnob("ball", "ボールの材質")],
+        knobs: [heightKnob("ball", 2), materialKnob("ball", "ボールの材質", "ゴム(天然)")],
       },
       {
         id: "d2-ballistic",

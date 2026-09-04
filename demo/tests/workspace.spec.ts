@@ -887,6 +887,61 @@ test("3D を引っぱっても、選んだものの札が勝手に開かない",
   expect(errors).toEqual([]);
 });
 
+test("つまみで変えた条件は、別のつまみを触っても残る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+
+  // 「落とす高さ」を 50 m にしてから重力を月へ変えると、高さだけが 20 m へ
+  // 戻っていた——高さのつまみが、名前を変えたあとのボディを指していなくて
+  // 何も起きていなかった(利用者役②)。二つの条件を重ねて確かめられない。
+  const height = page.locator("#knob-height");
+  await height.fill("50");
+  await height.dispatchEvent("change");
+  const ballHeight = async () =>
+    Number(
+      (
+        (await page.locator("#context .readouts dd").last().textContent()) ?? ""
+      ).replace(/[^0-9.]/g, ""),
+    );
+  await expect.poll(ballHeight, { timeout: 10_000 }).toBeGreaterThan(40);
+
+  await page.click("#knob-gravity button:has-text('月')");
+  // 月にしても高さは 50 m のまま。落ち方だけが変わる。
+  await expect.poll(ballHeight, { timeout: 10_000 }).toBeGreaterThan(40);
+  await expect(height).toHaveValue("50");
+  expect(errors).toEqual([]);
+});
+
+test("説明にゴムと書いてある実験は、ゴムで始まる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d3-bounce"]');
+
+  // 「ゴムの球を落として、跳ね返る高さを見ます」と書いてある隣で、つまみの
+  // 初期値が鋼を場面へ書き戻していた(利用者役②)。
+  await expect(
+    page.locator("#knob-material button.active"),
+  ).toHaveText(/ゴム/);
+  expect(errors).toEqual([]);
+});
+
+test("時間の帯は、どこまで戻れるのかを言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 記録は直近の数秒ぶんしか残らないので、帯の左端は 0 秒ではない。それを
+  // 言わずにいたので「位置と時刻が対応していない」と読まれた(利用者役②)。
+  await expect
+    .poll(async () => (await page.locator("#timeline-hint").textContent()) ?? "", {
+      timeout: 20_000,
+    })
+    .toMatch(/つまむと .+ 〜 .+ のあいだへ戻せます/);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
