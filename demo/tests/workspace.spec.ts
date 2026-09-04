@@ -678,6 +678,45 @@ test("見えている物が選べない場面では、その理由を言う", as
   expect(errors).toEqual([]);
 });
 
+test("選んだものの札から、置き場所を数値で決められる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 座標の欄は Inspector のずっと下にあり、見つけられないまま「2つの物を
+  // ぶつける」を諦めていた。目の前の札で決められるようにした。
+  const x = page.locator("#focus-pos-x");
+  await expect(x).toBeVisible();
+  await x.fill("3");
+  await x.dispatchEvent("change");
+  await expect.poll(async () => Number(await x.inputValue()), { timeout: 10_000 })
+    .toBeCloseTo(3, 2);
+  expect(errors).toEqual([]);
+});
+
+test("とめている間なら、材質を変えられる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 走らせて、止める。「止めているのに『とめている間だけ』と断られる」を
+  // 残さない。
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  await page.selectOption("#focus-material", "ゴム(天然)");
+  await expect
+    .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
+    .toBe("ゴム(天然)");
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

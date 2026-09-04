@@ -35,7 +35,9 @@
         <!-- 中: 走行。粒度に関わらず常にここにある(何度も探させない)。 -->
         <div id="transport" class="transport" role="group" aria-label="実行">
           <button id="btn-run" class="run-main"><span aria-hidden="true">▶</span> うごかす</button>
-          <button id="btn-restart" title="いまの設定のまま、最初からやり直す">
+          <!-- 何が失われるのかを書く。時間だけが戻ると思って押したら、自分で
+               足した物ごと消えた、と書かれた(利用者役④の観察)。 -->
+          <button id="btn-restart" title="この実験を最初の状態から作り直します(自分で足した物は消えます)">
             <span aria-hidden="true">↺</span> はじめから
           </button>
           <div id="run-speed" class="run-speed" role="group" aria-label="進む速さ">

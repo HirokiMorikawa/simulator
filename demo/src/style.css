@@ -2438,3 +2438,23 @@ kbd {
   flex: 1;
   min-width: 0;
 }
+
+
+/* 「選んだもの」の札の置き場所。3 欄を等幅に並べる。 */
+.focus-place {
+  margin-top: var(--space-2);
+}
+.focus-place > label {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-1);
+}
+.focus-place-fields {
+  display: flex;
+  gap: var(--space-2);
+}
+#app .focus-place-fields input {
+  flex: 1;
+  min-width: 0;
+}

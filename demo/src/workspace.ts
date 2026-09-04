@@ -102,6 +102,11 @@ export type WorkspaceApi = {
    * 走行中はできない(`false` を返す)。
    */
   setBodyMaterial: (index: number, materialName: string) => boolean;
+  /**
+   * 選んだ物を**その場所へ置き直す**。組み立てるときの位置決めなので、
+   * 走行中でも効く(Gizmo のドラッグと同じ扱い)。
+   */
+  setBodyPosition: (index: number, x: number, y: number, z: number) => boolean;
   /** 選べる材質の名前(スポーンパレットと同じ並び)。 */
   materialNames: () => string[];
   /** 選択中の剛体(無ければ -1)。 */
@@ -997,6 +1002,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
 
   let readoutNodes: { readout: NonNullable<Experiment["readouts"]>[number]; node: HTMLElement }[] = [];
   let focusNodes: Record<string, HTMLElement> = {};
+  /** 「選んだもの」の置き場所の入力欄(打っている最中は書き換えない)。 */
+  let focusPositionInputs: HTMLInputElement[] = [];
 
   /**
    * **作ったものが消えない**ようにするカード(利用者役④の一番の不満:
@@ -1088,6 +1095,11 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             remove.textContent = "消す";
             remove.setAttribute("aria-label", `${entry.name} を消す`);
             remove.addEventListener("click", () => {
+              // 取り消せない操作を、押した瞬間に実行しない(元に戻せるのか
+              // 分からず不安になった、と書かれた——利用者役④の観察)。
+              if (!window.confirm(`「${entry.name}」を消します。元には戻せません。`)) {
+                return;
+              }
               writeSavedScenes(readSavedScenes().filter((e) => e.name !== entry.name));
               renderContext();
             });
@@ -1169,6 +1181,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     contextBody.innerHTML = "";
     readoutNodes = [];
     focusNodes = {};
+    focusPositionInputs = [];
 
     if (!current) {
       // カタログの実験ではなく、**いまそこにある世界**を見ている状態
@@ -1450,9 +1463,41 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               const note = document.createElement("p");
               note.className = "card-note";
               note.id = "focus-material-note";
-              note.textContent = "材質を変えると、重さも密度から計算し直します。";
+              note.textContent =
+                "材質を変えると、重さも密度から計算し直し、場面を最初から組み直します。";
               body.appendChild(note);
             }
+
+            // **置き場所も、この札で決められる**。数値の欄は Inspector の
+            // ずっと下にあり、見つけられないまま「2 つの物をぶつける」という
+            // 一番やりたかったことを諦めていた(利用者役④の一番の不満)。
+            const place = document.createElement("div");
+            place.className = "focus-place";
+            const placeLabel = document.createElement("label");
+            placeLabel.textContent = "置き場所 x, y, z [m]";
+            placeLabel.htmlFor = "focus-pos-x";
+            place.appendChild(placeLabel);
+            const fields = document.createElement("div");
+            fields.className = "focus-place-fields";
+            const inputs = (["x", "y", "z"] as const).map((axis, i) => {
+              const input = document.createElement("input");
+              input.type = "number";
+              input.step = "0.1";
+              input.id = `focus-pos-${axis}`;
+              input.value = readout.position[i].toFixed(3);
+              input.dataset.axis = axis;
+              fields.appendChild(input);
+              return input;
+            });
+            const push = () => {
+              const [x, y, z] = inputs.map((input) => Number(input.value));
+              if (![x, y, z].every((v) => Number.isFinite(v))) return;
+              api.setBodyPosition(selected, x, y, z);
+            };
+            for (const input of inputs) input.addEventListener("change", push);
+            place.appendChild(fields);
+            body.appendChild(place);
+            focusPositionInputs = inputs;
             const actions = document.createElement("div");
             actions.className = "card-actions";
             const follow = document.createElement("button");
@@ -1788,6 +1833,23 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           }
           if (focusNodes["重さ"]) {
             focusNodes["重さ"].textContent = `${readout.mass.toFixed(3)} kg`;
+          }
+          // 置き場所の欄と材質の選びも、実際の値へ揃え直す(材質を変えた
+          // 直後にこの札だけ前の材質を出していた——利用者役④の観察)。
+          for (const [i, input] of focusPositionInputs.entries()) {
+            if (document.activeElement === input) continue;
+            const next = readout.position[i].toFixed(3);
+            if (input.value !== next) input.value = next;
+          }
+          const materialSelect = document.getElementById(
+            "focus-material",
+          ) as HTMLSelectElement | null;
+          if (
+            materialSelect &&
+            document.activeElement !== materialSelect &&
+            materialSelect.value !== readout.material
+          ) {
+            materialSelect.value = readout.material;
           }
         }
       }

@@ -6646,7 +6646,12 @@ async function setUpSceneView(
     bodyIndex: number,
     patch: (body: Record<string, unknown>) => void,
   ): boolean {
-    if (mode !== "edit") return false;
+    // **走っていなければ組み直せる**。以前は Edit モードのときだけに絞って
+    // いたので、「とめる」を押して止めた人が「材質は、とめている間だけ
+    // 変えられます」と拒まれた——止めているのに止めていないと言われる、という
+    // 一番説明のつかない断り方だった(利用者役④の観察)。組み直すと時刻は
+    // 0 に戻るので、走行中だけを断る。
+    if (mode === "play" && playing) return false;
     if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return false;
     let doc: { bodies?: Record<string, unknown>[] };
     try {
@@ -9970,6 +9975,12 @@ async function setUpSceneView(
         // 前の材質で計算した質量が居座らないように(密度から計算し直す)。
         delete b.mass_override;
       }),
+    setBodyPosition: (index, x, y, z) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      applyComponent(world, "set_body_position_at", { index, x, y, z });
+      markUnsaved();
+      return true;
+    },
     bodyReadout: (index) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return null;
       if (world.read_component("body_is_removed_at", String(index)) === "true") {
