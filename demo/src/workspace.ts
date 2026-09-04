@@ -1278,7 +1278,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         // 空欄で置いておくと、埋まらない欄が気になって現象から目が離れる。
         const settledKey = document.createElement("dt");
         settledKey.id = "readout-settled-key";
-        settledKey.textContent = "動きが止まった時刻";
+        // 判定の基準は**その場に書く**。tooltip に書いてあっても読まれない
+        // ——「止まった」の定義が画面から分からない、と書かれた(利用者役③)。
+        settledKey.textContent = "ほぼ止まった時刻(0.05 m/s 以下)";
         settledKey.title =
           "いちばん速い物の速さが 0.05 m/s を下回ったまま続いた時点です" +
           "(物理には手を加えていません——見えている値からそう読めた、というだけの表示)。";

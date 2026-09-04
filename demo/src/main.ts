@@ -1549,6 +1549,34 @@ function setUpHierarchy(
 // 同じくRust側がエラーを返す)。`updateInspectorTransformFields`は
 // `#inspector-position`等のDOM要素が無ければ何もしない null-safe 実装のため、
 // このプレースホルダ表示と両立する。
+/**
+ * **力学ボディが無い場面が、何で出来ているのかを言う**。
+ *
+ * 惑星が目の前を回っているのにクリックしても選べず、「このシーンには動く物が
+ * ありません」とだけ出ていた——見えているのに「無い」と言われ、自分の操作が
+ * 悪いのか対応していないのか画面から判断できない、と書かれた(利用者役③の
+ * 一番の不満)。「無い」ではなく「別の形で計算している」と言う。
+ */
+function describeNonBodyScene(world: WasmWorld): string {
+  const kinds: string[] = [];
+  if (world.astro_positions_f32().length > 0) {
+    kinds.push("天体(星や探査機)");
+  }
+  if (world.soft_body_positions_f32().length > 0) kinds.push("やわらかい物");
+  if (world.quantum_1d_density_f32().length > 0) kinds.push("量子の波");
+  if (world.quantum_2d_size().length === 2) kinds.push("量子の波");
+  if (world.conduction_rod_temperatures_f32().length > 0) kinds.push("棒の中の熱");
+  if (world.ising_size() > 0) kinds.push("スピンの格子");
+  if (world.fdtd_size().length === 2) kinds.push("電磁場");
+  if (kinds.length === 0) {
+    return "この場面には、つかめる物(力学ボディ)がありません。";
+  }
+  return (
+    `この場面の${kinds.join("・")}は、つかめる物(力学ボディ)ではなく` +
+    `専用の計算で動いています。だからクリックしても選べません。`
+  );
+}
+
 function renderInspectorFor(world: WasmWorld, index: number): void {
   const body = document.getElementById("inspector-body")!;
   if (index < 0 || index >= readNumber(world, "body_count")) {
@@ -1566,8 +1594,8 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     `
         : `
       <div class="empty-state">
-        <p>このシーンには動く物がありません。</p>
-        <p>起きていることはグラフのパネルか、場のパネルで観測してください。</p>
+        <p>${describeNonBodyScene(world)}</p>
+        <p>位置や速さは、下の「うごきのグラフ」と右の「いまの数値」で読めます。</p>
       </div>
     `;
     return;
@@ -4334,6 +4362,33 @@ function signedExp(v: number): number {
  * が 31555 秒で、数十万秒がすぐ並ぶ)ので、大きくなったら分/時間/日/年に
  * 持ち替える。単位が変わっても指しているのは同じ**経過時間**。
  */
+/**
+ * **軸ぜんぶを同じ単位で書くための整形**。
+ *
+ * 目盛りごとに `formatSeconds` を呼ぶと、左端が「8.77時間」で右端が「149.37日」
+ * のように**1本の軸に別々の単位**が並ぶ(利用者役③の観察)。軸の単位はいちばん
+ * 大きい値で決めて、全部の目盛りをその単位で書く。
+ */
+function timeAxisFormatter(maxSeconds: number): (seconds: number) => string {
+  const magnitude = Math.abs(maxSeconds);
+  const pick: [number, string] =
+    magnitude >= 31_557_600
+      ? [31_557_600, "年"]
+      : magnitude >= 86_400
+        ? [86_400, "日"]
+        : magnitude >= 3_600
+          ? [3_600, "時間"]
+          : magnitude >= 60
+            ? [60, "分"]
+            : magnitude >= 0.01 || magnitude === 0
+              ? [1, "s"]
+              : magnitude >= 1e-5
+                ? [1e-3, "ms"]
+                : [1e-6, "µs"];
+  const [scale, unit] = pick;
+  return (seconds: number) => `${(seconds / scale).toFixed(2)}${unit}`;
+}
+
 function formatSeconds(seconds: number): string {
   const magnitude = Math.abs(seconds);
   if (magnitude >= 31_557_600) return `${(seconds / 31_557_600).toFixed(2)}年`;
@@ -4485,8 +4540,11 @@ function setUpProbeGraph(): (
     const longest = series.reduce((m, s) => Math.max(m, s.history.length), 0);
     const haveTime = longest >= 2 && dt > 0;
     const oldestTime = currentTime - (longest - 1) * dt;
+    const rangeTime = timeAxisFormatter(
+      Math.max(Math.abs(currentTime), Math.abs(oldestTime)),
+    );
     timeRangeLabel.textContent = haveTime
-      ? `t = ${formatSeconds(oldestTime)} 〜 ${formatSeconds(currentTime)}`
+      ? `t = ${rangeTime(oldestTime)} 〜 ${rangeTime(currentTime)}`
       : "";
 
     // **目盛り線**。系列ごとに独立して正規化する設計(下記)なので共通の値軸は
@@ -4529,9 +4587,11 @@ function setUpProbeGraph(): (
     // 左端(古い)・まん中・右端(いま)に実際の時刻を置く。
     if (haveTime) {
       const span = currentTime - oldestTime;
-      outlined(formatSeconds(oldestTime), 3, h - 3, "#8b929c");
-      outlined(formatSeconds(oldestTime + span / 2), w / 2, h - 3, "#8b929c", "center");
-      outlined(formatSeconds(currentTime), w - 3, h - 3, "#8b929c", "right");
+      // 目盛りは**軸ぜんぶで同じ単位**にする(`timeAxisFormatter` のdoc参照)。
+      const axisTime = timeAxisFormatter(Math.max(Math.abs(currentTime), Math.abs(oldestTime)));
+      outlined(axisTime(oldestTime), 3, h - 3, "#8b929c");
+      outlined(axisTime(oldestTime + span / 2), w / 2, h - 3, "#8b929c", "center");
+      outlined(axisTime(currentTime), w - 3, h - 3, "#8b929c", "right");
     }
 
     // **線を全部描いてから、文字を描く**。系列ごとに「線 → その凡例」の順で

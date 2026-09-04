@@ -656,6 +656,27 @@ test("時間の帯には、何をするものか書いてある", async ({ page 
   expect(errors).toEqual([]);
 });
 
+test("見えている物が選べない場面では、その理由を言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+
+  // 惑星は目の前を回っているのに、以前は「動く物がありません」とだけ出ていた。
+  const inspector = page.locator("#inspector-body");
+  await expect(inspector).toContainText("天体");
+  await expect(inspector).toContainText("クリックしても選べません");
+  await expect(inspector).toContainText("いまの数値");
+
+  // 横軸は**軸ぜんぶで同じ単位**(左端が「時間」で右端が「日」になっていた)。
+  const range = (await page.locator("#probe-time-range").textContent()) ?? "";
+  const units = [...range.matchAll(/[0-9.]+(年|日|時間|分|s|ms|µs)/g)].map((m) => m[1]);
+  expect(units.length).toBe(2);
+  expect(units[0]).toBe(units[1]);
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {
