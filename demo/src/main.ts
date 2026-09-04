@@ -1161,6 +1161,11 @@ const HIERARCHY_AUTO_COLLAPSE_ROWS = 100;
 /** 既に一度自動で畳んだ枝(人が開き直したものを畳み直さないため)。 */
 const autoCollapsedGroups = new Set<string>();
 
+/**
+ * **いま頼んだ動き方**(まだ world が返してこないぶん)。`typeSelect` の doc 参照。
+ */
+let pendingBodyType: { index: number; kind: string } | null = null;
+
 function setUpHierarchy(
   world: WasmWorld,
   onSelect: (index: number) => void,
@@ -2640,9 +2645,14 @@ function wireInspectorEditFields(index: number): void {
   const typeSelect = document.getElementById(
     "inspector-body-type",
   ) as HTMLSelectElement | null;
-  typeSelect?.addEventListener("change", () =>
-    handlers.setBodyType(index, typeSelect.value),
-  );
+  typeSelect?.addEventListener("change", () => {
+    // **選んだ値をそのまま出しておく**。動き方の変更は次の step の頭で効く
+    // ので、止めているあいだ world はまだ前の値を返す——毎フレームの追いつき
+    // がその古い値を書き戻し、Static を選んだ直後に欄が Dynamic へ戻って
+    // 見えた。「効いていない」と読まれて当然だった(利用者役④の観察)。
+    pendingBodyType = { index, kind: typeSelect.value };
+    handlers.setBodyType(index, typeSelect.value);
+  });
   const groupInput = document.getElementById(
     "inspector-collision-group",
   ) as HTMLInputElement | null;
@@ -3034,7 +3044,19 @@ function updateInspectorRigidBodyFields(world: WasmWorld, index: number): void {
       massInput.value = mass > 0 ? mass.toPrecision(6) : "";
     }
   }
-  setIfIdle("inspector-body-type", world.read_component("body_type_at", String(index)));
+  {
+    const actual = world.read_component("body_type_at", String(index));
+    if (pendingBodyType && pendingBodyType.index === index) {
+      if (pendingBodyType.kind === actual) pendingBodyType = null;
+    } else if (pendingBodyType) {
+      // 別の物を選んだら、頼んだ値は忘れる。
+      pendingBodyType = null;
+    }
+    setIfIdle(
+      "inspector-body-type",
+      pendingBodyType ? pendingBodyType.kind : actual,
+    );
+  }
   // 材質は選び直せる欄になったので、ここでも**実際に付いている材質**へ
   // 揃え直す。走行中に変えようとして弾かれた選択が残らないようにするため。
   setIfIdle(
@@ -6351,6 +6373,20 @@ async function setUpSceneView(
     expand(gasCloud.points);
     expand(brownianCloud.points);
     expand(fluidPoints);
+    // **動く物がひとつも無いときは、固定の物で画角を決める**。
+    //
+    // ここで null を返していたので、自分で置いた物を Static(固定)にした
+    // 瞬間にカメラは一歩も動けなくなり、置き場所を数値で変えると物は画面の
+    // 外へ消えたきり、「これを追いかける」も「全体へ戻る」も効かなかった。
+    // おまけに舞台は「形のある物は出てきません」と言い張っていた(利用者役④
+    // の観察)。無限平面(床・壁)は 400 m 四方で画角を乗っ取るので、そこだけ
+    // は外す——静的な床を含めない元の理由は、これで保たれる。
+    if (!hasContent) {
+      for (const [, mesh] of bodyMeshes) {
+        if (mesh.geometry?.type === "PlaneGeometry") continue;
+        expand(mesh);
+      }
+    }
     return hasContent ? box : null;
   }
 
@@ -7759,10 +7795,29 @@ async function setUpSceneView(
   function markUnsaved() {
     hasUnsavedChanges = true;
   }
+  /**
+   * **いま在る場面と同じくらいの高さから落とす**。
+   *
+   * 置く高さは 12 m 固定だった。ふりこ(振れ幅 ±1 m ほど)に箱を一つ足すと、
+   * 12 m の空から豆粒が降ってきて、舞台のどこにも馴染まなかった(利用者役④
+   * の観察)。場面の広がりに合わせて、その少し上から落とす。何も無い場面では
+   * これまでどおり 12 m ——自由落下の手応えは、そこが気持ちいいから。
+   */
+  function spawnHeight(): number {
+    const box = contentBoundingBox();
+    if (!box) return SPAWN_HEIGHT;
+    const radius = box.getSize(new THREE.Vector3()).length() * 0.5;
+    if (!(radius > 0)) return SPAWN_HEIGHT;
+    return Math.min(SPAWN_HEIGHT, Math.max(radius * 1.5, radius + 0.5));
+  }
+
   function nextSpawnPosition(): { x: number; z: number } {
     const n = readNumber(world, "body_count") - sceneBaseBodyCount; // これまでのスポーン数
     const angle = n * 2.4; // 黄金角に近い値、重ならないようばらけさせる
-    const radius = 1.5 + n * 0.3;
+    // ばらけ方も場面の寸法に合わせる(高さだけ縮めても、横に 1.5 m 離れて
+    // いては小さな場面から外れてしまう)。
+    const scale = Math.max(spawnHeight() / SPAWN_HEIGHT, 0.05);
+    const radius = (1.5 + n * 0.3) * scale;
     return { x: Math.cos(angle) * radius, z: Math.sin(angle) * radius };
   }
 
@@ -8611,7 +8666,7 @@ async function setUpSceneView(
       const bodyIndex = applyComponent(world, "spawn_shape_json", {
         shape_json: JSON.stringify(prefab.shape),
         x,
-        y: SPAWN_HEIGHT,
+        y: spawnHeight(),
         z,
         material_name: prefab.material,
       }).index as number;
@@ -8797,7 +8852,7 @@ async function setUpSceneView(
   ] as [string, SpawnShapeKind][]) {
     document.getElementById(id)!.addEventListener("click", () => {
       const { x, z } = nextSpawnPosition();
-      spawnShapeAt(kind, x, SPAWN_HEIGHT, z);
+      spawnShapeAt(kind, x, spawnHeight(), z);
     });
   }
 

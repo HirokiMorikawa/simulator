@@ -1014,6 +1014,88 @@ test("粒が何百個もある場面でも、一覧が壁にならない", async
   expect(errors).toEqual([]);
 });
 
+test("固定にした物でも、画面から見失わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-pos-y")).toBeVisible();
+
+  // 動き方を「固定」にすると、カメラが画角を決める手がかりを失って一歩も
+  // 動けなくなり、置き場所を数値で変えた物は画面の外へ消えたきりだった。
+  // 舞台まで「形のある物は出てきません」と言い張っていた(利用者役④)。
+  await page.selectOption("#inspector-body-type", "Static");
+  // 選んだ値は、次の step で効くまでのあいだも欄に残る。
+  await expect(page.locator("#inspector-body-type")).toHaveValue("Static");
+  await page.click("#btn-run");
+  await page.waitForTimeout(700);
+  await page.click("#btn-run");
+
+  const y = page.locator("#focus-pos-y");
+  await y.fill("1.5");
+  await y.dispatchEvent("change");
+  await page.waitForTimeout(1200);
+  // 形のある物が在るのだから、そうは言わない。
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-stage-empty",
+    "false",
+  );
+  // 「全体へ戻る」は名前どおり画角も戻す。
+  await page.click("#btn-clear-selection");
+  await page.waitForTimeout(1200);
+  expect(errors).toEqual([]);
+});
+
+test("取っておけたことが、画面に出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 押しても何も変わらず、保存できたのか押し損ねたのか分からなかった
+  // (利用者役④)。名前は書き出す文書にも残す。
+  await page.fill("#input-scene-name", "わたしの落下じっけん");
+  await page.click("#btn-save-scene");
+  await expect(page.locator("#scene-save-status")).toContainText(
+    "わたしの落下じっけん",
+  );
+  const storedName = await page.evaluate(() => {
+    const raw = localStorage.getItem("simulator.scenes.saved") ?? "[]";
+    return JSON.parse(JSON.parse(raw)[0].json).name as string;
+  });
+  expect(storedName).toBe("わたしの落下じっけん");
+
+  // 名前で呼び出せる。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "わたしの");
+  await expect(page.locator(".palette-row").first()).toContainText(
+    "わたしの落下じっけん",
+  );
+  expect(errors).toEqual([]);
+});
+
+test("用意された実験に足した物は、その場面の大きさで出てくる", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d11-pendulum"]');
+  await page.waitForTimeout(1500);
+
+  // 置く高さが 12 m 固定で、振れ幅 ±1 m ほどのふりこに足した箱が、遠い空から
+  // 降ってくる豆粒にしかならなかった(利用者役④)。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-pos-y")).toBeVisible();
+  const y = Number(await page.locator("#focus-pos-y").inputValue());
+  expect(y).toBeLessThan(8);
+  expect(y).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

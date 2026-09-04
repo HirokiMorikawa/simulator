@@ -1099,6 +1099,44 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
    * 実験を読むのと同じ経路を通るので、開き直した場面は同じ物理で動く。
    * 置き場はこの端末(localStorage)と、持ち出せるファイルの 2 つ。
    */
+  /** 保存できたことの知らせ(カードを組み立てるときに出す)。 */
+  let sceneSaveNote: string | null = null;
+
+  /** いま名前欄に入っている名前(まだ保存していなくても、これを使う)。 */
+  function chosenSceneName(): string {
+    return (sceneNameDraft || ownSceneName || "").trim();
+  }
+
+  /**
+   * 場面の文書に、人が付けた名前を書き込む。
+   *
+   * 書き出したファイルは名前が `my-scene.json`、中の名前も `current` のままで、
+   * 自分が付けた名前がどこにも残らなかった(利用者役④の観察)。読み直したとき
+   * に同じ名前で戻るよう、文書そのものへ書く。壊れた文書は触らずそのまま返す。
+   */
+  function namedSceneJson(json: string, name: string): string {
+    if (!name) return json;
+    try {
+      const parsed = JSON.parse(json) as Record<string, unknown>;
+      parsed.name = name;
+      return JSON.stringify(parsed);
+    } catch {
+      return json;
+    }
+  }
+
+  /** 場面の文書に書いてある名前(無ければ空)。 */
+  function sceneJsonName(json: string): string {
+    try {
+      const parsed = JSON.parse(json) as { name?: unknown };
+      const name = typeof parsed.name === "string" ? parsed.name.trim() : "";
+      // 既定の作業名は「名前が付いている」とは言えない。
+      return name === "current" ? "" : name;
+    } catch {
+      return "";
+    }
+  }
+
   function savedScenesCard(): CardSpec {
     return {
       id: "my-scenes",
@@ -1136,7 +1174,11 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             (sceneNameDraft || nameInput.value).trim() ||
             `場面 ${new Date().toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
           const scenes = readSavedScenes().filter((entry) => entry.name !== name);
-          scenes.unshift({ name, savedAt: new Date().toISOString(), json });
+          scenes.unshift({
+            name,
+            savedAt: new Date().toISOString(),
+            json: namedSceneJson(json, name),
+          });
           const error = writeSavedScenes(scenes);
           if (error) {
             status.textContent = error;
@@ -1145,6 +1187,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           }
           ownSceneName = name;
           sceneNameDraft = name;
+          sceneSaveNote = `「${name}」を取っておきました。⌘K で名前を打つと、いつでも開けます。`;
           try {
             localStorage.setItem(LAST_OWN_SCENE_KEY, name);
           } catch {
@@ -1159,6 +1202,22 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         const status = document.createElement("p");
         status.className = "card-note";
         status.id = "scene-save-status";
+        // **取っておけたことを、画面で言う**。押しても何も変わらなかったので、
+        // 保存できたのか押し損ねたのか分からず、「二度と開けないのでは」と
+        // 読まれた(利用者役④の観察)。カードは保存のたびに組み直されるので、
+        // 知らせは変数に置いて、組み立てるときに出す。
+        if (sceneSaveNote) {
+          const shown = sceneSaveNote;
+          status.textContent = shown;
+          status.dataset.tone = "ok";
+          window.setTimeout(() => {
+            if (sceneSaveNote === shown) sceneSaveNote = null;
+            if (status.isConnected && status.textContent === shown) {
+              status.textContent = "";
+              delete status.dataset.tone;
+            }
+          }, 6000);
+        }
         body.appendChild(status);
 
         const scenes = readSavedScenes();
@@ -1204,11 +1263,13 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         download.addEventListener("click", () => {
           const json = apiRef.current?.exportSceneJson();
           if (!json) return;
-          const blob = new Blob([json], { type: "application/json" });
+          const blob = new Blob([namedSceneJson(json, chosenSceneName())], {
+            type: "application/json",
+          });
           const url = URL.createObjectURL(blob);
           const anchorElement = document.createElement("a");
           anchorElement.href = url;
-          anchorElement.download = `${ownSceneName || "my-scene"}.json`;
+          anchorElement.download = `${chosenSceneName() || "my-scene"}.json`;
           anchorElement.click();
           URL.revokeObjectURL(url);
         });
@@ -1220,7 +1281,13 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           const file = upload.files?.[0];
           if (!file) return;
           const text = await file.text();
-          openSavedScene({ name: file.name.replace(/\.json$/, ""), savedAt: "", json: text });
+          openSavedScene({
+            // 中に書いてある名前を優先する(付けた名前で書き出しているので、
+            // 読み直したときも同じ名前で戻る)。
+            name: sceneJsonName(text) || file.name.replace(/\.json$/, ""),
+            savedAt: "",
+            json: text,
+          });
         });
         files.append(download, upload);
         body.appendChild(files);
@@ -1604,8 +1671,13 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             clear.type = "button";
             clear.id = "btn-clear-selection";
             clear.textContent = "全体へ戻る";
+            clear.title = "選ぶのをやめて、ぜんぶが入る画角へ戻します";
             clear.addEventListener("click", () => {
               api.selectBody(-1);
+              // 名前どおり**画角も戻す**。選択を外すだけだったので、置き場所を
+              // 数値で変えて物を見失った人が、押しても何も変わらないまま
+              // 詰まっていた(利用者役④の観察)。
+              api.followCamera(true);
               renderCrumbs();
               renderContext();
             });
