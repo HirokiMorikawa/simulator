@@ -1030,6 +1030,21 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let focusNodes: Record<string, HTMLElement> = {};
   /** 「選んだもの」の置き場所の入力欄(打っている最中は書き換えない)。 */
   let focusPositionInputs: HTMLInputElement[] = [];
+  /**
+   * **いま置き直しを頼んだ値**(まだ物理側が追いついていないぶん)。
+   *
+   * 毎フレームの追いつきが、頼んだ直後の 1〜2 フレームだけ**古い位置**を
+   * 書き戻してしまい、打った値が元へ戻ったように見えることがある(遅い実行
+   * 環境で実際に踏んだ)。頼んだ値(`want`)と、頼んだ時点で欄に出ていた
+   * 古い値(`stale`)を控えておき、実際が動くまでは頼んだ値を出す。
+   */
+  let focusPositionPending: ({ want: number; stale: number } | null)[] = [
+    null,
+    null,
+    null,
+  ];
+  /** 直前に読み取った実際の置き場所(頼んだ時点の「古い値」の出どころ)。 */
+  let focusPositionSeen: number[] = [0, 0, 0];
 
   /**
    * **作ったものが消えない**ようにするカード(利用者役④の一番の不満:
@@ -1208,6 +1223,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     readoutNodes = [];
     focusNodes = {};
     focusPositionInputs = [];
+    focusPositionPending = [null, null, null];
+    focusPositionSeen = [0, 0, 0];
 
     if (!current) {
       // カタログの実験ではなく、**いまそこにある世界**を見ている状態
@@ -1527,6 +1544,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             const push = () => {
               const [x, y, z] = inputs.map((input) => Number(input.value));
               if (![x, y, z].every((v) => Number.isFinite(v))) return;
+              focusPositionPending = [x, y, z].map((want, i) => ({
+                want,
+                stale: focusPositionSeen[i],
+              }));
               api.setBodyPosition(selected, x, y, z);
             };
             for (const input of inputs) input.addEventListener("change", push);
@@ -1881,7 +1902,23 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           // 直後にこの札だけ前の材質を出していた——利用者役④の観察)。
           for (const [i, input] of focusPositionInputs.entries()) {
             if (document.activeElement === input) continue;
-            const next = readout.position[i].toFixed(3);
+            const actual = readout.position[i];
+            const pending = focusPositionPending[i];
+            focusPositionSeen[i] = actual;
+            if (pending !== null) {
+              // 物理側が追いつく(頼んだ値になる、または古い値から動く)まで
+              // は、頼んだ値を出したままにする。動いてしまう物なら次の瞬間に
+              // 古い値から離れるので、欄が固まったままになることはない。
+              if (
+                Math.abs(actual - pending.want) < 1e-6 ||
+                Math.abs(actual - pending.stale) > 1e-9
+              ) {
+                focusPositionPending[i] = null;
+              } else {
+                continue;
+              }
+            }
+            const next = actual.toFixed(3);
             if (input.value !== next) input.value = next;
           }
           const materialSelect = document.getElementById(
