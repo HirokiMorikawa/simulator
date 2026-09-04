@@ -6334,11 +6334,16 @@ async function setUpSceneView(
     // 注視点は、ずれが画角に対して大きいほど速く追いつく。一定の緩さだと、
     // 秒速十数メートルで飛ぶ球に置いていかれて画面から消える(実測)。
     const targetError = orbit.target.distanceTo(guidedFollowTarget);
+    // ずれが画角と同じくらいまで開いたら、**ほぼ一気に**追いつく。0.35 では
+    // 60°の坂を秒速 30m で滑り落ちる箱に置いていかれ、画面の隅で豆粒に
+    // なっていた(利用者役②の観察)。ずれの大きさで段を分ける。
     const targetEase = guidedCameraSnapNow
       ? 1
-      : targetError > desired * 0.2
-        ? 0.35
-        : Math.max(ease, 0.1);
+      : targetError > desired
+        ? 0.8
+        : targetError > desired * 0.2
+          ? 0.35
+          : Math.max(ease, 0.1);
     orbit.target.lerp(guidedFollowTarget, targetEase);
     const nextDistance = distance + (desired - distance) * ease;
     camera.position

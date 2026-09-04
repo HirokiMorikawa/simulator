@@ -60,9 +60,14 @@
 
         <!-- 右: 大局の粒度のダイヤル。連続値で、目盛りに名前が付いている。 -->
         <div id="detail-control" class="detail-control">
+          <!-- **実験のつまみと取り違えられない**ようにする。利用者役が2人続けて
+               「右パネルのつまみ(高さ・重力)と見た目が同じで、動かしたら
+               画面ごと変わってしまった」と書いた。名前で**画面の話**だと言い、
+               現象は変わらないと添える。帯も細く落として、物理のつまみと
+               見た目を分ける(`#detail-dial`、style.css)。 -->
           <div class="detail-head">
-            <span class="detail-name">見る深さ</span>
-            <div id="detail-stops" class="detail-stops" role="group" aria-label="見る深さ"></div>
+            <span class="detail-name">画面の詳しさ</span>
+            <div id="detail-stops" class="detail-stops" role="group" aria-label="画面の詳しさ"></div>
           </div>
           <input
             id="detail-dial"
@@ -71,7 +76,8 @@
             max="3"
             step="0.05"
             value="1"
-            aria-label="見る深さ(みる ↔ つくる)"
+            aria-label="画面の詳しさ(みる ↔ つくる)"
+            title="出てくる道具の多さが変わります。現象そのものは変わりません"
           />
           <div id="detail-hint" class="detail-hint"></div>
         </div>

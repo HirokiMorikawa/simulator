@@ -726,11 +726,14 @@ export const GUIDED_CATEGORIES: Category[] = [
             label: "箱の密度",
             kind: "range",
             min: 200,
-            max: 1400,
+            // 上限は 1200。1400 では水よりずっと重く、**水槽に底が無い**ので
+            // 箱が -50 m まで沈み続けて画面から消えた(利用者役②の観察)。
+            // 見どころは「浮くか沈むか」の境目なので、その前後だけを渡す。
+            max: 1200,
             step: 50,
             unit: "kg/m³",
             value: 600,
-            hint: "水は 1000 kg/m³。これを超えると沈みます。",
+            hint: "水は 1000 kg/m³。これを超えると沈みます(この水槽に底はないので、沈むと下がり続けます)。",
             apply: (scene, value) => {
               const material = scene.materials?.[0];
               if (material) material.density = Number(value);

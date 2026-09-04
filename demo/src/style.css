@@ -1985,9 +1985,19 @@ kbd {
   color: var(--accent);
   font-weight: 600;
 }
+/* 画面の詳しさの帯。**物理のつまみと見た目を分ける**——同じ太さ・同じ色だと
+   取り違えられ、条件を変えたつもりで画面ごと変わってしまう(利用者役の観察)。
+   細く、色も抑える。 */
 #app #detail-dial {
   width: 100%;
   margin: 0;
+  height: 14px;
+  accent-color: var(--text-subtle);
+  opacity: 0.75;
+}
+#app #detail-dial:hover,
+#app #detail-dial:focus-visible {
+  opacity: 1;
 }
 .detail-hint {
   font-size: var(--text-xs);

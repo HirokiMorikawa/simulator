@@ -161,10 +161,14 @@ function writeSavedScenes(scenes: SavedScene[]): string | null {
 
 /** 大局の粒度の目盛り。連続値だが、名前が付く位置がある。 */
 const GRAIN_STOPS = [
-  { at: 0, key: "watch", label: "みる", hint: "現象だけを大きく見る" },
-  { at: 1, key: "touch", label: "さわる", hint: "つまみを動かして試す" },
-  { at: 2, key: "study", label: "しらべる", hint: "数値・グラフ・一覧で確かめる" },
-  { at: 3, key: "build", label: "つくる", hint: "自分で組み立てる(全機能)" },
+  // hint は「その粒度で**画面に何が出るか**」。以前は「つまみを動かして試す」
+  // のように行為だけを書いていたので、この帯自体が実験のつまみだと読まれた
+  // ——2 人続けて取り違えた(利用者役②の観察)。画面の話だと分かる書き方に
+  // 統一し、現象は変わらないことを添える。
+  { at: 0, key: "watch", label: "みる", hint: "現象だけを大きく(道具は隠す)" },
+  { at: 1, key: "touch", label: "さわる", hint: "＋ 条件を変えるつまみ" },
+  { at: 2, key: "study", label: "しらべる", hint: "＋ グラフ・一覧・数値" },
+  { at: 3, key: "build", label: "つくる", hint: "＋ 自分で組み立てる道具ぜんぶ" },
 ];
 
 // パネルが現れ始める粒度。CSS 側の補間と同じ値をここでも使う(表示の
@@ -447,7 +451,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     app.dataset.project = String(project > 0);
     dial.value = detail.toFixed(2);
     dial.setAttribute("aria-valuetext", nearestStop(detail).label);
-    dialHint.textContent = nearestStop(detail).hint;
+    dialHint.textContent = `${nearestStop(detail).hint}(現象は変わりません)`;
     for (const button of dialStops.querySelectorAll("button")) {
       const at = Number((button as HTMLElement).dataset.at);
       button.classList.toggle("active", nearestStop(detail).at === at);
