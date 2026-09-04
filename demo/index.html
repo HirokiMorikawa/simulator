@@ -40,10 +40,13 @@
           <button id="btn-restart" title="この実験を最初の状態から作り直します(自分で足した物は消えます)">
             <span aria-hidden="true">↺</span> はじめから
           </button>
+          <!-- 絵文字だけでは何のボタンか分からず、速さの変え方が最後まで
+               分からなかったと書かれた(利用者役①)。言葉も添える。
+               ▶ は「うごかす」の再生印と紛らわしかったので使わない。 -->
           <div id="run-speed" class="run-speed" role="group" aria-label="進む速さ">
-            <button data-speed="0.25" title="ゆっくり進める">🐢</button>
-            <button data-speed="1" class="active" title="ちょうどよい速さ">▶</button>
-            <button data-speed="4" title="速く進める">🐇</button>
+            <button data-speed="0.25" title="ゆっくり進める">🐢 ゆっくり</button>
+            <button data-speed="1" class="active" title="ちょうどよい速さ">ふつう</button>
+            <button data-speed="4" title="速く進める">🐇 はやい</button>
           </div>
           <!-- 速さの数値は**速さのボタンのすぐ隣**に置く。離れた場所に単独で
                「×1」とだけ出ていたときは、押せるボタンだと読まれて実際に

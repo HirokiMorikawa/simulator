@@ -1916,8 +1916,9 @@ kbd {
 }
 #app .run-speed button {
   height: 32px;
-  width: 34px;
-  padding: 0;
+  /* 言葉を添えたぶん、幅は中身に合わせる(絵文字だけの正方形をやめた)。 */
+  padding: 0 var(--space-2);
+  white-space: nowrap;
   border-radius: 0;
 }
 #app .run-speed button:first-child {

@@ -1413,7 +1413,9 @@ function setUpHierarchy(
     probeList.className = "tree-nested";
     for (let i = 0; i < probeCount; i++) {
       const item = document.createElement("li");
-      item.textContent = world.read_component("imported_probe_label_at", String(i));
+      item.textContent = friendlyProbeLabel(
+        world.read_component("imported_probe_label_at", String(i)),
+      );
       probeList.appendChild(item);
     }
     bodies.appendChild(makeGroup("probes", "Probes", probeList));
@@ -2818,7 +2820,7 @@ function renderInspectorExtraComponents(
     const rows: string[] = [];
     for (let k = 0; k < probeCount; k += 1) {
       rows.push(
-        `<div class="inspector-field"><span>${escape(world.read_component("imported_probe_label_at", String(k)))}</span>` +
+        `<div class="inspector-field"><span>${escape(friendlyProbeLabel(world.read_component("imported_probe_label_at", String(k))))}</span>` +
           `<span>${readNumber(world, "imported_probe_value_at", String(k)).toFixed(4)}</span></div>`,
       );
     }
@@ -4389,6 +4391,57 @@ function timeAxisFormatter(maxSeconds: number): (seconds: number) => string {
   return (seconds: number) => `${(seconds / scale).toFixed(2)}${unit}`;
 }
 
+/**
+ * **観測点の生の名前を、人の言葉にする**。
+ *
+ * カタログが名前を与えていない系列は Rust 側の生ラベル(`AstroPosX[0]`、
+ * `BodySpeed(chassis)`)がそのまま凡例に出ていた。やさしい日本語で作った画面に
+ * 突然プログラムの変数名が現れ、「自分向けじゃない、壊れてるのかな」と読まれた
+ * (利用者役①の一番の不満)。**括弧の中身は残す**——どの物の値なのかは
+ * その人にとっても手掛かりになるため。
+ */
+function friendlyProbeLabel(raw: string): string {
+  const NAMES: [RegExp, string][] = [
+    [/^BodyPosY/, "高さ"],
+    [/^BodyPosX/, "横の位置"],
+    [/^BodySpeed/, "速さ"],
+    [/^AstroPosX/, "横の位置"],
+    [/^AstroPosY/, "縦の位置"],
+    [/^AstroVelX/, "横の速さ"],
+    [/^AstroVelY/, "縦の速さ"],
+    [/^SoftBodyPosX/, "横の位置"],
+    [/^SoftBodyPosY/, "高さ"],
+    [/^SphParticlePosY/, "水の粒の高さ"],
+    [/^SphParticleDensity/, "水の粒の密度"],
+    [/^NodeTemp/, "温度"],
+    [/^RodTemp/, "棒の温度"],
+    [/^CircuitCurrent/, "電流"],
+    [/^CircuitNodeVoltage/, "電圧"],
+    [/^GridFluidMeanV/, "流れの速さ(平均)"],
+    [/^GridFluidRmsV/, "流れの速さ(実効値)"],
+    [/^QuantumNorm/, "波の総量"],
+    [/^QuantumMeanX/, "波の位置"],
+    [/^QuantumEnergy/, "波のエネルギー"],
+    [/^QuantumTransmission/, "通り抜けた割合"],
+    [/^GasTemperature/, "気体の温度"],
+    [/^GasPressure/, "気体の圧力"],
+    [/^IsingMagnetization/, "磁化"],
+    [/^IsingEnergyPerSpin/, "1スピンあたりのエネルギー"],
+    [/^BrownianMsd/, "広がり(平均二乗変位)"],
+    [/^FdtdEz/, "電場 Ez"],
+    [/^FdtdEnergy/, "電磁場のエネルギー"],
+    [/^LedgerKinetic/, "運動エネルギー"],
+    [/^StateHashDigest/, "状態の指紋"],
+  ];
+  for (const [pattern, name] of NAMES) {
+    if (!pattern.test(raw)) continue;
+    // `BodySpeed(chassis)` の `chassis`、`AstroPosX[0]` の `0` は残す。
+    const detail = raw.match(/[([]([^)\]]+)[)\]]/);
+    return detail ? `${name}(${detail[1]})` : name;
+  }
+  return raw;
+}
+
 function formatSeconds(seconds: number): string {
   const magnitude = Math.abs(seconds);
   if (magnitude >= 31_557_600) return `${(seconds / 31_557_600).toFixed(2)}年`;
@@ -5450,12 +5503,16 @@ async function setUpSceneView(
   // 半透明の面をその高さに置く。物理には一切関与しない、見るための面。
   const waterPlane = new THREE.Mesh(
     new THREE.PlaneGeometry(200, 200),
+    // 水面は**水として見える**必要がある。暗い背景に対して色も濃さも近く、
+    // 「箱の下半分が沈んでいることが数字を読まないと分からない」と書かれた
+    // (利用者役①の観察)。明るい水色を、地の色と混ざらない濃さで置く。
     new THREE.MeshStandardMaterial({
-      color: 0x2f7fbf,
+      color: 0x4fb8ff,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.55,
       side: THREE.DoubleSide,
       depthWrite: false,
+      emissive: 0x123a5c,
     }),
   );
   waterPlane.rotation.x = -Math.PI / 2;
@@ -6237,7 +6294,11 @@ async function setUpSceneView(
     // 画角に収めると**球が豆粒になって見失う**(利用者役の観察)。動くものが
     // 画面の高さの 2% を下回らない距離を上限にする——まわりが多少切れても、
     // 対象が見えている方が優先。
-    const APPARENT_MIN = 60; // 画角60°で、対象が画面の約3%を占める距離の比
+    // 画角60°で、対象が画面のどれだけを占めるかを決める比。60 では約3%で、
+    // 1cm の磁石が落ちるだけの場面(D21)は数ピクセルの点にしかならず「ほぼ
+    // 真っ暗」と書かれた(利用者役①の観察)。35 なら約5%——まわりが見える
+    // ことは保ちつつ、対象が点にならない線として実測で選んだ。
+    const APPARENT_MIN = 35;
     const fit = radius * 3.6;
     const cap = Math.max(movingRadius * 6, movingRadius * APPARENT_MIN);
     const desired = Math.min(fit, cap);
@@ -9571,7 +9632,9 @@ async function setUpSceneView(
           // 従来どおり Rust 側の生ラベルを出す。
           label:
             guidedProbeLabels?.[i] ??
-            world.read_component("imported_probe_label_at", String(i)),
+            friendlyProbeLabel(
+              world.read_component("imported_probe_label_at", String(i)),
+            ),
           unit: guidedProbeUnits?.[i],
           color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
           // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
@@ -9746,7 +9809,11 @@ async function setUpSceneView(
     ]
       .filter((line) => !line.endsWith("= —"))
       .join("\n");
-    timelineTime.textContent = `t = ${readNumber(world, "time").toFixed(3)} s`;
+    // 秒に固定していたので、分子の世界では「t = 0.000 s」のまま動かず、
+    // 公転では「t = 10318451.296 s」と桁が読めなかった——右の「経過した時間」
+    // が「1.61 マイクロ秒」「117.97 日」と出ている隣で、単位がばらばらだった
+    // (利用者役①の観察)。同じ言葉にそろえる。
+    timelineTime.textContent = `t = ${formatSeconds(readNumber(world, "time"))}`;
     timelineStep.textContent = `step = ${readNumber(world, "step_count").toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
     // 何のための数字か画面から分からない、と書かれた(利用者役④の観察)。

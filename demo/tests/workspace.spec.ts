@@ -717,6 +717,33 @@ test("とめている間なら、材質を変えられる", async ({ page }) => 
   expect(errors).toEqual([]);
 });
 
+test("グラフに、プログラムの変数名を出さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+
+  // カタログが名前を与えていない系列は、Rust 側の生ラベル(`AstroPosX[0]`、
+  // `BodySpeed(chassis)`)がそのまま凡例に出ていた。やさしい日本語の画面に
+  // 突然変数名が現れ、「壊れてるのかな」と読まれた。
+  for (const id of ["d36-swingby", "d24-car"]) {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1500);
+    const tree = (await page.locator("#hierarchy-tree").textContent()) ?? "";
+    expect(tree).not.toMatch(/AstroPos|AstroVel|BodyPosY|BodyPosX|BodySpeed/);
+  }
+
+  // 時間の表示も、右の「経過した時間」と同じ言葉にそろえる。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d25-brownian"]');
+  await expect
+    .poll(async () => (await page.locator("#timeline-time").textContent()) ?? "", {
+      timeout: 15_000,
+    })
+    .toContain("µs");
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

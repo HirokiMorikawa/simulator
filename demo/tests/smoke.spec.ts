@@ -159,18 +159,20 @@ test("Hierarchy に Probes サブツリーが出る(D11 は body_pos_x/y の2本
   await waitForWorld(page);
 
   // **葉ノード(プローブのラベル)で検証する**。"Probes" の `li` は入れ子の `ul` を
-  // 含むため textContent が "ProbesBodyPosX(bob)..." になり `exact: true` に
+  // 観測点の名前は人の言葉へ直してある(`friendlyProbeLabel`)。括弧の中身
+  // (どの物の値か)はそのまま残る。
+  // 含むため textContent が "Probes横の位置(bob)..." になり `exact: true` に
   // 一致しない(Bodies/Frames も同じ構造)。
   const hierarchy = page.locator("#hierarchy-tree");
   // 既定シーンは scenario.probes を持たないのでプローブのラベルは1つも出ない。
-  await expect(hierarchy.getByText("BodyPosX(", { exact: false })).toHaveCount(0);
+  await expect(hierarchy.getByText("横の位置(", { exact: false })).toHaveCount(0);
 
   await page.click('.project-tab[data-tab="scenes"]');
   await page.click('.scene-gallery-list button[data-scene-file="d11-pendulum.json"]');
 
   // ラベルは sim-wasm の probe_target_label が生成する(ボディ名 "bob" 込み)。
-  await expect(hierarchy.getByText("BodyPosX(bob)", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("BodyPosY(bob)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("横の位置(bob)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(bob)", { exact: true })).toBeVisible();
 
   expect(errors).toEqual([]);
 });
@@ -193,7 +195,7 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
   // `JointJson::Ball`(本増分で追加)経由でパースできることの確認でもある。
   await page.click('.scene-gallery-list button[data-scene-file="d12-ragdoll.json"]');
   await expect(hierarchy.getByText("torso", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("BodyPosY(head)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(head)", { exact: true })).toBeVisible();
 
   // D8 散乱: 床 + 球50個 = 51体。ギャラリー中で最大のシーン。
   await page.click('.scene-gallery-list button[data-scene-file="d8-scatter.json"]');
@@ -203,8 +205,8 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
   // シーン定義プローブ8本が Probes サブツリーに並ぶ。
   await page.click('.scene-gallery-list button[data-scene-file="d36-swingby.json"]');
   await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(0);
-  await expect(hierarchy.getByText("AstroPosX[1]", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("AstroVelY[0]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("横の位置(1)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("縦の速さ(0)", { exact: true })).toBeVisible();
 
   // 剛体が無いシーンでも再生して描画ループが回ること。
   await page.click("#btn-mode-play");
@@ -295,20 +297,20 @@ test("増分Hで追加した5シーン(D13/D14/D15/D16/D23)がギャラリーか
 
   // D13 ロープ: 剛体0体・ソフトボディ21粒子。プローブで観測する。
   await page.click('.scene-gallery-list button[data-scene-file="d13-rope.json"]');
-  await expect(hierarchy.getByText("SoftBodyPosY[10]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(10)", { exact: true })).toBeVisible();
 
   // D16 熱伝導レース: 1D棒の格子点温度。
   await page.click('.scene-gallery-list button[data-scene-file="d16-conduction-race.json"]');
-  await expect(hierarchy.getByText("RodTemp[20]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("棒の温度(20)", { exact: true })).toBeVisible();
 
   // D15 対流: 格子流体の平均鉛直速度 + 熱ノード。
   await page.click('.scene-gallery-list button[data-scene-file="d15-convection.json"]');
-  await expect(hierarchy.getByText("GridFluidMeanV", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("NodeTemp[0]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("流れの速さ(平均)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("温度(0)", { exact: true })).toBeVisible();
 
   // D14 渦: 鉛直速度のRMS(平均だと上下対称で打ち消し合って0のまま)。
   await page.click('.scene-gallery-list button[data-scene-file="d14-vortex.json"]');
-  await expect(hierarchy.getByText("GridFluidRmsV", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("流れの速さ(実効値)", { exact: true })).toBeVisible();
   await expect(hierarchy.getByText("obstacle", { exact: true })).toBeVisible();
 
   // D23 注ぐ水: SPH粒子。
@@ -347,7 +349,7 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   await expect(
     inspector.getByText("記録している値 (Probe)", { exact: true }),
   ).toBeVisible();
-  await expect(inspector.getByText("BodyPosX(bob)", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("横の位置(bob)", { exact: true })).toBeVisible();
   // 近似バッジ(**群1で各ソルバの自己申告へ移行**)。
   // 移行前はWorld側が「どのドメインが有効か」から推測しており、力学ソルバ自身の
   // 近似(PGS+Baumgarte・マニフォールド4点)は**1件も挙がっていなかった**ため
