@@ -615,8 +615,9 @@ test("止めている間は、時間の帯をつまんだ場所に留まる", as
   const after = await state();
   // つまみは離した場所に留まり(以前は右端へ戻っていた)、
   expect(Number(after.value)).toBeLessThan(Number(before.value));
-  // 記録した先の時点も消えない(以前は巻き戻した瞬間に捨てていた)。
-  expect(after.max).toBe(before.max);
+  // 記録した先の時点も消えない(以前は巻き戻した瞬間に捨てていた)。走らせて
+  // いる間は記録が1つ増えることがあるので、**減っていないこと**を見る。
+  expect(Number(after.max)).toBeGreaterThanOrEqual(Number(before.max));
   expect(errors).toEqual([]);
 });
 
