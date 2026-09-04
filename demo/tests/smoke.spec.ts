@@ -636,13 +636,13 @@ test("群2: Hierarchy の折り畳み・Materials サブツリー・N step 送�
   await page.goto("/");
   await waitForWorld(page);
 
-  // ① Materials(参照)サブツリー。設計 §1.1 の列挙にあるのにツリーに無かった。
-  await expect(page.locator("#hierarchy-tree")).toContainText("Materials (参照)");
+  // ① 材質(参考)サブツリー。設計 §1.1 の列挙にあるのにツリーに無かった。
+  await expect(page.locator("#hierarchy-tree")).toContainText("材質(参考)");
 
-  // ② 折り畳み(設計 §1.1「ツリーは折り畳み可」)。Bodies を畳むと
-  //    ボディ行が消える(Materials 配下の参照行は残る)。
+  // ② 折り畳み(設計 §1.1「ツリーは折り畳み可」)。「物」を畳むと
+  //    ボディ行が消える(材質配下の参照行は残る)。
   const visibleBodies = () =>
-    page.locator("#hierarchy-tree .tree-group", { hasText: "Bodies" }).locator("li:visible").count();
+    page.locator("#hierarchy-tree .tree-group", { hasText: "物" }).locator("li:visible").count();
   expect(await visibleBodies()).toBeGreaterThan(0);
   await page.locator("#hierarchy-tree .tree-toggle").first().click();
   expect(await visibleBodies()).toBe(0);

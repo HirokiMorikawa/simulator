@@ -942,6 +942,78 @@ test("時間の帯は、どこまで戻れるのかを言う", async ({ page }) 
   expect(errors).toEqual([]);
 });
 
+test("ずっと同じ値の線も、グラフの上に見える", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+
+  // 一定値の系列は、幅ゼロの範囲を割った結果いつも**下端**に描かれ、時刻の
+  // 目盛り帯に重なって 1 本まるごと見えなかった(利用者役③:「電圧の線が
+  // どこにあるのか全く見えない」)。まん中あたりに、重ならないよう引く。
+  const canvas = page.locator("#probe-canvas");
+  await expect(canvas).toBeVisible();
+  await page.waitForTimeout(3000);
+
+  // 一定値であることは凡例が言う(高さを値と読み違えないため)。
+  // 折れ線を描く範囲の**下端**(時刻の目盛り帯のすぐ上)に、横いっぱいの
+  // 明るい線が寝ていないことを見る。これが一定値の線が潰れていた場所。
+  const bottomRun = await page.evaluate(() => {
+    const c = document.getElementById("probe-canvas") as HTMLCanvasElement;
+    const ctx = c.getContext("2d")!;
+    const AXIS_BAND = 15;
+    const plotBottom = c.height - AXIS_BAND;
+    let worst = 0;
+    for (let y = plotBottom - 3; y <= plotBottom; y += 1) {
+      if (y < 0 || y >= c.height) continue;
+      const row = ctx.getImageData(0, y, c.width, 1).data;
+      let lit = 0;
+      for (let x = 0; x < c.width; x += 1) {
+        const i = x * 4;
+        if (row[i] + row[i + 1] + row[i + 2] > 260) lit += 1;
+      }
+      worst = Math.max(worst, lit);
+    }
+    return { worst, width: c.width };
+  });
+  expect(bottomRun.worst).toBeLessThan(bottomRun.width * 0.5);
+  expect(errors).toEqual([]);
+});
+
+test("場面の中身は、日本語で並ぶ", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+
+  // 数値とグラフを見に来た人の目に「World Root」「Bodies」「Probes」といった
+  // 中の言葉が並んでいた(利用者役③)。
+  const tree = page.locator("#hierarchy-tree");
+  await expect(tree).toContainText("この場面ぜんぶ");
+  await expect(tree).toContainText("物");
+  await expect(tree).not.toContainText("World Root");
+  await expect(tree).not.toContainText("Bodies");
+  expect(errors).toEqual([]);
+});
+
+test("粒が何百個もある場面でも、一覧が壁にならない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d25-brownian"]');
+
+  // ブラウン運動は粒が 300 個あり、左が 300 行の壁になっていた(利用者役③)。
+  await expect
+    .poll(
+      async () =>
+        await page.locator("#hierarchy-tree .tree-body:visible").count(),
+      { timeout: 15_000 },
+    )
+    .toBeLessThan(100);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

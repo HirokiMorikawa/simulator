@@ -1151,6 +1151,16 @@ const hierarchyMultiSelection = new Set<number>();
 /// 無くなるため実害は無く、モジュール外の状態を増やさないほうが単純。
 let hierarchyRangeAnchor: number | null = null;
 
+/**
+ * この行数を超える枝は、最初だけ畳んでおく(`makeGroup` の doc 参照)。
+ *
+ * 積み木や 50 個の球のように「一つずつ見たい」場面は開いたままにしたいので、
+ * 線を引くのは**明らかに一覧として読めない量**(ブラウン運動の粒 300 個)。
+ */
+const HIERARCHY_AUTO_COLLAPSE_ROWS = 100;
+/** 既に一度自動で畳んだ枝(人が開き直したものを畳み直さないため)。 */
+const autoCollapsedGroups = new Set<string>();
+
 function setUpHierarchy(
   world: WasmWorld,
   onSelect: (index: number) => void,
@@ -1162,7 +1172,10 @@ function setUpHierarchy(
   const tree = document.getElementById("hierarchy-tree")!;
   tree.innerHTML = "";
   const root = document.createElement("li");
-  root.textContent = "World Root";
+  // 見出しも中身も、画面のほかの場所と同じ日本語で書く。「World Root」
+  // 「BODIES」「PROBES」のような中の言葉がそのまま出ていて、数値とグラフを
+  // 見に来ただけの人の目に意味の分からない語が並んでいた(利用者役③の観察)。
+  root.textContent = "この場面ぜんぶ";
   const bodies = document.createElement("ul");
   bodies.className = "tree-nested";
 
@@ -1173,6 +1186,15 @@ function setUpHierarchy(
     label: string,
     contents: HTMLUListElement,
   ): HTMLLIElement {
+    // **行が多すぎる枝は、最初は畳んでおく**。ブラウン運動は粒が 300 個
+    // あり、開いた瞬間に左が 300 行の壁になっていた——数値とグラフを見に来た
+    // 人には、目的の場所へたどり着く前の障害物でしかない(利用者役③の観察)。
+    // 畳むのは**一度だけ**なので、人が自分で開いたらそのまま開いたまま。
+    const rows = contents.children.length;
+    if (rows > HIERARCHY_AUTO_COLLAPSE_ROWS && !autoCollapsedGroups.has(key)) {
+      autoCollapsedGroups.add(key);
+      collapsedHierarchyGroups.add(key);
+    }
     const item = document.createElement("li");
     item.className = "tree-group";
     const toggle = document.createElement("span");
@@ -1306,7 +1328,7 @@ function setUpHierarchy(
   }
   highlight(BODY_INDEX_BOX);
 
-  bodies.appendChild(makeGroup("bodies", "Bodies", list));
+  bodies.appendChild(makeGroup("bodies", "物", list));
 
   // Joints(設計§1.1「シーングラフツリー(Bodies/Joints/Circuits/Fluids/
   // Probes/Frames)」)。振り子スポーン(`spawn_pendulum`)が追加した
@@ -1329,7 +1351,7 @@ function setUpHierarchy(
     jointList.appendChild(item);
   }
   if (jointCount > 0) {
-    bodies.appendChild(makeGroup("joints", "Joints", jointList));
+    bodies.appendChild(makeGroup("joints", "つなぎ目", jointList));
   }
 
   // Frames(設計§1.1「シーングラフツリー(...Frames)」、フレーム階層ドリルイン
@@ -1358,7 +1380,7 @@ function setUpHierarchy(
       }
       return ul;
     }
-    bodies.appendChild(makeGroup("frames", "Frames", buildFrameSubtree(0)));
+    bodies.appendChild(makeGroup("frames", "座標の枠", buildFrameSubtree(0)));
   }
 
   // Fluids(設計§1.1「シーングラフツリー(...Fluids)」)。個々の粒子や塊単位の
@@ -1398,7 +1420,7 @@ function setUpHierarchy(
       item.textContent = world.read_component("circuit_element_label_at", String(i));
       circuitList.appendChild(item);
     }
-    bodies.appendChild(makeGroup("circuits", "Circuits", circuitList));
+    bodies.appendChild(makeGroup("circuits", "回路", circuitList));
   }
 
   // Probes(設計§1.1「シーングラフツリー(...Probes)」、増分E2で追加)。
@@ -1423,7 +1445,7 @@ function setUpHierarchy(
       );
       probeList.appendChild(item);
     }
-    bodies.appendChild(makeGroup("probes", "Probes", probeList));
+    bodies.appendChild(makeGroup("probes", "記録している値", probeList));
   }
 
   // **Materials(群2)**。設計 §1.1 は「Bodies / Joints / Circuits / Fluids /
@@ -1473,7 +1495,7 @@ function setUpHierarchy(
       materialList.appendChild(item);
     }
     bodies.appendChild(
-      makeGroup("materials", "Materials (参照)", materialList),
+      makeGroup("materials", "材質(参考)", materialList),
     );
   }
 
@@ -4691,7 +4713,41 @@ function setUpProbeGraph(): (
       max: number;
       plotMin: number;
       plotMax: number;
+      /** ずっと同じ値だった系列を引く高さ(変化する系列は null)。 */
+      flatY: number | null;
     };
+    /**
+     * 値を縦の位置へ。
+     *
+     * **ずっと同じ値の系列は、まん中あたりに引く**。幅ゼロの範囲を 1.0 で
+     * 割っていたので、一定値の線は必ず**下端**——時刻の目盛り帯との境目に
+     * 重なって描かれ、線が 1 本まるごと見えなかった(利用者役③の観察:
+     * 「電圧の線がどこにあるのか全く見えない」)。一定の系列が複数あるときは
+     * まん中を挟んで少しずつずらす(同じ高さに重ねると、結局 1 本ぶんしか
+     * 見えない)。高さに意味は無いので、凡例にそう書いてある。
+     */
+    const plotY = (
+      value: number,
+      plotMin: number,
+      plotMax: number,
+      flatY: number | null,
+    ) => {
+      if (flatY !== null) return flatY;
+      return plotH - ((value - plotMin) / (plotMax - plotMin)) * plotH;
+    };
+    const isFlat = (s: ProbeSeries) => {
+      if (s.history.length < 2) return false;
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const v of s.history) {
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      return hi - lo <= 1e-12;
+    };
+    const flatCount = series.filter(isFlat).length;
+    const flatGap = Math.min(16, plotH / (flatCount + 1));
+    let flatSeen = 0;
     const drawn: Drawn[] = [];
 
     for (const s of series) {
@@ -4709,7 +4765,10 @@ function setUpProbeGraph(): (
       const plot = (v: number) => (useLog ? signedLog(v) : v);
       const plotMin = Math.min(plot(min), plot(max));
       const plotMax = Math.max(plot(min), plot(max));
-      const range = plotMax - plotMin > 1e-12 ? plotMax - plotMin : 1.0;
+      const flatY =
+        plotMax - plotMin <= 1e-12
+          ? plotH / 2 + (flatSeen++ - (flatCount - 1) / 2) * flatGap
+          : null;
 
       const offset = longest - s.history.length;
       ctx.strokeStyle = s.color;
@@ -4717,12 +4776,12 @@ function setUpProbeGraph(): (
       ctx.beginPath();
       for (let i = 0; i < s.history.length; i++) {
         const x = longest > 1 ? ((offset + i) / (longest - 1)) * w : w;
-        const y = plotH - ((plot(s.history[i]) - plotMin) / range) * plotH;
+        const y = plotY(plot(s.history[i]), plotMin, plotMax, flatY);
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
-      drawn.push({ series: s, min, max, plotMin, plotMax });
+      drawn.push({ series: s, min, max, plotMin, plotMax, flatY });
     }
 
     // **1本だけのときは、縦軸に実際の目盛りを描く**。各系列を自分の範囲へ
@@ -4744,8 +4803,11 @@ function setUpProbeGraph(): (
     }
 
     let legendY = 12;
-    for (const { series: s, min, max } of drawn) {
-      const suffix = useLog ? " [log]" : "";
+    for (const { series: s, min, max, flatY } of drawn) {
+      // 一定値の線はまん中に引く(`plotY` の doc)。高さを値と読み違えない
+      // よう、凡例でそう言っておく。
+      const suffix =
+        (useLog ? " [log]" : "") + (flatY !== null ? "(ずっと同じ値)" : "");
       const unitSuffix = s.unit ? ` ${s.unit}` : "";
       // 桁の大きい量(天体の距離は 1.5e11 m)を `toFixed(2)` で出すと
       // `149597047014.36` のような読めない数字が並ぶ(利用者役②の観察)。
@@ -4789,13 +4851,16 @@ function setUpProbeGraph(): (
         );
         lines.push(`t = ${hoverTime(time)}`);
       }
-      for (const { series: sr, plotMin, plotMax } of drawn) {
+      for (const { series: sr, plotMin, plotMax, flatY } of drawn) {
         const at = index - (longest - sr.history.length);
         if (at < 0 || at >= sr.history.length) continue;
         const value = sr.history[at];
-        const range = plotMax - plotMin > 1e-12 ? plotMax - plotMin : 1;
-        const y =
-          plotH - (((useLog ? signedLog(value) : value) - plotMin) / range) * plotH;
+        const y = plotY(
+          useLog ? signedLog(value) : value,
+          plotMin,
+          plotMax,
+          flatY,
+        );
         ctx.fillStyle = sr.color;
         ctx.beginPath();
         ctx.arc(x, y, 3, 0, Math.PI * 2);
