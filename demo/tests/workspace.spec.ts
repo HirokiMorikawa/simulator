@@ -540,9 +540,12 @@ test("選んだものの札から、材質をその場で変えられる", async
       .locator('[data-focus="重さ"]')
       .textContent()
       .then((t) => Number.parseFloat(t ?? "0"));
+  // 札の値が埋まるまで待つ。埋まる前に読むと 0 を掴み、「軽くなったか」の
+  // 比較そのものが意味を失う(遅い実行環境で実際に踏んだ)。
+  await expect.poll(mass, { timeout: 15_000 }).toBeGreaterThan(0);
   const steel = await mass();
   await select.selectOption("ゴム(天然)");
-  await expect.poll(mass, { timeout: 10_000 }).toBeLessThan(steel);
+  await expect.poll(mass, { timeout: 15_000 }).toBeLessThan(steel);
   expect(errors).toEqual([]);
 });
 
