@@ -2354,9 +2354,17 @@ kbd {
  * `t = 4.079 s step = 979` のような生の表示は、行の高さを超えて中身が
  * 切れる原因になっていた(利用者役の観察: 入力欄が下端で切れていた)。 */
 #app:not([data-grain="study"]):not([data-grain="build"]) .timeline-bookmarks,
-#app:not([data-grain="study"]):not([data-grain="build"]) #timeline-time,
 #app:not([data-grain="study"]):not([data-grain="build"]) #timeline-step {
   display: none;
+}
+/* 帯が何をするものかは浅い粒度でこそ要る。深い粒度では t / step の生の値が
+   同じ行に並ぶので、そちらに場所を譲る。 */
+#app[data-grain="study"] #timeline-hint,
+#app[data-grain="build"] #timeline-hint {
+  display: none;
+}
+#timeline-hint {
+  color: var(--text-subtle);
 }
 
 

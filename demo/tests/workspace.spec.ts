@@ -617,6 +617,42 @@ test("止めている間は、時間の帯をつまんだ場所に留まる", as
   expect(errors).toEqual([]);
 });
 
+test("つまみは、壊れた結果しか出ない値を渡さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d24-car"]');
+
+  // 1.0 Hz まで下げられたときは車体が底づきして横倒しになり、走り出す前に
+  // 止まっていた(進んだ距離 0.00 m のまま)。下限をその手前で止める。
+  const knob = page.locator("#knob-suspension");
+  await expect(knob).toHaveAttribute("min", "1.5");
+
+  // いちばん柔らかい設定でも、車はちゃんと走る。
+  await knob.fill("1.5");
+  await knob.dispatchEvent("change");
+  const distance = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => Number.parseFloat((await distance.textContent()) ?? "0"), {
+      timeout: 20_000,
+    })
+    .toBeGreaterThan(1);
+  expect(errors).toEqual([]);
+});
+
+test("時間の帯には、何をするものか書いてある", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  // 浅い粒度では時刻も step も隠していたので、ただの飾りの線に見えていた。
+  await expect(page.locator("#timeline-hint")).toBeVisible();
+  await expect(page.locator("#timeline-time")).toBeVisible();
+  // 深い粒度では生の値がその場所を使う。
+  await setGrain(page, 3);
+  await expect(page.locator("#timeline-hint")).toBeHidden();
+  await expect(page.locator("#timeline-step")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

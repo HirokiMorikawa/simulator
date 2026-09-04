@@ -1155,6 +1155,7 @@ export const GUIDED_CATEGORIES: Category[] = [
         blurb: "クランクを回すと電気が生まれ、抵抗が熱くなります。",
         watch: [
           "回転から電圧が生まれます(電磁誘導)。",
+          "3D に映るのは回す軸だけです——見どころは下の数値とグラフ。",
           "流れた電流のぶんだけ、抵抗の温度がじりじり上がります。",
           "電流の符号は向きです(発電機が押し出す向きを負に取っています)。",
           "回した力が電気になり、最後は熱になる——エネルギーの旅路です。",
@@ -1720,12 +1721,16 @@ export const GUIDED_CATEGORIES: Category[] = [
             id: "suspension",
             label: "サスペンションの硬さ",
             kind: "range",
-            min: 1,
+            // 下限は 1.5 Hz。1.0 Hz まで下げられるようにしていたが、そこまで
+            // 柔らかいと車体が沈み切って横倒しになり、走り出す前に止まって
+            // しまう(実測: 進んだ距離 0.00 m のまま)。壊れた結果しか出ない
+            // 目盛りは、つまみに載せない(利用者役②の観察)。
+            min: 1.5,
             max: 6,
             step: 0.5,
             unit: "Hz",
             value: 2.5,
-            hint: "柔らかいほど大きく沈み、硬いほど跳ねます。",
+            hint: "柔らかいほど大きく沈んで揺れ、硬いほど跳ねます。柔らかすぎると車体が底づきします。",
             apply: (scene, value) => {
               for (const joint of scene.joints ?? []) {
                 const wheel = (joint as { wheel?: { frequency?: number } }).wheel;
