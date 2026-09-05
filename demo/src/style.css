@@ -91,11 +91,13 @@
    * `prefers-reduced-motion` で 0s に落とす(下記)。個々の transition は
    * この変数だけを参照するので、無効化が 1 箇所で効く。 */
   --motion-fast: 90ms;
+  --motion-slow: 180ms;
 }
 
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-fast: 0s;
+    --motion-slow: 0s;
   }
 }
 
@@ -138,82 +140,110 @@ body {
 }
 
 /* ========================================================================
- * 3. レイアウト骨格
+ * 3. レイアウト骨格 — ひとつの画面、連続する粒度
  * ==================================================================== */
 
-/* 列幅・行高は**すべて CSS 変数**にする(増分「UI 品質」)。理由は 2 つ:
- *  - スプリッター(§4)がドラッグ中に `#app` のインラインスタイルとして
- *    同じ変数を書き換えるだけで済む
- *  - レイアウトプリセットも `grid-template-*` を丸ごと書き換えるのではなく
- *    変数の上書きで表現でき、プリセットとドロワー開閉が同じ宣言を奪い合わない
- *    (増分E3 で `--project-row` について踏んだ問題の一般化)
+/* **考え方**: 画面は 1 つ。`--detail`(0〜3 の連続値、`workspace.ts` が書く)が
+ * 大局の粒度を表し、各パネルの幅・高さはその値から補間された px として
+ * JS がインライン変数に書き込む(`--col-outline` など)。CSS 側は「その幅で
+ * 並べる」ことだけを受け持つ。
  *
- * 列に 2 本の細いガター列を挟むのは、スプリッターを**グリッドの一員**として
- * 置くため(絶対配置でパネルの上に浮かせると、パネル内のスクロールバーや
- * Scene View のポインタ操作と当たり判定を取り合う)。 */
+ * **なぜ JS が px を書くのか**: 幅を CSS の clamp() で作ると、幅の実測値を
+ * 使う処理(キャンバスのリサイズ、パネルの折り返し判定)から読めない。
+ * ひとつの数(粒度)から全部の寸法が決まる、という関係をコードの 1 箇所
+ * (`applyDetail`)に閉じ込める方が、後から目盛りを足すのも簡単になる。
+ *
+ * 列: [ 一覧 | 舞台 | 文脈 ]   行: [ コマンド / 道具 / 舞台 / 時間 / グラフ / ログ / 素材 ] */
 #app {
-  --col-left: 220px;
-  --col-right: 268px;
-  --row-timeline: auto;
-  --row-console: 160px;
-  --project-row: 30px;
-  --gutter: 5px;
+  --detail: 0.6;
+  --col-outline: 0px;
+  --col-context: 300px;
+  --row-toolbar: 0px;
+  --row-timeline: 0px;
+  --row-analysis: 0px;
+  --row-console: 0px;
+  --row-project: 0px;
 
   display: grid;
   height: 100vh;
-  grid-template-columns:
-    var(--col-left) var(--gutter) minmax(160px, 1fr)
-    var(--gutter) var(--col-right);
+  grid-template-columns: var(--col-outline) minmax(0, 1fr) var(--col-context);
   grid-template-rows:
-    auto 1fr var(--row-timeline) var(--gutter) var(--row-console)
-    var(--project-row);
-  grid-template-areas:
-    "toolbar   toolbar  toolbar   toolbar  toolbar"
-    "hierarchy gutter-l sceneview gutter-r inspector"
-    "timeline  timeline timeline  timeline timeline"
-    "gutter-h  gutter-h gutter-h  gutter-h gutter-h"
-    "console   console  console   console  probes"
-    "project   project  project   project  project";
-  gap: 1px;
+    auto var(--row-toolbar) minmax(0, 1fr)
+    var(--row-timeline) var(--row-analysis) var(--row-console) var(--row-project);
   background: var(--surface-app);
+  transition:
+    grid-template-columns var(--motion-slow) ease,
+    grid-template-rows var(--motion-slow) ease;
 }
 
-/* **増分E3で修正した重大なUIバグ**: 既定の `--project-row` はタブバーの
- * 高さぶんしかなく、Project ドロワーの本体(Scenes/Materials/Circuit/Prefabs/
- * Replays の中身)は画面外へ押し出されて**実ユーザーには一切到達不能**だった
- * (実測: viewport 900px に対し `#project-body` の top が 903px)。タブを
- * クリックしたら開くようにし、開いている間は本体が入る高さを与える。 */
-#app[data-drawer="open"] {
-  --project-row: 260px;
+#commandbar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+#toolbar {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+#hierarchy {
+  grid-column: 1;
+  grid-row: 3 / 6;
+}
+#scene-view {
+  grid-column: 2;
+  grid-row: 3;
+}
+#timeline {
+  grid-column: 2;
+  grid-row: 4;
+}
+#probe-graphs {
+  grid-column: 2;
+  grid-row: 5;
+}
+#context {
+  grid-column: 3;
+  grid-row: 3 / 5;
+}
+#inspector {
+  grid-column: 3;
+  grid-row: 5;
+}
+/* Inspector がまだ現れていない粒度では、文脈の柱が右列を最後まで使う
+ * ——空白の帯を作らない。 */
+#app[data-inspector="false"] #context {
+  grid-row: 3 / 6;
+}
+#console-panel {
+  grid-column: 1 / -1;
+  grid-row: 6;
+}
+#project-drawer {
+  grid-column: 1 / -1;
+  grid-row: 7;
 }
 
-#app[data-layout="physics-focus"] {
-  --row-console: 320px;
-}
-
-/* Astro(タイムライン重視、設計§2「Astro(タイムライン重視)」): タイムライン行を
- * 固定の大きな高さにし、その分コンソール行を縮める。 */
-#app[data-layout="astro"] {
-  --row-timeline: 140px;
-  --row-console: 120px;
-}
-
-/* Circuit-focus(設計§2「Circuit-focus(回路サブモード + プローブ大)」、増分E3)。
- * 回路エディタは Project ドロワーの Circuit タブにあるので、**ドロワーを常時
- * 大きく開いた状態**にし、あわせてプローブ行も広げる(回路の電圧をグラフで
- * 追うため)。Scene View は回路作業中は使わないので圧縮してよい。 */
-#app[data-layout="circuit-focus"] {
-  --project-row: 360px;
-  --row-console: 220px;
+/* 粒度が足りずに幅・高さが 0 になったパネルは、中身が漏れないように畳む。
+ * `display:none` ではなく寸法 0 + `visibility` にするのは、粒度を戻したときに
+ * 位置が飛ばない(=同じ場所から開き直す)ようにするため。 */
+#app[data-outline="false"] #hierarchy,
+#app[data-toolbar="false"] #toolbar,
+#app[data-analysis="false"] #probe-graphs,
+#app[data-console="false"] #console-panel,
+#app[data-project="false"] #project-drawer,
+#app[data-inspector="false"] #inspector,
+#app[data-timeline="false"] #timeline {
+  visibility: hidden;
+  pointer-events: none;
+  border: 0;
 }
 
 .panel {
   background: var(--surface-panel);
   overflow: auto;
   box-sizing: border-box;
-  /* パネルは `gap: 1px` の隙間(地の色)で分かれるので、以前のような
-   * 1px の枠線は要らない——枠線と隙間が二重に見えて線が太く濁っていた。 */
   border: 0;
+  min-width: 0;
+  min-height: 0;
 }
 
 .panel h2 {
@@ -223,64 +253,32 @@ body {
   color: var(--text-subtle);
   margin: 0;
   padding: var(--space-4) var(--space-5) var(--space-3);
-  /* 見出しはスクロールしても残す(Inspector の Component が増えると、今どの
-   * パネルを見ているのか分からなくなっていた)。 */
   position: sticky;
   top: 0;
   background: var(--surface-panel);
   z-index: 1;
 }
 
-/* ========================================================================
- * 4. スプリッター(パネル境界のドラッグリサイズ)
- * ==================================================================== */
+/* パネルどうしの境目は 1px の線で示す(隙間の地色ではなく)。粒度で
+ * パネルが消えるとき、隙間だけが残って見えるのを避けるため。 */
+#toolbar,
+#commandbar {
+  border-bottom: 1px solid var(--border);
+}
+#hierarchy {
+  border-right: 1px solid var(--border);
+}
+#context,
+#inspector {
+  border-left: 1px solid var(--border);
+}
+#timeline,
+#probe-graphs,
+#console-panel,
+#project-drawer {
+  border-top: 1px solid var(--border);
+}
 
-/* 設計 §1「ブラウザ 1 ページ内でリサイズ…ができる」の実体。Hierarchy /
- * Inspector の幅と Console 行の高さを掴んで動かせる。値は localStorage に
- * 残り、ダブルクリックで既定へ戻る(`setUpPanelSplitters`)。 */
-.splitter {
-  background: transparent;
-  position: relative;
-  z-index: 4;
-  transition: background var(--motion-fast) ease;
-}
-.splitter::after {
-  /* 掴みやすさのため、見た目の線(1px)より広い当たり判定(ガター幅)を持たせる。
-   * 視覚的な手掛かりは中央の細い線 1 本に留める(常時ハイライトすると
-   * パネル境界が主張しすぎる)。 */
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: var(--border);
-}
-.splitter:hover::after,
-.splitter[data-dragging="true"]::after {
-  background: var(--accent);
-}
-.splitter:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-}
-.splitter[data-axis="x"] {
-  cursor: col-resize;
-}
-.splitter[data-axis="y"] {
-  cursor: row-resize;
-}
-#splitter-left {
-  grid-area: gutter-l;
-}
-#splitter-right {
-  grid-area: gutter-r;
-}
-#splitter-console {
-  grid-area: gutter-h;
-}
-/* ドラッグ中はテキスト選択と iframe 的な取りこぼしを止める。 */
-body[data-splitter-dragging="true"] {
-  user-select: none;
-  cursor: var(--splitter-cursor, col-resize);
-}
 
 /* ========================================================================
  * 5. 共通コントロール
@@ -394,7 +392,6 @@ body[data-splitter-dragging="true"] {
 /* --- Toolbar --------------------------------------------------------- */
 
 #toolbar {
-  grid-area: toolbar;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -509,7 +506,6 @@ body[data-splitter-dragging="true"] {
 /* --- Hierarchy ------------------------------------------------------- */
 
 #hierarchy {
-  grid-area: hierarchy;
 }
 
 /* Hierarchy検索欄(D3「Unityパリティ」増分)。大量のボディを持つシーンで
@@ -599,7 +595,6 @@ body[data-splitter-dragging="true"] {
 /* --- Scene View ------------------------------------------------------ */
 
 #scene-view {
-  grid-area: sceneview;
   position: relative;
   padding: 0;
   overflow: hidden;
@@ -664,6 +659,38 @@ body[data-splitter-dragging="true"] {
   background: none;
 }
 #field-panel[hidden] {
+  display: none;
+}
+/* **舞台に描くものが無いシーンでは、場のパネルが主役**。隅の小窓のままだと
+   「棒の温度分布」が数十ピクセルの帯になり、色の違いが読めなかった。
+   3D が空いているのだから、その場所をそのまま渡す。 */
+#scene-view[data-stage-empty="true"] #field-panel {
+  inset: auto var(--space-5) var(--space-5) var(--space-5);
+  width: auto;
+  max-height: 68%;
+}
+#stage-empty-note {
+  position: absolute;
+  top: var(--space-6);
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  max-width: min(90%, 460px);
+  text-align: center;
+  line-height: 1.7;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  background: rgba(23, 25, 29, 0.88);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  pointer-events: none;
+  z-index: 2;
+}
+#stage-empty-note strong {
+  color: var(--text);
+}
+#stage-empty-note[hidden] {
   display: none;
 }
 #field-canvas {
@@ -750,7 +777,6 @@ body[data-splitter-dragging="true"] {
 /* --- Inspector ------------------------------------------------------- */
 
 #inspector {
-  grid-area: inspector;
 }
 
 #inspector-body {
@@ -902,7 +928,6 @@ body[data-splitter-dragging="true"] {
 /* --- Timeline -------------------------------------------------------- */
 
 #timeline {
-  grid-area: timeline;
   padding: var(--space-3) var(--space-5);
 }
 
@@ -944,8 +969,45 @@ body[data-splitter-dragging="true"] {
   color: var(--warn);
 }
 
+/* **時間をつまむ帯**。高さを指定していなかったので当たり判定が数ピクセルしか
+ * 無く、つまみを掴む以外に「この辺りへ飛ぶ」という当たり前の操作ができなかった
+ * (利用者役の観察)。溝を厚くし、つまみも指で掴める大きさにする。 */
 #timeline-scrubber {
   width: 100%;
+  height: 22px;
+  margin: var(--space-1) 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+#timeline-scrubber::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+}
+#timeline-scrubber::-moz-range-track {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+}
+#timeline-scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
+}
+#timeline-scrubber::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: none;
 }
 
 .timeline-bookmarks {
@@ -982,7 +1044,6 @@ body[data-splitter-dragging="true"] {
 /* --- Console --------------------------------------------------------- */
 
 #console-panel {
-  grid-area: console;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -1086,10 +1147,12 @@ body[data-splitter-dragging="true"] {
 /* --- Probe Graphs ---------------------------------------------------- */
 
 #probe-graphs {
-  grid-area: probes;
   padding: var(--space-3) var(--space-5) var(--space-4);
   display: flex;
   flex-direction: column;
+  /* 行の高さに収める。はみ出した分をスクロールで追えないまま切られると、
+   * グラフの下半分が永久に見られない(利用者役の観察)。 */
+  overflow: hidden;
   overflow: hidden;
 }
 
@@ -1155,7 +1218,6 @@ body[data-splitter-dragging="true"] {
 /* --- Project ドロワー ------------------------------------------------- */
 
 #project-drawer {
-  grid-area: project;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1754,4 +1816,659 @@ kbd {
   clip: rect(0 0 0 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* ========================================================================
+ * 9. コマンドバー・文脈カード・パレット(粒度の操作面)
+ * ==================================================================== */
+
+/* --- コマンドバー: 「どこを見ているか」「動かす」「どこまで踏み込むか」 --- */
+#commandbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-3) var(--space-5);
+  background: var(--surface-panel);
+  min-height: 48px;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+#app #commandbar button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+#app .crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 30px;
+  padding: 0 var(--space-4);
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-md);
+  white-space: nowrap;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#app .crumb:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+#app .crumb-root {
+  border-color: var(--border-strong);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+}
+#app .crumb-root:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+#app .crumb-root kbd {
+  font-size: var(--text-xs);
+  color: var(--text-subtle);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+}
+#app .crumb-leaf {
+  background: var(--accent-surface);
+  border-color: var(--accent-border);
+  font-family: var(--font-mono);
+}
+.crumb-sep {
+  color: var(--text-subtle);
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 0 auto;
+}
+#app #btn-run {
+  min-width: 118px;
+  height: 32px;
+  font-size: var(--text-md);
+  font-weight: 600;
+  background: var(--accent-strong);
+  border-color: var(--accent-border);
+  color: #fff;
+}
+#app #btn-run[data-playing="true"] {
+  background: var(--surface-raised);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+#app #btn-restart {
+  height: 32px;
+}
+.run-speed {
+  display: flex;
+}
+#app .run-speed button {
+  height: 32px;
+  /* 言葉を添えたぶん、幅は中身に合わせる(絵文字だけの正方形をやめた)。 */
+  padding: 0 var(--space-2);
+  white-space: nowrap;
+  border-radius: 0;
+}
+#app .run-speed button:first-child {
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+#app .run-speed button:last-child {
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+/* 速さの**読み取り値**。ボタンと見分けが付くよう、枠も地色も持たせず、
+   文字も一段小さく落とす(押せるものと押せないものが見た目で分かること)。 */
+.run-rate {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
+  white-space: nowrap;
+  margin-left: var(--space-2);
+  cursor: default;
+  user-select: none;
+}
+.run-clock {
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  color: var(--text-muted);
+  min-width: 11ch;
+  text-align: right;
+}
+
+/* --- 粒度のダイヤル。目盛りに名前があり、間の値も取れる --- */
+.detail-control {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: auto;
+  gap: 2px;
+  justify-items: stretch;
+  width: 320px;
+}
+.detail-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+.detail-name {
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+.detail-stops {
+  display: flex;
+  justify-content: space-between;
+  flex: 1;
+}
+#app .detail-stop {
+  background: transparent;
+  border: 0;
+  padding: 0 var(--space-2);
+  height: 18px;
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
+}
+#app .detail-stop:hover {
+  color: var(--text);
+}
+#app .detail-stop.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* 画面の詳しさの帯。**物理のつまみと見た目を分ける**——同じ太さ・同じ色だと
+   取り違えられ、条件を変えたつもりで画面ごと変わってしまう(利用者役の観察)。
+   細く、色も抑える。 */
+#app #detail-dial {
+  width: 100%;
+  margin: 0;
+  height: 14px;
+  accent-color: var(--text-subtle);
+  opacity: 0.75;
+}
+#app #detail-dial:hover,
+#app #detail-dial:focus-visible {
+  opacity: 1;
+}
+.detail-hint {
+  font-size: var(--text-xs);
+  color: var(--text-subtle);
+  text-align: center;
+  min-height: 14px;
+}
+
+/* --- 文脈の柱(カード) --- */
+#context {
+  padding-bottom: var(--space-6);
+}
+#context-body {
+  padding: var(--space-4) var(--space-4) var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+#app .card-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  width: 100%;
+  padding: var(--space-4);
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--text);
+}
+#app .card-header:hover {
+  background: var(--surface-hover);
+}
+.card-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.card-summary {
+  grid-column: 1 / -1;
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+  line-height: 1.5;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.card[data-expanded="true"] .card-summary {
+  display: none;
+}
+.card-chevron {
+  color: var(--text-subtle);
+  transition: transform var(--motion-fast) ease;
+}
+.card[data-expanded="true"] .card-chevron {
+  transform: rotate(180deg);
+}
+.card-body {
+  padding: 0 var(--space-4) var(--space-4);
+}
+.card[data-expanded="false"] .card-body {
+  display: none;
+}
+.card-where {
+  margin: 0 0 var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  background: var(--accent-surface);
+  border: 1px solid var(--accent-border);
+  font-size: var(--text-md);
+  line-height: 1.6;
+}
+.card-watch {
+  margin: 0;
+  padding-left: 1.1em;
+  font-size: var(--text-md);
+  line-height: 1.75;
+  color: var(--text-muted);
+}
+.card-watch li + li {
+  margin-top: var(--space-2);
+}
+.card-note {
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+  line-height: 1.6;
+  margin: 0 0 var(--space-4);
+}
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+#app .card-actions button {
+  height: 30px;
+}
+.readouts {
+  display: grid;
+  /* **値は折り返さない**。名前の列を `auto` にしていたので、「ほぼ止まった
+   * 時刻(0.05 m/s 以下)」のような長い名前が値の列を押し潰し、「6.72 秒」が
+   * 「6.7 / 2 / 秒」と三行に割れていた(利用者役①の観察)。数字は一目で
+   * 読めることがすべてなので、幅は値の側に譲り、名前の方を折り返す。 */
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  font-size: var(--text-md);
+}
+.readouts dt {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.readouts dd {
+  margin: 0;
+  text-align: right;
+  font-family: var(--font-mono);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* --- つまみ --- */
+.knob + .knob {
+  margin-top: var(--space-5);
+}
+.knob-label {
+  display: block;
+  font-size: var(--text-md);
+  margin-bottom: var(--space-2);
+}
+.knob-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+#app .knob-row input[type="range"] {
+  flex: 1;
+  height: 22px;
+}
+.knob-value {
+  min-width: 70px;
+  text-align: right;
+  font-family: var(--font-mono);
+}
+.knob-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+#app .knob-choice-btn {
+  height: 28px;
+}
+/* **選ばれているものは、選ばれていると分かること**。以前は地の色との差が
+ * 数ポイントしかなく、月を選んだのか地球のままなのか画面から読めなかった
+ * (利用者役の観察)。地・枠・文字の3つを同時に変え、印も付ける。 */
+#app .knob-choice-btn.active,
+#app .run-speed button.active,
+#app .palette-filter.active {
+  background: var(--accent-strong);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+#app .knob-choice-btn.active::before {
+  content: "✓ ";
+}
+#app .knob-reset {
+  width: 100%;
+  height: 30px;
+  margin-top: var(--space-5);
+}
+.knob-hint {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+  line-height: 1.5;
+}
+
+.context-empty {
+  padding: var(--space-6) var(--space-4);
+  text-align: center;
+}
+.context-empty-lead {
+  font-size: var(--text-md);
+  margin: 0 0 var(--space-5);
+}
+#app .context-empty-cta {
+  width: 100%;
+  height: 40px;
+  font-size: var(--text-md);
+  font-weight: 600;
+  background: var(--accent-strong);
+  border-color: var(--accent-border);
+  color: #fff;
+}
+.context-empty-note {
+  margin: var(--space-4) 0 0;
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+  line-height: 1.6;
+}
+
+/* --- パレット(⌘K) --- */
+#palette {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 10vh var(--space-6) var(--space-6);
+  background: rgba(6, 8, 11, 0.7);
+}
+#palette[hidden] {
+  display: none;
+}
+.palette-dialog {
+  width: min(760px, 96vw);
+  max-height: 76vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  gap: var(--space-4);
+}
+#app #palette-input,
+#palette-input {
+  width: 100%;
+  height: 44px;
+  padding: 0 var(--space-5);
+  font-size: 15px;
+  font-family: inherit;
+  color: var(--text);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-sizing: border-box;
+}
+.palette-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.palette-filter {
+  height: 28px;
+  padding: 0 var(--space-4);
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: var(--text-base);
+  cursor: pointer;
+}
+.palette-filter:hover {
+  color: var(--text);
+}
+
+.palette-results {
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 120px;
+}
+.palette-row {
+  display: grid;
+  grid-template-columns: 28px 1fr auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.palette-row[data-active="true"] {
+  background: var(--accent-surface);
+  border-color: var(--accent-border);
+}
+.palette-row-icon {
+  font-size: 20px;
+}
+.palette-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.palette-row-title {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+.palette-row-blurb {
+  font-size: var(--text-base);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.palette-row-tag {
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+.palette-empty {
+  color: var(--text-subtle);
+  font-size: var(--text-md);
+  padding: var(--space-6);
+  text-align: center;
+}
+.palette-foot {
+  margin: 0;
+  font-size: var(--text-base);
+  color: var(--text-subtle);
+}
+.palette-foot kbd {
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+  margin-right: var(--space-1);
+}
+
+/* 幅の狭い画面: 文脈の柱を下段へ回し、舞台を潰さない。 */
+@media (max-width: 900px) {
+  #app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  #commandbar {
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+  #hierarchy,
+  #context,
+  #inspector,
+  #scene-view,
+  #timeline,
+  #probe-graphs,
+  #console-panel,
+  #project-drawer,
+  #toolbar {
+    grid-column: 1;
+  }
+  #context {
+    grid-row: 4;
+    max-height: 40vh;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}
+
+/* HUD(`t = 1.508 s` / `step = 386` / `circuit V[2] = …`)は中の仕組みを
+ * 前提にした表示。浅い粒度では出さない——同じ情報を、文脈の柱が
+ * 「経過した時間」「ボールの高さ」という言葉で出している。 */
+#app:not([data-grain="build"]) #hud {
+  display: none;
+}
+
+/* 時間の帯は、粒度に応じて中身を選ぶ。
+ * 「さわる」で要るのは**いまどこにいるか**(スクラバ)だけ。ブックマークや
+ * `t = 4.079 s step = 979` のような生の表示は、行の高さを超えて中身が
+ * 切れる原因になっていた(利用者役の観察: 入力欄が下端で切れていた)。 */
+#app:not([data-grain="study"]):not([data-grain="build"]) .timeline-bookmarks,
+#app:not([data-grain="study"]):not([data-grain="build"]) #timeline-step {
+  display: none;
+}
+/* 帯が何をするものかは浅い粒度でこそ要る。深い粒度では t / step の生の値が
+   同じ行に並ぶので、そちらに場所を譲る。 */
+#app[data-grain="study"] #timeline-hint,
+#app[data-grain="build"] #timeline-hint {
+  display: none;
+}
+#timeline-hint {
+  color: var(--text-subtle);
+}
+
+
+/* **保存した場面の一覧**(利用者役④の一番の不満「作ったものが消える」への
+   受け皿)。名前を押せば開く、右の小さなボタンで消す——1行に用は2つだけ。 */
+.saved-scenes {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.saved-scenes li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+#app .saved-scene-open {
+  flex: 1;
+  justify-content: flex-start;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#app .saved-scene-remove {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+#input-scene-name {
+  flex: 1;
+  min-width: 0;
+}
+#input-scene-file {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+#scene-save-status[data-tone="warn"] {
+  color: var(--warn, #e0b050);
+}
+/* 自分で組み立てている場面であることを、パンくずでも見分けられるように。 */
+.crumb-own {
+  color: var(--text);
+}
+/* Inspector の「上級」欄。ただの球に関節や推力の設定が並んで面食らった、
+   という観察を受けて、めったに使わないものは畳んでおく。 */
+.inspector-advanced > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  padding: var(--space-1) 0;
+}
+
+
+/* 「選んだもの」の札に置いた材質の選び直し。読み値の並びのすぐ下に、
+   同じ幅で置く(押せるものだと分かる見た目にする)。 */
+.focus-material {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+.focus-material label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+#app .focus-material select {
+  flex: 1;
+  min-width: 0;
+}
+
+
+/* 「選んだもの」の札の置き場所。3 欄を等幅に並べる。 */
+.focus-place {
+  margin-top: var(--space-2);
+}
+.focus-place > label {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-1);
+}
+.focus-place-fields {
+  display: flex;
+  gap: var(--space-2);
+}
+#app .focus-place-fields input {
+  flex: 1;
+  min-width: 0;
 }

@@ -5722,8 +5722,23 @@ mod tests {
         );
 
         // 台帳(効率): 発電電力がそのままジュール熱として熱ノードへ入る。
+        //
+        // 熱容量は**シーンから読む**。ここに数値を直接書いていたときは、
+        // シーンの熱ノードを現実的な値へ調整した(1000 J/K = 水 1 kg 相当では
+        // 温度上昇が毎秒 0.000025 ℃ で、画面上「上がる」と書いてあるのに
+        // 確かめようがなかった)だけでこのテストが落ちた。確かめたいのは
+        // 「発電した電力がそのまま熱になる」ことであって、熱容量の値そのもの
+        // ではない。
+        let scenario: Scenario = serde_json::from_str(json).expect("valid scenario JSON");
+        let heat_capacity = scenario
+            .thermal
+            .as_ref()
+            .and_then(|t| t.nodes.first())
+            .map(|n| n.heat_capacity)
+            .expect("d20 は熱ノードを1つ持つ");
         let dt = 0.008333333;
-        let expected_delta_t = expected_emf * expected_current * (steps as f64 * dt) / 1000.0;
+        let expected_delta_t =
+            expected_emf * expected_current * (steps as f64 * dt) / heat_capacity;
         let delta_t = last(2) - 293.15;
         assert!(
             (delta_t - expected_delta_t).abs() / expected_delta_t < 0.02,

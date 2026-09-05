@@ -22,7 +22,73 @@
     <!-- **トースト**。失敗の即時通知を `window.alert`(操作をブロックする
          モーダル)から置き換える置き場。`aria-live` で読み上げにも届く。 -->
     <div id="toast-region" role="status" aria-live="polite" aria-atomic="false"></div>
-    <div id="app" data-layout="default">
+    <!-- ================================================================
+         **ひとつの画面**。`--detail`(0〜3 の連続値)が「大局 ⇄ 局所」の
+         濃淡を決め、パネルは幅・高さが補間されながら現れる。モードの
+         切り替えではないので、途中の濃さで止めておける。
+         ================================================================ -->
+    <div id="app" data-layout="default" data-grain="watch">
+      <header id="commandbar">
+        <!-- 左: いまどこを見ているか(パンくず)。押すと視点の粒度が変わる。 -->
+        <nav id="crumbs" class="crumbs" aria-label="いま見ているもの"></nav>
+
+        <!-- 中: 走行。粒度に関わらず常にここにある(何度も探させない)。 -->
+        <div id="transport" class="transport" role="group" aria-label="実行">
+          <button id="btn-run" class="run-main"><span aria-hidden="true">▶</span> うごかす</button>
+          <!-- 何が失われるのかを書く。時間だけが戻ると思って押したら、自分で
+               足した物ごと消えた、と書かれた(利用者役④の観察)。 -->
+          <button id="btn-restart" title="この実験を最初の状態から作り直します(自分で足した物は消えます)">
+            <span aria-hidden="true">↺</span> はじめから
+          </button>
+          <!-- 絵文字だけでは何のボタンか分からず、速さの変え方が最後まで
+               分からなかったと書かれた(利用者役①)。言葉も添える。
+               ▶ は「うごかす」の再生印と紛らわしかったので使わない。 -->
+          <div id="run-speed" class="run-speed" role="group" aria-label="進む速さ">
+            <button data-speed="0.25" title="ゆっくり進める">🐢 ゆっくり</button>
+            <button data-speed="1" class="active" title="ちょうどよい速さ">ふつう</button>
+            <button data-speed="4" title="速く進める">🐇 はやい</button>
+          </div>
+          <!-- 速さの数値は**速さのボタンのすぐ隣**に置く。離れた場所に単独で
+               「×1」とだけ出ていたときは、押せるボタンだと読まれて実際に
+               押され、何も起きずに戸惑わせた(利用者役①の一番の不満)。
+               「速さ」と添えて、読むものだと分かる見た目にする。 -->
+          <div id="run-rate" class="run-rate" title="いまの進む速さ" aria-live="polite">
+            速さ ×1
+          </div>
+          <div id="run-clock" class="run-clock" title="シミュレーション内の経過時間"></div>
+        </div>
+
+        <!-- 右: 大局の粒度のダイヤル。連続値で、目盛りに名前が付いている。 -->
+        <div id="detail-control" class="detail-control">
+          <!-- **実験のつまみと取り違えられない**ようにする。利用者役が2人続けて
+               「右パネルのつまみ(高さ・重力)と見た目が同じで、動かしたら
+               画面ごと変わってしまった」と書いた。名前で**画面の話**だと言い、
+               現象は変わらないと添える。帯も細く落として、物理のつまみと
+               見た目を分ける(`#detail-dial`、style.css)。 -->
+          <div class="detail-head">
+            <span class="detail-name">画面の詳しさ</span>
+            <div id="detail-stops" class="detail-stops" role="group" aria-label="画面の詳しさ"></div>
+          </div>
+          <input
+            id="detail-dial"
+            type="range"
+            min="0"
+            max="3"
+            step="0.05"
+            value="1"
+            aria-label="画面の詳しさ(みる ↔ つくる)"
+            title="出てくる道具の多さが変わります。現象そのものは変わりません"
+          />
+          <div id="detail-hint" class="detail-hint"></div>
+        </div>
+      </header>
+
+      <!-- 右の柱: いま見ているものの文脈。カードは大局の粒度で自動的に開き、
+           ヘッダを押せばその1枚だけ大局と無関係に開閉できる(局所の粒度)。 -->
+      <aside id="context" class="panel">
+        <div id="context-body"></div>
+      </aside>
+
       <header id="toolbar" class="panel">
         <div class="toolbar-group" id="mode-toggle">
           <button id="btn-mode-edit" class="mode-btn" title="Editモード: シーンを直接編集(シミュレーション停止)">
@@ -109,10 +175,13 @@
             <option value="64">×64</option>
             <option value="128">×128</option>
           </select>
+          <!-- 何もしていないのに 0.99 と 1.00 の間で揺れていて壊れているのかと
+               思った、と書かれた(利用者役④)。実測値なので揺れるのが正しい
+               ——そう読めるように「実測」と添える。 -->
           <span
             id="timescale-effective"
-            title="実際に達成できている時間倍率。指定値に届かないときは赤で表示する(1フレームあたりのstep数上限に当たっている)"
-            >×1.00</span
+            title="いま実際に出ている時間倍率(実測)。指定した倍率に届かないときは赤で出ます(1フレームで進める step 数の上限に当たっています)。左右に少し揺れるのは、フレームごとの実測だからです"
+            >実測 ×1.00</span
           >
         </div>
         <div class="toolbar-group">
@@ -268,13 +337,6 @@
           </button>
           <label for="select-scene">Scene</label>
           <select id="select-scene"><option value="">(既定シーン)</option></select>
-          <label for="select-layout">Layout</label>
-          <select id="select-layout">
-            <option value="default">Default</option>
-            <option value="physics-focus">Physics-focus</option>
-            <option value="circuit-focus">Circuit-focus</option>
-            <option value="astro">Astro</option>
-          </select>
         </div>
         <div class="toolbar-group toolbar-spacer"></div>
         <div class="toolbar-group">
@@ -282,47 +344,8 @@
         </div>
       </header>
 
-      <!-- **スプリッター**(設計 §1「ブラウザ 1 ページ内でリサイズ…ができる」)。
-           グリッドのガター列/行そのものを掴ませる。矢印キーでも動かせるよう
-           `tabindex` を持たせ、`role="separator"` で意味を伝える。 -->
-      <div
-        id="splitter-left"
-        class="splitter"
-        data-axis="x"
-        data-var="--col-left"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Hierarchy パネルの幅"
-        tabindex="0"
-        title="ドラッグで Hierarchy の幅を変える(ダブルクリックで既定へ戻す)"
-      ></div>
-      <div
-        id="splitter-right"
-        class="splitter"
-        data-axis="x"
-        data-var="--col-right"
-        data-invert="true"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Inspector パネルの幅"
-        tabindex="0"
-        title="ドラッグで Inspector の幅を変える(ダブルクリックで既定へ戻す)"
-      ></div>
-      <div
-        id="splitter-console"
-        class="splitter"
-        data-axis="y"
-        data-var="--row-console"
-        data-invert="true"
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label="Console / Probe Graphs 行の高さ"
-        tabindex="0"
-        title="ドラッグで Console 行の高さを変える(ダブルクリックで既定へ戻す)"
-      ></div>
-
       <aside id="hierarchy" class="panel">
-        <h2>Hierarchy</h2>
+        <h2>場面の中身</h2>
         <input
           id="hierarchy-search"
           type="text"
@@ -336,6 +359,14 @@
       <main id="scene-view" class="panel">
         <div id="scene-view-canvas-host"></div>
         <div id="hud"></div>
+        <!-- **舞台が空のときの案内**。熱伝導や量子のように力学ボディを1つも
+             持たないシーンでは 3D に描くものが無く、初見だと「読み込みに
+             失敗した」と読めてしまう。何も無いのではなく**形では見えない現象**
+             だと言い、見る場所(場のパネル/グラフ)へ送る。 -->
+        <p id="stage-empty-note" hidden>
+          👀 見どころは<strong>下のグラフとパネル</strong>です。<br />
+          形のある物は出てきません——数値と色の動きとして見てください。
+        </p>
         <!-- **場のパネル(群3)**。量子の |ψ|²・イジングのスピン格子・FDTD の Ez・
              気体の速さ分布・熱伝導棒の温度分布は、いずれも「格子上のスカラー場」で
              あって Scene View の剛体描画では表現できない(チェックリストが D27–D33 を
@@ -386,11 +417,20 @@
 
       <section id="timeline" class="panel">
         <div class="timeline-header">
+          <!-- 帯そのものが何をするものか、その場に書く。浅い粒度では時刻も
+               step 数も隠していたので、**ただの飾りの線**にしか見えず、
+               利用者役が4人続けて「動かない」と書いた(実際には動くのに、
+               動いた手応えがどこにも出ていなかった)。 -->
+          <span id="timeline-hint">⏪ つまむと、記録した時点へ戻せます</span>
           <span id="timeline-time">t = 0.000 s</span>
           <span id="timeline-step">step = 0</span>
           <span id="play-mode-badge" class="badge" data-mode="edit">Edit</span>
         </div>
-        <input id="timeline-scrubber" type="range" min="0" max="0" value="0" />
+        <!-- **飛び先は 1 秒ごとの記録**。細かさは記録の間隔で決まっているので、
+             ここでコンマ何秒を狙うことはできない(細かい値はグラフを指して読む)。
+             壊れていると読まれないよう、そう書いておく。 -->
+        <input id="timeline-scrubber" type="range" min="0" max="0" value="0"
+               title="1 秒ごとに記録した時点へ飛びます(コンマ何秒の値は、グラフを指すと読めます)" />
         <div class="timeline-bookmarks">
           <input id="bookmark-label" type="text" placeholder="ブックマーク名" />
           <button id="btn-add-bookmark" title="現在時点にラベルを付けて記録する">📌 Bookmark</button>
@@ -412,12 +452,16 @@
       </section>
 
       <section id="probe-graphs" class="panel">
-        <h2>Probe Graphs</h2>
+        <h2>うごきのグラフ</h2>
         <div class="probe-controls">
-          <label title="各系列を対数軸(|値|のlog10)で正規化する。桁の異なる量の比較に使う">
-            <input type="checkbox" id="toggle-probe-log" /> 対数軸
+          <!-- 名前だけ見て何をするものか分からない、と書かれた 2 つ
+               (利用者役①)。何が起きるかを名前そのものに書く。 -->
+          <label title="桁の違う量を同じグラフで見比べられるようにする(各系列を |値| の log10 で正規化する対数軸)">
+            <input type="checkbox" id="toggle-probe-log" /> 小さい変化も見る
           </label>
-          <button id="btn-probe-csv" title="表示中の全系列の履歴をCSVでダウンロードする">CSV</button>
+          <button id="btn-probe-csv" title="いま描かれている全系列の履歴を、時刻つきの表(CSV)にして保存する">
+            ⬇ 数値をおとす
+          </button>
           <span id="probe-time-range" class="probe-time-range"></span>
         </div>
         <canvas id="probe-canvas"></canvas>
@@ -425,8 +469,8 @@
              **ただの黒い矩形**で、プローブが無いのか壊れているのかが画面から
              読み取れなかった。次に何をすれば線が出るのかを書く。 -->
         <p id="probe-empty" class="empty-state">
-          まだ観測データがありません。<kbd>▶ Play</kbd> か <kbd>⏭</kbd> で
-          時間を進めると、シーンが宣言したプローブの履歴がここに描かれます。
+          まだデータがありません。<kbd>▶ うごかす</kbd>
+          を押すと、いまの数値の動きがここに線で描かれます。
         </p>
       </section>
 
@@ -441,6 +485,26 @@
         </div>
         <div id="project-body"></div>
       </footer>
+    </div>
+    <!-- **パレット**(`src/workspace.ts`)。⌘K / Ctrl+K、またはパンくず左端から
+         どこにいても 1 手で開く。打つか選ぶかで絞り、選んだ瞬間に走り出す
+         ——46 の実験という複雑さを、ひとつの入口で扱えるようにするための窓。 -->
+    <div id="palette" hidden role="dialog" aria-modal="true" aria-labelledby="palette-title">
+      <div class="palette-dialog overlay-surface">
+        <h2 id="palette-title" class="visually-hidden">実験をさがす</h2>
+        <input
+          id="palette-input"
+          type="text"
+          autocomplete="off"
+          placeholder="なにを見たい?  例: 落ちる / 水 / 熱 / 電気 / 宇宙 / 電子"
+          aria-label="実験を検索"
+        />
+        <div id="palette-filters" class="palette-filters" role="group" aria-label="分野でしぼる"></div>
+        <div id="palette-results" class="palette-results" role="listbox" aria-label="実験"></div>
+        <p class="palette-foot">
+          <kbd>↑</kbd><kbd>↓</kbd> で選び <kbd>Enter</kbd> で走り出します。<kbd>Esc</kbd> で閉じます。
+        </p>
+      </div>
     </div>
     <!-- **ショートカット一覧**(`?` / `F1` / ツールバーの `?`)。中身は
          `main.ts` の `SHORTCUT_GROUPS` から組み立てる——キーの割り当てを

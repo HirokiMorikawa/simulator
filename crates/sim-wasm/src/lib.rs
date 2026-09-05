@@ -478,6 +478,10 @@ struct HotPathViewBuffers {
     conduction_rod_temperatures: Vec<f32>,
     /// `fluid_particle_positions_f32`用。
     fluid_particle_positions: Vec<f32>,
+    /// `fluid_boundary_positions_f32`用。
+    fluid_boundary_positions: Vec<f32>,
+    /// `grid_fluid_3d_smoke_points_f32`用。
+    grid_fluid_3d_smoke: Vec<f32>,
     /// `y_probe_history_f64`用。
     y_probe_history: Vec<f64>,
     /// `speed_probe_history_f64`用。
@@ -516,6 +520,15 @@ pub struct WasmWorld {
     circuit_editor_motors: Vec<sim_em::MotorHandle>,
     snapshot_interval_steps: u64,
     snapshots: VecDeque<World>,
+    /// **巻き戻して眺めている位置**(`None` = 最新にいる)。
+    ///
+    /// 巻き戻した先より後のスナップショットは、そこから**進めた瞬間に**
+    /// 実際の未来ではなくなる。以前は巻き戻したその場で捨てていたが、
+    /// それだと止めたまま前後に行き来できず、スクラバを左へ引いて離すと
+    /// つまみが右端へ戻る(=動いていないように見える)ことになっていた
+    /// ——利用者役が2人続けて「マウスで動かせない」と書いた原因。
+    /// 記録は残したまま位置だけ覚えておき、実際に進めるときに切り捨てる。
+    restored_to: Option<usize>,
     bookmarks: Vec<(String, World)>,
     /// `spawn_fluid_block`を呼んだ回数(複数の水塊を並べてスポーンする際、
     /// 塊どうしが重ならないようX方向のオフセットを決めるのに使う。Hierarchyの
@@ -675,6 +688,7 @@ impl WasmWorld {
             circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
+            restored_to: None,
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
             imported_probe_handles: Vec::new(),
@@ -772,6 +786,7 @@ impl WasmWorld {
             circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
+            restored_to: None,
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
             imported_probe_handles,
@@ -1501,6 +1516,45 @@ impl WasmWorld {
             }
         }
         out
+    }
+
+    /// 3D格子流体の**煙**を、点群として返す。
+    ///
+    /// 1 点あたり 4 要素 `[x, y, z, 濃さ]`。`stride` でセルを間引き、`threshold`
+    /// 以下の薄いセルは飛ばす(全セルを返すと数万点になり、ほとんどが空気)。
+    ///
+    /// **なぜ要ったか**: 「煙が流れる(3D)」は 3D の舞台が最初から最後まで
+    /// 真っ暗だった——剛体も粒子も無く、煙は格子の中の数値としてしか存在して
+    /// いなかったため。「まん中の 3D を見てください」と案内している隣で何も
+    /// 映らない、という一番がっかりする画面になっていた(利用者役③の観察)。
+    /// 濃さをそのまま渡して、点として描けるようにする。読み出すだけで、計算には
+    /// 触らない。
+    pub fn grid_fluid_3d_smoke_points_f32(
+        &mut self,
+        stride: usize,
+        threshold: f32,
+    ) -> Float32Array {
+        let buf = &mut self.view_buffers.grid_fluid_3d_smoke;
+        buf.clear();
+        if let Some(grid) = self.inner.grid_fluid_3d() {
+            let step = stride.max(1);
+            for k in (0..grid.nz).step_by(step) {
+                for j in (0..grid.ny).step_by(step) {
+                    for i in (0..grid.nx).step_by(step) {
+                        let density = grid.smoke_density[i + grid.nx * (j + grid.ny * k)] as f32;
+                        if density <= threshold || !density.is_finite() {
+                            continue;
+                        }
+                        buf.push(((i as f64 + 0.5) * grid.h) as f32);
+                        buf.push(((j as f64 + 0.5) * grid.h) as f32);
+                        buf.push(((k as f64 + 0.5) * grid.h) as f32);
+                        buf.push(density);
+                    }
+                }
+            }
+        }
+        // SAFETY: `fluid_particle_positions_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// 3D格子流体ドメインの概要(**群9で追加**)。無ければ空文字列。
@@ -3154,6 +3208,14 @@ impl WasmWorld {
                 self.set_body_rotation_at_impl(u("index"), f("x"), f("y"), f("z"), f("w"))?;
                 Ok("{}".to_string())
             }
+            "add_body_probes" => {
+                let first = self.add_body_probes_impl(u("index"))?;
+                Ok(format!("{{\"index\":{first}}}"))
+            }
+            "set_body_mass_at" => {
+                self.set_body_mass_at_impl(u("index"), f("mass"))?;
+                Ok("{}".to_string())
+            }
             "set_body_scale_at" => {
                 self.set_body_scale_at_impl(u("index"), f("scale"))?;
                 Ok("{}".to_string())
@@ -4700,6 +4762,29 @@ impl WasmWorld {
         unsafe { Float32Array::view(buf) }
     }
 
+    /// **境界粒子**の位置をフラットな`[x0,y0,z0,...]`(f32)で返す。
+    ///
+    /// 水を受け止めている器は、これまで**画面のどこにも描かれていなかった**
+    /// ——「水のかたまりが落ちて、容器に溜まります」と書いてある隣で、真っ暗な
+    /// 空間に水色の塊が浮いているだけに見えた(利用者役①の観察)。器は物理側に
+    /// 境界粒子として実在するので、その位置をそのまま渡して描けるようにする。
+    /// 読み出すだけで、計算には一切触らない。
+    ///
+    /// 規約は`fluid_particle_positions_f32`と同じ(一時的なビュー)。
+    pub fn fluid_boundary_positions_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.fluid_boundary_positions;
+        buf.clear();
+        if let Some(sph) = self.inner.sph() {
+            buf.extend(
+                sph.boundary_position
+                    .iter()
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+            );
+        }
+        // SAFETY: `fluid_particle_positions_f32`と同じ。
+        unsafe { Float32Array::view(buf) }
+    }
+
     /// `index`番目のボディの位置 [x, y, z](f32)。
     /// `imported_probe_history_f64`と同じ理由で、index検証と値の取り出しは
     /// `body_position_at_impl`側(ネイティブテスト可能)。
@@ -4885,6 +4970,11 @@ impl WasmWorld {
     /// リングバッファへ記録する(モジュールdoc「スナップショットリングバッファ」
     /// 参照、既存の`World::snapshot`をそのまま使う)。
     pub fn step(&mut self) {
+        // 巻き戻した位置から**実際に進める**ときが、記録済みの未来を捨てる
+        // 瞬間である(`restored_to`のdoc参照)。ここから先は新しい時間の筋。
+        if let Some(index) = self.restored_to.take() {
+            self.snapshots.truncate(index + 1);
+        }
         self.inner.step();
         if self
             .inner
@@ -4921,9 +5011,12 @@ impl WasmWorld {
     }
 
     /// Timelineスクラバ操作: `index`番目のスナップショットへ巻き戻す(既存の
-    /// `World::restore`をそのまま使う)。巻き戻した時点より後のスナップショットは
-    /// もはや実際の未来を表さないため破棄する(新しいタイムラインがそこから
-    /// 再開する、設計の「直前スナップショットへの巻き戻し」と同じ発想)。
+    /// `World::restore`をそのまま使う)。
+    ///
+    /// 巻き戻した時点より後のスナップショットは、**そこから進めた瞬間に**
+    /// 実際の未来ではなくなる——破棄するのはその瞬間であって、巻き戻した
+    /// 時点ではない(`restored_to`のdoc参照)。止めたまま前後に行き来する
+    /// 操作を壊さないための区別である。
     fn restore_snapshot_impl(&mut self, index: usize) -> Result<(), WasmError> {
         // `try_snapshot_at`は`&self`(disjointでない全体借用)を取るため、
         // その戻り値を保持したまま`&mut self.inner`は取れない。フィールドへ
@@ -4937,7 +5030,9 @@ impl WasmWorld {
                 count: self.snapshots.len(),
             })?;
         self.inner.restore(snapshot);
-        self.snapshots.truncate(index + 1);
+        // ここでは捨てない——止めたまま前後に行き来できるようにする
+        // (`restored_to`のdoc参照)。捨てるのは次に進めるとき。
+        self.restored_to = Some(index);
         Ok(())
     }
 
@@ -5145,6 +5240,53 @@ impl WasmWorld {
         }
         let body = self.try_body_id_at(body_index)?;
         self.inner.push_command(Command::SetBodyMass { body, mass });
+        Ok(())
+    }
+
+    /// 指定したボディの**高さと速さを記録し始める**(観測点を2本足す)。
+    ///
+    /// **なぜ要ったか**: 観測点はシーンJSONが宣言したものしか無く、エディタで
+    /// 自分が置いた物には一本も付かなかった。そのため自分で組み立てた場面では
+    /// グラフが永久に「まだデータがありません」のままで、CSVボタンも押せない
+    /// ——用意された実験では動くだけに、壊れているとしか読めなかった
+    /// (利用者役の観察)。
+    ///
+    /// 追加した観測点は`imported_probe_handles`へ積む。シーンJSONが宣言した
+    /// ものと同じ扱いになり、既存の読み出し(`imported_probe_*`)がそのまま
+    /// 使えるためである。戻り値は最初のハンドル(高さの方)。
+    fn add_body_probes_impl(&mut self, index: usize) -> Result<usize, WasmError> {
+        let id = self.try_body_id_at(index)?;
+        let y = self.inner.add_probe(sim_world::ProbeTarget::BodyPosY(id));
+        let speed = self.inner.add_probe(sim_world::ProbeTarget::BodySpeed(id));
+        self.imported_probe_handles.push(y);
+        self.imported_probe_handles.push(speed);
+        Ok(y)
+    }
+
+    /// 質量を**その場で**変える(`set_body_position_at`等と同じ「Edit中の直接
+    /// 設定」の一員)。
+    ///
+    /// **なぜ要ったか**: 質量の変更は`Command`(`push_set_body_mass`)しか
+    /// 経路が無く、Commandは**次stepの先頭**で適用される。Editモードはstepが
+    /// 進まないので、Inspectorに質量を打ち込んでも永久に何も起きなかった
+    /// ——「10と入れたのに元の重さのまま落ちてくる」という、いちばん信用を
+    /// 失う壊れ方をしていた(利用者役の観察)。
+    ///
+    /// 適用する処理は`Command::SetBodyMass`の腕と**同一**
+    /// (`RigidBodySet::set_mass`)なので、Editで打つのとPlay中にCommandで
+    /// 送るのとで結果は変わらない。決定論とリプレイ再現性の観点でも、
+    /// 「Play中の介入はCommand」という取り決めは崩していない——これはPlayに
+    /// 入る前の初期条件づくりであり、`set_body_position_at`が既にそうである
+    /// のと同じ位置付けである。
+    fn set_body_mass_at_impl(&mut self, index: usize, mass: f64) -> Result<(), WasmError> {
+        if mass <= 0.0 || !mass.is_finite() {
+            return Err(WasmError::InvalidMass);
+        }
+        let id = self.try_body_id_at(index)?;
+        self.inner
+            .mechanics_mut()
+            .bodies
+            .set_mass(id.index as usize, mass);
         Ok(())
     }
 
@@ -5932,6 +6074,60 @@ mod tests {
                 &format!(r#"{{"index":{body},"scale":2.0}}"#),
             )
             .expect("set_body_scale_at via apply_component must succeed");
+
+        // 自分で置いた物にも観測点を足せる(`add_body_probes_impl`のdoc参照)。
+        let before: usize = world
+            .read_component_impl("imported_probe_count", "")
+            .unwrap()
+            .parse()
+            .unwrap();
+        world
+            .apply_component_impl("add_body_probes", &format!(r#"{{"index":{body}}}"#))
+            .expect("add_body_probes via apply_component must succeed");
+        let after: usize = world
+            .read_component_impl("imported_probe_count", "")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(after, before + 2, "高さと速さの2本が足される");
+        assert!(
+            world
+                .read_component_impl("imported_probe_label_at", &before.to_string())
+                .unwrap()
+                .starts_with("BodyPosY"),
+            "1本目は高さ"
+        );
+        assert!(
+            world
+                .apply_component_impl("add_body_probes", r#"{"index":9999}"#)
+                .is_err(),
+            "存在しないボディは弾く"
+        );
+
+        // 質量の直接設定は**stepを挟まずに**効く(Editモードでも打った値が
+        // 反映される、`set_body_mass_at_impl`のdoc参照)。
+        world
+            .apply_component_impl(
+                "set_body_mass_at",
+                &format!(r#"{{"index":{body},"mass":7.0}}"#),
+            )
+            .expect("set_body_mass_at via apply_component must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_mass_at", &body.to_string())
+                .unwrap(),
+            7.0_f64.to_string(),
+            "set_body_mass_at must apply immediately (no step)"
+        );
+        assert!(
+            world
+                .apply_component_impl(
+                    "set_body_mass_at",
+                    &format!(r#"{{"index":{body},"mass":0.0}}"#)
+                )
+                .is_err(),
+            "set_body_mass_at must reject a non-positive mass"
+        );
 
         let result = world
             .apply_component_impl(
@@ -7375,6 +7571,48 @@ mod tests {
     /// index範囲外などの別の`Err`にはなり得るが、それはkindが存在する証拠に
     /// なるので構わない)、②件数が一致すること(ディスパッチ側にだけ足された
     /// kindを検出する)、③kind名に重複が無いこと、を見る。
+    /// **止めたまま前後に行き来できる**(`restored_to`のdoc参照)。
+    ///
+    /// 以前は巻き戻したその場で後ろの記録を捨てていたため、左へ引いて離すと
+    /// つまみが右端へ戻り、利用者からは「マウスで動かせない」と見えていた。
+    /// 記録を捨てるのは**そこから進めたとき**である。
+    #[test]
+    fn restoring_a_snapshot_keeps_the_recorded_future_until_stepping_again() {
+        // dt = 0.1s なので 1s 間隔 = 10 step ごとに記録される。
+        let mut world = WasmWorld::new(-9.80665, 0.1, 50.0);
+        for _ in 0..50 {
+            world.step();
+        }
+        let recorded = world.snapshot_count_impl();
+        assert!(recorded >= 4, "記録が足りない: {recorded}");
+
+        // 巻き戻しても記録は残る——前後に行き来できる。
+        world.restore_snapshot_impl(1).expect("有効なindex");
+        assert_eq!(
+            world.snapshot_count_impl(),
+            recorded,
+            "巻き戻しただけでは記録を捨てない"
+        );
+        let back = world.read_component_impl("time", "").unwrap();
+        world
+            .restore_snapshot_impl(recorded - 1)
+            .expect("有効なindex");
+        assert_ne!(
+            world.read_component_impl("time", "").unwrap(),
+            back,
+            "先へも戻れる"
+        );
+
+        // 進めた瞬間に、そこから先の記録は実際の未来ではなくなるので捨てる。
+        world.restore_snapshot_impl(1).expect("有効なindex");
+        world.step();
+        assert_eq!(
+            world.snapshot_count_impl(),
+            2,
+            "巻き戻した位置から進めたら、そこから先は新しい時間の筋になる"
+        );
+    }
+
     #[test]
     fn component_schema_covers_every_apply_kind() {
         let schema: serde_json::Value = serde_json::from_str(&new_world().component_schema())
@@ -7412,7 +7650,7 @@ mod tests {
         // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
         // 足したらこの数と`component_schema`の表の両方を更新すること**——
         // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
-        const APPLY_KIND_COUNT: usize = 76;
+        const APPLY_KIND_COUNT: usize = 78;
         assert_eq!(
             entries.len(),
             APPLY_KIND_COUNT,
