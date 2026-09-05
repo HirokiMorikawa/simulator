@@ -1119,13 +1119,15 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
    * 環境で実際に踏んだ)。頼んだ値(`want`)と、頼んだ時点で欄に出ていた
    * 古い値(`stale`)を控えておき、実際が動くまでは頼んだ値を出す。
    */
-  let focusPositionPending: ({ want: number; stale: number } | null)[] = [
+  let focusPositionPending: ({ want: number; until: number } | null)[] = [
     null,
     null,
     null,
   ];
-  /** 直前に読み取った実際の置き場所(頼んだ時点の「古い値」の出どころ)。 */
-  let focusPositionSeen: number[] = [0, 0, 0];
+  /** 頼んだ値を出しておく上限の時間 [ms](物理が追いつかなくても、いつかは実際へ戻す)。 */
+  const POSITION_PENDING_MS = 1500;
+  /** 打ちかけの値(札を組み直しても消さない)。 */
+  let focusPositionDraft: (string | null)[] = [null, null, null];
 
   /**
    * **作ったものが消えない**ようにするカード(利用者役④の一番の不満:
@@ -1372,7 +1374,6 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     focusNodes = {};
     focusPositionInputs = [];
     focusPositionPending = [null, null, null];
-    focusPositionSeen = [0, 0, 0];
 
     if (!current) {
       // カタログの実験ではなく、**いまそこにある世界**を見ている状態
@@ -1679,18 +1680,26 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               input.type = "number";
               input.step = "0.1";
               input.id = `focus-pos-${axis}`;
-              input.value = readout.position[i].toFixed(3);
+              // **打ちかけの値は、札を組み直しても残す**。カードは選択や材質の
+              // 変更で組み直されるので、打った直後に組み直しが挟まると、打った
+              // 値が消えて元の位置が入り、そのまま「決定」されていた(遅い機械
+              // の CI で、3 と打ったのに 1.5 のままになる形で表に出た)。
+              input.value = focusPositionDraft[i] ?? readout.position[i].toFixed(3);
               input.dataset.axis = axis;
+              input.addEventListener("input", () => {
+                focusPositionDraft[i] = input.value;
+              });
               fields.appendChild(input);
               return input;
             });
             const push = () => {
               const [x, y, z] = inputs.map((input) => Number(input.value));
               if (![x, y, z].every((v) => Number.isFinite(v))) return;
-              focusPositionPending = [x, y, z].map((want, i) => ({
+              focusPositionPending = [x, y, z].map((want) => ({
                 want,
-                stale: focusPositionSeen[i],
+                until: performance.now() + POSITION_PENDING_MS,
               }));
+              focusPositionDraft = [null, null, null];
               api.setBodyPosition(selected, x, y, z);
             };
             for (const input of inputs) input.addEventListener("change", push);
@@ -2046,6 +2055,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       const selected = api.selectedBody();
       if (selected !== lastSelection) {
         lastSelection = selected;
+        // 別の物を選んだら、前の物へ打ちかけていた値は捨てる。
+        focusPositionDraft = [null, null, null];
+        focusPositionPending = [null, null, null];
         renderCrumbs();
         renderContext();
         // **選んだものの札は、選んだ瞬間に見えているべき**。カードが増えると
@@ -2079,14 +2091,13 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             if (document.activeElement === input) continue;
             const actual = readout.position[i];
             const pending = focusPositionPending[i];
-            focusPositionSeen[i] = actual;
             if (pending !== null) {
-              // 物理側が追いつく(頼んだ値になる、または古い値から動く)まで
-              // は、頼んだ値を出したままにする。動いてしまう物なら次の瞬間に
-              // 古い値から離れるので、欄が固まったままになることはない。
+              // 物理側が追いつくまでは、頼んだ値を出したままにする。追いつかない
+              // ときのために時間で切る——動く物なら、そのあとは実際の位置が
+              // そのまま出るので、欄が固まったままになることはない。
               if (
                 Math.abs(actual - pending.want) < 1e-6 ||
-                Math.abs(actual - pending.stale) > 1e-9
+                performance.now() > pending.until
               ) {
                 focusPositionPending[i] = null;
               } else {

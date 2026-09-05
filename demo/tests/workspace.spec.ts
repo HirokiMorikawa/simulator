@@ -745,6 +745,10 @@ test("選んだものの札から、置き場所を数値で決められる", as
   const x = page.locator("#focus-pos-x");
   await expect(x).toBeVisible();
   await x.fill("3");
+  // **打ちかけの値は、札が組み直されても消えない**。組み直しが打った直後に
+  // 挟まると、欄が元の位置に戻り、そのまま「決定」されて別の場所へ動いていた。
+  await page.waitForTimeout(1200);
+  await expect(x).toHaveValue("3");
   await x.dispatchEvent("change");
   await expect.poll(async () => Number(await x.inputValue()), { timeout: 10_000 })
     .toBeCloseTo(3, 2);
