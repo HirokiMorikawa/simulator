@@ -446,8 +446,15 @@
         </div>
         <!-- **飛び先は 1 秒ごとの記録**。細かさは記録の間隔で決まっているので、
              ここでコンマ何秒を狙うことはできない(細かい値はグラフを指して読む)。
-             壊れていると読まれないよう、そう書いておく。 -->
-        <input id="timeline-scrubber" type="range" min="0" max="0" value="0"
+             壊れていると読まれないよう、そう書いておく。
+             `value`はスナップショット**index**(常に整数、`main.ts`の
+             `scrubber.max = latestIndex`参照)なので`step`も整数の1を明示する
+             ——空にしてブラウザの既定へ委ねると「step が指定されていない」と
+             監査で読まれる(利用者役の報告)。`step="any"`にして index へ
+             小数を渡すと、Rust側の`u()`(`serde_json::Number::as_u64`)が
+             非整数を0扱いして**押した場所と違う時点へ黙って飛ぶ**ため、
+             ここは意図して1のまま固定する。 -->
+        <input id="timeline-scrubber" type="range" min="0" max="0" value="0" step="1"
                title="1 秒ごとに記録した時点へ飛びます(コンマ何秒の値は、グラフを指すと読めます)" />
         <div class="timeline-bookmarks">
           <input id="bookmark-label" type="text" placeholder="ブックマーク名" />

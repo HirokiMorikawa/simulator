@@ -206,7 +206,7 @@ function gravityKnob(): Knob {
     kind: "choice",
     options: GRAVITY_OPTIONS,
     value: 9.80665,
-    hint: "どの天体の上で実験するか。落ちる速さが変わります。",
+    hint: "どの天体の上で実験するか。落ちる速さが変わります(数値の単位は m/s²、1秒ごとに増える速さ)。",
     apply: (scene, value) => {
       scene.world = { ...(scene.world ?? {}), gravity: Number(value) };
     },
@@ -322,6 +322,7 @@ export const GUIDED_CATEGORIES: Category[] = [
         watch: [
           "落ちるほど速くなります(等加速度)。",
           "高さ 20 m のときで、着地はおよそ 2.0 秒後・速さ約 20 m/s(高さを変えると、どちらも変わります)。",
+          "着地してからも何度か小さく弾んでから止まります。",
           "重力を月に変えると、同じ高さでも 2.5 倍ゆっくり落ちます。",
         ],
         view: "3d",

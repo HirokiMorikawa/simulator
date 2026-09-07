@@ -655,6 +655,65 @@ test("止めている間は、時間の帯をつまんだ場所に留まる", as
   expect(errors).toEqual([]);
 });
 
+// 利用者役「しらべる」の観察: つまみの `step` が空(既定値の1が黙って効く)に
+// 見えて、「0 と 1 の2箇所にしか止まらない/途中の時刻が拾えない」と読まれた。
+// 再現すると、`value`/`max` はスナップショットの**index**(常に整数)であり、
+// 記録が2つしか無い立ち上がり直後だけ実際に0と1の2択になる——記録が貯まれば
+// 端でない位置(index)へも動かせ、そこに対応する**端でない時刻**が読める。
+// `step` は「index が整数である」ことを画面にも明示するため 1 を明示する
+// (`index.html` 側のdoc参照)。
+test("つまみを途中の位置へ動かすと、その時刻の値が読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  // リングバッファ(最大8個)が複数貯まるまで走らせる——端点2つだけでなく
+  // 「途中」と呼べる位置が実在することを確かめたい。
+  await expect.poll(() => elapsedSeconds(page), { timeout: 30_000 }).toBeGreaterThan(6);
+
+  const scrubber = page.locator("#timeline-scrubber");
+  await expect(scrubber).toHaveAttribute("step", "1");
+  const max = Number(await scrubber.getAttribute("max"));
+  expect(max).toBeGreaterThan(2);
+
+  const box = (await scrubber.boundingBox())!;
+  // 止める。
+  await page.mouse.move(box.x + box.width - 6, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+
+  // 端(0 / max)ではない、途中の位置へつまみを動かす。
+  await page.mouse.move(box.x + box.width - 6, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+
+  const value = Number(await scrubber.inputValue());
+  expect(value).toBeGreaterThan(0);
+  expect(value).toBeLessThan(max);
+
+  // その位置に対応する、端でない時刻が画面に読める(飾りの帯ではない)。
+  const timeText = await page.locator("#timeline-time").textContent();
+  const match = timeText?.match(/t = ([\d.]+) 秒/);
+  expect(match).not.toBeNull();
+  const shownTime = Number(match![1]);
+
+  const [minTime, maxTime] = await Promise.all([
+    scrubber.evaluate(() =>
+      Number((window as any).__world.read_component("snapshot_time_at", "0")),
+    ),
+    scrubber.evaluate((_el, m) =>
+      Number((window as any).__world.read_component("snapshot_time_at", String(m))),
+      max,
+    ),
+  ]);
+  // 案内文が約束する範囲(min〜max)の**内側**が読める——端点の使い回しではない。
+  expect(shownTime).toBeGreaterThan(minTime);
+  expect(shownTime).toBeLessThan(maxTime);
+  expect(errors).toEqual([]);
+});
+
 test("つまみは、壊れた結果しか出ない値を渡さない", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
