@@ -1507,6 +1507,34 @@ test("向きも、数値で決められる", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+test("「＋新規シーン」の直後は、床が「選んだもの」として出ない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  // エディタ側(`main.ts`)は内部都合で先頭のボディ(床)を選んだ状態のまま
+  // 「場面が差し替わった」と知らせてくる。以前はワークスペース側がそれを
+  // そのまま受け取っていたため、「＋新規シーン」の直後に一瞬だけ「選んだもの
+  // — ground」の札(置き場所・向きの入力欄つき)が実在した。遅い機械では、
+  // 続けて物を1つ置いたときの選択の切り替わり(床→置いた物)がこの後に
+  // 来るまでの間にちょうど入力が割り込むと、床の欄へ打った値が「本物の
+  // 選択変更」として正しく捨てられてしまい、置いた物には既定値(0)が
+  // 送られていた(「向きも、数値で決められる」がmacOS CIだけで
+  // 「入力欄が0のまま」と落ちた原因)。「選んだもの」札は**人が対象を
+  // クリックしたときだけ**出るべきで、床が一瞬でも出てはいけない。
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+
+  // 続けて物を置いたときは、その物(床ではない)が選ばれて出る——選択の
+  // 切り替わりが「なし→置いた物」の1回だけで済み、床を経由しない。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  const focus = page.locator('.card[data-card="focus"]');
+  await expect(focus).toBeVisible();
+  await expect(focus).toContainText("Box_1");
+  await expect(focus).not.toContainText("ground");
+  expect(errors).toEqual([]);
+});
+
 test("2つ目に置いた物も、グラフに記録できる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
@@ -1626,6 +1654,49 @@ test("大きさの表示と重さが噛み合う", async ({ page }) => {
   );
   expect(mass).toBeGreaterThan(3900);
   expect(mass).toBeLessThan(4100);
+  expect(errors).toEqual([]);
+});
+
+test("大きさの表示が、札と Inspector で食い違わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  const shape = page.locator('[data-focus="かたち"]');
+  const inspector = page.locator("#inspector-body");
+
+  // **球**: 「選んだもの」札は既定スポーン半径0.4mを「直径 0.80 m」の
+  // 人の言葉で書く。Inspectorは同じ球の半径をwasmの生の値のまま出すが
+  // (`body_shape_label_at`は半径を返す)、以前は「Sphere(0.4000)」と単位も
+  // 「半径」の断りも無く出ていたため、札の「直径0.80m」と数字だけ見比べると
+  // 半分にずれて見えた(利用者役の報告)。半径だと分かるラベルが付き、
+  // 0.4000 × 2 = 0.80 と暗算できることを確かめる。
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await expect(shape).toContainText("直径 0.80 m");
+  await expect(inspector).toContainText("Sphere(半径 0.4000 m)");
+
+  // **箱**: 札は一辺の長さ(半辺の2倍)。Inspectorは半辺をそのまま返すので
+  // 「半辺」と書いて区別する。
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(shape).toContainText("0.80 × 0.80 × 0.80 m");
+  await expect(inspector).toContainText("Box(半辺 x=0.4000, y=0.4000, z=0.4000 m)");
+
+  // **カプセル**: wasm側に専用の整形が無く(`Shape::Capsule`は
+  // `body_shape_label_at_impl`で`{other:?}`のRust Debug文字列
+  // `Capsule { radius: 0.2, half_height: 0.35 }`に落ちる)、以前は札側の
+  // 整形(`friendlyShape`)がこの`{`区切りの形を`(`区切り前提で読み損ね、
+  // 生のRust Debug文字列がそのまま「選んだもの」札にも出ていた
+  // (Inspectorだけでなく人向けの札まで壊れていた、より重い食い違い)。
+  // 札は「太さ・長さ」の人の言葉、Inspectorは「半径・半分の高さ」の
+  // ラベル付き生値になることを確かめる。
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-capsule")!.click());
+  await expect(shape).toContainText("太さ 0.40 m・長さ 0.70 m");
+  await expect(shape).not.toContainText("radius:");
+  await expect(inspector).toContainText("Capsule(半径 0.2 m, 半分の高さ 0.35 m)");
+
   expect(errors).toEqual([]);
 });
 

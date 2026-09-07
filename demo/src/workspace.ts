@@ -307,9 +307,22 @@ export function formatDuration(seconds: number, scale = 1): string {
   return `${(seconds / 3.155e7).toFixed(2)} 年`;
 }
 
+/** `body_shape_label_at`(wasm)が返す先頭の型名を取り出す。
+ *  `Sphere(0.4000)`のように`(`区切りの型と、`Capsule`のように専用の整形が
+ *  無く`{other:?}`のRust Debugへ落ちて`Capsule { radius: 0.2, ... }`と
+ *  `{`区切りになる型が混在する(`body_shape_label_at_impl`のdoc参照、Rust側は
+ *  触らない縮約)。`split("(")[0]`だけだと後者で丸ごと1語になり
+ *  `names`に無いキーとして弾かれ、カードにRustの生のDebug文字列が
+ *  そのまま出てしまっていた(利用者役の報告で確認: カプセルだけ
+ *  「選んだもの」札にも`Capsule { radius: 0.2, half_height: 0.35 }`が
+ *  出ていた)。先頭の英字だけを拾う方が両方に効く。 */
+function shapeHead(raw: string): string {
+  return (raw.match(/^[A-Za-z_]+/)?.[0] ?? "").toLowerCase();
+}
+
 /** `Plane(normal=(0,1,0), d=0)` のような内部表記を、ひと目で分かる名前にする。 */
 function friendlyShape(raw: string): string {
-  const head = raw.split("(")[0].trim().toLowerCase();
+  const head = shapeHead(raw);
   const names: Record<string, string> = {
     plane: "ゆか(平面)",
     sphere: "球",
@@ -342,6 +355,36 @@ function friendlyShape(raw: string): string {
     return `${name}(太さ ${meters(numbers[0] * 2)}・長さ ${meters(numbers[1] * 2)})`;
   }
   return name;
+}
+
+// **Inspector の「かたち (Shape)」欄で、生の値に何の値かを書き足す**。
+// wasm(`body_shape_label_at`)は球なら半径、箱なら半辺(一辺の半分)の長さを
+// 生のまま返す一方、「選んだもの」札は`friendlyShape`で人の言葉(直径・一辺)
+// に直して見せている——**どちらも自分の役割としては正しい**が、何の値かが
+// 書いていないため、球を1つ置くと札は「直径 0.80 m」、Inspectorは
+// 「Sphere(0.4000)」になり、同じ球なのに数字が噛み合わないように見えた
+// (利用者役の報告、`friendlyShape`のdoc参照)。
+//
+// **物理側(wasm)が返す値は書き換えない**——丸めも変換もせず、生の数字
+// 文字列をそのまま埋め込む。変えるのは「半径」「半辺」等のラベルと単位の
+// 表記だけ。Inspectorは中を知っている人向けの生の値を消さずに見せる場、
+// 「選んだもの」札は中を知らない人向けの人の言葉、という役割分担のまま
+// 両方を正しくする。
+export function annotateInspectorShape(raw: string): string {
+  const head = shapeHead(raw);
+  // 数を文字列のまま取り出す(`Number(...)`を経由して`toFixed`し直すと、
+  // wasmが返した桁数と表示上ずれかねない——ここは生の値を一切変えない)。
+  const nums = [...raw.matchAll(/-?\d+(?:\.\d+)?/g)].map((m) => m[0]);
+  if (head === "sphere" && nums.length >= 1) {
+    return `Sphere(半径 ${nums[0]} m)`;
+  }
+  if (head === "box" && nums.length >= 3) {
+    return `Box(半辺 x=${nums[0]}, y=${nums[1]}, z=${nums[2]} m)`;
+  }
+  if (head === "capsule" && nums.length >= 2) {
+    return `Capsule(半径 ${nums[0]} m, 半分の高さ ${nums[1]} m)`;
+  }
+  return raw;
 }
 
 function el<T extends HTMLElement>(id: string): T {
@@ -2057,6 +2100,28 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         current = null;
         ownSceneName = "";
         cardOverrides.clear();
+        // **読み込み直後は何も選ばれていない状態から始める**(`reload`と
+        // 同じ規則、そちらのdoc参照)。エディタ側(`sceneGalleryRef.current`)は
+        // 内部都合で先頭のボディ(たいてい床)を選んだ状態でこの通知を送って
+        // くるが、利用者から見れば自分では選んでいない——「選んだもの: ground」
+        // の札が一瞬でも出ると、そこにある置き場所・向きの入力欄も一瞬だけ
+        // 本物として存在してしまう。
+        //
+        // **これが実際に壊れていた**: 「＋新規シーン」の直後に物を1つ置く
+        // 一連の操作(スポーン系の全テストがこの形)では、この選び直し漏れの
+        // せいで「床が選ばれている」→「置いた物が選ばれている」という**本物の
+        // 選択変更が2回連続で起きる**。遅い機械(macOS CIランナー)ではその
+        // 間に床の札が実際に描画され、「向きも、数値で決められる」テストの
+        // `#focus-rot-z`が**床の欄**を掴んでしまうことがあった——打った
+        // 「30」は、そのすぐ後に置いた物へ選択が移る際に(本物の選択変更
+        // なので正しく)捨てられ、新しく出てきた置いた物の欄(既定値 0)に
+        // `change`が飛んで、向き0がそのまま world へ送られていた
+        // (`workspace.spec.ts`の該当テストのdoc参照。実測: CPU 20倍速の
+        // 抑制下で`selectionChange(-1→0=床)`→`selectionChange(0→1=箱)`の
+        // 2段が観測され、床の欄が生きている間に打ち込みが割り込むと再現した)。
+        // ここで先に選択を外しておけば、外から見える選択変更は「箱を選ぶ」の
+        // 1回だけになり、床の欄はそもそも存在しない。
+        api.selectBody(-1);
         api.setProbeLabels(null, null);
         api.setPace(null);
         // 実験を読み込むときと同じ規則(`reload`)。浅い粒度は「動いている

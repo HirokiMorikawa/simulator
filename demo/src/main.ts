@@ -8,6 +8,7 @@ import init, {
 } from "../pkg/sim_wasm.js";
 import "./style.css";
 import {
+  annotateInspectorShape,
   formatDuration,
   setUpWorkspace,
   type WorkspaceApi,
@@ -1646,7 +1647,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
-      <div class="inspector-field"><span>かたち (Shape)</span><span>${world.read_component("body_shape_label_at", String(index))}</span></div>
+      <div class="inspector-field"><span>かたち (Shape)</span><span>${annotateInspectorShape(world.read_component("body_shape_label_at", String(index)))}</span></div>
       <div class="inspector-field">
         <span>大きさ(倍率) x,y,z</span>
         <span class="inspector-scale-fields">
