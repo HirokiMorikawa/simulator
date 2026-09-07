@@ -1405,6 +1405,33 @@ test("遠くを回っている物を「もう在りません」と言わない",
   expect(errors).toEqual([]);
 });
 
+test("止まりかけた値は、指数ではなく 0 と書く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d10-brake-heat"]');
+  await page.waitForTimeout(1000);
+  await page.evaluate(() => {
+    const r = document.querySelector<HTMLInputElement>(
+      '.knob input[type="range"]',
+    );
+    if (!r) return;
+    r.value = r.max;
+    r.dispatchEvent(new Event("input", { bubbles: true }));
+    r.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  // 桁の離れた量を指数で書くようにしたら、こんどは止まりかけた箱の速さが
+  // 「8.67e-19 m/s」と出るようになった(利用者役②)。その量がこれまでに
+  // 取った大きさと比べて無視できるなら 0 と書く。
+  const speed = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => (await speed.textContent()) ?? "", { timeout: 25_000 })
+    .toMatch(/^0\.00 m\/s$/);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

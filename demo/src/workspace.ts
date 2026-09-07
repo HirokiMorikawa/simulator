@@ -1136,6 +1136,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   };
 
   let readoutNodes: { readout: NonNullable<Experiment["readouts"]>[number]; node: HTMLElement }[] = [];
+  /** その欄がこれまでに見せた最大の大きさ(「ほぼ 0」の判断に使う)。 */
+  const readoutSeenMax = new WeakMap<HTMLElement, number>();
   let focusNodes: Record<string, HTMLElement> = {};
   /** 「選んだもの」の置き場所の入力欄(打っている最中は書き換えない)。 */
   let focusPositionInputs: HTMLInputElement[] = [];
@@ -2142,6 +2144,21 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           }
           const values = sources.map((i) => api.probeValue(i));
           const value = readout.derive ? readout.derive(values) : values[0];
+          // **その量にとって「ほぼ 0」なら、0 と書く**。桁の離れた量を指数で
+          // 書くようにしたら、こんどは止まりかけた箱の速さが「8.67e-19 m/s」と
+          // 出るようになった——普通の人には壊れて見える(利用者役②の観察)。
+          // その量がこれまでに取った大きさと比べて無視できるほど小さいときだけ
+          // 0 に丸める。インクの広がり(常に 1e-17 前後)のように、量そのものが
+          // 小さい系列は指数のまま残る。
+          if (Number.isFinite(value)) {
+            const seen = Math.max(readoutSeenMax.get(node) ?? 0, Math.abs(value));
+            readoutSeenMax.set(node, seen);
+          }
+          const negligible =
+            Number.isFinite(value) &&
+            value !== 0 &&
+            Math.abs(value) < (readoutSeenMax.get(node) ?? 0) * 1e-6;
+          const shown = negligible ? 0 : value;
           // **無くなった物の値は、数字として出さない**。融け切った氷のように
           // 場から退いた剛体は、内部では遠く(-1e9 m)へ退避させられる。その値が
           // そのまま「氷の高さ -1,000,000,000.000 m」と出て、壊れたとしか読め
@@ -2151,8 +2168,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             : Math.abs(value - RETIRED_BODY_Y) <= RETIRED_BODY_TOLERANCE
               ? "もう在りません"
               : readout.format
-                ? readout.format(value)
-                : `${readoutNumber(value, readout.digits ?? 2)}${readout.unit ? ` ${readout.unit}` : ""}`;
+                ? readout.format(shown)
+                : `${readoutNumber(shown, readout.digits ?? 2)}${readout.unit ? ` ${readout.unit}` : ""}`;
         }
       }
 
