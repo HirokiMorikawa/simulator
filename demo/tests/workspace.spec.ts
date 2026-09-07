@@ -789,6 +789,65 @@ test("選んだものの札から、置き場所を数値で決められる", as
   expect(errors).toEqual([]);
 });
 
+/**
+ * 選んだ物が、いまの画角に**ちゃんと映っているか**を`main.ts`の
+ * `isWellVisible`と同じ判定(投影した点が画角の内側にあるか)で読む。
+ * `window.__camera`/`window.__world`はテスト専用に露出されている。
+ */
+async function bodyOnScreen(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: {
+        matrixWorldInverse: { elements: number[] };
+        projectionMatrix: { elements: number[] };
+      };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(kind: string, arg: string): string;
+        body_position_at_f32(index: number): Float32Array;
+      };
+    }).__world;
+    const index = Number(world.read_component("body_count", "")) - 1; // 直近に置いた物
+    const p = world.body_position_at_f32(index);
+    const mulMat4Vec4 = (e: number[], v: number[]) => {
+      const out = [0, 0, 0, 0];
+      for (let r = 0; r < 4; r += 1) {
+        out[r] = e[r] * v[0] + e[4 + r] * v[1] + e[8 + r] * v[2] + e[12 + r] * v[3];
+      }
+      return out;
+    };
+    const view = mulMat4Vec4(cam.matrixWorldInverse.elements, [p[0], p[1], p[2], 1]);
+    const clip = mulMat4Vec4(cam.projectionMatrix.elements, view);
+    if (clip[3] <= 0) return false; // カメラの後ろ
+    const ndc = [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]];
+    return Math.abs(ndc[0]) <= 1 && Math.abs(ndc[1]) <= 1 && ndc[2] <= 1;
+  });
+}
+
+test("置き場所を数値で変えても、その物は画面から消えない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+
+  // 置いた直後は物のすぐ近くまで画角が寄っている(至近距離)。ここから
+  // 数値で大きく動かすと、以前は画角が一切追随せず、物だけが動いて画面には
+  // 何も映らない床だけが残った(利用者役①の報告:「数値は正しく変わって
+  // いるのに、画面には何もない床だけが残る」)。
+  await expect.poll(() => bodyOnScreen(page), { timeout: 5_000 }).toBe(true);
+
+  const y = page.locator("#focus-pos-y");
+  await y.fill("9");
+  await y.dispatchEvent("change");
+  await page.waitForTimeout(800);
+
+  expect(await bodyOnScreen(page)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 test("とめている間なら、材質を変えられる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

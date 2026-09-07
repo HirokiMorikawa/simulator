@@ -6576,6 +6576,26 @@ async function setUpSceneView(
     return camera.position.distanceTo(point) <= Math.max(radius, 0.05) * 20;
   }
 
+  /**
+   * すでに置いてある物の、`isWellVisible` 判定に使う代表的な大きさ。
+   *
+   * スポーン時は形ごとに決まった定数(`spawnRadius`)があるが、置いた**あとで**
+   * 座標を打ち替えるときはそれが無い——対応するメッシュのバウンディング球を
+   * 現在のスケールごと測って代わりに使う。
+   */
+  function bodyVisibilityRadius(index: number): number {
+    const mesh = bodyMeshes.get(index);
+    if (!mesh) return 0.3;
+    mesh.geometry.computeBoundingSphere();
+    const own = mesh.geometry.boundingSphere?.radius ?? 0.3;
+    const scale = Math.max(
+      Math.abs(mesh.scale.x),
+      Math.abs(mesh.scale.y),
+      Math.abs(mesh.scale.z),
+    );
+    return Math.max(own * scale, 0.05);
+  }
+
   function frameCameraOnContent() {
     const box = contentBoundingBox();
     if (!box) return;
@@ -7294,6 +7314,13 @@ async function setUpSceneView(
     setPosition(bodyIndex, x, y, z) {
       if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
       applyComponent(world, "set_body_position_at", { index: bodyIndex, x, y, z });
+      // `workspaceApi.setBodyPosition` と同じ手当て(そちらのdoc参照)。
+      // 統合エディタの Inspector から打ち替えたときも、追従カメラが止まって
+      // いれば同じように画面から消える。
+      if (!guidedFollowCamera && !isWellVisible(x, y, z, bodyVisibilityRadius(bodyIndex))) {
+        bodyMeshes.get(bodyIndex)?.position.set(x, y, z);
+        frameCameraOnContent();
+      }
     },
   };
   renderInspectorFor(world, selectedBodyIndex);
@@ -10612,6 +10639,21 @@ async function setUpSceneView(
       if (index < 0 || index >= readNumber(world, "body_count")) return false;
       applyComponent(world, "set_body_position_at", { index, x, y, z });
       markUnsaved();
+      // **置いた人が見失わないこと**。追従カメラが自分の操作で止まっている
+      // ときは、数値で打ち替えた座標は毎フレームの合わせ直しの対象に入らない
+      // ——スポーン直後は至近距離まで寄っているので(`spawnShapeAt`のdoc
+      // 参照)、そこから数mでも動かすと画角の外へ出て、床だけが残る画面に
+      // なる(利用者役①の報告)。視線の向きは保ったまま、画角から外れそうな
+      // ときだけ合わせ直す——スポーン時と同じ手当て。
+      if (!guidedFollowCamera && !isWellVisible(x, y, z, bodyVisibilityRadius(index))) {
+        // `frameCameraOnContent`は`bodyMeshes`の**現在の**メッシュ位置から
+        // 箱を作る。メッシュは`render()`の毎フレーム同期でしか動かないため、
+        // ここで先に動かしておかないと、まだ古い位置のまま画角を合わせて
+        // しまい(=結果的に「もう合っている」ので画角が動かない)、直後の
+        // 同期で物だけが新しい位置へ移って再び画角の外に出る。
+        bodyMeshes.get(index)?.position.set(x, y, z);
+        frameCameraOnContent();
+      }
       return true;
     },
     setBodyRotation: (index, degX, degY, degZ) => {
