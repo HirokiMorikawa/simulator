@@ -4847,7 +4847,24 @@ function setUpProbeGraph(): (
     // 横に流す。数値はグラフを指せば読める(`hoverX` の doc 参照)。
     const LEGEND_LINE = 13;
     const compactLegend = (drawn.length + 1) * LEGEND_LINE > plotH * 0.55;
+    /**
+     * **凡例の下に帯を敷く**。縁取りだけでは、値が上下に大きく振れる系列
+     * (振り子・ロープ・積み木)で線が文字の上を何本も横切り、色と線が入り
+     * 乱れて読めなかった(利用者役③の観察)。地の色を薄く敷いてから文字を
+     * 置けば、線が来ても読める。
+     */
+    const legendBackdrop = (lines: number) => {
+      if (lines <= 0) return;
+      ctx.fillStyle = "rgba(8, 10, 13, 0.55)";
+      ctx.fillRect(0, 0, w, Math.min(plotH, 4 + lines * LEGEND_LINE));
+    };
+
     let legendY = 12;
+    legendBackdrop(
+      compactLegend
+        ? Math.ceil(drawn.length / 3) + (drawn.length > 1 ? 1 : 0)
+        : drawn.length + (drawn.length > 1 ? 1 : 0),
+    );
     if (compactLegend) {
       let x = 4;
       for (const { series: s, flatY } of drawn) {
