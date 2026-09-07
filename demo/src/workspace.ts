@@ -107,6 +107,24 @@ export type WorkspaceApi = {
    * 走行中でも効く(Gizmo のドラッグと同じ扱い)。
    */
   setBodyPosition: (index: number, x: number, y: number, z: number) => boolean;
+  /**
+   * 選んだ物の**向き**を、度で決める(x, y, z 軸まわり)。
+   *
+   * 向きは輪(ギズモ)をドラッグするしか手が無く、掴む場所がわずかに違うだけで
+   * どの軸が回るか変わってしまい、狙った角度の坂を作るまで何度もやり直しに
+   * なっていた(利用者役④の観察)。置き場所と同じように、数値でも決められる
+   * ようにする。
+   */
+  setBodyRotation: (index: number, degX: number, degY: number, degZ: number) => boolean;
+  /**
+   * 選んだ物の高さと速さを、グラフに記録し始める。
+   *
+   * 記録が付くのは最初に置いた物だけで、2 つ目以降を比べたくても足す手段が
+   * どこにも無かった(利用者役④の観察)。
+   */
+  addBodyProbes: (index: number) => boolean;
+  /** その物が、もうグラフに記録されているか。 */
+  hasBodyProbes: (index: number) => boolean;
   /** 選べる材質の名前(スポーンパレットと同じ並び)。 */
   materialNames: () => string[];
   /** 選択中の剛体(無ければ -1)。 */
@@ -120,6 +138,8 @@ export type WorkspaceApi = {
     material: string;
     mass: number;
     position: [number, number, number];
+    /** 向き(x, y, z 軸まわりの度)。 */
+    rotation: [number, number, number];
     speed: number;
   } | null;
 };
@@ -1128,6 +1148,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   const POSITION_PENDING_MS = 1500;
   /** 打ちかけの値(札を組み直しても消さない)。 */
   let focusPositionDraft: (string | null)[] = [null, null, null];
+  /** 向きの欄も、置き場所とまったく同じ扱いにする。 */
+  let focusRotationInputs: HTMLInputElement[] = [];
+  let focusRotationPending: ({ want: number; until: number } | null)[] = [
+    null,
+    null,
+    null,
+  ];
+  let focusRotationDraft: (string | null)[] = [null, null, null];
 
   /**
    * **作ったものが消えない**ようにするカード(利用者役④の一番の不満:
@@ -1309,8 +1337,16 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           const anchorElement = document.createElement("a");
           anchorElement.href = url;
           anchorElement.download = `${chosenSceneName() || "my-scene"}.json`;
+          // **文書に入れてから押す**。ぶら下がったままの `<a>` を押しても
+          // 名前(`download`)が効かず、保存されるファイルは中身に関係なく
+          // いつも「download」——拡張子も付かず、書き出しを重ねるとどれが
+          // どれだか分からなくなっていた(利用者役④の観察)。取り消し
+          // (`revokeObjectURL`)も、保存が始まってからにする。
+          anchorElement.style.display = "none";
+          document.body.appendChild(anchorElement);
           anchorElement.click();
-          URL.revokeObjectURL(url);
+          anchorElement.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 0);
         });
         const upload = document.createElement("input");
         upload.type = "file";
@@ -1374,6 +1410,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     focusNodes = {};
     focusPositionInputs = [];
     focusPositionPending = [null, null, null];
+    focusRotationInputs = [];
+    focusRotationPending = [null, null, null];
 
     if (!current) {
       // カタログの実験ではなく、**いまそこにある世界**を見ている状態
@@ -1706,6 +1744,65 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             place.appendChild(fields);
             body.appendChild(place);
             focusPositionInputs = inputs;
+
+            // **向きも数値で決められるようにする**(`setBodyRotation` の doc)。
+            const turn = document.createElement("div");
+            turn.className = "focus-place";
+            const turnLabel = document.createElement("label");
+            turnLabel.textContent = "向き x, y, z [度]";
+            turnLabel.htmlFor = "focus-rot-x";
+            turn.appendChild(turnLabel);
+            const turnFields = document.createElement("div");
+            turnFields.className = "focus-place-fields";
+            const turnInputs = (["x", "y", "z"] as const).map((axis, i) => {
+              const input = document.createElement("input");
+              input.type = "number";
+              input.step = "5";
+              input.id = `focus-rot-${axis}`;
+              input.value =
+                focusRotationDraft[i] ?? readout.rotation[i].toFixed(1);
+              input.dataset.axis = axis;
+              input.addEventListener("input", () => {
+                focusRotationDraft[i] = input.value;
+              });
+              turnFields.appendChild(input);
+              return input;
+            });
+            const pushTurn = () => {
+              const [rx, ry, rz] = turnInputs.map((input) => Number(input.value));
+              if (![rx, ry, rz].every((v) => Number.isFinite(v))) return;
+              focusRotationPending = [rx, ry, rz].map((want) => ({
+                want,
+                until: performance.now() + POSITION_PENDING_MS,
+              }));
+              focusRotationDraft = [null, null, null];
+              api.setBodyRotation(selected, rx, ry, rz);
+            };
+            for (const input of turnInputs) {
+              input.addEventListener("change", pushTurn);
+            }
+            turn.appendChild(turnFields);
+            const turnNote = document.createElement("p");
+            turnNote.className = "card-note";
+            turnNote.textContent =
+              "坂を作るなら、x か z を 20〜40 度あたりに。輪をつまんで回すこともできます。";
+            turn.appendChild(turnNote);
+            body.appendChild(turn);
+            focusRotationInputs = turnInputs;
+
+            // **この物もグラフに記録する**。記録が付くのは最初に置いた物だけで、
+            // 2 つ目以降を比べたくても足す手段がどこにも無かった(利用者役④)。
+            if (!api.hasBodyProbes(selected)) {
+              const record = document.createElement("button");
+              record.type = "button";
+              record.id = "btn-record-body";
+              record.textContent = "📈 この物もグラフに記録する";
+              record.addEventListener("click", () => {
+                api.addBodyProbes(selected);
+                renderContext();
+              });
+              body.appendChild(record);
+            }
             const actions = document.createElement("div");
             actions.className = "card-actions";
             const follow = document.createElement("button");
@@ -2058,6 +2155,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         // 別の物を選んだら、前の物へ打ちかけていた値は捨てる。
         focusPositionDraft = [null, null, null];
         focusPositionPending = [null, null, null];
+        focusRotationDraft = [null, null, null];
+        focusRotationPending = [null, null, null];
         renderCrumbs();
         renderContext();
         // **選んだものの札は、選んだ瞬間に見えているべき**。カードが増えると
@@ -2105,6 +2204,24 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               }
             }
             const next = actual.toFixed(3);
+            if (input.value !== next) input.value = next;
+          }
+          // 向きの欄も、置き場所とまったく同じ規則で揃える。
+          for (const [i, input] of focusRotationInputs.entries()) {
+            if (document.activeElement === input) continue;
+            const actual = readout.rotation[i];
+            const pending = focusRotationPending[i];
+            if (pending !== null) {
+              if (
+                Math.abs(actual - pending.want) < 1e-3 ||
+                performance.now() > pending.until
+              ) {
+                focusRotationPending[i] = null;
+              } else {
+                continue;
+              }
+            }
+            const next = actual.toFixed(1);
             if (input.value !== next) input.value = next;
           }
           const materialSelect = document.getElementById(

@@ -9560,7 +9560,16 @@ async function setUpSceneView(
       material_name: material,
     }).index as number;
     motorArmBodies.add(bodyIndex);
-    currentMotorTarget.set(bodyIndex, MOTOR_TARGET_LOW);
+    // **置いたら動く**。目標角度を腕の初期姿勢(0°)のまま置いていたので、
+    // モーターを足して「うごかす」を押しても腕は微動だにせず、ツールバーの
+    // 「⟳ モーター切替」を自分で見つけるまで壊れているようにしか見えなかった
+    // (利用者役④の観察)。反対側を目標にして置けば、走らせた瞬間に回り始める
+    // ——モーターが何をする部品なのかが、そこで初めて分かる。
+    currentMotorTarget.set(bodyIndex, MOTOR_TARGET_HIGH);
+    applyComponent(world, "set_motor_target_at", {
+      index: bodyIndex,
+      theta_target: MOTOR_TARGET_HIGH,
+    });
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(0.2, 1.2, 0.2),
       new THREE.MeshStandardMaterial({ color: 0x66ffcc }),
@@ -10509,6 +10518,44 @@ async function setUpSceneView(
       markUnsaved();
       return true;
     },
+    setBodyRotation: (index, degX, degY, degZ) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      // 度 → クォータニオン。順序は Inspector の表示(XYZ)と同じ。
+      const q = new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(
+          THREE.MathUtils.degToRad(degX),
+          THREE.MathUtils.degToRad(degY),
+          THREE.MathUtils.degToRad(degZ),
+          "XYZ",
+        ),
+      );
+      applyComponent(world, "set_body_rotation_at", {
+        index,
+        x: q.x,
+        y: q.y,
+        z: q.z,
+        w: q.w,
+      });
+      markUnsaved();
+      return true;
+    },
+    addBodyProbes: (index) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      const before = readNumber(world, "imported_probe_count");
+      addProbesForBody(index);
+      return readNumber(world, "imported_probe_count") > before;
+    },
+    hasBodyProbes: (index) => {
+      if (index < 0) return false;
+      const name = world.read_component("body_label_at", String(index));
+      if (!name) return false;
+      const count = readNumber(world, "imported_probe_count");
+      for (let i = 0; i < count; i += 1) {
+        const label = world.read_component("imported_probe_label_at", String(i));
+        if (label.includes(`(${name})`) || label.includes(`[${name}]`)) return true;
+      }
+      return false;
+    },
     bodyReadout: (index) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return null;
       if (world.read_component("body_is_removed_at", String(index)) === "true") {
@@ -10516,12 +10563,22 @@ async function setUpSceneView(
       }
       const position = world.body_position_at_f32(index);
       const velocity = world.body_velocity_at_f32(index);
+      const r = world.body_rotation_at_f32(index);
+      const euler = new THREE.Euler().setFromQuaternion(
+        new THREE.Quaternion(r[0], r[1], r[2], r[3]),
+        "XYZ",
+      );
       return {
         label: world.read_component("body_label_at", String(index)),
         shape: world.read_component("body_shape_label_at", String(index)),
         material: world.read_component("body_material_label_at", String(index)),
         mass: readNumber(world, "body_mass_at", String(index)),
         position: [position[0], position[1], position[2]],
+        rotation: [
+          THREE.MathUtils.radToDeg(euler.x),
+          THREE.MathUtils.radToDeg(euler.y),
+          THREE.MathUtils.radToDeg(euler.z),
+        ],
         speed: Math.hypot(velocity[0], velocity[1], velocity[2]),
       };
     },

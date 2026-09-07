@@ -1312,6 +1312,64 @@ test("床より下へ落ちていく物も、画面から見失わない", async
   expect(errors).toEqual([]);
 });
 
+test("向きも、数値で決められる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  // 向きは輪をドラッグするしか手が無く、掴む場所がわずかに違うだけでどの軸が
+  // 回るか変わるので、狙った角度の坂を作れなかった(利用者役④)。
+  const z = page.locator("#focus-rot-z");
+  await expect(z).toBeVisible();
+  await z.fill("30");
+  await z.dispatchEvent("change");
+  await expect
+    .poll(async () => Number(await z.inputValue()), { timeout: 10_000 })
+    .toBeCloseTo(30, 0);
+  expect(errors).toEqual([]);
+});
+
+test("2つ目に置いた物も、グラフに記録できる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.waitForTimeout(600);
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 記録が付くのは最初に置いた物だけで、2 つ目以降を比べたくても足す手段が
+  // どこにも無かった(利用者役④)。
+  const record = page.locator("#btn-record-body");
+  await expect(record).toBeVisible();
+  await record.click();
+  await expect(page.locator("#hierarchy-tree")).toContainText("高さ(Sphere_2)");
+  // 付いたら、そのボタンはもう出ない。
+  await expect(page.locator("#btn-record-body")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("モーターは、置いて動かせば回る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-motor")!.click());
+
+  // 目標角度を腕の初期姿勢のまま置いていたので、足して「うごかす」を押しても
+  // 微動だにせず、ツールバーの「モーター切替」を見つけるまで壊れているように
+  // しか見えなかった(利用者役④)。
+  const z = page.locator("#focus-rot-z");
+  await expect(z).toBeVisible();
+  await page.click("#btn-run");
+  await expect
+    .poll(async () => Math.abs(Number(await z.inputValue())), { timeout: 20_000 })
+    .toBeGreaterThan(30);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
