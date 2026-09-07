@@ -1518,6 +1518,22 @@ impl WasmWorld {
         out
     }
 
+    /// 気体の**箱の大きさ** `[x, y, z]` [m]。気体ドメインが無ければ空。
+    ///
+    /// 箱は `[0, x] × [0, y] × [0, z]`。「400 個の分子が箱の中で飛び回ります」と
+    /// 書いてあるのに、画面には箱の枠も壁も無く、点が真っ黒な空間に浮いている
+    /// だけに見えた(利用者役①の観察)。枠を描けるように、寸法をそのまま渡す。
+    pub fn kinetic_gas_box_size_f32(&self) -> Vec<f32> {
+        match self.inner.kinetic_gas() {
+            Some(gas) => vec![
+                gas.box_size.x as f32,
+                gas.box_size.y as f32,
+                gas.box_size.z as f32,
+            ],
+            None => Vec::new(),
+        }
+    }
+
     /// 3D格子流体の**煙**を、点群として返す。
     ///
     /// 1 点あたり 4 要素 `[x, y, z, 濃さ]`。`stride` でセルを間引き、`threshold`

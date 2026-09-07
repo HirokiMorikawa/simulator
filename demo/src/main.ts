@@ -6175,7 +6175,7 @@ async function setUpSceneView(
     const count = Math.min(positions.length / 3, STAT_MAX_PARTICLES);
     if (count === 0) {
       cloud.points.visible = false;
-      return;
+      return 0;
     }
     // 最遠粒子を PARTICLE_VIEW_RADIUS に収める(絶対スケールは Probe Graphs が出す)。
     let maxR = 0;
@@ -6196,6 +6196,36 @@ async function setUpSceneView(
     cloud.geometry.setDrawRange(0, count);
     cloud.attribute.needsUpdate = true;
     cloud.points.visible = true;
+    return scale;
+  }
+
+  /**
+   * **気体の箱の枠**。
+   *
+   * 「400 個の分子が箱の中で飛び回ります」と書いてあるのに、画面には枠も壁も
+   * 無く、点が真っ黒な空間に浮いているだけに見えた(利用者役①の観察)。粒子と
+   * まったく同じ縮尺・同じ中心で枠を描けば、「箱の中で跳ね返っている」ことが
+   * 絵のまま読める。物理には触らない。
+   */
+  const gasBoxLines = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+    new THREE.LineBasicMaterial({ color: 0x7f8a99 }),
+  );
+  gasBoxLines.visible = false;
+  scene.add(gasBoxLines);
+  function updateGasBox(currentWorld: WasmWorld, scale: number): void {
+    const size = currentWorld.kinetic_gas_box_size_f32();
+    if (size.length < 3 || !(scale > 0)) {
+      gasBoxLines.visible = false;
+      sceneViewElement.dataset.gasBox = "false";
+      return;
+    }
+    gasBoxLines.scale.set(size[0] * scale, size[1] * scale, size[2] * scale);
+    // 粒子は「箱の中心を原点へ寄せて、高さ 2 へ持ち上げる」で描いている
+    // (`updateParticleCloud`)。枠も同じ場所へ置く。
+    gasBoxLines.position.set(0, 2, 0);
+    gasBoxLines.visible = true;
+    sceneViewElement.dataset.gasBox = "true";
   }
 
   // **場のパネル(群3)**。チェックリストが D27–D33 を閉じる際に挙げた
@@ -8404,7 +8434,10 @@ async function setUpSceneView(
     // ソフトボディ/天体/粒子群のバウンディングボックスがまだ空)。
     updateSoftBodyOverlay(world);
     updateAstroOverlay(world);
-    updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter);
+    updateGasBox(
+      world,
+      updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter),
+    );
     updateParticleCloud(brownianCloud, world.brownian_positions_f32(1), [0, 0, 0]);
     sceneBaseBodyCount = bodies.length;
 
@@ -9993,7 +10026,10 @@ async function setUpSceneView(
     // ドメイン自体が World に無かった(統計)ものを描く。
     updateSoftBodyOverlay(world);
     updateAstroOverlay(world);
-    updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter);
+    updateGasBox(
+      world,
+      updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter),
+    );
     updateParticleCloud(brownianCloud, world.brownian_positions_f32(1), [0, 0, 0]);
     updateFieldPanel(world);
     // **舞台に何も描かれないシーン**(熱伝導・量子・イジング……)では、空の

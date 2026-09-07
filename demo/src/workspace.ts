@@ -209,9 +209,17 @@ const AUTORUN_BELOW = 2.5;
  *
  * 消えた物(融け切った氷など)は、内部では `y = -1e9 m` の遠方へ退避させられる。
  * その値を数字として出すと「-1,000,000,000.000 m」になり、壊れた画面にしか
- * 見えない(利用者役②の観察)。この桁に達したら、値ではなく状態として書く。
+ * 見えない(利用者役②の観察)。
+ *
+ * **桁の大きさで判定しない**。「1e8 を超えたら退避」と見ていたときは、太陽から
+ * 1.5e11 m を回っている惑星の距離まで「もう在りません」と書いてしまい、目の前を
+ * 回っている衛星を指して「消えました」と言う画面になっていた(利用者役①の
+ * 観察)。退避先はただ一点(y = -1e9 m)なので、そこにいるときだけ言う。
+ * 退避した物は速度も 0 にされるので、そこから動いて紛れることもない。
  */
-const RETIRED_BODY_MAGNITUDE = 1e8;
+const RETIRED_BODY_Y = -1e9;
+/** 退避先とみなす幅 [m]。 */
+const RETIRED_BODY_TOLERANCE = 1;
 
 const REVEAL = {
   analysis: 1.2, // グラフ
@@ -2140,7 +2148,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           // なかった(利用者役②の観察)。退避先の桁に達した値は、そう言う。
           node.textContent = !Number.isFinite(value)
             ? "—"
-            : Math.abs(value) >= RETIRED_BODY_MAGNITUDE
+            : Math.abs(value - RETIRED_BODY_Y) <= RETIRED_BODY_TOLERANCE
               ? "もう在りません"
               : readout.format
                 ? readout.format(value)

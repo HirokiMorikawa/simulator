@@ -1370,6 +1370,41 @@ test("モーターは、置いて動かせば回る", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+test("気体の実験には、箱の枠が描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d30-gas-box"]');
+
+  // 「400 個の分子が箱の中で飛び回ります」と書いてあるのに、枠も壁も無く、
+  // 点が真っ黒な空間に浮いているだけに見えた(利用者役①)。
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-gas-box",
+    "true",
+    { timeout: 20_000 },
+  );
+  expect(errors).toEqual([]);
+});
+
+test("遠くを回っている物を「もう在りません」と言わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+
+  // 退避した剛体の目印を「桁が大きい値」で見ていたので、太陽から 1.5e11 m を
+  // 回っている惑星の距離まで「もう在りません」と書き、目の前を回っている物を
+  // 指して消えたと言う画面になっていた(利用者役①)。
+  const distance = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => (await distance.textContent()) ?? "", { timeout: 15_000 })
+    .toMatch(/[0-9]/);
+  await expect(distance).not.toContainText("もう在りません");
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
