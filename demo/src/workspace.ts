@@ -1111,14 +1111,29 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     renderContext();
   }
 
-  /** いまのつまみの値でシーンを作り直し、頭から走らせる。 */
-  function reload(): void {
+  /**
+   * いまのつまみの値でシーンを作り直し、頭から走らせる。
+   *
+   * `keepPauseIntent: true` を渡すと、**「とめる」で止めていたなら止めた
+   * まま**作り直す(利用者役の報告: 「とめる」で一時停止していたのに、
+   * 重力のつまみを押したら勝手に再生が始まった。ツールチップ「動かすと、
+   * その設定で最初からやり直します」は"最初から"としか言っておらず、
+   * "止めていたのに動き出す"ことまでは書いていなかった)。
+   *
+   * 実験を選び直した直後(`start`)は今までどおり自動で走らせる——初めて
+   * 開いた人が空白ではなく動いている現象から始まる、という原則はここでは
+   * 崩さない。崩れるのは「すでに開いていて、自分で止めた」場面だけなので、
+   * その呼び出し元(つまみの変更・「はじめの設定に戻す」)だけがこのフラグを
+   * 渡す。
+   */
+  function reload(options?: { keepPauseIntent?: boolean }): void {
     const api = apiRef.current;
     if (!current) return;
     if (!api) {
       pendingStart = true;
       return;
     }
+    const wasPaused = options?.keepPauseIntent === true && !api.isPlaying();
     const json = sceneJsonFor(current);
     if (!json) return;
     api.loadSceneJson(json);
@@ -1145,8 +1160,12 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     lastActualRateWallMs = null;
     lastActualRateSimSeconds = null;
     api.followCamera(true);
-    if (detail < AUTORUN_BELOW) api.play();
-    else api.stopForEditing();
+    if (detail < AUTORUN_BELOW) {
+      if (wasPaused) api.pause();
+      else api.play();
+    } else {
+      api.stopForEditing();
+    }
     syncRun();
   }
 
@@ -1688,7 +1707,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           reset.textContent = "はじめの設定に戻す";
           reset.addEventListener("click", () => {
             knobValues = defaultKnobValues(experiment);
-            reload();
+            reload({ keepPauseIntent: true });
             renderContext();
           });
           body.appendChild(reset);
@@ -2059,7 +2078,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         knobValues[knob.id] = Number(input.value);
         paint();
       });
-      input.addEventListener("change", () => reload());
+      input.addEventListener("change", () => reload({ keepPauseIntent: true }));
       row.append(input, output);
       wrap.appendChild(row);
     } else {
@@ -2087,7 +2106,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               (sibling as HTMLElement).dataset.value === String(option.value),
             );
           }
-          reload();
+          reload({ keepPauseIntent: true });
         });
         group.appendChild(button);
       }

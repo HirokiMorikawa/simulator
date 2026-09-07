@@ -5137,6 +5137,10 @@ async function setUpSceneView(
   // 差し替え前の古いインスタンスを掴んだままになる。
   Object.defineProperty(window, "__world", { get: () => world, configurable: true });
   Object.defineProperty(window, "__scene", { get: () => scene, configurable: true });
+  // `orbit`(=注視点)も同じ理由でテスト専用に露出する。追従カメラが
+  // 「注視点は動くものの近くに保っているのに、球が画面から消える」ような
+  // ケースを見分けるのに、カメラ位置だけでなく注視点も要る。
+  Object.defineProperty(window, "__orbit", { get: () => orbit, configurable: true });
   // テスト専用フック: シーンギャラリーの「ワールドを差し替えて読み込み」
   // (`sceneGalleryRef.current`)を任意のJSON文字列で直接呼べるようにする
   // (`__camera`/`__world`/`__scene`と同じテスト専用露出、実行時の挙動には
@@ -6851,6 +6855,21 @@ async function setUpSceneView(
           ? 0.35
           : Math.max(ease, 0.1);
     orbit.target.lerp(guidedFollowTarget, targetEase);
+    // **注視点(`orbit.target`)自体も、動くものから画角の外へ出ないよう
+    // 上限を掛ける**。`guidedFollowTarget`は`offsetLimit`ですでに動くものの
+    // 近くに保っているが、`orbit.target`はそこへ`targetEase`で追いつく
+    // *途中*の値であり、上の`offsetLimit`とは無関係に遅れが積み上がる——
+    // 実測では、秒速 14m 超で水平に飛ぶ球(45°に投げる実験)に対して
+    // 注視点が最大 2m ほど遅れ続け、床グリッドしか映っていない画角のまま
+    // 着地まで一度も球が画面に現れなかった(進行管理役の実測、
+    // `window.__camera`/`window.__world`で確認)。遅れの**距離**そのものを
+    // `guidedFollowTarget`と同じ`offsetLimit`で頭打ちにすれば、毎フレーム
+    // 動くものへ追いつこうとする滑らかさは保ったまま、遅れが際限なく育つ
+    // ことはなくなる(=球は画角の外へ出たままにならない)。
+    const targetLag = orbit.target.clone().sub(movingCenter);
+    if (targetLag.length() > offsetLimit) {
+      orbit.target.copy(movingCenter).add(targetLag.setLength(offsetLimit));
+    }
     const nextDistance = distance + (desired - distance) * ease;
     camera.position
       .copy(orbit.target)

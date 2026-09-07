@@ -931,6 +931,33 @@ test("『全体へ戻る』を押しても、選んでいた物が豆粒にな�
   expect(errors).toEqual([]);
 });
 
+test("「斜めに投げる」を開いた直後から、球が着地まで画面に映り続ける", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+
+  // 秒速 20m・45°で水平に14m/s超で飛ぶ球。追従カメラの注視点(orbit.target)
+  // が対象へ追いつく前の遅れが際限なく育つと、カメラの向きの都合でその遅れが
+  // 真横方向に出て、球は画角の外へ出たまま二度と戻らない——案内は「まん中の
+  // 3D を見てください」と言うのに、床のグリッドしか映らなかった(進行管理役
+  // の実測: t=1.17〜7.12秒でカメラは球から2.3〜2.8mしか離れていないのに
+  // 画面には映っていなかった)。「見え方」の「カメラを合わせ直す」を押して
+  // 初めて映る、では遅い——**開いた直後から**映っていること。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d2-ballistic"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // 開いた直後(合わせ直しボタンに触れる前)。
+  await expect.poll(() => bodyOnScreen(page), { timeout: 5_000 }).toBe(true);
+
+  // 打ち上げ(約10m)から着地(飛行時間 約2.9秒)まで、複数時点で映り続ける。
+  for (const waitMs of [400, 500, 500, 500, 500, 500, 500]) {
+    await page.waitForTimeout(waitMs);
+    expect(await bodyOnScreen(page)).toBe(true);
+  }
+  expect(errors).toEqual([]);
+});
+
 test("とめている間なら、材質を変えられる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
@@ -949,6 +976,36 @@ test("とめている間なら、材質を変えられる", async ({ page }) => 
   await expect
     .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
     .toBe("ゴム(天然)");
+  expect(errors).toEqual([]);
+});
+
+test("とめてから重力のつまみを動かしても、止まったまま", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+
+  // 利用者役の報告: 「とめる」で一時停止していたのに、重力のつまみ(選択式)
+  // を押したら勝手に再生が始まった。ツールチップは「動かすと、その設定で
+  // 最初からやり直します」としか言っておらず、「止めていたのに動き出す」
+  // ことまでは書いていなかった——止めた意思を尊重し、止めたままやり直す
+  // ようにした。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  await page.click('#knob-gravity button[data-value="1.62"]'); // 月
+  await page.waitForTimeout(500);
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  // 止めたままでも、つまみそのものはちゃんと効いている(見た目の状態だけ
+  // 差し替えて、中身が古いまま、ではないこと)。
+  await expect(page.locator('#knob-gravity button[data-value="1.62"]')).toHaveClass(
+    /active/,
+  );
   expect(errors).toEqual([]);
 });
 
