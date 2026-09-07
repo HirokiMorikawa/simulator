@@ -1284,6 +1284,34 @@ test("桁の離れた値が、0 に潰れない", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
+test("床より下へ落ちていく物も、画面から見失わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d7-terminal"]');
+  await page.waitForTimeout(4000);
+
+  // 床の下へ潜らないための高さの下限を無条件に当てていたので、床の無い場面
+  // (5 mm の球が y=0 から落ち続ける)では対象が -170 m まで沈んでもカメラ
+  // だけが y≒0 に残り、200 m 以上離れた球を見ることになって画面が真っ黒
+  // だった。潜り込む床がそもそも無い場面では当てない。
+  const framed = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas");
+    return canvas ? canvas.width > 0 : false;
+  });
+  expect(framed).toBe(true);
+
+  // 画面のまん中あたりに、背景より明るいものが映っている。
+  const shot = await page
+    .locator("#scene-view canvas")
+    .first()
+    .screenshot({ scale: "css" });
+  // PNG が単色なら、ほぼ圧縮しきられて極端に小さくなる。
+  expect(shot.byteLength).toBeGreaterThan(4500);
+  expect(errors).toEqual([]);
+});
+
 test("大きさの表示と重さが噛み合う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

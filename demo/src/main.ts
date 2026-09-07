@@ -6689,10 +6689,14 @@ async function setUpSceneView(
     // ずれが画角と同じくらいまで開いたら、**ほぼ一気に**追いつく。0.35 では
     // 60°の坂を秒速 30m で滑り落ちる箱に置いていかれ、画面の隅で豆粒に
     // なっていた(利用者役②の観察)。ずれの大きさで段を分ける。
+    // ずれが画角と同じくらいまで開いたら、**そのまま合わせる**。0.8 では毎
+    // フレーム 2 割が残り、5 mm の球が秒速数十メートルで落ちる場面(空気抵抗の
+    // 実験)ではその残りが画角より大きく、カメラは永久に置いていかれて画面は
+    // 真っ黒のままだった(実測)。追いつけないなら追いかける意味がない。
     const targetEase = guidedCameraSnapNow
       ? 1
       : targetError > desired
-        ? 0.8
+        ? 1
         : targetError > desired * 0.2
           ? 0.35
           : Math.max(ease, 0.1);
@@ -6705,10 +6709,17 @@ async function setUpSceneView(
     // ——分子の世界(D25 は 10 µm ほどの広がり)では 0.3 m は 3 万倍も遠く、
     // 対象が点にすらならず真っ黒になっていた(利用者役①の観察)。判断には
     // 床合わせの下限(`radius`)ではなく、**動くものの本当の大きさ**を使う。
-    camera.position.y = Math.max(
-      camera.position.y,
-      Math.min(0.3, movingRadius * 0.5),
-    );
+    //
+    // **見る先が床より下なら、この下限は当てない**。床の無い場面(空気抵抗の
+    // 実験は 5 mm の球が y=0 から落ち続ける)では、対象が -170 m まで沈んでも
+    // カメラだけが y≈0 に留められ、200 m 以上離れた 5 mm の球を見ることに
+    // なって画面が真っ黒だった(実測)。潜り込む床がそもそも無い。
+    if (guidedFollowTarget.y >= 0) {
+      camera.position.y = Math.max(
+        camera.position.y,
+        Math.min(0.3, movingRadius * 0.5),
+      );
+    }
     updateClipPlanes(camera.position.distanceTo(orbit.target));
     if ((window as unknown as { __dbgCam?: boolean }).__dbgCam) {
       console.log(
