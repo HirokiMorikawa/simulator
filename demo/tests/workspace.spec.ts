@@ -848,6 +848,89 @@ test("置き場所を数値で変えても、その物は画面から消えな�
   expect(errors).toEqual([]);
 });
 
+/**
+ * カメラから**直近に置いた物**への向きの、水平面に対する仰角(sin)と距離。
+ * `frameCameraOnContent`/`updateGuidedFollowCamera`が向きを決めるのに使って
+ * いるのと同じ量(`window.__camera`/`window.__world`はテスト専用に露出)。
+ */
+async function cameraToLastBody(page: Page): Promise<{ elevation: number; distance: number }> {
+  return page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: { position: { x: number; y: number; z: number } };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(kind: string, arg: string): string;
+        body_position_at_f32(index: number): Float32Array;
+      };
+    }).__world;
+    const index = Number(world.read_component("body_count", "")) - 1;
+    const p = world.body_position_at_f32(index);
+    const dx = cam.position.x - p[0];
+    const dy = cam.position.y - p[1];
+    const dz = cam.position.z - p[2];
+    const distance = Math.hypot(dx, dy, dz);
+    return { elevation: distance > 1e-9 ? dy / distance : 0, distance };
+  });
+}
+
+test("置き場所を数値で高さを変えても、地平線が画角の外に消えない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+
+  // **真上から床を覗き込む向きにならないこと**。以前は前の画角(スポーン直後の
+  // 見上げ位置)をそのまま引き継いで合わせ直していたので、置き場所を数値で
+  // y=3のような低い高さへ打ち替えると、仰角が0.9を超える(ほぼ真上からの
+  // 見下ろし)ことがあった——地平線が画角の外へ出て、物が「宙に浮いている」
+  // のか「床の上にある」のかが画面から読めなくなる(進行管理側の実測)。
+  const y = page.locator("#focus-pos-y");
+  await y.fill("3");
+  await y.dispatchEvent("change");
+  await page.waitForTimeout(500);
+  expect(await bodyOnScreen(page)).toBe(true);
+  const afterHigh = await cameraToLastBody(page);
+  expect(afterHigh.elevation).toBeLessThan(0.6);
+
+  // 低い高さ(y=0.5)へ変えても同じく崩れないこと。
+  await y.fill("0.5");
+  await y.dispatchEvent("change");
+  await page.waitForTimeout(500);
+  expect(await bodyOnScreen(page)).toBe(true);
+  const afterLow = await cameraToLastBody(page);
+  expect(afterLow.elevation).toBeLessThan(0.6);
+  expect(errors).toEqual([]);
+});
+
+test("『全体へ戻る』を押しても、選んでいた物が豆粒にならない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+  await expect.poll(() => bodyOnScreen(page), { timeout: 5_000 }).toBe(true);
+
+  const clear = page.locator("#btn-clear-selection");
+  await expect(clear).toBeVisible();
+  await clear.click();
+  await page.waitForTimeout(1000);
+
+  // 追従カメラ(`updateGuidedFollowCamera`)をそのまま流用すると、原点(床)も
+  // 画角に収めようとして大きく引いたあげく、「対象を見失わない」ための
+  // 見かけの大きさの下限がそのまま効き、直前まで大きく見えていた球が豆粒に
+  // なっていた(利用者役の報告、実測で再現)。半径0.4mの球なら、
+  // `isWellVisible`と同じ「半径の20倍(=8m)より遠いと画面の高さの1割にも
+  // 満たない粒になる」という基準に照らして、十分近いままであること。
+  const after = await cameraToLastBody(page);
+  expect(after.distance).toBeLessThan(6);
+  expect(await bodyOnScreen(page)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 test("とめている間なら、材質を変えられる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

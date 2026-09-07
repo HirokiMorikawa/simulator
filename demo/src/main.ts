@@ -6612,9 +6612,38 @@ async function setUpSceneView(
     // 設けて、床の下からは絶対に見上げない(=床の中に埋まらない)ようにする
     // ——向きの「好み」より「対象が見えること」を優先する。
     const MIN_ELEVATION = 0.25; // sin(約14.5°)。低すぎると地面すれすれで違和感が出るため床下だけを防ぐ最小限の値。
-    if (normalizedDirection.y < MIN_ELEVATION) {
-      normalizedDirection.y = MIN_ELEVATION;
-      normalizedDirection.normalize();
+    // **仰角の上限**。QA不具合2への対処で下限は設けていたが上限が無く、
+    // 前のシーンから引き継いだ視線が急な見下ろしだと(スポーン直後の見上げ
+    // 位置から、置き場所を数値でy=3のような低い高さへ打ち替えた場合など)、
+    // 合わせ直した画角がほぼ真上から床を覗き込む向きになっていた。地平線が
+    // 画角の外へ出て、対象が「宙に浮いている」のか「床の上にある」のかが
+    // 画面から読めない(進行管理側の実測)。`updateGuidedFollowCamera` が
+    // 縦画角50°の上端に地平線を残すために使っている値と同じ根拠
+    // (asin(0.42)≈25°、カメラは`camera`定義のFOV50°を共有)をここでも使う
+    // ——値だけ借りて、帯を毎フレーム押さえ続ける追従カメラの仕組みそのもの
+    // は持ち込まない(ここは向きを保ったまま距離だけ合わせる一回きりの処理)。
+    const MAX_ELEVATION = 0.3;
+    // **`y`を書き換えて`normalize()`し直すだけでは、ほぼ真上/真下(水平成分が
+    // ほぼ0)の向きを直せない**。水平成分が小さいままだと、割り戻す
+    // (=normalize)ときにまた`y`が押し戻されてしまうため——実測でも
+    // MAX_ELEVATIONを大きく超えたまま(0.42を指定したのに0.93前後で
+    // 高止まり)だった。水平成分の**向き(方位)**はそのまま保ち、
+    // **大きさ**だけをクランプ後のyに合わせて計算し直す。
+    const clampedY = Math.min(Math.max(normalizedDirection.y, MIN_ELEVATION), MAX_ELEVATION);
+    if (clampedY !== normalizedDirection.y) {
+      const horizontal = Math.hypot(normalizedDirection.x, normalizedDirection.z);
+      const targetHorizontal = Math.sqrt(Math.max(1 - clampedY * clampedY, 0));
+      if (horizontal > 1e-6) {
+        const scale = targetHorizontal / horizontal;
+        normalizedDirection.x *= scale;
+        normalizedDirection.z *= scale;
+      } else {
+        // 方位が定まらない(ほぼ真上/真下だった)ときは、適当な方位を1つ選ぶ。
+        normalizedDirection.x = targetHorizontal * Math.SQRT1_2;
+        normalizedDirection.z = targetHorizontal * Math.SQRT1_2;
+      }
+      normalizedDirection.y = clampedY;
+      normalizedDirection.normalize(); // 数値誤差の後始末(大きさはほぼ1のまま)。
     }
     camera.position.copy(center).add(normalizedDirection.multiplyScalar(radius * 2.6));
     // 仰角クランプだけでは(対象が地面近くにある・半径が小さい等の組み合わせで)
@@ -10589,6 +10618,26 @@ async function setUpSceneView(
     followCamera: (enabled) => {
       guidedFollowCamera = enabled;
       guidedCameraSnap = enabled;
+    },
+    // **「全体へ戻る」専用の一回きりの合わせ直し**。
+    //
+    // 以前は`followCamera(true)`(=毎フレーム追いかける`updateGuidedFollowCamera`)
+    // を流用していた。あちらは「対象を見失わない」ために、原点を必ず画角へ
+    // 含めたうえで、対象が遠いほど寄る距離に上限(見かけの大きさの下限)を
+    // 掛ける——秒速数十mで飛んでいく物を追い切るための、意図した妥協。
+    // ところが止まっている・置いたばかりの1個の物(原点から離れた高さに
+    // 数値で置いた球など)にこれを使うと、原点も画角に収めようとして大きく
+    // 引いたあげく、その妥協(見かけの大きさの下限)がそのまま効いてしまい、
+    // さっきまで大きく見えていた物が豆粒になる(利用者役の報告、実測で再現)。
+    // 「全体へ戻る」が約束しているのは「いま置いてある物ぜんぶが入る画角」
+    // であって「これから先も逃げずに追い続ける」ことではないので、
+    // `frameCameraOnContent`(向きは保ったまま、対象ぜんぶに距離だけ合わせる
+    // 一回きりの処理)を直接呼ぶ。追従中だった場合は止める——止めないと、
+    // 合わせ直した直後の次フレームで`updateGuidedFollowCamera`が上書きして
+    // しまい、直した意味が無くなる。
+    frameOnContent: () => {
+      guidedFollowCamera = false;
+      frameCameraOnContent();
     },
     play: () => setMode("play"),
     stopForEditing: () => setMode("edit"),

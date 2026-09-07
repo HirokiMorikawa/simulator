@@ -66,6 +66,16 @@ export type WorkspaceApi = {
   /** 追従カメラの入り切り。 */
   followCamera: (enabled: boolean) => void;
   /**
+   * いま置いてある物ぜんぶが入る画角へ、**一回だけ**合わせ直す(向きは保つ)。
+   *
+   * `followCamera(true)` は毎フレーム追いかけ続ける追従カメラで、対象が
+   * 遠いほど原点も画角に収めようとして寄りすぎず「見かけの大きさの下限」で
+   * 折り合いを付ける(逃げていく物を見失わないための妥協)。「全体へ戻る」に
+   * それを流用すると、止まっている1個の物が豆粒になってしまう(利用者役の
+   * 報告)。ここは名前どおり「いま入れる」ことだけを約束する一回きりの処理。
+   */
+  frameOnContent: () => void;
+  /**
    * グラフの凡例・目盛りに出す表示名と単位(プローブ番号 → 人間の言葉)。
    * 単位が分かる系列だけ `units` に入れる(無ければ数だけを書く)。
    * `convert` は**表の数字と同じ量**をグラフにも描くための変換
@@ -1168,6 +1178,28 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let focusRotationDraft: (string | null)[] = [null, null, null];
 
   /**
+   * 置き場所・向きの欄を**組み直す**ときの初期値。
+   *
+   * 打っている最中(`draft`)は当然それを出すが、**「決定」した直後、まだ
+   * 物理側が追いついていない一瞬**(`pending`)に札の組み直しが挟まると、
+   * これまでは`draft`しか見ていなかったので実際の値(古い方)を出してしまい、
+   * 頼んだ値がその場で元へ戻ったように見えることがあった——毎フレームの
+   * 更新(`renderContext`本体)側は`pending`を締め切りまで尊重するのに、
+   * 札を**丸ごと作り直す**ときの初期値だけそれを見ていない、という食い違い。
+   * 組み直しの初期値も同じ規則(締め切りまでは頼んだ値)に揃える。
+   */
+  function pendingOrActual(
+    pending: { want: number; until: number } | null,
+    actual: number,
+    digits: number,
+  ): string {
+    if (pending !== null && performance.now() <= pending.until) {
+      return pending.want.toFixed(digits);
+    }
+    return actual.toFixed(digits);
+  }
+
+  /**
    * **作ったものが消えない**ようにするカード(利用者役④の一番の不満:
    * 「保存に相当する言葉もボタンもどこにもなく、ページを更新しただけで
    * 自作の内容が跡形もなく消えた」)。
@@ -1732,7 +1764,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               // 変更で組み直されるので、打った直後に組み直しが挟まると、打った
               // 値が消えて元の位置が入り、そのまま「決定」されていた(遅い機械
               // の CI で、3 と打ったのに 1.5 のままになる形で表に出た)。
-              input.value = focusPositionDraft[i] ?? readout.position[i].toFixed(3);
+              input.value =
+                focusPositionDraft[i] ??
+                pendingOrActual(focusPositionPending[i], readout.position[i], 3);
               input.dataset.axis = axis;
               input.addEventListener("input", () => {
                 focusPositionDraft[i] = input.value;
@@ -1770,7 +1804,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               input.step = "5";
               input.id = `focus-rot-${axis}`;
               input.value =
-                focusRotationDraft[i] ?? readout.rotation[i].toFixed(1);
+                focusRotationDraft[i] ??
+                pendingOrActual(focusRotationPending[i], readout.rotation[i], 1);
               input.dataset.axis = axis;
               input.addEventListener("input", () => {
                 focusRotationDraft[i] = input.value;
@@ -1829,8 +1864,11 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               api.selectBody(-1);
               // 名前どおり**画角も戻す**。選択を外すだけだったので、置き場所を
               // 数値で変えて物を見失った人が、押しても何も変わらないまま
-              // 詰まっていた(利用者役④の観察)。
-              api.followCamera(true);
+              // 詰まっていた(利用者役④の観察)。ただし毎フレーム追いかける
+              // `followCamera(true)`だと、止まっている物が豆粒になるまで
+              // 引いてしまうことがあった(利用者役の報告、`frameOnContent`の
+              // doc参照)。一回だけ、いま入れる画角に合わせ直す。
+              api.frameOnContent();
               renderCrumbs();
               renderContext();
             });
