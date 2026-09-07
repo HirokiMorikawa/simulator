@@ -325,6 +325,40 @@ test("保存した場面は、⌘K からどこにいても開き直せる", asy
   expect(errors).toEqual([]);
 });
 
+test("つなぎ目のある場面も、保存して開き直せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-pendulum")!.click());
+  await expect(page.locator("#hierarchy-tree")).toContainText("つなぎ目");
+  const bodies = await page.locator("#hierarchy-tree .tree-body").count();
+
+  await page.fill("#input-scene-name", "ふりこの場面");
+  await page.click("#btn-save-scene");
+  await expect(page.locator("#crumb-own-scene")).toContainText("ふりこの場面");
+
+  // 用意された実験へ行ってから、名前で探して戻る。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこの場面");
+  await expect(page.locator(".palette-row").first()).toContainText("ふりこの場面");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-own-scene")).toContainText("ふりこの場面");
+  // 物もつなぎ目も、保存したときのまま戻ってくる。書き出しがボディの名前だけを
+  // 画面の名前へ書き換えていた頃は、つなぎ目が消えた名前を指したままになり、
+  // 読み込みが `UnknownBodyName` で落ちて**画面が何も変わらなかった**。
+  await expect
+    .poll(() => page.locator("#hierarchy-tree .tree-body").count(), { timeout: 15_000 })
+    .toBe(bodies);
+  await expect(page.locator("#hierarchy-tree")).toContainText("つなぎ目");
+  expect(errors).toEqual([]);
+});
+
 test("自分で置いた物の動きが、そのままグラフと CSV に出る", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);

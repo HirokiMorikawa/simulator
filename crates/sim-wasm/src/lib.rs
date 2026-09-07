@@ -756,7 +756,7 @@ impl WasmWorld {
             .add_scenario_probes(&scenario, &body_ids_by_name)
             .map_err(WasmError::ScenarioProbes)?;
 
-        let bodies = scenario
+        let mut bodies: Vec<SpawnedBodyMeta> = scenario
             .bodies
             .iter()
             .zip(ids.iter())
@@ -775,6 +775,29 @@ impl WasmWorld {
                 }
             })
             .collect();
+
+        // **読み込んだ場面のDistanceJointも、スポーン時と同じように控えておく。**
+        // ここが`None`のままだと`constraint_anchor_points_at`が何も返さず、
+        // Scene Viewの拘束線もHierarchyの「つなぎ目」もそのボディには出ない
+        // ——振り子を保存して開き直した瞬間に、同じ揺れ方をしているのに紐だけが
+        // 消える(拘束は`World::from_scenario`が確かに作っているのに、UIから
+        // 見えなくなる)という壊れ方をしていた。
+        for joint in inner.joints() {
+            if joint.kind != sim_world::JointKind::Distance {
+                continue;
+            }
+            if let Some(meta) = bodies
+                .iter_mut()
+                .find(|meta| meta.id.index as usize == joint.body_a)
+            {
+                // 1つのボディが複数のDistanceJointを持つことはありうるが、
+                // 控えられるのは1本だけ(`SpawnedBodyMeta`)。先に見つけた方を
+                // 採る——描けるものを描く方が、何も描かないよりよい。
+                if meta.constraint_joint_index.is_none() {
+                    meta.constraint_joint_index = Some(joint.index);
+                }
+            }
+        }
 
         let snapshot_interval_steps = (1.0 / scenario.world.dt).round().max(1.0) as u64;
         Ok(WasmWorld {
@@ -8908,6 +8931,36 @@ mod tests {
         assert!(world
             .read_component_impl("imported_probe_history_len", "9")
             .is_err());
+    }
+
+    /// **読み込んだ場面のつなぎ目が、画面から消えないこと。**
+    ///
+    /// 振り子を保存して開き直すと、拘束(`World::from_scenario`が作る
+    /// DistanceJoint)は確かに効いているのに`constraint_anchor_points_at`が
+    /// 空を返し、Scene Viewの紐もHierarchyの「つなぎ目」も出なかった——
+    /// `SpawnedBodyMeta::constraint_joint_index`をスポーン経路でしか
+    /// 埋めていなかったため。読み込み経路でも埋める。
+    #[test]
+    fn a_distance_joint_read_from_a_scene_is_visible_to_the_editor() {
+        let json = r#"{
+            "name": "pendulum",
+            "world": { "gravity": 9.80665, "dt": 0.008333333 },
+            "bodies": [
+                { "name": "bob", "shape": { "sphere": { "radius": 0.2 } },
+                  "material": "鋼(炭素鋼)", "position": [1.5, 4, 0] }
+            ],
+            "joints": [
+                { "distance": { "body_a": "bob", "anchor_a": [0, 0, 0],
+                                "anchor_b": [1.5, 6, 0], "length": 2 } }
+            ]
+        }"#;
+        let world = WasmWorld::from_scene_json_impl(json).expect("scene must be valid");
+        let anchors = world
+            .constraint_anchor_points_impl(0)
+            .expect("body 0 must exist")
+            .expect("the loaded distance joint must be reachable from its body");
+        // 固定点側は書いたとおりの位置に出る(可動体側は物理が決める)。
+        assert_eq!([anchors[3], anchors[4], anchors[5]], [1.5, 6.0, 0.0]);
     }
 
     /// **エディタでシーンを保存しても合格基準が消えないこと**

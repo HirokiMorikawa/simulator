@@ -7118,6 +7118,60 @@ async function setUpSceneView(
     highlightHierarchy = rebuildHierarchy();
   }
 
+  /**
+   * 書き出した文書のボディ名を、いま画面に出ている名前へ揃える。
+   *
+   * 書き出しは名前を落として `body_0` のような連番にする(`export.rs` の
+   * `body_name`)。組み直した途端に一覧の名前が全部変わっては、どれが自分の
+   * 置いた物か分からなくなるので書き戻すのだが、**つなぎ目・結合・観測点は
+   * 名前でボディを指している**。ボディ側だけ書き換えると参照が宙に浮き、
+   * 読み込みが `UnknownBodyName("body_1")` で落ちる——ふりこを保存して開き
+   * 直すと、何も言わずに前の場面のままになった(利用者役④の観察)。
+   * だから**参照側も同じ表で一度に**書き換える。
+   *
+   * 表は先に全部作ってから一度だけ当てる。順に当てると
+   * `body_0`→`ボール`、`body_1`→`body_0` のような並びで二重に置換され、
+   * 別の物を指してしまう。
+   */
+  function relabelSceneBodies(doc: Record<string, unknown>): void {
+    const bodies = doc.bodies;
+    if (!Array.isArray(bodies)) return;
+    const taken = new Set<string>();
+    for (const body of bodies) {
+      const name = (body as Record<string, unknown> | null)?.name;
+      if (typeof name === "string") taken.add(name);
+    }
+    const rename = new Map<string, string>();
+    const count = readNumber(world, "body_count");
+    for (let i = 0; i < bodies.length && i < count; i += 1) {
+      const from = (bodies[i] as Record<string, unknown> | null)?.name;
+      const to = world.read_component("body_label_at", String(i));
+      if (typeof from !== "string" || !to || to === from) continue;
+      // 同じ名前の物が二つできると、参照がどちらを指すのか決められなくなる。
+      // そのときは書き出しの名前のままにしておく(見た目より、開けるほうが先)。
+      if (taken.has(to)) continue;
+      taken.delete(from);
+      taken.add(to);
+      rename.set(from, to);
+    }
+    if (rename.size === 0) return;
+    const relabel = (value: unknown): unknown => {
+      if (typeof value === "string") return rename.get(value) ?? value;
+      if (Array.isArray(value)) return value.map(relabel);
+      if (value && typeof value === "object") {
+        const obj = value as Record<string, unknown>;
+        for (const key of Object.keys(obj)) obj[key] = relabel(obj[key]);
+        return obj;
+      }
+      return value;
+    };
+    for (const key of Object.keys(doc)) {
+      // 場面の名前と材質名はボディの参照ではない。
+      if (key === "name" || key === "materials") continue;
+      doc[key] = relabel(doc[key]);
+    }
+  }
+
   function patchSceneBody(
     bodyIndex: number,
     patch: (body: Record<string, unknown>) => void,
@@ -7144,14 +7198,7 @@ async function setUpSceneView(
       bodies[bodyIndex];
     if (!target) return false;
     patch(target);
-    // 書き出しは名前を落として `body_0` のような連番にしてしまう。組み直した
-    // 途端に一覧の名前が全部変わっては、どれが自分の置いた物か分からなくなる
-    // ——いま画面に出ている名前をそのまま書き戻す。
-    const count = readNumber(world, "body_count");
-    for (let i = 0; i < bodies.length && i < count; i += 1) {
-      const name = world.read_component("body_label_at", String(i));
-      if (name) bodies[i].name = name;
-    }
+    relabelSceneBodies(doc as Record<string, unknown>);
     // 観測点は元の一覧へ戻す(`sceneOwnProbes` のdoc参照)。
     (doc as { probes?: unknown[] }).probes = sceneOwnProbes;
     // これは**同じ場面の編集**であって差し替えではない。差し替えとして
@@ -10486,11 +10533,7 @@ async function setUpSceneView(
         // 書き出しは名前を落とし、読み込みが足した編集用の観測点まで載せる。
         // `patchSceneBody` と同じ手当てをして、**読み直しても同じ場面**になる
         // 文書にしてから渡す。
-        const count = readNumber(world, "body_count");
-        for (let i = 0; i < (doc.bodies?.length ?? 0) && i < count; i += 1) {
-          const name = world.read_component("body_label_at", String(i));
-          if (name && doc.bodies) doc.bodies[i].name = name;
-        }
+        relabelSceneBodies(doc as Record<string, unknown>);
         doc.probes = sceneOwnProbes;
         return JSON.stringify(doc);
       } catch (err) {
