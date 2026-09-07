@@ -5937,9 +5937,14 @@ async function setUpSceneView(
   // 粒子位置をTHREE.Pointsで毎フレーム反映する(粒子数は固定なので、スポーン時に
   // 一度だけBufferAttributeを確保しrender()内で内容だけ更新する)。
   const fluidGeometry = new THREE.BufferGeometry();
+  // **水だと一目で分かる濃さ・大きさ(利用者役の観察: 「水面が波打つ」と書いて
+  // あるのに、画面は白っぽい半透明の箱にしか見えず、水にも水面にも見えなかった)**。
+  // 元の 0x3399ff・size 0.08 自体は正しい青だったが、下の境界点群(器)を透過で
+  // 重ねて描くと、器の側が(層の重なりで)不透明に近くなり水を覆い隠していた
+  // ——水側を直しても隠されては意味がないので、器側(下)も合わせて直す。
   const fluidMaterial = new THREE.PointsMaterial({
-    color: 0x3399ff,
-    size: 0.08,
+    color: 0x2f8fff,
+    size: 0.09,
   });
   const fluidPoints = new THREE.Points(fluidGeometry, fluidMaterial);
   fluidPoints.visible = false;
@@ -5953,6 +5958,18 @@ async function setUpSceneView(
    * 水色の塊が浮いているだけに見えた——器は物理側に境界粒子として実在するのに、
    * 画面のどこにも描かれていなかった(利用者役①の観察)。水より暗い色で、水の
    * 邪魔をせずに「どこに溜まるのか」だけが分かるように置く。物理には触らない。
+   *
+   * **その後の実測(進行管理役③)で分かった問題**: 器の壁・床は設計上3層厚に
+   * 敷き詰められている(`sim-fluid::sph`のモジュールdoc参照)。カメラの視線は
+   * 手前の壁だけで3層、奥の壁まで見通せば6層を貫く——半透明点を単純に3〜6枚
+   * 重ねると `1-(1-0.45)^6 ≈ 0.97` までアルファが積み上がり、器全体が
+   * ほぼ不透明な白い塊に見えて中の水を覆い隠してしまう(スクリーンショットで
+   * 実測して確認)。**器の存在しない層を消す(嘘)のではなく、実在する境界粒子の
+   * うち外殻(いちばん外側の1層)だけを描く**——`selectBoundaryShell`が
+   * バウンディングボックスの各軸で最小・最大に触れている粒子だけを残す
+   * (内側2層は元々「同じ器の一部」として重複して壁の厚みを支えている粒子で
+   * あり、外殻だけでも器の位置・形は正しく伝わる)。これで手前の壁は実質1層に
+   * 減り、水がちゃんと透けて見える。
    */
   const fluidBoundaryGeometry = new THREE.BufferGeometry();
   const fluidBoundaryPoints = new THREE.Points(
@@ -5961,14 +5978,50 @@ async function setUpSceneView(
     // いく様子が器の壁に隠れてしまう)。
     new THREE.PointsMaterial({
       color: 0x8c9aa8,
-      size: 0.045,
+      size: 0.04,
       transparent: true,
-      opacity: 0.45,
+      opacity: 0.3,
       depthWrite: false,
     }),
   );
   fluidBoundaryPoints.visible = false;
   scene.add(fluidBoundaryPoints);
+
+  /**
+   * 境界粒子(`[x0,y0,z0,x1,y1,z1,...]`)から、各軸(x/y/z)の最小・最大に
+   * (許容誤差内で)触れている粒子だけを残す——`fluidBoundaryPoints`のdoc
+   * 参照。3層厚の壁・床のうち、いちばん外側の1層だけが残る計算になる
+   * (内側の2層は同じ壁の内部を支えている粒子で、位置は動かさず単に描画を
+   * 間引くだけ——物理の状態には一切触れない)。
+   */
+  function selectBoundaryShell(flat: ArrayLike<number>): Float32Array {
+    const n = flat.length / 3;
+    if (n === 0) return new Float32Array(0);
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const x = flat[i * 3], y = flat[i * 3 + 1], z = flat[i * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    // 粒子間隔よりじゅうぶん小さい許容誤差(浮動小数点の丸め用)。
+    const eps = 1e-4;
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const x = flat[i * 3], y = flat[i * 3 + 1], z = flat[i * 3 + 2];
+      const onShell =
+        x - minX < eps || maxX - x < eps ||
+        y - minY < eps || maxY - y < eps ||
+        z - minZ < eps || maxZ - z < eps;
+      if (onShell) out.push(x, y, z);
+    }
+    return new Float32Array(out);
+  }
 
   /**
    * **3D の煙**。
@@ -8666,7 +8719,7 @@ async function setUpSceneView(
       if (boundary.length >= 3) {
         fluidBoundaryGeometry.setAttribute(
           "position",
-          new THREE.BufferAttribute(new Float32Array(boundary), 3),
+          new THREE.BufferAttribute(selectBoundaryShell(boundary), 3),
         );
         fluidBoundaryGeometry.computeBoundingSphere();
         fluidBoundaryPoints.visible = true;

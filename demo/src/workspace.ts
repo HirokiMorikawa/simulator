@@ -419,6 +419,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   const restartButton = el<HTMLButtonElement>("btn-restart");
   const clock = el<HTMLDivElement>("run-clock");
   const rate = el<HTMLDivElement>("run-rate");
+  const actualRate = el<HTMLDivElement>("run-actual-rate");
   const speedGroup = el<HTMLDivElement>("run-speed");
   const commandbar = el<HTMLElement>("commandbar");
 
@@ -436,6 +437,19 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let current: Experiment | null = null;
   let knobValues: Record<string, string | number> = {};
   let speedMultiplier = 1;
+  /**
+   * **実際に進んでいる速さの実測**(`run-actual-rate` のdoc参照)。
+   *
+   * 「実時間に対して、シミュレーション内の時間が何倍で進んでいるか」を、
+   * 直前のtickとの差分(実時間の差・`api.time()`の差)から毎フレーム測る。
+   * 生の瞬間値はフレームごとにばらつくので、指数移動平均で均す
+   * (`main.ts`の`updateEffectiveTimeScale`と同じ考え方——ただしこちらは
+   * ワールドの内部実装(step数)に触れず、`WorkspaceApi`越しに見える
+   * 「実時間・シミュレーション時間」だけから測る)。
+   */
+  let actualRateSmoothed: number | null = null;
+  let lastActualRateWallMs: number | null = null;
+  let lastActualRateSimSeconds: number | null = null;
   let filterCategory: string | null = null;
   let paletteIndex = 0;
   let paletteMatches: PaletteEntry[] = [];
@@ -1125,6 +1139,11 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     settledAt = null;
     everMoved = false;
     stillFrames = 0;
+    // 前の実験の「実際の速さ」を引きずらない(計算の重さは実験ごとに
+    // まったく違うため、切り替えた瞬間に古い実測値が一瞬出るのを避ける)。
+    actualRateSmoothed = null;
+    lastActualRateWallMs = null;
+    lastActualRateSimSeconds = null;
     api.followCamera(true);
     if (detail < AUTORUN_BELOW) api.play();
     else api.stopForEditing();
@@ -2089,6 +2108,62 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   /// 一度だけ)。
   let sceneReplacedSubscribed = false;
 
+  /** 揺れを均す指数移動平均の重み(`main.ts`の`updateEffectiveTimeScale`と同じ0.1)。 */
+  const ACTUAL_RATE_SMOOTHING = 0.1;
+  /**
+   * 「実際に進んでいる速さ」を測って`#run-actual-rate`へ出す(`run-actual-rate`
+   * のdoc参照——利用者役の報告「速さ×1と出ているのに実際は1/16の速さでしか
+   * 進んでいない」への対応)。
+   *
+   * 走っていない・時間が戻った(やり直し等)ときは前回値との差分が意味を
+   * 持たないので測らない。値が無ければ欄ごと隠す(何も無いほうが、意味の
+   * 無い数字よりまし)。
+   */
+  function updateActualRate(api: WorkspaceApi, simSeconds: number): void {
+    const nowMs = performance.now();
+    const playing = api.isPlaying();
+    if (!playing || lastActualRateWallMs === null || lastActualRateSimSeconds === null) {
+      lastActualRateWallMs = nowMs;
+      lastActualRateSimSeconds = simSeconds;
+      if (!playing) {
+        actualRate.hidden = true;
+      }
+      return;
+    }
+    const wallDelta = (nowMs - lastActualRateWallMs) / 1000;
+    const simDelta = simSeconds - lastActualRateSimSeconds;
+    lastActualRateWallMs = nowMs;
+    lastActualRateSimSeconds = simSeconds;
+    // 巻き戻し(やり直し・つまむと等)で simDelta が負になることがある——
+    // その1フレームは測定を捨てる(次のフレームから測り直せば十分)。
+    if (wallDelta <= 0 || simDelta < 0) return;
+    const measured = simDelta / wallDelta;
+    actualRateSmoothed =
+      actualRateSmoothed === null
+        ? measured
+        : actualRateSmoothed + (measured - actualRateSmoothed) * ACTUAL_RATE_SMOOTHING;
+
+    actualRate.hidden = false;
+    const r = actualRateSmoothed;
+    // **数字だけでなく、意味も添える**(利用者役の観察: 「実測」とだけ出ていても
+    // 壊れているのか重いのか区別できない、との指摘は`main.ts`の
+    // `updateEffectiveTimeScale`のdocに詳しい——ここでは中を知らない人向けに
+    // さらに言葉を足す)。
+    // **短い一行に留める**(利用者役の観察と同じ理由で長い注記をここへ足すと、
+    // 左のパンくず「水を注ぐ」の表示幅を奪って省略記号だらけになる——
+    // フルの言い分は`title`ツールチップ側(index.html)に書いてある)。
+    if (r < 0.9) {
+      actualRate.textContent = `実際は ×${r.toFixed(2)}(重い計算)`;
+      actualRate.classList.add("slow");
+    } else if (r > 1.1) {
+      actualRate.textContent = `実際は ×${r.toFixed(2)}`;
+      actualRate.classList.remove("slow");
+    } else {
+      actualRate.textContent = `実際もほぼ同じ(×${r.toFixed(2)})`;
+      actualRate.classList.remove("slow");
+    }
+  }
+
   function tick(): void {
     const api = apiRef.current;
     if (api && !sceneReplacedSubscribed) {
@@ -2158,6 +2233,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     if (api) {
       const seconds = api.time();
       const scale = api.stepSeconds();
+      updateActualRate(api, seconds);
       const timeNode = document.getElementById("readout-time");
       if (timeNode) {
         timeNode.textContent = formatDuration(seconds, scale);

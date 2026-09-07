@@ -1938,6 +1938,22 @@ kbd {
   cursor: default;
   user-select: none;
 }
+/* **実際に進んでいる速さ**(正直に伝える、`run-actual-rate` のdoc参照)。
+   計算が重くて指定どおりに進んでいないときだけ目立たせる(`slow`)——
+   常に警告色だと「いつも壊れている」ように見えてしまうため、実時間に
+   近い速さで進んでいるときは`.run-rate`と同じ地味な色に留める。 */
+.run-actual-rate {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-subtle);
+  white-space: nowrap;
+  margin-left: var(--space-2);
+  cursor: default;
+  user-select: none;
+}
+.run-actual-rate.slow {
+  color: var(--warn);
+}
 .run-clock {
   font-family: var(--font-mono);
   font-size: var(--text-md);

@@ -1352,6 +1352,72 @@ test("水を注ぐ実験は、受け止める器も描く", async ({ page }) => 
   expect(errors).toEqual([]);
 });
 
+test("水を注ぐ実験は、着水しても粒が容器の外へ弾け飛ばない", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d23-pouring-water"]');
+  await page.waitForTimeout(500);
+
+  // 進行管理役③の実測: 粒の一部が着水の瞬間に加速度不安定(SPH人工粘性が
+  // 弱すぎた)で秒速8〜9mまで跳ね上がり、器の上に浮いたまま止まって見える
+  // (実は放物線の頂点で一瞬速さがほぼ0になっているだけ)、あるいは床を
+  // 突き抜けて自由落下し続ける(y<-25)、という2通りの壊れ方をしていた。
+  // `window.__world`はテスト専用に露出されている(このファイル冒頭の
+  // `bodyOnScreen`と同じ規約)。直接`step()`を呼んで先まで進め、
+  // 落下・着水を経ても粒が現実的な範囲(容器の床 y=-0.04・注ぎ始めの高さ
+  // y=0.4)から大きく外れないことを見る。
+  const { minY, maxY } = await page.evaluate(() => {
+    const world = (
+      window as unknown as {
+        __world: {
+          step(): void;
+          fluid_particle_positions_f32(): Float32Array;
+        };
+      }
+    ).__world;
+    for (let s = 0; s < 2000; s += 1) world.step();
+    const pos = world.fluid_particle_positions_f32();
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < pos.length / 3; i += 1) {
+      const y = pos[i * 3 + 1];
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+    return { minY, maxY };
+  });
+  expect(minY).toBeGreaterThan(-0.5);
+  expect(maxY).toBeLessThan(1.0);
+  expect(errors).toEqual([]);
+});
+
+test("水を注ぐ実験は、実際の遅さを隠さず見せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d23-pouring-water"]');
+
+  // 「速さ ×1」は人が選んだ相対倍率でしかなく、実際にどれだけ実時間より
+  // 遅く進んでいるかは計算の重さ次第——それを隠さず出す(進行管理役③の
+  // 実測: 「ふつう」「速さ ×1」としか出ていないのに、実時間20.9秒でも
+  // シミュレーション内は1.25秒(=0.06倍)しか進まなかった)。
+  const rate = page.locator("#run-actual-rate");
+  await expect(rate).toBeVisible({ timeout: 10_000 });
+  await expect
+    .poll(async () => await rate.textContent(), { timeout: 15_000 })
+    .toMatch(/実際は ×0\.\d+/);
+  await expect(rate).toHaveClass(/slow/);
+  // この注記のぶんツールバーが混み合っても、パンくずの実験名が省略されて
+  // 消えない(横幅を奪い合って「水を注」まで切れていたのを直した)。
+  await expect(page.locator("#crumb-experiment")).toContainText("水を注ぐ");
+  expect(errors).toEqual([]);
+});
+
 test("グラフがまだ出ていない濃さでは、グラフを見ろと言わない", async ({
   page,
 }) => {
