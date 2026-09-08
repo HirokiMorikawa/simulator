@@ -7777,13 +7777,38 @@ async function setUpSceneView(
     pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   }
 
+  /**
+   * ヒットした`Object3D`(飾りを除いた子孫のこともある——複合形状の子
+   * メッシュ、手回し発電機の取っ手など)から、`pickables`に登録された
+   * 持ち主を辿って探す。
+   *
+   * `raycaster.intersectObjects`は既定で再帰的なので、`hit.object`は
+   * `pickables`に登録した`mesh`そのものとは限らない——複合形状
+   * (`meshFromShapeJson`の`compound`分岐)は空ジオメトリの`carrier`を
+   * 登録し、実際に当たるのは`carrier.add()`した子メッシュ。厳密な
+   * `===`一致だけで探すと、子に当たった時点で持ち主が見つからず
+   * ヒット自体が無かったことにされていた(課題Aの根本原因と同じ形の
+   * 取りこぼし)。親を辿って一致する`pickables`エントリを探す。
+   */
+  function resolvePickable(
+    object: THREE.Object3D | null,
+  ): { mesh: THREE.Object3D; bodyIndex: number } | undefined {
+    let current: THREE.Object3D | null = object;
+    while (current) {
+      const found = pickables.find((p) => p.mesh === current);
+      if (found) return found;
+      current = current.parent;
+    }
+    return undefined;
+  }
+
   function hitTest(event: PointerEvent, wantBack: boolean) {
     updatePointerNdc(event);
     raycaster.setFromCamera(pointerNdc, camera);
     const hits = raycaster.intersectObjects(pickables.map((p) => p.mesh));
     const hit = hits[wantBack && hits.length > 1 ? 1 : 0];
     if (!hit) return null;
-    const picked = pickables.find((p) => p.mesh === hit.object);
+    const picked = resolvePickable(hit.object);
     return picked ? { picked, worldPoint: hit.point } : null;
   }
 
@@ -8466,6 +8491,23 @@ async function setUpSceneView(
         }),
       );
       edges.name = "edges";
+      // **稜線は見た目だけの飾りで、当たり判定には出さない**。
+      //
+      // 課題A(利用者役の観察: 「坂はすべる? 止まる?」の箱をクリックしても
+      // 「選んだもの」が出ない)を実測で辿ると、`hitTest`の
+      // `raycaster.intersectObjects(pickables.map(p=>p.mesh))`が既定で
+      // recursive(子孫まで再帰的に判定)であり、ここで足した`LineSegments`
+      // (稜線)も判定対象に入っていた。`THREE.Line`系の当たり判定は既定の
+      // 太さ判定(`raycaster.params.Line.threshold`既定値1、ワールド座標で
+      // 1m)を使うため、辺から1m以内を通るレイはほぼ確実に「当たった」
+      // ことになり、しかもその距離は**面そのものへの距離より近く**出ることが
+      // 多い(実測: 箱の中心をクリックしたのに、面への距離2.84より近い
+      // 距離2.67の位置に、`pickables`に登録の無い辺のヒットが割り込む)。
+      // `hitTest`は先頭(最も近い)ヒットの持ち主を`pickables`から探すが、
+      // 辺は`pickables`に無いため見つからず`null`を返す——**当たっているのに
+      // 何も選ばれない**。稜線はどのみち面と同じ位置にあるので、当たり判定を
+      // 切っても本体(面)側のヒットがそのまま残り、選択には影響しない。
+      edges.raycast = () => {};
       mesh.add(edges);
     }
   }
@@ -11039,6 +11081,21 @@ async function setUpSceneView(
     maxSpeed: () => readNumber(world, "max_body_speed"),
     stageIsEmpty: () => sceneViewElement.dataset.stageEmpty === "true",
     materialNames: () => [...SPAWN_MATERIALS],
+    // **課題B**: 材質ボタンの隣に添える摩擦係数。でっち上げず、Rust側の材質DB
+    // (`material_properties_f64`、`materialsRef.current`と同じソース、
+    // `[density, friction, restitution, specificHeat, conductivity]`)から
+    // そのまま読む。未知の材質名(呼び出し側のtypoや将来の材質追加漏れ)では
+    // 例外を投げず`NaN`を返す——ここで例外が漏れると画面全体が壊れるため。
+    materialFriction: (name) => {
+      try {
+        const [, friction] = JSON.parse(
+          world.read_component("material_properties_f64", name),
+        ) as number[];
+        return friction;
+      } catch {
+        return NaN;
+      }
+    },
     setBodyMaterial: (index, materialName) =>
       patchSceneBody(index, (b) => {
         b.material = materialName;

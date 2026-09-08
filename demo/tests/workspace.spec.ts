@@ -2451,3 +2451,152 @@ test("「氷が水に変わる」は「熱・温度」に分類され、「の�
   ).toHaveCount(0);
   expect(errors).toEqual([]);
 });
+
+/**
+ * ボディの中心をワールド座標から画面座標(CSSピクセル)へ投影する。
+ * `bodyOnScreen`/`cameraToLastBody`と同じ、テスト専用に露出された
+ * `window.__camera`/`window.__world`を使う投影計算(このファイル冒頭の
+ * doc参照)。実際にクリックする画面座標を作るための版(あちらは画角内かの
+ * 判定のみ)。
+ */
+async function screenPointForBody(
+  page: Page,
+  bodyIndex: number,
+): Promise<{ x: number; y: number }> {
+  return page.evaluate((index) => {
+    const cam = (window as unknown as {
+      __camera: {
+        matrixWorldInverse: { elements: number[] };
+        projectionMatrix: { elements: number[] };
+      };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: { body_position_at_f32(index: number): Float32Array };
+    }).__world;
+    const p = world.body_position_at_f32(index);
+    const mulMat4Vec4 = (e: number[], v: number[]) => {
+      const out = [0, 0, 0, 0];
+      for (let r = 0; r < 4; r += 1) {
+        out[r] = e[r] * v[0] + e[4 + r] * v[1] + e[8 + r] * v[2] + e[12 + r] * v[3];
+      }
+      return out;
+    };
+    const view = mulMat4Vec4(cam.matrixWorldInverse.elements, [p[0], p[1], p[2], 1]);
+    const clip = mulMat4Vec4(cam.projectionMatrix.elements, view);
+    const ndcX = clip[0] / clip[3];
+    const ndcY = clip[1] / clip[3];
+    const canvas = document.querySelector("canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (ndcX * 0.5 + 0.5) * rect.width + rect.left,
+      y: (-ndcY * 0.5 + 0.5) * rect.height + rect.top,
+    };
+  }, bodyIndex);
+}
+
+// 課題A: 「坂はすべる? 止まる?」の箱をクリックしても「選んだもの」が出な
+// かった。実測すると、稜線を足す`addEdgeLines`が付けた`THREE.LineSegments`
+// (面と同じ位置にある、見た目だけの飾り)が`raycaster.intersectObjects`の
+// 既定(再帰的)に拾われ、既定の太さ判定(ワールド座標で1m)のせいで面より
+// **近い**当たりとして割り込んでいた。`hitTest`はいちばん近い当たりの持ち主を
+// `pickables`から探すが、稜線は登録されていないため見つからず、当たっている
+// のに`null`を返して黙って何も起きなかった(利用者役の観察の再現)。
+// 稜線の当たり判定を切り、`hitTest`が親を辿って持ち主を探すようにして直した。
+test("坂の実験で、箱をクリックすると「選んだもの」が出る(課題A)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 再生中のクリックと、とめてからのクリックの両方(利用者役の実測の表と
+  // 同じ2条件)。毎回、実験を選び直してまっさらな状態(未選択)から試す。
+  for (const playing of [true, false]) {
+    await page.keyboard.press("Control+k");
+    await page.click('.palette-row[data-experiment-id="d5-incline"]');
+    await page.waitForTimeout(800);
+
+    const playBtn = page.locator("#btn-run");
+    const isPlaying = (await playBtn.getAttribute("data-playing")) === "true";
+    if (isPlaying !== playing) await playBtn.click();
+    await page.waitForTimeout(150);
+
+    const point = await screenPointForBody(page, 1); // index 1 = box
+    await page.mouse.click(point.x, point.y);
+    await page.waitForTimeout(300);
+    await expect(page.locator('.card[data-card="focus"]')).toHaveCount(1);
+    await expect(page.locator('.card[data-card="focus"]')).toContainText("box");
+  }
+  expect(errors).toEqual([]);
+});
+
+// 他の実験でクリック選択が壊れていないことの確認(課題Aの回帰防止)。
+// ボール落下・積み木・跳ねるボール——いずれも「選んだもの」札が出る。
+for (const [id, bodyLabel] of [
+  ["d1-free-fall", "ball"],
+  ["d4-box-stack", "box"],
+  ["d3-bounce", "ball"],
+] as const) {
+  test(`${id} で、動く物をクリックすると「選んだもの」が出る(課題Aの回帰防止)`, async ({ page }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(800);
+
+    const playBtn = page.locator("#btn-run");
+    if ((await playBtn.getAttribute("data-playing")) === "true") await playBtn.click();
+    await page.waitForTimeout(150);
+
+    const point = await screenPointForBody(page, 1); // index 0 = 床、1 = 動く物
+    await page.mouse.click(point.x, point.y);
+    await page.waitForTimeout(300);
+    await expect(page.locator('.card[data-card="focus"]')).toHaveCount(1);
+    await expect(page.locator('.card[data-card="focus"]')).toContainText(bodyLabel);
+    expect(errors).toEqual([]);
+  });
+}
+
+// 課題B: 「箱の材質」ボタン(鋼・ゴム・木・氷・発泡スチロール・アルミ)は
+// どれがよく滑るのかが画面のどこにも書いておらず、利用者は「氷が滑りやすい
+// だろう」と勘で選ぶしかなかった。数値をでっち上げず、アプリが実際に使って
+// いる摩擦係数(Rust側の材質DB、`material_properties_f64`)をボタンへ添えた。
+test("材質ボタンに、実際の摩擦係数が添えてある(課題B)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d5-incline"]');
+  await page.waitForTimeout(500);
+
+  const buttons = page.locator("#knob-material .knob-choice-btn");
+  await expect(buttons).toHaveCount(6);
+
+  // 6つとも、でっち上げでない実数(data-friction、`materialFriction`が
+  // 返した値)を持っている。
+  const frictions: Record<string, number> = {};
+  const count = await buttons.count();
+  for (let i = 0; i < count; i += 1) {
+    const btn = buttons.nth(i);
+    const label = (await btn.textContent()) ?? "";
+    const raw = await btn.getAttribute("data-friction");
+    expect(raw).not.toBeNull();
+    const value = Number.parseFloat(raw ?? "NaN");
+    expect(Number.isFinite(value)).toBe(true);
+    // ボタンの文字にも同じ値が(小数第2位で)見えている。
+    expect(label).toContain(value.toFixed(2));
+    frictions[label] = value;
+  }
+
+  // 実測(進行管理役の裏取り): 氷がいちばん摩擦係数が小さく(=いちばん
+  // よく滑り)、ゴムがいちばん大きい(=いちばん滑りにくい)。
+  const iceEntry = Object.entries(frictions).find(([label]) => label.includes("氷"));
+  const rubberEntry = Object.entries(frictions).find(([label]) => label.includes("ゴム"));
+  expect(iceEntry).toBeDefined();
+  expect(rubberEntry).toBeDefined();
+  const allValues = Object.values(frictions);
+  expect(iceEntry![1]).toBe(Math.min(...allValues));
+  expect(iceEntry![1]).toBeLessThan(rubberEntry![1]);
+
+  // 数字の読み方が、既存の一言補足の隣に短く添えてある。
+  const hint = page.locator('[data-knob-id="material"] .knob-hint');
+  await expect(hint).toContainText("重さ・跳ね返り・すべりやすさが一度に変わります");
+  await expect(hint).toContainText("小さいほどよく滑ります");
+  expect(errors).toEqual([]);
+});

@@ -153,6 +153,15 @@ export type WorkspaceApi = {
   removeBody: (index: number) => boolean;
   /** 選べる材質の名前(スポーンパレットと同じ並び)。 */
   materialNames: () => string[];
+  /**
+   * その材質の摩擦係数(Rust側の材質DBが持つ実際の値、`material_properties_f64`
+   * の2番目)。**課題B**: 「箱の材質」ボタンは鋼・ゴム・木・氷・発泡スチロール・
+   * アルミの6択だが、どれがよく滑るかが画面のどこにも書かれておらず、利用者は
+   * 「氷が滑りやすいだろう」と勘で選ぶしかなかった(利用者役の報告)。数値を
+   * でっち上げず、アプリが実際に使っているこの値をそのままボタンへ添える。
+   * 未知の材質名には`NaN`を返す(呼び出し側は表示を省く)。
+   */
+  materialFriction: (name: string) => number;
   /** 選択中の剛体(無ければ -1)。 */
   selectedBody: () => number;
   selectBody: (index: number) => void;
@@ -2244,11 +2253,25 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       // 名前が無く、テストからも人からも「そこ」を指しにくかった)。
       group.id = `knob-${knob.id}`;
       label.htmlFor = group.id;
+      // **課題B**: 材質ボタンは「材質そのものは変わったと分かるが、その材質が
+      // よく滑るのかどうかは画面のどこにも書いていない」(利用者役の観察:
+      // 氷が滑りやすいだろうと勘で選ぶしかなかった)。数値をでっち上げず、
+      // アプリが実際に使っている摩擦係数(`api.materialFriction`、Rust側の
+      // 材質DBそのもの)をボタンへ添える——材質つまみ(`knob.id === "material"`)
+      // だけの上乗せで、他のchoiceつまみ(重力の天体選びなど)には影響しない。
+      const friction = (value: string | number): number =>
+        knob.id === "material"
+          ? (apiRef.current?.materialFriction(String(value)) ?? NaN)
+          : NaN;
       for (const option of knob.options ?? []) {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "knob-choice-btn";
-        button.textContent = option.label;
+        const f = friction(option.value);
+        button.textContent = Number.isFinite(f)
+          ? `${option.label}(摩擦 ${f.toFixed(2)})`
+          : option.label;
+        if (Number.isFinite(f)) button.dataset.friction = String(f);
         button.dataset.value = String(option.value);
         button.classList.toggle(
           "active",
@@ -2272,7 +2295,12 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     if (knob.hint) {
       const hint = document.createElement("p");
       hint.className = "knob-hint";
-      hint.textContent = knob.hint;
+      // 材質つまみだけ、ボタンに添えた摩擦係数の読み方を一言足す(既存の
+      // 一言補足の隣に収まる分量——長い説明は増やさない)。
+      hint.textContent =
+        knob.id === "material"
+          ? `${knob.hint}(摩擦の数字が小さいほどよく滑ります)`
+          : knob.hint;
       wrap.appendChild(hint);
     }
     return wrap;
