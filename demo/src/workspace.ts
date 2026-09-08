@@ -472,6 +472,30 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   let pendingStart = false;
   /** 物理側の起動待ちで、開けずにいる自分の場面。 */
   let pendingOwnScene: SavedScene | null = null;
+  /**
+   * **毎フレームの選択変更検出**(`tick()` 内の `selected !== lastSelection`)が
+   * 前回どこを見ていたかを覚える場所。
+   *
+   * **不変条件**: ここより下の、選択を直接触るすべての箇所
+   * (`api.selectBody(...)` を直接呼ぶ場所)は、呼んだ直後に必ず
+   * `lastSelection` もその値へ合わせる。これを怠ると、`tick()` が拾う前の
+   * 「本物の選択変更」を見失う。
+   *
+   * **これが実際に壊れていた**(Windows CI, `workspace.spec.ts`「大きさの
+   * 表示が、札と Inspector で食い違わない」): 「新規シーン」は毎回まっさら
+   * な世界を作り直すため、最初に置いた物は毎回同じ body index(床の次、
+   * =1)になる。「新規シーン→球(index 1 を選択)→新規シーン→箱
+   * (これも index 1 を選択)」という手順では、2 回目の「新規シーン」で
+   * `onSceneReplaced` が `api.selectBody(-1)` を直接呼んで `renderContext()`
+   * まで済ませるが、`lastSelection` は前の球の値(1)のまま残っていた。
+   * その後、箱を置いて選択が index 1 に変わっても、`tick()` が一度も
+   * 割り込まないまま(遅い機械ほど起きやすい——CPU を20〜40倍絞った実測で
+   * 再現、詳細はコミットの本文参照)次の tick に来ると
+   * `selected(1) !== lastSelection(1)` が偽になり、選んだものの札が二度と
+   * 組み直されなかった。直すのは「選択を直接触ったら、その場で
+   * `lastSelection` も合わせる」——そうすれば `tick()` が何回スキップされ
+   * ても、次に見るときの比較は必ず正しい値どうしになる。
+   */
   let lastSelection = -1;
   /** カードごとの局所的な開閉。`undefined` = 大局の粒度に従う。 */
   const cardOverrides = new Map<string, boolean>();
@@ -774,6 +798,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       experiment.addEventListener("click", () => {
         apiRef.current?.followCamera(true);
         apiRef.current?.selectBody(-1);
+        // `lastSelection` の不変条件(このファイル冒頭の doc 参照)。
+        lastSelection = -1;
         renderCrumbs();
         renderContext();
       });
@@ -1186,6 +1212,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     // 選んでいない——「選んだもの: ground / 重さ 0.000 kg」が出てくるのは
     // ノイズでしかない。選択は人が対象をクリックしたときだけ起きる。
     api.selectBody(-1);
+    // `lastSelection` の不変条件(このファイル冒頭の doc 参照)。
+    lastSelection = -1;
     api.setProbeLabels(
       probeLabelsFor(current),
       probeUnitsFor(current),
@@ -1574,6 +1602,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     }
     api.loadSceneJson(entry.json);
     api.selectBody(-1);
+    // `lastSelection` の不変条件(このファイル冒頭の doc 参照)。
+    lastSelection = -1;
     api.setProbeLabels(null, null);
     api.setPace(null);
     // 自分の場面は組み立てるためのものなので、カメラは追いかけない。
@@ -2021,6 +2051,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             clear.title = "選ぶのをやめて、ぜんぶが入る画角へ戻します";
             clear.addEventListener("click", () => {
               api.selectBody(-1);
+              // `lastSelection` の不変条件(このファイル冒頭の doc 参照)。
+              lastSelection = -1;
               // 名前どおり**画角も戻す**。選択を外すだけだったので、置き場所を
               // 数値で変えて物を見失った人が、押しても何も変わらないまま
               // 詰まっていた(利用者役④の観察)。ただし毎フレーム追いかける
@@ -2069,6 +2101,8 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
                 disarm();
                 if (api.removeBody(selected)) {
                   api.selectBody(-1);
+                  // `lastSelection` の不変条件(このファイル冒頭の doc 参照)。
+                  lastSelection = -1;
                   api.frameOnContent();
                   renderCrumbs();
                   renderContext();
@@ -2337,7 +2371,22 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         // 2段が観測され、床の欄が生きている間に打ち込みが割り込むと再現した)。
         // ここで先に選択を外しておけば、外から見える選択変更は「箱を選ぶ」の
         // 1回だけになり、床の欄はそもそも存在しない。
+        //
+        // **この「1回だけ」という前提そのものが、もう一段崩れていた**
+        // (Windows CI, `workspace.spec.ts`「大きさの表示が、札と Inspector
+        // で食い違わない」)。ここで直接呼ぶ`renderContext()`は選択なし
+        // (-1)の札を組み、`lastSelection`はまだ前の選択(例: 前に置いた
+        // 球の body index)を指したまま——ここで`tick()`が拾ってくれる
+        // 前提で更新していなかった。「新規シーン」は毎回同じ並びで body
+        // index を振り直すので、次に置く物(箱)が前の物(球)とまったく
+        // 同じ index に着地することが普通に起こる。その間に`tick()`が
+        // 一度も挟まらないと(遅い機械ほど起きやすい——CPU を20〜40倍
+        // 絞った実測で再現)、`selected === lastSelection`のまま二度と
+        // 更新されず、「選んだもの」の札が永久に組み直されなかった。
+        // ここで`lastSelection`も直接合わせておけば、`tick()`が何回
+        // 挟まろうと挟まるまいと、次に見るときの比較は必ず正しい。
         api.selectBody(-1);
+        lastSelection = -1;
         api.setProbeLabels(null, null);
         api.setPace(null);
         // 実験を読み込むときと同じ規則(`reload`)。浅い粒度は「動いている
