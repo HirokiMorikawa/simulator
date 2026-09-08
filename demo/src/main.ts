@@ -4975,6 +4975,19 @@ function setUpProbeGraph(): (
     // window へ露出する(`__camera`/`__world`と同じ扱い、実行時の見た目には
     // 影響しない)。
     const legendLinesForTest: string[] = [];
+    // **課題B・退行テストの作り直し**: 凡例の`max=`(履歴の最大値)と右の
+    // 「いまの数値」パネル(いまこの瞬間の値)は、そもそも別の量——熱が
+    // 伝わっていく途中は一致するとは限らない(パネル側は「これまでの最大値
+    // に比べて無視できる小ささなら0と書く」という凡例には無い丸めも持つ、
+    // `renderContext`のnegligible参照)。以前の回帰テストは両者を直接
+    // 比べていたため、遅い機械では「パネルは0.0に丸まった直後・凡例の
+    // 最大値はまだ丸まっていない微小値のまま」という、製品として正しい
+    // 食い違いをたまたま拾って落ちていた(進行管理役の裏取り、Issue参照)。
+    // 検査すべきは値の一致ではなく**書式の一致**——同じ生の値を
+    // `readoutNumber`に通せば、凡例もパネルも同じ文字列になること。
+    // そのために、描いた凡例の文字列と対になる「生の値・桁数」もテスト専用で
+    // 露出する(`__probeGraphLegend`と同じ扱い、実行時の見た目には影響しない)。
+    const legendRawForTest: { label: string; unit?: string; digits?: number; max: number; min: number }[] = [];
     for (const { series: s, min, max, flatY } of drawn) {
       if (compactLegend) break;
       // 一定値の線はまん中に引く(`plotY` の doc)。高さを値と読み違えない
@@ -4992,9 +5005,15 @@ function setUpProbeGraph(): (
       outlined(legendText, 4, legendY, s.color);
       legendY += 13;
       legendLinesForTest.push(legendText);
+      legendRawForTest.push({ label: s.label, unit: s.unit, digits: s.digits, max, min });
     }
     (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend =
       legendLinesForTest;
+    (
+      window as unknown as {
+        __probeGraphLegendRaw?: typeof legendRawForTest;
+      }
+    ).__probeGraphLegendRaw = legendRawForTest;
 
     // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを明示する
     // (黙っていると「こちらの線の方が大きい」と読まれる)。凡例の直下に置くの
@@ -5236,6 +5255,12 @@ async function setUpSceneView(
   // 「注視点は動くものの近くに保っているのに、球が画面から消える」ような
   // ケースを見分けるのに、カメラ位置だけでなく注視点も要る。
   Object.defineProperty(window, "__orbit", { get: () => orbit, configurable: true });
+  // グラフ凡例の書式回帰テスト用: 右の「いまの数値」パネルが実際に使っている
+  // `readoutNumber`そのものをテストへ渡す(複製すると、実装を変えても
+  // テスト側の複製が追随せず検査が形骸化するため。`__probeGraphLegendRaw`
+  // のdoc参照——`workspace.spec.ts`の「グラフの凡例の数値が…」参照)。
+  (window as unknown as { __readoutNumberForTest?: typeof readoutNumber }).__readoutNumberForTest =
+    readoutNumber;
   // テスト専用フック: シーンギャラリーの「ワールドを差し替えて読み込み」
   // (`sceneGalleryRef.current`)を任意のJSON文字列で直接呼べるようにする
   // (`__camera`/`__world`/`__scene`と同じテスト専用露出、実行時の挙動には

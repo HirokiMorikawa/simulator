@@ -1848,7 +1848,7 @@ test("桁の離れた値が、0 に潰れない", async ({ page }) => {
   expect(errors).toEqual([]);
 });
 
-test("グラフの凡例の数値が、右の「いまの数値」と同じ書式になる", async ({ page }) => {
+test("グラフの凡例の数値が、右の「いまの数値」と同じ書式のルールで書かれる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 2);
@@ -1856,26 +1856,60 @@ test("グラフの凡例の数値が、右の「いまの数値」と同じ書�
   await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
   await page.locator('#knob-material .knob-choice-btn', { hasText: "木" }).click();
 
-  // 「熱源から 0.25 m」は届いた温度が桁として最も大きく、指数表記が
-  // (`readoutNumber` のdoc参照)出るまでいちばん早い。
+  // --- このテストが前回落ちた理由と、書き直した理由 ---
+  // 元のテストは、右の「いまの数値」パネルのテキストと、グラフ凡例の
+  // `max=`(=これまでの最大値)のテキストを**文字どおり同じであること**で
+  // 検査していた。だがこの2つはそもそも別の量: パネルは「いまこの瞬間の
+  // 値」、凡例の `max=` は「これまでに観測した最大値」で、熱が棒を伝わって
+  // いく途中は一致するとは限らない。加えてパネル側だけに、`renderContext`の
+  // `negligible`(その系列がこれまでに取った大きさに比べて無視できるほど
+  // 小さいときだけ 0 と書く)という、凡例には無い丸めが入っている。
+  // 実機でも「パネルは 0.0 ℃・凡例は max=1.24e-17 ℃」のような食い違いが
+  // 普通に起きる(進行管理役の裏取り)。遅い macOS CI では、たまたまこの
+  // 「パネル側だけ0に丸まった直後」を捉えて `147 passed / 1 failed` に
+  // なっていた——製品の不具合ではなく、比べてはいけないものを比べていた。
+  //
+  // 本当に確かめたいのは値の一致ではなく**書式(桁の選び方・指数か固定
+  // 小数か)が同じルールで決まっていること**。そこで、凡例が実際に使った
+  // 「生の値」と「桁数」をテスト専用に露出させ(`__probeGraphLegendRaw`)、
+  // パネルが使っているのと**同じ`readoutNumber`関数**(複製ではなく本物、
+  // `__readoutNumberForTest`)にその生の値を通した結果と、凡例の描画済み
+  // 文字列を比べる。同じ値どうしを比べるので、時間経過によるズレは起きない。
+
+  // 「熱源から 0.25 m」は届いた温度が桁として最も大きく、指数表記から固定
+  // 小数へ切り替わる境目(`readoutNumber` のdoc参照)をいちばん早く通る。
   const near = page.locator('#context dd[data-probe="1"]');
+  // この瞬間の生の最大値がちょうど指数表記の境目付近にあるはずで、これが
+  // まさに退行(生の指数がずれて出る)が起きた領域。ここで止めて凡例を読む
+  // ——パネル側の読み取りは、もう検査には使わない(冒頭のコメント参照)。
   await expect
     .poll(async () => (await near.textContent()) ?? "", { timeout: 60_000 })
     .toMatch(/e[+-]?\d/);
-  // 値は毎フレーム動き続けるので、止めてから両方を読む
-  // (止めないと、パネルと凡例を読む間にコンマ数秒でも値がずれて
-  // 「食い違って見える」ことそのものが偶然の一致でごまかされかねない)。
   await page.click("#btn-run");
   await page.waitForTimeout(200);
 
   // canvas に直接ラスタライズされる凡例の文字はDOMから読めない
   // (`smoke.spec.ts` の「canvas の中身は直接検証できない」注記と同じ理由)ので、
-  // テスト専用に露出した `window.__probeGraphLegend`(`__camera`/`__world`と
-  // 同じ扱い)を読む。
-  const legendLines = await page.evaluate(
-    () => (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend ?? [],
-  );
+  // テスト専用に露出した `window.__probeGraphLegend`/`__probeGraphLegendRaw`
+  // (`__camera`/`__world`と同じ扱い)を読む。
+  const { legendLines, legendRaw } = await page.evaluate(() => {
+    const w = window as unknown as {
+      __probeGraphLegend?: string[];
+      __probeGraphLegendRaw?: {
+        label: string;
+        unit?: string;
+        digits?: number;
+        max: number;
+        min: number;
+      }[];
+    };
+    return {
+      legendLines: w.__probeGraphLegend ?? [],
+      legendRaw: w.__probeGraphLegendRaw ?? [],
+    };
+  });
   expect(legendLines.length).toBe(3);
+  expect(legendRaw.length).toBe(3);
 
   // 凡例の `min=` は、生の指数(`0.0e+0`)ではなく、パネルと同じ「0.0」の
   // 書き方であること(木の実験は0.25m以外どこもまだ届いていないので、遠い
@@ -1884,15 +1918,43 @@ test("グラフの凡例の数値が、右の「いまの数値」と同じ書�
     expect(line).not.toMatch(/e\+0/);
   }
 
-  // 本体: 「熱源から 0.25 m」について、凡例の max= の書式が、右のパネルが
-  // いま出している値と**文字どおり同じ**であること(`readoutNumber` を
-  // 双方が同じ digits で呼ぶようにした——`legendNumber` のdoc参照)。
-  // 実測(退行時): パネルは `0.0 ℃`、凡例は `9.3e-67 ℃` のような生の指数で、
-  // 同じ量なのに食い違って見えた。
-  const nearText = (await near.textContent()) ?? "";
+  // 本体: 元の不具合は「凡例が `readoutNumber` を使わず、桁数を知らない
+  // 独自の書式(生の指数 `9.3e-67` 等)で書いていた」こと(`legendNumber`の
+  // doc参照)。ここでは、凡例が実際に描いた文字列を、**同じ生の値**を
+  // パネルと同じ`readoutNumber`関数に通した結果と比べることで、それが
+  // 直っていることを検査する——値の一致ではなく、書式のルールの一致。
+  const readoutNumberInPage = async (value: number, digits: number) =>
+    page.evaluate(
+      ([v, d]) =>
+        (
+          window as unknown as {
+            __readoutNumberForTest?: (value: number, digits: number) => string;
+          }
+        ).__readoutNumberForTest?.(v, d) ?? "",
+      [value, digits] as const,
+    );
+
+  const near25 = legendRaw.find((s) => s.label.includes("0.25 m"));
+  expect(near25).toBeDefined();
+  expect(near25?.digits).toBeDefined();
+  const expectedMaxText = await readoutNumberInPage(near25!.max, near25!.digits!);
+  const expectedMinText = await readoutNumberInPage(near25!.min, near25!.digits!);
+  expect(expectedMaxText).toBeTruthy();
+
   const nearLine = legendLines.find((l) => l.includes("0.25 m"));
   expect(nearLine).toBeDefined();
-  expect(nearLine).toContain(`max=${nearText}`);
+  expect(nearLine).toContain(`max=${expectedMaxText} ℃`);
+  expect(nearLine).toContain(`min=${expectedMinText} ℃`);
+
+  // 退行時の実測を再現しないことも確かめる: 凡例の `max=` が生の指数
+  // (`toExponential`のデフォルト書式や、桁数を無視した `formatTickValue`)
+  // に戻っていないこと。`readoutNumber`が返す指数は必ず小数点以下2桁
+  // (`toExponential(2)`)なので、それ以外の指数書式(桁数違い)は退行の
+  // 兆候になる。
+  const maxMatch = nearLine?.match(/max=(-?\d(?:\.\d+)?e[+-]?\d+)/);
+  if (maxMatch) {
+    expect(maxMatch[1]).toMatch(/^-?\d\.\d{2}e[+-]?\d+$/);
+  }
   expect(errors).toEqual([]);
 });
 
