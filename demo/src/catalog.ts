@@ -1154,6 +1154,46 @@ export const GUIDED_CATEGORIES: Category[] = [
           { probe: 1, label: "ピストンの速さ", unit: "m/s", digits: 3 },
         ],
       },
+      {
+        // QA課題B: 元は「🚗 のりもの・機械」にあった。氷が融ける現象は
+        // 車・ロボットの分類ではなく熱の現象なので、こちらへ移した。
+        id: "d18b-ice-melts",
+        file: "d18b-ice-melts-into-water.json",
+        icon: "💧",
+        title: "氷が水に変わる",
+        blurb: "融けた氷が、そのまま水の粒として現れます。",
+        watch: [
+          "固体が減ったぶん、液体の粒が生まれます。",
+          "消えるのではなく、姿を変えるだけ——質量は保存されます。",
+        ],
+        view: "3d",
+        pace: 240,
+        knobs: [
+          {
+            id: "drink",
+            label: "まわりの温度",
+            kind: "range",
+            min: 280,
+            max: 360,
+            step: 5,
+            unit: "K",
+            value: 350,
+            hint: "温かいほど速く融けます。",
+            apply: (scene, value) => {
+              const thermal = scene.thermal as
+                | { ambient_temperature?: number; nodes?: { temperature?: number }[] }
+                | undefined;
+              if (!thermal) return;
+              thermal.ambient_temperature = Number(value);
+              if (thermal.nodes?.[0]) thermal.nodes[0].temperature = Number(value);
+            },
+          },
+        ],
+        readouts: [
+          { probe: 0, label: "氷の高さ", unit: "m", digits: 3 },
+          { probe: 1, label: "まわりの温度", format: celsius(), graph: CELSIUS_GRAPH },
+        ],
+      },
     ],
   },
   {
@@ -1824,44 +1864,6 @@ export const GUIDED_CATEGORIES: Category[] = [
         readouts: [
           { probe: 0, label: "進んだ距離", unit: "m", digits: 2 },
           { probe: 2, label: "車の速さ", unit: "m/s", digits: 2 },
-        ],
-      },
-      {
-        id: "d18b-ice-melts",
-        file: "d18b-ice-melts-into-water.json",
-        icon: "💧",
-        title: "氷が水に変わる",
-        blurb: "融けた氷が、そのまま水の粒として現れます。",
-        watch: [
-          "固体が減ったぶん、液体の粒が生まれます。",
-          "消えるのではなく、姿を変えるだけ——質量は保存されます。",
-        ],
-        view: "3d",
-        pace: 240,
-        knobs: [
-          {
-            id: "drink",
-            label: "まわりの温度",
-            kind: "range",
-            min: 280,
-            max: 360,
-            step: 5,
-            unit: "K",
-            value: 350,
-            hint: "温かいほど速く融けます。",
-            apply: (scene, value) => {
-              const thermal = scene.thermal as
-                | { ambient_temperature?: number; nodes?: { temperature?: number }[] }
-                | undefined;
-              if (!thermal) return;
-              thermal.ambient_temperature = Number(value);
-              if (thermal.nodes?.[0]) thermal.nodes[0].temperature = Number(value);
-            },
-          },
-        ],
-        readouts: [
-          { probe: 0, label: "氷の高さ", unit: "m", digits: 3 },
-          { probe: 1, label: "まわりの温度", format: celsius(), graph: CELSIUS_GRAPH },
         ],
       },
     ],

@@ -2170,3 +2170,102 @@ for (const category of CATEGORIES) {
     expect(errors).toEqual([]);
   });
 }
+
+/** `__scene` から`referenceGrid`(課題A)を探す。無ければ`null`。 */
+async function readReferenceGrid(page: Page): Promise<{
+  visible: boolean;
+  gridPos: number[];
+  camPos: number[];
+} | null> {
+  return page.evaluate(() => {
+    const scene = (window as unknown as { __scene: any }).__scene;
+    const camera = (window as unknown as { __camera: any }).__camera;
+    let grid: any = null;
+    scene.traverse((o: any) => {
+      if (o.userData?.isReferenceGrid) grid = o;
+    });
+    if (!grid) return null;
+    return {
+      visible: grid.visible as boolean,
+      gridPos: grid.position.toArray() as number[],
+      camPos: camera.position.toArray() as number[],
+    };
+  });
+}
+
+// 課題A: 磁石が銅管を落ちる・空気をばねにする・氷が水に変わるは、床も水面も
+// 無いまま対象だけが動く。かんたんモードの追従カメラは対象を画面の同じ場所へ
+// 置き続けるので、数値は動いていても絵が1ピクセルも変わらなかった
+// (利用者役・進行管理役の実測、`demo/src/main.ts`の`updateReferenceGrid`の
+// doc参照)。板(`referenceGrid`)を対象の背後・カメラの近くへ置き直し続ける
+// ことで直した——「カメラの近くに留まる」ことと「対象がその間に実際に大きく
+// 動いている」ことの両方をここで裏取りする(模様が世界座標で決まっている
+// ことまではPlaywrightの座標からは見えないので、そこは`artifact-design`
+// ではなく実際のスクリーンショットを目視して確認済み)。
+test("基準の無い場面では、方眼がカメラの近くに置き直され続ける(課題A)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d21-copper-tube"]');
+  await page.waitForTimeout(1500);
+
+  const first = await readReferenceGrid(page);
+  expect(first).not.toBeNull();
+  expect(first!.visible).toBe(true);
+
+  await page.waitForTimeout(3000);
+  const second = await readReferenceGrid(page);
+  expect(second!.visible).toBe(true);
+
+  const dist = (a: number[], b: number[]) =>
+    Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  // 板は常にカメラのすぐ近く(=画角の中)に置き直される——`y=0`に固定した
+  // 板だと、磁石がここまで落ちる間に画角の外へ出てしまっていた
+  // (前任者が詰まっていた不具合)。
+  expect(dist(first!.gridPos, first!.camPos)).toBeLessThan(5);
+  expect(dist(second!.gridPos, second!.camPos)).toBeLessThan(5);
+  // それでいて板自体は(カメラが世界の中を動いたぶん)実際に動いている
+  // ——静止したままカメラにくっついているだけなら、模様が世界座標でも
+  // 画面上は結局動いて見えない。
+  expect(dist(first!.gridPos, second!.gridPos)).toBeGreaterThan(0.5);
+  expect(errors).toEqual([]);
+});
+
+test("床のある場面では、方眼を追加で出さない(課題Aの回帰防止)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  for (const id of ["d1-free-fall", "d2-ballistic"]) {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1000);
+    const grid = await readReferenceGrid(page);
+    expect(grid?.visible ?? false).toBe(false);
+  }
+  expect(errors).toEqual([]);
+});
+
+// 課題B: 「氷が水に変わる」(d18b-ice-melts)は氷が融ける熱の現象なのに
+// 「🚗 のりもの・機械」に分類されていた。「🔥 熱・温度」へ移した。
+test("「氷が水に変わる」は「熱・温度」に分類され、「のりもの・機械」からは消えている(課題B)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // カタログのデータそのものの裏取り。
+  const heat = CATEGORIES.find((c) => c.id === "heat");
+  const machine = CATEGORIES.find((c) => c.id === "machine");
+  expect(heat?.experiments.some((e) => e.id === "d18b-ice-melts")).toBe(true);
+  expect(machine?.experiments.some((e) => e.id === "d18b-ice-melts")).toBe(false);
+
+  // 実際にそのタブから見つかることを画面で確かめる。
+  await page.keyboard.press("Control+k");
+  await page.click('[data-category-id="heat"]');
+  await expect(
+    page.locator('.palette-row[data-experiment-id="d18b-ice-melts"]'),
+  ).toBeVisible();
+  await page.click('[data-category-id="heat"]'); // フィルタ解除
+  await page.click('[data-category-id="machine"]');
+  await expect(
+    page.locator('.palette-row[data-experiment-id="d18b-ice-melts"]'),
+  ).toHaveCount(0);
+  expect(errors).toEqual([]);
+});

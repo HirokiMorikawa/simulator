@@ -5879,6 +5879,181 @@ async function setUpSceneView(
   }
   paintFloorGrid(ground.material as THREE.MeshStandardMaterial);
 
+  /**
+   * `referenceGrid`(下記)の見た目——既存の床(`paintFloorGrid`)と同じ、
+   * 1m間隔の細い線を世界座標に描く。**違いは基準にする2軸**——床は常に
+   * 世界のXZ平面に固定なので `vFloorWorldPos.xz` を直接使えるが、この方眼は
+   * カメラの方を向く1枚の板として毎フレーム動かす(`updateReferenceGrid`
+   * のdoc参照)。板を動かしても模様がついてこないよう、線の位置は板の
+   * ローカルUVではなく**ワールド座標を、毎フレーム渡す2本の直交ベクトル
+   * (uRight/uUp)へ射影した値**で決める——板をカメラの近くへ動かし続けても
+   * 線そのものは世界に固定されたまま、カメラが動けば線が画面を流れる。
+   */
+  function paintReferenceGrid(material: THREE.MeshStandardMaterial): {
+    uRight: { value: THREE.Vector3 };
+    uUp: { value: THREE.Vector3 };
+  } {
+    const uRight = { value: new THREE.Vector3(1, 0, 0) };
+    const uUp = { value: new THREE.Vector3(0, 1, 0) };
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uRight = uRight;
+      shader.uniforms.uUp = uUp;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vRefWorldPos;",
+        )
+        .replace(
+          "#include <begin_vertex>",
+          "#include <begin_vertex>\nvRefWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;",
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vRefWorldPos;\nuniform vec3 uRight;\nuniform vec3 uUp;",
+        )
+        .replace(
+          "#include <dithering_fragment>",
+          [
+            "#include <dithering_fragment>",
+            "{",
+            "  vec2 cell = vec2(dot(vRefWorldPos, uRight), dot(vRefWorldPos, uUp));",
+            "  vec2 width = fwidth(cell);",
+            "  vec2 toLine = abs(fract(cell - 0.5) - 0.5) / max(width, vec2(1e-6));",
+            "  float line = 1.0 - min(min(toLine.x, toLine.y), 1.0);",
+            "  float perCell = 1.0 / max(max(width.x, width.y), 1e-6);",
+            "  float fade = clamp((perCell - 2.0) / 6.0, 0.0, 1.0);",
+            "  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.78, 0.80, 0.82), line * 0.5 * fade);",
+            "}",
+          ].join("\n"),
+        );
+    };
+    return { uRight, uUp };
+  }
+
+  /**
+   * **基準の無い舞台に出す、控えめな方眼**(課題A)。
+   *
+   * 磁石が銅管を落ちる(D21)・空気をばねにする(D17)・氷が水に変わる(D18b)は、
+   * 床も壁も水面も無いまま対象だけが動く。かんたんモードの追従カメラ
+   * (`updateGuidedFollowCamera`)は対象を画面の同じ場所へ置き続けるので、
+   * 数値は大きく動いているのに絵は1ピクセルも変わらず、「動いているのか
+   * 止まっているのか」がボタンの文字でしか分からなかった(利用者役・進行
+   * 管理役の実測)。
+   *
+   * **`y=0`に固定した平面では直らない**——対象は`y=-9`・`-18`のように
+   * 落ち続け、追従カメラも一緒に下がるので、固定した平面はすぐ画角の外へ
+   * 出てしまう(進行管理役の実測・前任者が詰まった点)。かといって
+   * カメラに完全追従させると(対象と同じ動き方をするので)今度は板と
+   * カメラの相対位置が変わらず、模様が世界座標で決まっていても画面上は
+   * やはり静止して見える——**位置はカメラに追従、模様は世界座標**の
+   * 両方が要る。
+   *
+   * そこで、この方眼は**常にカメラの方を向く1枚の板**として毎フレーム
+   * 置き直す(`updateReferenceGrid`)。板の姿勢(位置・向き)は完全にカメラに
+   * 追従するが、板の上に描く模様は`paintReferenceGrid`のとおりワールド
+   * 座標そのもので決まる——板を動かしても模様はついてこない。結果、
+   * カメラが世界の中を動けば(=対象を追いかけて落ちれば)、板の位置に
+   * 関わらず**画面に映る模様(線)は流れる**。対象と重ならないよう、
+   * 対象(注視点)よりカメラから3倍遠い位置に置く(空気をばねにする実験で
+   * 対象と同じ高さに板を置いたら埋まって見えた反省、後述)。
+   *
+   * **物理には触らない**——このメッシュは`bodyMeshes`にも`pickables`にも
+   * 入れず、静的ボディとして追加もしない。当たり判定も画角合わせ
+   * (`contentBoundingBox`)も一切変えない、見た目だけの目盛りである。
+   * 色・線の太さ・間隔(1m)は既存の床(`ground`)と揃え、**現象より目立つ
+   * 補助線は逆効果**なので新しいデザインは足さない。
+   *
+   * 表示するかどうかは`updateReferenceGrid`が毎フレーム判定する——床のある
+   * 46実験の大半(静的ボディ・水面・流体境界・気体の箱の枠・天体のいずれか
+   * を持つ)では常に非表示のまま、見え方は変わらない。
+   */
+  const referenceGrid = new THREE.Mesh(
+    new THREE.PlaneGeometry(400, 400),
+    new THREE.MeshStandardMaterial({ color: 0x555555 }),
+  );
+  referenceGrid.visible = false;
+  referenceGrid.userData.isReferenceGrid = true;
+  const referenceGridUniforms = paintReferenceGrid(
+    referenceGrid.material as THREE.MeshStandardMaterial,
+  );
+  scene.add(referenceGrid);
+
+  // `updateReferenceGrid`の使い回し用一時オブジェクト(毎フレームの
+  // アロケーションを避ける)。
+  const REFERENCE_GRID_WORLD_UP = new THREE.Vector3(0, 1, 0);
+  const referenceGridForward = new THREE.Vector3();
+  const referenceGridRight = new THREE.Vector3();
+  const referenceGridUp = new THREE.Vector3();
+  const referenceGridNormal = new THREE.Vector3();
+  const referenceGridBasis = new THREE.Matrix4();
+
+  /**
+   * `referenceGrid`を出すかどうか、出すならどこへ置くかを毎フレーム決める。
+   *
+   * **出す条件**——「他に基準になる物が何も無い」ときだけ出す。床のグリッド・
+   * 水面・流体の器・気体の箱の枠・天体のいずれかが既にあるなら、それが
+   * 基準になるのでここでは出さない(既存実験の見え方を変えないため)。
+   * 動く物が無い(`contentBoundingBox`が空)ときも出さない——静止した舞台に
+   * 方眼だけ浮いていても基準として意味がない。
+   *
+   * **置き方**——カメラの向き(`camera.getWorldDirection`。かんたんモードの
+   * 追従カメラはほぼ一定の向きを保ったまま並行移動するだけなので、毎フレーム
+   * 計算し直しても向きはほとんど変わらない)を板の法線にし、注視点までの
+   * 距離の3倍だけカメラの前方へ置く。3倍取るのは、対象とほぼ同じ距離に
+   * 置くと板が対象に重なって埋まって見えるため(空気をばねにする実験は
+   * 対象が`y=0`平面上をx方向へ動くので、平面をそこへ置くと対象と同じ高さで
+   * 重なって見えなくなる、という前任者が気づいていた別の不具合と同じ原因)。
+   */
+  function updateReferenceGrid(currentWorld: WasmWorld): void {
+    const box = contentBoundingBox();
+    if (!box) {
+      referenceGrid.visible = false;
+      return;
+    }
+    let hasStaticBody = false;
+    for (const [bodyIndex] of bodyMeshes) {
+      if (currentWorld.read_component("body_is_static_at", String(bodyIndex)) === "true") {
+        hasStaticBody = true;
+        break;
+      }
+    }
+    const hasOtherReference =
+      hasStaticBody ||
+      waterPlane.visible ||
+      fluidBoundaryPoints.visible ||
+      gasBoxLines.visible ||
+      astroGroup.children.length > 0;
+    if (hasOtherReference) {
+      referenceGrid.visible = false;
+      return;
+    }
+
+    camera.getWorldDirection(referenceGridForward);
+    referenceGridRight.crossVectors(REFERENCE_GRID_WORLD_UP, referenceGridForward);
+    if (referenceGridRight.lengthSq() < 1e-8) {
+      // カメラがほぼ真上/真下を向いている(=世界の上方向と平行)ときだけの保険。
+      referenceGridRight.set(1, 0, 0);
+    }
+    referenceGridRight.normalize();
+    referenceGridUp.crossVectors(referenceGridForward, referenceGridRight).normalize();
+
+    const targetDistance = Math.max(
+      camera.position.distanceTo(orbit.target),
+      1e-6,
+    );
+    referenceGrid.position
+      .copy(camera.position)
+      .addScaledVector(referenceGridForward, targetDistance * 3);
+    referenceGridNormal.copy(referenceGridForward).negate();
+    referenceGridBasis.makeBasis(referenceGridRight, referenceGridUp, referenceGridNormal);
+    referenceGrid.quaternion.setFromRotationMatrix(referenceGridBasis);
+
+    referenceGridUniforms.uRight.value.copy(referenceGridRight);
+    referenceGridUniforms.uUp.value.copy(referenceGridUp);
+    referenceGrid.visible = true;
+  }
+
   // Scene View オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「速度ベクトル」、
   // 切替可)の最小デモ: 選択中ボディの速度ベクトルを矢印で表示する。縮約実装の
   // 理由: 接触点・力・拘束・流体場・フレーム軸のオーバーレイは対象外、速度のみ。
@@ -10590,6 +10765,7 @@ async function setUpSceneView(
 
     syncSettingsInputs();
     updateWaterPlane(world);
+    updateReferenceGrid(world);
     updateTethers(world);
     if (guidedFollowCamera) updateGuidedFollowCamera();
     // enableDamping を使うので毎フレーム update が要る。
