@@ -1442,12 +1442,18 @@ function setUpHierarchy(
   // 凡例が既に出している。
   const probeCount = readNumber(world, "imported_probe_count");
   if (probeCount > 0) {
+    // 消した物の観測点が生き残った物と見分けが付かないまま並んでいた
+    // (課題B、`friendlyProbeLabel`のdoc参照)。一覧を作る前に一度だけ
+    // 「いま生きているボディの名前」を集めておく(ボディごとに数え直すと
+    // probe数×body数になる)。
+    const aliveBodyNames = aliveBodyNamesOf(world);
     const probeList = document.createElement("ul");
     probeList.className = "tree-nested";
     for (let i = 0; i < probeCount; i++) {
       const item = document.createElement("li");
       item.textContent = friendlyProbeLabel(
         world.read_component("imported_probe_label_at", String(i)),
+        aliveBodyNames,
       );
       probeList.appendChild(item);
     }
@@ -4459,7 +4465,7 @@ function timeAxisFormatter(
  * (利用者役①の一番の不満)。**括弧の中身は残す**——どの物の値なのかは
  * その人にとっても手掛かりになるため。
  */
-function friendlyProbeLabel(raw: string): string {
+function friendlyProbeLabel(raw: string, aliveBodyNames?: ReadonlySet<string>): string {
   const NAMES: [RegExp, string][] = [
     [/^BodyPosY/, "高さ"],
     [/^BodyPosX/, "横の位置"],
@@ -4500,9 +4506,44 @@ function friendlyProbeLabel(raw: string): string {
     if (!pattern.test(raw)) continue;
     // `BodySpeed(chassis)` の `chassis`、`AstroPosX[0]` の `0` は残す。
     const detail = raw.match(/[([]([^)\]]+)[)\]]/);
-    return detail ? `${name}(${detail[1]})` : name;
+    if (!detail) return name;
+    // **消した物の観測点が、実在するかのように残る不具合(利用者役の報告)**。
+    // 物理コア側にプローブを消す手段が無く(`imported_probe_*`は追加専用)、
+    // グラフに描いた過去データを黙って捨てるのも乱暴なので、記録は残した
+    // まま「もう無い物」だと分かるようにする——`aliveBodyNames`(呼び出し側
+    // が「いま生きているボディの名前」で渡す、`probeTargetBodyName`のdoc
+    // 参照)に無い名前なら注記を足す。呼び出し側が渡さない(=判定不要な)
+    // ときは今まで通り何も足さない。
+    const targetName = probeTargetBodyName(raw);
+    const gone =
+      aliveBodyNames !== undefined &&
+      targetName !== null &&
+      !aliveBodyNames.has(targetName);
+    return gone ? `${name}(${detail[1]}・消えた物)` : `${name}(${detail[1]})`;
   }
   return raw;
+}
+
+/**
+ * **観測点(Probe)が指しているボディの名前**(`BodyPosY(Sphere_1)` →
+ * `Sphere_1`)。`add_body_probes`が作る2種(高さ・速さ)だけがボディを指す
+ * ——天体の添字(`AstroPosX[0]`)や回路の節番号はボディ名ではないので対象外
+ * (「消えたか」を判定できる相手がそもそも無い)。
+ */
+function probeTargetBodyName(raw: string): string | null {
+  const match = raw.match(/^Body(?:PosY|PosX|Speed)\(([^)]+)\)$/);
+  return match ? match[1] : null;
+}
+
+/** いま生きている(削除されていない)ボディの名前の集合。 */
+function aliveBodyNamesOf(world: WasmWorld): Set<string> {
+  const names = new Set<string>();
+  const count = readNumber(world, "body_count");
+  for (let i = 0; i < count; i += 1) {
+    if (world.read_component("body_is_removed_at", String(i)) === "true") continue;
+    names.add(world.read_component("body_label_at", String(i)));
+  }
+  return names;
 }
 
 /**
@@ -10719,6 +10760,7 @@ async function setUpSceneView(
       playButton.textContent = "▶";
     },
     isPlaying: () => mode === "play" && playing,
+    isEditing: () => mode === "edit",
     setProbeLabels: (labels, units, convert) => {
       guidedProbeLabels = labels;
       guidedProbeUnits = units ?? null;

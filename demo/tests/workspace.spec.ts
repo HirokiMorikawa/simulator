@@ -1906,6 +1906,108 @@ test("大きさの表示が、札と Inspector で食い違わない", async ({ 
   expect(errors).toEqual([]);
 });
 
+test("「うごかす」を押すと、自分で置いた球が落下から着地まで画面に映り続ける", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(300);
+
+  // 置いた直後(高さ12m)は`frameCameraOnContent`が至近距離まで寄せてくれる
+  // ので映っている。問題はここから——「うごかす」を押した瞬間、以前は
+  // 追従カメラ(組み立て中は`followCamera(false)`のまま、`playButton`の
+  // クリックハンドラのdoc参照)が誰も起きないまま置き去りにされ、球は
+  // 落ち始めた次のフレームで画角の外へ出て、着地はおろか落下そのものが
+  // 一度も見えなかった(進行管理役の実測: 高さ12.0m→10.16mの間にndc.yが
+  // 0→-1.61まで飛び出す)。
+  await expect.poll(() => bodyOnScreen(page), { timeout: 5_000 }).toBe(true);
+  await page.click("#btn-run");
+
+  // 落ち始め・着地までの複数時点で映り続けること。
+  for (const waitMs of [200, 300, 300, 300, 300, 500]) {
+    await page.waitForTimeout(waitMs);
+    expect(await bodyOnScreen(page)).toBe(true);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("一時停止中に自分でカメラを動かしても、「うごかす」で再開した瞬間に戻されない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(300);
+  await page.click("#btn-run"); // 走らせる(追従カメラが起きる)。
+  await page.waitForTimeout(400);
+  await page.click("#btn-run"); // 一時停止。
+
+  // 一時停止中に自分でカメラを操作する(=追従カメラを自分の意思で止める、
+  // `orbit.addEventListener("start", ...)`の既存の仕組み)。左ボタンは選択・
+  // ギズモ操作に割り当て済みで OrbitControls には繋がっていないため
+  // (`orbit.mouseButtons`のdoc参照)、実際に視点operationに使う中ボタンで
+  // 回転ドラッグする(`camera-gizmo-interaction.spec.ts`と同じ流儀)。
+  const box = await page.locator("#scene-view-canvas-host").boundingBox();
+  if (!box) throw new Error("scene-view-canvas-host not found");
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(cx + 150, cy - 60, { steps: 12 });
+  await page.mouse.up({ button: "middle" });
+  // `orbit.enableDamping`(慣性)がドラッグ後もしばらくカメラを動かし続ける
+  // ので、その減衰が収まるまで待ってから基準位置を取る——ここで待たずに
+  // 比べると、慣性による動きを「追従が起きてしまった」と誤検出する。
+  await page.waitForTimeout(1500);
+  const camAfterOrbit = await page.evaluate(() => {
+    const cam = (window as unknown as { __camera: { position: { x: number; y: number; z: number } } }).__camera;
+    return { x: cam.position.x, y: cam.position.y, z: cam.position.z };
+  });
+
+  // 再開しても、自分で動かしたカメラの位置がその場で覆されないこと
+  // (`isEditing()`がmode==="play"のままなので偽になり、追従が再度起きない)。
+  await page.click("#btn-run");
+  await page.waitForTimeout(50);
+  const camAfterResume = await page.evaluate(() => {
+    const cam = (window as unknown as { __camera: { position: { x: number; y: number; z: number } } }).__camera;
+    return { x: cam.position.x, y: cam.position.y, z: cam.position.z };
+  });
+  const moved = Math.hypot(
+    camAfterResume.x - camAfterOrbit.x,
+    camAfterResume.y - camAfterOrbit.y,
+    camAfterResume.z - camAfterOrbit.z,
+  );
+  expect(moved).toBeLessThan(0.05);
+  expect(errors).toEqual([]);
+});
+
+test("消した物の観測点は、左の「記録している値」に残っても消えた物だと分かる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(300);
+
+  const probes = page.locator("#hierarchy-tree");
+  await expect(probes).toContainText("高さ(Sphere_1)");
+  await expect(probes).not.toContainText("消えた物");
+
+  // 3D と一覧からは消える一方、グラフに描いた過去データを黙って捨てるのは
+  // 乱暴なので、「記録している値」には残す——ただし**もう無い物だと分かる**
+  // ように注記する(課題B、`friendlyProbeLabel`のdoc参照)。
+  await page.locator("#hierarchy-tree li", { hasText: "Sphere_1" }).first().click();
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(300);
+
+  await expect(probes).toContainText("高さ(Sphere_1・消えた物)");
+  await expect(probes).toContainText("速さ(Sphere_1・消えた物)");
+  // 3D・一覧からは実際に消えていること(一覧の食い違いそのものは直っている)。
+  await expect(page.locator("#hierarchy-tree")).not.toContainText("↳ Sphere_1");
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

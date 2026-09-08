@@ -42,6 +42,13 @@ export type WorkspaceApi = {
   pause: () => void;
   isPlaying: () => boolean;
   /**
+   * 走らせておらず、直接編集できる状態(Edit)か。`playButton`が
+   * Editから初めて走らせる瞬間だけ追従カメラを起こす判定に使う
+   * (一時停止からの再開ではmode==="play"のままなので偽になる、
+   * `playButton`のdoc参照)。
+   */
+  isEditing: () => boolean;
+  /**
    * 1 秒あたりに進める step 数。`null` で従来の「時間倍率」方式へ戻す。
    * シーンごとに dt が 16 桁も違うため、倍率では現象ごとの速さを指定できない
    * (`catalog.ts` 冒頭の doc 参照)。
@@ -1177,8 +1184,33 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     // 選んでいないとパレットを開いてしまい、置いたばかりの物を落とすのに
     // 「他人の実験一覧」が出てきた(利用者役④の観察)。動かすボタンは
     // 動かすためのものである。
-    if (api.isPlaying()) api.pause();
-    else api.play();
+    if (api.isPlaying()) {
+      api.pause();
+    } else {
+      // **課題A: 自分で組み立てている場面(`current`が無い=カタログの実験を
+      // 選んでいない)で、Editから初めて走らせる瞬間だけ追従カメラを起こす**。
+      //
+      // 「＋新規シーン」直後は、組み立て中にエディタと追従カメラが毎フレーム
+      // 引っ張り合わないよう、`onSceneReplaced`側でわざと`followCamera(false)`
+      // にしてある(そちらのdoc参照)。ところが「うごかす」を押しても
+      // どこもそれを起こし直さないままだったので、置いた球(既定の高さ12m)は
+      // 落ち始めた瞬間に追いかける者がいない画角の外へ出ていき、着地はおろか
+      // 落下そのものが一切映らなかった(進行管理役の実測、`workspace.spec.ts`
+      // の該当テストのdoc参照)。
+      //
+      // `isEditing()`(mode==="edit")で絞るのは2点のため——
+      // (1) カタログの実験は`reload()`が読み込み・パラメータ変更のたびに
+      //     無条件で`followCamera(true)`を呼んでおり、そちらはすでに面倒を
+      //     見ている。ここでも重ねて起こすと、Editで一時停止した状態から
+      //     手前でカメラを回して確かめている最中に「うごかす」を押した瞬間、
+      //     その手の操作を追従カメラが上書きしてしまう(既存46実験の見え方を
+      //     変えないため、`current`が無いときだけに絞る)。
+      // (2) 一時停止(`pause()`)は`mode`を"play"のまま変えないので、
+      //     一時停止中に自分でカメラを動かした操作を、再開のたびに奪わない
+      //     ——`isEditing()`は再開時には偽になる。
+      if (!current && api.isEditing()) api.followCamera(true);
+      api.play();
+    }
     syncRun();
   });
   restartButton.addEventListener("click", () => reload());
