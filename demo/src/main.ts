@@ -6004,7 +6004,20 @@ async function setUpSceneView(
    * 置くと板が対象に重なって埋まって見えるため(空気をばねにする実験は
    * 対象が`y=0`平面上をx方向へ動くので、平面をそこへ置くと対象と同じ高さで
    * 重なって見えなくなる、という前任者が気づいていた別の不具合と同じ原因)。
+   *
+   * **線の間隔は固定の1mではなく、画角に対して常に一定の本数(`CELLS_ACROSS_VIEW`)
+   * が入るよう毎フレーム決め直す**(進行管理役の実測での差し戻し: 磁石が
+   * 銅管を落ちる実験はカメラが対象から0.3m足らずまで寄るため、1m間隔の
+   * 線では視界の中に1本も入らないことが多く、「30m落ちても画面がほぼ
+   * 同じ」に見えていた——線の本数そのものが足りていなかった)。板までの
+   * 距離`distanceAhead`と縦画角から、板の縦の見かけの高さ
+   * (`2*distanceAhead*tan(fov/2)`)を出し、それを`CELLS_ACROSS_VIEW`等分した
+   * 長さを1マスにする——床の方眼(1マスあたり画面の高さの1割強)と同じ
+   * くらいの密度に、scaleに関わらず揃う。`uRight`/`uUp`を単位ベクトルでは
+   * なく「1/この間隔」の長さで渡すことで、シェーダ側は今までどおり
+   * `dot(位置, uRight)`が整数のところに線を引くだけでよい。
    */
+  const REFERENCE_GRID_CELLS_ACROSS_VIEW = 14;
   function updateReferenceGrid(currentWorld: WasmWorld): void {
     const box = contentBoundingBox();
     if (!box) {
@@ -6042,15 +6055,27 @@ async function setUpSceneView(
       camera.position.distanceTo(orbit.target),
       1e-6,
     );
+    const distanceAhead = targetDistance * 3;
     referenceGrid.position
       .copy(camera.position)
-      .addScaledVector(referenceGridForward, targetDistance * 3);
+      .addScaledVector(referenceGridForward, distanceAhead);
     referenceGridNormal.copy(referenceGridForward).negate();
     referenceGridBasis.makeBasis(referenceGridRight, referenceGridUp, referenceGridNormal);
     referenceGrid.quaternion.setFromRotationMatrix(referenceGridBasis);
 
-    referenceGridUniforms.uRight.value.copy(referenceGridRight);
-    referenceGridUniforms.uUp.value.copy(referenceGridUp);
+    // 縦画角ぶんの板の高さを`CELLS_ACROSS_VIEW`等分した長さを1マスにする。
+    const viewHeightAtGrid =
+      2 * distanceAhead * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    const gridSpacing = Math.max(
+      viewHeightAtGrid / REFERENCE_GRID_CELLS_ACROSS_VIEW,
+      1e-9,
+    );
+    referenceGridUniforms.uRight.value
+      .copy(referenceGridRight)
+      .multiplyScalar(1 / gridSpacing);
+    referenceGridUniforms.uUp.value
+      .copy(referenceGridUp)
+      .multiplyScalar(1 / gridSpacing);
     referenceGrid.visible = true;
   }
 

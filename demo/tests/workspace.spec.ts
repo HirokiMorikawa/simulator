@@ -2171,65 +2171,98 @@ for (const category of CATEGORIES) {
   });
 }
 
-/** `__scene` から`referenceGrid`(課題A)を探す。無ければ`null`。 */
-async function readReferenceGrid(page: Page): Promise<{
-  visible: boolean;
-  gridPos: number[];
-  camPos: number[];
-} | null> {
+/** `__scene` から`referenceGrid`(課題A)の`visible`を読む。無ければ`null`。 */
+async function referenceGridVisible(page: Page): Promise<boolean | null> {
   return page.evaluate(() => {
     const scene = (window as unknown as { __scene: any }).__scene;
-    const camera = (window as unknown as { __camera: any }).__camera;
     let grid: any = null;
     scene.traverse((o: any) => {
       if (o.userData?.isReferenceGrid) grid = o;
     });
-    if (!grid) return null;
-    return {
-      visible: grid.visible as boolean,
-      gridPos: grid.position.toArray() as number[],
-      camPos: camera.position.toArray() as number[],
-    };
+    return grid ? (grid.visible as boolean) : null;
   });
+}
+
+/**
+ * 3D舞台(`#scene-view-canvas-host`)を`gapMs`あけて2枚撮り、**画素が実際に
+ * どれだけ変わったか**を割合(0〜100)で返す。
+ *
+ * 「板を置いた」「座標上はカメラの近くにある」だけでは、線が1〜2本しか
+ * 見えず実質止まって見える状態でも通ってしまう(進行管理役の実測による
+ * 差し戻し: 座標ベースの裏取りだけのテストは green のまま、画面は
+ * ほぼ静止していた)。**見比べて動いていると分かるか**を直接測る。
+ */
+async function screenshotDiffPercent(page: Page, gapMs: number): Promise<number> {
+  const stage = page.locator("#scene-view-canvas-host");
+  const before = await stage.screenshot();
+  await page.waitForTimeout(gapMs);
+  const after = await stage.screenshot();
+  return page.evaluate(
+    async ({ a, b }) => {
+      function loadImg(dataUrl: string): Promise<HTMLImageElement> {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = reject;
+          img.src = dataUrl;
+        });
+      }
+      const [imgA, imgB] = await Promise.all([
+        loadImg("data:image/png;base64," + a),
+        loadImg("data:image/png;base64," + b),
+      ]);
+      const w = imgA.width;
+      const h = imgA.height;
+      const draw = (img: HTMLImageElement) => {
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d")!;
+        ctx.drawImage(img, 0, 0);
+        return ctx.getImageData(0, 0, w, h).data;
+      };
+      const d1 = draw(imgA);
+      const d2 = draw(imgB);
+      let diff = 0;
+      const total = w * h;
+      const THRESHOLD = 12; // 微小なAA/ノイズ差は無視する
+      for (let i = 0; i < d1.length; i += 4) {
+        const dr = Math.abs(d1[i] - d2[i]);
+        const dg = Math.abs(d1[i + 1] - d2[i + 1]);
+        const db = Math.abs(d1[i + 2] - d2[i + 2]);
+        if (dr + dg + db > THRESHOLD) diff++;
+      }
+      return (diff / total) * 100;
+    },
+    { a: before.toString("base64"), b: after.toString("base64") },
+  );
 }
 
 // 課題A: 磁石が銅管を落ちる・空気をばねにする・氷が水に変わるは、床も水面も
 // 無いまま対象だけが動く。かんたんモードの追従カメラは対象を画面の同じ場所へ
 // 置き続けるので、数値は動いていても絵が1ピクセルも変わらなかった
-// (利用者役・進行管理役の実測、`demo/src/main.ts`の`updateReferenceGrid`の
-// doc参照)。板(`referenceGrid`)を対象の背後・カメラの近くへ置き直し続ける
-// ことで直した——「カメラの近くに留まる」ことと「対象がその間に実際に大きく
-// 動いている」ことの両方をここで裏取りする(模様が世界座標で決まっている
-// ことまではPlaywrightの座標からは見えないので、そこは`artifact-design`
-// ではなく実際のスクリーンショットを目視して確認済み)。
-test("基準の無い場面では、方眼がカメラの近くに置き直され続ける(課題A)", async ({ page }) => {
-  const errors = collectPageErrors(page);
-  await boot(page);
-  await page.keyboard.press("Control+k");
-  await page.click('.palette-row[data-experiment-id="d21-copper-tube"]');
-  await page.waitForTimeout(1500);
+// (利用者役・進行管理役の実測)。板(`referenceGrid`)を対象の背後・カメラの
+// 近くへ置き直し続けることで直した——ただし、板を置いただけ・座標上カメラの
+// 近くにあるだけでは足りない。線の間隔が固定の1mだと、カメラが対象の
+// 数十cm手前まで寄るこの3実験では視界に線が1〜2本しか入らず、実質止まって
+// 見えたまま(進行管理役の差し戻し)。線の間隔を毎フレーム画角に対して
+// 一定本数(`REFERENCE_GRID_CELLS_ACROSS_VIEW`)になるよう決め直すことで
+// 直した(`demo/src/main.ts`の`updateReferenceGrid`のdoc参照)。ここでは
+// 座標ではなく**実際に画面の画素が変わった割合**で裏取りする。
+for (const id of ["d21-copper-tube", "d17-piston", "d18b-ice-melts"]) {
+  test(`基準の無い場面(${id})は、1秒で画面の5%以上の画素が変わる(課題A)`, async ({ page }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1500);
 
-  const first = await readReferenceGrid(page);
-  expect(first).not.toBeNull();
-  expect(first!.visible).toBe(true);
-
-  await page.waitForTimeout(3000);
-  const second = await readReferenceGrid(page);
-  expect(second!.visible).toBe(true);
-
-  const dist = (a: number[], b: number[]) =>
-    Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-  // 板は常にカメラのすぐ近く(=画角の中)に置き直される——`y=0`に固定した
-  // 板だと、磁石がここまで落ちる間に画角の外へ出てしまっていた
-  // (前任者が詰まっていた不具合)。
-  expect(dist(first!.gridPos, first!.camPos)).toBeLessThan(5);
-  expect(dist(second!.gridPos, second!.camPos)).toBeLessThan(5);
-  // それでいて板自体は(カメラが世界の中を動いたぶん)実際に動いている
-  // ——静止したままカメラにくっついているだけなら、模様が世界座標でも
-  // 画面上は結局動いて見えない。
-  expect(dist(first!.gridPos, second!.gridPos)).toBeGreaterThan(0.5);
-  expect(errors).toEqual([]);
-});
+    expect(await referenceGridVisible(page)).toBe(true);
+    const diffPct = await screenshotDiffPercent(page, 1000);
+    expect(diffPct).toBeGreaterThan(5);
+    expect(errors).toEqual([]);
+  });
+}
 
 test("床のある場面では、方眼を追加で出さない(課題Aの回帰防止)", async ({ page }) => {
   const errors = collectPageErrors(page);
@@ -2238,8 +2271,11 @@ test("床のある場面では、方眼を追加で出さない(課題Aの回帰
     await page.keyboard.press("Control+k");
     await page.click(`.palette-row[data-experiment-id="${id}"]`);
     await page.waitForTimeout(1000);
-    const grid = await readReferenceGrid(page);
-    expect(grid?.visible ?? false).toBe(false);
+    // 座標ではなく`visible`そのもの——方眼を追加で出す条件のコードパスに
+    // 一切入らないことを直接確かめる(見た目が変わらないことの一番確かな
+    // 保証。物理のタイミングは実行ごとにぶれるため、床のある実験は
+    // ピクセル差分では比較しない)。
+    expect(await referenceGridVisible(page)).toBe(false);
   }
   expect(errors).toEqual([]);
 });
