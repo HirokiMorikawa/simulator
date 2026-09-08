@@ -896,7 +896,10 @@ type ImportedShapeJson =
         triangles: [number, number, number][];
       };
     };
-type ImportedBodyJson = { shape: ImportedShapeJson };
+// `type`/`name`は**課題C(回す軸に回転が見えない)向けに追加**——`meshFromShapeJson`
+// が「無地の球にマーカーを足すか」を決めるのに、そのボディが`kinematic`か
+// (=外から姿勢を直接押し付けられている=誰かが意図して回している)を読む。
+type ImportedBodyJson = { shape: ImportedShapeJson; type?: string; name?: string };
 // 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5)向け。
 // `sim_world::scenario::PredictionPromptJson`のJSON表現と同じ形(物理には
 // 影響しないメタデータのため、Rust側で検証済みの値としてではなく、Importに
@@ -8592,7 +8595,19 @@ async function setUpSceneView(
   /// Plane専用の位置決め(normal/dから逆算)は他の形状(ボディの現在位置/姿勢を
   /// worldへ問い合わせる)と経路が異なるため、戻り値に`isPlane`を含めて呼び出し側が
   /// 分岐する。
-  function meshFromShapeJson(shape: ImportedShapeJson | undefined): {
+  ///
+  /// `markSpin`(**課題C向けに追加**): 無地の球は、実際に回っていても見た目に
+  /// 手掛かりが無い——「手回し発電機」の軸(`kinematic`な球、`angular_velocity`を
+  /// 外から与えられて回る)は、回転そのものは物理として正しく進んでいるのに
+  /// (実測で四元数が毎秒変わることを確認済み)、模様の無い灰色の球にしか見えず
+  /// 「回っている」という一番言いたいことが伝わらなかった(利用者役の報告)。
+  /// 形状(半径・質量・慣性・当たり判定)には一切触れず、**描画だけ**に小さな
+  /// 突起(取っ手)を足して回転を目に見えるようにする——物理の受け入れテストが
+  /// 検証している質量・慣性・衝突形状はどれも変わらない。
+  function meshFromShapeJson(
+    shape: ImportedShapeJson | undefined,
+    markSpin = false,
+  ): {
     mesh: THREE.Mesh;
     isPlane: boolean;
   } {
@@ -8618,11 +8633,26 @@ async function setUpSceneView(
       return { mesh, isPlane: true };
     }
     if (shape && "sphere" in shape) {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
+        new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+      );
+      if (markSpin) {
+        // **取っ手(課題C)**。球の中心から半径ぶん突き出た、色の違う小さな
+        // 棒。`mesh`の子にするので、毎フレーム`mesh.quaternion`を書き換える
+        // 既存の経路(呼び出し側、`body_rotation_at_f32`)にそのまま乗って
+        // 一緒に回る——ここでは一度だけ組み立てて終わり、当たり判定にも
+        // 質量にも触れない(`Mesh`の子は物理には見えない、描画専用の飾り)。
+        const r = shape.sphere.radius;
+        const handle = new THREE.Mesh(
+          new THREE.BoxGeometry(r * 0.35, r * 0.35, r * 1.5),
+          new THREE.MeshStandardMaterial({ color: 0x2a2a2a }),
+        );
+        handle.position.set(r * 0.9, 0, 0);
+        mesh.add(handle);
+      }
       return {
-        mesh: new THREE.Mesh(
-          new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
-          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
-        ),
+        mesh,
         isPlane: false,
       };
     }
@@ -8769,7 +8799,10 @@ async function setUpSceneView(
 
     for (let i = 0; i < count; i++) {
       const bodyIndex = startIndex + i;
-      const { mesh, isPlane } = meshFromShapeJson(bodies[i]?.shape);
+      const { mesh, isPlane } = meshFromShapeJson(
+        bodies[i]?.shape,
+        bodies[i]?.type === "kinematic",
+      );
       if (isPlane) {
         addSpawnedMesh(bodyIndex, mesh);
         continue;
@@ -8911,7 +8944,10 @@ async function setUpSceneView(
     const drawFloor = spread > 0 ? spread / 60 : 0;
 
     for (let bodyIndex = 0; bodyIndex < bodies.length; bodyIndex++) {
-      const { mesh, isPlane } = meshFromShapeJson(bodies[bodyIndex]?.shape);
+      const { mesh, isPlane } = meshFromShapeJson(
+        bodies[bodyIndex]?.shape,
+        bodies[bodyIndex]?.type === "kinematic",
+      );
       if (isPlane) {
         addSpawnedMesh(bodyIndex, mesh);
         continue;

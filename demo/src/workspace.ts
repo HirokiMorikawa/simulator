@@ -514,6 +514,21 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   /** 「舞台が空」と決めるまでに、空のまま待つフレーム数(60fps でおよそ半秒)。 */
   const STAGE_EMPTY_FRAMES = 30;
   let stageEmptyFrames = 0;
+  /**
+   * **舞台に形のある物が無い実験で、グラフの段だけを強制的に開いているか**。
+   *
+   * 課題A(利用者役の報告): 「電気の工作台」は 3D に映る物がひとつも無く、
+   * 現象そのものが数値とグラフでしかない。以前はこれを「グラフが読める
+   * 濃さまでダイヤルごと上げる」(`ANALYSIS_READABLE` へ `applyDetail`)で
+   * 解決していたが、それだと「変えてみる」(つまみ、reveal 0.8)まで巻き
+   * 込まれて開いてしまい、「みる」を選んだ人の画面が道具だらけになった
+   * (方針:「みる」で出すのは現象そのもの(グラフ)だけ)。
+   *
+   * そこで大局の粒度(`detail`/`chosenDetail`/ダイヤルの位置)には一切触れず、
+   * グラフの段(`--row-analysis`)の開閉だけを、この旗ひとつで上書きする。
+   * 「みる」は「みる」のまま、現象(グラフ)だけが追いついて出る。
+   */
+  let forceAnalysisOpen = false;
 
   // ---- 大局の粒度 -------------------------------------------------------------
   /**
@@ -554,8 +569,11 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     const toolbar = grow(detail, REVEAL.toolbar, 0.4, 64);
     // グラフも一覧と同じで「読める大きさか 0 か」。グラフを出したいだけの人が、
     // 一覧(1.6〜)まで引き連れてこないよう、読める点を一覧より手前に置く。
+    // `forceAnalysisOpen` が立っているとき(課題A: 舞台に形のある物が無い
+    // 実験)は、粒度がどこにあっても最低限(150px)を渡す——他の段(つまみ・
+    // 一覧・ツールバー)の閾値には一切触れない。
     let analysis =
-      detail >= REVEAL.analysis
+      detail >= REVEAL.analysis || forceAnalysisOpen
         ? Math.max(150, grow(detail, REVEAL.analysis, 0.8, 210))
         : 0;
     // 時間の帯も「用を成す高さか 0 か」。中身(スクラバ)が入らない高さで
@@ -1075,7 +1093,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     // **いま画面に出ているものだけを指す**。グラフがまだ出ていない濃さで
     // 「下のグラフを見てください」と書いてあって、下は真っ黒のまま——という
     // 食い違いが起きていた(利用者役①の観察)。出ていないなら、出し方を言う。
-    const graphOnScreen = detail >= REVEAL.analysis;
+    // `forceAnalysisOpen`(課題A)で強制的に開いているときも「出ている」扱い
+    // にする——実際にグラフの段が見えているのに「ダイヤルを右へ回すと出ます」
+    // と書くのは、それこそ舞台の実際と食い違う。
+    const graphOnScreen = detail >= REVEAL.analysis || forceAnalysisOpen;
     if (stageEmpty) {
       return graphOnScreen
         ? "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。"
@@ -1117,8 +1138,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     }
     closePalette();
     // 実験を選び直したら、**人が自分で選んだ濃さ**へ戻す。前の実験の都合で
-    // 上げた分を持ち越さない(`chosenDetail` の doc 参照)。
-    if (detail !== chosenDetail) applyDetail(chosenDetail, false, false);
+    // 上げた分を持ち越さない(`chosenDetail` の doc 参照)。前の実験が
+    // グラフの段を強制していたぶんもここで畳む——次のフレームで舞台の実際を
+    // 見て、必要ならまた開く(下の毎フレーム更新)。畳まないと、3D に物が
+    // 映る実験を選んでも一瞬グラフの段が居座って見える。
+    if (detail !== chosenDetail || forceAnalysisOpen) {
+      forceAnalysisOpen = false;
+      applyDetail(chosenDetail, false, false);
+    }
     lastStageEmpty = null;
     lastWhereText = "";
     stageEmptyFrames = 0;
@@ -2369,31 +2396,36 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       // 本当に空だと決める。
       stageEmptyFrames = api.stageIsEmpty() ? stageEmptyFrames + 1 : 0;
       const stageEmptyNow = stageEmptyFrames > STAGE_EMPTY_FRAMES;
-      // 文面は濃さでも変わる(`stageWhereText` の doc)ので、舞台の空き具合
-      // だけでなく**文そのもの**が変わったかで書き直す。
+      if (stageEmptyNow !== lastStageEmpty) {
+        lastStageEmpty = stageEmptyNow;
+        // 舞台に形のある物が**出てこない**と分かったときだけ、グラフの段を
+        // 強制的に開く——「選んだのに何も映らない」を残さないため。実験の表に
+        // ついた `view` ではなく舞台の実際で決めるので、3D に何か映る実験で
+        // 勝手に開くことはない(利用者役①の観察)。
+        //
+        // 課題A(利用者役の報告): 以前はここで大局の粒度そのもの
+        // (`ANALYSIS_READABLE` へ `applyDetail`)を上げていたが、それだと
+        // 「変えてみる」(つまみ)まで一緒に開いてしまい、「みる」を選んだ
+        // 人の画面が道具だらけになった。`forceAnalysisOpen` はグラフの段
+        // だけを開く旗なので、`detail`/`chosenDetail`/ダイヤルの位置には
+        // 触れない——「みる」を選んだ人は「みる」のまま、現象(グラフ)
+        // だけが追いついて出る。
+        //
+        // 「場」の実験(二重スリットなど)は、形のある物こそ無いものの、
+        // **3D の中の場のパネルに絵が出ている**。見に行く先がそこにある以上、
+        // グラフを強制して出す必要はない。
+        forceAnalysisOpen = stageEmptyNow && current?.view !== "field";
+        applyDetail(detail, false, false);
+      }
+
+      // 文面は濃さと `forceAnalysisOpen` でも変わる(`stageWhereText` の
+      // doc)ので、舞台の空き具合だけでなく**文そのもの**が変わったかで
+      // 書き直す。
       const whereNow = current ? stageWhereText(current, stageEmptyNow) : "";
       if (whereNow !== lastWhereText) {
         lastWhereText = whereNow;
         const where = document.querySelector<HTMLElement>(".card-where");
         if (where) where.textContent = whereNow;
-      }
-      if (stageEmptyNow !== lastStageEmpty) {
-        lastStageEmpty = stageEmptyNow;
-        // 舞台に形のある物が**出てこない**と分かったときだけ、グラフが読める
-        // 濃さまで開く——「選んだのに何も映らない」を残さないため。実験の表に
-        // ついた `view` ではなく舞台の実際で決めるので、3D に何か映る実験で
-        // 濃さが勝手に上がることはない(利用者役①の観察)。これは人の選択
-        // ではないので `chosenDetail` は動かさない。
-        // 「場」の実験(二重スリットなど)は、形のある物こそ無いものの、
-        // **3D の中の場のパネルに絵が出ている**。見に行く先がそこにある以上、
-        // グラフのために濃さを上げる必要はない(上げると「みる」に留まれない)。
-        if (
-          stageEmptyNow &&
-          current?.view !== "field" &&
-          detail < ANALYSIS_READABLE
-        ) {
-          applyDetail(ANALYSIS_READABLE, false, false);
-        }
       }
 
       // **もう何も動いていない**ことを見つけて、そのときの時刻を出す

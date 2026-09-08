@@ -1200,15 +1200,154 @@ test("「みる」を選んだら、実験を選び直しても「みる」の�
     expect(await grain()).toBe("watch");
   }
 
-  // 舞台に形のある物が出ない実験だけは、グラフが読める濃さまで開く。
+  // 舞台に形のある物が出ない実験(D9)でも、いまは「みる」のまま
+  // ——課題A(利用者役の報告)より前は、グラフを見せるために大局の粒度
+  // そのものを「さわる」まで押し上げていて、「変えてみる」(つまみ)まで
+  // 一緒に開いてしまっていた。いまはグラフの段だけを個別に強制する
+  // (`forceAnalysisOpen`、workspace.tsのdoc参照)ので、「みる」は「みる」の
+  // まま——次の「電気の工作台」のテストで、グラフだけが開くことを見る。
   await openExperiment("d9-cooling-coffee");
-  await expect
-    .poll(grain, { timeout: 10_000 })
-    .not.toBe("watch");
+  await expect.poll(grain, { timeout: 10_000 }).toBe("watch");
 
-  // それでも、次に 3D の実験へ移れば「みる」へ戻る(上げたのは一時的)。
+  // 3D の実験へ移っても、引き続き「みる」のまま。
   await openExperiment("d1-free-fall");
   await expect.poll(grain, { timeout: 10_000 }).toBe("watch");
+  expect(errors).toEqual([]);
+});
+
+// 課題A(利用者役の報告・進行管理役の裏取り): 「電気の工作台」は3Dに映る物が
+// ひとつも無い(回路のみのシーン)。以前は「みる」で開いても、グラフが出る
+// ころには大局の粒度が「さわる」まで上がっていて、「変えてみる」(つまみ)
+// まで開いてしまっていた——「みる」の画面が道具だらけになる、という別の
+// 問題を生んでいた。いまは大局の粒度(ダイヤル・「変えてみる」の開閉)には
+// 触れず、グラフの段だけを強制的に開く。
+test("舞台に形のある物が無い実験は、「みる」のままグラフの段だけが開く(課題A)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d19-electric-workbench"]');
+
+  const grain = () =>
+    page.evaluate(() => document.getElementById("app")!.dataset.grain);
+  const analysisOpen = () =>
+    page.evaluate(() => document.getElementById("app")!.dataset.analysis);
+  const knobsExpanded = () =>
+    page.evaluate(() =>
+      document
+        .querySelector('.card[data-card="knobs"]')
+        ?.getAttribute("data-expanded"),
+    );
+
+  // 「舞台が空」と決まるまで数十フレーム待つ(誤検出の防止、
+  // `STAGE_EMPTY_FRAMES`のdoc参照)ので、ここは`poll`で待ち合わせる。
+  await expect.poll(analysisOpen, { timeout: 5_000 }).toBe("true");
+
+  // グラフの段が開いても、「みる」のまま。つまみの「変えてみる」は畳まれた
+  // ままで、大局の粒度が引きずられて開くことはない。
+  expect(await grain()).toBe("watch");
+  expect(await knobsExpanded()).toBe("false");
+
+  // 「ここを見る」の文面も、実際に出ているグラフを指す(ダイヤルを回せとは
+  // もう言わない)。
+  await expect(page.locator(".card-where")).toContainText("下のグラフ");
+
+  // グラフの実データ(色分けした折れ線)が実際に描かれている。
+  const canvas = page.locator("#probe-canvas");
+  await expect(canvas).toBeVisible();
+  const canvasHeight = await canvas.evaluate((el) => el.clientHeight);
+  expect(canvasHeight).toBeGreaterThan(50);
+
+  // 3D に物が映る実験へ移れば、グラフの段は畳まれ、「みる」のまま。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.waitForTimeout(500);
+  expect(await grain()).toBe("watch");
+  await expect.poll(analysisOpen, { timeout: 5_000 }).toBe("false");
+  expect(errors).toEqual([]);
+});
+
+// 課題B(利用者役の報告): 「氷が水に変わる」の氷は床が無く、永遠に落ち続けて
+// いた(2.5秒で y=-17.91、進行管理役の実測)。「氷の高さ」がどんどん大きな
+// 負の値になるのは、融解とは無関係のノイズでしかなかった。SPHの器の床
+// (`sph.raw_state.boundary_position`、y=-0.05)に合わせた静止した床を
+// シーンJSONへ足し、氷がその場に留まるようにした。
+test("「氷が水に変わる」の氷は、床の上に留まって落ち続けない(課題B)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d18b-ice-melts"]');
+  await page.waitForTimeout(3_000);
+
+  const iceHeight = await page.evaluate(() => {
+    const w = window.__world as {
+      body_position_at_f32: (i: number) => Float32Array;
+    };
+    return w.body_position_at_f32(0)[1];
+  });
+  // 落ち続けていれば数メートル単位の負の値になる(進行管理役の実測: 2.5秒で
+  // -17.91m)。床に留まっていれば、氷の半分の厚み程度(0.05m)を大きくは
+  // 超えない。
+  expect(Math.abs(iceHeight)).toBeLessThan(0.2);
+
+  // 案内文も、もう「液体の粒が生まれます」とは書かない(粒は物理には実在
+  // するが、生成直後に物理側の不具合で弾け飛び、正しい姿を描ける状態では
+  // ない——Rustは今回の増分の対象外なので、確実に見える範囲だけを書く)。
+  const watchText = await page
+    .locator(".card-watch")
+    .evaluate((el) => el.textContent ?? "");
+  expect(watchText).not.toContain("液体の粒が生まれます");
+  expect(errors).toEqual([]);
+});
+
+// 課題C(利用者役の報告): 「手回し発電機」の3Dに映る「軸」は模様の無い灰色の
+// 球で、実際には回っていても見た目に手掛かりが無かった。物理の回転自体は
+// 正しく進んでいる(実測で四元数が毎秒変わることを確認済み)ので、形状・
+// 質量・慣性には触れず、描画だけに取っ手を足して回転を見えるようにした。
+test("「手回し発電機」の軸は、取っ手が回って見える(課題C)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+  await page.waitForTimeout(1_000);
+
+  // 取っ手(課題C、`meshFromShapeJson`のdoc参照)は球の子として足しているので、
+  // その`matrixWorld`の並進成分(4列目)を直接読む——`THREE.Vector3`を
+  // 新しく作らずに済む(evaluate内で`THREE`のグローバルが要らない)。
+  const handleWorldX = async () => {
+    return page.evaluate(() => {
+      const scene = (
+        window as unknown as {
+          __scene: { traverse: (fn: (obj: any) => void) => void };
+        }
+      ).__scene;
+      let x: number | null = null;
+      scene.traverse((obj: any) => {
+        if (obj.type === "Mesh" && obj.children.length === 1) {
+          const handle = obj.children[0];
+          if (handle.type === "Mesh") {
+            handle.updateWorldMatrix(true, false);
+            x = handle.matrixWorld.elements[12];
+          }
+        }
+      });
+      return x;
+    });
+  };
+
+  const x1 = await handleWorldX();
+  expect(x1).not.toBeNull();
+  await page.waitForTimeout(800);
+  const x2 = await handleWorldX();
+  expect(x2).not.toBeNull();
+  // 回っていれば、取っ手の世界座標は時間とともに変わる(円を描く)。
+  expect(Math.abs((x1 as number) - (x2 as number))).toBeGreaterThan(0.01);
   expect(errors).toEqual([]);
 });
 
@@ -2249,7 +2388,14 @@ async function screenshotDiffPercent(page: Page, gapMs: number): Promise<number>
 // 一定本数(`REFERENCE_GRID_CELLS_ACROSS_VIEW`)になるよう決め直すことで
 // 直した(`demo/src/main.ts`の`updateReferenceGrid`のdoc参照)。ここでは
 // 座標ではなく**実際に画面の画素が変わった割合**で裏取りする。
-for (const id of ["d21-copper-tube", "d17-piston", "d18b-ice-melts"]) {
+//
+// 「氷が水に変わる」(d18b-ice-melts)は元はこの一覧にいたが、課題B
+// (利用者役の報告: 氷が床も無く永遠に落ち続けていた)への対応でSPHの器の
+// 床に合わせた静止した床(`type: "static"`の`plane`)をシーンJSONへ足した
+// ——これで**本物の基準**(床)ができたので、もう「基準の無い場面」では
+// ない。方眼を追加で出さないことは、下の「床のある場面では、方眼を追加で
+// 出さない」に移して確かめる。
+for (const id of ["d21-copper-tube", "d17-piston"]) {
   test(`基準の無い場面(${id})は、1秒で画面の5%以上の画素が変わる(課題A)`, async ({ page }) => {
     const errors = collectPageErrors(page);
     await boot(page);
@@ -2267,7 +2413,7 @@ for (const id of ["d21-copper-tube", "d17-piston", "d18b-ice-melts"]) {
 test("床のある場面では、方眼を追加で出さない(課題Aの回帰防止)", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
-  for (const id of ["d1-free-fall", "d2-ballistic"]) {
+  for (const id of ["d1-free-fall", "d2-ballistic", "d18b-ice-melts"]) {
     await page.keyboard.press("Control+k");
     await page.click(`.palette-row[data-experiment-id="${id}"]`);
     await page.waitForTimeout(1000);
