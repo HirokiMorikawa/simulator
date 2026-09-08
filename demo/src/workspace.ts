@@ -87,11 +87,18 @@ export type WorkspaceApi = {
    * 単位が分かる系列だけ `units` に入れる(無ければ数だけを書く)。
    * `convert` は**表の数字と同じ量**をグラフにも描くための変換
    * (ケルビン → ℃ など、`Readout.graph` のdoc参照)。
+   *
+   * **課題B**: `digits` は右の「いまの数値」パネルが使っている桁数
+   * (`Readout.digits`)をそのままグラフ側にも渡す——凡例の max/min を
+   * `readoutNumber` で整形するときに使う。ここを渡さないと、同じ量なのに
+   * パネルは読める形、グラフだけ生の指数(`9.3e-67`)という食い違いが
+   * 起きる(実測: 「熱が棒を伝わる」で木を選ぶと再現した)。
    */
   setProbeLabels: (
     labels: Record<number, string> | null,
     units?: Record<number, string> | null,
     convert?: Record<number, (value: number) => number> | null,
+    digits?: Record<number, number> | null,
   ) => void;
   /**
    * **いまの場面をそのまま文書にする**(利用者役④の観察: 自分で組み立てた
@@ -1077,6 +1084,23 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     return units;
   }
 
+  /**
+   * グラフの凡例に出す桁数(`Readout.digits`、既定 2)。**課題B**:
+   * `readoutNumber` を右のパネルと同じ`digits`で呼ぶための下ごしらえ
+   * (`setProbeLabels` のdoc参照)。`format` を持つ読み値(既存の
+   * `celsius()` 等)はここでは対象にしない——その整形はパネル側専用の
+   * 関数で完結しており、グラフ側に渡せる`digits`を持たないため
+   * (該当する読み値は少なく、影響は今回の食い違いには関係しない)。
+   */
+  function probeDigitsFor(experiment: Experiment): Record<number, number> {
+    const digits: Record<number, number> = {};
+    for (const readout of experiment.readouts ?? []) {
+      if (readout.derive || readout.format) continue;
+      digits[readout.probe] = readout.digits ?? 2;
+    }
+    return digits;
+  }
+
   /** グラフに描く前にかける変換(`Readout.graph` のdoc参照)。 */
   function probeConvertFor(
     experiment: Experiment,
@@ -1227,6 +1251,7 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
       probeLabelsFor(current),
       probeUnitsFor(current),
       probeConvertFor(current),
+      probeDigitsFor(current),
     );
     api.setPace(current.pace * speedMultiplier);
     // 作り直したら「止まった時刻」も忘れる(前回の結果が残っていると、
@@ -2214,6 +2239,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     label.textContent = knob.label;
     wrap.appendChild(label);
 
+    // **課題A**: ボタンに実際に摩擦の数字を添えられたか(選択肢つまみだけが
+    // 埋める。範囲つまみには摩擦のボタンが無いので常に false のまま)。下の
+    // 一言補足は、実験ごとに手で書き分けるのではなく、ここで実際に数字を
+    // 出せたかどうかで判定する——「熱が棒を伝わる」は材質つまみ
+    // (`id === "material"`)を使うが、選択肢の値は材質名ではなく熱拡散率の
+    // 数値なので `materialFriction` が引けず、ボタンに数字が出ない。
+    let frictionShownOnAnyButton = false;
+
     if (knob.kind === "range") {
       const row = document.createElement("div");
       row.className = "knob-row";
@@ -2271,7 +2304,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         button.textContent = Number.isFinite(f)
           ? `${option.label}(摩擦 ${f.toFixed(2)})`
           : option.label;
-        if (Number.isFinite(f)) button.dataset.friction = String(f);
+        if (Number.isFinite(f)) {
+          button.dataset.friction = String(f);
+          frictionShownOnAnyButton = true;
+        }
         button.dataset.value = String(option.value);
         button.classList.toggle(
           "active",
@@ -2295,12 +2331,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     if (knob.hint) {
       const hint = document.createElement("p");
       hint.className = "knob-hint";
-      // 材質つまみだけ、ボタンに添えた摩擦係数の読み方を一言足す(既存の
-      // 一言補足の隣に収まる分量——長い説明は増やさない)。
-      hint.textContent =
-        knob.id === "material"
-          ? `${knob.hint}(摩擦の数字が小さいほどよく滑ります)`
-          : knob.hint;
+      // ボタンに摩擦の数字を実際に添えられたときだけ、その読み方を一言足す
+      // (既存の一言補足の隣に収まる分量——長い説明は増やさない)。
+      // `knob.id === "material"` だけでは判定しない——「熱が棒を伝わる」の
+      // ように id は同じでも選択肢が材質名でない(摩擦が引けない)実験がある
+      // ため、そこに「よく滑ります」と出すと文意が通らなくなる(退行)。
+      hint.textContent = frictionShownOnAnyButton
+        ? `${knob.hint}(摩擦の数字が小さいほどよく滑ります)`
+        : knob.hint;
       wrap.appendChild(hint);
     }
     return wrap;

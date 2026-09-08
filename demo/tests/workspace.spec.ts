@@ -502,6 +502,49 @@ test("棒の材質を変えると、熱の伝わり方が実際に変わる", as
   expect(errors).toEqual([]);
 });
 
+test("熱が棒を伝わるの材質ヒントに、摩擦の説明が付かない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
+
+  // `562eb88` の退行: 「材質ボタンに摩擦係数を添える」変更のヒント文が、
+  // 摩擦と何の関係も無いこの実験にまで漏れていた。この実験の材質つまみは
+  // 熱拡散率(数値)を選ぶだけで、ボタンにも摩擦の数字は付かない
+  // ——ヒントにも付いてはいけない。
+  const buttons = page.locator("#knob-material .knob-choice-btn");
+  await expect(buttons).toHaveCount(4);
+  for (const button of await buttons.all()) {
+    expect(await button.getAttribute("data-friction")).toBeNull();
+  }
+  const hint = page.locator("#knob-material").locator(
+    "xpath=following-sibling::p[contains(@class,'knob-hint')]",
+  );
+  await expect(hint).not.toContainText("摩擦");
+  await expect(hint).toContainText("木はほとんど伝わりません");
+  expect(errors).toEqual([]);
+});
+
+test("坂の実験の材質ヒントには、摩擦の説明が付く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d5-incline"]');
+
+  // こちらは材質つまみの値がそのまま材質名で、ボタンにも実際の摩擦係数が
+  // 添えられる実験——摩擦の読み方の一言はここでこそ意味を持つ。
+  const buttons = page.locator("#knob-material .knob-choice-btn");
+  await expect(buttons).toHaveCount(6);
+  for (const button of await buttons.all()) {
+    expect(await button.getAttribute("data-friction")).not.toBeNull();
+  }
+  const hint = page.locator("#knob-material").locator(
+    "xpath=following-sibling::p[contains(@class,'knob-hint')]",
+  );
+  await expect(hint).toContainText("摩擦の数字が小さいほどよく滑ります");
+  expect(errors).toEqual([]);
+});
+
 test("グラフを指すと、その時刻の値が読める", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
@@ -1802,6 +1845,54 @@ test("桁の離れた値が、0 に潰れない", async ({ page }) => {
       { timeout: 20_000 },
     )
     .toMatch(/e[+-]?\d/);
+  expect(errors).toEqual([]);
+});
+
+test("グラフの凡例の数値が、右の「いまの数値」と同じ書式になる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
+  await page.locator('#knob-material .knob-choice-btn', { hasText: "木" }).click();
+
+  // 「熱源から 0.25 m」は届いた温度が桁として最も大きく、指数表記が
+  // (`readoutNumber` のdoc参照)出るまでいちばん早い。
+  const near = page.locator('#context dd[data-probe="1"]');
+  await expect
+    .poll(async () => (await near.textContent()) ?? "", { timeout: 60_000 })
+    .toMatch(/e[+-]?\d/);
+  // 値は毎フレーム動き続けるので、止めてから両方を読む
+  // (止めないと、パネルと凡例を読む間にコンマ数秒でも値がずれて
+  // 「食い違って見える」ことそのものが偶然の一致でごまかされかねない)。
+  await page.click("#btn-run");
+  await page.waitForTimeout(200);
+
+  // canvas に直接ラスタライズされる凡例の文字はDOMから読めない
+  // (`smoke.spec.ts` の「canvas の中身は直接検証できない」注記と同じ理由)ので、
+  // テスト専用に露出した `window.__probeGraphLegend`(`__camera`/`__world`と
+  // 同じ扱い)を読む。
+  const legendLines = await page.evaluate(
+    () => (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend ?? [],
+  );
+  expect(legendLines.length).toBe(3);
+
+  // 凡例の `min=` は、生の指数(`0.0e+0`)ではなく、パネルと同じ「0.0」の
+  // 書き方であること(木の実験は0.25m以外どこもまだ届いていないので、遠い
+  // 2本の min は必ず、始まりのまま=0 のはず)。
+  for (const line of legendLines) {
+    expect(line).not.toMatch(/e\+0/);
+  }
+
+  // 本体: 「熱源から 0.25 m」について、凡例の max= の書式が、右のパネルが
+  // いま出している値と**文字どおり同じ**であること(`readoutNumber` を
+  // 双方が同じ digits で呼ぶようにした——`legendNumber` のdoc参照)。
+  // 実測(退行時): パネルは `0.0 ℃`、凡例は `9.3e-67 ℃` のような生の指数で、
+  // 同じ量なのに食い違って見えた。
+  const nearText = (await near.textContent()) ?? "";
+  const nearLine = legendLines.find((l) => l.includes("0.25 m"));
+  expect(nearLine).toBeDefined();
+  expect(nearLine).toContain(`max=${nearText}`);
   expect(errors).toEqual([]);
 });
 

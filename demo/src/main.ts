@@ -10,6 +10,7 @@ import "./style.css";
 import {
   annotateInspectorShape,
   formatDuration,
+  readoutNumber,
   setUpWorkspace,
   type WorkspaceApi,
   type WorkspaceApiRef,
@@ -4404,6 +4405,14 @@ type ProbeSeries = {
   history: Float64Array;
   /** 単位([m] / [m/s] / [℃] …)。目盛りと凡例に添える。無ければ付けない。 */
   unit?: string;
+  /**
+   * **課題B**: 右の「いまの数値」パネルと同じ桁数(`Readout.digits`)。
+   * 分かっているときだけ、凡例・目盛りの数値を`readoutNumber`で整形する
+   * (`type Drawn`のdoc、`legendNumber`参照)。無ければ従来どおり
+   * `formatTickValue`(シーンギャラリーの生プローブなど、桁数の由来が
+   * 無い系列向け)。
+   */
+  digits?: number;
 };
 
 /// 符号を保つ対数変換(symlog)。`type ProbeSeries`のdoc参照。
@@ -4418,6 +4427,28 @@ function formatTickValue(value: number): string {
   if (magnitude >= 1) return value.toFixed(2);
   if (magnitude >= 0.001) return value.toFixed(3);
   return value.toExponential(1);
+}
+
+/**
+ * **課題B**: グラフの目盛り・凡例・指した時刻の値を、右の「いまの数値」
+ * パネルと同じ書式にそろえる。
+ *
+ * 直前まで、パネルは`readoutNumber`(桁が離れた値だけ指数で書き、それ以外は
+ * 固定小数——`readoutNumber`のdoc参照)を使う一方、グラフ側は独自の
+ * `formatTickValue`をそのまま出していた。結果、「熱が棒を伝わる」で木を
+ * 選ぶと同じ量なのにパネルは`0.0 ℃`、凡例は`9.3e-67 ℃`のような生の指数
+ * ——読み手には「食い違っている」としか見えない(実測で再現)。
+ *
+ * `series.digits`(=`Readout.digits`)が分かっている系列は`readoutNumber`
+ * を直接呼び、パネルと文字どおり同じ書式にする。分かっていない系列
+ * (シーンギャラリーの生プローブなど、桁数の由来が無いもの)は、既存の
+ * `formatTickValue`(値の大きさで桁数を決める、汎用の目盛り整形)のまま
+ * 触らない——ここで新しい書式をもう一つ作ると、三つ目の食い違いが生まれる。
+ */
+function legendNumber(series: ProbeSeries, value: number): string {
+  return series.digits !== undefined
+    ? readoutNumber(value, series.digits)
+    : formatTickValue(value);
 }
 
 function signedLog(v: number): number {
@@ -4889,7 +4920,7 @@ function setUpProbeGraph(): (
         [1, only.plotMin],
       ] as [number, number][]) {
         const y = Math.min(plotH - 2, Math.max(10, ratio * plotH));
-        outlined(`${formatTickValue(back(plotted))}${unit}`, w - 6, y, "#8b929c", "right");
+        outlined(`${legendNumber(only.series, back(plotted))}${unit}`, w - 6, y, "#8b929c", "right");
       }
     }
 
@@ -4937,6 +4968,13 @@ function setUpProbeGraph(): (
         legendY += LEGEND_LINE;
       }
     }
+    // **課題B**: 凡例はcanvasへ直接ラスタライズされ、DOMには残らないので
+    // Playwrightからは文字として読めない(`updateProbeGraph`の呼び出し元に
+    // 同じ注記あり)。右の「いまの数値」パネルと**同じ書式で描けているか**を
+    // 回帰テストで確かめるためだけに、描いた凡例の文字列をテスト専用で
+    // window へ露出する(`__camera`/`__world`と同じ扱い、実行時の見た目には
+    // 影響しない)。
+    const legendLinesForTest: string[] = [];
     for (const { series: s, min, max, flatY } of drawn) {
       if (compactLegend) break;
       // 一定値の線はまん中に引く(`plotY` の doc)。高さを値と読み違えない
@@ -4946,13 +4984,17 @@ function setUpProbeGraph(): (
       const unitSuffix = s.unit ? ` ${s.unit}` : "";
       // 桁の大きい量(天体の距離は 1.5e11 m)を `toFixed(2)` で出すと
       // `149597047014.36` のような読めない数字が並ぶ(利用者役②の観察)。
-      // 目盛りと同じ整形にそろえる。
+      // 目盛りと同じ整形にそろえる(`legendNumber` のdoc参照——右の
+      // 「いまの数値」パネルと桁数が分かっている系列は、そこと同じ書式)。
       const legendText =
-        `${s.label}: max=${formatTickValue(max)}${unitSuffix} ` +
-        `min=${formatTickValue(min)}${unitSuffix}${suffix}`;
+        `${s.label}: max=${legendNumber(s, max)}${unitSuffix} ` +
+        `min=${legendNumber(s, min)}${unitSuffix}${suffix}`;
       outlined(legendText, 4, legendY, s.color);
       legendY += 13;
+      legendLinesForTest.push(legendText);
     }
+    (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend =
+      legendLinesForTest;
 
     // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを明示する
     // (黙っていると「こちらの線の方が大きい」と読まれる)。凡例の直下に置くの
@@ -5001,7 +5043,7 @@ function setUpProbeGraph(): (
         ctx.arc(x, y, 3, 0, Math.PI * 2);
         ctx.fill();
         lines.push(
-          `${sr.label}: ${formatTickValue(value)}${sr.unit ? ` ${sr.unit}` : ""}`,
+          `${sr.label}: ${legendNumber(sr, value)}${sr.unit ? ` ${sr.unit}` : ""}`,
         );
       }
       // 読み取り値は**いつも左**、凡例の下へ置く。右端は縦軸の目盛りが使って
@@ -10640,6 +10682,11 @@ async function setUpSceneView(
             unitForProbeLabel(
               world.read_component("imported_probe_label_at", String(i)),
             ),
+          // **課題B**: かんたんモードが桁数を持っているプローブだけ渡す
+          // (`type ProbeSeries` のdoc参照)。持たない生プローブは
+          // `undefined` のままにし、凡例は従来どおり `formatTickValue` で
+          // 整形する。
+          digits: guidedProbeDigits?.[i],
           color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
           // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
           // 返す(B16、`HotPathViewBuffers`のdoc参照)——このループが呼ぶたび
@@ -10904,6 +10951,13 @@ async function setUpSceneView(
   /// グラフに描く前にかける変換(ケルビン → ℃ など)。表の数字と同じ量を
   /// 描くために、カタログ側が読み値ごとに指定する(`Readout.graph` のdoc参照)。
   let guidedProbeConvert: Record<number, (value: number) => number> | null = null;
+  /**
+   * **課題B**: 右の「いまの数値」パネルと同じ桁数(`Readout.digits`)。
+   * グラフの凡例・目盛りを`readoutNumber`で整形するときに使う——ここが
+   * 無いと、同じ量なのにパネルは読める形、グラフだけ生の指数
+   * (`9.3e-67`)という食い違いが起きる(`setProbeLabels` のdoc参照)。
+   */
+  let guidedProbeDigits: Record<number, number> | null = null;
   let lastTimeMs = performance.now();
 
   function frame(nowMs: number) {
@@ -11049,10 +11103,11 @@ async function setUpSceneView(
     },
     isPlaying: () => mode === "play" && playing,
     isEditing: () => mode === "edit",
-    setProbeLabels: (labels, units, convert) => {
+    setProbeLabels: (labels, units, convert, digits) => {
       guidedProbeLabels = labels;
       guidedProbeUnits = units ?? null;
       guidedProbeConvert = convert ?? null;
+      guidedProbeDigits = digits ?? null;
     },
     setPace: (stepsPerSecond) => {
       guidedPace = stepsPerSecond;
