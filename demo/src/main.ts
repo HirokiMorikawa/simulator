@@ -1348,7 +1348,7 @@ function setUpHierarchy(
     if (world.constraint_anchor_points_at(i).length < 6) continue;
     jointCount += 1;
     const item = document.createElement("li");
-    item.textContent = `DistanceJoint (${world.read_component("body_label_at", String(i))})`;
+    item.textContent = `振り子 (DistanceJoint) (${world.read_component("body_label_at", String(i))})`;
     item.classList.add("tree-selectable");
     item.addEventListener("click", () => {
       highlight(i);
@@ -1643,7 +1643,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   }
   const label = world.read_component("body_label_at", String(index));
   const staticBadge = (world.read_component("body_is_static_at", String(index)) === "true")
-    ? ' <span class="badge">Static</span>'
+    ? ' <span class="badge">動かない(Static)</span>'
     : "";
   // `body_position_at_f32`はWasmメモリを直接指す一時的なビューを返す(B16、
   // `crates/sim-wasm/src/lib.rs`の`HotPathViewBuffers`のdoc参照)ため、下の
@@ -2532,8 +2532,17 @@ function renderRigidBodyComponent(world: WasmWorld, index: number): string {
   const bodyType = world.read_component("body_type_at", String(index));
   const group = readNumber(world, "body_collision_group_at", String(index));
   const mask = readNumber(world, "body_collision_mask_at", String(index));
+  // プログラムの型名(Dynamic/Static/Kinematic)がそのまま選択肢の文字になっていて、
+  // 中を知らない人には何を選んでいるか分からなかった(利用者役の報告)。
+  // `value`属性は既存のテスト・保存データが参照しているので変えず、
+  // 見える文字だけを「人の言葉(元の語)」の順に差し替える。
+  const BODY_TYPE_LABELS: Record<string, string> = {
+    Dynamic: "動く(Dynamic)",
+    Static: "動かない(Static)",
+    Kinematic: "決めたとおりに動く(Kinematic)",
+  };
   const option = (value: string) =>
-    `<option value="${value}"${value === bodyType ? " selected" : ""}>${value}</option>`;
+    `<option value="${value}"${value === bodyType ? " selected" : ""}>${BODY_TYPE_LABELS[value] ?? value}</option>`;
   // 材質は**選び直せる**。以前は文字を出すだけで、「鋼のボールをゴムに変えて
   // 弾み方を見る」という、いちばんやりたい比べ方ができなかった(利用者役の
   // 観察)。いま付いている材質が一覧に無い場合も落とさず先頭に出す。
@@ -2569,8 +2578,8 @@ function renderRigidBodyComponent(world: WasmWorld, index: number): string {
         <select id="inspector-body-type">${["Dynamic", "Static", "Kinematic"].map(option).join("")}</select>
       </div>
       <p class="inspector-note">
-        動き方: Dynamic = 力で動く / Static = 動かない(床や壁) /
-        Kinematic = 決めた通りに動き、ぶつかられても押し返されない。
+        動き方: 動く(Dynamic) = 重力や衝突で動く / 動かない(Static) = 動かない(床や坂) /
+        決めたとおりに動く(Kinematic) = 決めた通りに動き、ぶつかられても押し返されない。
       </p>
       <details class="inspector-advanced" id="inspector-collision-details"${
         inspectorAdvancedOpen ? " open" : ""
@@ -10857,6 +10866,20 @@ async function setUpSceneView(
         if (label.includes(`(${name})`) || label.includes(`[${name}]`)) return true;
       }
       return false;
+    },
+    // **消す手段を、画面から見つけられるようにする**(利用者役の報告: 消す
+    // 手段がDeleteキーしか無く、画面のどこにも書かれていなかった)。
+    // Hierarchy右クリックの「削除」・Deleteキーと同じ`hierarchyActionsRef`
+    // 経由の削除を、そのまま呼ぶだけの薄いラッパ。床(index 0)は削除すると
+    // 場面の基準面が無くなるため、右クリックメニューと同じく拒む。
+    // 押し間違いで戻せなくなる操作なので、確認は呼び出し側(この物の札)で
+    // 挟む——ここでは無条件に実行する。
+    removeBody: (index) => {
+      if (index <= BODY_INDEX_GROUND) return false;
+      if (index >= readNumber(world, "body_count")) return false;
+      if (world.read_component("body_is_removed_at", String(index)) === "true") return false;
+      hierarchyActionsRef.current?.remove(index);
+      return true;
     },
     bodyReadout: (index) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return null;

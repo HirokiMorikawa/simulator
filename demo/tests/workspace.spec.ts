@@ -2008,6 +2008,150 @@ test("消した物の観測点は、左の「記録している値」に残っ�
   expect(errors).toEqual([]);
 });
 
+// 課題A(進行管理役の裏取り済み): 「坂を作るなら20〜40度に」という案内どおりに
+// やっても坂にならなかった(床は向きを変えても傾かない・箱は動くままだと転がって
+// 平らに戻る)。案内を実態に合わせ、実際にその手順で坂ができることを確かめる。
+test("床(ゆか)を選ぶと、向きはここでは変えられないと正直に書かれている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.locator("#hierarchy-tree .tree-body").first().click();
+
+  const note = page.locator("#focus-rotation-note");
+  await expect(note).toContainText("ここ(ゆか)の向きはここでは変えられません");
+
+  // 実際に打っても傾かないことも確かめる(利用者役の報告どおり、進行管理役の
+  // 裏取りでも`Plane(normal=(0,1,0), d=0)`のままだった)。
+  const rotX = page.locator("#focus-rot-x");
+  await rotX.fill("30");
+  await rotX.dispatchEvent("change");
+  await page.waitForTimeout(500);
+  await expect(page.locator("#inspector-body")).toContainText("Plane(normal=(0,1,0), d=0)");
+  expect(errors).toEqual([]);
+});
+
+test("案内どおりに箱を置いて傾け、動かないようにすると、実際に坂になる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  const y = page.locator("#focus-pos-y");
+  await y.fill("0.5");
+  await y.dispatchEvent("change");
+  const rotX = page.locator("#focus-rot-x");
+  await rotX.fill("30");
+  await rotX.dispatchEvent("change");
+
+  // 案内が「動かない(Static)」にする所まで届いている(課題B の言葉と揃えて
+  // いること自体も、この文言で確かめる)。
+  const note = page.locator("#focus-rotation-note");
+  await expect(note).toContainText("動かない(Static)");
+
+  await page.selectOption("#inspector-body-type", "Static");
+  await expect(page.locator("#inspector-body-type")).toHaveValue("Static");
+
+  await page.click("#btn-run");
+  await page.waitForTimeout(3000);
+
+  // 動くままだと重力で転がって平らに戻る(直す前の実際の症状)が、
+  // Static にしたので 30 度のまま——3手(置く→傾ける→動かなくする)で
+  // 坂が組み上がる。
+  await expect
+    .poll(async () => Number(await rotX.inputValue()), { timeout: 10_000 })
+    .toBeCloseTo(30, 0);
+  expect(errors).toEqual([]);
+});
+
+// 課題B: プログラムの言葉(Dynamic/Static/Kinematic・DistanceJoint等)が
+// 説明なしにそのまま画面へ出ていた。人の言葉を主に、元の語を括弧へ落とす。
+test("動き方の選択肢とバッジ、「＋追加」メニューが人の言葉で読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  // 動き方(Body type): 主が人の言葉、従が元の語。`value`(保存データ・
+  // 他のテストが参照する)は元の英単語のまま変えていない。
+  const bodyTypeTexts = await page.locator("#inspector-body-type option").allTextContents();
+  expect(bodyTypeTexts).toEqual([
+    "動く(Dynamic)",
+    "動かない(Static)",
+    "決めたとおりに動く(Kinematic)",
+  ]);
+  await page.selectOption("#inspector-body-type", "Static");
+  await expect(page.locator("#inspector-body-type")).toHaveValue("Static");
+
+  // INSPECTOR の名前横のバッジも同じ言葉。バッジは選び直した瞬間ではなく
+  // 選択の再描画で出るので、既定でStaticな床を選び直して確かめる。
+  await page.locator("#hierarchy-tree .tree-body").first().click();
+  await expect(page.locator("#inspector-body .badge")).toHaveText("動かない(Static)");
+
+  // 「＋追加」メニュー: DistanceJoint 等の型名は括弧の中だけ、主たる名前は日本語。
+  await page.click("#btn-add");
+  const menuTexts = await page.locator("#context-menu button").allTextContents();
+  expect(menuTexts).toContain("＋ 振り子 (DistanceJoint)");
+  expect(menuTexts).toContain("＋ モーター (BallJoint + HingeMotorPd)");
+  expect(menuTexts).toContain("＋ 流体 (SPH 水塊)");
+  await page.keyboard.press("Escape");
+
+  // ↑ Nudge ボタンも人の言葉が主になり、内部の仕組み(Command経由)は
+  // 利用者向けの説明から落ちている。
+  await expect(page.locator("#btn-nudge")).toContainText("押し上げる");
+  const nudgeTitle = await page.locator("#btn-nudge").getAttribute("title");
+  expect(nudgeTitle ?? "").not.toContain("Command");
+  expect(errors).toEqual([]);
+});
+
+// 課題C: 「Undo」は位置/向き/大きさしか戻せないのに「Undo」とだけ書かれ、
+// 何でも戻せると期待させていた。また、消す手段がDeleteキーだけで画面に
+// 書かれていなかった(利用者役は自動テストで偶然見つけた)。
+test("「Undo」は、できること(動かしたのを戻す)に合わせた名前になっている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  await expect(page.locator("#btn-undo")).toContainText("動かしたのを戻す");
+  await expect(page.locator("#btn-redo")).toContainText("戻したのをやり直す");
+  expect(errors).toEqual([]);
+});
+
+test("置いた物は、選んだ札の「これを消す」から見つけて消せる(押し間違い対策つき)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  const sphereRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Sphere_1" });
+  await expect(sphereRow).toHaveCount(1);
+
+  const removeBtn = page.locator("#btn-remove-body");
+  await expect(removeBtn).toBeVisible();
+  await expect(removeBtn).toContainText("これを消す");
+
+  // 1回押しただけでは消えない(押し間違い対策——確認してから消す)。
+  await removeBtn.click();
+  await expect(sphereRow).toHaveCount(1);
+  await expect(removeBtn).toContainText("本当に消しますか");
+
+  // 続けてもう一度押すと、実際に消える(「物」の一覧から消える。記録済みの
+  // グラフは、消えた物だと分かる注記つきで残る——別のテストが確かめる対象)。
+  await removeBtn.click();
+  await expect(sphereRow).toHaveCount(0);
+  // 消した直後は選択も外れる(床が代わりに選ばれたままにはしない)。
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+
+  // 床(ゆか)は場面の基準面なので、消す対象には出ない。
+  await page.locator("#hierarchy-tree .tree-body").first().click();
+  await expect(page.locator("#btn-remove-body")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {

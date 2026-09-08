@@ -142,6 +142,15 @@ export type WorkspaceApi = {
   addBodyProbes: (index: number) => boolean;
   /** その物が、もうグラフに記録されているか。 */
   hasBodyProbes: (index: number) => boolean;
+  /**
+   * 選んだ物を場面から消す。Hierarchy右クリックの「削除」・Deleteキーと
+   * 同じ経路(`false`が返るのは、床(index 0)を指定したか、既に無い場合)。
+   *
+   * 押し間違いで戻せなくなる操作(この後の「動かしたのを戻す(Undo)」は
+   * 位置/向き/大きさしか戻せず、削除は対象外)なので、**呼ぶ前に確認を
+   * 挟むのは呼び出し側の責任**——この関数自体は無条件に消す。
+   */
+  removeBody: (index: number) => boolean;
   /** 選べる材質の名前(スポーンパレットと同じ並び)。 */
   materialNames: () => string[];
   /** 選択中の剛体(無ければ -1)。 */
@@ -1942,8 +1951,18 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
             turn.appendChild(turnFields);
             const turnNote = document.createElement("p");
             turnNote.className = "card-note";
+            turnNote.id = "focus-rotation-note";
+            // 「x か z を 20〜40 度に」とだけ書いていたが、それを実際にやっても
+            // 坂にならなかった(進行管理役の裏取り)。ゆか(平面)は向きを変えても
+            // 傾かない(物理側がPlaneの向きをnormal/dで持ち、回転を反映しない
+            // ——今回の直す範囲外)ので、その旨を正直に書く。箱などを傾けた
+            // 場合も、動き方が「動く(Dynamic)」のままだと重力で転がって平らに
+            // 戻るので、「動かない(Static)」にする所までを案内する
+            // (課題A: 利用者役はこの手順が無いために坂を組み立てられなかった)。
             turnNote.textContent =
-              "坂を作るなら、x か z を 20〜40 度あたりに。輪をつまんで回すこともできます。";
+              shapeHead(readout.shape) === "plane"
+                ? "ここ(ゆか)の向きはここでは変えられません。坂を作るには、下の「＋ 追加」で箱などを置き、向きを 20〜40 度にしたうえで、動き方を「動かない(Static)」にしてください。"
+                : "坂として使うには、向きを 20〜40 度にしたうえで、下の「動き方」を「動かない(Static)」にしてください。動くままだと、重力で転がって平らに戻ります。";
             turn.appendChild(turnNote);
             body.appendChild(turn);
             focusRotationInputs = turnInputs;
@@ -1986,6 +2005,50 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
               renderContext();
             });
             actions.append(follow, clear);
+            // **消す手段を、この札から見つけられるようにする**(利用者役の
+            // 報告: 置いた物を消す手段がDeleteキーしか無く、画面のどこにも
+            // 書かれていなかった——自動テストで偶然見つけたと書かれた)。
+            // ゆか(床)は場面の基準面なので、Hierarchy右クリックの「削除」と
+            // 同じく対象から外す(`removeBody`も床は`false`を返す)。
+            if (shapeHead(readout.shape) !== "plane") {
+              // **押し間違いで消えると困る操作**なので、1回押しただけでは
+              // 消さない——ラベルを「本当に消しますか?」に変えて、続けて
+              // 押したときだけ`removeBody`を呼ぶ(数秒操作が無ければ元に戻す)。
+              // ネイティブの`confirm()`はPlaywrightでの自動化やモーダル体験の
+              // 一貫性の面で避け、ボタンの中で完結させる。
+              const remove = document.createElement("button");
+              remove.type = "button";
+              remove.id = "btn-remove-body";
+              remove.className = "btn-danger";
+              remove.textContent = "🗑 これを消す";
+              remove.title = "この物を場面から消します(元に戻せません——「動かしたのを戻す」の対象外です)";
+              let armed = false;
+              let armedTimer: ReturnType<typeof setTimeout> | null = null;
+              const disarm = () => {
+                armed = false;
+                if (armedTimer !== null) clearTimeout(armedTimer);
+                armedTimer = null;
+                remove.textContent = "🗑 これを消す";
+                remove.classList.remove("btn-danger-armed");
+              };
+              remove.addEventListener("click", () => {
+                if (!armed) {
+                  armed = true;
+                  remove.textContent = "本当に消しますか?(もう一度押す)";
+                  remove.classList.add("btn-danger-armed");
+                  armedTimer = setTimeout(disarm, 4000);
+                  return;
+                }
+                disarm();
+                if (api.removeBody(selected)) {
+                  api.selectBody(-1);
+                  api.frameOnContent();
+                  renderCrumbs();
+                  renderContext();
+                }
+              });
+              actions.appendChild(remove);
+            }
             body.appendChild(actions);
           },
         }));

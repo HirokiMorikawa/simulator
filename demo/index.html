@@ -112,7 +112,7 @@
           <button id="btn-mode-edit" class="mode-btn" title="Editモード: シーンを直接編集(シミュレーション停止)">
             Edit
           </button>
-          <button id="btn-mode-play" class="mode-btn" title="Playモード: Command経由の操作のみ・シミュレーション実行">
+          <button id="btn-mode-play" class="mode-btn" title="Playモード: 決まった操作だけでシミュレーションを実行">
             ▶ Play
           </button>
         </div>
@@ -145,19 +145,19 @@
           >
             🌐 World
           </button>
-          <button id="btn-nudge" title="選択中の剛体に上向きの力を加える(Command経由)">
-            ↑ Nudge
+          <button id="btn-nudge" title="選択中の物に上向きの力を加える">
+            ↑ 押し上げる(Nudge)
           </button>
-          <button id="btn-motor-toggle" title="選択中のモーターアームの目標角度を0°/90°で切替(Command::SetMotorTarget経由)">
+          <button id="btn-motor-toggle" title="選択中のモーターアームの目標角度を0°/90°で切替">
             ⟳ モーター切替
           </button>
         </div>
         <div class="toolbar-group">
-          <button id="btn-undo" title="Editモードでの直前の位置編集を取り消す(Gizmoドラッグのみ)">
-            ↶ Undo
+          <button id="btn-undo" title="Editモードで動かす/回す/拡縮した直前の1件だけを戻す(それ以外の変更は戻せません)">
+            ↶ 動かしたのを戻す
           </button>
-          <button id="btn-redo" title="Undoを取り消してやり直す(Gizmoドラッグのみ)">
-            ↷ Redo
+          <button id="btn-redo" title="「動かしたのを戻す」を取り消してやり直す">
+            ↷ 戻したのをやり直す
           </button>
         </div>
         <div class="toolbar-group">

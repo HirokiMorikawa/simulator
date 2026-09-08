@@ -2116,6 +2116,17 @@ kbd {
 #app .card-actions button {
   height: 30px;
 }
+/* 「これを消す」: 1 回目は控えめに、2 回目(押し間違い確認後)だけ
+ * はっきり赤くする(`danger`)。押し間違いで消える操作だと一目で
+ * 分かるようにするための段階分け。 */
+#app .card-actions button.btn-danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+#app .card-actions button.btn-danger-armed {
+  background: var(--danger);
+  color: #fff;
+}
 .readouts {
   display: grid;
   /* **値は折り返さない**。名前の列を `auto` にしていたので、「ほぼ止まった
