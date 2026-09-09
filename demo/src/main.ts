@@ -7228,11 +7228,35 @@ async function setUpSceneView(
    * 保証する——全体を追う設計そのものは変えない。
    */
   let lastSpawnedBodyIndex = -1;
-  let lastSpawnedAt = 0;
-  /** 「置いた直後」とみなす猶予 [ms]。`POSITION_PENDING_MS`(workspace.ts)と
-   *  同じ桁——それより長く効かせると、「置いたら最後もう全体を追わなくなる」
-   *  という別の体験になる。 */
-  const RECENT_SPAWN_GUARD_MS = 1500;
+  /**
+   * **猶予は時間ではなく「利用者がまだ見ているか」で切る**(進行管理役の実測、
+   * 課題6)。
+   *
+   * 最初の実装は`performance.now()`との差を`RECENT_SPAWN_GUARD_MS`(1500ms)
+   * 未満かで判定していた。これは**何秒に伸ばしても同じ崖が来る**——実測
+   * (`d1-free-fall`を粒度2で開き、走らせたまま「➕ 球を1つ足す」): 猶予の
+   * 中は見かけの直径 79.6px(+0.9s)→61.3px(+1.7s)まで保たれるが、猶予が
+   * 切れた直後の+2.8sで一気に14.2px、+7.8sには10.5px(=時間切れ前の措置が
+   * 無かった旧実装とほぼ同じ点)まで戻る。置いた球そのものは静止していて
+   * 見失う理由が無いのに、「まだ高い所を落下中の元の球」を画角に収めようと
+   * するアグリゲートの框付けに毎回引き戻される。10秒・30秒に伸ばしても、
+   * 元の球が落ち続ける限りいつか同じ崖を踏むだけで解決にならない
+   * (「時間で切る」という判定基準そのものが原因)。
+   *
+   * 利用者から見た「まだ見ている」を近似する条件は2つある——**置いた物が
+   * まだ選ばれていること**(置くと自動で選ばれる、`spawnShapeAt`のdoc参照)と
+   * **自分でカメラを動かしていないこと**。どちらも壊れたら、素直に「動く物
+   * ぜんぶを追う」既定へ戻す(=このガードを外す)。前者は下の
+   * `updateGuidedFollowCamera`で`selectedBodyIndex`と毎フレーム突き合わせる
+   * (ライブな判定——選び直せば再び効く)。後者は`orbit`の`start`イベント
+   * (実際のドラッグ・ホイール操作でのみ発火し、このファイルが
+   * `camera.position`/`orbit.target`を直接書き換える自動追従では発火しない)
+   * で`cameraMovedSinceSpawn`を立てる**一度きりの片道スイッチ**にした——
+   * 「操作を奪わない」という追従カメラ全体の原則(直後のdoc参照)と同じで、
+   * 一度手を動かした利用者を追いかけ直すのは横取りになる。次に物を置いた
+   * ときだけ`spawnShapeAt`側でfalseへ戻す。
+   */
+  let cameraMovedSinceSpawn = false;
   /**
    * **場面が始まったときの広がり**。
    *
@@ -7391,23 +7415,28 @@ async function setUpSceneView(
     // 大きく引いてしまうことがある——実測(進行管理役、`d1-free-fall`を
     // 粒度2で開き、右クリックで2個目の球を置いたケース): 既存の球が距離
     // 30m超の場所へ落ちて止まっていたため、置いた物は距離47.3m・見かけの
-    // 直径9.9pxにしかならなかった。「全体を追う」設計自体は変えず、置いてから
-    // `RECENT_SPAWN_GUARD_MS`の間だけ、上の計算結果でその物がちゃんと見えて
-    // いるかを別枠で確かめ、見えていなければその物1個だけの画角に差し替える。
-    // 猶予を過ぎたら何もしない——ずっと効かせると「置いたら最後、もう全体を
-    // 追わなくなる」という別の体験になる。
+    // 直径9.9pxにしかならなかった。「全体を追う」設計自体は変えず、
+    // **利用者がその物をまだ見ているとみなせる間**だけ、上の計算結果で
+    // その物がちゃんと見えているかを別枠で確かめ、見えていなければその物
+    // 1個だけの画角に差し替える(`cameraMovedSinceSpawn`のdoc参照——時間で
+    // 切らない理由の実測はそちら)。「まだ見ている」の近似は「まだ選ばれて
+    // いる」こと(`selectedBodyIndex`との一致——選び直せば外れる、ライブな
+    // 判定)。
     if (
       lastSpawnedBodyIndex >= 0 &&
-      performance.now() - lastSpawnedAt <= RECENT_SPAWN_GUARD_MS
+      !cameraMovedSinceSpawn &&
+      selectedBodyIndex === lastSpawnedBodyIndex
     ) {
-      // **覚えた番号は、場面が差し替わると存在しなくなる**。猶予の1.5秒は
-      // 短いが、置いた直後に⌘Kで別の実験へ移るのは普通の操作で、実際に
-      // 起きた——実測(進行管理役): `d1-free-fall`(床0・球1)に箱を足して
-      // index 2 を覚えた直後に別の実験へ移ると、新しい場面にはその番号の物が
-      // 無く、`body_is_removed_at`が`body index 2 out of range`を投げて
-      // ページエラーになった。**個数とメッシュの両方で先に閉じてから**
-      // wasm に尋ねる(閉じたら覚えるのをやめる——次のフレームでまた同じ
-      // 例外を踏まないため)。
+      // **覚えた番号は、場面が差し替わると存在しなくなる**。置いた直後に
+      // ⌘Kで別の実験へ移るのは普通の操作で、実際に起きた——実測
+      // (進行管理役): `d1-free-fall`(床0・球1)に箱を足してindex 2を
+      // 覚えた直後に別の実験へ移ると、新しい場面にはその番号の物が無く、
+      // `body_is_removed_at`が`body index 2 out of range`を投げてページ
+      // エラーになった。**個数とメッシュの両方で先に閉じてから**wasmに
+      // 尋ねる(閉じたら覚えるのをやめる——次のフレームでまた同じ例外を
+      // 踏まないため)。時間で切っていた旧実装より猶予が長く続き得るので
+      // (選択が保たれカメラも動かされない限りずっと有効)、この安全確認は
+      // 前より重要になっている。
       const mesh = bodyMeshes.get(lastSpawnedBodyIndex);
       if (mesh === undefined || lastSpawnedBodyIndex >= readNumber(world, "body_count")) {
         lastSpawnedBodyIndex = -1;
@@ -7454,6 +7483,14 @@ async function setUpSceneView(
   // 自分でカメラを動かしたら追従をやめる(操作を横取りしない)。
   orbit.addEventListener("start", () => {
     guidedFollowCamera = false;
+    // **置いたばかりの物への特別扱いも、ここで手を引く**
+    // (`cameraMovedSinceSpawn`のdoc参照)。このイベントは実際のドラッグ・
+    // ホイール操作でのみ発火し(`updateGuidedFollowCamera`が`camera.position`/
+    // `orbit.target`を直接書き換える自動追従では発火しない)、以後は次の
+    // spawnまで戻らない片道スイッチ——後で「これを追いかける」を押して
+    // `guidedFollowCamera`だけが復活しても、利用者が自分で見た先を上書き
+    // しない。
+    cameraMovedSinceSpawn = true;
   });
 
   function updateGridFluidOverlay(currentWorld: WasmWorld) {
@@ -9843,9 +9880,11 @@ async function setUpSceneView(
     addSpawnedMesh(bodyIndex, mesh);
     // **追従カメラに「いま置いた」と伝える**(`lastSpawnedBodyIndex`のdoc参照
     // ——`updateGuidedFollowCamera`がこれを見て、アグリゲートの框付けとは
-    // 別枠でこの物の可視性を保証する)。
+    // 別枠でこの物の可視性を保証する)。片道スイッチの`cameraMovedSinceSpawn`
+    // も、新しく置いた物についてはまだ手を引いていない状態へ戻す
+    // (`cameraMovedSinceSpawn`のdoc参照)。
     lastSpawnedBodyIndex = bodyIndex;
-    lastSpawnedAt = performance.now();
+    cameraMovedSinceSpawn = false;
     // **置いた物の動きが、そのままグラフに出る**。観測点はシーンJSONが宣言した
     // ものしか無く、自分で置いた物には一本も付かなかったので、自作の場面では
     // グラフが永久に空で CSV も押せなかった(利用者役④の観察)。

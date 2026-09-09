@@ -3335,3 +3335,121 @@ test("粒度2「しらべる」でも、足す手段が見つかり、置いた�
 
   expect(errors).toEqual([]);
 });
+
+// **課題6(進行管理役の実測)**: 上のテストは「とめてから足す」経路
+// (`#btn-run`を押して一時停止してから`#btn-add-body-card`を押す)しか通らず、
+// これは常に緑だった。ところが実際の不具合は**走らせたまま**足したときだけ
+// 起きる——`updateGuidedFollowCamera`が「置いたばかりの物」を見失わない
+// ようにする猶予を`performance.now()`との差(`RECENT_SPAWN_GUARD_MS`=1500ms)
+// で切っていたため、走行中は猶予が切れた瞬間に、まだ高い所から落ち続ける
+// 元の球を画角へ収めようとするアグリゲートな框付けへ引き戻される。
+// 実測(修正前、進行管理役):
+//   +0.9s 距離 5.9m 直径 79.6px  +1.7s 距離 7.6m 直径 61.3px
+//   +2.8s 距離32.7m 直径14.2px  +7.8s 距離44.3m 直径10.5px
+// 「置いた物が1秒半だけ見えて、また消える」——時間の長さをどれだけ伸ばしても
+// 同じ崖が来る(`cameraMovedSinceSpawn`のdoc参照)。ここでは走らせたまま足し、
+// 8秒後まで見失われないことを確かめる。
+test("走らせたまま足した球は、8秒後も見失われない(猶予を時間ではなく「まだ見ているか」で切る)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // **走らせたまま**(とめない)。実測の状況と同じく、元の球がある程度
+  // 落ちてから足す。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.waitForTimeout(1500);
+
+  const addButton = page.locator("#btn-add-body-card");
+  await expect(addButton).toBeVisible();
+  await addButton.click();
+  const t0 = Date.now();
+
+  // 修正後の実測(進行管理役): +0.9s/+1.7s/+2.8s/+7.8sのいずれも約172.9px
+  // (選択も保たれ、カメラも動かしていないため、`updateGuidedFollowCamera`の
+  // 「置いたばかりの物を見失わない」枠がそのまま効き続ける)。しきい値は
+  // 上の「置いた物は、他の物が遠くにあっても…」と同じ40px(「読める点」との
+  // 境目)に取る。
+  for (const checkpointSeconds of [0.9, 1.7, 2.8, 7.8]) {
+    const waitMs = checkpointSeconds * 1000 - (Date.now() - t0);
+    if (waitMs > 0) await page.waitForTimeout(waitMs);
+    const diameter = await apparentSphereDiameterPx(page);
+    expect(diameter, `+${checkpointSeconds}s time`).toBeGreaterThan(40);
+  }
+
+  expect(errors).toEqual([]);
+});
+
+// **課題6続き**: 上のガードは「選ばれている」「カメラを自分で動かしていない」
+// の2条件で保っている。どちらかが崩れたら、既存の「これを追いかける」
+// 「全体へ戻る」ボタンの意味を保つため、素直に「動く物ぜんぶを追う」既定
+// (=遠くに引くアグリゲートな框付け)に戻ることを確かめる——「選ぶと
+// ずっと特別扱いのまま」という別の不具合を作らないため。
+test("自分でカメラを動かしたら、置いた物への特別扱いをやめて既定の追従に戻る", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.waitForTimeout(1500);
+
+  await page.click("#btn-add-body-card");
+  await page.waitForTimeout(500);
+  // ガードが効いている間は十分な大きさ(実測: 約172.9px)。
+  expect(await apparentSphereDiameterPx(page)).toBeGreaterThan(40);
+
+  // 自分でカメラを操作する(中ボタンドラッグ——左ボタンは選択・ギズモに
+  // 割り当て済みのため、既存の「一時停止中に自分でカメラを動かしても…」
+  // テストと同じ流儀を使う)。
+  const box = await page.locator("#scene-view-canvas-host").boundingBox();
+  if (!box) throw new Error("scene-view-canvas-host not found");
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(cx + 150, cy - 60, { steps: 12 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForTimeout(1500); // 慣性(damping)が収まるまで。
+
+  // **ここで確かめたいのは「手を動かした後は片道スイッチが戻らない」ことで、
+  // ボタンを押すこと自体が目的ではない**。まず何も押さずに時間を進めるだけで
+  // 再現するか実測した——`__dbgCam`(`updateGuidedFollowCamera`のdocが出す
+  // デバッグログ)を20秒間観測しても0行のままで、`updateGuidedFollowCamera`
+  // 自体が一度も走っていないと確認できた。`orbit`の`start`イベントは
+  // `guidedFollowCamera`も`false`にする(操作を横取りしない、既存の設計)ため、
+  // 手を動かした後は**カメラがその場に凍結される**——直径は球がまだ落ち続けて
+  // いる間だけ変わり(172.9px→86px前後)、着地後は20秒待っても変化しない。
+  // つまり「何もしないで待つ」だけでは、アグリゲートな框付けへ戻る場面
+  // そのものが起きない。戻る場面を作るには、追従を再び起こす必要がある。
+  //
+  // その手段は今のところ`followCamera(true)`を呼ぶ「👀 これを追いかける」
+  // (`btn-follow-body`)しかない(`全体へ戻る`は選択そのものを外すので、
+  // 「選択は保ったままカメラだけ動かした」という、ここで確かめたい状況とは
+  // 別物になってしまう)。**ただし`btn-follow-body`は「これを追いかける」と
+  // 名乗りながら、中身は`api.followCamera(true)`だけ
+  // (`demo/src/workspace.ts`の同ボタン参照)——「選んだ物」ではなく「動く物
+  // ぜんぶ」を追う既定へ戻すボタンで、ボタンの名前と挙動が食い違っている。
+  // これはこの修正の欠陥ではなく、このボタン自体が抱える別の未解決課題**
+  // (進行管理役の指摘、2026-09-09)。ここでは「片道スイッチが正しく効いて
+  // いること」を確かめるための手段として借りているだけで、下の40px未満と
+  // いう結果を「望ましい最終UX」として認めているわけではない——本来なら
+  // 「置いた物を選んだままカメラだけ再追従させたら、置いた物へ戻ってほしい」
+  // はずで、それが5.8pxまで引いてしまうこと自体は別タスクで直すべき対象。
+  await page.click("#btn-follow-body");
+  await page.waitForTimeout(2000);
+  // 実測(進行管理役): ガード中172.9px→「これを追いかける」後、直径5.8px・
+  // 距離53.7mまで引く。これは「片道スイッチが解けなかった」ことの確認であり
+  // (もし解けていなければ、ここでも置いた物1個の画角のまま大きく見え続けた
+  // はず)、`btn-follow-body`の挙動を追認する意図ではない。
+  expect(await apparentSphereDiameterPx(page)).toBeLessThan(40);
+
+  expect(errors).toEqual([]);
+});
