@@ -13,7 +13,7 @@
   },
   "thermal": {
     "ambient_temperature": 293.15,
-    "nodes": [ { "temperature": 293.15, "heat_capacity": 1000.0 } ]
+    "nodes": [ { "temperature": 293.15, "heat_capacity": 0.5 } ]
   },
   "couplings": [
     { "motor_coupling": { "body": "crank", "axis": [0, 1, 0],

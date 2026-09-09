@@ -589,6 +589,14 @@ pub fn apply_schema() -> Vec<ComponentKindSchema> {
             "set_body_rotation_at",
             vec![u("index"), f_nd("x"), f_nd("y"), f_nd("z"), f_nd("w")],
         ),
+        // 自分で置いた物の高さと速さを記録し始める。
+        kind("add_body_probes", vec![u("index")]),
+        // 質量の直接設定(Edit中)。`push_set_body_mass`と同じ検証
+        // (正の有限値)を通るので`min`を載せる。
+        kind(
+            "set_body_mass_at",
+            vec![u("index"), f("mass", "kg").positive()],
+        ),
         // `set_body_scale_at`は`scale`を検証しない(`set_body_scale_xyz_at`
         // だけが正の有限値を要求する)ので`min`を載せない——載せると
         // 「弾かれる」という誤った期待を与える。

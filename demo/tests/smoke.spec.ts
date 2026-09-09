@@ -29,7 +29,7 @@ test("起動して wasm が初期化され、既定シーンが Hierarchy と HU
   // Playwright の strict モードが複数一致で落ちる)。
   const hierarchy = page.locator("#hierarchy-tree");
   await expect(hierarchy.getByText("Ground", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("Box_1", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("箱 1", { exact: true })).toBeVisible();
   await expect(page.locator("#hud")).toContainText("step = 0");
   expect(errors).toEqual([]);
 });
@@ -137,10 +137,16 @@ test("Probe Graphs の対数軸トグルと CSV エクスポートが動く(増�
   for await (const c of stream) chunks.push(c as Buffer);
   const csv = Buffer.concat(chunks).toString("utf8");
   const lines = csv.split("\n");
-  expect(lines[0]).toBe("sample,BodyPosY,BodySpeed");
+  // 1列目は**経過時間(秒)**。サンプル番号のままでは「何秒の値か」を表計算側で
+  // 計算し直す必要があった(利用者役の観察)。
+  expect(lines[0]).toBe("time_s,BodyPosY,BodySpeed");
   expect(lines.length).toBeGreaterThan(2);
-  // 2行目は sample=0 と2系列の数値。
+  // 2行目は時刻と2系列の数値。時刻は単調に増える。
   expect(lines[1].split(",")).toHaveLength(3);
+  const firstTime = Number.parseFloat(lines[1].split(",")[0]);
+  const secondTime = Number.parseFloat(lines[2].split(",")[0]);
+  expect(Number.isFinite(firstTime)).toBe(true);
+  expect(secondTime).toBeGreaterThan(firstTime);
 
   expect(errors).toEqual([]);
 });
@@ -153,18 +159,20 @@ test("Hierarchy に Probes サブツリーが出る(D11 は body_pos_x/y の2本
   await waitForWorld(page);
 
   // **葉ノード(プローブのラベル)で検証する**。"Probes" の `li` は入れ子の `ul` を
-  // 含むため textContent が "ProbesBodyPosX(bob)..." になり `exact: true` に
+  // 観測点の名前は人の言葉へ直してある(`friendlyProbeLabel`)。括弧の中身
+  // (どの物の値か)はそのまま残る。
+  // 含むため textContent が "Probes横の位置(bob)..." になり `exact: true` に
   // 一致しない(Bodies/Frames も同じ構造)。
   const hierarchy = page.locator("#hierarchy-tree");
   // 既定シーンは scenario.probes を持たないのでプローブのラベルは1つも出ない。
-  await expect(hierarchy.getByText("BodyPosX(", { exact: false })).toHaveCount(0);
+  await expect(hierarchy.getByText("横の位置(", { exact: false })).toHaveCount(0);
 
   await page.click('.project-tab[data-tab="scenes"]');
   await page.click('.scene-gallery-list button[data-scene-file="d11-pendulum.json"]');
 
   // ラベルは sim-wasm の probe_target_label が生成する(ボディ名 "bob" 込み)。
-  await expect(hierarchy.getByText("BodyPosX(bob)", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("BodyPosY(bob)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("横の位置(bob)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(bob)", { exact: true })).toBeVisible();
 
   expect(errors).toEqual([]);
 });
@@ -187,7 +195,7 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
   // `JointJson::Ball`(本増分で追加)経由でパースできることの確認でもある。
   await page.click('.scene-gallery-list button[data-scene-file="d12-ragdoll.json"]');
   await expect(hierarchy.getByText("torso", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("BodyPosY(head)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(head)", { exact: true })).toBeVisible();
 
   // D8 散乱: 床 + 球50個 = 51体。ギャラリー中で最大のシーン。
   await page.click('.scene-gallery-list button[data-scene-file="d8-scatter.json"]');
@@ -197,8 +205,8 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
   // シーン定義プローブ8本が Probes サブツリーに並ぶ。
   await page.click('.scene-gallery-list button[data-scene-file="d36-swingby.json"]');
   await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(0);
-  await expect(hierarchy.getByText("AstroPosX[1]", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("AstroVelY[0]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("横の位置(1)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("縦の速さ(0)", { exact: true })).toBeVisible();
 
   // 剛体が無いシーンでも再生して描画ループが回ること。
   await page.click("#btn-mode-play");
@@ -289,20 +297,20 @@ test("増分Hで追加した5シーン(D13/D14/D15/D16/D23)がギャラリーか
 
   // D13 ロープ: 剛体0体・ソフトボディ21粒子。プローブで観測する。
   await page.click('.scene-gallery-list button[data-scene-file="d13-rope.json"]');
-  await expect(hierarchy.getByText("SoftBodyPosY[10]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(10)", { exact: true })).toBeVisible();
 
   // D16 熱伝導レース: 1D棒の格子点温度。
   await page.click('.scene-gallery-list button[data-scene-file="d16-conduction-race.json"]');
-  await expect(hierarchy.getByText("RodTemp[20]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("棒の温度(20)", { exact: true })).toBeVisible();
 
   // D15 対流: 格子流体の平均鉛直速度 + 熱ノード。
   await page.click('.scene-gallery-list button[data-scene-file="d15-convection.json"]');
-  await expect(hierarchy.getByText("GridFluidMeanV", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("NodeTemp[0]", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("流れの速さ(平均)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("温度(0)", { exact: true })).toBeVisible();
 
   // D14 渦: 鉛直速度のRMS(平均だと上下対称で打ち消し合って0のまま)。
   await page.click('.scene-gallery-list button[data-scene-file="d14-vortex.json"]');
-  await expect(hierarchy.getByText("GridFluidRmsV", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("流れの速さ(実効値)", { exact: true })).toBeVisible();
   await expect(hierarchy.getByText("obstacle", { exact: true })).toBeVisible();
 
   // D23 注ぐ水: SPH粒子。
@@ -330,7 +338,10 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   // ① Toolbar のシーン選択ドロップダウン: ドロワーを開かずにシーンを差し替える。
   await page.selectOption("#select-scene", "d19-electric-workbench.json");
   const hierarchy = page.locator("#hierarchy-tree");
-  await expect(hierarchy.getByText("CircuitV[2]", { exact: true })).toBeVisible();
+  // 生の名前(`CircuitV[2]`)ではなく、画面のほかの場所と同じ日本語で並ぶ。
+  await expect(
+    hierarchy.getByText("つなぎ目の電圧(2)", { exact: true }),
+  ).toBeVisible();
 
   // ② Inspector の追加 Component。D19 は剛体を持たないので、まず剛体のある
   //    シーンへ切り替えてからボディを選ぶ。
@@ -338,8 +349,10 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   await hierarchy.getByText("bob", { exact: true }).click();
   const inspector = page.locator("#inspector-body");
   // Probe セクション(シーン定義プローブ)と現在値。
-  await expect(inspector.getByText("Probe", { exact: true })).toBeVisible();
-  await expect(inspector.getByText("BodyPosX(bob)", { exact: true })).toBeVisible();
+  await expect(
+    inspector.getByText("記録している値 (Probe)", { exact: true }),
+  ).toBeVisible();
+  await expect(inspector.getByText("横の位置(bob)", { exact: true })).toBeVisible();
   // 近似バッジ(**群1で各ソルバの自己申告へ移行**)。
   // 移行前はWorld側が「どのドメインが有効か」から推測しており、力学ソルバ自身の
   // 近似(PGS+Baumgarte・マニフォールド4点)は**1件も挙がっていなかった**ため
@@ -364,7 +377,9 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   await waitForWorld(page);
   await addViaMenu(page, "＋ 振り子");
   await hierarchy.getByText("Pendulum", { exact: false }).first().click();
-  await expect(inspector.getByText("Joint", { exact: true })).toBeVisible();
+  await expect(
+    inspector.getByText("つなぎ目 (Joint)", { exact: true }),
+  ).toBeVisible();
 
   // ③ Console の種別タブ。既定シーンへ戻して接触を起こす。
   await page.selectOption("#select-scene", "d4-box-stack.json");
@@ -394,7 +409,7 @@ test("増分L: 流体場オーバーレイ・カプセル・材料派生", async
 
   // ① カプセルのスポーン(sim-mechanics 側で体積・慣性・接触を実装した)。
   await addViaMenu(page, "＋ カプセル");
-  await expect(hierarchy.getByText("Capsule_", { exact: false }).first()).toBeVisible();
+  await expect(hierarchy.getByText("カプセル", { exact: false }).first()).toBeVisible();
   // 落として床に載る(接触が起きる = カプセル-平面の接触が働いている)。
   await page.click("#btn-mode-play");
   const contact = page.locator("#console-log li", { hasText: "bodies=" }).first();
@@ -624,13 +639,13 @@ test("群2: Hierarchy の折り畳み・Materials サブツリー・N step 送�
   await page.goto("/");
   await waitForWorld(page);
 
-  // ① Materials(参照)サブツリー。設計 §1.1 の列挙にあるのにツリーに無かった。
-  await expect(page.locator("#hierarchy-tree")).toContainText("Materials (参照)");
+  // ① 材質(参考)サブツリー。設計 §1.1 の列挙にあるのにツリーに無かった。
+  await expect(page.locator("#hierarchy-tree")).toContainText("材質(参考)");
 
-  // ② 折り畳み(設計 §1.1「ツリーは折り畳み可」)。Bodies を畳むと
-  //    ボディ行が消える(Materials 配下の参照行は残る)。
+  // ② 折り畳み(設計 §1.1「ツリーは折り畳み可」)。「物」を畳むと
+  //    ボディ行が消える(材質配下の参照行は残る)。
   const visibleBodies = () =>
-    page.locator("#hierarchy-tree .tree-group", { hasText: "Bodies" }).locator("li:visible").count();
+    page.locator("#hierarchy-tree .tree-group", { hasText: "物" }).locator("li:visible").count();
   expect(await visibleBodies()).toBeGreaterThan(0);
   await page.locator("#hierarchy-tree .tree-toggle").first().click();
   expect(await visibleBodies()).toBe(0);
@@ -661,8 +676,12 @@ test("群2: Hierarchy の折り畳み・Materials サブツリー・N step 送�
     "title",
     /step 数上限/,
   );
+  // 表示は「実測 ×N」(実測値だと分かるように語を添えた)。
   const effective = Number(
-    (await page.locator("#timescale-effective").textContent())!.replace("×", ""),
+    (await page.locator("#timescale-effective").textContent())!.replace(
+      /[^0-9.]/g,
+      "",
+    ),
   );
   expect(effective).toBeGreaterThan(1); // 速くはなっている
   expect(effective).toBeLessThan(128); // が指定値には届かない
@@ -1013,30 +1032,15 @@ test("Project ドロワーがタブクリックで開き、中身が画面内に
   // 起動直後は閉じており本体は画面外。
   expect(await insideViewport()).toBe(false);
 
+  // 開閉は行の高さのアニメーション(約 0.2 秒)を伴うので、収まるまで待つ。
   await page.click('.project-tab[data-tab="materials"]');
-  expect(await insideViewport()).toBe(true);
+  await expect.poll(insideViewport, { timeout: 5_000 }).toBe(true);
   // 中身(材質表)が実際に見えること。
   await expect(page.locator("#project-body .materials-table")).toBeVisible();
 
   // 同じタブをもう一度クリックすると閉じる。
   await page.click('.project-tab[data-tab="materials"]');
-  expect(await insideViewport()).toBe(false);
-
-  expect(errors).toEqual([]);
-});
-
-test("Circuit-focus レイアウトでドロワーが開いた状態になる(増分E3)", async ({ page }) => {
-  const errors = collectPageErrors(page);
-  await page.goto("/");
-  await waitForWorld(page);
-
-  await page.selectOption("#select-layout", "circuit-focus");
-  const visible = await page.evaluate(() => {
-    const r = document.getElementById("project-body")!.getBoundingClientRect();
-    return { inside: r.top < window.innerHeight, height: r.height };
-  });
-  expect(visible.inside).toBe(true);
-  expect(visible.height).toBeGreaterThan(200);
+  await expect.poll(insideViewport, { timeout: 5_000 }).toBe(false);
 
   expect(errors).toEqual([]);
 });
@@ -1088,13 +1092,13 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
   await addViaMenu(page, "＋ 複合形状 (L字)");
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 1);
-  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("Compound_");
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("複合形状");
 
   // ② 同じく凸包メッシュを追加。
   await addViaMenu(page, "＋ 凸包メッシュ");
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 2);
-  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("ConvexMesh_");
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("凸包メッシュ");
 
   // ③ Scene View の右クリックメニューからも同じ2形状を配置できる
   // (ツールバーのボタンとメニューの両方が同じ `spawnShapeAt` を共有する設計、
@@ -1129,7 +1133,7 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
   // ⑤ Hierarchy 右クリックで複合形状を複製できる(`body_shape_json_at`
   // 経由で実際の形状を読み直してメッシュを再構築する経路、スポーン時の
   // 既定形状だと決め打ちしない)。
-  const compoundRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Compound_" }).first();
+  const compoundRow = page.locator("#hierarchy-tree .tree-body", { hasText: "複合形状" }).first();
   await compoundRow.click({ button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
   const beforeDuplicate = await rowCount();
@@ -1164,7 +1168,7 @@ test("Prefab: 複合形状/凸包メッシュをプレハブ化して再スポ�
 
   // ② Hierarchy 右クリック →「プレハブ化」。旧実装ではここで
   //    「この形状はPrefab化できません」のalertが出て登録されなかった。
-  for (const label of ["Compound_", "ConvexMesh_"]) {
+  for (const label of ["複合形状", "凸包メッシュ"]) {
     const row = page.locator("#hierarchy-tree .tree-body", { hasText: label }).first();
     await row.click({ button: "right" });
     await expect(page.locator("#context-menu")).toBeVisible();
@@ -1190,8 +1194,8 @@ test("Prefab: 複合形状/凸包メッシュをプレハブ化して再スポ�
   expect(await rowCount()).toBe(beforeSpawn + 2);
   // 復元されたボディのラベルは形状から引かれる(`shape_label_prefix`)ので、
   // 「球として戻ってきた」等の取り違えはラベルで検出できる。
-  await expect(page.locator("#hierarchy-tree")).toContainText("Compound_");
-  await expect(page.locator("#hierarchy-tree")).toContainText("ConvexMesh_");
+  await expect(page.locator("#hierarchy-tree")).toContainText("複合形状");
+  await expect(page.locator("#hierarchy-tree")).toContainText("凸包メッシュ");
 
   // ⑤ 再スポーンしたボディを実際に走らせてもクラッシュしない(描画・物理の
   //    両方が復元後の形状で動くこと)。`⏭`はPlayへ入ってからでないと無効。
@@ -1219,7 +1223,7 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
   await waitForWorld(page);
 
   // Box_1 を選択する(Inspector の Add Coupling フォームを開くため)。
-  await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
+  await page.locator("#hierarchy-tree").getByText("箱 1", { exact: true }).click();
   const inspector = page.locator("#inspector-body");
 
   // ---- ドメインをSettingsから有効化する ----
@@ -1338,7 +1342,7 @@ test("縦串⑤(飛行機の物理): 翼揚力/マグヌス揚力をUIから追�
   await page.goto("/");
   await waitForWorld(page);
 
-  await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
+  await page.locator("#hierarchy-tree").getByText("箱 1", { exact: true }).click();
   const inspector = page.locator("#inspector-body");
 
   // フィールドIDは`component_schema`が返す`add_*_coupling`の実引数名
@@ -1493,7 +1497,7 @@ test("D1: スケッチ→押し出しで剛体をUIから作れ、走らせて�
   await page.waitForTimeout(200);
   expect(await rowCount()).toBe(before + 1);
   await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText(
-    /ConvexMesh_|Compound_/,
+    /凸包メッシュ|複合形状/,
   );
   // 押し出した後はスケッチが片付いている。
   await expect(page.locator("#sketch-status")).toContainText(
@@ -1530,7 +1534,7 @@ test("D1: スケッチ→押し出しで剛体をUIから作れ、走らせて�
   await page.waitForTimeout(200);
   expect(await rowCount()).toBe(before + 2);
   await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText(
-    "Compound_",
+    "複合形状",
   );
 
   // ⑥ 実際に走らせる——押し出したメッシュが物理(接触生成・質量特性)と

@@ -7,6 +7,17 @@ import init, {
   sketch_extrude_shape_json,
 } from "../pkg/sim_wasm.js";
 import "./style.css";
+import {
+  annotateInspectorShape,
+  formatDuration,
+  friendlyBodyLabel,
+  pickDurationUnit,
+  readoutNumber,
+  setUpWorkspace,
+  type ConfirmDiscardRef,
+  type WorkspaceApi,
+  type WorkspaceApiRef,
+} from "./workspace";
 
 // 統合エディタ(docs/23-frontend/01-editor.md)の骨格増分。
 //
@@ -83,6 +94,13 @@ const SPAWN_MATERIALS = [
   "ゴム(天然)",
 ];
 const SPAWN_HEIGHT = 12.0;
+/// 衝突マスクの既定値(32bit すべて 1 = すべてと当たる)。Inspector に生の
+/// 4294967295 だけが出ていて意味が読めなかったので、説明にこの定数を使う。
+const MASK_ALL = 0xffff_ffff;
+/// Inspector の「上級」欄を開いたままにしておくか。Inspector は選択や編集の
+/// たびに描き直すので、覚えておかないと**開くたびにすぐ閉じる**
+/// (押しても居着かない折り畳みは、壊れているのと区別が付かない)。
+let inspectorAdvancedOpen = false;
 /// Hierarchy 右クリック「複製」で複製体をずらす距離 [m](群2)。
 /// 同一位置に重ねると初期貫入から弾き飛ばされるため、必ず離す。
 const DUPLICATE_OFFSET_M = 0.6;
@@ -110,22 +128,6 @@ const NEW_SCENE_JSON = JSON.stringify({
     },
   ],
 });
-
-function setUpLayoutPresetSwitcher() {
-  const app = document.getElementById("app")!;
-  const select = document.getElementById("select-layout") as HTMLSelectElement;
-  select.addEventListener("change", () => {
-    app.dataset.layout = select.value;
-    // **プリセットが握る変数のインライン上書きを捨てる**。スプリッター
-    // (`setUpPanelSplitters`)は `#app` のインラインスタイルへ `--row-console`
-    // を書くが、インラインは `#app[data-layout=…]` のルールより強いので、
-    // 捨てないと「レイアウトを切り替えても Console の高さが変わらない」
-    // という無言の不具合になる(増分E3 の `--project-row` で踏んだのと同じ、
-    // 「同じ宣言を 2 つの機能が奪い合う」問題)。列幅はプリセットが触らない
-    // ので残す。
-    clearPresetOwnedPanelSizes();
-  });
-}
 
 // ---------------------------------------------------------------------------
 // UI 基盤(増分「UI 品質の底上げ」)
@@ -198,174 +200,6 @@ function markBootFailed(message: string): void {
 /// CSS 変数として書き、localStorage に残す。**タブ化・切り離しは引き続き対象外**
 /// ——パネルの入れ替えはグリッドエリアの静的な割り当てを崩す必要があり、
 /// 本増分の範囲を超える。
-type SplitterLimits = { min: number; max: () => number; fallback: number };
-const SPLITTER_LIMITS: Record<string, SplitterLimits> = {
-  "--col-left": { min: 150, max: () => window.innerWidth * 0.4, fallback: 220 },
-  "--col-right": { min: 190, max: () => window.innerWidth * 0.45, fallback: 268 },
-  "--row-console": { min: 80, max: () => window.innerHeight * 0.6, fallback: 160 },
-};
-/// プリセット(`#app[data-layout=…]`)が握っている変数。`setUpLayoutPresetSwitcher`
-/// はこれだけをインラインから外す。
-const PRESET_OWNED_PANEL_VARS = ["--row-console"];
-const PANEL_SIZE_STORAGE_KEY = "simulator.editor.panel-sizes";
-
-function readStoredPanelSizes(): Record<string, number> {
-  try {
-    const raw = window.localStorage.getItem(PANEL_SIZE_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    const out: Record<string, number> = {};
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (key in SPLITTER_LIMITS && typeof value === "number" && value > 0) {
-        out[key] = value;
-      }
-    }
-    return out;
-    // localStorage はプライベートウィンドウ等で例外を投げ得る。保存できない
-    // ことは機能の本質ではないので黙って諦める(既定サイズで動く)。
-  } catch {
-    return {};
-  }
-}
-function writeStoredPanelSizes(sizes: Record<string, number>): void {
-  try {
-    window.localStorage.setItem(PANEL_SIZE_STORAGE_KEY, JSON.stringify(sizes));
-  } catch {
-    /* 保存できなくても操作自体は成立する。 */
-  }
-}
-function clearPresetOwnedPanelSizes(): void {
-  const app = document.getElementById("app");
-  if (!app) return;
-  const sizes = readStoredPanelSizes();
-  for (const name of PRESET_OWNED_PANEL_VARS) {
-    app.style.removeProperty(name);
-    delete sizes[name];
-  }
-  writeStoredPanelSizes(sizes);
-}
-
-function setUpPanelSplitters(): void {
-  const app = document.getElementById("app");
-  if (!app) return;
-  const stored = readStoredPanelSizes();
-
-  function setSize(name: string, px: number, persist: boolean): number {
-    const limits = SPLITTER_LIMITS[name];
-    const clamped = Math.round(
-      Math.min(Math.max(px, limits.min), Math.max(limits.max(), limits.min)),
-    );
-    app!.style.setProperty(name, `${clamped}px`);
-    if (persist) {
-      const sizes = readStoredPanelSizes();
-      sizes[name] = clamped;
-      writeStoredPanelSizes(sizes);
-    }
-    return clamped;
-  }
-  /// 今の実寸(px)。インライン上書きが無ければ CSS 側の既定を読む。
-  function currentSize(name: string): number {
-    const raw = getComputedStyle(app!).getPropertyValue(name).trim();
-    const parsed = Number.parseFloat(raw);
-    return Number.isFinite(parsed) && parsed > 0
-      ? parsed
-      : SPLITTER_LIMITS[name].fallback;
-  }
-
-  for (const [name, value] of Object.entries(stored)) setSize(name, value, false);
-
-  const splitters =
-    document.querySelectorAll<HTMLElement>(".splitter[data-var]");
-  splitters.forEach((splitter) => {
-    const name = splitter.dataset.var!;
-    if (!(name in SPLITTER_LIMITS)) return;
-    const axis = splitter.dataset.axis === "y" ? "y" : "x";
-    // 掴んだ境界の「どちら側」のパネルを伸ばすか。Inspector と Console は
-    // ガターより後ろ(右/下)にあるので、ポインタの移動方向と逆に伸びる。
-    const sign = splitter.dataset.invert === "true" ? -1 : 1;
-
-    function announce(px: number) {
-      splitter.setAttribute("aria-valuenow", String(Math.round(px)));
-      splitter.setAttribute("aria-valuemin", String(SPLITTER_LIMITS[name].min));
-      splitter.setAttribute(
-        "aria-valuemax",
-        String(Math.round(SPLITTER_LIMITS[name].max())),
-      );
-    }
-    announce(currentSize(name));
-
-    splitter.addEventListener("pointerdown", (event) => {
-      // 主ボタンのみ。右クリックで掴んだままになるのを防ぐ。
-      if (event.button !== 0) return;
-      event.preventDefault();
-      const start = axis === "x" ? event.clientX : event.clientY;
-      const startSize = currentSize(name);
-      splitter.setPointerCapture(event.pointerId);
-      splitter.dataset.dragging = "true";
-      document.body.dataset.splitterDragging = "true";
-      document.body.style.setProperty(
-        "--splitter-cursor",
-        axis === "x" ? "col-resize" : "row-resize",
-      );
-
-      const onMove = (move: PointerEvent) => {
-        const now = axis === "x" ? move.clientX : move.clientY;
-        announce(setSize(name, startSize + (now - start) * sign, false));
-      };
-      const onUp = () => {
-        splitter.removeEventListener("pointermove", onMove);
-        splitter.removeEventListener("pointerup", onUp);
-        splitter.removeEventListener("pointercancel", onUp);
-        delete splitter.dataset.dragging;
-        delete document.body.dataset.splitterDragging;
-        document.body.style.removeProperty("--splitter-cursor");
-        // 確定時にだけ保存する(ドラッグ中に毎フレーム書くと無駄が大きい)。
-        setSize(name, currentSize(name), true);
-      };
-      splitter.addEventListener("pointermove", onMove);
-      splitter.addEventListener("pointerup", onUp);
-      splitter.addEventListener("pointercancel", onUp);
-    });
-
-    // ダブルクリックで既定へ戻す(掴み直して探るより速い、一般的な作法)。
-    splitter.addEventListener("dblclick", () => {
-      app!.style.removeProperty(name);
-      const sizes = readStoredPanelSizes();
-      delete sizes[name];
-      writeStoredPanelSizes(sizes);
-      announce(currentSize(name));
-    });
-
-    // **キーボードでも動かせる**(QA 報告書 §5「キーボードのみでの操作は未検証」)。
-    // マウスを持たない利用者にとって、ドラッグしか手段が無い操作は存在しないのと
-    // 同じになる。
-    splitter.addEventListener("keydown", (event) => {
-      const step = event.shiftKey ? 48 : 16;
-      let delta = 0;
-      if (axis === "x" && event.key === "ArrowLeft") delta = -step;
-      else if (axis === "x" && event.key === "ArrowRight") delta = step;
-      else if (axis === "y" && event.key === "ArrowUp") delta = -step;
-      else if (axis === "y" && event.key === "ArrowDown") delta = step;
-      else if (event.key === "Home") {
-        app!.style.removeProperty(name);
-        const sizes = readStoredPanelSizes();
-        delete sizes[name];
-        writeStoredPanelSizes(sizes);
-        announce(currentSize(name));
-        event.preventDefault();
-        return;
-      } else return;
-      announce(setSize(name, currentSize(name) + delta * sign, true));
-      event.preventDefault();
-    });
-  });
-}
-
-/// **ショートカット一覧**。定義を `keydown` ハンドラと同じファイルに置く
-/// (`setUpSceneView` 内のハンドラが実装、ここが一覧)。QA 不具合 7 は
-/// 「`title` と README には書いてあるが `keydown` に case が無い」という
-/// 食い違いだったので、一覧の側も同じファイルに置いて突き合わせやすくする。
 const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
   {
     title: "ツール",
@@ -413,11 +247,11 @@ const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
     ],
   },
   {
-    title: "パネル",
+    title: "画面",
     items: [
+      ["⌘K / Ctrl+K", "実験をさがす(どこからでも)"],
+      ["[ / ]", "見る深さを浅く / 深くする(みる↔つくる)"],
       ["? / F1", "この一覧を開く / 閉じる"],
-      ["← → ↑ ↓", "スプリッターにフォーカス中はパネルの大きさを変える"],
-      ["Home", "スプリッターにフォーカス中は既定の大きさへ戻す"],
     ],
   },
 ];
@@ -677,6 +511,13 @@ function reportError(message: string): void {
 /// 可変の参照オブジェクト越しにハンドラを配線する。
 type InspectorEditHandlers = {
   setMass(bodyIndex: number, mass: number): void;
+  /// 材質の差し替え(**利用者役④の観察**)。物理コアに「後から材質を変える」
+  /// 操作は無い(材質はボディを作るときに決まる)ので、**いまの場面を
+  /// シーン文書として書き出し、その体の材質だけを書き換えて読み直す**。
+  /// 密度が変われば質量も、反発・摩擦も、同じ読み込み経路で一貫して決まり直す
+  /// ——中途半端に一部だけ差し替えるより、理論の辻褄が合う。
+  /// 走行中(Play)は場面を組み直せないので `false` を返す。
+  setMaterial(bodyIndex: number, materialName: string): boolean;
   setBodyType(bodyIndex: number, kind: string): void;
   setCollisionFilter(bodyIndex: number, group: number, mask: number): void;
   /// 軸別スケール(群2、設計 §1.2 の Gizmo は Transform を編集する)。
@@ -1059,7 +900,10 @@ type ImportedShapeJson =
         triangles: [number, number, number][];
       };
     };
-type ImportedBodyJson = { shape: ImportedShapeJson };
+// `type`/`name`は**課題C(回す軸に回転が見えない)向けに追加**——`meshFromShapeJson`
+// が「無地の球にマーカーを足すか」を決めるのに、そのボディが`kinematic`か
+// (=外から姿勢を直接押し付けられている=誰かが意図して回している)を読む。
+type ImportedBodyJson = { shape: ImportedShapeJson; type?: string; name?: string };
 // 予測→実験ミニパネル(設計docs/23-frontend/01-editor.md §5)向け。
 // `sim_world::scenario::PredictionPromptJson`のJSON表現と同じ形(物理には
 // 影響しないメタデータのため、Rust側で検証済みの値としてではなく、Importに
@@ -1315,6 +1159,21 @@ const hierarchyMultiSelection = new Set<number>();
 /// 無くなるため実害は無く、モジュール外の状態を増やさないほうが単純。
 let hierarchyRangeAnchor: number | null = null;
 
+/**
+ * この行数を超える枝は、最初だけ畳んでおく(`makeGroup` の doc 参照)。
+ *
+ * 積み木や 50 個の球のように「一つずつ見たい」場面は開いたままにしたいので、
+ * 線を引くのは**明らかに一覧として読めない量**(ブラウン運動の粒 300 個)。
+ */
+const HIERARCHY_AUTO_COLLAPSE_ROWS = 100;
+/** 既に一度自動で畳んだ枝(人が開き直したものを畳み直さないため)。 */
+const autoCollapsedGroups = new Set<string>();
+
+/**
+ * **いま頼んだ動き方**(まだ world が返してこないぶん)。`typeSelect` の doc 参照。
+ */
+let pendingBodyType: { index: number; kind: string } | null = null;
+
 function setUpHierarchy(
   world: WasmWorld,
   onSelect: (index: number) => void,
@@ -1322,11 +1181,15 @@ function setUpHierarchy(
   onSelectFrame: (frameIndex: number) => void,
   actions: HierarchyActions | null,
   materialNames: readonly string[],
+  onSelectFluid: () => void,
 ): (index: number) => void {
   const tree = document.getElementById("hierarchy-tree")!;
   tree.innerHTML = "";
   const root = document.createElement("li");
-  root.textContent = "World Root";
+  // 見出しも中身も、画面のほかの場所と同じ日本語で書く。「World Root」
+  // 「BODIES」「PROBES」のような中の言葉がそのまま出ていて、数値とグラフを
+  // 見に来ただけの人の目に意味の分からない語が並んでいた(利用者役③の観察)。
+  root.textContent = "この場面ぜんぶ";
   const bodies = document.createElement("ul");
   bodies.className = "tree-nested";
 
@@ -1337,6 +1200,15 @@ function setUpHierarchy(
     label: string,
     contents: HTMLUListElement,
   ): HTMLLIElement {
+    // **行が多すぎる枝は、最初は畳んでおく**。ブラウン運動は粒が 300 個
+    // あり、開いた瞬間に左が 300 行の壁になっていた——数値とグラフを見に来た
+    // 人には、目的の場所へたどり着く前の障害物でしかない(利用者役③の観察)。
+    // 畳むのは**一度だけ**なので、人が自分で開いたらそのまま開いたまま。
+    const rows = contents.children.length;
+    if (rows > HIERARCHY_AUTO_COLLAPSE_ROWS && !autoCollapsedGroups.has(key)) {
+      autoCollapsedGroups.add(key);
+      collapsedHierarchyGroups.add(key);
+    }
     const item = document.createElement("li");
     item.className = "tree-group";
     const toggle = document.createElement("span");
@@ -1365,6 +1237,13 @@ function setUpHierarchy(
 
   const count = readNumber(world, "body_count");
   const items: (HTMLLIElement | null)[] = [];
+  // **課題B(利用者役の報告)**: 「Fluids」行はボディではない(SPH粒子は
+  // `RigidBodySet`のような個別ID体系を持たない)ので、`items`(ボディ用の
+  // 選択状態)には入らない。それでも選んだこと自体は見えてよい——`highlight`に
+  // このセンチネル値を渡すと、ボディ側は全て非選択になり「Fluids」行だけが
+  // 選択済みの見た目になる(実在するボディindexは常に0以上なので衝突しない)。
+  const FLUID_SELECTED_SENTINEL = -2;
+  let fluidListItem: HTMLLIElement | null = null;
 
   function refreshSelectionClasses(primary: number) {
     items.forEach((it, i) => {
@@ -1375,6 +1254,7 @@ function setUpHierarchy(
         hierarchyMultiSelection.has(i) && i !== primary,
       );
     });
+    fluidListItem?.classList.toggle("selected", primary === FLUID_SELECTED_SENTINEL);
   }
   function highlight(index: number) {
     refreshSelectionClasses(index);
@@ -1388,7 +1268,11 @@ function setUpHierarchy(
       continue;
     }
     const item = document.createElement("li");
-    item.textContent = world.read_component("body_label_at", String(i));
+    // **場面の中身に出る名前は、人の言葉にする**(`friendlyBodyLabel`のdoc
+    // 参照——自動採番の`Sphere_2`のような機械語のまま出ていた。実測: 粒度2
+    // 「しらべる」で右クリックから球を足すと、一覧に「Sphere_2」とだけ出て、
+    // どれが今置いた物か読めなかった)。
+    item.textContent = friendlyBodyLabel(world.read_component("body_label_at", String(i)));
     // `tree-body` は **Bodies サブツリーの実体行**だけに付く(群2)。
     // Materials(参照)や Joints の行も `tree-selectable` なので、
     // 「ボディが何体あるか」を数えるにはこちらを使う。
@@ -1470,7 +1354,7 @@ function setUpHierarchy(
   }
   highlight(BODY_INDEX_BOX);
 
-  bodies.appendChild(makeGroup("bodies", "Bodies", list));
+  bodies.appendChild(makeGroup("bodies", "物", list));
 
   // Joints(設計§1.1「シーングラフツリー(Bodies/Joints/Circuits/Fluids/
   // Probes/Frames)」)。振り子スポーン(`spawn_pendulum`)が追加した
@@ -1484,7 +1368,9 @@ function setUpHierarchy(
     if (world.constraint_anchor_points_at(i).length < 6) continue;
     jointCount += 1;
     const item = document.createElement("li");
-    item.textContent = `DistanceJoint (${world.read_component("body_label_at", String(i))})`;
+    item.textContent = friendlyBodyLabel(
+      `振り子 (DistanceJoint) (${world.read_component("body_label_at", String(i))})`,
+    );
     item.classList.add("tree-selectable");
     item.addEventListener("click", () => {
       highlight(i);
@@ -1493,7 +1379,7 @@ function setUpHierarchy(
     jointList.appendChild(item);
   }
   if (jointCount > 0) {
-    bodies.appendChild(makeGroup("joints", "Joints", jointList));
+    bodies.appendChild(makeGroup("joints", "つなぎ目", jointList));
   }
 
   // Frames(設計§1.1「シーングラフツリー(...Frames)」、フレーム階層ドリルイン
@@ -1522,7 +1408,7 @@ function setUpHierarchy(
       }
       return ul;
     }
-    bodies.appendChild(makeGroup("frames", "Frames", buildFrameSubtree(0)));
+    bodies.appendChild(makeGroup("frames", "座標の枠", buildFrameSubtree(0)));
   }
 
   // Fluids(設計§1.1「シーングラフツリー(...Fluids)」)。個々の粒子や塊単位の
@@ -1530,10 +1416,25 @@ function setUpHierarchy(
   // 持たないため)、スポーンした水塊の数+総粒子数の概要表示のみとする
   // (縮約実装、`spawn_fluid_block`が複数回スポーンで水塊を追加できるように
   // なったことを受けての最小限のHierarchy反映)。
+  //
+  // **課題B(利用者役の報告)**: この行はクリックしても何も起きず、Inspectorは
+  // 「まだ何も選んでいません」のままだった——個々のボディと違って選べないこと
+  // 自体はSPH粒子の性質上避けられないが、「押しても無反応」は別の話。個別の
+  // ボディとしては選べない**理由**を画面で言い、代わりに「何がどれだけ
+  // あるか」だけは読めるようにする(このリポジトリの前例: `describeNonBodyScene`
+  // ——見えている物が選べない場面では、その理由を言う)。
   const fluidSpawnCount = readNumber(world, "fluid_spawn_count");
   if (fluidSpawnCount > 0) {
     const fluidItem = document.createElement("li");
     fluidItem.textContent = `Fluids (${fluidSpawnCount}塊, ${readNumber(world, "fluid_particle_count")}粒子)`;
+    fluidItem.classList.add("tree-selectable");
+    fluidItem.title = "個々の粒子や塊は選べません(SPH流体はボディのような個別IDを持たないため)。クリックすると合計の数値だけ見られます。";
+    fluidItem.addEventListener("click", () => {
+      hierarchyMultiSelection.clear();
+      highlight(FLUID_SELECTED_SENTINEL);
+      onSelectFluid();
+    });
+    fluidListItem = fluidItem;
     bodies.appendChild(fluidItem);
   }
 
@@ -1562,7 +1463,7 @@ function setUpHierarchy(
       item.textContent = world.read_component("circuit_element_label_at", String(i));
       circuitList.appendChild(item);
     }
-    bodies.appendChild(makeGroup("circuits", "Circuits", circuitList));
+    bodies.appendChild(makeGroup("circuits", "回路", circuitList));
   }
 
   // Probes(設計§1.1「シーングラフツリー(...Probes)」、増分E2で追加)。
@@ -1578,14 +1479,24 @@ function setUpHierarchy(
   // 凡例が既に出している。
   const probeCount = readNumber(world, "imported_probe_count");
   if (probeCount > 0) {
+    // 消した物の観測点が生き残った物と見分けが付かないまま並んでいた
+    // (課題B、`friendlyProbeLabel`のdoc参照)。一覧を作る前に一度だけ
+    // 「いま生きているボディの名前」を集めておく(ボディごとに数え直すと
+    // probe数×body数になる)。
+    const aliveBodyNames = aliveBodyNamesOf(world);
     const probeList = document.createElement("ul");
     probeList.className = "tree-nested";
     for (let i = 0; i < probeCount; i++) {
       const item = document.createElement("li");
-      item.textContent = world.read_component("imported_probe_label_at", String(i));
+      item.textContent = friendlyBodyLabel(
+        friendlyProbeLabel(
+          world.read_component("imported_probe_label_at", String(i)),
+          aliveBodyNames,
+        ),
+      );
       probeList.appendChild(item);
     }
-    bodies.appendChild(makeGroup("probes", "Probes", probeList));
+    bodies.appendChild(makeGroup("probes", "記録している値", probeList));
   }
 
   // **Materials(群2)**。設計 §1.1 は「Bodies / Joints / Circuits / Fluids /
@@ -1622,7 +1533,9 @@ function setUpHierarchy(
         // 2つ現れると、見た目にどちらが実体でどちらが参照か分からないうえ、
         // ラベルでの選択(テスト・自動化)も曖昧になる(実際に Playwright の
         // strict モードが 8 本まとめて落ちて気付いた)。
-        userItem.textContent = `↳ ${world.read_component("body_label_at", String(bodyIndex))}`;
+        userItem.textContent = friendlyBodyLabel(
+          `↳ ${world.read_component("body_label_at", String(bodyIndex))}`,
+        );
         userItem.classList.add("tree-selectable");
         userItem.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -1635,7 +1548,7 @@ function setUpHierarchy(
       materialList.appendChild(item);
     }
     bodies.appendChild(
-      makeGroup("materials", "Materials (参照)", materialList),
+      makeGroup("materials", "材質(参考)", materialList),
     );
   }
 
@@ -1718,20 +1631,149 @@ function setUpHierarchy(
 // 同じくRust側がエラーを返す)。`updateInspectorTransformFields`は
 // `#inspector-position`等のDOM要素が無ければ何もしない null-safe 実装のため、
 // このプレースホルダ表示と両立する。
-function renderInspectorFor(world: WasmWorld, index: number): void {
+/**
+ * **力学ボディが無い場面が、何で出来ているのかを言う**。
+ *
+ * 惑星が目の前を回っているのにクリックしても選べず、「このシーンには動く物が
+ * ありません」とだけ出ていた——見えているのに「無い」と言われ、自分の操作が
+ * 悪いのか対応していないのか画面から判断できない、と書かれた(利用者役③の
+ * 一番の不満)。「無い」ではなく「別の形で計算している」と言う。
+ */
+function describeNonBodyScene(world: WasmWorld): string {
+  const kinds: string[] = [];
+  if (world.astro_positions_f32().length > 0) {
+    kinds.push("天体(星や探査機)");
+  }
+  if (world.soft_body_positions_f32().length > 0) kinds.push("やわらかい物");
+  if (world.quantum_1d_density_f32().length > 0) kinds.push("量子の波");
+  if (world.quantum_2d_size().length === 2) kinds.push("量子の波");
+  if (world.conduction_rod_temperatures_f32().length > 0) kinds.push("棒の中の熱");
+  if (world.ising_size() > 0) kinds.push("スピンの格子");
+  if (world.fdtd_size().length === 2) kinds.push("電磁場");
+  if (kinds.length === 0) {
+    return "この場面には、つかめる物(力学ボディ)がありません。";
+  }
+  return (
+    `この場面の${kinds.join("・")}は、つかめる物(力学ボディ)ではなく` +
+    `専用の計算で動いています。だからクリックしても選べません。`
+  );
+}
+
+/**
+ * **課題C(利用者役の報告)**: 「まだ何も選んでいません」に出る個数が、
+ * 消したはずのボディを数え続けていた。`remove_body_at` は index のずれを
+ * 避けるためスロットを残すだけ(`body_is_removed_at`のdoc、Hierarchyの
+ * 「削除済みは並べない」処理と同じ理由)なので、`body_count`(生死問わず
+ * 全スロット数)をそのまま出すと消した分だけ多く見える。画面に出す個数は
+ * **いま生きている物の数**に直す。
+ */
+function countLiveBodies(world: WasmWorld): number {
+  const total = readNumber(world, "body_count");
+  let live = 0;
+  for (let i = 0; i < total; i++) {
+    if (world.read_component("body_is_removed_at", String(i)) !== "true") live += 1;
+  }
+  return live;
+}
+
+/**
+ * **課題B(利用者役の報告)**: Hierarchyの「Fluids」行はクリックしても
+ * Inspectorが「まだ何も選んでいません」のままだった。SPH粒子はボディ
+ * (`RigidBody`)のような個別ID体系を持たないため、個々の粒子や塊を他の
+ * ボディと同じInspectorで選ばせることはできない——が、それは「押しても
+ * 何も起きない」ことの理由にはならない。せめて「何がどれだけあるか」
+ * (水塊の数・総粒子数・いまの広がり)を読めるようにし、選べない理由も
+ * 画面で言う(このリポジトリの前例: `describeNonBodyScene`)。
+ */
+function renderFluidSummaryInspector(world: WasmWorld): void {
   const body = document.getElementById("inspector-body")!;
-  if (index < 0 || index >= readNumber(world, "body_count")) {
+  const blobCount = readNumber(world, "fluid_spawn_count");
+  const particleCount = readNumber(world, "fluid_particle_count");
+  if (blobCount === 0) {
+    // 呼ばれた後にワールドが差し替わり、流体が無くなっていた場合の保険。
     body.innerHTML = `
       <div class="empty-state">
-        <p>選択中のボディはありません。</p>
-        <p>このシーンには力学ボディがありません——Probe Graphs パネルや Scene View の場のパネルで観測してください。</p>
+        <p>Fluidsはもうありません。</p>
       </div>
     `;
     return;
   }
+  const positions = world.fluid_particle_positions_f32();
+  let extentRows = "";
+  if (particleCount > 0 && positions.length >= particleCount * 3) {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < particleCount; i++) {
+      const x = positions[i * 3];
+      const y = positions[i * 3 + 1];
+      const z = positions[i * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    extentRows = `
+      <div class="inspector-field"><span>広がり x [m]</span><span>${minX.toFixed(2)} 〜 ${maxX.toFixed(2)}</span></div>
+      <div class="inspector-field"><span>広がり y [m]</span><span>${minY.toFixed(2)} 〜 ${maxY.toFixed(2)}</span></div>
+      <div class="inspector-field"><span>広がり z [m]</span><span>${minZ.toFixed(2)} 〜 ${maxZ.toFixed(2)}</span></div>
+    `;
+  }
+  body.innerHTML = `
+    <div class="inspector-component">
+      <h3>Fluids(SPH 水塊)</h3>
+      <div class="inspector-field"><span>水塊の数</span><span>${blobCount}</span></div>
+      <div class="inspector-field"><span>総粒子数</span><span>${particleCount}</span></div>
+      ${extentRows}
+    </div>
+    <p class="inspector-note">
+      個々の粒子や塊は選べません——SPH流体はボディ(RigidBody)のような
+      個別IDを持たないため、位置や速さを1粒ずつ読み出す先がありません。
+      動きの様子は Scene View で直接見てください。
+    </p>
+  `;
+}
+
+function renderInspectorFor(world: WasmWorld, index: number): void {
+  const body = document.getElementById("inspector-body")!;
+  if (index < 0 || index >= readNumber(world, "body_count")) {
+    // 「選んでいない」と「そもそも無い」は別のこと。以前はどちらでも
+    // 「このシーンには力学ボディがありません」と出していたので、ボディが
+    // 並んでいる画面でも「無い」と読めてしまった。実際の本数で言い分ける。
+    const total = countLiveBodies(world);
+    body.innerHTML =
+      total > 0
+        ? `
+      <div class="empty-state">
+        <p>まだ何も選んでいません。</p>
+        <p>画面の中の物をクリックするか、左の一覧から選ぶと、ここに位置・速さ・質量が出ます(${total} 個あります)。</p>
+      </div>
+    `
+        : `
+      <div class="empty-state">
+        <p>${describeNonBodyScene(world)}</p>
+        <p>位置や速さは、下の「うごきのグラフ」と右の「いまの数値」で読めます。</p>
+      </div>
+    `;
+    return;
+  }
+  // **課題③(進行管理役の指摘)を検討したが、ここは触らないことにした**。
+  // 「選んだもの」札は`friendlyBodyLabel`済みの読める名前(「球 2」)、
+  // Inspectorの見出しは生のラベル(`Sphere_2`)のままで、同じ画面で文字が
+  // 食い違って見える。ここを friendlyBodyLabel に通せば直りそうに見えたが、
+  // `ui-usability.spec.ts`「Hierarchy を上下キーで辿ると選択が Inspector へ
+  // 連動する」に**まさにこの生のラベルを検証する既存アサーション**があり、
+  // そのテストのコメントには「Hierarchy(場面の中身)は読める名前を出す一方、
+  // Inspector(中を知っている人向けの生の値)は機械語のままにする」という
+  // **意図した役割分担**が明記されていた(実測: friendlyBodyLabelに通すと
+  // このテストが`"Box_1"`を期待する箇所で`"箱 1"`を受け取り落ちた)。
+  // これは見た目の食い違いではなく、既存の設計判断に反する変更になる
+  // ——影響範囲(Inspectorを「生の値の場」として当てにしている他の導線が
+  // 無いか)を私は洗い切れていないので、無理に直さず元のままにする。
   const label = world.read_component("body_label_at", String(index));
   const staticBadge = (world.read_component("body_is_static_at", String(index)) === "true")
-    ? ' <span class="badge">Static</span>'
+    ? ' <span class="badge">動かない(Static)</span>'
     : "";
   // `body_position_at_f32`はWasmメモリを直接指す一時的なビューを返す(B16、
   // `crates/sim-wasm/src/lib.rs`の`HotPathViewBuffers`のdoc参照)ため、下の
@@ -1741,29 +1783,34 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
-      <div class="inspector-field"><span>Shape</span><span>${world.read_component("body_shape_label_at", String(index))}</span></div>
-    </div>
-    <div class="inspector-component">
-      <h3>Transform</h3>
+      <div class="inspector-field"><span>かたち (Shape)</span><span>${annotateInspectorShape(world.read_component("body_shape_label_at", String(index)))}</span></div>
       <div class="inspector-field">
-        <span>Position (x,y,z)</span>
-        <span class="inspector-scale-fields">
-          <input type="number" id="inspector-position-x" step="0.05" value="${initialPosition[0]}" />
-          <input type="number" id="inspector-position-y" step="0.05" value="${initialPosition[1]}" />
-          <input type="number" id="inspector-position-z" step="0.05" value="${initialPosition[2]}" />
-        </span>
-      </div>
-      <div class="inspector-field"><span>Rotation</span><span id="inspector-rotation">—</span></div>
-      <div class="inspector-field"><span>Velocity</span><span id="inspector-velocity">—</span></div>
-      <div class="inspector-field">
-        <span>Scale (x,y,z)</span>
+        <span>大きさ(倍率) x,y,z</span>
         <span class="inspector-scale-fields">
           <input type="number" id="inspector-scale-x" min="0.01" step="0.1" value="1" />
           <input type="number" id="inspector-scale-y" min="0.01" step="0.1" value="1" />
           <input type="number" id="inspector-scale-z" min="0.01" step="0.1" value="1" />
         </span>
       </div>
-      <p class="inspector-note">軸別スケールは Box のみ(球・カプセルは形状表現に非等方の自由度が無い)。3欄を同じ値にすると等方スケールとして球にも効く。</p>
+      <p class="inspector-note">
+        <strong>いまの大きさを 1 とした倍率</strong>です(2 と入れると 2 倍)。
+        3 欄バラバラに効くのは箱だけ——球やカプセルは形そのものに縦横の
+        自由度が無いので、<strong>3 欄を同じ値</strong>にすると全体が拡大します。
+        重さは材質の密度から計算し直されます。
+      </p>
+    </div>
+    <div class="inspector-component">
+      <h3>置き場所と向き (Transform)</h3>
+      <div class="inspector-field">
+        <span>位置 x,y,z [m]</span>
+        <span class="inspector-scale-fields">
+          <input type="number" id="inspector-position-x" step="0.05" value="${initialPosition[0]}" />
+          <input type="number" id="inspector-position-y" step="0.05" value="${initialPosition[1]}" />
+          <input type="number" id="inspector-position-z" step="0.05" value="${initialPosition[2]}" />
+        </span>
+      </div>
+      <div class="inspector-field"><span>向き (Rotation)</span><span id="inspector-rotation">—</span></div>
+      <div class="inspector-field"><span>速度 x,y,z [m/s]</span><span id="inspector-velocity">—</span></div>
     </div>
     ${renderRigidBodyComponent(world, index)}
     ${renderInspectorExtraComponents(world, index)}
@@ -2611,37 +2658,81 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
 /// 違い、Play モード中でもリプレイ再現性と決定論が壊れない。
 function renderRigidBodyComponent(world: WasmWorld, index: number): string {
   const mass = readNumber(world, "body_mass_at", String(index));
+  const currentMaterial = world.read_component("body_material_label_at", String(index));
   const bodyType = world.read_component("body_type_at", String(index));
   const group = readNumber(world, "body_collision_group_at", String(index));
   const mask = readNumber(world, "body_collision_mask_at", String(index));
+  // プログラムの型名(Dynamic/Static/Kinematic)がそのまま選択肢の文字になっていて、
+  // 中を知らない人には何を選んでいるか分からなかった(利用者役の報告)。
+  // `value`属性は既存のテスト・保存データが参照しているので変えず、
+  // 見える文字だけを「人の言葉(元の語)」の順に差し替える。
+  const BODY_TYPE_LABELS: Record<string, string> = {
+    Dynamic: "動く(Dynamic)",
+    Static: "動かない(Static)",
+    Kinematic: "決めたとおりに動く(Kinematic)",
+  };
   const option = (value: string) =>
-    `<option value="${value}"${value === bodyType ? " selected" : ""}>${value}</option>`;
+    `<option value="${value}"${value === bodyType ? " selected" : ""}>${BODY_TYPE_LABELS[value] ?? value}</option>`;
+  // 材質は**選び直せる**。以前は文字を出すだけで、「鋼のボールをゴムに変えて
+  // 弾み方を見る」という、いちばんやりたい比べ方ができなかった(利用者役の
+  // 観察)。いま付いている材質が一覧に無い場合も落とさず先頭に出す。
+  const materialOption = (selected: string) => {
+    const names = SPAWN_MATERIALS.includes(selected)
+      ? SPAWN_MATERIALS
+      : [selected, ...SPAWN_MATERIALS];
+    return names
+      .map(
+        (name) =>
+          `<option value="${name}"${name === selected ? " selected" : ""}>${name}</option>`,
+      )
+      .join("");
+  };
   // 質量 0 は「無限質量」(Static/Kinematic)を意味するので、数値入力には
   // 出さずプレースホルダで示す——0 と表示すると「0 kg の物体」に見えてしまう。
   const massValue = mass > 0 ? mass.toPrecision(6) : "";
   return `
     <div class="inspector-component">
-      <h3>RigidBody</h3>
-      <div class="inspector-field"><span>Material</span><span>${world.read_component("body_material_label_at", String(index))}</span></div>
+      <h3>物としての性質 (RigidBody)</h3>
       <div class="inspector-field">
-        <span>Mass [kg]</span>
+        <span>材質 (Material)</span>
+        <select id="inspector-material">${materialOption(currentMaterial)}</select>
+      </div>
+      <div class="inspector-field">
+        <span>重さ / Mass [kg]</span>
         <input type="number" id="inspector-mass" min="0" step="0.1"
                value="${massValue}" placeholder="∞ (無限質量)"
                ${mass > 0 ? "" : "disabled"} />
       </div>
       <div class="inspector-field">
-        <span>Body type</span>
+        <span>動き方 (Body type)</span>
         <select id="inspector-body-type">${["Dynamic", "Static", "Kinematic"].map(option).join("")}</select>
       </div>
-      <div class="inspector-field">
-        <span>Collision group</span>
-        <input type="number" id="inspector-collision-group" min="0" step="1" value="${group}" />
-      </div>
-      <div class="inspector-field">
-        <span>Collision mask</span>
-        <input type="number" id="inspector-collision-mask" min="0" step="1" value="${mask}" />
-      </div>
-      <p class="inspector-note">編集は Command としてキューに積まれ、次 step の先頭で適用されます。</p>
+      <p class="inspector-note">
+        動き方: 動く(Dynamic) = 重力や衝突で動く / 動かない(Static) = 動かない(床や坂) /
+        決めたとおりに動く(Kinematic) = 決めた通りに動き、ぶつかられても押し返されない。
+      </p>
+      <details class="inspector-advanced" id="inspector-collision-details"${
+        inspectorAdvancedOpen ? " open" : ""
+      }>
+        <summary>ぶつかる相手を選ぶ(上級)</summary>
+        <div class="inspector-field">
+          <span>自分の組 (group)</span>
+          <input type="number" id="inspector-collision-group" min="0" step="1" value="${group}" />
+        </div>
+        <div class="inspector-field">
+          <span>ぶつかる組 (mask)</span>
+          <input type="number" id="inspector-collision-mask" min="0" step="1" value="${mask}" />
+        </div>
+        <p class="inspector-note">
+          どちらもビットの並びです。${MASK_ALL}(=すべてのビットが 1)なら
+          <strong>すべてと当たる</strong>——既定はこれ。特定の組だけをすり抜け
+          させたいときに変えます。
+        </p>
+      </details>
+      <p class="inspector-note">
+        材質・重さを変えると、その場で場面を組み直して反映します(走行中は
+        次の 1 step 先頭で効きます)。
+      </p>
     </div>
   `;
 }
@@ -2658,6 +2749,26 @@ function wireInspectorEditFields(index: number): void {
     const value = Number(massInput.value);
     if (!Number.isFinite(value) || value <= 0) return;
     handlers.setMass(index, value);
+  });
+
+  const advanced = document.getElementById(
+    "inspector-collision-details",
+  ) as HTMLDetailsElement | null;
+  advanced?.addEventListener("toggle", () => {
+    inspectorAdvancedOpen = advanced.open;
+  });
+
+  const materialSelect = document.getElementById(
+    "inspector-material",
+  ) as HTMLSelectElement | null;
+  materialSelect?.addEventListener("change", () => {
+    if (!handlers.setMaterial(index, materialSelect.value)) {
+      // 走行中は組み直せない。黙って元へ戻すと「押したのに何も起きない」に
+      // なるので、戻したうえで理由を言う。
+      // 選び直した値は、次のフレームで `updateInspectorRigidBodyFields` が
+      // 実際の材質へ戻す(嘘の表示を残さない)。
+      reportError("材質は、とめている間だけ変えられます(▶ を押す前に)。");
+    }
   });
 
   // Position の直接編集(**残タスク完遂の縦串①増分**)。Gizmo と同じく
@@ -2680,9 +2791,14 @@ function wireInspectorEditFields(index: number): void {
   const typeSelect = document.getElementById(
     "inspector-body-type",
   ) as HTMLSelectElement | null;
-  typeSelect?.addEventListener("change", () =>
-    handlers.setBodyType(index, typeSelect.value),
-  );
+  typeSelect?.addEventListener("change", () => {
+    // **選んだ値をそのまま出しておく**。動き方の変更は次の step の頭で効く
+    // ので、止めているあいだ world はまだ前の値を返す——毎フレームの追いつき
+    // がその古い値を書き戻し、Static を選んだ直後に欄が Dynamic へ戻って
+    // 見えた。「効いていない」と読まれて当然だった(利用者役④の観察)。
+    pendingBodyType = { index, kind: typeSelect.value };
+    handlers.setBodyType(index, typeSelect.value);
+  });
   const groupInput = document.getElementById(
     "inspector-collision-group",
   ) as HTMLInputElement | null;
@@ -2799,7 +2915,7 @@ function renderInspectorExtraComponents(
       })
       .join("");
     sections.push(
-      `<div class="inspector-component" data-stacked><h3>Joint</h3>${rows}</div>`,
+      `<div class="inspector-component" data-stacked><h3>つなぎ目 (Joint)</h3>${rows}</div>`,
     );
   }
 
@@ -2814,7 +2930,7 @@ function renderInspectorExtraComponents(
       );
     }
     sections.push(
-      `<div class="inspector-component"><h3>Circuit</h3>${rows.join("")}</div>`,
+      `<div class="inspector-component"><h3>回路 (Circuit)</h3>${rows.join("")}</div>`,
     );
   }
 
@@ -2868,14 +2984,14 @@ function renderInspectorExtraComponents(
       : "");
   if (forThisBody.length > 0) {
     sections.push(
-      `<div class="inspector-component" data-stacked><h3>Coupling</h3>` +
+      `<div class="inspector-component" data-stacked><h3>はたらきかけ (Coupling)</h3>` +
         forThisBody.map(couplingRow).join("") +
         `</div>`,
     );
   }
   if (sceneWide.length > 0) {
     sections.push(
-      `<div class="inspector-component" data-stacked><h3>Coupling (シーン全体)</h3>` +
+      `<div class="inspector-component" data-stacked><h3>はたらきかけ — 場面ぜんぶ (Coupling)</h3>` +
         sceneWide.map(couplingRow).join("") +
         `</div>`,
     );
@@ -2887,12 +3003,12 @@ function renderInspectorExtraComponents(
     const rows: string[] = [];
     for (let k = 0; k < probeCount; k += 1) {
       rows.push(
-        `<div class="inspector-field"><span>${escape(world.read_component("imported_probe_label_at", String(k)))}</span>` +
+        `<div class="inspector-field"><span>${escape(friendlyProbeLabel(world.read_component("imported_probe_label_at", String(k))))}</span>` +
           `<span>${readNumber(world, "imported_probe_value_at", String(k)).toFixed(4)}</span></div>`,
       );
     }
     sections.push(
-      `<div class="inspector-component"><h3>Probe</h3>${rows.join("")}</div>`,
+      `<div class="inspector-component"><h3>記録している値 (Probe)</h3>${rows.join("")}</div>`,
     );
   }
 
@@ -2970,7 +3086,7 @@ function renderInspectorExtraComponents(
   // 挙動は`initialApplyFieldValue`が踏襲する。
   sections.push(`
     <div class="inspector-component" data-stacked>
-      <h3>Add Joint</h3>
+      <h3>つなぎ目を足す (Add Joint)</h3>
       <div class="inspector-field">
         <span>種別</span>
         <select id="add-joint-kind">
@@ -3016,7 +3132,7 @@ function renderInspectorExtraComponents(
   // `<div id="add-coupling-fields">`をJointと同じ設計で描き直す。
   sections.push(`
     <div class="inspector-component" data-stacked>
-      <h3>Add Coupling</h3>
+      <h3>はたらきかけを足す (Add Coupling)</h3>
       <div class="inspector-field">
         <span>種別</span>
         <select id="add-coupling-kind">
@@ -3074,7 +3190,25 @@ function updateInspectorRigidBodyFields(world: WasmWorld, index: number): void {
       massInput.value = mass > 0 ? mass.toPrecision(6) : "";
     }
   }
-  setIfIdle("inspector-body-type", world.read_component("body_type_at", String(index)));
+  {
+    const actual = world.read_component("body_type_at", String(index));
+    if (pendingBodyType && pendingBodyType.index === index) {
+      if (pendingBodyType.kind === actual) pendingBodyType = null;
+    } else if (pendingBodyType) {
+      // 別の物を選んだら、頼んだ値は忘れる。
+      pendingBodyType = null;
+    }
+    setIfIdle(
+      "inspector-body-type",
+      pendingBodyType ? pendingBodyType.kind : actual,
+    );
+  }
+  // 材質は選び直せる欄になったので、ここでも**実際に付いている材質**へ
+  // 揃え直す。走行中に変えようとして弾かれた選択が残らないようにするため。
+  setIfIdle(
+    "inspector-material",
+    world.read_component("body_material_label_at", String(index)),
+  );
   setIfIdle(
     "inspector-collision-group",
     world.read_component("body_collision_group_at", String(index)),
@@ -3262,6 +3396,7 @@ function setUpProjectDrawer(
   sceneGalleryRef: SceneGalleryRef,
   circuitElementsRef: CircuitElementsRef,
   validationBaseJsonRef: ValidationBaseJsonRef,
+  confirmDiscardRef: ConfirmDiscardRef,
 ) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
@@ -3390,6 +3525,10 @@ function setUpProjectDrawer(
       }
       card.append(title, description, tags);
       card.addEventListener("click", () => {
+        // **課題B**: Project ドロワーの Scenes タブからの読み込みも、
+        // ⌘K・「新規シーン」と同じく今の作りかけを差し替えてしまう
+        // (`ConfirmDiscardRef`のdoc参照)。
+        if (confirmDiscardRef.current && !confirmDiscardRef.current()) return;
         const json = sceneGalleryFileContent(entry.file);
         if (!json || !sceneGalleryRef.current) return;
         sceneGalleryRef.current(json);
@@ -3478,8 +3617,11 @@ function setUpProjectDrawer(
     body.appendChild(list);
 
     const importNote = document.createElement("p");
+    // 内部の型名(`sim_world::Scenario`)や「ヘッドレスランナー」がそのまま
+    // 出ていて、何を言っているのか分からないと書かれた(利用者役④の観察)。
     importNote.textContent =
-      "シーンJSON(sim_world::Scenarioスキーマ、ヘッドレスランナー・D1–D43のテストと同じ形式)を読み込み、現在のシーンへボディを追加する。";
+      "場面のファイル(.json)を読み込んで、いまの場面へ物を足します。" +
+      "書き出したファイルや、用意された実験のファイルが使えます。";
     body.appendChild(importNote);
 
     const importInput = document.createElement("input");
@@ -3871,13 +4013,16 @@ function setUpProjectDrawer(
     const table = document.createElement("table");
     table.className = "materials-table";
     const header = table.insertRow();
+    // 画面の他が日本語なのにここだけ英語で、`restitution` が読めないと
+    // 書かれた(利用者役④の観察)。日本語を主にして、元の語は括弧に残す
+    // ——教科書や他のソフトで探すときの手掛かりになるので消さない。
     for (const label of [
-      "Material",
-      "density [kg/m^3]",
-      "friction",
-      "restitution",
-      "specific heat [J/(kg・K)]",
-      "conductivity [W/(m・K)]",
+      "材質 (Material)",
+      "密度 [kg/m³]",
+      "摩擦 (friction)",
+      "反発 (restitution)",
+      "比熱 [J/(kg・K)]",
+      "熱伝導率 [W/(m・K)]",
     ]) {
       const th = document.createElement("th");
       th.textContent = label;
@@ -4385,28 +4530,310 @@ function setUpProjectDrawer(
 //   履歴長が異なり得る(プローブの登録タイミングが違う)ため、**最長の系列に
 //   合わせて短い系列の末尾を空欄で埋める**。Probeのリングバッファは絶対時刻を
 //   持たないため、時刻列ではなく**サンプル番号**を出す(縮約、下記doc参照)。
-type ProbeSeries = { label: string; color: string; history: Float64Array };
+type ProbeSeries = {
+  label: string;
+  color: string;
+  history: Float64Array;
+  /** 単位([m] / [m/s] / [℃] …)。目盛りと凡例に添える。無ければ付けない。 */
+  unit?: string;
+  /**
+   * **課題B**: 右の「いまの数値」パネルと同じ桁数(`Readout.digits`)。
+   * 分かっているときだけ、凡例・目盛りの数値を`readoutNumber`で整形する
+   * (`type Drawn`のdoc、`legendNumber`参照)。無ければ従来どおり
+   * `formatTickValue`(シーンギャラリーの生プローブなど、桁数の由来が
+   * 無い系列向け)。
+   */
+  digits?: number;
+};
 
 /// 符号を保つ対数変換(symlog)。`type ProbeSeries`のdoc参照。
+/**
+ * 目盛りの数値。桁数を値の大きさで決める——`0.24000 m` のように意味の無い桁が
+ * 並ぶと、かえって読みにくい。
+ */
+function formatTickValue(value: number): string {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1000) return value.toPrecision(4);
+  if (magnitude >= 100) return value.toFixed(0);
+  if (magnitude >= 1) return value.toFixed(2);
+  if (magnitude >= 0.001) return value.toFixed(3);
+  return value.toExponential(1);
+}
+
+/**
+ * **課題B**: グラフの目盛り・凡例・指した時刻の値を、右の「いまの数値」
+ * パネルと同じ書式にそろえる。
+ *
+ * 直前まで、パネルは`readoutNumber`(桁が離れた値だけ指数で書き、それ以外は
+ * 固定小数——`readoutNumber`のdoc参照)を使う一方、グラフ側は独自の
+ * `formatTickValue`をそのまま出していた。結果、「熱が棒を伝わる」で木を
+ * 選ぶと同じ量なのにパネルは`0.0 ℃`、凡例は`9.3e-67 ℃`のような生の指数
+ * ——読み手には「食い違っている」としか見えない(実測で再現)。
+ *
+ * `series.digits`(=`Readout.digits`)が分かっている系列は`readoutNumber`
+ * を直接呼び、パネルと文字どおり同じ書式にする。分かっていない系列
+ * (シーンギャラリーの生プローブなど、桁数の由来が無いもの)は、既存の
+ * `formatTickValue`(値の大きさで桁数を決める、汎用の目盛り整形)のまま
+ * 触らない——ここで新しい書式をもう一つ作ると、三つ目の食い違いが生まれる。
+ */
+function legendNumber(series: ProbeSeries, value: number): string {
+  return series.digits !== undefined
+    ? readoutNumber(value, series.digits)
+    : formatTickValue(value);
+}
+
 function signedLog(v: number): number {
   return Math.sign(v) * Math.log10(1 + Math.abs(v));
 }
 
-/// 表示中の全系列をCSV文字列にする。1列目はサンプル番号
-/// (`sim_math::RingBuffer`は絶対時刻を保持しないため、時刻列は出せない——
-/// 出すなら`World`側にサンプル時刻も積む変更が要るので後続増分の対象)。
-/// 系列ごとに履歴長が違い得るので最長に合わせ、短い系列は空欄で埋める。
-function probeSeriesToCsv(series: ProbeSeries[]): string {
+/// `signedLog`の逆。対数表示のときに**目盛りへ実測値を書く**ために使う
+/// (変換後の値を書くと読み手が実測値を誤読する。`type ProbeSeries`のdoc参照)。
+function signedExp(v: number): number {
+  return Math.sign(v) * (Math.pow(10, Math.abs(v)) - 1);
+}
+
+/**
+ * **軸ぜんぶを同じ単位で書くための整形**。
+ *
+ * 目盛りごとに単位を選ぶと、左端が「8.77時間」で右端が「149.37日」
+ * のように**1本の軸に別々の単位**が並ぶ(利用者役③の観察)。軸の単位はいちばん
+ * 大きい値で決めて、全部の目盛りをその単位で書く。
+ */
+function timeAxisFormatter(
+  maxSeconds: number,
+  stepSeconds: number,
+): (seconds: number) => string {
+  const t = Math.abs(maxSeconds);
+  // 単位の切れ目は `formatDuration`(右パネルの「経過した時間」)と同じにする。
+  // 別々に決めていたときは、同じ画面に「373.00 ピコ秒」と「0.4ns」が並んだ
+  // (利用者役③の観察)。人の尺度で進むシーンが秒より下へ落ちない規則も同じ。
+  const human = stepSeconds >= 1e-4;
+  const pick: [number, string] =
+    t >= 3.155e7
+      ? [3.155e7, "年"]
+      : t >= 86400
+        ? [86400, "日"]
+        : t >= 3600
+          ? [3600, "時間"]
+          : t >= 60
+            ? [60, "分"]
+            : human || t >= 1
+              ? [1, "秒"]
+              : t >= 1e-3
+                ? [1e-3, "ミリ秒"]
+                : t >= 1e-6
+                  ? [1e-6, "マイクロ秒"]
+                  : t >= 1e-9
+                    ? [1e-9, "ナノ秒"]
+                    : [1e-12, "ピコ秒"];
+  const [scale, unit] = pick;
+  return (seconds: number) => `${(seconds / scale).toFixed(2)} ${unit}`;
+}
+
+/**
+ * **観測点の生の名前を、人の言葉にする**。
+ *
+ * カタログが名前を与えていない系列は Rust 側の生ラベル(`AstroPosX[0]`、
+ * `BodySpeed(chassis)`)がそのまま凡例に出ていた。やさしい日本語で作った画面に
+ * 突然プログラムの変数名が現れ、「自分向けじゃない、壊れてるのかな」と読まれた
+ * (利用者役①の一番の不満)。**括弧の中身は残す**——どの物の値なのかは
+ * その人にとっても手掛かりになるため。
+ */
+function friendlyProbeLabel(raw: string, aliveBodyNames?: ReadonlySet<string>): string {
+  const NAMES: [RegExp, string][] = [
+    [/^BodyPosY/, "高さ"],
+    [/^BodyPosX/, "横の位置"],
+    [/^BodySpeed/, "速さ"],
+    [/^AstroPosX/, "横の位置"],
+    [/^AstroPosY/, "縦の位置"],
+    [/^AstroVelX/, "横の速さ"],
+    [/^AstroVelY/, "縦の速さ"],
+    [/^SoftBodyPosX/, "横の位置"],
+    [/^SoftBodyPosY/, "高さ"],
+    [/^SphParticlePosY/, "水の粒の高さ"],
+    [/^SphParticleDensity/, "水の粒の密度"],
+    [/^NodeTemp/, "温度"],
+    [/^RodTemp/, "棒の温度"],
+    [/^CircuitCurrent/, "電流"],
+    // Rust 側が出す生の名前は `CircuitV[4]`(`CircuitNodeVoltage` ではない)。
+    // 取りこぼしていたので、電気の実験の凡例だけがコード風の名前で並んでいた
+    // (利用者役①の観察)。
+    [/^CircuitNodeVoltage/, "電圧"],
+    [/^CircuitV\b/, "つなぎ目の電圧"],
+    [/^GridFluidMeanV/, "流れの速さ(平均)"],
+    [/^GridFluidRmsV/, "流れの速さ(実効値)"],
+    [/^QuantumNorm/, "波の総量"],
+    [/^QuantumMeanX/, "波の位置"],
+    [/^QuantumEnergy/, "波のエネルギー"],
+    [/^QuantumTransmission/, "通り抜けた割合"],
+    [/^GasTemperature/, "気体の温度"],
+    [/^GasPressure/, "気体の圧力"],
+    [/^IsingMagnetization/, "磁化"],
+    [/^IsingEnergyPerSpin/, "1スピンあたりのエネルギー"],
+    [/^BrownianMsd/, "広がり(平均二乗変位)"],
+    [/^FdtdEz/, "電場 Ez"],
+    [/^FdtdEnergy/, "電磁場のエネルギー"],
+    [/^LedgerKinetic/, "運動エネルギー"],
+    [/^StateHashDigest/, "状態の指紋"],
+  ];
+  for (const [pattern, name] of NAMES) {
+    if (!pattern.test(raw)) continue;
+    // `BodySpeed(chassis)` の `chassis`、`AstroPosX[0]` の `0` は残す。
+    const detail = raw.match(/[([]([^)\]]+)[)\]]/);
+    if (!detail) return name;
+    // **消した物の観測点が、実在するかのように残る不具合(利用者役の報告)**。
+    // 物理コア側にプローブを消す手段が無く(`imported_probe_*`は追加専用)、
+    // グラフに描いた過去データを黙って捨てるのも乱暴なので、記録は残した
+    // まま「もう無い物」だと分かるようにする——`aliveBodyNames`(呼び出し側
+    // が「いま生きているボディの名前」で渡す、`probeTargetBodyName`のdoc
+    // 参照)に無い名前なら注記を足す。呼び出し側が渡さない(=判定不要な)
+    // ときは今まで通り何も足さない。
+    const targetName = probeTargetBodyName(raw);
+    const gone =
+      aliveBodyNames !== undefined &&
+      targetName !== null &&
+      !aliveBodyNames.has(targetName);
+    return gone ? `${name}(${detail[1]}・消えた物)` : `${name}(${detail[1]})`;
+  }
+  return raw;
+}
+
+/**
+ * **観測点(Probe)が指しているボディの名前**(`BodyPosY(Sphere_1)` →
+ * `Sphere_1`)。`add_body_probes`が作る2種(高さ・速さ)だけがボディを指す
+ * ——天体の添字(`AstroPosX[0]`)や回路の節番号はボディ名ではないので対象外
+ * (「消えたか」を判定できる相手がそもそも無い)。
+ */
+function probeTargetBodyName(raw: string): string | null {
+  const match = raw.match(/^Body(?:PosY|PosX|Speed)\(([^)]+)\)$/);
+  return match ? match[1] : null;
+}
+
+/** いま生きている(削除されていない)ボディの名前の集合。 */
+function aliveBodyNamesOf(world: WasmWorld): Set<string> {
+  const names = new Set<string>();
+  const count = readNumber(world, "body_count");
+  for (let i = 0; i < count; i += 1) {
+    if (world.read_component("body_is_removed_at", String(i)) === "true") continue;
+    names.add(world.read_component("body_label_at", String(i)));
+  }
+  return names;
+}
+
+/**
+ * 生の観測点の名前から**単位**を決める。カタログが単位を与えていない系列は
+ * 凡例に数字だけが並び、隣の系列には単位が付いている、という不揃いになって
+ * いた(利用者役③の観察: 「高さ(chassis): max=0.750 min=0.531」だけ単位なし)。
+ */
+function unitForProbeLabel(raw: string): string | undefined {
+  const UNITS: [RegExp, string][] = [
+    [/^BodyPos[XY]/, "m"],
+    [/^BodySpeed/, "m/s"],
+    [/^AstroPos[XY]/, "m"],
+    [/^AstroVel[XY]/, "m/s"],
+    [/^SoftBodyPos[XY]/, "m"],
+    [/^SphParticlePosY/, "m"],
+    [/^SphParticleDensity/, "kg/m³"],
+    [/^NodeTemp/, "K"],
+    [/^RodTemp/, "℃"],
+    [/^CircuitCurrent/, "A"],
+    [/^CircuitNodeVoltage/, "V"],
+    [/^CircuitV\b/, "V"],
+    [/^GridFluid(Mean|Rms)V/, "m/s"],
+    [/^GasTemperature/, "K"],
+    [/^GasPressure/, "Pa"],
+    [/^BrownianMsd/, "m²"],
+    [/^LedgerKinetic/, "J"],
+  ];
+  for (const [pattern, unit] of UNITS) if (pattern.test(raw)) return unit;
+  return undefined;
+}
+
+
+/**
+ * 時刻列の桁数を決める。
+ *
+ * **実測(課題①)**: `d34-solar-system`を粒度2で4秒走らせて書き出すと、
+ * `dt=31554.896928761154 秒`・単位は「日」(`pickDurationUnit`が画面の
+ * 「187.36 日」と同じ理由で選ぶ)。screen並みの2桁固定(`toFixed(2)`)だと
+ * 1歩ぶんの差(31554.9 秒 ≒ 0.365日)は`0.37`のように**2桁で十分見分けが付く
+ * ので、そのまま2桁でよい。だが逆に、歩幅がその単位に対してもっと細かい場面
+ * (例: 1歩が単位の1/10000)では2桁固定だと同じ値の行が並んでしまう
+ * ——グラフは1ステップごとの細かさを持っているのに、CSVがそれを捨てて
+ * しまう(指示にある「丸めすぎて同じ値の行が並ぶ」)。そこで**1歩の差が
+ * その単位で見分けられる桁数**を計算し、画面と同じ2桁を下限に、必要なら
+ * それより増やす。上限を設けるのは、桁が離れすぎたシーン(例: 1歩が
+ * ピコ秒で単位が「年」になるような極端な組み合わせ)で無意味に長い数字が
+ * 並ぶのを避けるため——そのようなシーンは`pickDurationUnit`が`human`判定で
+ * 秒未満の単位へ落ちるので実際にはほぼ起きないが、保険として残す。
+ */
+function csvTimeDigits(dt: number, factor: number): number {
+  const stepInUnit = Math.abs(dt) / factor;
+  if (!(stepInUnit > 0)) return 2;
+  // 1歩の差が小数点以下何桁目に現れるか(例: 0.365 → 1桁目)+ 1桁の余裕。
+  const needed = Math.ceil(-Math.log10(stepInUnit)) + 1;
+  return Math.min(12, Math.max(2, needed));
+}
+
+/// 表示中の全系列をCSV文字列にする。1列目は**経過時間**——画面の「いまの数値
+/// / 経過した時間」と同じ単位(`pickDurationUnit`、`formatDuration`のdoc参照)
+/// で書く。
+///
+/// **課題①の実測**: 直前までは常に生の秒(`31554896.93 秒`級の16桁)で、
+/// 画面が「187.36 日」と言っているのと突き合わせられなかった(利用者役③の
+/// 報告)。位置の列がすでに画面と同じ「億 km」で書いてある(下の見出し参照)
+/// のに、時刻列だけ単位がそろっていなかった。
+///
+/// リングバッファ自体は絶対時刻を持たないので、`currentTime`(最後のサンプル
+/// の時刻)と`dt`から逆算する——グラフの横軸と同じ数え方なので、書き出した
+/// CSVと画面の折れ線は同じ時刻を指す。サンプル番号のままでは「何秒の値か」を
+/// 表計算側で計算し直す必要があり、実際にそこで詰まった。
+/// 系列ごとに履歴長が違い得るので**最新のサンプルで右端を揃え**、足りない
+/// 古い側を空欄で埋める(最後のサンプルはどの系列でも「いま」なので、
+/// 右詰めだけが時刻と辻褄が合う)。
+function probeSeriesToCsv(
+  series: ProbeSeries[],
+  dt: number,
+  currentTime: number,
+): string {
   const rows = series.reduce((m, s) => Math.max(m, s.history.length), 0);
   const escape = (s: string) =>
     /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  // 単位は画面の「経過した時間」と同じ選び方(`pickDurationUnit`)。
+  // `d1-free-fall`のように人の尺度で進む場面では、これは常に「秒」を選ぶ
+  // ——実測で確認済み(元々生の秒だった場面には、そのまま`time_s`の見出しで
+  // 秒が並ぶだけで、余計な変換は起きない)。
+  const { factor: timeFactor, unit: timeUnit } = pickDurationUnit(
+    currentTime,
+    dt,
+  );
+  const timeDigits = csvTimeDigits(dt, timeFactor);
+  // **見出しの書き方が「秒」のときだけ`time_s`になるのは意図的**——他の列と
+  // 同じ`time [秒]`にすると、既存の書き出し済みCSV・それを前提にした受け入れ
+  // テスト(`smoke.spec.ts`の`"time_s,BodyPosY,BodySpeed"`等)が指す見出し名が
+  // 変わってしまう。単位が「秒」のときは元々「変換の要らない場面」なので
+  // (直前のコメント参照)、見出しも変えずに済ませるのが「余計なお世話に
+  // しない」を見出しの側でも徹底することになる——「秒」以外はこれまで
+  // 単位表記が無かった(生の秒しか書いていなかった)ので、他の列
+  // (`[℃]`等)と同じ角括弧書きを素直に採用する。
+  const timeHeader = timeUnit === "秒" ? "time_s" : `time [${timeUnit}]`;
+  // 見出しには**単位**も書く。画面には m / ℃ / V と出ているのに書き出した
+  // ファイルには数字しか無く、後から見返すと「これ ℃ だっけ K だっけ」に
+  // なると書かれた(利用者役③の観察)。
   const lines = [
-    ["sample", ...series.map((s) => s.label)].map(escape).join(","),
+    [
+      timeHeader,
+      ...series.map((s) => (s.unit ? `${s.label} [${s.unit}]` : s.label)),
+    ]
+      .map(escape)
+      .join(","),
   ];
   for (let i = 0; i < rows; i++) {
-    const cells = [String(i)];
+    const time = currentTime - (rows - 1 - i) * dt;
+    const cells = [(time / timeFactor).toFixed(timeDigits)];
     for (const s of series) {
-      cells.push(i < s.history.length ? String(s.history[i]) : "");
+      const at = i - (rows - s.history.length);
+      cells.push(at >= 0 && at < s.history.length ? String(s.history[at]) : "");
     }
     lines.push(cells.join(","));
   }
@@ -4440,11 +4867,31 @@ function setUpProbeGraph(): (
   // 渡してくる最新の配列をここで覚えておく(描画とエクスポートで同じデータを
   // 使うため、別経路でクエリし直して食い違うのを避ける)。
   let latest: ProbeSeries[] = [];
+  let latestDt = 0;
+  let latestTime = 0;
+  /**
+   * グラフの上でいま指している横位置 [px](外へ出たら null)。
+   *
+   * **なぜ要ったか**: 巻き戻しは 1 秒ごとの記録にしか飛べない(スナップ
+   * ショットの予算がそう決まっている)。一方でグラフと CSV は 1 step ごとの
+   * 細かさで値を持っている。「0.3 秒後の高さは?」に画面上で答えられないのが
+   * いちばんもどかしい、と書かれた(利用者役③の一番の不満)ので、**すでに
+   * 細かく持っている側**——グラフ——を指して読めるようにする。物理には触らず、
+   * 記録済みの値を読むだけ。
+   */
+  let hoverX: number | null = null;
+  canvas.addEventListener("mousemove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    hoverX = event.clientX - rect.left;
+  });
+  canvas.addEventListener("mouseleave", () => {
+    hoverX = null;
+  });
   csvButton.addEventListener("click", () => {
     if (latest.length === 0) return;
     // 押しても何も起きないボタンは「壊れている」と読まれるので、下の
     // `csvButton.disabled` で先に押せなくしてある。ここは念のための保険。
-    const blob = new Blob([probeSeriesToCsv(latest)], {
+    const blob = new Blob([probeSeriesToCsv(latest, latestDt, latestTime)], {
       type: "text/csv;charset=utf-8",
     });
     const url = URL.createObjectURL(blob);
@@ -4457,6 +4904,8 @@ function setUpProbeGraph(): (
 
   return (series: ProbeSeries[], dt: number, currentTime: number) => {
     latest = series;
+    latestDt = dt;
+    latestTime = currentTime;
     // **空状態**(増分「UI 品質の底上げ」)。描ける系列(サンプル 2 点以上)が
     // 1 本も無いあいだは、黒い矩形ではなく「何をすれば線が出るか」を出す。
     const drawable = series.filter((s) => s.history.length >= 2);
@@ -4478,37 +4927,134 @@ function setUpProbeGraph(): (
     ctx.clearRect(0, 0, w, h);
     ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
-    // **目盛り線**(増分「UI 品質の底上げ」)。系列ごとに独立して正規化する
-    // 設計(下記)なので共通の値軸は引けないが、**高さの 1/4 ごとの水平線**が
-    // あるだけで「どのくらい動いたか」「振動しているのか単調なのか」が
-    // 目で追えるようになる。線は地に沈む明度に抑え、データを隠さない。
+    // 下端は**時刻の目盛り帯**に譲り、折れ線はその上だけに描く。以前は
+    // キャンバス全面に描いていたので、横軸の数字を置く場所が無く「グラフの
+    // どこが何秒か」が読めなかった。
+    const AXIS_BAND = 15;
+    const plotH = Math.max(20, h - AXIS_BAND);
+
+    // 系列は**右端(=いま)で揃える**。長さが違っても最後のサンプルはどの系列
+    // でも現在時刻なので、右詰めだけが横軸の時刻と辻褄が合う(左詰めや
+    // 引き伸ばしでは、短い系列が実際とは違う時刻に描かれてしまう)。
+    const longest = series.reduce((m, s) => Math.max(m, s.history.length), 0);
+    const haveTime = longest >= 2 && dt > 0;
+    const oldestTime = currentTime - (longest - 1) * dt;
+    const rangeTime = timeAxisFormatter(
+      Math.max(Math.abs(currentTime), Math.abs(oldestTime)),
+      dt,
+    );
+    timeRangeLabel.textContent = haveTime
+      ? `t = ${rangeTime(oldestTime)} 〜 ${rangeTime(currentTime)}`
+      : "";
+
+    // **目盛り線**。系列ごとに独立して正規化する設計(下記)なので共通の値軸は
+    // 引けないが、1/4 ごとの格子があるだけで「どのくらい動いたか」「振動して
+    // いるのか単調なのか」が目で追える。線は地に沈む明度に抑え、データを隠さない。
     ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let i = 1; i < 4; i++) {
-      const y = Math.round((h * i) / 4) + 0.5;
+      const y = Math.round((plotH * i) / 4) + 0.5;
       ctx.moveTo(0, y);
       ctx.lineTo(w, y);
+      const x = Math.round((w * i) / 4) + 0.5;
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, plotH);
     }
     ctx.stroke();
 
-    // QA不具合9: グラフのどこが何秒なのか画面から分からず、当時のリングバッファの
-    // 打ち切りと相まって「第1バウンドを数回あとの極大と取り違える」ような読み違いが
-    // 実際に起きた。最長の系列を基準に、画面の左端(古い側)〜右端(新しい側、
-    // = 現在時刻)の時刻を表示する——`ProbeSeries`自体は絶対時刻を持たない
-    // (`probeSeriesToCsv`のdoc参照)ので、`currentTime`と`dt`から逆算する。
-    // **打ち切り自体は解消済み**(`sim_world::Probe`のdoc参照: 履歴は可変長に
-    // なり、古いサンプルが無言で捨てられることは無くなった)なので、この
-    // 逆算は常に「本当の開始時刻」を指す。
-    const longest = series.reduce((m, s) => Math.max(m, s.history.length), 0);
-    if (longest >= 2 && dt > 0) {
-      const oldestTime = currentTime - (longest - 1) * dt;
-      timeRangeLabel.textContent = `t = ${oldestTime.toFixed(2)}s 〜 ${currentTime.toFixed(2)}s`;
-    } else {
-      timeRangeLabel.textContent = "";
+    // 文字は折れ線や格子に重なるので、**濃い縁取りを先に引いてから**塗る
+    // (素の塗りだけだと、線と同系色の場所で文字が読めなかった)。
+    const outlined = (
+      text: string,
+      x: number,
+      y: number,
+      color: string,
+      align: CanvasTextAlign = "left",
+    ) => {
+      ctx.textAlign = align;
+      ctx.lineJoin = "round";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = color;
+      ctx.fillText(text, x, y);
+      ctx.textAlign = "left";
+    };
+
+    // **横軸の時刻**。QA不具合9(「第1バウンドを数回あとの極大と取り違える」)
+    // は範囲の文字表示で一度潰したが、線の途中が何秒なのかは依然読めなかった。
+    // 左端(古い)・まん中・右端(いま)に実際の時刻を置く。
+    if (haveTime) {
+      const span = currentTime - oldestTime;
+      // 目盛りは**軸ぜんぶで同じ単位**にする(`timeAxisFormatter` のdoc参照)。
+      const axisTime = timeAxisFormatter(
+        Math.max(Math.abs(currentTime), Math.abs(oldestTime)),
+        dt,
+      );
+      outlined(axisTime(oldestTime), 3, h - 3, "#8b929c");
+      outlined(axisTime(oldestTime + span / 2), w / 2, h - 3, "#8b929c", "center");
+      outlined(axisTime(currentTime), w - 3, h - 3, "#8b929c", "right");
     }
 
-    let legendY = 12;
+    // **線を全部描いてから、文字を描く**。系列ごとに「線 → その凡例」の順で
+    // 描いていたときは、あとの系列の線が前の系列の凡例の上に乗り、左端の
+    // 文字が読めなくなっていた(「1段目の速さ」が「段目の速さ」に見えた
+    // ——利用者役①の観察)。文字は最後にまとめて上へ置く。
+    type Drawn = {
+      series: ProbeSeries;
+      min: number;
+      max: number;
+      plotMin: number;
+      plotMax: number;
+      /** ずっと同じ値だった系列を引く高さ(変化する系列は null)。 */
+      flatY: number | null;
+    };
+    /**
+     * 値を縦の位置へ。
+     *
+     * **ずっと同じ値の系列は、まん中あたりに引く**。幅ゼロの範囲を 1.0 で
+     * 割っていたので、一定値の線は必ず**下端**——時刻の目盛り帯との境目に
+     * 重なって描かれ、線が 1 本まるごと見えなかった(利用者役③の観察:
+     * 「電圧の線がどこにあるのか全く見えない」)。一定の系列が複数あるときは
+     * まん中を挟んで少しずつずらす(同じ高さに重ねると、結局 1 本ぶんしか
+     * 見えない)。高さに意味は無いので、凡例にそう書いてある。
+     */
+    const plotY = (
+      value: number,
+      plotMin: number,
+      plotMax: number,
+      flatY: number | null,
+    ) => {
+      if (flatY !== null) return flatY;
+      const span = plotMax - plotMin;
+      if (!(span > 0)) return plotH / 2;
+      return plotH - ((value - plotMin) / span) * plotH;
+    };
+    // **「同じ値」かどうかは、桁に対して見る**。差の絶対値で見ていたので、
+    // インクの広がり(1.5e-22 → 1.9e-17)のように**桁が 5 つも動いている**系列
+    // まで「ずっと同じ値」と言い、まん中の一直線に潰していた(利用者役③の
+    // 観察)。値の大きさに対する比で判定する。
+    const flatSpan = (s: ProbeSeries) => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const v of s.history) {
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      return { lo, hi };
+    };
+    const isFlat = (s: ProbeSeries) => {
+      if (s.history.length < 2) return false;
+      const { lo, hi } = flatSpan(s);
+      const scale = Math.max(Math.abs(lo), Math.abs(hi));
+      return hi - lo <= Math.max(scale * 1e-9, Number.MIN_VALUE);
+    };
+    const flatCount = series.filter(isFlat).length;
+    const flatGap = Math.min(16, plotH / (flatCount + 1));
+    let flatSeen = 0;
+    const drawn: Drawn[] = [];
+
     for (const s of series) {
       if (s.history.length < 2) continue;
 
@@ -4524,30 +5070,190 @@ function setUpProbeGraph(): (
       const plot = (v: number) => (useLog ? signedLog(v) : v);
       const plotMin = Math.min(plot(min), plot(max));
       const plotMax = Math.max(plot(min), plot(max));
-      const range = plotMax - plotMin > 1e-12 ? plotMax - plotMin : 1.0;
+      const flatY = isFlat(s)
+        ? plotH / 2 + (flatSeen++ - (flatCount - 1) / 2) * flatGap
+        : null;
 
+      const offset = longest - s.history.length;
       ctx.strokeStyle = s.color;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
       for (let i = 0; i < s.history.length; i++) {
-        const x = (i / (s.history.length - 1)) * w;
-        const y = h - ((plot(s.history[i]) - plotMin) / range) * h;
+        const x = longest > 1 ? ((offset + i) / (longest - 1)) * w : w;
+        const y = plotY(plot(s.history[i]), plotMin, plotMax, flatY);
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+      drawn.push({ series: s, min, max, plotMin, plotMax, flatY });
+    }
 
-      // 凡例は折れ線の上に重なるので、**濃い縁取りを先に引いてから**塗る
-      // (以前は素の塗りだけで、線と同系色の場所では文字が読めなかった)。
-      const suffix = useLog ? " [log]" : "";
-      const legendText = `${s.label}: max=${max.toFixed(2)} min=${min.toFixed(2)}${suffix}`;
-      ctx.lineJoin = "round";
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(8, 10, 13, 0.85)";
-      ctx.strokeText(legendText, 4, legendY);
-      ctx.fillStyle = s.color;
-      ctx.fillText(legendText, 4, legendY);
+    // **1本だけのときは、縦軸に実際の目盛りを描く**。各系列を自分の範囲へ
+    // 正規化して重ねる作りなので、複数本のときに共通の縦軸は引けない
+    // ——が、1本ならその写像は一対一で、目盛りは正確に引ける。対数表示でも
+    // `signedExp`で戻せば**実測値**を書けるので、ここで軸を消さない。
+    if (drawn.length === 1) {
+      const only = drawn[0];
+      const unit = only.series.unit ? ` ${only.series.unit}` : "";
+      const back = (v: number) => (useLog ? signedExp(v) : v);
+      for (const [ratio, plotted] of [
+        [0, only.plotMax],
+        [0.5, (only.plotMax + only.plotMin) / 2],
+        [1, only.plotMin],
+      ] as [number, number][]) {
+        const y = Math.min(plotH - 2, Math.max(10, ratio * plotH));
+        outlined(`${legendNumber(only.series, back(plotted))}${unit}`, w - 6, y, "#8b929c", "right");
+      }
+    }
+
+    // **凡例がグラフを埋め尽くさないようにする**。
+    //
+    // 1 系列 1 行で max/min まで書いていたので、系列が 6 本ある電気の実験を
+    // 浅い濃さ(グラフ帯が 88 px)で開くと、凡例だけで帯を使い切り、肝心の
+    // 折れ線が読めなかった(利用者役①の観察)。入り切らないときは、名前だけを
+    // 横に流す。数値はグラフを指せば読める(`hoverX` の doc 参照)。
+    const LEGEND_LINE = 13;
+    const compactLegend = (drawn.length + 1) * LEGEND_LINE > plotH * 0.55;
+    /**
+     * **凡例の下に帯を敷く**。縁取りだけでは、値が上下に大きく振れる系列
+     * (振り子・ロープ・積み木)で線が文字の上を何本も横切り、色と線が入り
+     * 乱れて読めなかった(利用者役③の観察)。地の色を薄く敷いてから文字を
+     * 置けば、線が来ても読める。
+     */
+    const legendBackdrop = (lines: number) => {
+      if (lines <= 0) return;
+      ctx.fillStyle = "rgba(8, 10, 13, 0.55)";
+      ctx.fillRect(0, 0, w, Math.min(plotH, 4 + lines * LEGEND_LINE));
+    };
+
+    let legendY = 12;
+    legendBackdrop(
+      compactLegend
+        ? Math.ceil(drawn.length / 3) + (drawn.length > 1 ? 1 : 0)
+        : drawn.length + (drawn.length > 1 ? 1 : 0),
+    );
+    if (compactLegend) {
+      let x = 4;
+      for (const { series: s, flatY } of drawn) {
+        const text = `${s.label}${flatY !== null ? "(一定)" : ""}`;
+        const width = ctx.measureText(text).width + 12;
+        if (x + width > w - 4) {
+          x = 4;
+          legendY += LEGEND_LINE;
+        }
+        outlined(text, x, legendY, s.color);
+        x += width;
+      }
+      legendY += LEGEND_LINE;
+      if (drawn.length > 1) {
+        outlined("各線はそれぞれの範囲に合わせて描いています", 4, legendY, "#6f757e");
+        legendY += LEGEND_LINE;
+      }
+    }
+    // **課題B**: 凡例はcanvasへ直接ラスタライズされ、DOMには残らないので
+    // Playwrightからは文字として読めない(`updateProbeGraph`の呼び出し元に
+    // 同じ注記あり)。右の「いまの数値」パネルと**同じ書式で描けているか**を
+    // 回帰テストで確かめるためだけに、描いた凡例の文字列をテスト専用で
+    // window へ露出する(`__camera`/`__world`と同じ扱い、実行時の見た目には
+    // 影響しない)。
+    const legendLinesForTest: string[] = [];
+    // **課題B・退行テストの作り直し**: 凡例の`max=`(履歴の最大値)と右の
+    // 「いまの数値」パネル(いまこの瞬間の値)は、そもそも別の量——熱が
+    // 伝わっていく途中は一致するとは限らない(パネル側は「これまでの最大値
+    // に比べて無視できる小ささなら0と書く」という凡例には無い丸めも持つ、
+    // `renderContext`のnegligible参照)。以前の回帰テストは両者を直接
+    // 比べていたため、遅い機械では「パネルは0.0に丸まった直後・凡例の
+    // 最大値はまだ丸まっていない微小値のまま」という、製品として正しい
+    // 食い違いをたまたま拾って落ちていた(進行管理役の裏取り、Issue参照)。
+    // 検査すべきは値の一致ではなく**書式の一致**——同じ生の値を
+    // `readoutNumber`に通せば、凡例もパネルも同じ文字列になること。
+    // そのために、描いた凡例の文字列と対になる「生の値・桁数」もテスト専用で
+    // 露出する(`__probeGraphLegend`と同じ扱い、実行時の見た目には影響しない)。
+    const legendRawForTest: { label: string; unit?: string; digits?: number; max: number; min: number }[] = [];
+    for (const { series: s, min, max, flatY } of drawn) {
+      if (compactLegend) break;
+      // 一定値の線はまん中に引く(`plotY` の doc)。高さを値と読み違えない
+      // よう、凡例でそう言っておく。
+      const suffix =
+        (useLog ? " [log]" : "") + (flatY !== null ? "(ずっと同じ値)" : "");
+      const unitSuffix = s.unit ? ` ${s.unit}` : "";
+      // 桁の大きい量(天体の距離は 1.5e11 m)を `toFixed(2)` で出すと
+      // `149597047014.36` のような読めない数字が並ぶ(利用者役②の観察)。
+      // 目盛りと同じ整形にそろえる(`legendNumber` のdoc参照——右の
+      // 「いまの数値」パネルと桁数が分かっている系列は、そこと同じ書式)。
+      const legendText =
+        `${s.label}: max=${legendNumber(s, max)}${unitSuffix} ` +
+        `min=${legendNumber(s, min)}${unitSuffix}${suffix}`;
+      outlined(legendText, 4, legendY, s.color);
       legendY += 13;
+      legendLinesForTest.push(legendText);
+      legendRawForTest.push({ label: s.label, unit: s.unit, digits: s.digits, max, min });
+    }
+    (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend =
+      legendLinesForTest;
+    (
+      window as unknown as {
+        __probeGraphLegendRaw?: typeof legendRawForTest;
+      }
+    ).__probeGraphLegendRaw = legendRawForTest;
+
+    // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを明示する
+    // (黙っていると「こちらの線の方が大きい」と読まれる)。凡例の直下に置くの
+    // は、下端が時刻の目盛り帯になったため。
+    if (!compactLegend && drawn.length > 1) {
+      outlined("各線はそれぞれの範囲に合わせて描いています", 4, legendY, "#6f757e");
+      legendY += 13;
+    }
+
+    // **指した時刻の値を読む**(`hoverX` のdoc参照)。1 step ごとの細かさで
+    // 「その瞬間いくつだったか」を出す——巻き戻しの 1 秒刻みでは届かない
+    // ところを、記録済みの値を読むことで埋める。
+    if (hoverX !== null && longest >= 2 && w > 0) {
+      const ratio = Math.min(1, Math.max(0, hoverX / w));
+      const index = Math.round(ratio * (longest - 1));
+      const x = (index / (longest - 1)) * w;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, plotH);
+      ctx.stroke();
+
+      const time = haveTime ? currentTime - (longest - 1 - index) * dt : null;
+      const lines: string[] = [];
+      // 指した時刻も軸と同じ単位で書く(別々に決めると同じ画面で単位がばらつく)。
+      if (time !== null) {
+        const hoverTime = timeAxisFormatter(
+          Math.max(Math.abs(currentTime), Math.abs(oldestTime)),
+          dt,
+        );
+        lines.push(`t = ${hoverTime(time)}`);
+      }
+      for (const { series: sr, plotMin, plotMax, flatY } of drawn) {
+        const at = index - (longest - sr.history.length);
+        if (at < 0 || at >= sr.history.length) continue;
+        const value = sr.history[at];
+        const y = plotY(
+          useLog ? signedLog(value) : value,
+          plotMin,
+          plotMax,
+          flatY,
+        );
+        ctx.fillStyle = sr.color;
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+        lines.push(
+          `${sr.label}: ${legendNumber(sr, value)}${sr.unit ? ` ${sr.unit}` : ""}`,
+        );
+      }
+      // 読み取り値は**いつも左**、凡例の下へ置く。右端は縦軸の目盛りが使って
+      // いるので、指の位置で左右へ振ると目盛りと重なって両方読めなくなる。
+      let y = legendY + 4;
+      for (const line of lines) {
+        outlined(line, 4, y, "#e6e9ee");
+        y += 13;
+      }
     }
   };
 }
@@ -4578,6 +5284,8 @@ async function setUpSceneView(
   circuitElementsRef: CircuitElementsRef,
   consoleDiagnosticsRef: ConsoleDiagnosticsRef,
   validationBaseJsonRef: ValidationBaseJsonRef,
+  workspaceApiRef: WorkspaceApiRef,
+  confirmDiscardRef: ConfirmDiscardRef,
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -4726,6 +5434,16 @@ async function setUpSceneView(
   // 差し替え前の古いインスタンスを掴んだままになる。
   Object.defineProperty(window, "__world", { get: () => world, configurable: true });
   Object.defineProperty(window, "__scene", { get: () => scene, configurable: true });
+  // `orbit`(=注視点)も同じ理由でテスト専用に露出する。追従カメラが
+  // 「注視点は動くものの近くに保っているのに、球が画面から消える」ような
+  // ケースを見分けるのに、カメラ位置だけでなく注視点も要る。
+  Object.defineProperty(window, "__orbit", { get: () => orbit, configurable: true });
+  // グラフ凡例の書式回帰テスト用: 右の「いまの数値」パネルが実際に使っている
+  // `readoutNumber`そのものをテストへ渡す(複製すると、実装を変えても
+  // テスト側の複製が追随せず検査が形骸化するため。`__probeGraphLegendRaw`
+  // のdoc参照——`workspace.spec.ts`の「グラフの凡例の数値が…」参照)。
+  (window as unknown as { __readoutNumberForTest?: typeof readoutNumber }).__readoutNumberForTest =
+    readoutNumber;
   // テスト専用フック: シーンギャラリーの「ワールドを差し替えて読み込み」
   // (`sceneGalleryRef.current`)を任意のJSON文字列で直接呼べるようにする
   // (`__camera`/`__world`/`__scene`と同じテスト専用露出、実行時の挙動には
@@ -4749,6 +5467,12 @@ async function setUpSceneView(
   // 「ワールド全体を差し替える」処理を再利用するため、新しい差し替えロジックは
   // 増やさない。
   document.getElementById("btn-new-scene")!.addEventListener("click", () => {
+    // **課題B(進行管理役の実測)**: つくるモードで振り子とボールを配置した
+    // 状態から押すと、確認なく即座に空の場面へ差し替わり置いた物が全て
+    // 消えていた。保存していない作りかけがあるときだけ、ワークスペース側
+    // (`current`/`ownSceneName`を握っている)に確認してもらう
+    // (`ConfirmDiscardRef`のdoc参照)。
+    if (confirmDiscardRef.current && !confirmDiscardRef.current()) return;
     sceneGalleryRef.current?.(NEW_SCENE_JSON);
   });
 
@@ -5264,7 +5988,65 @@ async function setUpSceneView(
     renderer.setSize(w, h);
   }
   window.addEventListener("resize", resize);
+  // **器の大きさが変わったら追従する**。`window` の resize だけを見ていた頃は、
+  // 見る深さ(粒度)を変えて Scene View の器が伸び縮みしても、three.js の
+  // キャンバスが前の寸法のまま引き伸ばされて表示が歪んでいた(ウィンドウを
+  // 1px 動かすと直る、という分かりにくい症状だった)。
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => resize()).observe(host);
+  }
   resize();
+
+  // **水面**。`fluids[].static_water` は「水位より下は浮力が働く」という
+  // モデルで、これまで**画面には何も描かれていなかった**——「浮くか沈むか」を
+  // 見に来た人の目には、真っ暗な空間に箱が浮いているだけに映る(実際に
+  // 利用者役の観察で最初に挙がった不満)。水位が設定されているあいだ、
+  // 半透明の面をその高さに置く。物理には一切関与しない、見るための面。
+  const waterPlane = new THREE.Mesh(
+    new THREE.PlaneGeometry(200, 200),
+    // 水面は**水として見える**必要がある。暗い背景に対して色も濃さも近く、
+    // 「箱の下半分が沈んでいることが数字を読まないと分からない」と書かれた
+    // (利用者役①の観察)。明るい水色を、地の色と混ざらない濃さで置く。
+    new THREE.MeshStandardMaterial({
+      color: 0x4fb8ff,
+      transparent: true,
+      opacity: 0.55,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      emissive: 0x123a5c,
+    }),
+  );
+  waterPlane.rotation.x = -Math.PI / 2;
+  waterPlane.visible = false;
+  // 水面にも方眼を塗る(`paintFloorGrid` は下で定義)。塗らないと、画面が
+  // 一面の青になるだけで**どこが水面なのか分からない**——箱が浮いている感じ
+  // がまったく出なかった(利用者役①の観察)。線が入ると、面として奥行きが
+  // 見え、箱がその面のどこに、どれだけ沈んでいるかが読める。
+  paintFloorGrid(waterPlane.material as THREE.MeshStandardMaterial);
+  waterPlane.renderOrder = 1;
+  scene.add(waterPlane);
+  /**
+   * **診断のための重ね描きは、診断しに来た人にだけ見せる**。
+   * 接触点の赤い点・力の矢印・拘束軸は、物理を確かめる人には必要だが、
+   * 現象を眺めに来た人には「この赤い点は何?」という謎でしかない
+   * (利用者役の観察: 積み木の境目の赤い点の意味が分からなかった)。
+   * 見る深さが「しらべる」以上のときだけ描く——設定のチェックはその上での
+   * 個別の切り替えとして残る。
+   */
+  function diagnosticsVisible(): boolean {
+    const grain = document.getElementById("app")?.dataset.grain;
+    return grain === "study" || grain === "build";
+  }
+
+  function updateWaterPlane(currentWorld: WasmWorld) {
+    const level = Number(currentWorld.read_component("water_level", ""));
+    if (Number.isNaN(level)) {
+      waterPlane.visible = false;
+      return;
+    }
+    waterPlane.visible = true;
+    waterPlane.position.y = level;
+  }
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.5));
   const sun = new THREE.DirectionalLight(0xffffff, 1.0);
@@ -5282,8 +6064,12 @@ async function setUpSceneView(
   scene.add(box);
 
   // 床(静的平面、`WasmWorld::new`が`BODY_INDEX_GROUND`として構築するコンクリート面)。
+  // **地面は広く取る**。20m 四方だと、45°に投げた球(40m 先へ落ちる)や
+  // 走る車がすぐ端を越えてしまい、その先が**黒い虚空**になる——落ちたのか
+  // 消えたのか分からない画面になっていた(利用者役の観察)。物理の床は無限
+  // 平面なので、見た目の方を実態へ寄せる。
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(20, 20),
+    new THREE.PlaneGeometry(400, 400),
     new THREE.MeshStandardMaterial({ color: 0x555555 }),
   );
   ground.rotation.x = -Math.PI / 2;
@@ -5300,8 +6086,257 @@ async function setUpSceneView(
   bodyMeshes.set(BODY_INDEX_GROUND, ground);
   bodyMeshes.set(BODY_INDEX_BOX, box);
 
-  const grid = new THREE.GridHelper(20, 20, 0x444444, 0x222222);
-  scene.add(grid);
+  /**
+   * **床に方眼を描く**(1 マス 1 m)。
+   *
+   * 床は一色に塗りつぶされた広がりで、球が落ちているのか止まっているのか、
+   * どれくらいの大きさの世界なのかが画面からは読めなかった(利用者役①の
+   * 観察:「背景が単色にしか見えず、高さもスケール感も伝わらない」)。
+   *
+   * 別のメッシュ(`THREE.GridHelper`)を床と同じ y=0 に重ねる手は使わない
+   * ——奥行きの分解能が「近 = 視距離/1000、遠 = 視距離×1000」と広いため、
+   * 手前では床が勝ち、遠くでは方眼が勝つ、という**距離で見え方が変わる**
+   * 描画になっていた(実測。描く順や深さ比べを切っても直らない)。床その
+   * ものの色として塗れば、重ね合わせの問題は起きようがない。
+   *
+   * 1 マスが 1 画素を切るほど遠く(あるいは分子のように小さな世界)では、
+   * 線が潰れて面が白く濁るので、そのぶん薄める。方眼が見えないだけで、
+   * 妙な模様は出ない。
+   */
+  function paintFloorGrid(material: THREE.MeshStandardMaterial): void {
+    material.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vFloorWorldPos;",
+        )
+        .replace(
+          "#include <begin_vertex>",
+          "#include <begin_vertex>\nvFloorWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;",
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vFloorWorldPos;",
+        )
+        .replace(
+          "#include <dithering_fragment>",
+          [
+            "#include <dithering_fragment>",
+            "{",
+            "  vec2 cell = vFloorWorldPos.xz;",
+            "  vec2 width = fwidth(cell);",
+            "  vec2 toLine = abs(fract(cell - 0.5) - 0.5) / max(width, vec2(1e-6));",
+            "  float line = 1.0 - min(min(toLine.x, toLine.y), 1.0);",
+            "  float perCell = 1.0 / max(max(width.x, width.y), 1e-6);",
+            "  float fade = clamp((perCell - 2.0) / 6.0, 0.0, 1.0);",
+            "  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.78, 0.80, 0.82), line * 0.5 * fade);",
+            "}",
+          ].join("\n"),
+        );
+    };
+  }
+  paintFloorGrid(ground.material as THREE.MeshStandardMaterial);
+
+  /**
+   * `referenceGrid`(下記)の見た目——既存の床(`paintFloorGrid`)と同じ、
+   * 1m間隔の細い線を世界座標に描く。**違いは基準にする2軸**——床は常に
+   * 世界のXZ平面に固定なので `vFloorWorldPos.xz` を直接使えるが、この方眼は
+   * カメラの方を向く1枚の板として毎フレーム動かす(`updateReferenceGrid`
+   * のdoc参照)。板を動かしても模様がついてこないよう、線の位置は板の
+   * ローカルUVではなく**ワールド座標を、毎フレーム渡す2本の直交ベクトル
+   * (uRight/uUp)へ射影した値**で決める——板をカメラの近くへ動かし続けても
+   * 線そのものは世界に固定されたまま、カメラが動けば線が画面を流れる。
+   */
+  function paintReferenceGrid(material: THREE.MeshStandardMaterial): {
+    uRight: { value: THREE.Vector3 };
+    uUp: { value: THREE.Vector3 };
+  } {
+    const uRight = { value: new THREE.Vector3(1, 0, 0) };
+    const uUp = { value: new THREE.Vector3(0, 1, 0) };
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uRight = uRight;
+      shader.uniforms.uUp = uUp;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vRefWorldPos;",
+        )
+        .replace(
+          "#include <begin_vertex>",
+          "#include <begin_vertex>\nvRefWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;",
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          "#include <common>\nvarying vec3 vRefWorldPos;\nuniform vec3 uRight;\nuniform vec3 uUp;",
+        )
+        .replace(
+          "#include <dithering_fragment>",
+          [
+            "#include <dithering_fragment>",
+            "{",
+            "  vec2 cell = vec2(dot(vRefWorldPos, uRight), dot(vRefWorldPos, uUp));",
+            "  vec2 width = fwidth(cell);",
+            "  vec2 toLine = abs(fract(cell - 0.5) - 0.5) / max(width, vec2(1e-6));",
+            "  float line = 1.0 - min(min(toLine.x, toLine.y), 1.0);",
+            "  float perCell = 1.0 / max(max(width.x, width.y), 1e-6);",
+            "  float fade = clamp((perCell - 2.0) / 6.0, 0.0, 1.0);",
+            "  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.78, 0.80, 0.82), line * 0.5 * fade);",
+            "}",
+          ].join("\n"),
+        );
+    };
+    return { uRight, uUp };
+  }
+
+  /**
+   * **基準の無い舞台に出す、控えめな方眼**(課題A)。
+   *
+   * 磁石が銅管を落ちる(D21)・空気をばねにする(D17)・氷が水に変わる(D18b)は、
+   * 床も壁も水面も無いまま対象だけが動く。かんたんモードの追従カメラ
+   * (`updateGuidedFollowCamera`)は対象を画面の同じ場所へ置き続けるので、
+   * 数値は大きく動いているのに絵は1ピクセルも変わらず、「動いているのか
+   * 止まっているのか」がボタンの文字でしか分からなかった(利用者役・進行
+   * 管理役の実測)。
+   *
+   * **`y=0`に固定した平面では直らない**——対象は`y=-9`・`-18`のように
+   * 落ち続け、追従カメラも一緒に下がるので、固定した平面はすぐ画角の外へ
+   * 出てしまう(進行管理役の実測・前任者が詰まった点)。かといって
+   * カメラに完全追従させると(対象と同じ動き方をするので)今度は板と
+   * カメラの相対位置が変わらず、模様が世界座標で決まっていても画面上は
+   * やはり静止して見える——**位置はカメラに追従、模様は世界座標**の
+   * 両方が要る。
+   *
+   * そこで、この方眼は**常にカメラの方を向く1枚の板**として毎フレーム
+   * 置き直す(`updateReferenceGrid`)。板の姿勢(位置・向き)は完全にカメラに
+   * 追従するが、板の上に描く模様は`paintReferenceGrid`のとおりワールド
+   * 座標そのもので決まる——板を動かしても模様はついてこない。結果、
+   * カメラが世界の中を動けば(=対象を追いかけて落ちれば)、板の位置に
+   * 関わらず**画面に映る模様(線)は流れる**。対象と重ならないよう、
+   * 対象(注視点)よりカメラから3倍遠い位置に置く(空気をばねにする実験で
+   * 対象と同じ高さに板を置いたら埋まって見えた反省、後述)。
+   *
+   * **物理には触らない**——このメッシュは`bodyMeshes`にも`pickables`にも
+   * 入れず、静的ボディとして追加もしない。当たり判定も画角合わせ
+   * (`contentBoundingBox`)も一切変えない、見た目だけの目盛りである。
+   * 色・線の太さ・間隔(1m)は既存の床(`ground`)と揃え、**現象より目立つ
+   * 補助線は逆効果**なので新しいデザインは足さない。
+   *
+   * 表示するかどうかは`updateReferenceGrid`が毎フレーム判定する——床のある
+   * 46実験の大半(静的ボディ・水面・流体境界・気体の箱の枠・天体のいずれか
+   * を持つ)では常に非表示のまま、見え方は変わらない。
+   */
+  const referenceGrid = new THREE.Mesh(
+    new THREE.PlaneGeometry(400, 400),
+    new THREE.MeshStandardMaterial({ color: 0x555555 }),
+  );
+  referenceGrid.visible = false;
+  referenceGrid.userData.isReferenceGrid = true;
+  const referenceGridUniforms = paintReferenceGrid(
+    referenceGrid.material as THREE.MeshStandardMaterial,
+  );
+  scene.add(referenceGrid);
+
+  // `updateReferenceGrid`の使い回し用一時オブジェクト(毎フレームの
+  // アロケーションを避ける)。
+  const REFERENCE_GRID_WORLD_UP = new THREE.Vector3(0, 1, 0);
+  const referenceGridForward = new THREE.Vector3();
+  const referenceGridRight = new THREE.Vector3();
+  const referenceGridUp = new THREE.Vector3();
+  const referenceGridNormal = new THREE.Vector3();
+  const referenceGridBasis = new THREE.Matrix4();
+
+  /**
+   * `referenceGrid`を出すかどうか、出すならどこへ置くかを毎フレーム決める。
+   *
+   * **出す条件**——「他に基準になる物が何も無い」ときだけ出す。床のグリッド・
+   * 水面・流体の器・気体の箱の枠・天体のいずれかが既にあるなら、それが
+   * 基準になるのでここでは出さない(既存実験の見え方を変えないため)。
+   * 動く物が無い(`contentBoundingBox`が空)ときも出さない——静止した舞台に
+   * 方眼だけ浮いていても基準として意味がない。
+   *
+   * **置き方**——カメラの向き(`camera.getWorldDirection`。かんたんモードの
+   * 追従カメラはほぼ一定の向きを保ったまま並行移動するだけなので、毎フレーム
+   * 計算し直しても向きはほとんど変わらない)を板の法線にし、注視点までの
+   * 距離の3倍だけカメラの前方へ置く。3倍取るのは、対象とほぼ同じ距離に
+   * 置くと板が対象に重なって埋まって見えるため(空気をばねにする実験は
+   * 対象が`y=0`平面上をx方向へ動くので、平面をそこへ置くと対象と同じ高さで
+   * 重なって見えなくなる、という前任者が気づいていた別の不具合と同じ原因)。
+   *
+   * **線の間隔は固定の1mではなく、画角に対して常に一定の本数(`CELLS_ACROSS_VIEW`)
+   * が入るよう毎フレーム決め直す**(進行管理役の実測での差し戻し: 磁石が
+   * 銅管を落ちる実験はカメラが対象から0.3m足らずまで寄るため、1m間隔の
+   * 線では視界の中に1本も入らないことが多く、「30m落ちても画面がほぼ
+   * 同じ」に見えていた——線の本数そのものが足りていなかった)。板までの
+   * 距離`distanceAhead`と縦画角から、板の縦の見かけの高さ
+   * (`2*distanceAhead*tan(fov/2)`)を出し、それを`CELLS_ACROSS_VIEW`等分した
+   * 長さを1マスにする——床の方眼(1マスあたり画面の高さの1割強)と同じ
+   * くらいの密度に、scaleに関わらず揃う。`uRight`/`uUp`を単位ベクトルでは
+   * なく「1/この間隔」の長さで渡すことで、シェーダ側は今までどおり
+   * `dot(位置, uRight)`が整数のところに線を引くだけでよい。
+   */
+  const REFERENCE_GRID_CELLS_ACROSS_VIEW = 14;
+  function updateReferenceGrid(currentWorld: WasmWorld): void {
+    const box = contentBoundingBox();
+    if (!box) {
+      referenceGrid.visible = false;
+      return;
+    }
+    let hasStaticBody = false;
+    for (const [bodyIndex] of bodyMeshes) {
+      if (currentWorld.read_component("body_is_static_at", String(bodyIndex)) === "true") {
+        hasStaticBody = true;
+        break;
+      }
+    }
+    const hasOtherReference =
+      hasStaticBody ||
+      waterPlane.visible ||
+      fluidBoundaryPoints.visible ||
+      gasBoxLines.visible ||
+      astroGroup.children.length > 0;
+    if (hasOtherReference) {
+      referenceGrid.visible = false;
+      return;
+    }
+
+    camera.getWorldDirection(referenceGridForward);
+    referenceGridRight.crossVectors(REFERENCE_GRID_WORLD_UP, referenceGridForward);
+    if (referenceGridRight.lengthSq() < 1e-8) {
+      // カメラがほぼ真上/真下を向いている(=世界の上方向と平行)ときだけの保険。
+      referenceGridRight.set(1, 0, 0);
+    }
+    referenceGridRight.normalize();
+    referenceGridUp.crossVectors(referenceGridForward, referenceGridRight).normalize();
+
+    const targetDistance = Math.max(
+      camera.position.distanceTo(orbit.target),
+      1e-6,
+    );
+    const distanceAhead = targetDistance * 3;
+    referenceGrid.position
+      .copy(camera.position)
+      .addScaledVector(referenceGridForward, distanceAhead);
+    referenceGridNormal.copy(referenceGridForward).negate();
+    referenceGridBasis.makeBasis(referenceGridRight, referenceGridUp, referenceGridNormal);
+    referenceGrid.quaternion.setFromRotationMatrix(referenceGridBasis);
+
+    // 縦画角ぶんの板の高さを`CELLS_ACROSS_VIEW`等分した長さを1マスにする。
+    const viewHeightAtGrid =
+      2 * distanceAhead * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    const gridSpacing = Math.max(
+      viewHeightAtGrid / REFERENCE_GRID_CELLS_ACROSS_VIEW,
+      1e-9,
+    );
+    referenceGridUniforms.uRight.value
+      .copy(referenceGridRight)
+      .multiplyScalar(1 / gridSpacing);
+    referenceGridUniforms.uUp.value
+      .copy(referenceGridUp)
+      .multiplyScalar(1 / gridSpacing);
+    referenceGrid.visible = true;
+  }
 
   // Scene View オーバーレイ(設計docs/23-frontend/01-editor.md §1.2「速度ベクトル」、
   // 切替可)の最小デモ: 選択中ボディの速度ベクトルを矢印で表示する。縮約実装の
@@ -5415,14 +6450,146 @@ async function setUpSceneView(
   // 粒子位置をTHREE.Pointsで毎フレーム反映する(粒子数は固定なので、スポーン時に
   // 一度だけBufferAttributeを確保しrender()内で内容だけ更新する)。
   const fluidGeometry = new THREE.BufferGeometry();
+  // **水だと一目で分かる濃さ・大きさ(利用者役の観察: 「水面が波打つ」と書いて
+  // あるのに、画面は白っぽい半透明の箱にしか見えず、水にも水面にも見えなかった)**。
+  // 元の 0x3399ff・size 0.08 自体は正しい青だったが、下の境界点群(器)を透過で
+  // 重ねて描くと、器の側が(層の重なりで)不透明に近くなり水を覆い隠していた
+  // ——水側を直しても隠されては意味がないので、器側(下)も合わせて直す。
   const fluidMaterial = new THREE.PointsMaterial({
-    color: 0x3399ff,
-    size: 0.08,
+    color: 0x2f8fff,
+    size: 0.09,
   });
   const fluidPoints = new THREE.Points(fluidGeometry, fluidMaterial);
   fluidPoints.visible = false;
   scene.add(fluidPoints);
   let fluidPositionAttribute: THREE.BufferAttribute | null = null;
+
+  /**
+   * **水を受け止めている器**(境界粒子)。
+   *
+   * 「水のかたまりが落ちて、容器に溜まります」と書いてある隣で、真っ暗な空間に
+   * 水色の塊が浮いているだけに見えた——器は物理側に境界粒子として実在するのに、
+   * 画面のどこにも描かれていなかった(利用者役①の観察)。水より暗い色で、水の
+   * 邪魔をせずに「どこに溜まるのか」だけが分かるように置く。物理には触らない。
+   *
+   * **その後の実測(進行管理役③)で分かった問題**: 器の壁・床は設計上3層厚に
+   * 敷き詰められている(`sim-fluid::sph`のモジュールdoc参照)。カメラの視線は
+   * 手前の壁だけで3層、奥の壁まで見通せば6層を貫く——半透明点を単純に3〜6枚
+   * 重ねると `1-(1-0.45)^6 ≈ 0.97` までアルファが積み上がり、器全体が
+   * ほぼ不透明な白い塊に見えて中の水を覆い隠してしまう(スクリーンショットで
+   * 実測して確認)。**器の存在しない層を消す(嘘)のではなく、実在する境界粒子の
+   * うち外殻(いちばん外側の1層)だけを描く**——`selectBoundaryShell`が
+   * バウンディングボックスの各軸で最小・最大に触れている粒子だけを残す
+   * (内側2層は元々「同じ器の一部」として重複して壁の厚みを支えている粒子で
+   * あり、外殻だけでも器の位置・形は正しく伝わる)。これで手前の壁は実質1層に
+   * 減り、水がちゃんと透けて見える。
+   */
+  const fluidBoundaryGeometry = new THREE.BufferGeometry();
+  const fluidBoundaryPoints = new THREE.Points(
+    fluidBoundaryGeometry,
+    // 器は**中の水が見える**濃さにする(詰まった粒で塗り潰すと、溜まって
+    // いく様子が器の壁に隠れてしまう)。
+    new THREE.PointsMaterial({
+      color: 0x8c9aa8,
+      size: 0.04,
+      transparent: true,
+      opacity: 0.3,
+      depthWrite: false,
+    }),
+  );
+  fluidBoundaryPoints.visible = false;
+  scene.add(fluidBoundaryPoints);
+
+  /**
+   * 境界粒子(`[x0,y0,z0,x1,y1,z1,...]`)から、各軸(x/y/z)の最小・最大に
+   * (許容誤差内で)触れている粒子だけを残す——`fluidBoundaryPoints`のdoc
+   * 参照。3層厚の壁・床のうち、いちばん外側の1層だけが残る計算になる
+   * (内側の2層は同じ壁の内部を支えている粒子で、位置は動かさず単に描画を
+   * 間引くだけ——物理の状態には一切触れない)。
+   */
+  function selectBoundaryShell(flat: ArrayLike<number>): Float32Array {
+    const n = flat.length / 3;
+    if (n === 0) return new Float32Array(0);
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const x = flat[i * 3], y = flat[i * 3 + 1], z = flat[i * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    // 粒子間隔よりじゅうぶん小さい許容誤差(浮動小数点の丸め用)。
+    const eps = 1e-4;
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const x = flat[i * 3], y = flat[i * 3 + 1], z = flat[i * 3 + 2];
+      const onShell =
+        x - minX < eps || maxX - x < eps ||
+        y - minY < eps || maxY - y < eps ||
+        z - minZ < eps || maxZ - z < eps;
+      if (onShell) out.push(x, y, z);
+    }
+    return new Float32Array(out);
+  }
+
+  /**
+   * **3D の煙**。
+   *
+   * 「煙が流れる(3D)」は、剛体も粒子も持たず、煙は格子の中の数値としてしか
+   * 存在していなかった——舞台は最初から最後まで真っ暗で、「まん中の 3D を見て
+   * ください」と案内している隣に何も映らなかった(利用者役③の観察)。濃いセル
+   * だけを点として描く。濃さは点の色の明るさに載せる。物理には触らない。
+   */
+  const smokeGeometry = new THREE.BufferGeometry();
+  const smokePoints = new THREE.Points(
+    smokeGeometry,
+    new THREE.PointsMaterial({
+      size: 0.03,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+    }),
+  );
+  smokePoints.visible = false;
+  scene.add(smokePoints);
+  /** 煙の点を作り直す(セル数が変わり得るので毎回張り直す)。 */
+  function updateSmokeOverlay(currentWorld: WasmWorld): void {
+    const raw = currentWorld.grid_fluid_3d_smoke_points_f32(1, 0.01);
+    const count = Math.floor(raw.length / 4);
+    if (count === 0) {
+      smokePoints.visible = false;
+      sceneViewElement.dataset.smoke = "false";
+      return;
+    }
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    let peak = 0;
+    for (let n = 0; n < count; n += 1) {
+      const d = raw[n * 4 + 3];
+      if (d > peak) peak = d;
+    }
+    const scale = peak > 0 ? 1 / peak : 1;
+    for (let n = 0; n < count; n += 1) {
+      positions[n * 3] = raw[n * 4];
+      positions[n * 3 + 1] = raw[n * 4 + 1];
+      positions[n * 3 + 2] = raw[n * 4 + 2];
+      // 薄いところも見えるように、濃さは 0.35 から上へ効かせる。
+      const tone = 0.35 + 0.65 * Math.min(1, raw[n * 4 + 3] * scale);
+      colors[n * 3] = tone;
+      colors[n * 3 + 1] = tone;
+      colors[n * 3 + 2] = tone;
+    }
+    smokeGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    smokeGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    smokeGeometry.computeBoundingSphere();
+    smokePoints.visible = true;
+    sceneViewElement.dataset.smoke = "true";
+  }
 
   // **格子流体の速度場オーバーレイ(増分L)**。セルごとに`ArrowHelper`を作ると
   // 数百オブジェクトになるので、**1本の`LineSegments`**で全ベクトルを描く
@@ -5592,7 +6759,7 @@ async function setUpSceneView(
     const count = Math.min(positions.length / 3, STAT_MAX_PARTICLES);
     if (count === 0) {
       cloud.points.visible = false;
-      return;
+      return 0;
     }
     // 最遠粒子を PARTICLE_VIEW_RADIUS に収める(絶対スケールは Probe Graphs が出す)。
     let maxR = 0;
@@ -5613,6 +6780,36 @@ async function setUpSceneView(
     cloud.geometry.setDrawRange(0, count);
     cloud.attribute.needsUpdate = true;
     cloud.points.visible = true;
+    return scale;
+  }
+
+  /**
+   * **気体の箱の枠**。
+   *
+   * 「400 個の分子が箱の中で飛び回ります」と書いてあるのに、画面には枠も壁も
+   * 無く、点が真っ黒な空間に浮いているだけに見えた(利用者役①の観察)。粒子と
+   * まったく同じ縮尺・同じ中心で枠を描けば、「箱の中で跳ね返っている」ことが
+   * 絵のまま読める。物理には触らない。
+   */
+  const gasBoxLines = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)),
+    new THREE.LineBasicMaterial({ color: 0x7f8a99 }),
+  );
+  gasBoxLines.visible = false;
+  scene.add(gasBoxLines);
+  function updateGasBox(currentWorld: WasmWorld, scale: number): void {
+    const size = currentWorld.kinetic_gas_box_size_f32();
+    if (size.length < 3 || !(scale > 0)) {
+      gasBoxLines.visible = false;
+      sceneViewElement.dataset.gasBox = "false";
+      return;
+    }
+    gasBoxLines.scale.set(size[0] * scale, size[1] * scale, size[2] * scale);
+    // 粒子は「箱の中心を原点へ寄せて、高さ 2 へ持ち上げる」で描いている
+    // (`updateParticleCloud`)。枠も同じ場所へ置く。
+    gasBoxLines.position.set(0, 2, 0);
+    gasBoxLines.visible = true;
+    sceneViewElement.dataset.gasBox = "true";
   }
 
   // **場のパネル(群3)**。チェックリストが D27–D33 を閉じる際に挙げた
@@ -5623,6 +6820,8 @@ async function setUpSceneView(
   // Ez 場はいずれも「格子上のスカラー場」であり、3D 空間に浮かべるより
   // 平面に色で塗るほうが読める(実際、物理の教科書もそう描く)。
   // Probe Graphs の隣に置き、対象ドメインが無効なときは畳んで場所を取らない。
+  const sceneViewElement = document.getElementById("scene-view")!;
+  const stageEmptyNote = document.getElementById("stage-empty-note");
   const fieldPanel = document.getElementById("field-panel")!;
   const fieldCanvas = document.getElementById("field-canvas") as HTMLCanvasElement;
   const fieldTitle = document.getElementById("field-title")!;
@@ -5731,6 +6930,64 @@ async function setUpSceneView(
     }
   }
 
+  /// 棒の温度分布(D16)。色の帯**だけ**では「熱がどこまで進んだか」は見えても
+  /// 何度なのかが読めないので、帯の下に**位置 → 温度の折れ線**を重ね、両端の
+  /// 目盛りを書く。範囲は実際の min/max に合わせて引き伸ばす——0〜最大で
+  /// 正規化すると、数度の差が同じ色に潰れてしまう。
+  function drawRodTemperature(values: Float32Array, min: number, max: number) {
+    if (!fieldContext) return;
+    const w = 512;
+    const h = 190;
+    const strip = 26;
+    const pad = 18;
+    fieldCanvas.width = w;
+    fieldCanvas.height = h;
+    fieldContext.fillStyle = "#111";
+    fieldContext.fillRect(0, 0, w, h);
+    const n = values.length;
+    const span = max - min > 1e-9 ? max - min : 1;
+    const at = (i: number) => (n > 1 ? (i / (n - 1)) * w : w / 2);
+
+    // 上端の帯: 棒そのものを上から見た図。
+    for (let i = 0; i < n; i += 1) {
+      const [r, g, b] = sequentialColor((values[i] - min) / span);
+      fieldContext.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      fieldContext.fillRect(Math.floor(at(i)), 0, Math.ceil(w / n) + 1, strip);
+    }
+
+    // 下段: 位置 → 温度の折れ線。
+    const top = strip + 12;
+    const bottom = h - pad;
+    fieldContext.strokeStyle = "rgba(255, 255, 255, 0.10)";
+    fieldContext.lineWidth = 1;
+    fieldContext.beginPath();
+    for (let i = 0; i <= 2; i += 1) {
+      const y = Math.round(top + ((bottom - top) * i) / 2) + 0.5;
+      fieldContext.moveTo(0, y);
+      fieldContext.lineTo(w, y);
+    }
+    fieldContext.stroke();
+    fieldContext.strokeStyle = "#ff9c6c";
+    fieldContext.lineWidth = 2;
+    fieldContext.beginPath();
+    for (let i = 0; i < n; i += 1) {
+      const y = bottom - ((values[i] - min) / span) * (bottom - top);
+      if (i === 0) fieldContext.moveTo(at(i), y);
+      else fieldContext.lineTo(at(i), y);
+    }
+    fieldContext.stroke();
+
+    fieldContext.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    fieldContext.fillStyle = "#8b929c";
+    fieldContext.textAlign = "left";
+    fieldContext.fillText(`${max.toFixed(1)} ℃`, 4, top + 10);
+    fieldContext.fillText(`${min.toFixed(1)} ℃`, 4, bottom - 2);
+    fieldContext.fillText("熱源側", 4, h - 3);
+    fieldContext.textAlign = "right";
+    fieldContext.fillText("反対の端", w - 4, h - 3);
+    fieldContext.textAlign = "left";
+  }
+
   function updateFieldPanel(currentWorld: WasmWorld) {
     if (!fieldContext) return;
     // **優先順位を固定する**(決定論的な表示)。同時に複数ドメインが載っている
@@ -5794,8 +7051,17 @@ async function setUpSceneView(
     }
     const rod = currentWorld.conduction_rod_temperatures_f32();
     if (rod.length > 0) {
-      fieldTitle.textContent = `熱伝導棒の温度分布(${rod.length} 格子点)`;
-      drawScalarField(rod, rod.length, 1, sequentialColor, "positive");
+      let min = Infinity;
+      let max = -Infinity;
+      for (let i = 0; i < rod.length; i += 1) {
+        if (rod[i] < min) min = rod[i];
+        if (rod[i] > max) max = rod[i];
+      }
+      // 題に**いま出ている値の範囲**を書く。色の帯だけでは「濃い/薄い」しか
+      // 分からず、何度なのかが読めなかった(色だけで数値を当てさせない)。
+      fieldTitle.textContent =
+        `棒の中の温度(左端が熱源、${min.toFixed(1)}〜${max.toFixed(1)} ℃)`;
+      drawRodTemperature(rod, min, max);
       fieldPanel.hidden = false;
       return;
     }
@@ -5813,7 +7079,12 @@ async function setUpSceneView(
   ///
   /// 描画対象すべてのバウンディングボックスを取り、その中心を注視点に、
   /// 対角長からカメラ距離を決める(Unity の F キーと同じ考え方)。
-  function frameCameraOnContent() {
+  /// 箱を作る部分は `contentBoundingBox` として切り出してある——
+  /// かんたんモードの追従カメラ(`updateGuidedFollowCamera`)が同じ
+  /// 「観察対象」の定義を使うため。
+  ///
+  /// 「観察対象」のバウンディングボックス。静的な床・壁は含めない(QA不具合2)。
+  function contentBoundingBox(): THREE.Box3 | null {
     const box = new THREE.Box3();
     let hasContent = false;
     const expand = (object: THREE.Object3D) => {
@@ -5837,32 +7108,633 @@ async function setUpSceneView(
     expand(gasCloud.points);
     expand(brownianCloud.points);
     expand(fluidPoints);
-    if (!hasContent) return;
-    const center = box.getCenter(new THREE.Vector3());
-    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.5);
+    expand(smokePoints);
+    // **動く物がひとつも無いときは、固定の物で画角を決める**。
+    //
+    // ここで null を返していたので、自分で置いた物を Static(固定)にした
+    // 瞬間にカメラは一歩も動けなくなり、置き場所を数値で変えると物は画面の
+    // 外へ消えたきり、「これを追いかける」も「全体へ戻る」も効かなかった。
+    // おまけに舞台は「形のある物は出てきません」と言い張っていた(利用者役④
+    // の観察)。無限平面(床・壁)は 400 m 四方で画角を乗っ取るので、そこだけ
+    // は外す——静的な床を含めない元の理由は、これで保たれる。
+    if (!hasContent) {
+      for (const [, mesh] of bodyMeshes) {
+        if (mesh.geometry?.type === "PlaneGeometry") continue;
+        expand(mesh);
+      }
+    }
+    return hasContent ? box : null;
+  }
+
+  /**
+   * その大きさの物が、いまの画角で**ちゃんと見えているか**。
+   *
+   * 画面の内側に入っているだけでは足りない——実際、置いた直後の球は画面の
+   * まん中にありながら数ピクセルしかなく、移動ギズモに隠れて「何も置けて
+   * いない」ように見えた(利用者役④の観察)。距離と大きさの比も見る。
+   */
+  function isWellVisible(x: number, y: number, z: number, radius: number): boolean {
+    const point = new THREE.Vector3(x, y, z);
+    const ndc = point.clone().project(camera);
+    // `project` は z > 1 でカメラの後ろ、|x|,|y| > 1 で画面の外。少し内側
+    // (0.9)で判定して、隅にかろうじて映っている状態も「見えない」側に倒す。
+    if (Math.abs(ndc.x) > 0.9 || Math.abs(ndc.y) > 0.9 || ndc.z > 1) return false;
+    // 半径の 20 倍より遠いと、画面の高さの 1 割にも満たない粒になる。
+    return camera.position.distanceTo(point) <= Math.max(radius, 0.05) * 20;
+  }
+
+  /**
+   * すでに置いてある物の、`isWellVisible` 判定に使う代表的な大きさ。
+   *
+   * スポーン時は形ごとに決まった定数(`spawnRadius`)があるが、置いた**あとで**
+   * 座標を打ち替えるときはそれが無い——対応するメッシュのバウンディング球を
+   * 現在のスケールごと測って代わりに使う。
+   */
+  function bodyVisibilityRadius(index: number): number {
+    const mesh = bodyMeshes.get(index);
+    if (!mesh) return 0.3;
+    mesh.geometry.computeBoundingSphere();
+    const own = mesh.geometry.boundingSphere?.radius ?? 0.3;
+    const scale = Math.max(
+      Math.abs(mesh.scale.x),
+      Math.abs(mesh.scale.y),
+      Math.abs(mesh.scale.z),
+    );
+    return Math.max(own * scale, 0.05);
+  }
+
+  /**
+   * **近くの大きな物から離れる向き**を選ぶ(課題①、進行管理役の実測)。
+   *
+   * `d24-car`を粒度2で3秒走らせ`wheel_fl`を選んで「これを追いかける」を
+   * 押すと、注視点・距離の数値は正しく(距離21.0m→1.4m)なっていたのに、
+   * **画面には地面の稜線しか映らなかった**(スクリーンショットで確認)。
+   * 実測: カメラ(7.72,0.68,20.65)・距離1.44mの直後、すぐ隣の車体
+   * (`chassis`、半径1.36m)までの距離が1.19mしかなく、**カメラが車体の
+   * 内側に入り込んでいた**。原因は`frameCameraOnBox`の向きが「直前の
+   * カメラの向きをそのまま保つ」だけで、対象(タイヤ)がもっと大きな組み立て
+   * 物(車体)の一部品だと、その向きのまま寄ると車体を突き抜けてしまうこと
+   * があるため。
+   *
+   * ここでは向きを**保つ**のではなく、対象のまわりにある他の動く物から
+   * 「離れる」向きを選び直す——近く・大きい物ほど強く押し返す(逆二乗、
+   * `isWellVisible`が「近いほど問題」と見るのと同じ発想)。静的な床は
+   * 対象に含めない(`contentBoundingBox`と同じ扱い——床は「まわりの物」
+   * ではなく地面そのもの)。まわりに何も無ければ`null`を返し、呼び出し側は
+   * 従来どおり直前のカメラの向きを保つ(孤立した球1個を追う既存のケースは
+   * 変えない)。
+   */
+  function chooseFollowDirection(
+    targetCenter: THREE.Vector3,
+    excludeIndex: number,
+  ): THREE.Vector3 | null {
+    const away = new THREE.Vector3();
+    const toOther = new THREE.Vector3();
+    for (const [idx, mesh] of bodyMeshes) {
+      if (idx === excludeIndex) continue;
+      if (!mesh.visible) continue;
+      if (world.read_component("body_is_static_at", String(idx)) === "true") continue;
+      toOther.copy(targetCenter).sub(mesh.position);
+      const d = toOther.length();
+      if (d < 1e-6) continue;
+      const otherRadius = bodyVisibilityRadius(idx);
+      // 近く・大きいほど強く押し返す。
+      const weight = otherRadius / (d * d);
+      away.addScaledVector(toOther, weight / d);
+    }
+    return away.lengthSq() > 1e-9 ? away.normalize() : null;
+  }
+
+  /**
+   * **視線の途中にある物を突き抜けない距離**まで寄る(課題①のもう半分)。
+   *
+   * `chooseFollowDirection`で「大きな物から離れる向き」を選んでも、車の
+   * ように前後左右をタイヤに囲まれた対象では、選んだ向きの先にもまだ別の
+   * 物がある場合が残る。向き`dir`に沿って対象から`distance`だけ離れた点が、
+   * 他の物の可視半径(`bodyVisibilityRadius`)の内側に入っていないかを
+   * 確かめ、入っていれば**その物の手前**までしか寄らない(向こうへ抜けると
+   * 今度はその物自体が視線を塞ぐ——手前で止まるのが正しい)。
+   */
+  function clearCameraFromNearbyBodies(
+    targetCenter: THREE.Vector3,
+    dir: THREE.Vector3,
+    distance: number,
+    excludeIndex: number,
+  ): number {
+    let result = distance;
+    const toOther = new THREE.Vector3();
+    for (const [idx, mesh] of bodyMeshes) {
+      if (idx === excludeIndex) continue;
+      if (!mesh.visible) continue;
+      if (world.read_component("body_is_static_at", String(idx)) === "true") continue;
+      toOther.copy(mesh.position).sub(targetCenter);
+      const alongDir = toOther.dot(dir);
+      if (alongDir <= 0) continue; // 視線の反対側(自分の後ろ)の物は塞がない。
+      const perp = Math.sqrt(
+        Math.max(toOther.lengthSq() - alongDir * alongDir, 0),
+      );
+      const otherRadius = bodyVisibilityRadius(idx) * 1.2; // 少し余白を持たせる。
+      if (perp >= otherRadius) continue; // 視線からそれているので塞がない。
+      const nearEdge = alongDir - Math.sqrt(
+        Math.max(otherRadius * otherRadius - perp * perp, 0),
+      );
+      if (nearEdge > 0) result = Math.min(result, nearEdge);
+    }
+    return Math.max(result, 0.1);
+  }
+
+  /**
+   * **中心・半径・向きから、実際にカメラを置く**共通の実処理。`frameCameraOnBox`
+   * (向きは直前のカメラを保つ)と、単独追跡(`chooseFollowDirection`で選んだ
+   * 向きを使う、課題①のdoc参照)の両方がここへ合流する——仰角クランプ・
+   * クリップ面の計算を二重に持たないため。
+   */
+  function positionCameraTowardTarget(
+    center: THREE.Vector3,
+    radius: number,
+    direction: THREE.Vector3,
+    options?: { excludeIndex: number },
+  ) {
     orbit.target.copy(center);
-    // 現在の視線方向を保ったまま距離だけ合わせる(向きの好みを壊さない)。
-    const direction = camera.position.clone().sub(center);
-    if (direction.lengthSq() < 1e-9) direction.set(1, 0.7, 1.2);
-    const normalizedDirection = direction.normalize();
+    const normalizedDirection = direction.clone();
+    if (normalizedDirection.lengthSq() < 1e-9) normalizedDirection.set(1, 0.7, 1.2);
+    normalizedDirection.normalize();
     // QA不具合2続き: 前のシーンから引き継いだ視線方向の仰角が低い(または
     // 水平面より下を向いている)と、対象が地面近くにある場合(D11/D12/D13等)
     // カメラが計算上そのまま床の下へ潜り込んでしまう。仰角の最低ラインを
     // 設けて、床の下からは絶対に見上げない(=床の中に埋まらない)ようにする
     // ——向きの「好み」より「対象が見えること」を優先する。
     const MIN_ELEVATION = 0.25; // sin(約14.5°)。低すぎると地面すれすれで違和感が出るため床下だけを防ぐ最小限の値。
-    if (normalizedDirection.y < MIN_ELEVATION) {
-      normalizedDirection.y = MIN_ELEVATION;
-      normalizedDirection.normalize();
+    // **仰角の上限**。QA不具合2への対処で下限は設けていたが上限が無く、
+    // 前のシーンから引き継いだ視線が急な見下ろしだと(スポーン直後の見上げ
+    // 位置から、置き場所を数値でy=3のような低い高さへ打ち替えた場合など)、
+    // 合わせ直した画角がほぼ真上から床を覗き込む向きになっていた。地平線が
+    // 画角の外へ出て、対象が「宙に浮いている」のか「床の上にある」のかが
+    // 画面から読めない(進行管理側の実測)。`updateGuidedFollowCamera` が
+    // 縦画角50°の上端に地平線を残すために使っている値と同じ根拠
+    // (asin(0.42)≈25°、カメラは`camera`定義のFOV50°を共有)をここでも使う
+    // ——値だけ借りて、帯を毎フレーム押さえ続ける追従カメラの仕組みそのもの
+    // は持ち込まない(ここは向きを保ったまま距離だけ合わせる一回きりの処理)。
+    const MAX_ELEVATION = 0.3;
+    // **`y`を書き換えて`normalize()`し直すだけでは、ほぼ真上/真下(水平成分が
+    // ほぼ0)の向きを直せない**。水平成分が小さいままだと、割り戻す
+    // (=normalize)ときにまた`y`が押し戻されてしまうため——実測でも
+    // MAX_ELEVATIONを大きく超えたまま(0.42を指定したのに0.93前後で
+    // 高止まり)だった。水平成分の**向き(方位)**はそのまま保ち、
+    // **大きさ**だけをクランプ後のyに合わせて計算し直す。
+    const clampedY = Math.min(Math.max(normalizedDirection.y, MIN_ELEVATION), MAX_ELEVATION);
+    if (clampedY !== normalizedDirection.y) {
+      const horizontal = Math.hypot(normalizedDirection.x, normalizedDirection.z);
+      const targetHorizontal = Math.sqrt(Math.max(1 - clampedY * clampedY, 0));
+      if (horizontal > 1e-6) {
+        const scale = targetHorizontal / horizontal;
+        normalizedDirection.x *= scale;
+        normalizedDirection.z *= scale;
+      } else {
+        // 方位が定まらない(ほぼ真上/真下だった)ときは、適当な方位を1つ選ぶ。
+        normalizedDirection.x = targetHorizontal * Math.SQRT1_2;
+        normalizedDirection.z = targetHorizontal * Math.SQRT1_2;
+      }
+      normalizedDirection.y = clampedY;
+      normalizedDirection.normalize(); // 数値誤差の後始末(大きさはほぼ1のまま)。
     }
-    camera.position.copy(center).add(normalizedDirection.multiplyScalar(radius * 2.6));
+    let distance = radius * 2.6;
+    // **視線の途中にある物を突き抜けない**(課題①、`clearCameraFromNearbyBodies`
+    // のdoc参照)。単独追跡(`excludeIndex`が渡されたとき)だけ確かめる——
+    // `frameCameraOnContent`/`frameCameraOnPoint`の既存の挙動(実測済みの
+    // ピクセル数を伴うテストがある)は変えない。
+    if (options) {
+      distance = clearCameraFromNearbyBodies(
+        center,
+        normalizedDirection,
+        distance,
+        options.excludeIndex,
+      );
+    }
+    camera.position.copy(center).add(normalizedDirection.multiplyScalar(distance));
     // 仰角クランプだけでは(対象が地面近くにある・半径が小さい等の組み合わせで)
     // なお僅かに地面下へ出るケースが残ったため、最終防衛線として絶対高さも
     // 下限クランプする(このプロジェクトの地面は常にy=0の平面、モジュールdoc
     // 「床の下に潜り込む」参照)。
-    camera.position.y = Math.max(camera.position.y, 0.3);
+    // 床の下へ潜らないための最低の高さ。ただし**対象より大きく持ち上げない**
+    // ——分子の世界(D25 は 10 µm ほどの広がり)では 0.3 m は 3 万倍も遠く、
+    // 対象が点にすらならず真っ黒になっていた(利用者役①の観察)。
+    camera.position.y = Math.max(camera.position.y, Math.min(0.3, radius * 0.5));
+    // **見る対象の大きさに合わせて、手前と奥の切り取り面も動かす**。
+    //
+    // 手前の面は 0.1 m に固定してあったので、分子の運動(D25 ブラウン運動は
+    // 半径 1 µm の粒が 10 µm ほどの範囲に散らばる)のような小さな世界では、
+    // 対象がまるごと手前の面より近くに来て**全部消える**——選んだのに真っ黒、
+    // の正体のひとつ(利用者役①の観察)。距離に対する比で決める。
+    updateClipPlanes(camera.position.distanceTo(center));
     orbit.update();
   }
+
+  /**
+   * 箱1つに画角を合わせる、共通の実処理。`frameCameraOnContent`(場面ぜんぶの
+   * 箱)と`frameCameraOnPoint`(置いたばかりの1個だけの箱)の両方がこれを呼ぶ
+   * ——向き・仰角クランプ・クリップ面の計算を二重に持たないため。
+   */
+  function frameCameraOnBox(box: THREE.Box3) {
+    const center = box.getCenter(new THREE.Vector3());
+    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.5);
+    // 現在の視線方向を保ったまま距離だけ合わせる(向きの好みを壊さない)。
+    const direction = camera.position.clone().sub(center);
+    positionCameraTowardTarget(center, radius, direction);
+  }
+
+  function frameCameraOnContent() {
+    const box = contentBoundingBox();
+    if (!box) return;
+    frameCameraOnBox(box);
+  }
+
+  /**
+   * **置いたばかりの物“だけ”に画角を合わせ直す**。
+   *
+   * `frameCameraOnContent`(場面の動く物ぜんぶが入る画角)を呼んでも、なお
+   * 置いた物が見えないことがある——実測(進行管理役、粒度2「しらべる」の
+   * `d1-free-fall`で2個目の球を右クリックで置いたケース): 既存の球が
+   * 遠く離れた場所へ落ちて止まっていたため、`contentBoundingBox`が両方を
+   * 含む大きな箱を作り、全体が入る画角に引いた結果、新しい球は距離47.3m・
+   * 見かけの直径9.9pxにしかならなかった(「置いたのに何も起きなかった」と
+   * 読まれて当然の大きさ)。「全体を入れる」ことと「いま置いた物が見える」
+   * ことは両立しない場合があるので、後者を優先し、置いた物1個だけの箱で
+   * 画角を作り直す。
+   */
+  function frameCameraOnPoint(x: number, y: number, z: number, radius: number) {
+    const r = Math.max(radius, 0.05);
+    frameCameraOnBox(
+      new THREE.Box3(
+        new THREE.Vector3(x - r, y - r, z - r),
+        new THREE.Vector3(x + r, y + r, z + r),
+      ),
+    );
+  }
+
+  /**
+   * **追従カメラ**(かんたんモード)。
+   *
+   * 読み込み時の 1 回だけ画角を合わせる従来のやり方は、**動くものを見る**という
+   * 目的に対して成立していなかった——高さ 20m から落ちる球は、読み込み直後の
+   * 球(半径 0.3m)にぴったり寄った画角から 1 秒で外へ出ていき、初めて使う人の
+   * 画面には**空のグリッドだけが残る**(実際にスクリーンショットで確認した)。
+   * 統合エディタなら自分でカメラを回して探せばよいが、それは「中を知っている
+   * 人の操作」であって、かんたんモードが引き受けるべき仕事ではない。
+   *
+   * そこで毎フレーム、観察対象と原点(床・太陽など「基準」がある場所)を
+   * 含む箱を作り、そこへゆっくり寄せる。ユーザーが自分でカメラを操作したら
+   * 追従は止める(操作を奪わない)——「カメラを戻す」で再開できる。
+   */
+  let guidedFollowCamera = false;
+  let guidedCameraSnap = false;
+  /**
+   * **いま単独で追っている物**(課題2、進行管理役の実測)。
+   *
+   * もとは「置いたばかりの物を見失わない」ためだけの仕組みだった
+   * (`lastSpawnedBodyIndex`という名前だった)——`updateGuidedFollowCamera`は
+   * 毎フレーム動き続けるので、`spawnShapeAt`側の一度きりの画角合わせを足しても
+   * **次のフレームでこの関数がすぐ上書きしてしまう**——実測: `guidedFollowCamera`
+   * が有効な場面(実験を選ぶと既定で有効)で、既に遠く(距離30m超)にある物が
+   * あるところへ新しく1個置くと、この関数が「動く物ぜんぶ」を入れる画角に
+   * 引いてしまい、置いたばかりの物は見かけの直径9.9pxにしかならなかった。
+   *
+   * 「選んだもの」札の「👀 これを追いかける」(`followSelectedBody`)も、
+   * 中身は「その物を選んだ状態で単独追跡を起こす」だけなので、同じ変数へ
+   * 一般化した——2つの似た仕組みを持たない(進行管理役の指摘)。実測
+   * (`d24-car-drives`を粒度2で3秒走らせ`wheel_fl`を選んで押したケース):
+   * 一般化前は押しても`api.followCamera(true)`(アグリゲートな既定へ戻す
+   * だけ)しか呼べず、注視点は選んだ物へ来ず距離はむしろ16.7m→24.6mと
+   * 遠のいていた。下の`updateGuidedFollowCamera`で「その物がちゃんと
+   * 見えているか」を**アグリゲートの框付けとは別枠**で保証する——全体を追う
+   * 既定そのものは、これが有効でないときは変えない。
+   */
+  let followedBodyIndex = -1;
+  /**
+   * **猶予は時間ではなく「利用者がまだ見ているか」で切る**(進行管理役の実測、
+   * 課題6)。
+   *
+   * 最初の実装は`performance.now()`との差を`RECENT_SPAWN_GUARD_MS`(1500ms)
+   * 未満かで判定していた。これは**何秒に伸ばしても同じ崖が来る**——実測
+   * (`d1-free-fall`を粒度2で開き、走らせたまま「➕ 球を1つ足す」): 猶予の
+   * 中は見かけの直径 79.6px(+0.9s)→61.3px(+1.7s)まで保たれるが、猶予が
+   * 切れた直後の+2.8sで一気に14.2px、+7.8sには10.5px(=時間切れ前の措置が
+   * 無かった旧実装とほぼ同じ点)まで戻る。置いた球そのものは静止していて
+   * 見失う理由が無いのに、「まだ高い所を落下中の元の球」を画角に収めようと
+   * するアグリゲートの框付けに毎回引き戻される。10秒・30秒に伸ばしても、
+   * 元の球が落ち続ける限りいつか同じ崖を踏むだけで解決にならない
+   * (「時間で切る」という判定基準そのものが原因)。
+   *
+   * 利用者から見た「まだ見ている」を近似する条件は2つある——**置いた物が
+   * まだ選ばれていること**(置くと自動で選ばれる、`spawnShapeAt`のdoc参照)と
+   * **自分でカメラを動かしていないこと**。どちらも壊れたら、素直に「動く物
+   * ぜんぶを追う」既定へ戻す(=このガードを外す)。前者は下の
+   * `updateGuidedFollowCamera`で`selectedBodyIndex`と毎フレーム突き合わせる
+   * (ライブな判定——選び直せば再び効く)。後者は`orbit`の`start`イベント
+   * (実際のドラッグ・ホイール操作でのみ発火し、このファイルが
+   * `camera.position`/`orbit.target`を直接書き換える自動追従では発火しない)
+   * で`cameraMovedSinceSpawn`を立てる**一度きりの片道スイッチ**にした——
+   * 「操作を奪わない」という追従カメラ全体の原則(直後のdoc参照)と同じで、
+   * 一度手を動かした利用者を追いかけ直すのは横取りになる。次に物を置いた
+   * ときだけ`spawnShapeAt`側でfalseへ戻す——「👀 これを追いかける」
+   * (`followSelectedBody`)を押したときも同じ扱いで戻す。こちらは利用者の
+   * **明示的な**指示なので、横取りにはならない(`orbit`の`start`で自動的に
+   * 戻ってしまうのとは違う)。
+   */
+  let cameraMovedSinceSpawn = false;
+  /**
+   * **場面が始まったときの広がり**。
+   *
+   * 追従は「いま動いている物」の箱で画角を決めていた。ところが落ちた球が
+   * 床で止まると、その箱は球ひとつ(半径 0.3 m)まで縮む——カメラは 2.4 m
+   * まで寄り、画面は**のっぺりした床一色**になって、20 m 落ちてきたことも、
+   * どれくらいの大きさの世界なのかも消えてしまう(利用者役①の観察:
+   * 「背景が単色にしか見えず、高さもスケール感も伝わらない」)。
+   *
+   * 始まりの広がりを覚えておいて箱に含めれば、**現象が起きた場所**が画角に
+   * 残る。寄りすぎの上限(`cap`)はそのままなので、対象が豆粒になることは
+   * ない。物理には触れない、見え方だけの話。
+   */
+  let guidedSceneStartBox: THREE.Box3 | null = null;
+  let guidedSceneStartPending = false;
+  const guidedFollowTarget = new THREE.Vector3();
+  const guidedFollowDirection = new THREE.Vector3();
+  /**
+   * **単独追跡している物1個だけの箱**。有効でなければ`null`(呼び出し側は
+   * アグリゲートな`contentBoundingBox()`にフォールバックする)。
+   *
+   * `followedBodyIndex`のdoc参照——「置いたばかりの物を見失わない」ガードと
+   * 「👀 これを追いかける」を同じ変数へ一般化した際、ここも一本化した。
+   *
+   * **試作1**: アグリゲートな框付けを**計算し終えたあと**、その物が画面から
+   * 外れていた場合だけ`frameCameraOnPoint`で上書きする、もとの「安全網」の
+   * ままにして、上書きの条件だけ「単独追跡が有効な間は毎フレーム」に広げよう
+   * とした。上書き(このフレーム)→アグリゲートが引き戻す(次フレーム)→
+   * また上書き、を繰り返すはずで、実際に試すと注視点・距離が毎フレーム
+   * 大きく往復した(進行管理役の実測、`d24-car-drives`で`wheel_fl`を
+   * 追跡させたケース)。
+   *
+   * **試作2**: 上書きをやめ、`updateGuidedFollowCamera`が使う「観察対象の
+   * 箱」そのものをこの小さな箱に差し替え、原点や「始まりの広がり」を含める
+   * 処理はそのまま通す形にした。往復は無くなったが、`updateGuidedFollowCamera`
+   * の`cap`(見かけの大きさの下限、`APPARENT_MIN`のdoc参照)は**アグリゲート
+   * =動く物ぜんぶの塊**の大きさを前提に定数を決めていたため、半径0.3mの球
+   * 1個をこの式に通すと寄り過ぎを避ける側に振れて距離8m超まで引いてしまい、
+   * 逆に見かけの直径が26px(要件の40px未満)まで小さくなった
+   * (実測、`d1-free-fall`で球を足した直後)——「全体を追う設計を変えない」
+   * ための式を単独追跡にまで持ち込んだのが原因。
+   *
+   * **今回**: `frameCameraOnBox`(=`frameCameraOnPoint`が使っているのと同じ
+   * 実処理、向きを保ったまま対象の半径の2.6倍まで距離を合わせる)を、単独
+   * 追跡が有効な間は毎フレームそのまま呼ぶ——アグリゲートの計算は一切通さず
+   * `updateGuidedFollowCamera`の冒頭で早期returnする。既存の「置いたばかりの
+   * 物」安全網とまったく同じ式を流用しているので、そちらの実測
+   * (直径172.9px前後)がそのまま単独追跡でも成り立つ。対象は毎フレーム
+   * 新しい位置から計算し直すので、往復も起きない。
+   */
+  function followedBodyBox(): THREE.Box3 | null {
+    if (followedBodyIndex < 0 || cameraMovedSinceSpawn) return null;
+    // **覚えた番号は、場面が差し替わると存在しなくなる**。置いた直後に
+    // ⌘Kで別の実験へ移るのは普通の操作で、実際に起きた——実測
+    // (進行管理役): `d1-free-fall`(床0・球1)に箱を足してindex 2を
+    // 覚えた直後に別の実験へ移ると、新しい場面にはその番号の物が無く、
+    // `body_is_removed_at`が`body index 2 out of range`を投げてページ
+    // エラーになった。**個数とメッシュの両方で先に閉じてから**wasmに
+    // 尋ねる(閉じたら覚えるのをやめる——次のフレームでまた同じ例外を
+    // 踏まないため)。
+    const mesh = bodyMeshes.get(followedBodyIndex);
+    if (mesh === undefined || followedBodyIndex >= readNumber(world, "body_count")) {
+      followedBodyIndex = -1;
+      return null;
+    }
+    if (world.read_component("body_is_removed_at", String(followedBodyIndex)) === "true") {
+      return null;
+    }
+    // **「まだ見ている」の近似は「まだ選ばれていること」**(置くと自動で
+    // 選ばれる、`spawnShapeAt`のdoc参照)——ライブな判定で、選び直せば外れる。
+    if (selectedBodyIndex !== followedBodyIndex) return null;
+    const r = bodyVisibilityRadius(followedBodyIndex);
+    return new THREE.Box3(
+      new THREE.Vector3(
+        mesh.position.x - r,
+        mesh.position.y - r,
+        mesh.position.z - r,
+      ),
+      new THREE.Vector3(
+        mesh.position.x + r,
+        mesh.position.y + r,
+        mesh.position.z + r,
+      ),
+    );
+  }
+  function updateGuidedFollowCamera() {
+    // **単独追跡が有効な間は、アグリゲートな計算を一切通さない**
+    // (`followedBodyBox`のdoc参照「試作2」——アグリゲート用の式に単独追跡を
+    // 混ぜると寄り方の基準が食い違う)。毎フレーム対象の最新位置から
+    // 計算し直すだけなので、往復も起きない。
+    const followedBox = followedBodyBox();
+    if (followedBox) {
+      // **`frameCameraOnBox`をそのまま流用しない**(課題①、進行管理役の
+      // スクリーンショットでの指摘)。あちらは「直前のカメラの向きを保つ」
+      // だけなので、対象が車体のようなもっと大きな組み立て物の一部品だと、
+      // その向きのまま寄ると組み立て物を突き抜けて画面が真っ暗になった
+      // (`chooseFollowDirection`のdoc参照)。向きは「まわりの大きな物から
+      // 離れる」方向を選び直し、距離も「視線の途中にある物を突き抜けない」
+      // 上限まで詰める(`clearCameraFromNearbyBodies`のdoc参照)。
+      const center = followedBox.getCenter(new THREE.Vector3());
+      const radius = Math.max(
+        followedBox.getSize(new THREE.Vector3()).length() * 0.5,
+        0.5,
+      );
+      const direction =
+        chooseFollowDirection(center, followedBodyIndex) ??
+        camera.position.clone().sub(center);
+      positionCameraTowardTarget(center, radius, direction, {
+        excludeIndex: followedBodyIndex,
+      });
+      return;
+    }
+    const box = contentBoundingBox();
+    if (!box) return;
+    if (guidedSceneStartPending) {
+      guidedSceneStartPending = false;
+      guidedSceneStartBox = box.clone();
+    }
+    // 動くものだけの中心と大きさ。**対象が豆粒にならない下限**を決めるのに使う。
+    const movingCenter = box.getCenter(new THREE.Vector3());
+    const movingRadius = Math.max(
+      box.getSize(new THREE.Vector3()).length() * 0.5,
+      1e-9,
+    );
+    // 原点を必ず含める。落下は「床(y=0)まで」、公転は「中心の星まで」が
+    // 見えて初めて現象として読めるため。
+    box.expandByPoint(new THREE.Vector3(0, 0, 0));
+    // 始まりの広がりも含める(`guidedSceneStartBox` の doc 参照)。
+    if (guidedSceneStartBox) box.union(guidedSceneStartBox);
+    box.getCenter(guidedFollowTarget);
+    const radius = Math.max(
+      box.getSize(new THREE.Vector3()).length() * 0.5,
+      0.5,
+    );
+    // 対象の 3.6 倍まで引く。「対象が大きく映ること」より**まわりが見えること**を
+    // 優先する——坂を滑る箱は、坂が画面に入っていなければ何が起きているのか
+    // 分からない(倍率ではなく比で決めるのは、シーンの寸法が 1e-7 m の分子から
+    // 1e11 m の公転まで振れるため)。
+    //
+    // ただし引きすぎない。45°に投げた球は 40m 先まで飛ぶので、原点まで含めて
+    // 画角に収めると**球が豆粒になって見失う**(利用者役の観察)。動くものが
+    // 画面の高さの 2% を下回らない距離を上限にする——まわりが多少切れても、
+    // 対象が見えている方が優先。
+    // 画角60°で、対象が画面のどれだけを占めるかを決める比。60 では約3%で、
+    // 1cm の磁石が落ちるだけの場面(D21)は数ピクセルの点にしかならず「ほぼ
+    // 真っ暗」と書かれた(利用者役①の観察)。35 なら約5%——まわりが見える
+    // ことは保ちつつ、対象が点にならない線として実測で選んだ。
+    // 35 では、走り続ける車のように**対象と原点が離れていく**場面で、対象が
+    // 画面の高さの 3% ほどの点にしかならなかった(利用者役②の観察:「車が画面
+    // の端の小さな点になっていて、まともに見えない」)。16 なら画面の高さの
+    // 6〜7% ——まわりが見えることは保ちつつ、何が走っているのか分かる大きさ。
+    // 全体が入る場面では `fit` の方が小さいので、この上限は効かない。
+    const APPARENT_MIN = 16;
+    const fit = radius * 3.6;
+    const cap = Math.max(movingRadius * 6, movingRadius * APPARENT_MIN);
+    const desired = Math.min(fit, cap);
+    // **全部は入らないと決めたなら、注視点も寄せる**。距離だけ縮めて注視点を
+    // 全体の中心に置いたままだと、対象が画角の外へ出て「何も映っていない
+    // 地面」だけが残る(45°に投げた球で実際に起きた)。入り切らない度合いに
+    // 応じて、注視点を全体の中心から動くものへ寄せていく。
+    const bias = fit > 0 ? Math.min(1, desired / fit) : 1;
+    guidedFollowTarget.lerpVectors(movingCenter, guidedFollowTarget, bias);
+    // 寄せた注視点が、動くものから画角の外へ出ないようにする。全体の中心へ
+    // 引っぱられすぎると、対象が画面の端で切れる。
+    const offset = guidedFollowTarget.clone().sub(movingCenter);
+    const offsetLimit = desired * 0.3;
+    if (offset.length() > offsetLimit) {
+      guidedFollowTarget.copy(movingCenter).add(offset.setLength(offsetLimit));
+    }
+    // 対象が急に遠ざかるときは追いつきを速める(一定の緩さだと置いていかれる)。
+    const distanceNow = camera.position.distanceTo(orbit.target);
+    const chasing = desired > distanceNow * 1.25 || desired < distanceNow * 0.6;
+    const guidedCameraSnapNow = guidedCameraSnap;
+    const ease = guidedCameraSnapNow ? 1 : chasing ? 0.22 : 0.08;
+    guidedCameraSnap = false;
+    guidedFollowDirection.copy(camera.position).sub(orbit.target);
+    if (guidedFollowDirection.lengthSq() < 1e-12) {
+      guidedFollowDirection.set(1, 0.7, 1.2);
+    }
+    const distance = guidedFollowDirection.length();
+    guidedFollowDirection.normalize();
+    // 仰角は**帯**で押さえる。下限は床の下に潜らないため。上限が無かったので、
+    // 場面によっては 45° ほぼ真上から見下ろす画になり、地平線が画角の外へ
+    // 出て**空が一切映らない**——落ちているのか止まっているのかが画面から
+    // 消えていた(利用者役①の観察)。0.42(約 25°)なら、縦画角 50° の
+    // 上端に地平線が残り、地面と空の境が必ず見える。
+    if (guidedFollowDirection.y < 0.3) {
+      guidedFollowDirection.y = 0.3;
+      guidedFollowDirection.normalize();
+    } else if (guidedFollowDirection.y > 0.42) {
+      guidedFollowDirection.y = 0.42;
+      guidedFollowDirection.normalize();
+    }
+    // 注視点は、ずれが画角に対して大きいほど速く追いつく。一定の緩さだと、
+    // 秒速十数メートルで飛ぶ球に置いていかれて画面から消える(実測)。
+    const targetError = orbit.target.distanceTo(guidedFollowTarget);
+    // ずれが画角と同じくらいまで開いたら、**ほぼ一気に**追いつく。0.35 では
+    // 60°の坂を秒速 30m で滑り落ちる箱に置いていかれ、画面の隅で豆粒に
+    // なっていた(利用者役②の観察)。ずれの大きさで段を分ける。
+    // ずれが画角と同じくらいまで開いたら、**そのまま合わせる**。0.8 では毎
+    // フレーム 2 割が残り、5 mm の球が秒速数十メートルで落ちる場面(空気抵抗の
+    // 実験)ではその残りが画角より大きく、カメラは永久に置いていかれて画面は
+    // 真っ黒のままだった(実測)。追いつけないなら追いかける意味がない。
+    const targetEase = guidedCameraSnapNow
+      ? 1
+      : targetError > desired
+        ? 1
+        : targetError > desired * 0.2
+          ? 0.35
+          : Math.max(ease, 0.1);
+    orbit.target.lerp(guidedFollowTarget, targetEase);
+    // **注視点(`orbit.target`)自体も、動くものから画角の外へ出ないよう
+    // 上限を掛ける**。`guidedFollowTarget`は`offsetLimit`ですでに動くものの
+    // 近くに保っているが、`orbit.target`はそこへ`targetEase`で追いつく
+    // *途中*の値であり、上の`offsetLimit`とは無関係に遅れが積み上がる——
+    // 実測では、秒速 14m 超で水平に飛ぶ球(45°に投げる実験)に対して
+    // 注視点が最大 2m ほど遅れ続け、床グリッドしか映っていない画角のまま
+    // 着地まで一度も球が画面に現れなかった(進行管理役の実測、
+    // `window.__camera`/`window.__world`で確認)。遅れの**距離**そのものを
+    // `guidedFollowTarget`と同じ`offsetLimit`で頭打ちにすれば、毎フレーム
+    // 動くものへ追いつこうとする滑らかさは保ったまま、遅れが際限なく育つ
+    // ことはなくなる(=球は画角の外へ出たままにならない)。
+    const targetLag = orbit.target.clone().sub(movingCenter);
+    if (targetLag.length() > offsetLimit) {
+      orbit.target.copy(movingCenter).add(targetLag.setLength(offsetLimit));
+    }
+    const nextDistance = distance + (desired - distance) * ease;
+    camera.position
+      .copy(orbit.target)
+      .addScaledVector(guidedFollowDirection, nextDistance);
+    // 床の下へ潜らないための最低の高さ。ただし**対象より大きく持ち上げない**
+    // ——分子の世界(D25 は 10 µm ほどの広がり)では 0.3 m は 3 万倍も遠く、
+    // 対象が点にすらならず真っ黒になっていた(利用者役①の観察)。判断には
+    // 床合わせの下限(`radius`)ではなく、**動くものの本当の大きさ**を使う。
+    //
+    // **見る先が床より下なら、この下限は当てない**。床の無い場面(空気抵抗の
+    // 実験は 5 mm の球が y=0 から落ち続ける)では、対象が -170 m まで沈んでも
+    // カメラだけが y≈0 に留められ、200 m 以上離れた 5 mm の球を見ることに
+    // なって画面が真っ黒だった(実測)。潜り込む床がそもそも無い。
+    if (guidedFollowTarget.y >= 0) {
+      camera.position.y = Math.max(
+        camera.position.y,
+        Math.min(0.3, movingRadius * 0.5),
+      );
+    }
+    updateClipPlanes(camera.position.distanceTo(orbit.target));
+    // 「置いたばかりの物を見失わない」「これを追いかける」の実体は、この
+    // 関数が使う`box`を`followedBodyBox()`に差し替えることで既に済んでいる
+    // (関数冒頭・`followedBodyBox`のdoc参照)——ここでの後付けの上書きは
+    // 不要になった(往復を避けるため、あえて追加しない)。
+    if ((window as unknown as { __dbgCam?: boolean }).__dbgCam) {
+      console.log(
+        "[dbg]",
+        JSON.stringify({
+          movingRadius,
+          radius,
+          desired,
+          target: orbit.target.toArray(),
+          cam: camera.position.toArray(),
+          near: camera.near,
+          far: camera.far,
+        }),
+      );
+    }
+  }
+
+  /**
+   * 見る対象までの距離に合わせて、手前と奥の切り取り面を動かす。
+   *
+   * 手前の面は 0.1 m に固定してあったので、分子の運動のような小さな世界では
+   * 対象がまるごと手前の面より近くに来て**全部消える**。シーンの寸法は
+   * 1e-7 m の分子から 1e11 m の公転まで振れるので、絶対値ではなく比で決める。
+   */
+  function updateClipPlanes(viewDistance: number): void {
+    const near = Math.max(viewDistance / 1000, 1e-9);
+    const far = Math.max(viewDistance * 1000, near * 1e6);
+    if (camera.near === near && camera.far === far) return;
+    camera.near = near;
+    camera.far = far;
+    camera.updateProjectionMatrix();
+  }
+  // 自分でカメラを動かしたら追従をやめる(操作を横取りしない)。
+  orbit.addEventListener("start", () => {
+    guidedFollowCamera = false;
+    // **置いたばかりの物への特別扱いも、ここで手を引く**
+    // (`cameraMovedSinceSpawn`のdoc参照)。このイベントは実際のドラッグ・
+    // ホイール操作でのみ発火し(`updateGuidedFollowCamera`が`camera.position`/
+    // `orbit.target`を直接書き換える自動追従では発火しない)、以後は次の
+    // spawnまで戻らない片道スイッチ——後で「これを追いかける」を押して
+    // `guidedFollowCamera`だけが復活しても、利用者が自分で見た先を上書き
+    // しない。
+    cameraMovedSinceSpawn = true;
+  });
 
   function updateGridFluidOverlay(currentWorld: WasmWorld) {
     const enabled = (
@@ -6101,6 +7973,15 @@ async function setUpSceneView(
     selectedFrameIndex = frameIndex;
     highlightHierarchy = rebuildHierarchy();
   }
+  // **課題B(利用者役の報告)**: Hierarchyの「Fluids」行を選んだときの経路。
+  // SPH粒子は個々のボディとして選べないので`selectBody`は使わず、Inspectorへ
+  // 専用の概要(`renderFluidSummaryInspector`)を出す。ボディの選択は解く
+  // (どちらか一方だけが選ばれている状態にする——両方選択済みに見えるのを防ぐ)。
+  function selectFluidSummary() {
+    selectedBodyIndex = -1;
+    motorToggleButton.disabled = true;
+    renderFluidSummaryInspector(world);
+  }
   // **Hierarchy の右クリック操作(群2)**。実体(`hierarchyActionsImpl`)は
   // メッシュ管理・プレハブ機構が揃う後段で組み立てるので、ここでは**遅延解決の
   // プロキシ**を渡す——`setUpHierarchy` は呼び出し時点の `actions` を各行の
@@ -6123,6 +8004,7 @@ async function setUpSceneView(
       selectFrame,
       hierarchyActions,
       SPAWN_MATERIALS,
+      selectFluidSummary,
     );
   }
   let highlightHierarchy = rebuildHierarchy();
@@ -6141,11 +8023,174 @@ async function setUpSceneView(
   // 毎フレーム値を読み直して表示を更新するため、実際に適用された step で
   // 表示が変わる(Playモードが止まっていれば `step` ボタンを押すまで変わらない、
   // これは「次step先頭で適用」という設計そのものが目に見えている状態)。
+  /**
+   * **いまの場面をシーン文書として取り出し、書き換えて読み直す**
+   * (利用者役④の観察: 材質を変える手段がどこにも無かった)。
+   *
+   * 物理コアに「後から材質を差し替える」操作は無い——材質はボディを作る
+   * ときに決まり、密度から質量が、反発・摩擦係数が決まる。**一部だけを
+   * 上書きすると理論の辻褄が合わなくなる**ので、シーンを書き出して該当の
+   * 体だけ書き換え、**同じ読み込み経路**で作り直す。こうすれば材質・質量・
+   * 反発は必ず互いに整合したままになる。
+   *
+   * ボディの並びは書き出しでも保たれるが、名前が一致するものを優先して
+   * 探す(削除済みの体があると添字がずれ得るため)。
+   */
+  /**
+   * 選んだ物の高さと速さを記録し始める。**シーン文書側の観測点一覧にも足す**
+   * のが要点——足さないと、材質を変えて場面を組み直した瞬間や、保存して開き
+   * 直した瞬間に、記録だけが黙って消える(`sceneOwnProbes`のdoc参照)。
+   */
+  function addProbesForBody(bodyIndex: number): void {
+    if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
+    const name = world.read_component("body_label_at", String(bodyIndex));
+    try {
+      applyComponent(world, "add_body_probes", { index: bodyIndex });
+    } catch (err) {
+      reportError(`グラフへの記録を始められませんでした: ${String(err)}`);
+      return;
+    }
+    if (name) {
+      sceneOwnProbes = [
+        ...sceneOwnProbes,
+        { body_pos_y: name },
+        { body_speed: name },
+      ];
+    }
+    highlightHierarchy = rebuildHierarchy();
+  }
+
+  /**
+   * 書き出した文書のボディ名を、いま画面に出ている名前へ揃える。
+   *
+   * 書き出しは名前を落として `body_0` のような連番にする(`export.rs` の
+   * `body_name`)。組み直した途端に一覧の名前が全部変わっては、どれが自分の
+   * 置いた物か分からなくなるので書き戻すのだが、**つなぎ目・結合・観測点は
+   * 名前でボディを指している**。ボディ側だけ書き換えると参照が宙に浮き、
+   * 読み込みが `UnknownBodyName("body_1")` で落ちる——ふりこを保存して開き
+   * 直すと、何も言わずに前の場面のままになった(利用者役④の観察)。
+   * だから**参照側も同じ表で一度に**書き換える。
+   *
+   * 表は先に全部作ってから一度だけ当てる。順に当てると
+   * `body_0`→`ボール`、`body_1`→`body_0` のような並びで二重に置換され、
+   * 別の物を指してしまう。
+   */
+  function relabelSceneBodies(doc: Record<string, unknown>): void {
+    const bodies = doc.bodies;
+    if (!Array.isArray(bodies)) return;
+    const taken = new Set<string>();
+    for (const body of bodies) {
+      const name = (body as Record<string, unknown> | null)?.name;
+      if (typeof name === "string") taken.add(name);
+    }
+    const rename = new Map<string, string>();
+    const count = readNumber(world, "body_count");
+    for (let i = 0; i < bodies.length && i < count; i += 1) {
+      const from = (bodies[i] as Record<string, unknown> | null)?.name;
+      const to = world.read_component("body_label_at", String(i));
+      if (typeof from !== "string" || !to || to === from) continue;
+      // 同じ名前の物が二つできると、参照がどちらを指すのか決められなくなる。
+      // そのときは書き出しの名前のままにしておく(見た目より、開けるほうが先)。
+      if (taken.has(to)) continue;
+      taken.delete(from);
+      taken.add(to);
+      rename.set(from, to);
+    }
+    if (rename.size === 0) return;
+    const relabel = (value: unknown): unknown => {
+      if (typeof value === "string") return rename.get(value) ?? value;
+      if (Array.isArray(value)) return value.map(relabel);
+      if (value && typeof value === "object") {
+        const obj = value as Record<string, unknown>;
+        for (const key of Object.keys(obj)) obj[key] = relabel(obj[key]);
+        return obj;
+      }
+      return value;
+    };
+    for (const key of Object.keys(doc)) {
+      // 場面の名前と材質名はボディの参照ではない。
+      if (key === "name" || key === "materials") continue;
+      doc[key] = relabel(doc[key]);
+    }
+  }
+
+  function patchSceneBody(
+    bodyIndex: number,
+    patch: (body: Record<string, unknown>) => void,
+  ): boolean {
+    // **走っていなければ組み直せる**。以前は Edit モードのときだけに絞って
+    // いたので、「とめる」を押して止めた人が「材質は、とめている間だけ
+    // 変えられます」と拒まれた——止めているのに止めていないと言われる、という
+    // 一番説明のつかない断り方だった(利用者役④の観察)。組み直すと時刻は
+    // 0 に戻るので、走行中だけを断る。
+    if (mode === "play" && playing) return false;
+    if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return false;
+    let doc: { bodies?: Record<string, unknown>[] };
+    try {
+      doc = JSON.parse(world.read_component("export_scene_json", ""));
+    } catch {
+      return false;
+    }
+    const bodies = doc.bodies;
+    if (!Array.isArray(bodies)) return false;
+    const hadFrames = readNumber(world, "frame_count");
+    const label = world.read_component("body_label_at", String(bodyIndex));
+    const target =
+      bodies.find((b) => typeof b.name === "string" && b.name === label) ??
+      bodies[bodyIndex];
+    if (!target) return false;
+    patch(target);
+    relabelSceneBodies(doc as Record<string, unknown>);
+    // 観測点は元の一覧へ戻す(`sceneOwnProbes` のdoc参照)。
+    (doc as { probes?: unknown[] }).probes = sceneOwnProbes;
+    // これは**同じ場面の編集**であって差し替えではない。差し替えとして
+    // 知らせると、上の画面が「別の場面になった」と判断して名前を捨て、
+    // 選択も読み込み直後の床へ戻ってしまう(材質を変えただけで場面の名前が
+    // 消え、右の「選んだもの」が ground に化けた——利用者役④の観察)。
+    workspaceIsLoading = true;
+    try {
+      sceneGalleryRef.current?.(JSON.stringify(doc));
+    } catch (err) {
+      reportError(`場面の組み直しに失敗しました: ${String(err)}`);
+      return false;
+    } finally {
+      workspaceIsLoading = false;
+    }
+    // 組み直しでボディは作り直されるが、並びは同じなので選び直せる。
+    if (bodyIndex < readNumber(world, "body_count")) selectBody(bodyIndex);
+    markUnsaved();
+    // 回転する座標系はシーン文書に書く場所が無い(`to_scenario` が持たない)ので、
+    // 組み直すと外れる。黙って消すのがいちばん悪いので、あったときだけ言う。
+    if (hadFrames && readNumber(world, "frame_count") < hadFrames) {
+      showToast("場面を組み直しました(回転する座標系は外れます)");
+    }
+    return true;
+  }
+
   inspectorEditRef.current = {
     setMass(bodyIndex, mass) {
       if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
+      // **とめている間は、打った値がその場で効く**。Command は次 step の先頭で
+      // 適用されるので、Edit モード(step が進まない)では打ち込んでも永久に
+      // 何も起きなかった——「10 と入れたのに元の重さのまま落ちてくる」という、
+      // いちばん信用を失う壊れ方をしていた(利用者役④の観察)。
+      // 直接設定は Position/Scale と同じ「Play に入る前の初期条件づくり」で、
+      // 適用する処理は Command の腕と同一(`set_body_mass_at_impl` のdoc参照)。
+      if (mode === "edit") {
+        applyComponent(world, "set_body_mass_at", { index: bodyIndex, mass });
+        markUnsaved();
+        return;
+      }
       applyComponent(world, "push_set_body_mass", { body_index: bodyIndex, mass });
       pushCommandLog(world, { kind: "SetBodyMass", bodyIndex, mass });
+    },
+    setMaterial(bodyIndex, materialName) {
+      return patchSceneBody(bodyIndex, (b) => {
+        b.material = materialName;
+        // 材質を選び直したのに、前の材質で計算した質量が居座っては意味が
+        // ない。密度から計算し直させる。
+        delete b.mass_override;
+      });
     },
     setBodyType(bodyIndex, kind) {
       if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
@@ -6191,6 +8236,13 @@ async function setUpSceneView(
     setPosition(bodyIndex, x, y, z) {
       if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
       applyComponent(world, "set_body_position_at", { index: bodyIndex, x, y, z });
+      // `workspaceApi.setBodyPosition` と同じ手当て(そちらのdoc参照)。
+      // 統合エディタの Inspector から打ち替えたときも、追従カメラが止まって
+      // いれば同じように画面から消える。
+      if (!guidedFollowCamera && !isWellVisible(x, y, z, bodyVisibilityRadius(bodyIndex))) {
+        bodyMeshes.get(bodyIndex)?.position.set(x, y, z);
+        frameCameraOnContent();
+      }
     },
   };
   renderInspectorFor(world, selectedBodyIndex);
@@ -6212,8 +8264,75 @@ async function setUpSceneView(
   // THREE.Line(振り子スポーンごとに1本、`world.constraint_anchor_points_at`が
   // 返す2点を毎フレーム反映する)。
   const constraintLines = new Map<number, THREE.Line>();
+  // **吊るされているものは、吊るされて見えなければならない**。シーンJSONの
+  // `joints[].distance` は「この物体を、この点から一定距離に保つ」という拘束
+  // だが、画面には何も描かれていなかった——ふりこが「宙に浮いた2つの球」に
+  // 見えて、往復の意味が読み取れなかった(利用者役の観察)。
+  // ワークスペースが読み込んだシーンから紐の情報を受け取り、毎フレーム
+  // 「物体の位置 ↔ 支点」を結ぶ線を引く。物理には関与しない。
+  type Tether = { bodyIndex: number; anchor: [number, number, number] };
+  let tethers: Tether[] = [];
+  const tetherLines: THREE.Line[] = [];
+  function setTethers(next: Tether[]): void {
+    for (const line of tetherLines) {
+      scene.remove(line);
+      line.geometry.dispose();
+    }
+    tetherLines.length = 0;
+    tethers = next;
+    for (const _ of tethers) {
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(),
+          new THREE.Vector3(),
+        ]),
+        new THREE.LineBasicMaterial({ color: 0xd9d2c4 }),
+      );
+      scene.add(line);
+      tetherLines.push(line);
+    }
+  }
+  function updateTethers(currentWorld: WasmWorld): void {
+    const count = readNumber(currentWorld, "body_count");
+    tethers.forEach((tether, i) => {
+      const line = tetherLines[i];
+      if (!line) return;
+      if (tether.bodyIndex < 0 || tether.bodyIndex >= count) {
+        line.visible = false;
+        return;
+      }
+      const position = currentWorld.body_position_at_f32(tether.bodyIndex);
+      const attribute = line.geometry.attributes
+        .position as THREE.BufferAttribute;
+      attribute.setXYZ(0, position[0], position[1], position[2]);
+      attribute.setXYZ(1, tether.anchor[0], tether.anchor[1], tether.anchor[2]);
+      attribute.needsUpdate = true;
+      line.geometry.computeBoundingSphere();
+      line.visible = true;
+    });
+  }
   const raycaster = new THREE.Raycaster();
   const pointerNdc = new THREE.Vector2();
+  // **触れるものは、触れると分かるようにする**。3D の中の物体は選べるのに、
+  // 見た目は他と同じで押せるかどうかが分からなかった(利用者役の観察: 惑星を
+  // クリックしても何も起きず、触れる/触れないの区別が最後まで付かなかった)。
+  // 指させるものの上ではカーソルを変える——押せることを、押す前に伝える。
+  let hoverCursorFrame = 0;
+  function updateHoverCursor(event: PointerEvent): void {
+    // ポインタ移動は毎フレーム何度も来るので、間引く(見た目には差が出ない)。
+    const now = performance.now();
+    if (now - hoverCursorFrame < 60) return;
+    hoverCursorFrame = now;
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hit = raycaster.intersectObjects(
+      pickables.map((p) => p.mesh),
+      false,
+    );
+    renderer.domElement.style.cursor = hit.length > 0 ? "pointer" : "";
+  }
   const dragPlane = new THREE.Plane();
   const dragPlaneHit = new THREE.Vector3();
   const cameraDirection = new THREE.Vector3();
@@ -6225,13 +8344,38 @@ async function setUpSceneView(
     pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   }
 
+  /**
+   * ヒットした`Object3D`(飾りを除いた子孫のこともある——複合形状の子
+   * メッシュ、手回し発電機の取っ手など)から、`pickables`に登録された
+   * 持ち主を辿って探す。
+   *
+   * `raycaster.intersectObjects`は既定で再帰的なので、`hit.object`は
+   * `pickables`に登録した`mesh`そのものとは限らない——複合形状
+   * (`meshFromShapeJson`の`compound`分岐)は空ジオメトリの`carrier`を
+   * 登録し、実際に当たるのは`carrier.add()`した子メッシュ。厳密な
+   * `===`一致だけで探すと、子に当たった時点で持ち主が見つからず
+   * ヒット自体が無かったことにされていた(課題Aの根本原因と同じ形の
+   * 取りこぼし)。親を辿って一致する`pickables`エントリを探す。
+   */
+  function resolvePickable(
+    object: THREE.Object3D | null,
+  ): { mesh: THREE.Object3D; bodyIndex: number } | undefined {
+    let current: THREE.Object3D | null = object;
+    while (current) {
+      const found = pickables.find((p) => p.mesh === current);
+      if (found) return found;
+      current = current.parent;
+    }
+    return undefined;
+  }
+
   function hitTest(event: PointerEvent, wantBack: boolean) {
     updatePointerNdc(event);
     raycaster.setFromCamera(pointerNdc, camera);
     const hits = raycaster.intersectObjects(pickables.map((p) => p.mesh));
     const hit = hits[wantBack && hits.length > 1 ? 1 : 0];
     if (!hit) return null;
-    const picked = pickables.find((p) => p.mesh === hit.object);
+    const picked = resolvePickable(hit.object);
     return picked ? { picked, worldPoint: hit.point } : null;
   }
 
@@ -6370,7 +8514,10 @@ async function setUpSceneView(
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
-    if (!dragStartScreen) return;
+    if (!dragStartScreen) {
+      updateHoverCursor(event);
+      return;
+    }
     const dx = event.clientX - dragStartScreen.x;
     const dy = event.clientY - dragStartScreen.y;
     if (!isDragging) {
@@ -6460,15 +8607,36 @@ async function setUpSceneView(
         undoButton.disabled = mode !== "edit";
         redoButton.disabled = true;
       } else {
-        if (mode !== "play" || !pointerDownHit) return;
+        // ここまで来たドラッグは、**掴む**か、**視点を回す**かのどちらか。
+        //
+        // 動かせない物(床・壁)は掴んでも物理的に何も起きない。それでも掴み
+        // 扱いにしていたので、画面のほとんどを占める床の上でドラッグすると
+        // 視点が回らず、代わりに床が「選んだもの」として開いていた——3D を
+        // ぐるっと見回そうとしただけで、材質や座標の欄が出てくる
+        // (利用者役①の観察:「ドラッグしても視点が回らず、専門的なパネルが
+        // 開く」)。掴めない物の上のドラッグは、そのまま視点回しへ譲る。
+        const hit = pointerDownHit;
+        const picked = hit?.picked.bodyIndex ?? -1;
+        const grabbable =
+          mode === "play" &&
+          hit !== null &&
+          picked >= 0 &&
+          world.read_component("body_is_static_at", String(picked)) !== "true";
+        if (!grabbable || hit === null) {
+          // 視点を動かすための引っぱりなので、離したときのクリック選択にも
+          // 落とさない(閾値を越えたぶんだけ捨てる。押して離すだけの選択は
+          // そのまま効く)。
+          pointerDownHit = null;
+          return;
+        }
         isDragging = true;
         dragMode = "grab";
-        grabbedBodyIndex = pointerDownHit.picked.bodyIndex;
+        grabbedBodyIndex = picked;
         selectBody(grabbedBodyIndex);
         camera.getWorldDirection(cameraDirection);
         dragPlane.setFromNormalAndCoplanarPoint(
           cameraDirection,
-          pointerDownHit.worldPoint,
+          hit.worldPoint,
         );
         // `body_position_at_f32`はWasmメモリを直接指す一時的なビューを返す
         // (B16、`HotPathViewBuffers`のdoc参照)。下の`applyComponent`が挟む
@@ -6701,7 +8869,7 @@ async function setUpSceneView(
   let cappedIndicatorFrames = 0;
   function updateEffectiveTimeScale(measured: number, capped: boolean) {
     effectiveTimeScale += (measured - effectiveTimeScale) * 0.1;
-    timescaleEffective.textContent = `×${effectiveTimeScale.toFixed(2)}`;
+    timescaleEffective.textContent = `実測 ×${effectiveTimeScale.toFixed(2)}`;
     if (capped) cappedIndicatorFrames = CAPPED_INDICATOR_HOLD_FRAMES;
     else if (cappedIndicatorFrames > 0) cappedIndicatorFrames -= 1;
     const degraded = cappedIndicatorFrames > 0;
@@ -6819,20 +8987,153 @@ async function setUpSceneView(
   // ボディ数)。以後のスポーンパレット操作による「これまでのスポーン数」の
   // 基準点として使う。
   let sceneBaseBodyCount = 2;
+  /// いま読み込んでいる場面が**もともと持っていた**観測点の一覧
+  /// (`sceneGalleryRef.current` のdoc参照)。書き換えて読み直すときに、
+  /// 書き出しが足してしまう編集用の観測点を持ち込まないために使う。
+  let sceneOwnProbes: unknown[] = [];
+  /// 場面が差し替わったことをワークスペースへ知らせる先(`onSceneReplaced`)。
+  const sceneReplacedCallbacks: (() => void)[] = [];
+  /// ワークスペース自身が読み込んでいる最中か。自分の読み込みで自分へ
+  /// 「差し替わった」と通知して堂々巡りにならないようにするための札。
+  let workspaceIsLoading = false;
   /// 未保存の変更があるか(群2、`beforeunload` のdoc参照)。
   let hasUnsavedChanges = false;
+  // **課題B(進行管理役の実測)**: 「今の場面(実験の上に足した物・自分の
+  // 場面)に、直近の読み込み/保存から編集が加わっているか」を別に持つ。
+  // `hasUnsavedChanges` は「一度でも編集したことがあるか」を`beforeunload`
+  // のためだけに一方向に立てる値で、場面を読み直しても下りない
+  // (読み直し自体もスポーン経由で`markUnsaved()`を呼ぶため——起動時の
+  // 既定シーン読み込みだけで既に立ってしまう、意図した設計ではあるが
+  // 「保存したかどうか」を言うには使えない)。こちらは場面を読み直す
+  // (`sceneGalleryRef.current`の末尾)たびに下ろし、「この場面を保存する」
+  // が成功したときも下ろす——「新規シーン」等で今の作りかけを黙って
+  // 捨てる前に確認するかどうかを、この値だけで判断できるようにする。
+  let sceneEditedSinceLoad = false;
   function markUnsaved() {
     hasUnsavedChanges = true;
+    sceneEditedSinceLoad = true;
   }
+  /**
+   * **いま在る場面と同じくらいの高さから落とす**。
+   *
+   * 置く高さは 12 m 固定だった。ふりこ(振れ幅 ±1 m ほど)に箱を一つ足すと、
+   * 12 m の空から豆粒が降ってきて、舞台のどこにも馴染まなかった(利用者役④
+   * の観察)。場面の広がりに合わせて、その少し上から落とす。何も無い場面では
+   * これまでどおり 12 m ——自由落下の手応えは、そこが気持ちいいから。
+   */
+  function spawnHeight(): number {
+    const box = contentBoundingBox();
+    if (!box) return SPAWN_HEIGHT;
+    const radius = box.getSize(new THREE.Vector3()).length() * 0.5;
+    if (!(radius > 0)) return SPAWN_HEIGHT;
+    return Math.min(SPAWN_HEIGHT, Math.max(radius * 1.5, radius + 0.5));
+  }
+
   function nextSpawnPosition(): { x: number; z: number } {
     const n = readNumber(world, "body_count") - sceneBaseBodyCount; // これまでのスポーン数
     const angle = n * 2.4; // 黄金角に近い値、重ならないようばらけさせる
-    const radius = 1.5 + n * 0.3;
+    // ばらけ方も場面の寸法に合わせる(高さだけ縮めても、横に 1.5 m 離れて
+    // いては小さな場面から外れてしまう)。
+    const scale = Math.max(spawnHeight() / SPAWN_HEIGHT, 0.05);
+    const radius = (1.5 + n * 0.3) * scale;
     return { x: Math.cos(angle) * radius, z: Math.sin(angle) * radius };
+  }
+
+  /**
+   * **稜線を足す**。同じ材質の箱を積むと、隙間も影の差も出ないため
+   * 「3 段の積み木」が 1 本の柱にしか見えない(利用者役の観察)。面の境目に
+   * 細い線を重ねると、積み上がっていることがひと目で分かる。球には付けない
+   * (経線・緯線が出てうるさいだけになる)。
+   */
+  function addEdgeLines(root: THREE.Object3D): void {
+    // 複合形状は複数の子メッシュで出来ている(凸包メッシュのように
+    // ジオメトリを持たない入れ物のこともある)。持っているものにだけ足す
+    // ——ここで例外が出ると**スポーンそのものが失敗する**ので、形は問わない。
+    const targets: THREE.Mesh[] = [];
+    root.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (mesh.isMesh && mesh.geometry) targets.push(mesh);
+    });
+    for (const mesh of targets) {
+      const kind = mesh.geometry.type;
+      if (kind === "SphereGeometry" || kind === "PlaneGeometry") continue;
+      // 頂点を持たないジオメトリ(入れ物だけのメッシュ)には稜線を作れない。
+      // ここで例外を投げると**スポーンごと失敗する**ので、必ず確かめる。
+      const positions = mesh.geometry.attributes?.position;
+      if (!positions || positions.count === 0) continue;
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(mesh.geometry, 25),
+        new THREE.LineBasicMaterial({
+          color: 0x1a1a1a,
+          transparent: true,
+          opacity: 0.55,
+        }),
+      );
+      edges.name = "edges";
+      // **稜線は見た目だけの飾りで、当たり判定には出さない**。
+      //
+      // 課題A(利用者役の観察: 「坂はすべる? 止まる?」の箱をクリックしても
+      // 「選んだもの」が出ない)を実測で辿ると、`hitTest`の
+      // `raycaster.intersectObjects(pickables.map(p=>p.mesh))`が既定で
+      // recursive(子孫まで再帰的に判定)であり、ここで足した`LineSegments`
+      // (稜線)も判定対象に入っていた。`THREE.Line`系の当たり判定は既定の
+      // 太さ判定(`raycaster.params.Line.threshold`既定値1、ワールド座標で
+      // 1m)を使うため、辺から1m以内を通るレイはほぼ確実に「当たった」
+      // ことになり、しかもその距離は**面そのものへの距離より近く**出ることが
+      // 多い(実測: 箱の中心をクリックしたのに、面への距離2.84より近い
+      // 距離2.67の位置に、`pickables`に登録の無い辺のヒットが割り込む)。
+      // `hitTest`は先頭(最も近い)ヒットの持ち主を`pickables`から探すが、
+      // 辺は`pickables`に無いため見つからず`null`を返す——**当たっているのに
+      // 何も選ばれない**。稜線はどのみち面と同じ位置にあるので、当たり判定を
+      // 切っても本体(面)側のヒットがそのまま残り、選択には影響しない。
+      edges.raycast = () => {};
+      mesh.add(edges);
+    }
+  }
+
+  /**
+   * **材質は見た目に出す**。鋼もゴムも発泡スチロールも同じオレンジでは、
+   * 「材質を変えると跳ね方が変わる」と書いてあっても、変えたことが画面から
+   * 分からない(利用者役の観察: 材質を切り替えても見た目が一切変わらない)。
+   * 物性そのものは Rust 側の材質DBが持っている。ここはその名前を、人が
+   * 見て納得する色に写すだけ。
+   */
+  const MATERIAL_COLORS: Record<string, number> = {
+    "鋼(炭素鋼)": 0x9aa3ad,
+    アルミニウム: 0xc9ced4,
+    銅: 0xc07a4a,
+    ガラス: 0x9fd3e0,
+    コンクリート: 0x8a8a80,
+    "木材(松)": 0xc08b4a,
+    "ゴム(天然)": 0x4d5359,
+    "氷(0°C)": 0xa8d8ef,
+    水: 0x4f9ad6,
+    空気: 0xd8e6f2,
+    発泡スチロール: 0xf0f0ea,
+    "人体(平均)": 0xd9a07a,
+    "PTFE(テフロン)": 0xe8e8e8,
+  };
+  function applyMaterialColor(bodyIndex: number, mesh: THREE.Object3D): void {
+    // 床や壁は「観察の対象」ではなく背景なので、材質の色は当てない——
+    // ゴムの床を黒くすると、その上のゴム球が背景に溶けて見えなくなる。
+    if (world.read_component("body_is_static_at", String(bodyIndex)) === "true") {
+      return;
+    }
+    const name = world.read_component("body_material_label_at", String(bodyIndex));
+    const color = MATERIAL_COLORS[name];
+    if (color === undefined) return;
+    mesh.traverse((object) => {
+      const target = object as THREE.Mesh;
+      if (!target.isMesh) return;
+      const material = target.material as THREE.MeshStandardMaterial;
+      if (material?.color) material.color.setHex(color);
+    });
   }
 
   function addSpawnedMesh(bodyIndex: number, mesh: THREE.Mesh) {
     markUnsaved();
+    applyMaterialColor(bodyIndex, mesh);
+    addEdgeLines(mesh);
     scene.add(mesh);
     pickables.push({ mesh, bodyIndex });
     bodyMeshes.set(bodyIndex, mesh);
@@ -6915,30 +9216,64 @@ async function setUpSceneView(
   /// Plane専用の位置決め(normal/dから逆算)は他の形状(ボディの現在位置/姿勢を
   /// worldへ問い合わせる)と経路が異なるため、戻り値に`isPlane`を含めて呼び出し側が
   /// 分岐する。
-  function meshFromShapeJson(shape: ImportedShapeJson | undefined): {
+  ///
+  /// `markSpin`(**課題C向けに追加**): 無地の球は、実際に回っていても見た目に
+  /// 手掛かりが無い——「手回し発電機」の軸(`kinematic`な球、`angular_velocity`を
+  /// 外から与えられて回る)は、回転そのものは物理として正しく進んでいるのに
+  /// (実測で四元数が毎秒変わることを確認済み)、模様の無い灰色の球にしか見えず
+  /// 「回っている」という一番言いたいことが伝わらなかった(利用者役の報告)。
+  /// 形状(半径・質量・慣性・当たり判定)には一切触れず、**描画だけ**に小さな
+  /// 突起(取っ手)を足して回転を目に見えるようにする——物理の受け入れテストが
+  /// 検証している質量・慣性・衝突形状はどれも変わらない。
+  function meshFromShapeJson(
+    shape: ImportedShapeJson | undefined,
+    markSpin = false,
+  ): {
     mesh: THREE.Mesh;
     isPlane: boolean;
   } {
     if (shape && "plane" in shape) {
       const [nx, ny, nz] = shape.plane.normal;
       const normal = new THREE.Vector3(nx, ny, nz).normalize();
+      // 無限平面の見た目。20m 四方だと、遠くまで飛ぶ/走るものが端を越えて
+      // その先が黒い虚空になる(利用者役の観察)。物理は無限なので広く描く。
       const mesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(20, 20),
+        new THREE.PlaneGeometry(400, 400),
         new THREE.MeshStandardMaterial({
           color: 0x777755,
           side: THREE.DoubleSide,
         }),
       );
       mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+      // 水平な床には方眼を塗る(`paintFloorGrid` の doc 参照)。壁など
+      // 横向きの面には塗らない。
+      if (normal.y > 0.9) {
+        paintFloorGrid(mesh.material as THREE.MeshStandardMaterial);
+      }
       mesh.position.copy(normal.multiplyScalar(shape.plane.d));
       return { mesh, isPlane: true };
     }
     if (shape && "sphere" in shape) {
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
+        new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
+      );
+      if (markSpin) {
+        // **取っ手(課題C)**。球の中心から半径ぶん突き出た、色の違う小さな
+        // 棒。`mesh`の子にするので、毎フレーム`mesh.quaternion`を書き換える
+        // 既存の経路(呼び出し側、`body_rotation_at_f32`)にそのまま乗って
+        // 一緒に回る——ここでは一度だけ組み立てて終わり、当たり判定にも
+        // 質量にも触れない(`Mesh`の子は物理には見えない、描画専用の飾り)。
+        const r = shape.sphere.radius;
+        const handle = new THREE.Mesh(
+          new THREE.BoxGeometry(r * 0.35, r * 0.35, r * 1.5),
+          new THREE.MeshStandardMaterial({ color: 0x2a2a2a }),
+        );
+        handle.position.set(r * 0.9, 0, 0);
+        mesh.add(handle);
+      }
       return {
-        mesh: new THREE.Mesh(
-          new THREE.SphereGeometry(shape.sphere.radius, 16, 12),
-          new THREE.MeshStandardMaterial({ color: 0xffaa00 }),
-        ),
+        mesh,
         isPlane: false,
       };
     }
@@ -7085,7 +9420,10 @@ async function setUpSceneView(
 
     for (let i = 0; i < count; i++) {
       const bodyIndex = startIndex + i;
-      const { mesh, isPlane } = meshFromShapeJson(bodies[i]?.shape);
+      const { mesh, isPlane } = meshFromShapeJson(
+        bodies[i]?.shape,
+        bodies[i]?.type === "kinematic",
+      );
       if (isPlane) {
         addSpawnedMesh(bodyIndex, mesh);
         continue;
@@ -7129,6 +9467,15 @@ async function setUpSceneView(
     clearConsole();
     const parsed = JSON.parse(json) as ImportedScenarioJson;
     const bodies = parsed.bodies ?? [];
+    // **その場面がもともと持っていた観測点**を覚えておく。
+    //
+    // 読み込みは必ず編集用の観測点(先頭ボディの高さ・速さ)を 2 本足すので、
+    // 書き出した文書にはそれも載る。書き出し→読み直しを繰り返すと観測点が
+    // 雪だるま式に増え、グラフの凡例が同じ名前で埋まった(実測: 1 → 4 → 10
+    // → 22)。**書き換えて読み直すときは、ここで覚えた元の一覧へ戻す**。
+    sceneOwnProbes = Array.isArray((parsed as { probes?: unknown[] }).probes)
+      ? ((parsed as { probes?: unknown[] }).probes as unknown[])
+      : [];
 
     for (const mesh of bodyMeshes.values()) {
       scene.remove(mesh);
@@ -7154,6 +9501,7 @@ async function setUpSceneView(
     commandLog.length = 0;
     fluidPositionAttribute = null;
     fluidPoints.visible = false;
+    fluidBoundaryPoints.visible = false;
     circuitFreeWiringState.active = true;
     circuitSwitchToggle.disabled = true;
 
@@ -7183,18 +9531,92 @@ async function setUpSceneView(
     // ソフトボディ/天体/粒子群のバウンディングボックスがまだ空)。
     updateSoftBodyOverlay(world);
     updateAstroOverlay(world);
-    updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter);
+    updateGasBox(
+      world,
+      updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter),
+    );
     updateParticleCloud(brownianCloud, world.brownian_positions_f32(1), [0, 0, 0]);
     sceneBaseBodyCount = bodies.length;
 
     currentPredictionPrompts = parsed.prediction_prompts ?? [];
     renderPredictionPanel();
 
+    // **見えない大きさの物は、見える大きさで描く**。
+    //
+    // D25(ブラウン運動)は半径 1 µm の粒 300 個が 0.3 m の範囲に散らばる。
+    // 実寸で描くと 1 画素にも満たず、画面は真っ黒——選んだのに何も映らない、
+    // という一番がっかりする状態になっていた(利用者役①の一番の不満)。
+    // 散らばりの 1/60 を下回る物だけ、**描画だけ**を膨らませる(物理は素の
+    // ままで、当たり判定も質量も一切変えない)。実物より大きく描いていること
+    // は実験の説明文に書く。
+    const spread = (() => {
+      let min = [Infinity, Infinity, Infinity];
+      let max = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < bodies.length; i += 1) {
+        const p = world.body_position_at_f32(i);
+        for (let a = 0; a < 3; a += 1) {
+          if (p[a] < min[a]) min[a] = p[a];
+          if (p[a] > max[a]) max[a] = p[a];
+        }
+      }
+      if (!Number.isFinite(min[0])) return 0;
+      return Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+    })();
+    const drawFloor = spread > 0 ? spread / 60 : 0;
+
     for (let bodyIndex = 0; bodyIndex < bodies.length; bodyIndex++) {
-      const { mesh, isPlane } = meshFromShapeJson(bodies[bodyIndex]?.shape);
+      const { mesh, isPlane } = meshFromShapeJson(
+        bodies[bodyIndex]?.shape,
+        bodies[bodyIndex]?.type === "kinematic",
+      );
       if (isPlane) {
         addSpawnedMesh(bodyIndex, mesh);
         continue;
+      }
+      // **課題②(進行管理役の実測)**: 上の`spread`はボディ**位置**の散らばりで
+      // 決まるので、ボディが1個しか無い場面では常に0になり(自分と自分の
+      // 距離は0)、`drawFloor`も常に0——「見えない大きさの物を見える大きさで
+      // 描く」が一度も働かない。並進運動する物(D1のボールなど)は落ちる
+      // うちに軌道の大きさで画角が自然に合うので実害が無かったが、
+      // **その場で回るだけで並進しないkinematicな物**は軌道が無いぶん一生
+      // 画角が合わない。実測(`d20-generator`粒度2、3秒後):クランク
+      // (半径0.05mの球)が舞台高さ543pxに対し見かけの直径35px(6.4%)にしか
+      // ならず、回転が読み取れなかった。
+      //
+      // kinematicな物だけに絞って、最低限見える大きさまで描画だけを
+      // 膨らませる(物理には触れない、D25と同じ考え方)。**動くdynamicな
+      // 物には触れない**——D1/D2のような投射系はここまでの実測で問題が
+      // 出ていないものを、確かめもせず変える理由が無いため。ボディ名や
+      // シーンIDへ直接ヒモ付けていないので、将来同じ理由(回るだけ・小さい)
+      // で困る場面にもそのまま効く。
+      //
+      // 目標半径 0.3m は`d1-free-fall`のボールと同じ——このアプリで
+      // 「ちょうどよく見える」と実測済みの大きさをそのまま借りる(新しい
+      // 基準をここで作らない)。
+      const KINEMATIC_MIN_VISUAL_RADIUS = 0.3;
+      let scaleFactor = 1;
+      if (drawFloor > 0 || bodies[bodyIndex]?.type === "kinematic") {
+        mesh.geometry.computeBoundingSphere();
+        const own = mesh.geometry.boundingSphere?.radius ?? 0;
+        if (drawFloor > 0 && own > 0 && own < drawFloor) {
+          scaleFactor = Math.max(scaleFactor, drawFloor / own);
+        }
+        if (
+          bodies[bodyIndex]?.type === "kinematic" &&
+          own > 0 &&
+          own < KINEMATIC_MIN_VISUAL_RADIUS
+        ) {
+          scaleFactor = Math.max(
+            scaleFactor,
+            KINEMATIC_MIN_VISUAL_RADIUS / own,
+          );
+        }
+        // 毎フレームの再適用(`render()`)と喧嘩しないよう、拡大率は
+        // Scale ギズモと同じ入れ物へ載せる。
+        if (scaleFactor > 1) {
+          currentScale.set(bodyIndex, scaleFactor);
+          mesh.scale.setScalar(scaleFactor);
+        }
       }
       const pos = world.body_position_at_f32(bodyIndex);
       mesh.position.set(pos[0], pos[1], pos[2]);
@@ -7230,9 +9652,63 @@ async function setUpSceneView(
       highlightHierarchy = rebuildHierarchy();
       renderInspectorFor(world, selectedBodyIndex);
     }
+    // **シーンが最初から持っている水の粒**を描けるようにする。点群は
+    // 「+ 流体」ボタンで置いたときにしか作っておらず、水を含むシーン
+    // (D23 水を注ぐ・D18b 氷が水に変わる)を読み込むと**一粒も描かれない**
+    // ままだった——選んだのに真っ黒、という一番がっかりする壊れ方をしていた
+    // (利用者役①の一番の不満)。
+    const fluidParticles = readNumber(world, "fluid_particle_count");
+    if (fluidParticles > 0) {
+      fluidPositionAttribute = new THREE.BufferAttribute(
+        new Float32Array(fluidParticles * 3),
+        3,
+      );
+      fluidGeometry.setAttribute("position", fluidPositionAttribute);
+      fluidPoints.visible = true;
+      // 位置を物理から読み切ってから画角を合わせる(でないと原点を見る)。
+      const positions = world.fluid_particle_positions_f32();
+      if (positions.length >= fluidParticles * 3) {
+        (fluidPositionAttribute.array as Float32Array).set(
+          positions.subarray(0, fluidParticles * 3),
+        );
+        fluidPositionAttribute.needsUpdate = true;
+        fluidGeometry.computeBoundingSphere();
+      }
+      // 器も一緒に描く(`fluidBoundaryPoints` の doc 参照)。境界粒子は
+      // 動かないので、読み込みのときに一度だけ置けばよい。
+      const boundary = world.fluid_boundary_positions_f32();
+      if (boundary.length >= 3) {
+        fluidBoundaryGeometry.setAttribute(
+          "position",
+          new THREE.BufferAttribute(selectBoundaryShell(boundary), 3),
+        );
+        fluidBoundaryGeometry.computeBoundingSphere();
+        fluidBoundaryPoints.visible = true;
+      } else {
+        fluidBoundaryPoints.visible = false;
+      }
+    } else {
+      fluidBoundaryPoints.visible = false;
+    }
+    // 器を描いているかどうかは、舞台の状態として外から読めるようにしておく
+    // (`data-stage-empty` と同じ扱い)。
+    sceneViewElement.dataset.fluidBoundary = String(fluidBoundaryPoints.visible);
+
     // **シーンの中身にカメラを合わせる(群3、`frameCameraOnContent`のdoc参照)**。
     // 剛体・ソフトボディ・天体・粒子群がすべて配置し終わった後に呼ぶ。
     frameCameraOnContent();
+    // 場面が差し替わったことを上の画面へ伝える。ワークスペース自身の読み込み
+    // (`loadSceneJson`)は既に知っているので通知しない(`workspaceIsLoading`)。
+    if (!workspaceIsLoading) {
+      for (const callback of sceneReplacedCallbacks) callback();
+    }
+    // **読み直した直後は「未編集」から始まる**。上のボディ組み立てループが
+    // `addSpawnedMesh`経由で`markUnsaved()`(→`sceneEditedSinceLoad = true`)を
+    // 読み込んだボディの数だけ呼んでしまっているので、ここで確実に下ろす
+    // ——呼び出し元が誰であっても(新規シーン・実験の選び直し・保存済みの
+    // 場面を開く・起動時の既定シーン)、読み終えた瞬間は「捨てるものが無い」
+    // 状態だから。
+    sceneEditedSinceLoad = false;
   };
 
   // Replay再生実行(`ReplayVerifyRef`のdoc参照)。記録済み`commandLog`を、
@@ -7522,7 +9998,7 @@ async function setUpSceneView(
       const bodyIndex = applyComponent(world, "spawn_shape_json", {
         shape_json: JSON.stringify(prefab.shape),
         x,
-        y: SPAWN_HEIGHT,
+        y: spawnHeight(),
         z,
         material_name: prefab.material,
       }).index as number;
@@ -7592,6 +10068,14 @@ async function setUpSceneView(
     z: number,
   ): number {
     const material = spawnMaterialSelect.value;
+    // 「ちゃんと見えているか」の判定に使う代表的な大きさ(`isWellVisible`)。
+    const spawnRadius = {
+      sphere: SPAWN_SPHERE_RADIUS,
+      box: SPAWN_BOX_HALF_EXTENT,
+      capsule: SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
+      compound: SPAWN_BOX_HALF_EXTENT,
+      convex_mesh: SPAWN_CONVEX_MESH_HALF,
+    }[kind];
     let bodyIndex: number;
     let mesh: THREE.Mesh;
     switch (kind) {
@@ -7667,7 +10151,40 @@ async function setUpSceneView(
         ).mesh;
         break;
     }
+    // **置いた場所へ、その場で置く**。メッシュの位置は次の `render()` が
+    // 物理から反映するまで原点のままで、画角合わせ(下)はその原点を見て
+    // しまう——置いた物が遠くの点にしか見えなかった原因(利用者役④の観察)。
+    mesh.position.set(x, y, z);
     addSpawnedMesh(bodyIndex, mesh);
+    // **追従カメラに「いま置いた」と伝える**(`followedBodyIndex`のdoc参照
+    // ——`updateGuidedFollowCamera`がこれを見て、アグリゲートの框付けとは
+    // 別枠でこの物を単独で追わせる)。片道スイッチの`cameraMovedSinceSpawn`
+    // も、新しく置いた物についてはまだ手を引いていない状態へ戻す
+    // (`cameraMovedSinceSpawn`のdoc参照)。
+    followedBodyIndex = bodyIndex;
+    cameraMovedSinceSpawn = false;
+    // **置いた物の動きが、そのままグラフに出る**。観測点はシーンJSONが宣言した
+    // ものしか無く、自分で置いた物には一本も付かなかったので、自作の場面では
+    // グラフが永久に空で CSV も押せなかった(利用者役④の観察)。
+    //
+    // 足すのは**まだ一本も観測点が無いとき**だけ。置くたびに増やすと、数個
+    // 置いた時点で凡例が読めなくなる——最初に置いた物が主役、という素直な
+    // 既定にしておき、増やしたい人は Inspector から足せるようにする。
+    if (readNumber(world, "imported_probe_count") === 0) {
+      addProbesForBody(bodyIndex);
+    }
+    // **置いた物が画面の外だと、置けたことが分からない**。既定の落下開始点は
+    // 高さ 12 m で、起動時の画角では十字の目印しか映らず「何も無いところに
+    // 置いたのでは」と読まれた(利用者役④の観察)。画面に入っていないときだけ
+    // 画角を合わせ直す——見えているのに勝手に動かすと、並べている最中の視点を
+    // 奪うことになる。
+    if (!isWellVisible(x, y, z, spawnRadius)) {
+      frameCameraOnContent();
+      // **場面全体を入れる画角でも、なお置いた物が見えないことがある**
+      // (`frameCameraOnPoint`のdoc参照——他の物が遠くにあると、全体を
+      // 入れる画角がその物を豆粒にする)。そのときは置いた物1個だけに絞る。
+      if (!isWellVisible(x, y, z, spawnRadius)) frameCameraOnPoint(x, y, z, spawnRadius);
+    }
     return bodyIndex;
   }
 
@@ -7680,7 +10197,7 @@ async function setUpSceneView(
   ] as [string, SpawnShapeKind][]) {
     document.getElementById(id)!.addEventListener("click", () => {
       const { x, z } = nextSpawnPosition();
-      spawnShapeAt(kind, x, SPAWN_HEIGHT, z);
+      spawnShapeAt(kind, x, spawnHeight(), z);
     });
   }
 
@@ -7794,7 +10311,11 @@ async function setUpSceneView(
       },
       { separator: true },
       { label: "＋ 振り子 (DistanceJoint)", onSelect: clickHidden("btn-spawn-pendulum") },
-      { label: "＋ モーター (BallJoint + HingeMotorPd)", onSelect: clickHidden("btn-spawn-motor") },
+      {
+        label: "＋ モーター (角度を指定して止まる。回り続けません)",
+        onSelect: clickHidden("btn-spawn-motor"),
+        title: "サーボのような動き方です。「うごかす」を押すといまの目標角度まで動いて止まり、ツールバーの「⟳ モーター切替」でその目標角度(0°⇔90°)を切り替えます。回転速度を設定する項目はありません(角度を保つ部品のため)",
+      },
       { label: "＋ 流体 (SPH 水塊)", onSelect: clickHidden("btn-spawn-fluid") },
       { separator: true },
       {
@@ -7869,39 +10390,68 @@ async function setUpSceneView(
       const bodyIndex = spawnShapeAt(kind, x, restHeight, z);
       selectBody(bodyIndex);
     };
+    // **粒度が浅いと、内部語彙と生座標は読めない**(進行管理役の実測、課題4)。
+    // 「ここに球を配置 (-20.30, -33.80)」のような生の座標、「複合形状(L字)」
+    // 「凸包メッシュ」のような内部のシェイプ名は、「つくる」まで踏み込んだ
+    // 人には手がかりだが、そこまで踏み込んでいない人には読めない記号でしか
+    // ない。しきい値は`REVEAL.toolbar`と同じ意図(このメニュー自体もう1つの
+    // スポーン導線であり、ツールバーの語彙と揃える)——「つくる」の名目の
+    // 粒度(`dataset.grain === "build"`)だけ、いまの詳しい書き方をそのまま
+    // 使う。それより浅い粒度では、球・箱・カプセルの3種だけに絞り
+    // (複合形状・凸包メッシュは「＋ 追加」メニュー・ツールバーから届く
+    // 「つくる」向けの道具として残す)、生座標は落とす。
+    const isBuildGrain = document.getElementById("app")?.dataset.grain === "build";
+    const shapeItems: ContextMenuItem[] = isBuildGrain
+      ? [
+          {
+            label: `ここに球を配置 (${x.toFixed(2)}, ${z.toFixed(2)})`,
+            onSelect: place("sphere", SPAWN_SPHERE_RADIUS),
+          },
+          {
+            label: "ここに箱を配置",
+            onSelect: place("box", SPAWN_BOX_HALF_EXTENT),
+          },
+          {
+            label: "ここにカプセルを配置",
+            onSelect: place(
+              "capsule",
+              SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
+            ),
+            title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
+          },
+          {
+            label: "ここに複合形状(L字)を配置",
+            onSelect: place("compound", SPAWN_COMPOUND_L_SHAPE_REST_OFFSET),
+            title: "Shape::Compound(Box×2の子)",
+          },
+          {
+            label: "ここに凸包メッシュを配置",
+            onSelect: place("convex_mesh", SPAWN_CONVEX_MESH_HALF),
+            title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
+          },
+        ]
+      : [
+          { label: "ここに球を置く", onSelect: place("sphere", SPAWN_SPHERE_RADIUS) },
+          { label: "ここに箱を置く", onSelect: place("box", SPAWN_BOX_HALF_EXTENT) },
+          {
+            label: "ここにカプセルを置く",
+            onSelect: place(
+              "capsule",
+              SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
+            ),
+            title: "カプセルは箱をすり抜けます(未対応)",
+          },
+        ];
     showContextMenu(event.clientX, event.clientY, [
-      {
-        label: `ここに球を配置 (${x.toFixed(2)}, ${z.toFixed(2)})`,
-        onSelect: place("sphere", SPAWN_SPHERE_RADIUS),
-      },
-      {
-        label: "ここに箱を配置",
-        onSelect: place("box", SPAWN_BOX_HALF_EXTENT),
-      },
-      {
-        label: "ここにカプセルを配置",
-        onSelect: place(
-          "capsule",
-          SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
-        ),
-        title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
-      },
-      {
-        label: "ここに複合形状(L字)を配置",
-        onSelect: place("compound", SPAWN_COMPOUND_L_SHAPE_REST_OFFSET),
-        title: "Shape::Compound(Box×2の子)",
-      },
-      {
-        label: "ここに凸包メッシュを配置",
-        onSelect: place("convex_mesh", SPAWN_CONVEX_MESH_HALF),
-        title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
-      },
+      ...shapeItems,
       { separator: true },
       {
         label: `材質: ${spawnMaterialSelect.value}`,
         disabled: true,
         onSelect: () => {},
-        title: "材質はツールバーの材質セレクタで切り替えます",
+        title: isBuildGrain
+          ? "材質はツールバーの材質セレクタで切り替えます"
+          : "材質は、置いたあと「選んだもの」札で選べます",
       },
     ]);
   });
@@ -8231,12 +10781,32 @@ async function setUpSceneView(
       material_name: material,
     }).index as number;
     motorArmBodies.add(bodyIndex);
-    currentMotorTarget.set(bodyIndex, MOTOR_TARGET_LOW);
+    // **置いたら動く**。目標角度を腕の初期姿勢(0°)のまま置いていたので、
+    // モーターを足して「うごかす」を押しても腕は微動だにせず、ツールバーの
+    // 「⟳ モーター切替」を自分で見つけるまで壊れているようにしか見えなかった
+    // (利用者役④の観察)。反対側を目標にして置けば、走らせた瞬間に回り始める
+    // ——モーターが何をする部品なのかが、そこで初めて分かる。
+    currentMotorTarget.set(bodyIndex, MOTOR_TARGET_HIGH);
+    applyComponent(world, "set_motor_target_at", {
+      index: bodyIndex,
+      theta_target: MOTOR_TARGET_HIGH,
+    });
     const mesh = new THREE.Mesh(
       new THREE.BoxGeometry(0.2, 1.2, 0.2),
       new THREE.MeshStandardMaterial({ color: 0x66ffcc }),
     );
     addSpawnedMesh(bodyIndex, mesh);
+    // **課題A(利用者役の報告)**: 「モーター」という名前から「回り続ける」動きを
+    // 期待して置いたのに、実際は目標角度まで振れてそこで止まる(サーボと同じ)
+    // 動きだった。回り続けるように物理を変えるのは別件(受け入れテストに
+    // 関わる)なので、ここでは**実際の動きを置いた直後に言葉で伝える**。
+    // 「⟳ モーター切替」が何をするボタンなのかも、押す前にここで分かる。
+    showToast(
+      "モーターを追加しました。回り続けるのではなく、いまの目標角度まで動いてそこで止まります" +
+        "(サーボのような動き)。ツールバーの「⟳ モーター切替」で目標角度(0°⇔90°)を切り替えられます" +
+        "——回転速度を設定する項目が無いのは、この部品が角度を保つものだからです。",
+      "success",
+    );
   });
 
   document.getElementById("btn-spawn-fluid")!.addEventListener("click", () => {
@@ -8249,6 +10819,42 @@ async function setUpSceneView(
     fluidGeometry.setAttribute("position", fluidPositionAttribute);
     fluidPoints.visible = true;
     highlightHierarchy = rebuildHierarchy();
+    // **課題B(利用者役の報告)**: 置いた直後、既定のカメラ距離では水塊が
+    // 1〜2ピクセルの点にしか見えず、ズームしても「置けたこと」が画面から
+    // 読めなかった。ボディのスポーン(`spawnShapeAt`の`isWellVisible`)と
+    // 同じ判定・同じ理由で、画面にちゃんと入っていない時だけ画角を
+    // 合わせ直す(すでに見えているなら、並べている最中の視点を奪わない)。
+    // `frameCameraOnContent`が見る`fluidPoints`のバウンディングボックスは
+    // 頂点の**いまの**座標を使うため、毎フレーム更新を待たずここで
+    // 実際の粒子座標を先に書き込んでおく。
+    const positions = world.fluid_particle_positions_f32();
+    if (count > 0 && positions.length >= count * 3) {
+      (fluidPositionAttribute.array as Float32Array).set(
+        positions.subarray(0, count * 3),
+      );
+      fluidPositionAttribute.needsUpdate = true;
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let i = 0; i < count; i++) {
+        const px = positions[i * 3];
+        const py = positions[i * 3 + 1];
+        const pz = positions[i * 3 + 2];
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+        if (pz < minZ) minZ = pz;
+        if (pz > maxZ) maxZ = pz;
+      }
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const centerZ = (minZ + maxZ) / 2;
+      const radius = Math.max(
+        Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) / 2,
+        0.05,
+      );
+      if (!isWellVisible(centerX, centerY, centerZ, radius)) frameCameraOnContent();
+    }
   });
 
   // フレーム階層ドリルインUI: Hierarchyで選択中のフレーム(既定はROOTでは
@@ -8312,23 +10918,37 @@ async function setUpSceneView(
   // スナップショット予算」既定1s間隔・リングバッファN=8面)。ドラッグ中
   // (`scrubbing`)は`render()`側からスクラバのmax/valueを触らない——そうしないと
   // 毎フレームの「最新に追従」更新がユーザーのドラッグ位置を上書きしてしまう。
+  const timelineHint = document.getElementById("timeline-hint");
   const scrubber = document.getElementById(
     "timeline-scrubber",
   ) as HTMLInputElement;
   const playModeBadge = document.getElementById("play-mode-badge")!;
   let scrubbing = false;
+  /**
+   * **人が置いたつまみの位置**(`null` = 最新に追従する)。
+   *
+   * 離した瞬間に「最新へ追従」の更新がつまみを右端へ戻していたため、左へ
+   * 引いて離すと何も起きなかったように見えた(利用者役が2人続けて「マウスで
+   * 動かせない」と書いた)。止まっている間は、人が置いた場所に留まる。
+   */
+  let scrubberParked: number | null = null;
   scrubber.addEventListener("pointerdown", () => {
     scrubbing = true;
     playing = false;
     playButton.textContent = "▶";
   });
   scrubber.addEventListener("input", () => {
-    applyComponent(world, "restore_snapshot", { index: Number(scrubber.value) });
+    scrubberParked = Number(scrubber.value);
+    applyComponent(world, "restore_snapshot", { index: scrubberParked });
     render();
   });
-  scrubber.addEventListener("pointerup", () => {
+  const stopScrubbing = () => {
     scrubbing = false;
-  });
+  };
+  scrubber.addEventListener("pointerup", stopScrubbing);
+  // ドラッグ中にポインタが帯の外へ出て離されることは普通にある。要素の
+  // `pointerup` だけを見ていると、そのとき掴んだままの状態が残ってしまう。
+  window.addEventListener("pointerup", stopScrubbing);
 
   // Timelineブックマーク(設計docs/23-frontend/01-editor.md §1.4「ブックマーク:
   // 任意時点にラベル付けし、後で戻れる」)。リングバッファの退避を受けない別領域
@@ -8496,7 +11116,7 @@ async function setUpSceneView(
       fy: NUDGE_FORCE_NEWTONS,
       fz: 0.0,
     });
-    if (forceOverlayToggle.checked) {
+    if (forceOverlayToggle.checked && diagnosticsVisible()) {
       const p = world.body_position_at_f32(selectedBodyIndex);
       showForceOverlay(
         new THREE.Vector3(p[0], p[1], p[2]),
@@ -8584,7 +11204,7 @@ async function setUpSceneView(
     }
 
     for (const [bodyIndex, line] of constraintLines) {
-      if (!constraintOverlayToggle.checked) {
+      if (!constraintOverlayToggle.checked || !diagnosticsVisible()) {
         line.visible = false;
         continue;
       }
@@ -8601,7 +11221,7 @@ async function setUpSceneView(
       line.visible = true;
     }
 
-    if (frameOverlayToggle.checked) {
+    if (frameOverlayToggle.checked && diagnosticsVisible()) {
       for (const [frameIndex, helper] of frameAxesHelpers) {
         // `frame_world_position_f32`/`frame_world_rotation_f32`はいずれも
         // Wasmメモリを直接指す一時的なビューを返す(B16、`HotPathViewBuffers`の
@@ -8634,15 +11254,37 @@ async function setUpSceneView(
     // LineSegmentsの頂点バッファへ直接書き込む(セルごとに`ArrowHelper`を
     // 作ると数百オブジェクトになるため、1本のジオメトリで描く)。
     updateGridFluidOverlay(world);
+    updateSmokeOverlay(world);
 
     // **群3で追加したドメインの描画**。それまで Scene View に一切現れず
     // Probe Graphs でしか観測できなかった(ソフトボディ・天体)、あるいは
     // ドメイン自体が World に無かった(統計)ものを描く。
     updateSoftBodyOverlay(world);
     updateAstroOverlay(world);
-    updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter);
+    updateGasBox(
+      world,
+      updateParticleCloud(gasCloud, world.kinetic_gas_positions_f32(1), gasBoxCenter),
+    );
     updateParticleCloud(brownianCloud, world.brownian_positions_f32(1), [0, 0, 0]);
     updateFieldPanel(world);
+    // **舞台に何も描かれないシーン**(熱伝導・量子・イジング……)では、空の
+    // 3D をそのまま見せない。案内を出し、場のパネルへ舞台の幅を渡す
+    // (`#scene-view[data-stage-empty]`、style.css 参照)。
+    //
+    // 判断は「剛体が 0 個か」ではなく**実際に何か描かれているか**で行う。
+    // 剛体の有無で決めていたときは、天体(D34 惑星)のように剛体を持たない
+    // が確かに描かれているシーンにまで「形では見えません」と出て、
+    // 「見えているのに?」と読まれた(利用者役①の観察)。案内を出すのは、
+    // 代わりに見る場所(場のパネル)が実際にあるときだけにする。
+    // 代わりに見る場所があるとき——場のパネルか、記録している観測点——だけ
+    // 案内を出す。以前は場のパネルがあるときだけだったので、コーヒーが冷める
+    // ような「熱のノードとグラフだけ」の場面では真っ黒な 3D が説明なしに
+    // 残り、「これ壊れてる?」と読まれた(利用者役③の観察)。
+    const stageEmpty =
+      contentBoundingBox() === null &&
+      (!fieldPanel.hidden || readNumber(world, "imported_probe_count") > 0);
+    sceneViewElement.dataset.stageEmpty = String(stageEmpty);
+    if (stageEmptyNote) stageEmptyNote.hidden = !stageEmpty;
 
     // **2026-07-28のD9/D34/D35増分で追加したガード**: `hasSelectedBody()`が
     // falseのとき(D9/D34/D35のように力学ボディを1つも持たないギャラリー
@@ -8699,7 +11341,24 @@ async function setUpSceneView(
       const series: ProbeSeries[] = [];
       for (let i = 0; i < probeCount; i++) {
         series.push({
-          label: world.read_component("imported_probe_label_at", String(i)),
+          // かんたんモードでは、グラフの凡例も人間の言葉にする
+          // (`NodeTemp[0]` ではなく「コーヒーの温度」)。指定が無いプローブは
+          // 従来どおり Rust 側の生ラベルを出す。
+          label:
+            guidedProbeLabels?.[i] ??
+            friendlyProbeLabel(
+              world.read_component("imported_probe_label_at", String(i)),
+            ),
+          unit:
+            guidedProbeUnits?.[i] ??
+            unitForProbeLabel(
+              world.read_component("imported_probe_label_at", String(i)),
+            ),
+          // **課題B**: かんたんモードが桁数を持っているプローブだけ渡す
+          // (`type ProbeSeries` のdoc参照)。持たない生プローブは
+          // `undefined` のままにし、凡例は従来どおり `formatTickValue` で
+          // 整形する。
+          digits: guidedProbeDigits?.[i],
           color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
           // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
           // 返す(B16、`HotPathViewBuffers`のdoc参照)——このループが呼ぶたび
@@ -8707,7 +11366,14 @@ async function setUpSceneView(
           // 次のイテレーションが上書きしてしまう。`updateProbeGraph`が全系列を
           // まとめて後で描く(=ループを抜けるまで読まない)以上、ここで即座に
           // 自前のコピーへ読み切っておく必要がある。
-          history: Float64Array.from(world.imported_probe_history_f64(i)),
+          history: (() => {
+            const raw = Float64Array.from(world.imported_probe_history_f64(i));
+            const convert = guidedProbeConvert?.[i];
+            if (!convert) return raw;
+            // 表が ℃ でグラフだけ生のケルビン、という食い違いを作らない。
+            for (let k = 0; k < raw.length; k += 1) raw[k] = convert(raw[k]);
+            return raw;
+          })(),
         });
       }
       updateProbeGraph(series, readNumber(world, "dt"), readNumber(world, "time"));
@@ -8751,7 +11417,7 @@ async function setUpSceneView(
       velocityArrow.visible = false;
     }
 
-    if (contactOverlayToggle.checked) {
+    if (contactOverlayToggle.checked && diagnosticsVisible()) {
       const contactPoints = world.contact_points_f32();
       const count = Math.min(
         contactPoints.length / 3,
@@ -8774,7 +11440,9 @@ async function setUpSceneView(
     }
 
     forceArrow.visible =
-      forceOverlayToggle.checked && performance.now() < forceOverlayHideAtMs;
+      forceOverlayToggle.checked &&
+      diagnosticsVisible() &&
+      performance.now() < forceOverlayHideAtMs;
 
     // **ツール切替(群2で追加)**: 設計 §1.2「W(移動)/E(回転)/R(スケール)/
     // Q(選択のみ)」。以前は3つのギズモを**同時に**表示していたため、
@@ -8853,17 +11521,33 @@ async function setUpSceneView(
         `heater T[${node}] = ${formatHudNumber(sceneTemperature)} K` +
         (delta === 0 ? "" : ` (Δ ${delta > 0 ? "+" : ""}${formatHudNumber(delta)})`);
     }
+    // 値の無い行(そのシーンに回路や熱ノードが無い)は出さない——「circuit V = —」
+    // が並ぶだけで、何が測れているのかが読み取れなくなる。
     hud.textContent = [
       `t = ${readNumber(world, "time").toFixed(3)} s`,
       `step = ${readNumber(world, "step_count").toString()}`,
       `y = ${selectedBodyValid ? inspectorPosition.y.toFixed(4) : "—"} m`,
       circuitLine,
       temperatureLine,
-    ].join("\n");
-    timelineTime.textContent = `t = ${readNumber(world, "time").toFixed(3)} s`;
+    ]
+      .filter((line) => !line.endsWith("= —"))
+      .join("\n");
+    // 秒に固定していたので、分子の世界では「t = 0.000 s」のまま動かず、
+    // 公転では「t = 10318451.296 s」と桁が読めなかった——右の「経過した時間」
+    // が「1.61 マイクロ秒」「117.97 日」と出ている隣で、単位がばらばらだった
+    // (利用者役①の観察)。同じ言葉にそろえる。
+    timelineTime.textContent = `t = ${formatDuration(
+      readNumber(world, "time"),
+      readNumber(world, "dt"),
+    )}`;
     timelineStep.textContent = `step = ${readNumber(world, "step_count").toString()}`;
     hashDisplay.textContent = `hash: ${hashFull.slice(0, 8)}`;
-    hashDisplay.title = hashFull;
+    // 何のための数字か画面から分からない、と書かれた(利用者役④の観察)。
+    // 全文だけを出していたのを、意味も添える。
+    hashDisplay.title =
+      `いまの状態を短くまとめた指紋です。同じ条件で走らせれば必ず同じ値に` +
+      `なるので、「同じ結果を再現できたか」の確認に使います。` +
+      `クリックで全文をコピーします。\n${hashFull}`;
     // バッジは操作の可否を決める最重要の状態なので、文字だけでなく色でも
     // 分ける(`style.css` の `.badge[data-mode]`)。
     const badgeMode = mode === "edit" ? "edit" : playing ? "playing" : "paused";
@@ -8872,12 +11556,40 @@ async function setUpSceneView(
     playModeBadge.dataset.mode = badgeMode;
 
     if (!scrubbing) {
-      const latestIndex = Math.max(readNumber(world, "snapshot_count") - 1, 0);
+      const snapshotCount = readNumber(world, "snapshot_count");
+      const latestIndex = Math.max(snapshotCount - 1, 0);
       scrubber.max = String(latestIndex);
-      scrubber.value = String(latestIndex);
+      // **どこまで戻れるのかを書く**。記録は 1 秒ごとの直近 8 個しか残らない
+      // ので、帯の左端は 0 秒ではなく「いちばん古い記録」。それを言わずに
+      // いたので、帯の 3 割の位置を押したのに 9 秒が出る、位置と時刻が
+      // 対応していない、と読まれた(利用者役②の観察)。実際に戻れる範囲を
+      // そのまま出せば、位置と時刻は素直に結びつく。
+      if (timelineHint) {
+        timelineHint.textContent =
+          snapshotCount > 1
+            ? `⏪ つまむと ${formatDuration(
+                readNumber(world, "snapshot_time_at", "0"),
+                readNumber(world, "dt"),
+              )} 〜 ${formatDuration(
+                readNumber(world, "snapshot_time_at", String(latestIndex)),
+                readNumber(world, "dt"),
+              )} のあいだへ戻せます`
+            : "⏪ つまむと、記録した時点へ戻せます";
+      }
+      // 走らせている間は最新に追従し、止めている間は人が置いた場所に留まる
+      // (`scrubberParked` のdoc参照)。
+      if (playing) scrubberParked = null;
+      const parked = scrubberParked;
+      scrubber.value = String(
+        parked === null ? latestIndex : Math.min(parked, latestIndex),
+      );
     }
 
     syncSettingsInputs();
+    updateWaterPlane(world);
+    updateReferenceGrid(world);
+    updateTethers(world);
+    if (guidedFollowCamera) updateGuidedFollowCamera();
     // enableDamping を使うので毎フレーム update が要る。
     orbit.update();
     renderer.render(scene, camera);
@@ -8896,6 +11608,28 @@ async function setUpSceneView(
   });
 
   let accumulator = 0;
+  // **かんたんモードの進み方**(`guided.ts` の `setPace`)。`null` なら従来どおり
+  // 「時間倍率 × 実時間」で進める。数値が入っているときは *1 秒あたりの step 数*
+  // として扱う——シーンごとに dt が 1e-12 秒(気体分子)〜31555 秒(太陽系)と
+  // 16 桁も違い、同じ「×1」が実時間どおりにも「1 step に 4 分」にもなるため、
+  // 現象ごとに見やすい速さを倍率では指定できない(D34 は上限の ×128 でも
+  // 1 step 4 分かかり、選んでも永遠に何も起きなかった)。
+  let guidedPace: number | null = null;
+  let stepAccumulator = 0;
+  /** かんたんモードが指定するプローブの表示名(index → 名前)。 */
+  let guidedProbeLabels: Record<number, string> | null = null;
+  /** かんたんな表示名に添える単位(グラフの目盛りと凡例で使う)。 */
+  let guidedProbeUnits: Record<number, string> | null = null;
+  /// グラフに描く前にかける変換(ケルビン → ℃ など)。表の数字と同じ量を
+  /// 描くために、カタログ側が読み値ごとに指定する(`Readout.graph` のdoc参照)。
+  let guidedProbeConvert: Record<number, (value: number) => number> | null = null;
+  /**
+   * **課題B**: 右の「いまの数値」パネルと同じ桁数(`Readout.digits`)。
+   * グラフの凡例・目盛りを`readoutNumber`で整形するときに使う——ここが
+   * 無いと、同じ量なのにパネルは読める形、グラフだけ生の指数
+   * (`9.3e-67`)という食い違いが起きる(`setProbeLabels` のdoc参照)。
+   */
+  let guidedProbeDigits: Record<number, number> | null = null;
   let lastTimeMs = performance.now();
 
   function frame(nowMs: number) {
@@ -8906,17 +11640,26 @@ async function setUpSceneView(
     const playingBack = advanceLivePlayback(frameSeconds);
 
     if (!playingBack && mode === "play" && playing) {
-      accumulator += frameSeconds * timeScale;
-      let steps = 0;
       // **`DT` 定数ではなく `world.dt()` を読む(群2)**。Settings で dt を
       // 変更できるようにした結果、固定の `DT` で積算すると「dt を半分にすると
       // 時間が倍速で進む」という嘘の挙動になっていた(実装検証中に発見)。
       const dt = readNumber(world, "dt");
-      while (accumulator >= dt && steps < MAX_STEPS_PER_FRAME) {
+      // このフレームで進めたい step 数(`guidedPace` の doc 参照)。
+      let budget: number;
+      if (guidedPace !== null) {
+        stepAccumulator += frameSeconds * guidedPace;
+        budget = Math.floor(stepAccumulator);
+        stepAccumulator -= budget;
+      } else {
+        accumulator += frameSeconds * timeScale;
+        budget = Math.floor(accumulator / dt);
+      }
+      let steps = 0;
+      while (steps < budget && steps < MAX_STEPS_PER_FRAME) {
         if (heaterToggle.checked) applyComponent(world, "push_heat_source", { watts: HEATER_WATTS });
         applyThrustForStep();
         world.step();
-        accumulator -= dt;
+        if (guidedPace === null) accumulator -= dt;
         steps += 1;
       }
       // **実効時間倍率(群2)**。高倍率では `MAX_STEPS_PER_FRAME` に当たって
@@ -8926,7 +11669,10 @@ async function setUpSceneView(
       //  一気に進む「時間の借金」になるので、上限に当たったフレームでは
       //  余りを捨てる。)
       const capped = steps >= MAX_STEPS_PER_FRAME;
-      if (capped) accumulator = 0;
+      if (capped) {
+        accumulator = 0;
+        stepAccumulator = 0;
+      }
       updateEffectiveTimeScale(
         frameSeconds > 0 ? (steps * dt) / frameSeconds : timeScale,
         capped,
@@ -8954,17 +11700,272 @@ async function setUpSceneView(
   // 反映するまで構築時の既定値(0,0,0)のままなので、先に`render()`を1回
   // 呼んでメッシュを実際の物理状態へ同期させてからでないと、存在しない
   // (0,0,0)を対象に画角を合わせてしまう。
+  // **かんたんモード(`guided.ts`)へ渡す窓口**。意図的にこれだけに絞ってある
+  // ——シーンを読む / 進める / 止める / いまの数値を読む。ここが太ると
+  // 統合エディタとかんたんモードが互いの内部状態に依存し始め、どちらも
+  // 直せなくなる。読み込みは統合エディタのシーンギャラリーと同じ経路
+  // (`sceneGalleryRef.current`)を通す——別経路を作ると、片方だけ直った
+  // 不整合(旧ワールドのメッシュが残る等)が必ず起きる。
+  const workspaceApi: WorkspaceApi = {
+    setTethers,
+    hasUnsavedWork: () => sceneEditedSinceLoad,
+    markSceneSaved: () => {
+      sceneEditedSinceLoad = false;
+    },
+    exportSceneJson: () => {
+      try {
+        const doc = JSON.parse(world.read_component("export_scene_json", "")) as {
+          bodies?: Record<string, unknown>[];
+          probes?: unknown[];
+        };
+        // 書き出しは名前を落とし、読み込みが足した編集用の観測点まで載せる。
+        // `patchSceneBody` と同じ手当てをして、**読み直しても同じ場面**になる
+        // 文書にしてから渡す。
+        relabelSceneBodies(doc as Record<string, unknown>);
+        doc.probes = sceneOwnProbes;
+        return JSON.stringify(doc);
+      } catch (err) {
+        reportError(`場面の書き出しに失敗しました: ${String(err)}`);
+        return null;
+      }
+    },
+    onSceneReplaced: (callback) => {
+      sceneReplacedCallbacks.push(callback);
+    },
+    loadSceneJson: (json) => {
+      setTethers([]);
+      workspaceIsLoading = true;
+      try {
+        sceneGalleryRef.current?.(json);
+      } finally {
+        workspaceIsLoading = false;
+      }
+      // 読み込み直後は「いまある物」しか無いので、落下の行き先(床)まで
+      // 入る画角へ即座に合わせ直す(`updateGuidedFollowCamera` の doc 参照)。
+      guidedFollowCamera = true;
+      guidedCameraSnap = true;
+      guidedSceneStartBox = null;
+      guidedSceneStartPending = true;
+      // **前の場面の「単独追跡」を持ち越さない**。`followedBodyIndex`は
+      // ボディ番号でしかないので、差し替わった新しい場面でたまたま同じ番号の
+      // 別の物を指してしまう恐れがある(`followedBodyBox`の存在チェックだけ
+      // では防げない事故)。場面が変わったら素直に外す。
+      followedBodyIndex = -1;
+      cameraMovedSinceSpawn = false;
+    },
+    followCamera: (enabled) => {
+      guidedFollowCamera = enabled;
+      guidedCameraSnap = enabled;
+    },
+    followSelectedBody: () => {
+      // **選んだ物があれば、その物を単独追跡へ渡す**(`followedBodyIndex`の
+      // doc参照——「置いたばかりの物を見失わない」仕組みの一般化)。
+      // `cameraMovedSinceSpawn`も明示的な指示として解く(同上docの追記参照)。
+      if (selectedBodyIndex >= 0) {
+        followedBodyIndex = selectedBodyIndex;
+        cameraMovedSinceSpawn = false;
+      }
+      // 選んでいる物が無ければ、これまでどおり「動く物ぜんぶ」を追う既定へ。
+      guidedFollowCamera = true;
+      guidedCameraSnap = true;
+    },
+    // **「全体へ戻る」専用の一回きりの合わせ直し**。
+    //
+    // 以前は`followCamera(true)`(=毎フレーム追いかける`updateGuidedFollowCamera`)
+    // を流用していた。あちらは「対象を見失わない」ために、原点を必ず画角へ
+    // 含めたうえで、対象が遠いほど寄る距離に上限(見かけの大きさの下限)を
+    // 掛ける——秒速数十mで飛んでいく物を追い切るための、意図した妥協。
+    // ところが止まっている・置いたばかりの1個の物(原点から離れた高さに
+    // 数値で置いた球など)にこれを使うと、原点も画角に収めようとして大きく
+    // 引いたあげく、その妥協(見かけの大きさの下限)がそのまま効いてしまい、
+    // さっきまで大きく見えていた物が豆粒になる(利用者役の報告、実測で再現)。
+    // 「全体へ戻る」が約束しているのは「いま置いてある物ぜんぶが入る画角」
+    // であって「これから先も逃げずに追い続ける」ことではないので、
+    // `frameCameraOnContent`(向きは保ったまま、対象ぜんぶに距離だけ合わせる
+    // 一回きりの処理)を直接呼ぶ。追従中だった場合は止める——止めないと、
+    // 合わせ直した直後の次フレームで`updateGuidedFollowCamera`が上書きして
+    // しまい、直した意味が無くなる。
+    frameOnContent: () => {
+      guidedFollowCamera = false;
+      frameCameraOnContent();
+    },
+    play: () => setMode("play"),
+    stopForEditing: () => setMode("edit"),
+    pause: () => {
+      playing = false;
+      playButton.textContent = "▶";
+    },
+    isPlaying: () => mode === "play" && playing,
+    isEditing: () => mode === "edit",
+    setProbeLabels: (labels, units, convert, digits) => {
+      guidedProbeLabels = labels;
+      guidedProbeUnits = units ?? null;
+      guidedProbeConvert = convert ?? null;
+      guidedProbeDigits = digits ?? null;
+    },
+    setPace: (stepsPerSecond) => {
+      guidedPace = stepsPerSecond;
+      stepAccumulator = 0;
+      accumulator = 0;
+    },
+    probeCount: () => readNumber(world, "imported_probe_count"),
+    probeValue: (index) =>
+      readNumber(world, "imported_probe_value_at", String(index)),
+    time: () => readNumber(world, "time"),
+    stepSeconds: () => readNumber(world, "dt"),
+    // **局所へ入る/出る**。パンくずの「全体へ戻る」は選択を解く操作なので、
+    // 負のindexを「選択なし」として受ける(ボディが1つも無いギャラリーシーンで
+    // 既に使っている状態表現と同じ、`selectedBodyIndex = -1`)。
+    selectedBody: () => selectedBodyIndex,
+    selectBody: (index) => {
+      if (index < 0) {
+        selectedBodyIndex = -1;
+        highlightHierarchy = rebuildHierarchy();
+        renderInspectorFor(world, -1);
+        return;
+      }
+      if (index < readNumber(world, "body_count")) selectBody(index);
+    },
+    bodyCount: () => readNumber(world, "body_count"),
+    maxSpeed: () => readNumber(world, "max_body_speed"),
+    stageIsEmpty: () => sceneViewElement.dataset.stageEmpty === "true",
+    materialNames: () => [...SPAWN_MATERIALS],
+    // **課題B**: 材質ボタンの隣に添える摩擦係数。でっち上げず、Rust側の材質DB
+    // (`material_properties_f64`、`materialsRef.current`と同じソース、
+    // `[density, friction, restitution, specificHeat, conductivity]`)から
+    // そのまま読む。未知の材質名(呼び出し側のtypoや将来の材質追加漏れ)では
+    // 例外を投げず`NaN`を返す——ここで例外が漏れると画面全体が壊れるため。
+    materialFriction: (name) => {
+      try {
+        const [, friction] = JSON.parse(
+          world.read_component("material_properties_f64", name),
+        ) as number[];
+        return friction;
+      } catch {
+        return NaN;
+      }
+    },
+    setBodyMaterial: (index, materialName) =>
+      patchSceneBody(index, (b) => {
+        b.material = materialName;
+        // 前の材質で計算した質量が居座らないように(密度から計算し直す)。
+        delete b.mass_override;
+      }),
+    setBodyPosition: (index, x, y, z) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      applyComponent(world, "set_body_position_at", { index, x, y, z });
+      markUnsaved();
+      // **置いた人が見失わないこと**。追従カメラが自分の操作で止まっている
+      // ときは、数値で打ち替えた座標は毎フレームの合わせ直しの対象に入らない
+      // ——スポーン直後は至近距離まで寄っているので(`spawnShapeAt`のdoc
+      // 参照)、そこから数mでも動かすと画角の外へ出て、床だけが残る画面に
+      // なる(利用者役①の報告)。視線の向きは保ったまま、画角から外れそうな
+      // ときだけ合わせ直す——スポーン時と同じ手当て。
+      if (!guidedFollowCamera && !isWellVisible(x, y, z, bodyVisibilityRadius(index))) {
+        // `frameCameraOnContent`は`bodyMeshes`の**現在の**メッシュ位置から
+        // 箱を作る。メッシュは`render()`の毎フレーム同期でしか動かないため、
+        // ここで先に動かしておかないと、まだ古い位置のまま画角を合わせて
+        // しまい(=結果的に「もう合っている」ので画角が動かない)、直後の
+        // 同期で物だけが新しい位置へ移って再び画角の外に出る。
+        bodyMeshes.get(index)?.position.set(x, y, z);
+        frameCameraOnContent();
+        // 他の物が遠くにあると、全体を入れる画角がこの物を豆粒にすることが
+        // ある(`frameCameraOnPoint`のdoc参照、`spawnShapeAt`と同じ手当て)。
+        const radius = bodyVisibilityRadius(index);
+        if (!isWellVisible(x, y, z, radius)) frameCameraOnPoint(x, y, z, radius);
+      }
+      return true;
+    },
+    setBodyRotation: (index, degX, degY, degZ) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      // 度 → クォータニオン。順序は Inspector の表示(XYZ)と同じ。
+      const q = new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(
+          THREE.MathUtils.degToRad(degX),
+          THREE.MathUtils.degToRad(degY),
+          THREE.MathUtils.degToRad(degZ),
+          "XYZ",
+        ),
+      );
+      applyComponent(world, "set_body_rotation_at", {
+        index,
+        x: q.x,
+        y: q.y,
+        z: q.z,
+        w: q.w,
+      });
+      markUnsaved();
+      return true;
+    },
+    addBodyProbes: (index) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      const before = readNumber(world, "imported_probe_count");
+      addProbesForBody(index);
+      return readNumber(world, "imported_probe_count") > before;
+    },
+    hasBodyProbes: (index) => {
+      if (index < 0) return false;
+      const name = world.read_component("body_label_at", String(index));
+      if (!name) return false;
+      const count = readNumber(world, "imported_probe_count");
+      for (let i = 0; i < count; i += 1) {
+        const label = world.read_component("imported_probe_label_at", String(i));
+        if (label.includes(`(${name})`) || label.includes(`[${name}]`)) return true;
+      }
+      return false;
+    },
+    // **消す手段を、画面から見つけられるようにする**(利用者役の報告: 消す
+    // 手段がDeleteキーしか無く、画面のどこにも書かれていなかった)。
+    // Hierarchy右クリックの「削除」・Deleteキーと同じ`hierarchyActionsRef`
+    // 経由の削除を、そのまま呼ぶだけの薄いラッパ。床(index 0)は削除すると
+    // 場面の基準面が無くなるため、右クリックメニューと同じく拒む。
+    // 押し間違いで戻せなくなる操作なので、確認は呼び出し側(この物の札)で
+    // 挟む——ここでは無条件に実行する。
+    removeBody: (index) => {
+      if (index <= BODY_INDEX_GROUND) return false;
+      if (index >= readNumber(world, "body_count")) return false;
+      if (world.read_component("body_is_removed_at", String(index)) === "true") return false;
+      hierarchyActionsRef.current?.remove(index);
+      return true;
+    },
+    bodyReadout: (index) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return null;
+      if (world.read_component("body_is_removed_at", String(index)) === "true") {
+        return null;
+      }
+      const position = world.body_position_at_f32(index);
+      const velocity = world.body_velocity_at_f32(index);
+      const r = world.body_rotation_at_f32(index);
+      const euler = new THREE.Euler().setFromQuaternion(
+        new THREE.Quaternion(r[0], r[1], r[2], r[3]),
+        "XYZ",
+      );
+      return {
+        label: world.read_component("body_label_at", String(index)),
+        shape: world.read_component("body_shape_label_at", String(index)),
+        material: world.read_component("body_material_label_at", String(index)),
+        mass: readNumber(world, "body_mass_at", String(index)),
+        position: [position[0], position[1], position[2]],
+        rotation: [
+          THREE.MathUtils.radToDeg(euler.x),
+          THREE.MathUtils.radToDeg(euler.y),
+          THREE.MathUtils.radToDeg(euler.z),
+        ],
+        speed: Math.hypot(velocity[0], velocity[1], velocity[2]),
+      };
+    },
+  };
+  workspaceApiRef.current = workspaceApi;
+
   render();
   frameCameraOnContent();
   requestAnimationFrame(frame);
 }
 
 function main() {
-  setUpLayoutPresetSwitcher();
-  // UI 基盤(増分「UI 品質の底上げ」)。world より先に立ち上げる——読み込み中
-  // でもショートカット一覧は開けるし、初期化に失敗したときの通知経路(トースト)が
-  // 必要になるのはまさにその瞬間だから。
-  setUpPanelSplitters();
+  // UI 基盤。world より先に立ち上げる——読み込み中でもショートカット一覧は
+  // 開けるし、初期化に失敗したときの通知経路(トースト)が必要になるのは
+  // まさにその瞬間だから。
   setUpShortcutOverlay();
   setUpTabListKeyboardNavigation();
   setUpHierarchyKeyboardNavigation();
@@ -8989,6 +11990,12 @@ function main() {
     sceneSelect.addEventListener("change", () => {
       const file = sceneSelect.value;
       if (!file) return;
+      // **課題B**: Toolbar からのシーン選択も、⌘K で実験を選び直すのと
+      // 同じく今の作りかけを差し替えてしまう(`ConfirmDiscardRef`のdoc参照)。
+      if (confirmDiscardRef.current && !confirmDiscardRef.current()) {
+        sceneSelect.value = "";
+        return;
+      }
       const json = sceneGalleryFileContent(file);
       if (json && sceneGalleryRef.current) sceneGalleryRef.current(json);
     });
@@ -9019,6 +12026,17 @@ function main() {
   const sceneGalleryRef: SceneGalleryRef = { current: null };
   const circuitElementsRef: CircuitElementsRef = { current: null };
   const validationBaseJsonRef: ValidationBaseJsonRef = { current: null };
+  // かんたんモード(`guided.ts`)。`setUpSceneView`(wasm の初期化を含む)より
+  // 先に UI を組み立てておく——読み込みが終わって起動オーバーレイが消えた
+  // 瞬間に、①のカテゴリ選択が既に目の前にある状態にするため。物理側の窓口
+  // (`guidedApiRef`)が埋まるのは初期化の完了時で、それまでに選ばれた実験は
+  // 窓口が来た時点で自動的に走り出す(`guided.ts` の `pendingStart`)。
+  const workspaceApiRef: WorkspaceApiRef = { current: null };
+  // **課題B**: 「新規シーン」・Toolbar のシーン選択のように、ワークスペース
+  // (`reload`/`openSavedScene`)を経由せずここが直接シーンを差し替える経路
+  // 向けの確認窓口(`ConfirmDiscardRef`のdoc参照)。
+  const confirmDiscardRef: ConfirmDiscardRef = { current: null };
+  setUpWorkspace(workspaceApiRef, confirmDiscardRef);
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
@@ -9035,6 +12053,7 @@ function main() {
     sceneGalleryRef,
     circuitElementsRef,
     validationBaseJsonRef,
+    confirmDiscardRef,
   );
   setUpSceneView(
     updateProbeGraph,
@@ -9058,6 +12077,8 @@ function main() {
     circuitElementsRef,
     consoleDiagnosticsRef,
     validationBaseJsonRef,
+    workspaceApiRef,
+    confirmDiscardRef,
   )
     .then(() => {
       markBootReady();
