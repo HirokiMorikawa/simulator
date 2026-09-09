@@ -107,6 +107,21 @@ export type WorkspaceApi = {
    */
   exportSceneJson: () => string | null;
   /**
+   * **直近の読み込み(実験を選んだ/新規シーン/保存した場面を開いた)から、
+   * 何か編集が加わっているか**(課題B、進行管理役の実測: つくるモードで
+   * 物を置いた状態から「新規シーン」を押すと、確認なく即座に空へ差し替わり
+   * 置いた物が全部消えた)。「新規シーン」のように今の場面を黙って捨てる
+   * 導線の手前で、確認を挟むかどうかをこれだけで判断する——実験を選んだ
+   * だけ・まっさらな場面では立たないので、そのたびに聞かれてうるさくなる
+   * ことはない。
+   */
+  hasUnsavedWork: () => boolean;
+  /**
+   * 「この場面を保存する」が成功したときに呼ぶ。以後は `hasUnsavedWork()`
+   * が偽に戻る(保存したものを、もう一度捨てる確認で止めない)。
+   */
+  markSceneSaved: () => void;
+  /**
    * エディタ側(新規シーン・シーンギャラリー等)が場面を差し替えたときに
    * 呼ばれる。ワークスペースが握っている「いま見ている実験」が実物と
    * 食い違ったままになるのを防ぐためのもの——実際、新規シーンを作っても
@@ -187,6 +202,19 @@ export type WorkspaceApi = {
 };
 
 export type WorkspaceApiRef = { current: WorkspaceApi | null };
+
+/**
+ * **課題B**: main.ts 側が直接シーンを差し替えるいくつかの経路(「新規
+ * シーン」ボタン・Toolbar のシーン選択ドロップダウン)は、ワークスペースの
+ * `reload`/`openSavedScene` を経由しないため、そちらに置いた確認
+ * (`confirmDiscardIfNeeded`)を素通りしてしまう。`current`/`ownSceneName`
+ * のような「いま何を見ているか」はワークスペースだけが持つので、判断
+ * そのものはここへ置き、main.ts 側は「進めてよいか」を一度だけ尋ねる
+ * ためにこの参照を呼ぶ(`sceneGalleryRef` 等、既存の *Ref 受け渡しと同じ
+ * 形)。`true` を返せば進めてよい(確認不要、または確認して OK だった)、
+ * `false` は「やめる」。
+ */
+export type ConfirmDiscardRef = { current: (() => boolean) | null };
 
 const DETAIL_KEY = "simulator.ui.detail";
 const LAST_EXPERIMENT_KEY = "simulator.ui.last-experiment";
@@ -436,7 +464,16 @@ function readStoredDetail(): number {
   }
 }
 
-export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
+export function setUpWorkspace(
+  apiRef: WorkspaceApiRef,
+  confirmDiscardRef?: ConfirmDiscardRef,
+): void {
+  // **課題B**: `confirmDiscardIfNeeded`(このファイル下方で定義)を、
+  // main.ts 側の直接差し替え経路(「新規シーン」・Toolbar のシーン選択)が
+  // 呼べるようにする(`ConfirmDiscardRef`のdoc参照)。
+  if (confirmDiscardRef) {
+    confirmDiscardRef.current = () => confirmDiscardIfNeeded();
+  }
   const app = el<HTMLDivElement>("app");
   const dial = el<HTMLInputElement>("detail-dial");
   const dialStops = el<HTMLDivElement>("detail-stops");
@@ -1187,6 +1224,16 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   }
 
   function start(experiment: Experiment): void {
+    // **課題B**: ここは`current`(=いま見ている実験)そのものを差し替える
+    // 入口——`reload()`より前に、まさにこの`current =`で書き換えてしまう。
+    // 確認を`reload()`側だけに任せると、`current`は既に新しい実験に
+    // 変わった後で聞くことになり、利用者が「やめる」を選んでも(実際の
+    // 場面は差し替わらないまま)パンくず・実験名だけが新しい方に化けて
+    // 残る食い違いが起きる(実測: Box_1を置いた状態で⌘Kから「🎯 ボールを
+    // 落とす」を選び確認でキャンセルすると、Hierarchyには消えていない
+    // Box_1が残るのに、パンくずは「🎯 ボールを落とす›Box_1」になる)。
+    // 何も書き換える前にここで先に聞き、やめるならここで全部やめる。
+    if (!confirmDiscardIfNeeded()) return;
     current = experiment;
     knobValues = defaultKnobValues(experiment);
     cardOverrides.clear();
@@ -1208,7 +1255,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
     lastStageEmpty = null;
     lastWhereText = "";
     stageEmptyFrames = 0;
-    reload();
+    // **確認はもう済んだ**。ここでまた`reload()`の内側の確認に掛けると、
+    // 1回の選択で確認ダイアログが2回続けて出る(`sceneEditedSinceLoad`は
+    // 実際に読み込みが終わるまで下りないため)。`skipConfirm`で二重を防ぐ。
+    reload({ skipConfirm: true });
     renderCrumbs();
     renderContext();
   }
@@ -1228,13 +1278,40 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
    * その呼び出し元(つまみの変更・「はじめの設定に戻す」)だけがこのフラグを
    * 渡す。
    */
-  function reload(options?: { keepPauseIntent?: boolean }): void {
+  /**
+   * **課題B(進行管理役の実測)**: 「新規シーン」「はじめから」「実験を
+   * 選び直す」「保存した場面を開く」は、どれも今の場面をその場で
+   * 差し替える——保存していない作りかけがあっても確認なく即座に消えて
+   * いた(利用者役の報告: 振り子とボールを配置した状態から「新規シーン」を
+   * 押したら、確認なく空の場面になった)。
+   *
+   * 呼ぶたびに聞くとうるさいので、`hasUnsavedWork()`(直近の読み込み/保存
+   * からの編集の有無)が立っているときだけ確認する——実験を選んだだけ・
+   * まっさらな場面では何も編集していないので、黙って進む。
+   *
+   * `window.confirm` は保存した場面の「消す」(`savedScenesCard` の
+   * `remove`)に既に前例がある——モーダルを自前で作らず、この画面の慣習に
+   * 合わせる。
+   */
+  function confirmDiscardIfNeeded(): boolean {
+    const api = apiRef.current;
+    if (!api?.hasUnsavedWork()) return true;
+    return window.confirm(
+      "保存していない作りかけがあります。このまま進めると消えます(元には戻せません)。続けますか?",
+    );
+  }
+
+  function reload(options?: { keepPauseIntent?: boolean; skipConfirm?: boolean }): void {
     const api = apiRef.current;
     if (!current) return;
     if (!api) {
       pendingStart = true;
       return;
     }
+    // `skipConfirm`は`start()`専用(そちらのdoc参照) ——既に確認済みの
+    // 呼び出しでは二重にダイアログを出さない。他の呼び出し元(「はじめから」・
+    // つまみの変更)はここで初めて確認する。
+    if (!options?.skipConfirm && !confirmDiscardIfNeeded()) return;
     const wasPaused = options?.keepPauseIntent === true && !api.isPlaying();
     const json = sceneJsonFor(current);
     if (!json) return;
@@ -1508,6 +1585,9 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
           ownSceneName = name;
           sceneNameDraft = name;
           sceneSaveNote = `「${name}」を取っておきました。⌘K で名前を打つと、いつでも開けます。`;
+          // **課題B**: 保存できたので、「新規シーン」等で捨てる前の確認は
+          // もう要らない(`hasUnsavedWork`のdoc参照)。
+          api.markSceneSaved();
           try {
             localStorage.setItem(LAST_OWN_SCENE_KEY, name);
           } catch {
@@ -1627,6 +1707,10 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
   function openSavedScene(entry: SavedScene): void {
     const api = apiRef.current;
     if (!api) return;
+    // **課題B**: 別の場面(ファイルからの読み込みも含む)を開くのも、今の
+    // 作りかけを黙って差し替えてしまう導線の一つ(`confirmDiscardIfNeeded`
+    // のdoc参照)。
+    if (!confirmDiscardIfNeeded()) return;
     current = null;
     ownSceneName = entry.name;
     try {
@@ -2130,6 +2214,14 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
                   remove.textContent = "本当に消しますか?(もう一度押す)";
                   remove.classList.add("btn-danger-armed");
                   armedTimer = setTimeout(disarm, 4000);
+                  // **確認文言は元のラベルよりずっと長い**。折り返して操作列が
+                  // 縦に伸び、直前まで画面に入っていたこのボタン自身が
+                  // 画面の外へ押し出されることがあった(課題A、進行管理役の
+                  // 実測: 1回目の押下でラベルは変わるのに、間をおかず押した
+                  // 2回目は画面上の別の場所——別パネルの Inspector——を
+                  // 押すことになり、消えなかった)。伸びた直後に自分自身を
+                  // 見える範囲へ合わせ直す。
+                  remove.scrollIntoView({ block: "nearest" });
                   return;
                 }
                 disarm();
@@ -2628,9 +2720,19 @@ export function setUpWorkspace(apiRef: WorkspaceApiRef): void {
         // 一番下へ回るので、画面の高さによっては選んでも何も起きていないように
         // 見えた(利用者役③の観察: 900px では「選んだもの」欄が見えない)。
         if (selected >= 0) {
-          document
-            .querySelector('.card[data-card="focus"]')
-            ?.scrollIntoView({ block: "nearest" });
+          const focusCard = document.querySelector('.card[data-card="focus"]');
+          focusCard?.scrollIntoView({ block: "nearest" });
+          // **課題A(進行管理役の実測)**: 「選んだもの」札そのものは見出しが
+          // 画面に入れば上のスクロールで満たされてしまうが、この札は
+          // 置き場所・向きの入力欄などで縦に長く(実測: 文脈パネルの表示できる
+          // 高さの倍を超える)、「🗑 これを消す」を含む操作列(全体へ戻る/
+          // 追いかける/消す)はその下に隠れたままになる——スクロールバーの
+          // 手がかりも無いため、実マウスで押しても画面上には何も無い場所
+          // (別パネルの Inspector)を押すことになり、何度押しても反応しない
+          // ように見えた(Playwright の `locator.click()` は要素を自前で
+          // スクロールしてから押すため、この壊れ方には気づけなかった)。
+          // 見出しを合わせたあと、操作列も見える範囲まで追加でスクロールする。
+          focusCard?.querySelector(".card-actions")?.scrollIntoView({ block: "nearest" });
         }
       } else if (selected >= 0 && Object.keys(focusNodes).length > 0) {
         const readout = api.bodyReadout(selected);

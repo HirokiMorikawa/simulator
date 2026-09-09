@@ -12,6 +12,7 @@ import {
   formatDuration,
   readoutNumber,
   setUpWorkspace,
+  type ConfirmDiscardRef,
   type WorkspaceApi,
   type WorkspaceApiRef,
 } from "./workspace";
@@ -3270,6 +3271,7 @@ function setUpProjectDrawer(
   sceneGalleryRef: SceneGalleryRef,
   circuitElementsRef: CircuitElementsRef,
   validationBaseJsonRef: ValidationBaseJsonRef,
+  confirmDiscardRef: ConfirmDiscardRef,
 ) {
   const body = document.getElementById("project-body")!;
   const tabs = document.querySelectorAll<HTMLButtonElement>(".project-tab");
@@ -3398,6 +3400,10 @@ function setUpProjectDrawer(
       }
       card.append(title, description, tags);
       card.addEventListener("click", () => {
+        // **課題B**: Project ドロワーの Scenes タブからの読み込みも、
+        // ⌘K・「新規シーン」と同じく今の作りかけを差し替えてしまう
+        // (`ConfirmDiscardRef`のdoc参照)。
+        if (confirmDiscardRef.current && !confirmDiscardRef.current()) return;
         const json = sceneGalleryFileContent(entry.file);
         if (!json || !sceneGalleryRef.current) return;
         sceneGalleryRef.current(json);
@@ -5103,6 +5109,7 @@ async function setUpSceneView(
   consoleDiagnosticsRef: ConsoleDiagnosticsRef,
   validationBaseJsonRef: ValidationBaseJsonRef,
   workspaceApiRef: WorkspaceApiRef,
+  confirmDiscardRef: ConfirmDiscardRef,
 ) {
   await init();
   let world = new WasmWorld(GRAVITY, DT, INITIAL_HEIGHT);
@@ -5284,6 +5291,12 @@ async function setUpSceneView(
   // 「ワールド全体を差し替える」処理を再利用するため、新しい差し替えロジックは
   // 増やさない。
   document.getElementById("btn-new-scene")!.addEventListener("click", () => {
+    // **課題B(進行管理役の実測)**: つくるモードで振り子とボールを配置した
+    // 状態から押すと、確認なく即座に空の場面へ差し替わり置いた物が全て
+    // 消えていた。保存していない作りかけがあるときだけ、ワークスペース側
+    // (`current`/`ownSceneName`を握っている)に確認してもらう
+    // (`ConfirmDiscardRef`のdoc参照)。
+    if (confirmDiscardRef.current && !confirmDiscardRef.current()) return;
     sceneGalleryRef.current?.(NEW_SCENE_JSON);
   });
 
@@ -8498,8 +8511,20 @@ async function setUpSceneView(
   let workspaceIsLoading = false;
   /// 未保存の変更があるか(群2、`beforeunload` のdoc参照)。
   let hasUnsavedChanges = false;
+  // **課題B(進行管理役の実測)**: 「今の場面(実験の上に足した物・自分の
+  // 場面)に、直近の読み込み/保存から編集が加わっているか」を別に持つ。
+  // `hasUnsavedChanges` は「一度でも編集したことがあるか」を`beforeunload`
+  // のためだけに一方向に立てる値で、場面を読み直しても下りない
+  // (読み直し自体もスポーン経由で`markUnsaved()`を呼ぶため——起動時の
+  // 既定シーン読み込みだけで既に立ってしまう、意図した設計ではあるが
+  // 「保存したかどうか」を言うには使えない)。こちらは場面を読み直す
+  // (`sceneGalleryRef.current`の末尾)たびに下ろし、「この場面を保存する」
+  // が成功したときも下ろす——「新規シーン」等で今の作りかけを黙って
+  // 捨てる前に確認するかどうかを、この値だけで判断できるようにする。
+  let sceneEditedSinceLoad = false;
   function markUnsaved() {
     hasUnsavedChanges = true;
+    sceneEditedSinceLoad = true;
   }
   /**
    * **いま在る場面と同じくらいの高さから落とす**。
@@ -9155,6 +9180,13 @@ async function setUpSceneView(
     if (!workspaceIsLoading) {
       for (const callback of sceneReplacedCallbacks) callback();
     }
+    // **読み直した直後は「未編集」から始まる**。上のボディ組み立てループが
+    // `addSpawnedMesh`経由で`markUnsaved()`(→`sceneEditedSinceLoad = true`)を
+    // 読み込んだボディの数だけ呼んでしまっているので、ここで確実に下ろす
+    // ——呼び出し元が誰であっても(新規シーン・実験の選び直し・保存済みの
+    // 場面を開く・起動時の既定シーン)、読み終えた瞬間は「捨てるものが無い」
+    // 状態だから。
+    sceneEditedSinceLoad = false;
   };
 
   // Replay再生実行(`ReplayVerifyRef`のdoc参照)。記録済み`commandLog`を、
@@ -11061,6 +11093,10 @@ async function setUpSceneView(
   // 不整合(旧ワールドのメッシュが残る等)が必ず起きる。
   const workspaceApi: WorkspaceApi = {
     setTethers,
+    hasUnsavedWork: () => sceneEditedSinceLoad,
+    markSceneSaved: () => {
+      sceneEditedSinceLoad = false;
+    },
     exportSceneJson: () => {
       try {
         const doc = JSON.parse(world.read_component("export_scene_json", "")) as {
@@ -11317,6 +11353,12 @@ function main() {
     sceneSelect.addEventListener("change", () => {
       const file = sceneSelect.value;
       if (!file) return;
+      // **課題B**: Toolbar からのシーン選択も、⌘K で実験を選び直すのと
+      // 同じく今の作りかけを差し替えてしまう(`ConfirmDiscardRef`のdoc参照)。
+      if (confirmDiscardRef.current && !confirmDiscardRef.current()) {
+        sceneSelect.value = "";
+        return;
+      }
       const json = sceneGalleryFileContent(file);
       if (json && sceneGalleryRef.current) sceneGalleryRef.current(json);
     });
@@ -11353,7 +11395,11 @@ function main() {
   // (`guidedApiRef`)が埋まるのは初期化の完了時で、それまでに選ばれた実験は
   // 窓口が来た時点で自動的に走り出す(`guided.ts` の `pendingStart`)。
   const workspaceApiRef: WorkspaceApiRef = { current: null };
-  setUpWorkspace(workspaceApiRef);
+  // **課題B**: 「新規シーン」・Toolbar のシーン選択のように、ワークスペース
+  // (`reload`/`openSavedScene`)を経由せずここが直接シーンを差し替える経路
+  // 向けの確認窓口(`ConfirmDiscardRef`のdoc参照)。
+  const confirmDiscardRef: ConfirmDiscardRef = { current: null };
+  setUpWorkspace(workspaceApiRef, confirmDiscardRef);
   setUpProjectDrawer(
     materialsRef,
     circuitRef,
@@ -11370,6 +11416,7 @@ function main() {
     sceneGalleryRef,
     circuitElementsRef,
     validationBaseJsonRef,
+    confirmDiscardRef,
   );
   setUpSceneView(
     updateProbeGraph,
@@ -11394,6 +11441,7 @@ function main() {
     consoleDiagnosticsRef,
     validationBaseJsonRef,
     workspaceApiRef,
+    confirmDiscardRef,
   )
     .then(() => {
       markBootReady();

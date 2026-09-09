@@ -2122,6 +2122,14 @@ kbd {
 #app .card-actions button.btn-danger {
   color: var(--danger);
   border-color: var(--danger);
+  /* **確認前後でボタンの位置が動かないようにする**(課題A、進行管理役の
+   * 実測)。確認文言(「本当に消しますか?(もう一度押す)」)は元のラベル
+   * より2倍以上長く、他のボタン(👀/全体へ戻る)と横並びのままだと折り返し
+   * 発生の有無で自分の x 座標ごと動いてしまい、1回目の押下の直後・同じ
+   * 場所へ続けて押した2回目が的を外して画面上の別パネル(Inspector)を
+   * 押すことになっていた。常に単独の行を占めるようにし、ラベルが伸びても
+   * 左上の基準位置は動かず、下方向にだけ伸びるようにする。 */
+  flex-basis: 100%;
 }
 #app .card-actions button.btn-danger-armed {
   background: var(--danger);

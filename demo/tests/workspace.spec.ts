@@ -1,5 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
-import { collectPageErrors } from "./helpers";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import { addViaMenu, collectPageErrors } from "./helpers";
 import { GUIDED_CATEGORIES as CATEGORIES } from "../src/catalog";
 
 // ワークスペース(`src/workspace.ts`)の E2E。
@@ -2413,12 +2413,42 @@ test("「Undo」は、できること(動かしたのを戻す)に合わせた�
   expect(errors).toEqual([]);
 });
 
+/**
+ * ロケータの `.click()` は要素を自前でスクロールして見える位置へ持って
+ * いってから押すため、「ボタンは在るのに画面上は別パネルに隠れて実マウスで
+ * 押せない」という壊れ方(課題A、進行管理役の実測)があっても素通りして
+ * しまう。ここでは本物のマウス操作に近い形で、
+ *   1. 要素の中心座標で `elementFromPoint` を引き、実際に**その要素自身が
+ *      画面上に見えている**ことを確かめてから
+ *   2. その座標へ低レベル `page.mouse` で押す
+ * ことで、見た目には存在するのに他パネルに隠れて反応しない壊れ方を
+ * 実際に検出できるようにする。
+ */
+async function realClickVerifyingVisible(page: Page, locator: Locator) {
+  const box = await locator.boundingBox();
+  if (!box) throw new Error("要素の位置が取れない(非表示?)");
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  const atPoint = await page.evaluate(
+    ({ x, y, id }) => document.elementFromPoint(x, y)?.id === id,
+    { x, y, id: await locator.evaluate((el) => el.id) },
+  );
+  expect(
+    atPoint,
+    "ボタンの座標を実マウスで押しても、画面上ではその場所に別の要素が" +
+      "描かれていて届かない(他パネルに隠れている可能性)",
+  ).toBe(true);
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.up();
+}
+
 test("置いた物は、選んだ札の「これを消す」から見つけて消せる(押し間違い対策つき)", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
-  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await addViaMenu(page, "＋ 球");
   const sphereRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Sphere_1" });
   await expect(sphereRow).toHaveCount(1);
 
@@ -2426,14 +2456,19 @@ test("置いた物は、選んだ札の「これを消す」から見つけて�
   await expect(removeBtn).toBeVisible();
   await expect(removeBtn).toContainText("これを消す");
 
-  // 1回押しただけでは消えない(押し間違い対策——確認してから消す)。
-  await removeBtn.click();
+  // **実マウスの座標で**1回押す。1回押しただけでは消えない
+  // (押し間違い対策——確認してから消す)。
+  await realClickVerifyingVisible(page, removeBtn);
   await expect(sphereRow).toHaveCount(1);
   await expect(removeBtn).toContainText("本当に消しますか");
 
+  // 確認文言は元のラベルよりずっと長い。ここで座標を取り直さず
+  // **前回と同じボタンが同じ場所にまだあること**を確かめてから続けて押す
+  // ——ラベルが伸びて別のボタンを押し場所ごと動かしていたら、ここで
+  // 「別の要素に隠れている」として落ちる(課題Aの回帰そのものの形)。
+  await realClickVerifyingVisible(page, removeBtn);
   // 続けてもう一度押すと、実際に消える(「物」の一覧から消える。記録済みの
   // グラフは、消えた物だと分かる注記つきで残る——別のテストが確かめる対象)。
-  await removeBtn.click();
   await expect(sphereRow).toHaveCount(0);
   // 消した直後は選択も外れる(床が代わりに選ばれたままにはしない)。
   await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
@@ -2441,6 +2476,189 @@ test("置いた物は、選んだ札の「これを消す」から見つけて�
   // 床(ゆか)は場面の基準面なので、消す対象には出ない。
   await page.locator("#hierarchy-tree .tree-body").first().click();
   await expect(page.locator("#btn-remove-body")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+// **課題B**: 保存していない作りかけを、確認なく黙って捨てる導線が無いか。
+//
+// 「新規シーン」・Toolbarのシーン選択・⌘Kでの実験選び直し・保存済み場面を
+// 開く、はどれも「いま見ている場面をその場で丸ごと差し替える」処理を経由
+// する(`workspace.ts`の`confirmDiscardIfNeeded`のdoc参照)。**保存していない
+// 自分の作りかけがあるときだけ**確認し(実験を選んだだけ・まっさらな状態
+// では聞かない)、キャンセルすれば実際には何も変わらないことを確かめる。
+test("「新規シーン」は、作りかけが無ければ確認なしに進む", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    void d.dismiss();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  // 起動直後(実験を選んだだけ・何も編集していない)は「作りかけ」ではない。
+  await page.click("#btn-new-scene");
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1); // 床のみ
+  expect(dialogs).toEqual([]);
+
+  // 「新規シーン」を押した直後(まだ何も置いていない、まっさらな状態)も
+  // 同様に確認なしで進む。
+  await page.click("#btn-new-scene");
+  expect(dialogs).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("「新規シーン」は、置いた物があれば確認し、キャンセルすれば何も消えない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    void d.dismiss(); // キャンセル
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  await expect(row).toHaveCount(1);
+
+  await page.click("#btn-new-scene");
+  expect(dialogs.length).toBe(1);
+  expect(dialogs[0]).toContain("消えます");
+  // キャンセルしたので、置いた箱はそのまま残っている。
+  await expect(row).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test("「新規シーン」は、置いた物があっても確認してOKすれば実際に空になる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  let dialogCount = 0;
+  page.on("dialog", (d) => {
+    dialogCount++;
+    void d.accept();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  await expect(row).toHaveCount(1);
+
+  await page.click("#btn-new-scene");
+  expect(dialogCount).toBe(1);
+  // OKしたので、実際に空(床のみ)へ差し替わっている。
+  await expect(row).toHaveCount(0);
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test("⌘Kで別の実験を選び直すときも、作りかけがあれば確認し、キャンセルすれば場面もパンくずも食い違わない", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  let dialogCount = 0;
+  page.on("dialog", (d) => {
+    dialogCount++;
+    void d.dismiss(); // キャンセル
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  await expect(row).toHaveCount(1);
+
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.locator("#palette-results button").first().click();
+
+  expect(dialogCount).toBe(1);
+  // キャンセルしたので、置いた箱も「じぶんの場面」の表示も両方そのまま
+  // ——パンくずだけ新しい実験名に化けて、実物(Hierarchy)は前のまま、
+  // という食い違いが起きていないことを確かめる。
+  await expect(row).toHaveCount(1);
+  await expect(page.locator("#crumb-own-scene")).toHaveCount(1);
+  await expect(page.locator("#crumb-experiment")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("保存済みの場面を開くときも、作りかけがあれば確認する", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    void d.dismiss();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+
+  // まず1つ場面を保存しておく。
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 球");
+  await page.fill("#input-scene-name", "テスト保存場面A");
+  await page.click("#btn-save-scene");
+  await expect(page.locator("#crumb-own-scene")).toContainText("テスト保存場面A");
+
+  // 新規シーンへ切り替え、別の物を置く(=直近の保存より後の、未保存の作りかけ)。
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const boxRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  await expect(boxRow).toHaveCount(1);
+
+  // ⌘Kから、さっき保存した場面を開こうとする。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "テスト保存場面A");
+  await expect(page.locator(".palette-row").first()).toContainText("テスト保存場面A");
+  await page.keyboard.press("Enter");
+
+  expect(dialogs.length).toBe(1);
+  // キャンセルしたので、箱を置いた今の場面のまま(保存済み場面には切り替わらない)。
+  await expect(boxRow).toHaveCount(1);
+  await expect(page.locator("#crumb-own-scene")).not.toContainText("テスト保存場面A");
+  expect(errors).toEqual([]);
+});
+
+test("Toolbarのシーン選択も、作りかけがあれば確認し、キャンセルすれば切り替わらない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  let dialogCount = 0;
+  page.on("dialog", (d) => {
+    dialogCount++;
+    void d.dismiss();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  await expect(row).toHaveCount(1);
+
+  await page.selectOption("#select-scene", { index: 1 });
+  expect(dialogCount).toBe(1);
+  // キャンセルしたので、置いた箱はそのまま。ドロップダウンの選択も戻る。
+  await expect(row).toHaveCount(1);
+  await expect(page.locator("#select-scene")).toHaveValue("");
+  expect(errors).toEqual([]);
+});
+
+test("Projectドロワーの「シーン」タブから読み込むときも、作りかけがあれば確認する", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  let dialogCount = 0;
+  page.on("dialog", (d) => {
+    dialogCount++;
+    void d.dismiss();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  await expect(row).toHaveCount(1);
+
+  await page.click('.project-tab[data-tab="scenes"]');
+  await page.click('.scene-gallery-list button[data-scene-file="d4-box-stack.json"]');
+
+  expect(dialogCount).toBe(1);
+  // キャンセルしたので、D4(4体)には差し替わらず、箱を置いた今の場面のまま。
+  await expect(row).toHaveCount(1);
   expect(errors).toEqual([]);
 });
 
