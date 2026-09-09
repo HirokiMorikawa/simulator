@@ -1757,6 +1757,19 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     `;
     return;
   }
+  // **課題③(進行管理役の指摘)を検討したが、ここは触らないことにした**。
+  // 「選んだもの」札は`friendlyBodyLabel`済みの読める名前(「球 2」)、
+  // Inspectorの見出しは生のラベル(`Sphere_2`)のままで、同じ画面で文字が
+  // 食い違って見える。ここを friendlyBodyLabel に通せば直りそうに見えたが、
+  // `ui-usability.spec.ts`「Hierarchy を上下キーで辿ると選択が Inspector へ
+  // 連動する」に**まさにこの生のラベルを検証する既存アサーション**があり、
+  // そのテストのコメントには「Hierarchy(場面の中身)は読める名前を出す一方、
+  // Inspector(中を知っている人向けの生の値)は機械語のままにする」という
+  // **意図した役割分担**が明記されていた(実測: friendlyBodyLabelに通すと
+  // このテストが`"Box_1"`を期待する箇所で`"箱 1"`を受け取り落ちた)。
+  // これは見た目の食い違いではなく、既存の設計判断に反する変更になる
+  // ——影響範囲(Inspectorを「生の値の場」として当てにしている他の導線が
+  // 無いか)を私は洗い切れていないので、無理に直さず元のままにする。
   const label = world.read_component("body_label_at", String(index));
   const staticBadge = (world.read_component("body_is_static_at", String(index)) === "true")
     ? ' <span class="badge">動かない(Static)</span>'
@@ -7099,18 +7112,101 @@ async function setUpSceneView(
   }
 
   /**
-   * 箱1つに画角を合わせる、共通の実処理。`frameCameraOnContent`(場面ぜんぶの
-   * 箱)と`frameCameraOnPoint`(置いたばかりの1個だけの箱)の両方がこれを呼ぶ
-   * ——向き・仰角クランプ・クリップ面の計算を二重に持たないため。
+   * **近くの大きな物から離れる向き**を選ぶ(課題①、進行管理役の実測)。
+   *
+   * `d24-car`を粒度2で3秒走らせ`wheel_fl`を選んで「これを追いかける」を
+   * 押すと、注視点・距離の数値は正しく(距離21.0m→1.4m)なっていたのに、
+   * **画面には地面の稜線しか映らなかった**(スクリーンショットで確認)。
+   * 実測: カメラ(7.72,0.68,20.65)・距離1.44mの直後、すぐ隣の車体
+   * (`chassis`、半径1.36m)までの距離が1.19mしかなく、**カメラが車体の
+   * 内側に入り込んでいた**。原因は`frameCameraOnBox`の向きが「直前の
+   * カメラの向きをそのまま保つ」だけで、対象(タイヤ)がもっと大きな組み立て
+   * 物(車体)の一部品だと、その向きのまま寄ると車体を突き抜けてしまうこと
+   * があるため。
+   *
+   * ここでは向きを**保つ**のではなく、対象のまわりにある他の動く物から
+   * 「離れる」向きを選び直す——近く・大きい物ほど強く押し返す(逆二乗、
+   * `isWellVisible`が「近いほど問題」と見るのと同じ発想)。静的な床は
+   * 対象に含めない(`contentBoundingBox`と同じ扱い——床は「まわりの物」
+   * ではなく地面そのもの)。まわりに何も無ければ`null`を返し、呼び出し側は
+   * 従来どおり直前のカメラの向きを保つ(孤立した球1個を追う既存のケースは
+   * 変えない)。
    */
-  function frameCameraOnBox(box: THREE.Box3) {
-    const center = box.getCenter(new THREE.Vector3());
-    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.5);
+  function chooseFollowDirection(
+    targetCenter: THREE.Vector3,
+    excludeIndex: number,
+  ): THREE.Vector3 | null {
+    const away = new THREE.Vector3();
+    const toOther = new THREE.Vector3();
+    for (const [idx, mesh] of bodyMeshes) {
+      if (idx === excludeIndex) continue;
+      if (!mesh.visible) continue;
+      if (world.read_component("body_is_static_at", String(idx)) === "true") continue;
+      toOther.copy(targetCenter).sub(mesh.position);
+      const d = toOther.length();
+      if (d < 1e-6) continue;
+      const otherRadius = bodyVisibilityRadius(idx);
+      // 近く・大きいほど強く押し返す。
+      const weight = otherRadius / (d * d);
+      away.addScaledVector(toOther, weight / d);
+    }
+    return away.lengthSq() > 1e-9 ? away.normalize() : null;
+  }
+
+  /**
+   * **視線の途中にある物を突き抜けない距離**まで寄る(課題①のもう半分)。
+   *
+   * `chooseFollowDirection`で「大きな物から離れる向き」を選んでも、車の
+   * ように前後左右をタイヤに囲まれた対象では、選んだ向きの先にもまだ別の
+   * 物がある場合が残る。向き`dir`に沿って対象から`distance`だけ離れた点が、
+   * 他の物の可視半径(`bodyVisibilityRadius`)の内側に入っていないかを
+   * 確かめ、入っていれば**その物の手前**までしか寄らない(向こうへ抜けると
+   * 今度はその物自体が視線を塞ぐ——手前で止まるのが正しい)。
+   */
+  function clearCameraFromNearbyBodies(
+    targetCenter: THREE.Vector3,
+    dir: THREE.Vector3,
+    distance: number,
+    excludeIndex: number,
+  ): number {
+    let result = distance;
+    const toOther = new THREE.Vector3();
+    for (const [idx, mesh] of bodyMeshes) {
+      if (idx === excludeIndex) continue;
+      if (!mesh.visible) continue;
+      if (world.read_component("body_is_static_at", String(idx)) === "true") continue;
+      toOther.copy(mesh.position).sub(targetCenter);
+      const alongDir = toOther.dot(dir);
+      if (alongDir <= 0) continue; // 視線の反対側(自分の後ろ)の物は塞がない。
+      const perp = Math.sqrt(
+        Math.max(toOther.lengthSq() - alongDir * alongDir, 0),
+      );
+      const otherRadius = bodyVisibilityRadius(idx) * 1.2; // 少し余白を持たせる。
+      if (perp >= otherRadius) continue; // 視線からそれているので塞がない。
+      const nearEdge = alongDir - Math.sqrt(
+        Math.max(otherRadius * otherRadius - perp * perp, 0),
+      );
+      if (nearEdge > 0) result = Math.min(result, nearEdge);
+    }
+    return Math.max(result, 0.1);
+  }
+
+  /**
+   * **中心・半径・向きから、実際にカメラを置く**共通の実処理。`frameCameraOnBox`
+   * (向きは直前のカメラを保つ)と、単独追跡(`chooseFollowDirection`で選んだ
+   * 向きを使う、課題①のdoc参照)の両方がここへ合流する——仰角クランプ・
+   * クリップ面の計算を二重に持たないため。
+   */
+  function positionCameraTowardTarget(
+    center: THREE.Vector3,
+    radius: number,
+    direction: THREE.Vector3,
+    options?: { excludeIndex: number },
+  ) {
     orbit.target.copy(center);
-    // 現在の視線方向を保ったまま距離だけ合わせる(向きの好みを壊さない)。
-    const direction = camera.position.clone().sub(center);
-    if (direction.lengthSq() < 1e-9) direction.set(1, 0.7, 1.2);
-    const normalizedDirection = direction.normalize();
+    const normalizedDirection = direction.clone();
+    if (normalizedDirection.lengthSq() < 1e-9) normalizedDirection.set(1, 0.7, 1.2);
+    normalizedDirection.normalize();
     // QA不具合2続き: 前のシーンから引き継いだ視線方向の仰角が低い(または
     // 水平面より下を向いている)と、対象が地面近くにある場合(D11/D12/D13等)
     // カメラが計算上そのまま床の下へ潜り込んでしまう。仰角の最低ラインを
@@ -7150,7 +7246,20 @@ async function setUpSceneView(
       normalizedDirection.y = clampedY;
       normalizedDirection.normalize(); // 数値誤差の後始末(大きさはほぼ1のまま)。
     }
-    camera.position.copy(center).add(normalizedDirection.multiplyScalar(radius * 2.6));
+    let distance = radius * 2.6;
+    // **視線の途中にある物を突き抜けない**(課題①、`clearCameraFromNearbyBodies`
+    // のdoc参照)。単独追跡(`excludeIndex`が渡されたとき)だけ確かめる——
+    // `frameCameraOnContent`/`frameCameraOnPoint`の既存の挙動(実測済みの
+    // ピクセル数を伴うテストがある)は変えない。
+    if (options) {
+      distance = clearCameraFromNearbyBodies(
+        center,
+        normalizedDirection,
+        distance,
+        options.excludeIndex,
+      );
+    }
+    camera.position.copy(center).add(normalizedDirection.multiplyScalar(distance));
     // 仰角クランプだけでは(対象が地面近くにある・半径が小さい等の組み合わせで)
     // なお僅かに地面下へ出るケースが残ったため、最終防衛線として絶対高さも
     // 下限クランプする(このプロジェクトの地面は常にy=0の平面、モジュールdoc
@@ -7167,6 +7276,19 @@ async function setUpSceneView(
     // の正体のひとつ(利用者役①の観察)。距離に対する比で決める。
     updateClipPlanes(camera.position.distanceTo(center));
     orbit.update();
+  }
+
+  /**
+   * 箱1つに画角を合わせる、共通の実処理。`frameCameraOnContent`(場面ぜんぶの
+   * 箱)と`frameCameraOnPoint`(置いたばかりの1個だけの箱)の両方がこれを呼ぶ
+   * ——向き・仰角クランプ・クリップ面の計算を二重に持たないため。
+   */
+  function frameCameraOnBox(box: THREE.Box3) {
+    const center = box.getCenter(new THREE.Vector3());
+    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.5);
+    // 現在の視線方向を保ったまま距離だけ合わせる(向きの好みを壊さない)。
+    const direction = camera.position.clone().sub(center);
+    positionCameraTowardTarget(center, radius, direction);
   }
 
   function frameCameraOnContent() {
@@ -7215,19 +7337,27 @@ async function setUpSceneView(
   let guidedFollowCamera = false;
   let guidedCameraSnap = false;
   /**
-   * **置いたばかりの物を、追従カメラに覚えさせる**(課題2、進行管理役の実測)。
+   * **いま単独で追っている物**(課題2、進行管理役の実測)。
    *
-   * `updateGuidedFollowCamera`は毎フレーム動き続けるので、`spawnShapeAt`側の
-   * 一度きりの画角合わせ(`frameCameraOnPoint`)を足しても、**次のフレームで
-   * この関数がすぐ上書きしてしまう**——実測: `guidedFollowCamera`が有効な
-   * 場面(実験を選ぶと既定で有効)で、既に遠く(距離30m超)にある物がある
-   * ところへ新しく1個置くと、この関数が「動く物ぜんぶ」を入れる画角に
+   * もとは「置いたばかりの物を見失わない」ためだけの仕組みだった
+   * (`lastSpawnedBodyIndex`という名前だった)——`updateGuidedFollowCamera`は
+   * 毎フレーム動き続けるので、`spawnShapeAt`側の一度きりの画角合わせを足しても
+   * **次のフレームでこの関数がすぐ上書きしてしまう**——実測: `guidedFollowCamera`
+   * が有効な場面(実験を選ぶと既定で有効)で、既に遠く(距離30m超)にある物が
+   * あるところへ新しく1個置くと、この関数が「動く物ぜんぶ」を入れる画角に
    * 引いてしまい、置いたばかりの物は見かけの直径9.9pxにしかならなかった。
-   * ここに「最後に置いた物」を覚えておき、下の`updateGuidedFollowCamera`で
-   * 「その物がちゃんと見えているか」を**アグリゲートの框付けとは別枠**で
-   * 保証する——全体を追う設計そのものは変えない。
+   *
+   * 「選んだもの」札の「👀 これを追いかける」(`followSelectedBody`)も、
+   * 中身は「その物を選んだ状態で単独追跡を起こす」だけなので、同じ変数へ
+   * 一般化した——2つの似た仕組みを持たない(進行管理役の指摘)。実測
+   * (`d24-car-drives`を粒度2で3秒走らせ`wheel_fl`を選んで押したケース):
+   * 一般化前は押しても`api.followCamera(true)`(アグリゲートな既定へ戻す
+   * だけ)しか呼べず、注視点は選んだ物へ来ず距離はむしろ16.7m→24.6mと
+   * 遠のいていた。下の`updateGuidedFollowCamera`で「その物がちゃんと
+   * 見えているか」を**アグリゲートの框付けとは別枠**で保証する——全体を追う
+   * 既定そのものは、これが有効でないときは変えない。
    */
-  let lastSpawnedBodyIndex = -1;
+  let followedBodyIndex = -1;
   /**
    * **猶予は時間ではなく「利用者がまだ見ているか」で切る**(進行管理役の実測、
    * 課題6)。
@@ -7254,7 +7384,10 @@ async function setUpSceneView(
    * で`cameraMovedSinceSpawn`を立てる**一度きりの片道スイッチ**にした——
    * 「操作を奪わない」という追従カメラ全体の原則(直後のdoc参照)と同じで、
    * 一度手を動かした利用者を追いかけ直すのは横取りになる。次に物を置いた
-   * ときだけ`spawnShapeAt`側でfalseへ戻す。
+   * ときだけ`spawnShapeAt`側でfalseへ戻す——「👀 これを追いかける」
+   * (`followSelectedBody`)を押したときも同じ扱いで戻す。こちらは利用者の
+   * **明示的な**指示なので、横取りにはならない(`orbit`の`start`で自動的に
+   * 戻ってしまうのとは違う)。
    */
   let cameraMovedSinceSpawn = false;
   /**
@@ -7274,7 +7407,101 @@ async function setUpSceneView(
   let guidedSceneStartPending = false;
   const guidedFollowTarget = new THREE.Vector3();
   const guidedFollowDirection = new THREE.Vector3();
+  /**
+   * **単独追跡している物1個だけの箱**。有効でなければ`null`(呼び出し側は
+   * アグリゲートな`contentBoundingBox()`にフォールバックする)。
+   *
+   * `followedBodyIndex`のdoc参照——「置いたばかりの物を見失わない」ガードと
+   * 「👀 これを追いかける」を同じ変数へ一般化した際、ここも一本化した。
+   *
+   * **試作1**: アグリゲートな框付けを**計算し終えたあと**、その物が画面から
+   * 外れていた場合だけ`frameCameraOnPoint`で上書きする、もとの「安全網」の
+   * ままにして、上書きの条件だけ「単独追跡が有効な間は毎フレーム」に広げよう
+   * とした。上書き(このフレーム)→アグリゲートが引き戻す(次フレーム)→
+   * また上書き、を繰り返すはずで、実際に試すと注視点・距離が毎フレーム
+   * 大きく往復した(進行管理役の実測、`d24-car-drives`で`wheel_fl`を
+   * 追跡させたケース)。
+   *
+   * **試作2**: 上書きをやめ、`updateGuidedFollowCamera`が使う「観察対象の
+   * 箱」そのものをこの小さな箱に差し替え、原点や「始まりの広がり」を含める
+   * 処理はそのまま通す形にした。往復は無くなったが、`updateGuidedFollowCamera`
+   * の`cap`(見かけの大きさの下限、`APPARENT_MIN`のdoc参照)は**アグリゲート
+   * =動く物ぜんぶの塊**の大きさを前提に定数を決めていたため、半径0.3mの球
+   * 1個をこの式に通すと寄り過ぎを避ける側に振れて距離8m超まで引いてしまい、
+   * 逆に見かけの直径が26px(要件の40px未満)まで小さくなった
+   * (実測、`d1-free-fall`で球を足した直後)——「全体を追う設計を変えない」
+   * ための式を単独追跡にまで持ち込んだのが原因。
+   *
+   * **今回**: `frameCameraOnBox`(=`frameCameraOnPoint`が使っているのと同じ
+   * 実処理、向きを保ったまま対象の半径の2.6倍まで距離を合わせる)を、単独
+   * 追跡が有効な間は毎フレームそのまま呼ぶ——アグリゲートの計算は一切通さず
+   * `updateGuidedFollowCamera`の冒頭で早期returnする。既存の「置いたばかりの
+   * 物」安全網とまったく同じ式を流用しているので、そちらの実測
+   * (直径172.9px前後)がそのまま単独追跡でも成り立つ。対象は毎フレーム
+   * 新しい位置から計算し直すので、往復も起きない。
+   */
+  function followedBodyBox(): THREE.Box3 | null {
+    if (followedBodyIndex < 0 || cameraMovedSinceSpawn) return null;
+    // **覚えた番号は、場面が差し替わると存在しなくなる**。置いた直後に
+    // ⌘Kで別の実験へ移るのは普通の操作で、実際に起きた——実測
+    // (進行管理役): `d1-free-fall`(床0・球1)に箱を足してindex 2を
+    // 覚えた直後に別の実験へ移ると、新しい場面にはその番号の物が無く、
+    // `body_is_removed_at`が`body index 2 out of range`を投げてページ
+    // エラーになった。**個数とメッシュの両方で先に閉じてから**wasmに
+    // 尋ねる(閉じたら覚えるのをやめる——次のフレームでまた同じ例外を
+    // 踏まないため)。
+    const mesh = bodyMeshes.get(followedBodyIndex);
+    if (mesh === undefined || followedBodyIndex >= readNumber(world, "body_count")) {
+      followedBodyIndex = -1;
+      return null;
+    }
+    if (world.read_component("body_is_removed_at", String(followedBodyIndex)) === "true") {
+      return null;
+    }
+    // **「まだ見ている」の近似は「まだ選ばれていること」**(置くと自動で
+    // 選ばれる、`spawnShapeAt`のdoc参照)——ライブな判定で、選び直せば外れる。
+    if (selectedBodyIndex !== followedBodyIndex) return null;
+    const r = bodyVisibilityRadius(followedBodyIndex);
+    return new THREE.Box3(
+      new THREE.Vector3(
+        mesh.position.x - r,
+        mesh.position.y - r,
+        mesh.position.z - r,
+      ),
+      new THREE.Vector3(
+        mesh.position.x + r,
+        mesh.position.y + r,
+        mesh.position.z + r,
+      ),
+    );
+  }
   function updateGuidedFollowCamera() {
+    // **単独追跡が有効な間は、アグリゲートな計算を一切通さない**
+    // (`followedBodyBox`のdoc参照「試作2」——アグリゲート用の式に単独追跡を
+    // 混ぜると寄り方の基準が食い違う)。毎フレーム対象の最新位置から
+    // 計算し直すだけなので、往復も起きない。
+    const followedBox = followedBodyBox();
+    if (followedBox) {
+      // **`frameCameraOnBox`をそのまま流用しない**(課題①、進行管理役の
+      // スクリーンショットでの指摘)。あちらは「直前のカメラの向きを保つ」
+      // だけなので、対象が車体のようなもっと大きな組み立て物の一部品だと、
+      // その向きのまま寄ると組み立て物を突き抜けて画面が真っ暗になった
+      // (`chooseFollowDirection`のdoc参照)。向きは「まわりの大きな物から
+      // 離れる」方向を選び直し、距離も「視線の途中にある物を突き抜けない」
+      // 上限まで詰める(`clearCameraFromNearbyBodies`のdoc参照)。
+      const center = followedBox.getCenter(new THREE.Vector3());
+      const radius = Math.max(
+        followedBox.getSize(new THREE.Vector3()).length() * 0.5,
+        0.5,
+      );
+      const direction =
+        chooseFollowDirection(center, followedBodyIndex) ??
+        camera.position.clone().sub(center);
+      positionCameraTowardTarget(center, radius, direction, {
+        excludeIndex: followedBodyIndex,
+      });
+      return;
+    }
     const box = contentBoundingBox();
     if (!box) return;
     if (guidedSceneStartPending) {
@@ -7409,46 +7636,10 @@ async function setUpSceneView(
       );
     }
     updateClipPlanes(camera.position.distanceTo(orbit.target));
-    // **置いたばかりの物を見失わない**(`lastSpawnedBodyIndex`のdoc参照)。
-    // 上のアグリゲートな框付け(場面の「動く物ぜんぶ」を入れる画角)は、
-    // 遠く離れた物が既にあると、置いたばかりの小さな物を巻き込んで画角を
-    // 大きく引いてしまうことがある——実測(進行管理役、`d1-free-fall`を
-    // 粒度2で開き、右クリックで2個目の球を置いたケース): 既存の球が距離
-    // 30m超の場所へ落ちて止まっていたため、置いた物は距離47.3m・見かけの
-    // 直径9.9pxにしかならなかった。「全体を追う」設計自体は変えず、
-    // **利用者がその物をまだ見ているとみなせる間**だけ、上の計算結果で
-    // その物がちゃんと見えているかを別枠で確かめ、見えていなければその物
-    // 1個だけの画角に差し替える(`cameraMovedSinceSpawn`のdoc参照——時間で
-    // 切らない理由の実測はそちら)。「まだ見ている」の近似は「まだ選ばれて
-    // いる」こと(`selectedBodyIndex`との一致——選び直せば外れる、ライブな
-    // 判定)。
-    if (
-      lastSpawnedBodyIndex >= 0 &&
-      !cameraMovedSinceSpawn &&
-      selectedBodyIndex === lastSpawnedBodyIndex
-    ) {
-      // **覚えた番号は、場面が差し替わると存在しなくなる**。置いた直後に
-      // ⌘Kで別の実験へ移るのは普通の操作で、実際に起きた——実測
-      // (進行管理役): `d1-free-fall`(床0・球1)に箱を足してindex 2を
-      // 覚えた直後に別の実験へ移ると、新しい場面にはその番号の物が無く、
-      // `body_is_removed_at`が`body index 2 out of range`を投げてページ
-      // エラーになった。**個数とメッシュの両方で先に閉じてから**wasmに
-      // 尋ねる(閉じたら覚えるのをやめる——次のフレームでまた同じ例外を
-      // 踏まないため)。時間で切っていた旧実装より猶予が長く続き得るので
-      // (選択が保たれカメラも動かされない限りずっと有効)、この安全確認は
-      // 前より重要になっている。
-      const mesh = bodyMeshes.get(lastSpawnedBodyIndex);
-      if (mesh === undefined || lastSpawnedBodyIndex >= readNumber(world, "body_count")) {
-        lastSpawnedBodyIndex = -1;
-      } else if (
-        world.read_component("body_is_removed_at", String(lastSpawnedBodyIndex)) !== "true"
-      ) {
-        const r = bodyVisibilityRadius(lastSpawnedBodyIndex);
-        if (!isWellVisible(mesh.position.x, mesh.position.y, mesh.position.z, r)) {
-          frameCameraOnPoint(mesh.position.x, mesh.position.y, mesh.position.z, r);
-        }
-      }
-    }
+    // 「置いたばかりの物を見失わない」「これを追いかける」の実体は、この
+    // 関数が使う`box`を`followedBodyBox()`に差し替えることで既に済んでいる
+    // (関数冒頭・`followedBodyBox`のdoc参照)——ここでの後付けの上書きは
+    // 不要になった(往復を避けるため、あえて追加しない)。
     if ((window as unknown as { __dbgCam?: boolean }).__dbgCam) {
       console.log(
         "[dbg]",
@@ -9878,12 +10069,12 @@ async function setUpSceneView(
     // しまう——置いた物が遠くの点にしか見えなかった原因(利用者役④の観察)。
     mesh.position.set(x, y, z);
     addSpawnedMesh(bodyIndex, mesh);
-    // **追従カメラに「いま置いた」と伝える**(`lastSpawnedBodyIndex`のdoc参照
+    // **追従カメラに「いま置いた」と伝える**(`followedBodyIndex`のdoc参照
     // ——`updateGuidedFollowCamera`がこれを見て、アグリゲートの框付けとは
-    // 別枠でこの物の可視性を保証する)。片道スイッチの`cameraMovedSinceSpawn`
+    // 別枠でこの物を単独で追わせる)。片道スイッチの`cameraMovedSinceSpawn`
     // も、新しく置いた物についてはまだ手を引いていない状態へ戻す
     // (`cameraMovedSinceSpawn`のdoc参照)。
-    lastSpawnedBodyIndex = bodyIndex;
+    followedBodyIndex = bodyIndex;
     cameraMovedSinceSpawn = false;
     // **置いた物の動きが、そのままグラフに出る**。観測点はシーンJSONが宣言した
     // ものしか無く、自分で置いた物には一本も付かなかったので、自作の場面では
@@ -11468,10 +11659,28 @@ async function setUpSceneView(
       guidedCameraSnap = true;
       guidedSceneStartBox = null;
       guidedSceneStartPending = true;
+      // **前の場面の「単独追跡」を持ち越さない**。`followedBodyIndex`は
+      // ボディ番号でしかないので、差し替わった新しい場面でたまたま同じ番号の
+      // 別の物を指してしまう恐れがある(`followedBodyBox`の存在チェックだけ
+      // では防げない事故)。場面が変わったら素直に外す。
+      followedBodyIndex = -1;
+      cameraMovedSinceSpawn = false;
     },
     followCamera: (enabled) => {
       guidedFollowCamera = enabled;
       guidedCameraSnap = enabled;
+    },
+    followSelectedBody: () => {
+      // **選んだ物があれば、その物を単独追跡へ渡す**(`followedBodyIndex`の
+      // doc参照——「置いたばかりの物を見失わない」仕組みの一般化)。
+      // `cameraMovedSinceSpawn`も明示的な指示として解く(同上docの追記参照)。
+      if (selectedBodyIndex >= 0) {
+        followedBodyIndex = selectedBodyIndex;
+        cameraMovedSinceSpawn = false;
+      }
+      // 選んでいる物が無ければ、これまでどおり「動く物ぜんぶ」を追う既定へ。
+      guidedFollowCamera = true;
+      guidedCameraSnap = true;
     },
     // **「全体へ戻る」専用の一回きりの合わせ直し**。
     //

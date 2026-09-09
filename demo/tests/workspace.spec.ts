@@ -1010,6 +1010,73 @@ async function apparentSphereDiameterPx(page: Page): Promise<number> {
   });
 }
 
+/**
+ * **舞台の画面(canvas)中心付近の、輝度のばらつき(標準偏差)**。
+ *
+ * **課題①(進行管理役の実測・スクリーンショットでの指摘、2026-09-09)**:
+ * 「これを追いかける」を直した最初のバージョンは、注視点・距離の数値は
+ * 正しかった(`d24-car`で`wheel_fl`を追わせると距離21.0m→1.4m)のに、
+ * **カメラが車体(chassis)の内側に入り込み、画面には地面の稜線しか映って
+ * いなかった**。距離・注視点だけを見るテストはこれを見逃す——進行管理役の
+ * 言葉で言えば「数値は完璧で画面は真っ暗」。ここでは実際にレンダリングされた
+ * 画素を読み、単色でつぶれていないかを確かめる。
+ *
+ * `canvas`はWebGLで`preserveDrawingBuffer`を立てていないため、
+ * `getContext("webgl").readPixels()`は次のフレームの前にはもう内容が
+ * 消えている(実測: 呼ぶと常に`[0,0,0,0]`)。かわりに Playwright の
+ * `locator.screenshot()`(実際に画面へ出た画素をキャプチャする、コンポジタ
+ * 越しの撮影)を取り、`<img>`要素で読み込んで別の2Dキャンバスへ描き直し、
+ * `getImageData`で読む——ブラウザ標準のPNGデコーダをそのまま使うので、
+ * 自前のPNGパーサは要らない。
+ *
+ * しきい値は実測で較正した(中心の一辺`windowPx`四方の輝度の標準偏差、
+ * 既定200px)。60px四方だと、直った後でもタイヤの陰影が少ない滑らかな面
+ * だけが窓に収まることがあり(実測2.66、壊れていたときの0.54と十分離れて
+ * いない)、境目の取り方に無理が出た。200px四方まで広げると、対象の輪郭や
+ * まわりの地面・他の部品まで窓に入るため、差がはっきりする:
+ *   壊れていたとき(カメラが車体の内側)                     4.5(ほぼ単色)
+ *   直した後(`wheel_fl`が大きく映る、車体・他のタイヤも見える) 20.9
+ * 中間よりだいぶ壊れていた側に寄せて、8を境目に取る。
+ */
+async function canvasCenterLuminanceStd(page: Page, windowPx = 200): Promise<number> {
+  const canvas = page.locator("#scene-view-canvas-host canvas").first();
+  const buf = await canvas.screenshot();
+  const b64 = buf.toString("base64");
+  return page.evaluate(
+    async ({ b64, windowPx }) => {
+      const img = new Image();
+      img.src = "data:image/png;base64," + b64;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      const cx = Math.floor(c.width / 2);
+      const cy = Math.floor(c.height / 2);
+      const half = Math.floor(windowPx / 2);
+      const data = ctx.getImageData(
+        Math.max(0, cx - half),
+        Math.max(0, cy - half),
+        windowPx,
+        windowPx,
+      ).data;
+      let sum = 0;
+      let sumSq = 0;
+      let n = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        sum += lum;
+        sumSq += lum * lum;
+        n += 1;
+      }
+      const mean = sum / n;
+      return Math.sqrt(Math.max(sumSq / n - mean * mean, 0));
+    },
+    { b64, windowPx },
+  );
+}
+
 test("置き場所を数値で高さを変えても、地平線が画角の外に消えない", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
@@ -3385,10 +3452,13 @@ test("走らせたまま足した球は、8秒後も見失われない(猶予を
 });
 
 // **課題6続き**: 上のガードは「選ばれている」「カメラを自分で動かしていない」
-// の2条件で保っている。どちらかが崩れたら、既存の「これを追いかける」
-// 「全体へ戻る」ボタンの意味を保つため、素直に「動く物ぜんぶを追う」既定
+// の2条件で保っている。どちらかが崩れたら、素直に「動く物ぜんぶを追う」既定
 // (=遠くに引くアグリゲートな框付け)に戻ることを確かめる——「選ぶと
-// ずっと特別扱いのまま」という別の不具合を作らないため。
+// ずっと特別扱いのまま」という別の不具合を作らないため。検証の手段として
+// 「カメラを合わせ直す」(`btn-refocus`)を使う理由は、テスト本体のコメント
+// (「もとはここで…」から始まる段落)を参照——「これを追いかける」
+// (`btn-follow-body`)は別タスクで「選んだ物を単独で追う」意味に直っており
+// (`main.ts`の`followSelectedBody`のdoc参照)、この検証にはもう使えない。
 test("自分でカメラを動かしたら、置いた物への特別扱いをやめて既定の追従に戻る", async ({
   page,
 }) => {
@@ -3430,26 +3500,116 @@ test("自分でカメラを動かしたら、置いた物への特別扱いを�
   // つまり「何もしないで待つ」だけでは、アグリゲートな框付けへ戻る場面
   // そのものが起きない。戻る場面を作るには、追従を再び起こす必要がある。
   //
-  // その手段は今のところ`followCamera(true)`を呼ぶ「👀 これを追いかける」
-  // (`btn-follow-body`)しかない(`全体へ戻る`は選択そのものを外すので、
-  // 「選択は保ったままカメラだけ動かした」という、ここで確かめたい状況とは
-  // 別物になってしまう)。**ただし`btn-follow-body`は「これを追いかける」と
-  // 名乗りながら、中身は`api.followCamera(true)`だけ
-  // (`demo/src/workspace.ts`の同ボタン参照)——「選んだ物」ではなく「動く物
-  // ぜんぶ」を追う既定へ戻すボタンで、ボタンの名前と挙動が食い違っている。
-  // これはこの修正の欠陥ではなく、このボタン自体が抱える別の未解決課題**
-  // (進行管理役の指摘、2026-09-09)。ここでは「片道スイッチが正しく効いて
-  // いること」を確かめるための手段として借りているだけで、下の40px未満と
-  // いう結果を「望ましい最終UX」として認めているわけではない——本来なら
-  // 「置いた物を選んだままカメラだけ再追従させたら、置いた物へ戻ってほしい」
-  // はずで、それが5.8pxまで引いてしまうこと自体は別タスクで直すべき対象。
-  await page.click("#btn-follow-body");
+  // **もとはここで`followCamera(true)`を呼ぶだけの「👀 これを追いかける」
+  // (`btn-follow-body`)を借りていた**——当時のこのボタンは「選んだ物」では
+  // なく「動く物ぜんぶ」を追う既定へ戻すだけで、ボタン名と挙動が食い違って
+  // いたので、「片道スイッチが解けていないなら、押しても選んだ物には戻らず
+  // アグリゲートな框付けのまま(=豆粒)」という**副作用**を検証手段として
+  // 使えた(進行管理役の指摘、2026-09-09)。
+  //
+  // **その食い違いを直す別タスクで`btn-follow-body`は「選んだ物を単独で
+  // 追わせる」ボタンになった**(`main.ts`の`followedBodyIndex`/
+  // `followSelectedBody`のdoc参照)——選んでいる球はここでもまだ選ばれた
+  // ままなので、いま`btn-follow-body`を押すと**明示的な指示**として
+  // `cameraMovedSinceSpawn`を意図的に解き、球へ単独で追従し直す(押すと
+  // 大きく見えるのが直った後の正しい姿で、この2本目のテストにとっては
+  // 「片道スイッチが解けないこと」の検証手段として使えなくなった、というだけ)。
+  // ここでは`btn-follow-body`の代わりに、選択の有無に関係なく常に出ている
+  // 「見え方」札の「👀 カメラを合わせ直す」(`btn-refocus`)を使う——中身は
+  // 変わらず`api.followCamera(true)`だけで、`followedBodyIndex`/
+  // `cameraMovedSinceSpawn`には一切触れない(`workspace.ts`の該当ボタン参照)。
+  // 実測: この置き換え後も、押すと直径は40px未満まで引く(下のアサーション)
+  // ——`cameraMovedSinceSpawn`の片道スイッチは`btn-refocus`のような素朴な
+  // 再追従では解けないことが、引き続き確かめられている。
+  await page.click("#btn-refocus");
   await page.waitForTimeout(2000);
-  // 実測(進行管理役): ガード中172.9px→「これを追いかける」後、直径5.8px・
-  // 距離53.7mまで引く。これは「片道スイッチが解けなかった」ことの確認であり
-  // (もし解けていなければ、ここでも置いた物1個の画角のまま大きく見え続けた
-  // はず)、`btn-follow-body`の挙動を追認する意図ではない。
+  // 実測(進行管理役): ガード中172.9px→「カメラを合わせ直す」後、直径5.8px・
+  // 距離53.7mまで引く(`btn-follow-body`を借りていた頃と同じアグリゲートな
+  // 框付けに戻る——`api.followCamera(true)`の中身は変えていないため)。
+  // これは「片道スイッチが解けなかった」ことの確認であり、`btn-refocus`の
+  // 挙動を追認する意図ではない。
   expect(await apparentSphereDiameterPx(page)).toBeLessThan(40);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題①(進行管理役の実測・スクリーンショットでの指摘、2026-09-09)**:
+// 「これを追いかける」を選んだ物へ向けて直した本編の検証が1本も無かった
+// (依頼にあった「`d24-car`で`wheel_fl`を選んで押したあと、注視点がその物の
+// そばに来て、距離が押す前より縮む」がテストとして残っていなかった)。加えて
+// 最初の直し方は、距離・注視点の数値こそ正しかったが、**カメラが車体
+// (chassis)の内側に入り込み、画面には地面の稜線しか映っていなかった**
+// (スクリーンショットで発覚)。距離・注視点だけを見るテストはこの不具合を
+// 見逃す(進行管理役の言葉で言えば「数値は完璧で画面は真っ暗」)ので、ここでは
+//   ①注視点がその物のそばに来て、距離が縮む(依頼の原文どおりの数値)
+//   ②「追っている物」より「すぐ隣の別の物(車体)」に近づいていないこと
+//     (埋まっていれば入れ替わる——実測: 壊れていたとき wheel=1.44m/
+//     chassis=1.19m、直した後 wheel=1.44m/chassis=2.51m)
+//   ③画面中心付近が単色でつぶれていないこと(`canvasCenterLuminanceStd`の
+//     doc参照——実測: 壊れていたとき標準偏差4.5、直した後20.9)
+// の3つを確かめる。②③は「距離だけでは見逃す」ことへの直接の対策。
+test("d24-carでwheel_flを選んで「これを追いかける」を押すと、そばへ寄り、車体の内側に埋まらない(課題①)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d24-car"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(3000); // 進行管理役の実測と同じく3秒走らせる。
+
+  // wheel_fl を選ぶ(ground=0, chassis=1, wheel_fl=2——`d24-car.json`の
+  // ボディ宣言順そのままで、Hierarchy の並びとも一致する)。
+  await page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_fl" }).click();
+  await page.waitForTimeout(300);
+
+  const readState = () =>
+    page.evaluate(() => {
+      const cam = (window as unknown as {
+        __camera: { position: { x: number; y: number; z: number } };
+      }).__camera;
+      const orbit = (window as unknown as {
+        __orbit: { target: { x: number; y: number; z: number } };
+      }).__orbit;
+      const world = (window as unknown as {
+        __world: { body_position_at_f32(index: number): Float32Array };
+      }).__world;
+      // `body_position_at_f32`はwasm側の使い回しバッファを指すことがあるので、
+      // 呼ぶたびに`Array.from`でコピーしてから次を呼ぶ(2本目の呼び出しが
+      // 1本目の配列の中身まで書き換えてしまう実測ずみの落とし穴)。
+      const wheel = Array.from(world.body_position_at_f32(2));
+      const chassis = Array.from(world.body_position_at_f32(1));
+      const camPos = [cam.position.x, cam.position.y, cam.position.z];
+      const target = [orbit.target.x, orbit.target.y, orbit.target.z];
+      const dist = (a: number[], b: number[]) =>
+        Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+      return {
+        camToWheel: dist(camPos, wheel),
+        camToChassis: dist(camPos, chassis),
+        camToTarget: dist(camPos, target),
+        targetToWheel: dist(target, wheel),
+      };
+    });
+
+  const before = await readState();
+
+  await page.click("#btn-follow-body");
+  await page.waitForTimeout(1000);
+
+  const after = await readState();
+
+  // ①依頼の原文どおり: 注視点がその物のそばに来て、距離が押す前より縮む。
+  expect(after.targetToWheel, "注視点とwheel_flの距離").toBeLessThan(0.5);
+  expect(after.camToTarget, "押した後のカメラ距離").toBeLessThan(before.camToTarget);
+
+  // ②課題①: 埋まっていれば、追っているはずのwheel_flより車体に近づく
+  // (=不等号が逆転する)。
+  expect(after.camToWheel, "カメラ—wheel_fl 距離").toBeLessThan(after.camToChassis);
+
+  // ③課題①: 画面中心付近が単色でつぶれていないこと。
+  const std = await canvasCenterLuminanceStd(page);
+  expect(std, "画面中心付近の輝度の標準偏差").toBeGreaterThan(8);
 
   expect(errors).toEqual([]);
 });

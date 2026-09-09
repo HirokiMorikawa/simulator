@@ -73,6 +73,20 @@ export type WorkspaceApi = {
   /** 追従カメラの入り切り。 */
   followCamera: (enabled: boolean) => void;
   /**
+   * **選んだ物**を追いかける(「選んだもの」札の「👀 これを追いかける」)。
+   *
+   * `followCamera(true)`だけでは、対象を選んでいてもその物を追わない
+   * ——中身は「動く物ぜんぶ」を入れる既定の框付けに戻すだけで、`main.ts`の
+   * `updateGuidedFollowCamera`は選択を見ていない(進行管理役の実測、
+   * `d24-car-drives`を粒度2で3秒走らせ`wheel_fl`を選んで押したケース:
+   * 押す前16.7m→押した後24.6m、注視点も物から離れた場所のまま——ラベルは
+   * 「追いかける」なのに押すと選んだ物が遠くなる)。ここでは選んでいる物が
+   * あれば、それを`main.ts`側の「置いたばかりの物を見失わない」仕組み
+   * (`followedBodyIndex`のdoc参照)に**明示的に**渡し、以後その物を単独で
+   * 追わせる。選んでいなければ、これまでどおり全体を追う既定に戻す。
+   */
+  followSelectedBody: () => void;
+  /**
    * いま置いてある物ぜんぶが入る画角へ、**一回だけ**合わせ直す(向きは保つ)。
    *
    * `followCamera(true)` は毎フレーム追いかけ続ける追従カメラで、対象が
@@ -2282,7 +2296,10 @@ export function setUpWorkspace(
             follow.type = "button";
             follow.id = "btn-follow-body";
             follow.textContent = "👀 これを追いかける";
-            follow.addEventListener("click", () => api.followCamera(true));
+            // **選んだ物そのものを追わせる**(`followSelectedBody`のdoc参照
+            // ——以前は`followCamera(true)`で「動く物ぜんぶ」の既定に戻す
+            // だけだった)。
+            follow.addEventListener("click", () => api.followSelectedBody());
             const clear = document.createElement("button");
             clear.type = "button";
             clear.id = "btn-clear-selection";
