@@ -254,7 +254,7 @@ test("材質を選び直すと、重さもその材質のものになる", async
   await expect.poll(mass, { timeout: 10_000 }).toBeLessThan(steel);
 
   // 名前は連番へ作り変わらない(書き出し→読み直しで消えていた)。
-  await expect(page.locator("#hierarchy-tree")).toContainText("Sphere_1");
+  await expect(page.locator("#hierarchy-tree")).toContainText("球 1");
   expect(errors).toEqual([]);
 });
 
@@ -394,7 +394,7 @@ test("材質を変えても、場面の名前と選んでいた物は変わら�
 
   // 組み直しは「同じ場面の編集」であって差し替えではない。
   await expect(page.locator("#crumb-own-scene")).toContainText("名前つきの場面");
-  await expect(page.locator('.card[data-card="focus"]')).toContainText("Sphere_1");
+  await expect(page.locator('.card[data-card="focus"]')).toContainText("球 1");
   expect(errors).toEqual([]);
 });
 
@@ -973,6 +973,40 @@ async function cameraToLastBody(page: Page): Promise<{ elevation: number; distan
     const dz = cam.position.z - p[2];
     const distance = Math.hypot(dx, dy, dz);
     return { elevation: distance > 1e-9 ? dy / distance : 0, distance };
+  });
+}
+
+/**
+ * **選んだ物の見かけの直径 [px]**(課題2: 進行管理役がスクリーンショットで
+ * 直接測ったのと同じ量——距離とカメラの`fov`・canvas の高さから逆算する。
+ * 実測: `d1-free-fall`で粒度2から右クリックで2個目の球を置いたとき、
+ * 距離47.3m・見かけの直径9.9pxだった)。直近に置いた物(`body_count - 1`)を
+ * 対象にする。半径は`main.ts`の`SPAWN_SPHERE_RADIUS`と同じ0.4m決め打ち
+ * ——このファイルのテストは球しか置かないため。
+ */
+async function apparentSphereDiameterPx(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: { position: { x: number; y: number; z: number }; fov: number };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(kind: string, arg: string): string;
+        body_position_at_f32(index: number): Float32Array;
+      };
+    }).__world;
+    const index = Number(world.read_component("body_count", "")) - 1;
+    const p = world.body_position_at_f32(index);
+    const dx = cam.position.x - p[0];
+    const dy = cam.position.y - p[1];
+    const dz = cam.position.z - p[2];
+    const distance = Math.hypot(dx, dy, dz);
+    const canvas = document.querySelector("#scene-view-canvas-host canvas") as HTMLCanvasElement;
+    const heightPx = canvas.clientHeight;
+    const fovRad = (cam.fov * Math.PI) / 180;
+    const pxPerMeterAtDistance = heightPx / 2 / Math.tan(fovRad / 2) / distance;
+    const RADIUS = 0.4; // SPAWN_SPHERE_RADIUS(main.ts)。
+    return 2 * RADIUS * pxPerMeterAtDistance;
   });
 }
 
@@ -2028,7 +2062,7 @@ test("「＋新規シーン」の直後は、床が「選んだもの」とし�
   await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
   const focus = page.locator('.card[data-card="focus"]');
   await expect(focus).toBeVisible();
-  await expect(focus).toContainText("Box_1");
+  await expect(focus).toContainText("箱 1");
   await expect(focus).not.toContainText("ground");
   expect(errors).toEqual([]);
 });
@@ -2047,7 +2081,7 @@ test("2つ目に置いた物も、グラフに記録できる", async ({ page })
   const record = page.locator("#btn-record-body");
   await expect(record).toBeVisible();
   await record.click();
-  await expect(page.locator("#hierarchy-tree")).toContainText("高さ(Sphere_2)");
+  await expect(page.locator("#hierarchy-tree")).toContainText("高さ(球 2)");
   // 付いたら、そのボタンはもう出ない。
   await expect(page.locator("#btn-record-body")).toHaveCount(0);
   expect(errors).toEqual([]);
@@ -2283,20 +2317,20 @@ test("消した物の観測点は、左の「記録している値」に残っ�
   await page.waitForTimeout(300);
 
   const probes = page.locator("#hierarchy-tree");
-  await expect(probes).toContainText("高さ(Sphere_1)");
+  await expect(probes).toContainText("高さ(球 1)");
   await expect(probes).not.toContainText("消えた物");
 
   // 3D と一覧からは消える一方、グラフに描いた過去データを黙って捨てるのは
   // 乱暴なので、「記録している値」には残す——ただし**もう無い物だと分かる**
   // ように注記する(課題B、`friendlyProbeLabel`のdoc参照)。
-  await page.locator("#hierarchy-tree li", { hasText: "Sphere_1" }).first().click();
+  await page.locator("#hierarchy-tree li", { hasText: "球 1" }).first().click();
   await page.keyboard.press("Delete");
   await page.waitForTimeout(300);
 
-  await expect(probes).toContainText("高さ(Sphere_1・消えた物)");
-  await expect(probes).toContainText("速さ(Sphere_1・消えた物)");
+  await expect(probes).toContainText("高さ(球 1・消えた物)");
+  await expect(probes).toContainText("速さ(球 1・消えた物)");
   // 3D・一覧からは実際に消えていること(一覧の食い違いそのものは直っている)。
-  await expect(page.locator("#hierarchy-tree")).not.toContainText("↳ Sphere_1");
+  await expect(page.locator("#hierarchy-tree")).not.toContainText("↳ 球 1");
   expect(errors).toEqual([]);
 });
 
@@ -2449,7 +2483,7 @@ test("置いた物は、選んだ札の「これを消す」から見つけて�
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
   await addViaMenu(page, "＋ 球");
-  const sphereRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Sphere_1" });
+  const sphereRow = page.locator("#hierarchy-tree .tree-body", { hasText: "球 1" });
   await expect(sphereRow).toHaveCount(1);
 
   const removeBtn = page.locator("#btn-remove-body");
@@ -2518,7 +2552,7 @@ test("「新規シーン」は、置いた物があれば確認し、キャン�
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
   await addViaMenu(page, "＋ 箱");
-  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
   await expect(row).toHaveCount(1);
 
   await page.click("#btn-new-scene");
@@ -2540,7 +2574,7 @@ test("「新規シーン」は、置いた物があっても確認してOKすれ
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
   await addViaMenu(page, "＋ 箱");
-  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
   await expect(row).toHaveCount(1);
 
   await page.click("#btn-new-scene");
@@ -2564,7 +2598,7 @@ test("⌘Kで別の実験を選び直すときも、作りかけがあれば確�
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
   await addViaMenu(page, "＋ 箱");
-  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
   await expect(row).toHaveCount(1);
 
   await page.keyboard.press("Control+k");
@@ -2601,7 +2635,7 @@ test("保存済みの場面を開くときも、作りかけがあれば確認�
   // 新規シーンへ切り替え、別の物を置く(=直近の保存より後の、未保存の作りかけ)。
   await page.click("#btn-new-scene");
   await addViaMenu(page, "＋ 箱");
-  const boxRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  const boxRow = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
   await expect(boxRow).toHaveCount(1);
 
   // ⌘Kから、さっき保存した場面を開こうとする。
@@ -2628,7 +2662,7 @@ test("Toolbarのシーン選択も、作りかけがあれば確認し、キャ�
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
   await addViaMenu(page, "＋ 箱");
-  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
   await expect(row).toHaveCount(1);
 
   await page.selectOption("#select-scene", { index: 1 });
@@ -2650,7 +2684,7 @@ test("Projectドロワーの「シーン」タブから読み込むときも、�
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
   await addViaMenu(page, "＋ 箱");
-  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "Box_1" });
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
   await expect(row).toHaveCount(1);
 
   await page.click('.project-tab[data-tab="scenes"]');
@@ -3171,7 +3205,7 @@ test("消した物のあとの個数表示は、生きている数だけを数�
   await addViaMenu(page, "箱");
   await page.waitForTimeout(200);
 
-  const box = page.locator("#hierarchy-tree .tree-body", { hasText: "Box" });
+  const box = page.locator("#hierarchy-tree .tree-body", { hasText: "箱" });
   await box.click({ button: "right" });
   await page.locator("#context-menu button", { hasText: "削除" }).first().click();
   await page.waitForTimeout(200);
@@ -3184,5 +3218,120 @@ test("消した物のあとの個数表示は、生きている数だけを数�
   await page.click("#btn-clear-selection");
   await expect(page.locator("#inspector-body")).toContainText("1 個あります");
   await expect(page.locator("#inspector-body")).not.toContainText("2 個あります");
+  expect(errors).toEqual([]);
+});
+
+// **課題2(進行管理役の実測)**: 置いた物が、他の物が遠くにあると豆粒にしか
+// ならない不具合。`d1-free-fall`を粒度2「しらべる」で開き、右クリックで
+// 2個目の球を置いたところ、既存の球が遠く(実測: 距離47.3m)へ落ちて
+// 止まっていたため、`frameCameraOnContent`が両方を入れる画角に引いてしまい、
+// 新しい球は見かけの直径9.9pxにしかならなかった(「置いたのに何も起きな
+// かった」と読まれて当然の大きさ)。ここでは同じ状況(遠くに他の物がある
+// 場面で新しく1個置く)を、粒度3「つくる」の数値欄で確実に再現する。
+test("置いた物は、他の物が遠くにあっても十分な大きさで見える(実測: 修正前は距離47.3m・直径9.9px)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  // 1個目を置いて、進行管理役の実測と同じ桁(30〜40m)まで遠ざける
+  // ——`contentBoundingBox`がこれも含めて画角を決める、「他の遠い物」役。
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+  await page.locator("#focus-pos-x").fill("40");
+  await page.locator("#focus-pos-y").fill("0.4");
+  const farZ = page.locator("#focus-pos-z");
+  await farZ.fill("40");
+  // **`dispatchEvent("change")` ではなく `Tab` で本物のフォーカス移動を
+  // 起こして確定させる**。手で `dispatchEvent` すると、ブラウザ内部の
+  // 「まだ確定していない」という印は消えないまま残り、この直後に別の要素
+  // (下の2個目のスポーンボタン)をクリックしてフォーカスを奪った瞬間、
+  // ブラウザが**もう一度**本物の`change`を同じ値で発火させてしまう
+  // (実測で踏んだ: この2回目の`change`が`setBodyPosition`をもう一度呼び、
+  // そちらの可視性フォールバックが1個目に画角を引き戻して、この後の
+  // 「2個目が見える」検証を汚染していた)。`Tab`ならその場で一度だけ確定する。
+  await farZ.press("Tab");
+  await page.waitForTimeout(500);
+
+  // 2個目を、進行管理役の実測と同じ状況(遠くに他の物がある場面)で置く。
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+
+  // 直近に置いた物(2個目)が、十分な大きさで見えること。しきい値は
+  // 「読める点」との境目として安全側の40pxに取る(修正後の実測は250px前後、
+  // 修正前の実測は9.9px)。
+  const diameter = await apparentSphereDiameterPx(page);
+  expect(diameter).toBeGreaterThan(40);
+  expect(errors).toEqual([]);
+});
+
+// **課題1・3・4(進行管理役の実測)**: 粒度2「しらべる」で`d1-free-fall`を
+// 開いた状態の再現。ツールバー(`#btn-add`)は畳まれているのに、「選んだ
+// もの」札の「🗑 これを消す」は選ぶだけで出る——**消す手段は見えるのに
+// 足す手段が見えない**という非対称。右クリックすれば実は置けるが、
+// 「ここに球を配置 (-20.30, -33.80)」のような生座標や「複合形状(L字)」
+// 「凸包メッシュ」のような内部語彙はこの粒度の人には読めない。置いた物の
+// 名前も`Sphere_2`という機械語のままだった。
+test("粒度2「しらべる」でも、足す手段が見つかり、置いた物の名前が読める", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // 実測どおりの前提: この粒度ではツールバーがまだ畳まれている。
+  await expect(page.locator("#toolbar")).toBeHidden();
+
+  // とめてから足す(物理が進んでいる最中の測定でぶれないように)。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  // ①「足す」導線が、この粒度でも見つかること(課題1)。
+  await expect(page.locator('.card[data-card="add-body"]')).toBeVisible();
+  const addButton = page.locator("#btn-add-body-card");
+  await expect(addButton).toBeVisible();
+  const before = await page.locator("#hierarchy-tree .tree-body").count();
+  await addButton.click();
+  await page.waitForTimeout(500);
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(before + 1);
+
+  // ②置いた物が、機械語(`Sphere_2`)ではなく読める名前で出ること——場面の
+  // 中身・パンくず・「選んだもの」札の3箇所(課題3)。
+  await expect(page.locator("#hierarchy-tree")).not.toContainText("Sphere_");
+  const crumb = page.locator("#crumb-body");
+  await expect(crumb).toBeVisible();
+  await expect(crumb).not.toContainText("Sphere_");
+  await expect(crumb).toContainText("球");
+  const focus = page.locator('.card[data-card="focus"]');
+  await expect(focus).toBeVisible();
+  await expect(focus).not.toContainText("Sphere_");
+  await expect(focus).toContainText("球");
+
+  // ③置いた物が、置いた本人に見える大きさになること(課題2、単独テストは
+  // 上の「置いた物は、他の物が遠くにあっても…」参照)。
+  expect(await apparentSphereDiameterPx(page)).toBeGreaterThan(40);
+
+  // ④右クリックのスポーンパレットも、この粒度では平易な言葉になっている
+  // こと——生座標・「複合形状(L字)」「凸包メッシュ」のような内部語彙は
+  // 出さない(「つくる」粒度専用のまま、課題4)。
+  const canvas = page.locator("#scene-view-canvas-host canvas").first();
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.6, {
+    button: "right",
+  });
+  const menu = page.locator("#context-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu).toContainText("ここに球を置く");
+  await expect(menu).not.toContainText("複合形状");
+  await expect(menu).not.toContainText("凸包メッシュ");
+  await expect(menu).not.toContainText("配置 (");
+  await page.keyboard.press("Escape");
+
   expect(errors).toEqual([]);
 });

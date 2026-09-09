@@ -10,6 +10,7 @@ import "./style.css";
 import {
   annotateInspectorShape,
   formatDuration,
+  friendlyBodyLabel,
   readoutNumber,
   setUpWorkspace,
   type ConfirmDiscardRef,
@@ -1266,7 +1267,11 @@ function setUpHierarchy(
       continue;
     }
     const item = document.createElement("li");
-    item.textContent = world.read_component("body_label_at", String(i));
+    // **場面の中身に出る名前は、人の言葉にする**(`friendlyBodyLabel`のdoc
+    // 参照——自動採番の`Sphere_2`のような機械語のまま出ていた。実測: 粒度2
+    // 「しらべる」で右クリックから球を足すと、一覧に「Sphere_2」とだけ出て、
+    // どれが今置いた物か読めなかった)。
+    item.textContent = friendlyBodyLabel(world.read_component("body_label_at", String(i)));
     // `tree-body` は **Bodies サブツリーの実体行**だけに付く(群2)。
     // Materials(参照)や Joints の行も `tree-selectable` なので、
     // 「ボディが何体あるか」を数えるにはこちらを使う。
@@ -1362,7 +1367,9 @@ function setUpHierarchy(
     if (world.constraint_anchor_points_at(i).length < 6) continue;
     jointCount += 1;
     const item = document.createElement("li");
-    item.textContent = `振り子 (DistanceJoint) (${world.read_component("body_label_at", String(i))})`;
+    item.textContent = friendlyBodyLabel(
+      `振り子 (DistanceJoint) (${world.read_component("body_label_at", String(i))})`,
+    );
     item.classList.add("tree-selectable");
     item.addEventListener("click", () => {
       highlight(i);
@@ -1480,9 +1487,11 @@ function setUpHierarchy(
     probeList.className = "tree-nested";
     for (let i = 0; i < probeCount; i++) {
       const item = document.createElement("li");
-      item.textContent = friendlyProbeLabel(
-        world.read_component("imported_probe_label_at", String(i)),
-        aliveBodyNames,
+      item.textContent = friendlyBodyLabel(
+        friendlyProbeLabel(
+          world.read_component("imported_probe_label_at", String(i)),
+          aliveBodyNames,
+        ),
       );
       probeList.appendChild(item);
     }
@@ -1523,7 +1532,9 @@ function setUpHierarchy(
         // 2つ現れると、見た目にどちらが実体でどちらが参照か分からないうえ、
         // ラベルでの選択(テスト・自動化)も曖昧になる(実際に Playwright の
         // strict モードが 8 本まとめて落ちて気付いた)。
-        userItem.textContent = `↳ ${world.read_component("body_label_at", String(bodyIndex))}`;
+        userItem.textContent = friendlyBodyLabel(
+          `↳ ${world.read_component("body_label_at", String(bodyIndex))}`,
+        );
         userItem.classList.add("tree-selectable");
         userItem.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -7087,9 +7098,12 @@ async function setUpSceneView(
     return Math.max(own * scale, 0.05);
   }
 
-  function frameCameraOnContent() {
-    const box = contentBoundingBox();
-    if (!box) return;
+  /**
+   * 箱1つに画角を合わせる、共通の実処理。`frameCameraOnContent`(場面ぜんぶの
+   * 箱)と`frameCameraOnPoint`(置いたばかりの1個だけの箱)の両方がこれを呼ぶ
+   * ——向き・仰角クランプ・クリップ面の計算を二重に持たないため。
+   */
+  function frameCameraOnBox(box: THREE.Box3) {
     const center = box.getCenter(new THREE.Vector3());
     const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.5);
     orbit.target.copy(center);
@@ -7155,6 +7169,35 @@ async function setUpSceneView(
     orbit.update();
   }
 
+  function frameCameraOnContent() {
+    const box = contentBoundingBox();
+    if (!box) return;
+    frameCameraOnBox(box);
+  }
+
+  /**
+   * **置いたばかりの物“だけ”に画角を合わせ直す**。
+   *
+   * `frameCameraOnContent`(場面の動く物ぜんぶが入る画角)を呼んでも、なお
+   * 置いた物が見えないことがある——実測(進行管理役、粒度2「しらべる」の
+   * `d1-free-fall`で2個目の球を右クリックで置いたケース): 既存の球が
+   * 遠く離れた場所へ落ちて止まっていたため、`contentBoundingBox`が両方を
+   * 含む大きな箱を作り、全体が入る画角に引いた結果、新しい球は距離47.3m・
+   * 見かけの直径9.9pxにしかならなかった(「置いたのに何も起きなかった」と
+   * 読まれて当然の大きさ)。「全体を入れる」ことと「いま置いた物が見える」
+   * ことは両立しない場合があるので、後者を優先し、置いた物1個だけの箱で
+   * 画角を作り直す。
+   */
+  function frameCameraOnPoint(x: number, y: number, z: number, radius: number) {
+    const r = Math.max(radius, 0.05);
+    frameCameraOnBox(
+      new THREE.Box3(
+        new THREE.Vector3(x - r, y - r, z - r),
+        new THREE.Vector3(x + r, y + r, z + r),
+      ),
+    );
+  }
+
   /**
    * **追従カメラ**(かんたんモード)。
    *
@@ -7171,6 +7214,25 @@ async function setUpSceneView(
    */
   let guidedFollowCamera = false;
   let guidedCameraSnap = false;
+  /**
+   * **置いたばかりの物を、追従カメラに覚えさせる**(課題2、進行管理役の実測)。
+   *
+   * `updateGuidedFollowCamera`は毎フレーム動き続けるので、`spawnShapeAt`側の
+   * 一度きりの画角合わせ(`frameCameraOnPoint`)を足しても、**次のフレームで
+   * この関数がすぐ上書きしてしまう**——実測: `guidedFollowCamera`が有効な
+   * 場面(実験を選ぶと既定で有効)で、既に遠く(距離30m超)にある物がある
+   * ところへ新しく1個置くと、この関数が「動く物ぜんぶ」を入れる画角に
+   * 引いてしまい、置いたばかりの物は見かけの直径9.9pxにしかならなかった。
+   * ここに「最後に置いた物」を覚えておき、下の`updateGuidedFollowCamera`で
+   * 「その物がちゃんと見えているか」を**アグリゲートの框付けとは別枠**で
+   * 保証する——全体を追う設計そのものは変えない。
+   */
+  let lastSpawnedBodyIndex = -1;
+  let lastSpawnedAt = 0;
+  /** 「置いた直後」とみなす猶予 [ms]。`POSITION_PENDING_MS`(workspace.ts)と
+   *  同じ桁——それより長く効かせると、「置いたら最後もう全体を追わなくなる」
+   *  という別の体験になる。 */
+  const RECENT_SPAWN_GUARD_MS = 1500;
   /**
    * **場面が始まったときの広がり**。
    *
@@ -7323,6 +7385,41 @@ async function setUpSceneView(
       );
     }
     updateClipPlanes(camera.position.distanceTo(orbit.target));
+    // **置いたばかりの物を見失わない**(`lastSpawnedBodyIndex`のdoc参照)。
+    // 上のアグリゲートな框付け(場面の「動く物ぜんぶ」を入れる画角)は、
+    // 遠く離れた物が既にあると、置いたばかりの小さな物を巻き込んで画角を
+    // 大きく引いてしまうことがある——実測(進行管理役、`d1-free-fall`を
+    // 粒度2で開き、右クリックで2個目の球を置いたケース): 既存の球が距離
+    // 30m超の場所へ落ちて止まっていたため、置いた物は距離47.3m・見かけの
+    // 直径9.9pxにしかならなかった。「全体を追う」設計自体は変えず、置いてから
+    // `RECENT_SPAWN_GUARD_MS`の間だけ、上の計算結果でその物がちゃんと見えて
+    // いるかを別枠で確かめ、見えていなければその物1個だけの画角に差し替える。
+    // 猶予を過ぎたら何もしない——ずっと効かせると「置いたら最後、もう全体を
+    // 追わなくなる」という別の体験になる。
+    if (
+      lastSpawnedBodyIndex >= 0 &&
+      performance.now() - lastSpawnedAt <= RECENT_SPAWN_GUARD_MS
+    ) {
+      // **覚えた番号は、場面が差し替わると存在しなくなる**。猶予の1.5秒は
+      // 短いが、置いた直後に⌘Kで別の実験へ移るのは普通の操作で、実際に
+      // 起きた——実測(進行管理役): `d1-free-fall`(床0・球1)に箱を足して
+      // index 2 を覚えた直後に別の実験へ移ると、新しい場面にはその番号の物が
+      // 無く、`body_is_removed_at`が`body index 2 out of range`を投げて
+      // ページエラーになった。**個数とメッシュの両方で先に閉じてから**
+      // wasm に尋ねる(閉じたら覚えるのをやめる——次のフレームでまた同じ
+      // 例外を踏まないため)。
+      const mesh = bodyMeshes.get(lastSpawnedBodyIndex);
+      if (mesh === undefined || lastSpawnedBodyIndex >= readNumber(world, "body_count")) {
+        lastSpawnedBodyIndex = -1;
+      } else if (
+        world.read_component("body_is_removed_at", String(lastSpawnedBodyIndex)) !== "true"
+      ) {
+        const r = bodyVisibilityRadius(lastSpawnedBodyIndex);
+        if (!isWellVisible(mesh.position.x, mesh.position.y, mesh.position.z, r)) {
+          frameCameraOnPoint(mesh.position.x, mesh.position.y, mesh.position.z, r);
+        }
+      }
+    }
     if ((window as unknown as { __dbgCam?: boolean }).__dbgCam) {
       console.log(
         "[dbg]",
@@ -9744,6 +9841,11 @@ async function setUpSceneView(
     // しまう——置いた物が遠くの点にしか見えなかった原因(利用者役④の観察)。
     mesh.position.set(x, y, z);
     addSpawnedMesh(bodyIndex, mesh);
+    // **追従カメラに「いま置いた」と伝える**(`lastSpawnedBodyIndex`のdoc参照
+    // ——`updateGuidedFollowCamera`がこれを見て、アグリゲートの框付けとは
+    // 別枠でこの物の可視性を保証する)。
+    lastSpawnedBodyIndex = bodyIndex;
+    lastSpawnedAt = performance.now();
     // **置いた物の動きが、そのままグラフに出る**。観測点はシーンJSONが宣言した
     // ものしか無く、自分で置いた物には一本も付かなかったので、自作の場面では
     // グラフが永久に空で CSV も押せなかった(利用者役④の観察)。
@@ -9759,7 +9861,13 @@ async function setUpSceneView(
     // 置いたのでは」と読まれた(利用者役④の観察)。画面に入っていないときだけ
     // 画角を合わせ直す——見えているのに勝手に動かすと、並べている最中の視点を
     // 奪うことになる。
-    if (!isWellVisible(x, y, z, spawnRadius)) frameCameraOnContent();
+    if (!isWellVisible(x, y, z, spawnRadius)) {
+      frameCameraOnContent();
+      // **場面全体を入れる画角でも、なお置いた物が見えないことがある**
+      // (`frameCameraOnPoint`のdoc参照——他の物が遠くにあると、全体を
+      // 入れる画角がその物を豆粒にする)。そのときは置いた物1個だけに絞る。
+      if (!isWellVisible(x, y, z, spawnRadius)) frameCameraOnPoint(x, y, z, spawnRadius);
+    }
     return bodyIndex;
   }
 
@@ -9965,39 +10073,68 @@ async function setUpSceneView(
       const bodyIndex = spawnShapeAt(kind, x, restHeight, z);
       selectBody(bodyIndex);
     };
+    // **粒度が浅いと、内部語彙と生座標は読めない**(進行管理役の実測、課題4)。
+    // 「ここに球を配置 (-20.30, -33.80)」のような生の座標、「複合形状(L字)」
+    // 「凸包メッシュ」のような内部のシェイプ名は、「つくる」まで踏み込んだ
+    // 人には手がかりだが、そこまで踏み込んでいない人には読めない記号でしか
+    // ない。しきい値は`REVEAL.toolbar`と同じ意図(このメニュー自体もう1つの
+    // スポーン導線であり、ツールバーの語彙と揃える)——「つくる」の名目の
+    // 粒度(`dataset.grain === "build"`)だけ、いまの詳しい書き方をそのまま
+    // 使う。それより浅い粒度では、球・箱・カプセルの3種だけに絞り
+    // (複合形状・凸包メッシュは「＋ 追加」メニュー・ツールバーから届く
+    // 「つくる」向けの道具として残す)、生座標は落とす。
+    const isBuildGrain = document.getElementById("app")?.dataset.grain === "build";
+    const shapeItems: ContextMenuItem[] = isBuildGrain
+      ? [
+          {
+            label: `ここに球を配置 (${x.toFixed(2)}, ${z.toFixed(2)})`,
+            onSelect: place("sphere", SPAWN_SPHERE_RADIUS),
+          },
+          {
+            label: "ここに箱を配置",
+            onSelect: place("box", SPAWN_BOX_HALF_EXTENT),
+          },
+          {
+            label: "ここにカプセルを配置",
+            onSelect: place(
+              "capsule",
+              SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
+            ),
+            title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
+          },
+          {
+            label: "ここに複合形状(L字)を配置",
+            onSelect: place("compound", SPAWN_COMPOUND_L_SHAPE_REST_OFFSET),
+            title: "Shape::Compound(Box×2の子)",
+          },
+          {
+            label: "ここに凸包メッシュを配置",
+            onSelect: place("convex_mesh", SPAWN_CONVEX_MESH_HALF),
+            title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
+          },
+        ]
+      : [
+          { label: "ここに球を置く", onSelect: place("sphere", SPAWN_SPHERE_RADIUS) },
+          { label: "ここに箱を置く", onSelect: place("box", SPAWN_BOX_HALF_EXTENT) },
+          {
+            label: "ここにカプセルを置く",
+            onSelect: place(
+              "capsule",
+              SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
+            ),
+            title: "カプセルは箱をすり抜けます(未対応)",
+          },
+        ];
     showContextMenu(event.clientX, event.clientY, [
-      {
-        label: `ここに球を配置 (${x.toFixed(2)}, ${z.toFixed(2)})`,
-        onSelect: place("sphere", SPAWN_SPHERE_RADIUS),
-      },
-      {
-        label: "ここに箱を配置",
-        onSelect: place("box", SPAWN_BOX_HALF_EXTENT),
-      },
-      {
-        label: "ここにカプセルを配置",
-        onSelect: place(
-          "capsule",
-          SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
-        ),
-        title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
-      },
-      {
-        label: "ここに複合形状(L字)を配置",
-        onSelect: place("compound", SPAWN_COMPOUND_L_SHAPE_REST_OFFSET),
-        title: "Shape::Compound(Box×2の子)",
-      },
-      {
-        label: "ここに凸包メッシュを配置",
-        onSelect: place("convex_mesh", SPAWN_CONVEX_MESH_HALF),
-        title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
-      },
+      ...shapeItems,
       { separator: true },
       {
         label: `材質: ${spawnMaterialSelect.value}`,
         disabled: true,
         onSelect: () => {},
-        title: "材質はツールバーの材質セレクタで切り替えます",
+        title: isBuildGrain
+          ? "材質はツールバーの材質セレクタで切り替えます"
+          : "材質は、置いたあと「選んだもの」札で選べます",
       },
     ]);
   });
@@ -11397,6 +11534,10 @@ async function setUpSceneView(
         // 同期で物だけが新しい位置へ移って再び画角の外に出る。
         bodyMeshes.get(index)?.position.set(x, y, z);
         frameCameraOnContent();
+        // 他の物が遠くにあると、全体を入れる画角がこの物を豆粒にすることが
+        // ある(`frameCameraOnPoint`のdoc参照、`spawnShapeAt`と同じ手当て)。
+        const radius = bodyVisibilityRadius(index);
+        if (!isWellVisible(x, y, z, radius)) frameCameraOnPoint(x, y, z, radius);
       }
       return true;
     },

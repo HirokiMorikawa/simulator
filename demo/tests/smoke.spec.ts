@@ -29,7 +29,7 @@ test("起動して wasm が初期化され、既定シーンが Hierarchy と HU
   // Playwright の strict モードが複数一致で落ちる)。
   const hierarchy = page.locator("#hierarchy-tree");
   await expect(hierarchy.getByText("Ground", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("Box_1", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("箱 1", { exact: true })).toBeVisible();
   await expect(page.locator("#hud")).toContainText("step = 0");
   expect(errors).toEqual([]);
 });
@@ -409,7 +409,7 @@ test("増分L: 流体場オーバーレイ・カプセル・材料派生", async
 
   // ① カプセルのスポーン(sim-mechanics 側で体積・慣性・接触を実装した)。
   await addViaMenu(page, "＋ カプセル");
-  await expect(hierarchy.getByText("Capsule_", { exact: false }).first()).toBeVisible();
+  await expect(hierarchy.getByText("カプセル", { exact: false }).first()).toBeVisible();
   // 落として床に載る(接触が起きる = カプセル-平面の接触が働いている)。
   await page.click("#btn-mode-play");
   const contact = page.locator("#console-log li", { hasText: "bodies=" }).first();
@@ -1092,13 +1092,13 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
   await addViaMenu(page, "＋ 複合形状 (L字)");
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 1);
-  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("Compound_");
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("複合形状");
 
   // ② 同じく凸包メッシュを追加。
   await addViaMenu(page, "＋ 凸包メッシュ");
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 2);
-  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("ConvexMesh_");
+  await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("凸包メッシュ");
 
   // ③ Scene View の右クリックメニューからも同じ2形状を配置できる
   // (ツールバーのボタンとメニューの両方が同じ `spawnShapeAt` を共有する設計、
@@ -1133,7 +1133,7 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
   // ⑤ Hierarchy 右クリックで複合形状を複製できる(`body_shape_json_at`
   // 経由で実際の形状を読み直してメッシュを再構築する経路、スポーン時の
   // 既定形状だと決め打ちしない)。
-  const compoundRow = page.locator("#hierarchy-tree .tree-body", { hasText: "Compound_" }).first();
+  const compoundRow = page.locator("#hierarchy-tree .tree-body", { hasText: "複合形状" }).first();
   await compoundRow.click({ button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
   const beforeDuplicate = await rowCount();
@@ -1168,7 +1168,7 @@ test("Prefab: 複合形状/凸包メッシュをプレハブ化して再スポ�
 
   // ② Hierarchy 右クリック →「プレハブ化」。旧実装ではここで
   //    「この形状はPrefab化できません」のalertが出て登録されなかった。
-  for (const label of ["Compound_", "ConvexMesh_"]) {
+  for (const label of ["複合形状", "凸包メッシュ"]) {
     const row = page.locator("#hierarchy-tree .tree-body", { hasText: label }).first();
     await row.click({ button: "right" });
     await expect(page.locator("#context-menu")).toBeVisible();
@@ -1194,8 +1194,8 @@ test("Prefab: 複合形状/凸包メッシュをプレハブ化して再スポ�
   expect(await rowCount()).toBe(beforeSpawn + 2);
   // 復元されたボディのラベルは形状から引かれる(`shape_label_prefix`)ので、
   // 「球として戻ってきた」等の取り違えはラベルで検出できる。
-  await expect(page.locator("#hierarchy-tree")).toContainText("Compound_");
-  await expect(page.locator("#hierarchy-tree")).toContainText("ConvexMesh_");
+  await expect(page.locator("#hierarchy-tree")).toContainText("複合形状");
+  await expect(page.locator("#hierarchy-tree")).toContainText("凸包メッシュ");
 
   // ⑤ 再スポーンしたボディを実際に走らせてもクラッシュしない(描画・物理の
   //    両方が復元後の形状で動くこと)。`⏭`はPlayへ入ってからでないと無効。
@@ -1223,7 +1223,7 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
   await waitForWorld(page);
 
   // Box_1 を選択する(Inspector の Add Coupling フォームを開くため)。
-  await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
+  await page.locator("#hierarchy-tree").getByText("箱 1", { exact: true }).click();
   const inspector = page.locator("#inspector-body");
 
   // ---- ドメインをSettingsから有効化する ----
@@ -1342,7 +1342,7 @@ test("縦串⑤(飛行機の物理): 翼揚力/マグヌス揚力をUIから追�
   await page.goto("/");
   await waitForWorld(page);
 
-  await page.locator("#hierarchy-tree").getByText("Box_1", { exact: true }).click();
+  await page.locator("#hierarchy-tree").getByText("箱 1", { exact: true }).click();
   const inspector = page.locator("#inspector-body");
 
   // フィールドIDは`component_schema`が返す`add_*_coupling`の実引数名
@@ -1497,7 +1497,7 @@ test("D1: スケッチ→押し出しで剛体をUIから作れ、走らせて�
   await page.waitForTimeout(200);
   expect(await rowCount()).toBe(before + 1);
   await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText(
-    /ConvexMesh_|Compound_/,
+    /凸包メッシュ|複合形状/,
   );
   // 押し出した後はスケッチが片付いている。
   await expect(page.locator("#sketch-status")).toContainText(
@@ -1534,7 +1534,7 @@ test("D1: スケッチ→押し出しで剛体をUIから作れ、走らせて�
   await page.waitForTimeout(200);
   expect(await rowCount()).toBe(before + 2);
   await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText(
-    "Compound_",
+    "複合形状",
   );
 
   // ⑥ 実際に走らせる——押し出したメッシュが物理(接触生成・質量特性)と

@@ -417,6 +417,39 @@ function friendlyShape(raw: string): string {
   return name;
 }
 
+/**
+ * **自分で置いた物の名前を、機械語から人の言葉へ直す**。
+ *
+ * 自分で置いた物には、Rust側(`crates/sim-wasm/src/lib.rs`の`spawn_*_impl`、
+ * 物理には無関係の内部識別子)が`Sphere_2`のような名前を割り振る。数字は
+ * 場面全体での置いた順(全ボディ通し番号——「2匹目の球」ではなく「3番目に
+ * 置いた物」の意味)で、そこは変えずに残す——同じ名前の物が2つできると
+ * どちらを指すか読めなくなる(`relabelSceneBodies`が名前の衝突を避けている
+ * のと同じ理由)。シーンJSONが名前を与えている物(`ball`・`ground`など)は
+ * この形に一致しないので、そのまま返す——読めない機械語なのは自動採番の
+ * 物だけ。
+ *
+ * **場面の中身(Hierarchy)・パンくず・「選んだもの」札の3箇所だけに使う**。
+ * 観測点の内部照合(`hasBodyProbes`・`probeTargetBodyName`)やシーン書き出し
+ * (`exportSceneJson`・`relabelSceneBodies`)は、この関数を通す**前**の生の
+ * 名前で参照し合っているため、そちら側は変えない——変えると「同じ名前のはず
+ * なのに一致しない」不具合を自分で作ることになる。
+ */
+const AUTO_BODY_LABEL_NAMES: Record<string, string> = {
+  Sphere: "球",
+  Box: "箱",
+  Capsule: "カプセル",
+  Compound: "複合形状",
+  ConvexMesh: "凸包メッシュ",
+};
+
+export function friendlyBodyLabel(raw: string): string {
+  return raw.replace(/\b(Sphere|Box|Capsule|Compound|ConvexMesh)_(\d+)\b/g, (whole, kind: string, n: string) => {
+    const name = AUTO_BODY_LABEL_NAMES[kind];
+    return name ? `${name} ${n}` : whole;
+  });
+}
+
 // **Inspector の「かたち (Shape)」欄で、生の値に何の値かを書き足す**。
 // wasm(`body_shape_label_at`)は球なら半径、箱なら半辺(一辺の半分)の長さを
 // 生のまま返す一方、「選んだもの」札は`friendlyShape`で人の言葉(直径・一辺)
@@ -868,7 +901,7 @@ export function setUpWorkspace(
         const body = document.createElement("span");
         body.className = "crumb crumb-leaf";
         body.id = "crumb-body";
-        body.textContent = readout.label;
+        body.textContent = friendlyBodyLabel(readout.label);
         crumbs.appendChild(body);
       }
     }
@@ -1550,6 +1583,74 @@ export function setUpWorkspace(
     }
   }
 
+  /**
+   * **「足す」を、「消す」と同じくらい見つけやすくする**。
+   *
+   * 実測(進行管理役、粒度2「しらべる」の`d1-free-fall`): この粒度では
+   * ツールバー(`#toolbar`・`#btn-add`、`REVEAL.toolbar`=2.4)がまだ畳まれて
+   * いる一方、「選んだもの」札の「🗑 これを消す」は選ぶだけで出る
+   * (`reveal: 0`)。**消す手段は堂々と見えるのに、足す手段だけが無い**
+   * ——右クリックすれば舞台のどこからでも置けるが、それを見つけられるかは
+   * 別問題で、実際「2個目を置くのに粒度を一段上げさせられた」と読まれた。
+   *
+   * ツールバーそのものを下げるのは選ばない——時間倍率・凸包メッシュ・
+   * 熱ノードなど、しらべる粒度の人には要らない道具まで雪崩れ込む
+   * (`REVEAL.toolbar`のdoc、群を分けている理由そのもの)。ここは
+   * 「物を足す」という**1つの行為だけ**を、右カラムのこのカードに出す。
+   *
+   * **経路は右クリックの「ここに球を配置」やツールバーの「＋ 球」と同じ**
+   * (`btn-spawn-sphere`を押すのと同じボタンを鳴らすだけ)——物理は二重に
+   * 実装しない。置いた物はそのまま選ぶ——「足す」を押した直後に
+   * 「選んだもの」札が現れ、「これを消す」まで見える形で行為が閉じる。
+   *
+   * **しきい値は`REVEAL.outline`(1.6)に揃える**——「場面の中身(一覧)」が
+   * 見えている粒度でこそ「その中身を増やす」行為も筋が通る、という対応関係
+   * にした。「さわる」(1.0)側は迷ったが、そちらの主な行為は「用意された
+   * つまみで条件を変える」であって場面の組み立てそのものではないため見送った
+   * ——`GRAIN_STOPS`の hint 文言(「さわる」=「＋ 条件を変えるつまみ」、
+   * 「しらべる」=「＋ グラフ・一覧・数値」)とも合う判断。なお`reveal`は
+   * 「自動で開くか」だけを決め、それより浅い粒度でもカードの見出し自体は
+   * 畳んだまま残る(`buildCard`/`syncCards`の doc 参照)ので、「さわる」の
+   * 人が全く気付けないわけではない。
+   */
+  function addBodyCard(): CardSpec {
+    return {
+      id: "add-body",
+      title: "物を足す",
+      reveal: REVEAL.outline,
+      build: (body) => {
+        const note = document.createElement("p");
+        note.className = "card-note";
+        note.textContent =
+          "この場面に、球をひとつ足します。置き場所はいまある物のそば" +
+          "(自動で決まります)。形や置く場所を選びたいときは、舞台を右クリック" +
+          "してください。";
+        body.appendChild(note);
+        const actions = document.createElement("div");
+        actions.className = "card-actions";
+        const add = document.createElement("button");
+        add.type = "button";
+        add.id = "btn-add-body-card";
+        add.textContent = "➕ 球を1つ足す";
+        add.addEventListener("click", () => {
+          const api = apiRef.current;
+          if (!api) return;
+          // **既存のスポーン経路をそのまま鳴らす**(ツールバーの「＋ 球」・
+          // 右クリックの「ここに球を配置」と同じボタン)。ここでは物理側の
+          // 呼び出しを一切書かない。
+          document.getElementById("btn-spawn-sphere")?.click();
+          // 置いた物を選ぶ——「これを消す」まで見える「選んだもの」札が
+          // その場で開く(選択の切り替わりは毎フレームのポーリングが拾う、
+          // `lastSelection` の doc 参照)。新しい物は必ず末尾に足される。
+          const newIndex = api.bodyCount() - 1;
+          if (newIndex >= 0) api.selectBody(newIndex);
+        });
+        actions.appendChild(add);
+        body.appendChild(actions);
+      },
+    };
+  }
+
   function savedScenesCard(): CardSpec {
     return {
       id: "my-scenes",
@@ -1813,6 +1914,7 @@ export function setUpWorkspace(
             body.appendChild(list);
           },
         },
+        addBodyCard(),
         savedScenesCard(),
       ];
       for (const spec of world) contextBody.appendChild(buildCard(spec));
@@ -1948,6 +2050,9 @@ export function setUpWorkspace(
     }
 
     for (const spec of specs) contextBody.appendChild(buildCard(spec));
+    // 用意された実験の上でも、「これを消す」と同じ足場で「足す」ができる
+    // ようにする(`addBodyCard`のdoc参照)。
+    contextBody.appendChild(buildCard(addBodyCard()));
     appendFocusCard();
     // **用意された実験の上に組み立てた場合も保存できる**。以前は「自分の場面」
     // (実験を選んでいない状態)のときしか保存の口を出しておらず、実験に物を
@@ -1986,7 +2091,7 @@ export function setUpWorkspace(
       if (readout) {
         contextBody.appendChild(buildCard({
           id: "focus",
-          title: `選んだもの — ${readout.label}`,
+          title: `選んだもの — ${friendlyBodyLabel(readout.label)}`,
           reveal: 0, // 選ぶ行為そのものが局所への踏み込みなので、常に開く。
           build: (body) => {
             const list = document.createElement("dl");

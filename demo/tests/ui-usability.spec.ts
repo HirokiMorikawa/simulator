@@ -56,8 +56,11 @@ test("Hierarchy を上下キーで辿ると選択が Inspector へ連動する",
   await expect(page.locator("#inspector-body h3").first()).toContainText("Ground");
 
   await page.keyboard.press("ArrowDown");
+  // Hierarchy(場面の中身)は読める名前を出す(`friendlyBodyLabel`)一方、
+  // Inspector(中を知っている人向けの生の値)は機械語のままにする——役割分担は
+  // `friendlyBodyLabel`のdoc参照。
   await expect(page.locator("#hierarchy-tree .tree-body.selected")).toHaveText(
-    "Box_1",
+    "箱 1",
   );
   await expect(page.locator("#inspector-body h3").first()).toContainText("Box_1");
 
