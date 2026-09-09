@@ -1255,10 +1255,10 @@ export function setUpWorkspace(
     lastStageEmpty = null;
     lastWhereText = "";
     stageEmptyFrames = 0;
-    // **確認はもう済んだ**。ここでまた`reload()`の内側の確認に掛けると、
-    // 1回の選択で確認ダイアログが2回続けて出る(`sceneEditedSinceLoad`は
-    // 実際に読み込みが終わるまで下りないため)。`skipConfirm`で二重を防ぐ。
-    reload({ skipConfirm: true });
+    // 確認はすでにこの関数の先頭で済ませた——`reload()`はもう確認しない
+    // (`confirmDiscardIfNeeded`のdoc「課題(退行)」参照)ので、二重には
+    // ならない。
+    reload();
     renderCrumbs();
     renderContext();
   }
@@ -1279,9 +1279,9 @@ export function setUpWorkspace(
    * 渡す。
    */
   /**
-   * **課題B(進行管理役の実測)**: 「新規シーン」「はじめから」「実験を
-   * 選び直す」「保存した場面を開く」は、どれも今の場面をその場で
-   * 差し替える——保存していない作りかけがあっても確認なく即座に消えて
+   * **課題B(進行管理役の実測)**: 「新規シーン」「実験を選び直す(`start`)」
+   * 「保存した場面を開く」は、どれも**今の場面を、別の場面(またはまっさら)
+   * へ差し替える**——保存していない作りかけがあっても確認なく即座に消えて
    * いた(利用者役の報告: 振り子とボールを配置した状態から「新規シーン」を
    * 押したら、確認なく空の場面になった)。
    *
@@ -1292,6 +1292,22 @@ export function setUpWorkspace(
    * `window.confirm` は保存した場面の「消す」(`savedScenesCard` の
    * `remove`)に既に前例がある——モーダルを自前で作らず、この画面の慣習に
    * 合わせる。
+   *
+   * **課題(退行、進行管理役の実測)**: `reload()`(「はじめから」・つまみの
+   * 変更)は**別の場面へ移らない**——同じ実験を、いまのつまみのまま頭から
+   * やり直すだけの、このアプリ自身の「やり直す」ボタンである。以前は
+   * `reload()`の内側でもこの関数を呼んでいたため、材質を選んだもの札で
+   * 差し替えただけ(`markUnsaved()`が立つ)で「はじめから」を押すたびに、
+   * 場面を捨てる導線と同じ「保存していない作りかけがあります…元には戻せ
+   * ません」という強い確認が出てしまっていた(利用者役の報告:「アプリが
+   * 固まった」と読まれた——Playwrightはダイアログを自動で閉じるため見過ごし
+   * ていたが、ダイアログを登録しない実測では実際に無反応に見える)。押した
+   * 人は「やり直したいだけ」で、何を失うかは`btn-restart`のtitle(「自分で
+   * 足した物は消え、札で変えた置き場所・向き・材質も戻ります」)がすでに
+   * 落ち着いた言葉で書いている——これ以上の確認は要らない。この関数は
+   * **場面をまるごと差し替える入口だけ**が呼ぶ(`start`・「新規シーン」・
+   * Toolbarのシーン選択・Projectドロワーのシーン読み込み・保存済み場面を
+   * 開く)。
    */
   function confirmDiscardIfNeeded(): boolean {
     const api = apiRef.current;
@@ -1301,17 +1317,17 @@ export function setUpWorkspace(
     );
   }
 
-  function reload(options?: { keepPauseIntent?: boolean; skipConfirm?: boolean }): void {
+  function reload(options?: { keepPauseIntent?: boolean }): void {
     const api = apiRef.current;
     if (!current) return;
     if (!api) {
       pendingStart = true;
       return;
     }
-    // `skipConfirm`は`start()`専用(そちらのdoc参照) ——既に確認済みの
-    // 呼び出しでは二重にダイアログを出さない。他の呼び出し元(「はじめから」・
-    // つまみの変更)はここで初めて確認する。
-    if (!options?.skipConfirm && !confirmDiscardIfNeeded()) return;
+    // **確認はここではしない**(このファイル冒頭、`confirmDiscardIfNeeded`の
+    // doc「課題(退行)」参照)。`reload()`は同じ実験をやり直すだけで、別の
+    // 場面へは移らない——確認が要る呼び出し元(`start`)はそちらで済ませて
+    // いる。
     const wasPaused = options?.keepPauseIntent === true && !api.isPlaying();
     const json = sceneJsonFor(current);
     if (!json) return;

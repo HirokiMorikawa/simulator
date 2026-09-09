@@ -2662,6 +2662,63 @@ test("Projectドロワーの「シーン」タブから読み込むときも、�
   expect(errors).toEqual([]);
 });
 
+// **退行(進行管理役の実測)**: `51dca5c` で「保存していない作りかけを捨てる
+// 前に確認する」を入れた範囲が広すぎ、「はじめから」(このアプリ自身の
+// 「やり直す」ボタンで、別の場面へは移らない)まで、材質を変えた直後だけ
+// 「保存していない作りかけがあります。このまま進めると消えます(元には
+// 戻せません)。」という強い確認を出してしまっていた。Playwrightは
+// `page.on("dialog", ...)` を登録しないと未処理のダイアログを自動で閉じる
+// ため、登録しない実測(利用者役が「アプリが固まった」と読んだのと同じ状況)
+// と、登録した実測の両方で確かめる。
+test("「はじめから」は、材質を変えたあとでも確認を出さない(退行)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    void d.accept();
+  });
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // とめる → 球を選ぶ → 材質を変える(`hasUnsavedWork()` が立つ、
+  // `setBodyMaterial` の doc 参照)。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+  await page.locator("#hierarchy-tree .tree-body").last().click();
+  await page.selectOption("#focus-material", "木材(松)");
+  await expect
+    .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
+    .toBe("木材(松)");
+
+  // ある程度時間を進めてから、もう一度とめて値を固定する(「はじめから」は
+  // 止めた意思を引き継がず必ず動かすので、`before` を動いたまま読むと
+  // 「はじめから」後にさらに進んだ分と競合し、まれに `after` が `before` を
+  // 追い越しかねない——`before` は止めて固定した値で読む)。しきい値を高めに
+  // 取り、「はじめから」後 500ms 経っても追い付かない余裕を持たせる。
+  await page.click("#btn-run");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 10_000 }).toBeGreaterThan(1.0);
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+  const before = await elapsedSeconds(page);
+  expect(before).toBeGreaterThan(1.0);
+
+  await page.click("#btn-restart");
+  await page.waitForTimeout(500);
+
+  // 確認は一切出ない。
+  expect(dialogs).toEqual([]);
+  // 「はじめから」は実際に効いている——経過時刻がいったん頭へ戻り、
+  // 止めて固定した値より小さいところから再び進む(ダイアログに阻まれて
+  // 無反応、ではないことの実測)。
+  const after = await elapsedSeconds(page);
+  expect(after).toBeLessThan(before);
+  expect(errors).toEqual([]);
+});
+
 // カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
 for (const category of CATEGORIES) {
   test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {
