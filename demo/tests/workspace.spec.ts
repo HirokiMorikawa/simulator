@@ -2386,7 +2386,7 @@ test("動き方の選択肢とバッジ、「＋追加」メニューが人の�
   await page.click("#btn-add");
   const menuTexts = await page.locator("#context-menu button").allTextContents();
   expect(menuTexts).toContain("＋ 振り子 (DistanceJoint)");
-  expect(menuTexts).toContain("＋ モーター (BallJoint + HingeMotorPd)");
+  expect(menuTexts).toContain("＋ モーター (角度を指定して止まる。回り続けません)");
   expect(menuTexts).toContain("＋ 流体 (SPH 水塊)");
   await page.keyboard.press("Escape");
 
@@ -2969,5 +2969,163 @@ test("材質ボタンに、実際の摩擦係数が添えてある(課題B)", as
   const hint = page.locator('[data-knob-id="material"] .knob-hint');
   await expect(hint).toContainText("重さ・跳ね返り・すべりやすさが一度に変わります");
   await expect(hint).toContainText("小さいほどよく滑ります");
+  expect(errors).toEqual([]);
+});
+
+// 課題A(利用者役の報告): 「モーター」という名前から「回り続ける」動きを
+// 期待して置いたのに、実際は目標角度まで振れてそこで止まる(サーボと同じ)
+// 動きだった。物理は変えず(回り続けるようにするのは受け入れテストに
+// 関わる別件)、実際の動きを置いた直後に言葉で伝える。
+test("モーターを追加すると、回り続けないことがその場で分かる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "モーター");
+
+  // 置いた直後のトーストで、実際の動き(角度まで動いて止まる)と
+  // 「⟳ モーター切替」が何をするボタンなのかが分かる。
+  const toast = page.locator(".toast-message");
+  await expect(toast).toContainText("回り続ける");
+  await expect(toast).toContainText("止まります");
+  await expect(toast).toContainText("モーター切替");
+
+  // ツールバーのボタン自体にも「回り続けない」ことが書いてある(押す前に
+  // 分かる、ホバーだけに頼らない)。
+  await expect(page.locator("#btn-motor-toggle")).toContainText("0°⇔90°");
+  expect(errors).toEqual([]);
+});
+
+/**
+ * 流体粒子(全体)のバウンディングボックスを、画面座標(CSSピクセル)での
+ * 対角の大きさへ投影する。`bodyOnScreen`/`screenPointForBody`と同じ、
+ * テスト専用に露出された`window.__camera`/`window.__world`を使う投影計算
+ * (このファイル冒頭付近のdoc参照)——「見えているか」ではなく「どれだけの
+ * 大きさに見えているか」を測る版。
+ */
+async function fluidProjectedDiagonalPx(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: {
+        matrixWorldInverse: { elements: number[] };
+        projectionMatrix: { elements: number[] };
+      };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(kind: string, arg: string): string;
+        fluid_particle_positions_f32(): Float32Array;
+      };
+    }).__world;
+    const count = Number(world.read_component("fluid_particle_count", ""));
+    const pos = world.fluid_particle_positions_f32();
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < count; i += 1) {
+      const x = pos[i * 3];
+      const y = pos[i * 3 + 1];
+      const z = pos[i * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    const mulMat4Vec4 = (e: number[], v: number[]) => {
+      const out = [0, 0, 0, 0];
+      for (let r = 0; r < 4; r += 1) {
+        out[r] = e[r] * v[0] + e[4 + r] * v[1] + e[8 + r] * v[2] + e[12 + r] * v[3];
+      }
+      return out;
+    };
+    const canvas = document.querySelector("canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    const project = (x: number, y: number, z: number) => {
+      const view = mulMat4Vec4(cam.matrixWorldInverse.elements, [x, y, z, 1]);
+      const clip = mulMat4Vec4(cam.projectionMatrix.elements, view);
+      const ndcX = clip[0] / clip[3];
+      const ndcY = clip[1] / clip[3];
+      return {
+        x: (ndcX * 0.5 + 0.5) * rect.width,
+        y: (-ndcY * 0.5 + 0.5) * rect.height,
+      };
+    };
+    const p0 = project(minX, minY, minZ);
+    const p1 = project(maxX, maxY, maxZ);
+    return Math.hypot(p1.x - p0.x, p1.y - p0.y);
+  });
+}
+
+// 課題B(利用者役の報告): 「＋ 流体」を置くと物理的には生成されるが、
+// 既定のカメラ距離では1〜2ピクセルの点にしか見えず、「置けたこと」が
+// 画面から読めなかった。ボディのスポーンと同じ理由で、画面にちゃんと
+// 入っていないときだけ画角を寄せる。
+test("流体を追加すると、置いた直後から画面でちゃんと見える大きさになる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "流体");
+  await page.waitForTimeout(300);
+
+  // 直したのは「1〜2ピクセルの点」——十分大きな余裕を見て、1桁ピクセルより
+  // はっきり大きいことだけを求める(画角の細かい合わせ方までは縛らない)。
+  const diagonal = await fluidProjectedDiagonalPx(page);
+  expect(diagonal).toBeGreaterThan(15);
+  expect(errors).toEqual([]);
+});
+
+// 課題B(利用者役の報告)続き: 一覧の「Fluids」をクリックしてもInspectorが
+// 「まだ何も選んでいません」のままで、押しても何も起きなかった。個々の
+// 粒子や塊は(SPH流体がボディのような個別IDを持たないため)他のボディと
+// 同じInspectorでは選べないが、それは「押しても無反応」の理由にはならない
+// ——せめて数量が読め、選べない理由も画面で言う。
+test("Fluidsの一覧行を選ぶと、数量と選べない理由が読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "流体");
+  await page.waitForTimeout(200);
+
+  const fluidRow = page.locator("#hierarchy-tree li", { hasText: "Fluids" }).last();
+  await fluidRow.click();
+
+  const inspector = page.locator("#inspector-body");
+  await expect(inspector).not.toContainText("まだ何も選んでいません");
+  await expect(inspector).toContainText("水塊の数");
+  await expect(inspector).toContainText("総粒子数");
+  await expect(inspector).toContainText("選べません");
+  // クリックした行自体も「選んだ」見た目になる(押しても無反応、をやめた証拠)。
+  await expect(fluidRow).toHaveClass(/selected/);
+  expect(errors).toEqual([]);
+});
+
+// 課題C(利用者役の報告): 「まだ何も選んでいません」に出る個数が、消した
+// はずのボディを数え続けていた(`remove_body_at`はindexのずれを避けるため
+// スロットを残すだけなので、生死問わず数える`body_count`をそのまま出すと
+// 消した分だけ多く見える)。画面に出す個数は、いま生きている物の数にする。
+test("消した物のあとの個数表示は、生きている数だけを数える", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene"); // ground だけの場面。
+  await addViaMenu(page, "箱");
+  await page.waitForTimeout(200);
+
+  const box = page.locator("#hierarchy-tree .tree-body", { hasText: "Box" });
+  await box.click({ button: "right" });
+  await page.locator("#context-menu button", { hasText: "削除" }).first().click();
+  await page.waitForTimeout(200);
+
+  // 生きているボディは ground だけ(1体)。
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+
+  // 選択を解いて、空状態の個数表示を見る——消した箱を含めた「2」ではなく
+  // 「1」でなければならない。
+  await page.click("#btn-clear-selection");
+  await expect(page.locator("#inspector-body")).toContainText("1 個あります");
+  await expect(page.locator("#inspector-body")).not.toContainText("2 個あります");
   expect(errors).toEqual([]);
 });

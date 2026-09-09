@@ -1179,6 +1179,7 @@ function setUpHierarchy(
   onSelectFrame: (frameIndex: number) => void,
   actions: HierarchyActions | null,
   materialNames: readonly string[],
+  onSelectFluid: () => void,
 ): (index: number) => void {
   const tree = document.getElementById("hierarchy-tree")!;
   tree.innerHTML = "";
@@ -1234,6 +1235,13 @@ function setUpHierarchy(
 
   const count = readNumber(world, "body_count");
   const items: (HTMLLIElement | null)[] = [];
+  // **課題B(利用者役の報告)**: 「Fluids」行はボディではない(SPH粒子は
+  // `RigidBodySet`のような個別ID体系を持たない)ので、`items`(ボディ用の
+  // 選択状態)には入らない。それでも選んだこと自体は見えてよい——`highlight`に
+  // このセンチネル値を渡すと、ボディ側は全て非選択になり「Fluids」行だけが
+  // 選択済みの見た目になる(実在するボディindexは常に0以上なので衝突しない)。
+  const FLUID_SELECTED_SENTINEL = -2;
+  let fluidListItem: HTMLLIElement | null = null;
 
   function refreshSelectionClasses(primary: number) {
     items.forEach((it, i) => {
@@ -1244,6 +1252,7 @@ function setUpHierarchy(
         hierarchyMultiSelection.has(i) && i !== primary,
       );
     });
+    fluidListItem?.classList.toggle("selected", primary === FLUID_SELECTED_SENTINEL);
   }
   function highlight(index: number) {
     refreshSelectionClasses(index);
@@ -1399,10 +1408,25 @@ function setUpHierarchy(
   // 持たないため)、スポーンした水塊の数+総粒子数の概要表示のみとする
   // (縮約実装、`spawn_fluid_block`が複数回スポーンで水塊を追加できるように
   // なったことを受けての最小限のHierarchy反映)。
+  //
+  // **課題B(利用者役の報告)**: この行はクリックしても何も起きず、Inspectorは
+  // 「まだ何も選んでいません」のままだった——個々のボディと違って選べないこと
+  // 自体はSPH粒子の性質上避けられないが、「押しても無反応」は別の話。個別の
+  // ボディとしては選べない**理由**を画面で言い、代わりに「何がどれだけ
+  // あるか」だけは読めるようにする(このリポジトリの前例: `describeNonBodyScene`
+  // ——見えている物が選べない場面では、その理由を言う)。
   const fluidSpawnCount = readNumber(world, "fluid_spawn_count");
   if (fluidSpawnCount > 0) {
     const fluidItem = document.createElement("li");
     fluidItem.textContent = `Fluids (${fluidSpawnCount}塊, ${readNumber(world, "fluid_particle_count")}粒子)`;
+    fluidItem.classList.add("tree-selectable");
+    fluidItem.title = "個々の粒子や塊は選べません(SPH流体はボディのような個別IDを持たないため)。クリックすると合計の数値だけ見られます。";
+    fluidItem.addEventListener("click", () => {
+      hierarchyMultiSelection.clear();
+      highlight(FLUID_SELECTED_SENTINEL);
+      onSelectFluid();
+    });
+    fluidListItem = fluidItem;
     bodies.appendChild(fluidItem);
   }
 
@@ -1623,13 +1647,89 @@ function describeNonBodyScene(world: WasmWorld): string {
   );
 }
 
+/**
+ * **課題C(利用者役の報告)**: 「まだ何も選んでいません」に出る個数が、
+ * 消したはずのボディを数え続けていた。`remove_body_at` は index のずれを
+ * 避けるためスロットを残すだけ(`body_is_removed_at`のdoc、Hierarchyの
+ * 「削除済みは並べない」処理と同じ理由)なので、`body_count`(生死問わず
+ * 全スロット数)をそのまま出すと消した分だけ多く見える。画面に出す個数は
+ * **いま生きている物の数**に直す。
+ */
+function countLiveBodies(world: WasmWorld): number {
+  const total = readNumber(world, "body_count");
+  let live = 0;
+  for (let i = 0; i < total; i++) {
+    if (world.read_component("body_is_removed_at", String(i)) !== "true") live += 1;
+  }
+  return live;
+}
+
+/**
+ * **課題B(利用者役の報告)**: Hierarchyの「Fluids」行はクリックしても
+ * Inspectorが「まだ何も選んでいません」のままだった。SPH粒子はボディ
+ * (`RigidBody`)のような個別ID体系を持たないため、個々の粒子や塊を他の
+ * ボディと同じInspectorで選ばせることはできない——が、それは「押しても
+ * 何も起きない」ことの理由にはならない。せめて「何がどれだけあるか」
+ * (水塊の数・総粒子数・いまの広がり)を読めるようにし、選べない理由も
+ * 画面で言う(このリポジトリの前例: `describeNonBodyScene`)。
+ */
+function renderFluidSummaryInspector(world: WasmWorld): void {
+  const body = document.getElementById("inspector-body")!;
+  const blobCount = readNumber(world, "fluid_spawn_count");
+  const particleCount = readNumber(world, "fluid_particle_count");
+  if (blobCount === 0) {
+    // 呼ばれた後にワールドが差し替わり、流体が無くなっていた場合の保険。
+    body.innerHTML = `
+      <div class="empty-state">
+        <p>Fluidsはもうありません。</p>
+      </div>
+    `;
+    return;
+  }
+  const positions = world.fluid_particle_positions_f32();
+  let extentRows = "";
+  if (particleCount > 0 && positions.length >= particleCount * 3) {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < particleCount; i++) {
+      const x = positions[i * 3];
+      const y = positions[i * 3 + 1];
+      const z = positions[i * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    extentRows = `
+      <div class="inspector-field"><span>広がり x [m]</span><span>${minX.toFixed(2)} 〜 ${maxX.toFixed(2)}</span></div>
+      <div class="inspector-field"><span>広がり y [m]</span><span>${minY.toFixed(2)} 〜 ${maxY.toFixed(2)}</span></div>
+      <div class="inspector-field"><span>広がり z [m]</span><span>${minZ.toFixed(2)} 〜 ${maxZ.toFixed(2)}</span></div>
+    `;
+  }
+  body.innerHTML = `
+    <div class="inspector-component">
+      <h3>Fluids(SPH 水塊)</h3>
+      <div class="inspector-field"><span>水塊の数</span><span>${blobCount}</span></div>
+      <div class="inspector-field"><span>総粒子数</span><span>${particleCount}</span></div>
+      ${extentRows}
+    </div>
+    <p class="inspector-note">
+      個々の粒子や塊は選べません——SPH流体はボディ(RigidBody)のような
+      個別IDを持たないため、位置や速さを1粒ずつ読み出す先がありません。
+      動きの様子は Scene View で直接見てください。
+    </p>
+  `;
+}
+
 function renderInspectorFor(world: WasmWorld, index: number): void {
   const body = document.getElementById("inspector-body")!;
   if (index < 0 || index >= readNumber(world, "body_count")) {
     // 「選んでいない」と「そもそも無い」は別のこと。以前はどちらでも
     // 「このシーンには力学ボディがありません」と出していたので、ボディが
     // 並んでいる画面でも「無い」と読めてしまった。実際の本数で言い分ける。
-    const total = readNumber(world, "body_count");
+    const total = countLiveBodies(world);
     body.innerHTML =
       total > 0
         ? `
@@ -7496,6 +7596,15 @@ async function setUpSceneView(
     selectedFrameIndex = frameIndex;
     highlightHierarchy = rebuildHierarchy();
   }
+  // **課題B(利用者役の報告)**: Hierarchyの「Fluids」行を選んだときの経路。
+  // SPH粒子は個々のボディとして選べないので`selectBody`は使わず、Inspectorへ
+  // 専用の概要(`renderFluidSummaryInspector`)を出す。ボディの選択は解く
+  // (どちらか一方だけが選ばれている状態にする——両方選択済みに見えるのを防ぐ)。
+  function selectFluidSummary() {
+    selectedBodyIndex = -1;
+    motorToggleButton.disabled = true;
+    renderFluidSummaryInspector(world);
+  }
   // **Hierarchy の右クリック操作(群2)**。実体(`hierarchyActionsImpl`)は
   // メッシュ管理・プレハブ機構が揃う後段で組み立てるので、ここでは**遅延解決の
   // プロキシ**を渡す——`setUpHierarchy` は呼び出し時点の `actions` を各行の
@@ -7518,6 +7627,7 @@ async function setUpSceneView(
       selectFrame,
       hierarchyActions,
       SPAWN_MATERIALS,
+      selectFluidSummary,
     );
   }
   let highlightHierarchy = rebuildHierarchy();
@@ -9776,7 +9886,11 @@ async function setUpSceneView(
       },
       { separator: true },
       { label: "＋ 振り子 (DistanceJoint)", onSelect: clickHidden("btn-spawn-pendulum") },
-      { label: "＋ モーター (BallJoint + HingeMotorPd)", onSelect: clickHidden("btn-spawn-motor") },
+      {
+        label: "＋ モーター (角度を指定して止まる。回り続けません)",
+        onSelect: clickHidden("btn-spawn-motor"),
+        title: "サーボのような動き方です。「うごかす」を押すといまの目標角度まで動いて止まり、ツールバーの「⟳ モーター切替」でその目標角度(0°⇔90°)を切り替えます。回転速度を設定する項目はありません(角度を保つ部品のため)",
+      },
       { label: "＋ 流体 (SPH 水塊)", onSelect: clickHidden("btn-spawn-fluid") },
       { separator: true },
       {
@@ -10228,6 +10342,17 @@ async function setUpSceneView(
       new THREE.MeshStandardMaterial({ color: 0x66ffcc }),
     );
     addSpawnedMesh(bodyIndex, mesh);
+    // **課題A(利用者役の報告)**: 「モーター」という名前から「回り続ける」動きを
+    // 期待して置いたのに、実際は目標角度まで振れてそこで止まる(サーボと同じ)
+    // 動きだった。回り続けるように物理を変えるのは別件(受け入れテストに
+    // 関わる)なので、ここでは**実際の動きを置いた直後に言葉で伝える**。
+    // 「⟳ モーター切替」が何をするボタンなのかも、押す前にここで分かる。
+    showToast(
+      "モーターを追加しました。回り続けるのではなく、いまの目標角度まで動いてそこで止まります" +
+        "(サーボのような動き)。ツールバーの「⟳ モーター切替」で目標角度(0°⇔90°)を切り替えられます" +
+        "——回転速度を設定する項目が無いのは、この部品が角度を保つものだからです。",
+      "success",
+    );
   });
 
   document.getElementById("btn-spawn-fluid")!.addEventListener("click", () => {
@@ -10240,6 +10365,42 @@ async function setUpSceneView(
     fluidGeometry.setAttribute("position", fluidPositionAttribute);
     fluidPoints.visible = true;
     highlightHierarchy = rebuildHierarchy();
+    // **課題B(利用者役の報告)**: 置いた直後、既定のカメラ距離では水塊が
+    // 1〜2ピクセルの点にしか見えず、ズームしても「置けたこと」が画面から
+    // 読めなかった。ボディのスポーン(`spawnShapeAt`の`isWellVisible`)と
+    // 同じ判定・同じ理由で、画面にちゃんと入っていない時だけ画角を
+    // 合わせ直す(すでに見えているなら、並べている最中の視点を奪わない)。
+    // `frameCameraOnContent`が見る`fluidPoints`のバウンディングボックスは
+    // 頂点の**いまの**座標を使うため、毎フレーム更新を待たずここで
+    // 実際の粒子座標を先に書き込んでおく。
+    const positions = world.fluid_particle_positions_f32();
+    if (count > 0 && positions.length >= count * 3) {
+      (fluidPositionAttribute.array as Float32Array).set(
+        positions.subarray(0, count * 3),
+      );
+      fluidPositionAttribute.needsUpdate = true;
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let i = 0; i < count; i++) {
+        const px = positions[i * 3];
+        const py = positions[i * 3 + 1];
+        const pz = positions[i * 3 + 2];
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+        if (pz < minZ) minZ = pz;
+        if (pz > maxZ) maxZ = pz;
+      }
+      const centerX = (minX + maxX) / 2;
+      const centerY = (minY + maxY) / 2;
+      const centerZ = (minZ + maxZ) / 2;
+      const radius = Math.max(
+        Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) / 2,
+        0.05,
+      );
+      if (!isWellVisible(centerX, centerY, centerZ, radius)) frameCameraOnContent();
+    }
   });
 
   // フレーム階層ドリルインUI: Hierarchyで選択中のフレーム(既定はROOTでは
