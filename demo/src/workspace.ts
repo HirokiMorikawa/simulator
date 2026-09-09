@@ -351,7 +351,19 @@ export function readoutNumber(value: number, digits: number): string {
   return value.toFixed(digits);
 }
 
-export function formatDuration(seconds: number, scale = 1): string {
+/**
+ * 経過時間の単位を選ぶ(`formatDuration`から切り出し)。
+ *
+ * **切り出した理由**: CSV書き出しの時刻列(`probeSeriesToCsv`)も、右パネルの
+ * 「経過した時間」と**同じ選び方**で単位をそろえたい(利用者役③の観察:
+ * 画面が「187.36 日」なのにCSVは生の秒で16桁、突き合わせられない)。
+ * 単位を選ぶ判断はここに一本化し、`formatDuration`とCSV側の両方から呼ぶ
+ * ——別々に選ぶ実装を持つと、いつか片方だけ直して食い違う。
+ */
+export function pickDurationUnit(
+  seconds: number,
+  scale: number,
+): { factor: number; unit: string } {
   const t = Math.abs(seconds);
   // **単位はシーンの時間スケールで決める**。値そのもので切り替えると、同じ
   // 実験の途中で「958.33 ミリ秒 → 1.02 秒」と桁も単位も飛んで読みにくい
@@ -363,22 +375,23 @@ export function formatDuration(seconds: number, scale = 1): string {
   // 「0 秒」、下の時間の帯が「0.00 ピコ秒」と食い違って見えた。値からは
   // 単位を選べないので、そのときは**時間の刻み**から選ぶ。
   const pick = t === 0 ? Math.abs(scale) : t;
-  if (scale >= 1e-4) {
-    if (pick < 60) return `${seconds.toFixed(2)} 秒`;
-    if (pick < 3600) return `${(seconds / 60).toFixed(2)} 分`;
-    if (pick < 86400) return `${(seconds / 3600).toFixed(2)} 時間`;
-    if (pick < 3.155e7) return `${(seconds / 86400).toFixed(2)} 日`;
-    return `${(seconds / 3.155e7).toFixed(2)} 年`;
+  const human = scale >= 1e-4;
+  if (!human) {
+    if (pick < 1e-9) return { factor: 1e-12, unit: "ピコ秒" };
+    if (pick < 1e-6) return { factor: 1e-9, unit: "ナノ秒" };
+    if (pick < 1e-3) return { factor: 1e-6, unit: "マイクロ秒" };
+    if (pick < 1) return { factor: 1e-3, unit: "ミリ秒" };
   }
-  if (pick < 1e-9) return `${(seconds * 1e12).toFixed(2)} ピコ秒`;
-  if (pick < 1e-6) return `${(seconds * 1e9).toFixed(2)} ナノ秒`;
-  if (pick < 1e-3) return `${(seconds * 1e6).toFixed(2)} マイクロ秒`;
-  if (pick < 1) return `${(seconds * 1e3).toFixed(2)} ミリ秒`;
-  if (pick < 60) return `${seconds.toFixed(2)} 秒`;
-  if (pick < 3600) return `${(seconds / 60).toFixed(2)} 分`;
-  if (pick < 86400) return `${(seconds / 3600).toFixed(2)} 時間`;
-  if (pick < 3.155e7) return `${(seconds / 86400).toFixed(2)} 日`;
-  return `${(seconds / 3.155e7).toFixed(2)} 年`;
+  if (pick < 60) return { factor: 1, unit: "秒" };
+  if (pick < 3600) return { factor: 60, unit: "分" };
+  if (pick < 86400) return { factor: 3600, unit: "時間" };
+  if (pick < 3.155e7) return { factor: 86400, unit: "日" };
+  return { factor: 3.155e7, unit: "年" };
+}
+
+export function formatDuration(seconds: number, scale = 1): string {
+  const { factor, unit } = pickDurationUnit(seconds, scale);
+  return `${(seconds / factor).toFixed(2)} ${unit}`;
 }
 
 /** `body_shape_label_at`(wasm)が返す先頭の型名を取り出す。

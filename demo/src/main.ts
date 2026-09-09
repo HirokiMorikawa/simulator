@@ -11,6 +11,7 @@ import {
   annotateInspectorShape,
   formatDuration,
   friendlyBodyLabel,
+  pickDurationUnit,
   readoutNumber,
   setUpWorkspace,
   type ConfirmDiscardRef,
@@ -4749,7 +4750,40 @@ function unitForProbeLabel(raw: string): string | undefined {
 }
 
 
-/// 表示中の全系列をCSV文字列にする。1列目は**経過時間(秒)**。
+/**
+ * 時刻列の桁数を決める。
+ *
+ * **実測(課題①)**: `d34-solar-system`を粒度2で4秒走らせて書き出すと、
+ * `dt=31554.896928761154 秒`・単位は「日」(`pickDurationUnit`が画面の
+ * 「187.36 日」と同じ理由で選ぶ)。screen並みの2桁固定(`toFixed(2)`)だと
+ * 1歩ぶんの差(31554.9 秒 ≒ 0.365日)は`0.37`のように**2桁で十分見分けが付く
+ * ので、そのまま2桁でよい。だが逆に、歩幅がその単位に対してもっと細かい場面
+ * (例: 1歩が単位の1/10000)では2桁固定だと同じ値の行が並んでしまう
+ * ——グラフは1ステップごとの細かさを持っているのに、CSVがそれを捨てて
+ * しまう(指示にある「丸めすぎて同じ値の行が並ぶ」)。そこで**1歩の差が
+ * その単位で見分けられる桁数**を計算し、画面と同じ2桁を下限に、必要なら
+ * それより増やす。上限を設けるのは、桁が離れすぎたシーン(例: 1歩が
+ * ピコ秒で単位が「年」になるような極端な組み合わせ)で無意味に長い数字が
+ * 並ぶのを避けるため——そのようなシーンは`pickDurationUnit`が`human`判定で
+ * 秒未満の単位へ落ちるので実際にはほぼ起きないが、保険として残す。
+ */
+function csvTimeDigits(dt: number, factor: number): number {
+  const stepInUnit = Math.abs(dt) / factor;
+  if (!(stepInUnit > 0)) return 2;
+  // 1歩の差が小数点以下何桁目に現れるか(例: 0.365 → 1桁目)+ 1桁の余裕。
+  const needed = Math.ceil(-Math.log10(stepInUnit)) + 1;
+  return Math.min(12, Math.max(2, needed));
+}
+
+/// 表示中の全系列をCSV文字列にする。1列目は**経過時間**——画面の「いまの数値
+/// / 経過した時間」と同じ単位(`pickDurationUnit`、`formatDuration`のdoc参照)
+/// で書く。
+///
+/// **課題①の実測**: 直前までは常に生の秒(`31554896.93 秒`級の16桁)で、
+/// 画面が「187.36 日」と言っているのと突き合わせられなかった(利用者役③の
+/// 報告)。位置の列がすでに画面と同じ「億 km」で書いてある(下の見出し参照)
+/// のに、時刻列だけ単位がそろっていなかった。
+///
 /// リングバッファ自体は絶対時刻を持たないので、`currentTime`(最後のサンプル
 /// の時刻)と`dt`から逆算する——グラフの横軸と同じ数え方なので、書き出した
 /// CSVと画面の折れ線は同じ時刻を指す。サンプル番号のままでは「何秒の値か」を
@@ -4765,12 +4799,30 @@ function probeSeriesToCsv(
   const rows = series.reduce((m, s) => Math.max(m, s.history.length), 0);
   const escape = (s: string) =>
     /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  // 単位は画面の「経過した時間」と同じ選び方(`pickDurationUnit`)。
+  // `d1-free-fall`のように人の尺度で進む場面では、これは常に「秒」を選ぶ
+  // ——実測で確認済み(元々生の秒だった場面には、そのまま`time_s`の見出しで
+  // 秒が並ぶだけで、余計な変換は起きない)。
+  const { factor: timeFactor, unit: timeUnit } = pickDurationUnit(
+    currentTime,
+    dt,
+  );
+  const timeDigits = csvTimeDigits(dt, timeFactor);
+  // **見出しの書き方が「秒」のときだけ`time_s`になるのは意図的**——他の列と
+  // 同じ`time [秒]`にすると、既存の書き出し済みCSV・それを前提にした受け入れ
+  // テスト(`smoke.spec.ts`の`"time_s,BodyPosY,BodySpeed"`等)が指す見出し名が
+  // 変わってしまう。単位が「秒」のときは元々「変換の要らない場面」なので
+  // (直前のコメント参照)、見出しも変えずに済ませるのが「余計なお世話に
+  // しない」を見出しの側でも徹底することになる——「秒」以外はこれまで
+  // 単位表記が無かった(生の秒しか書いていなかった)ので、他の列
+  // (`[℃]`等)と同じ角括弧書きを素直に採用する。
+  const timeHeader = timeUnit === "秒" ? "time_s" : `time [${timeUnit}]`;
   // 見出しには**単位**も書く。画面には m / ℃ / V と出ているのに書き出した
   // ファイルには数字しか無く、後から見返すと「これ ℃ だっけ K だっけ」に
   // なると書かれた(利用者役③の観察)。
   const lines = [
     [
-      "time_s",
+      timeHeader,
       ...series.map((s) => (s.unit ? `${s.label} [${s.unit}]` : s.label)),
     ]
       .map(escape)
@@ -4778,7 +4830,7 @@ function probeSeriesToCsv(
   ];
   for (let i = 0; i < rows; i++) {
     const time = currentTime - (rows - 1 - i) * dt;
-    const cells = [String(time)];
+    const cells = [(time / timeFactor).toFixed(timeDigits)];
     for (const s of series) {
       const at = i - (rows - s.history.length);
       cells.push(at >= 0 && at < s.history.length ? String(s.history[at]) : "");
@@ -9521,14 +9573,49 @@ async function setUpSceneView(
         addSpawnedMesh(bodyIndex, mesh);
         continue;
       }
-      if (drawFloor > 0) {
+      // **課題②(進行管理役の実測)**: 上の`spread`はボディ**位置**の散らばりで
+      // 決まるので、ボディが1個しか無い場面では常に0になり(自分と自分の
+      // 距離は0)、`drawFloor`も常に0——「見えない大きさの物を見える大きさで
+      // 描く」が一度も働かない。並進運動する物(D1のボールなど)は落ちる
+      // うちに軌道の大きさで画角が自然に合うので実害が無かったが、
+      // **その場で回るだけで並進しないkinematicな物**は軌道が無いぶん一生
+      // 画角が合わない。実測(`d20-generator`粒度2、3秒後):クランク
+      // (半径0.05mの球)が舞台高さ543pxに対し見かけの直径35px(6.4%)にしか
+      // ならず、回転が読み取れなかった。
+      //
+      // kinematicな物だけに絞って、最低限見える大きさまで描画だけを
+      // 膨らませる(物理には触れない、D25と同じ考え方)。**動くdynamicな
+      // 物には触れない**——D1/D2のような投射系はここまでの実測で問題が
+      // 出ていないものを、確かめもせず変える理由が無いため。ボディ名や
+      // シーンIDへ直接ヒモ付けていないので、将来同じ理由(回るだけ・小さい)
+      // で困る場面にもそのまま効く。
+      //
+      // 目標半径 0.3m は`d1-free-fall`のボールと同じ——このアプリで
+      // 「ちょうどよく見える」と実測済みの大きさをそのまま借りる(新しい
+      // 基準をここで作らない)。
+      const KINEMATIC_MIN_VISUAL_RADIUS = 0.3;
+      let scaleFactor = 1;
+      if (drawFloor > 0 || bodies[bodyIndex]?.type === "kinematic") {
         mesh.geometry.computeBoundingSphere();
         const own = mesh.geometry.boundingSphere?.radius ?? 0;
+        if (drawFloor > 0 && own > 0 && own < drawFloor) {
+          scaleFactor = Math.max(scaleFactor, drawFloor / own);
+        }
+        if (
+          bodies[bodyIndex]?.type === "kinematic" &&
+          own > 0 &&
+          own < KINEMATIC_MIN_VISUAL_RADIUS
+        ) {
+          scaleFactor = Math.max(
+            scaleFactor,
+            KINEMATIC_MIN_VISUAL_RADIUS / own,
+          );
+        }
         // 毎フレームの再適用(`render()`)と喧嘩しないよう、拡大率は
         // Scale ギズモと同じ入れ物へ載せる。
-        if (own > 0 && own < drawFloor) {
-          currentScale.set(bodyIndex, drawFloor / own);
-          mesh.scale.setScalar(drawFloor / own);
+        if (scaleFactor > 1) {
+          currentScale.set(bodyIndex, scaleFactor);
+          mesh.scale.setScalar(scaleFactor);
         }
       }
       const pos = world.body_position_at_f32(bodyIndex);

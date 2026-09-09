@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { addViaMenu, collectPageErrors } from "./helpers";
+import { addViaMenu, collectPageErrors, decodePng } from "./helpers";
 import { GUIDED_CATEGORIES as CATEGORIES } from "../src/catalog";
 
 // ワークスペース(`src/workspace.ts`)の E2E。
@@ -587,6 +587,76 @@ test("書き出した数値には単位が付いている", async ({ page }) => 
   // 画面には ℃ と出ているのにファイルは数字だけ、を残さない。
   expect(header).toContain("[℃]");
   expect(header.startsWith("time_s,")).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+// **課題①(進行管理役の実測)**: `d34-solar-system`を粒度2で開いて数秒走らせ
+// 「数値をおとす」を押すと、画面は「経過した時間 187.36 日」なのに、書き出した
+// CSVの時刻列は`31554.896928761154`のような生の秒・16桁だった——画面と
+// 突き合わせられない。上のテスト(コーヒー、秒のまま)は「余計な変換をしない」
+// ほうしか見ていないので、こちらは「変換が要る場面で実際に変換されているか」
+// を別に確かめる。
+test("秒より大きい単位で進む実験は、書き出したCSVの時刻も画面と同じ単位になる", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(1);
+
+  // 画面の「経過した時間」が選んだ単位を、CSVも同じ単位で書いているかどうかの
+  // 正解として使う——別々に単位を決める実装が2つ生まれると、今回のように
+  // また食い違う。
+  const readout = (await page.locator("#readout-time").textContent()) ?? "";
+  const unitMatch = readout.match(/([^\d.\-\s]+)\s*$/);
+  expect(unitMatch).not.toBeNull();
+  const unit = unitMatch![1];
+  // 太陽系(粒度2、数秒)は必ず「秒」より大きい単位に上がる実験なので、
+  // ここが「秒」のままなら実測の前提が崩れている(=テスト自体が無意味になる)。
+  expect(unit).not.toBe("秒");
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#btn-probe-csv"),
+  ]);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(c as Buffer);
+  const lines = Buffer.concat(chunks)
+    .toString("utf8")
+    .split("\n")
+    .filter((l) => l.length > 0);
+
+  // 見出し1列目は画面と同じ単位を角括弧で書く。`time_s`ではない
+  // (`time_s`は「秒のときだけ」の書き方——下のコメント参照)。
+  const header = lines[0].split(",");
+  expect(header[0]).toBe(`time [${unit}]`);
+
+  const times = lines.slice(1).map((l) => Number.parseFloat(l.split(",")[0]));
+  expect(times.length).toBeGreaterThan(5);
+  expect(times.every((t) => Number.isFinite(t))).toBe(true);
+
+  // 桁数: 生の秒だと16桁(`31554896.928761154`級)だった。画面と同じ
+  // 読みやすさに揃えたので、小数点以下は2桁以上10桁以下に収まる
+  // (`csvTimeDigits`のdoc参照——歩幅に応じて2桁より増えることはあるが、
+  // 生の浮動小数点の全桁がそのまま出ることはない)。
+  for (const line of lines.slice(1, 6)) {
+    const cell = line.split(",")[0];
+    const fractionDigits = cell.includes(".") ? cell.split(".")[1].length : 0;
+    expect(fractionDigits).toBeGreaterThanOrEqual(2);
+    expect(fractionDigits).toBeLessThanOrEqual(10);
+  }
+
+  // **丸めすぎて同じ値の行が並んでいないか**(`csvTimeDigits`が本来防ぐはず
+  // のこと)。グラフは1ステップごとの細かさを持っており、CSVはそれを
+  // 持ち出すための道具——時刻が隣同士で潰れていたら、その細かさを捨てて
+  // いることになる。時刻は単調に増えるはずなので、差が正であることを
+  // 全行で確かめる。
+  for (let i = 1; i < times.length; i++) {
+    expect(times[i]).toBeGreaterThan(times[i - 1]);
+  }
   expect(errors).toEqual([]);
 });
 
@@ -1492,6 +1562,99 @@ test("「手回し発電機」の軸は、取っ手が回って見える(課題C
   expect(x2).not.toBeNull();
   // 回っていれば、取っ手の世界座標は時間とともに変わる(円を描く)。
   expect(Math.abs((x1 as number) - (x2 as number))).toBeGreaterThan(0.01);
+  expect(errors).toEqual([]);
+});
+
+/**
+ * `steelBodyMaskBBox`: 「手回し発電機」のクランク(材質は鋼、
+ * `MATERIAL_COLORS`で0x9aa3ad=青みがかった灰色)だけを、背景の方眼・地の色
+ * (どちらもRGBが揃った無彩色、`scene.background = 0x111111`のdoc参照)から
+ * 切り分ける。閾値(b-r>=8 かつ r>30)は実測(前後のスクリーンショットを
+ * ピクセル単位で読み、鋼の陰影がどの明るさでもR-B差が8前後を下回らない一方、
+ * 方眼線・背景はR=G=Bにほぼ揃うことを確認済み)で決めた——この実験専用の
+ * 較正値であり、他の材質色を判定する汎用しきい値ではない。
+ */
+function steelBodyMaskBBox(img: { width: number; height: number; data: Uint8Array }) {
+  const { width, height, data } = img;
+  let minx = width;
+  let miny = height;
+  let maxx = -1;
+  let maxy = -1;
+  let sumx = 0;
+  let n = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const r = data[i];
+      const b = data[i + 2];
+      if (b - r >= 8 && r > 30) {
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+        sumx += x;
+        n++;
+      }
+    }
+  }
+  // skewX: 画素の重心(sumx/n)が、バウンディングボックスの幾何中心から
+  // どれだけ左右にずれているか。球そのものは軸対称なので、球だけなら常に
+  // ほぼ0——取っ手(球の中心から半径ぶん突き出た飾り、`meshFromShapeJson`の
+  // `markSpin`のdoc参照)がどちら向きに突き出ているかによってのみこの値が
+  // 動く。回っていれば符号込みで揺れ、静止画なら(たまたま同じ姿勢のまま)
+  // 一定値に張り付く。
+  const skewX = n > 0 ? sumx / n - (minx + maxx) / 2 : 0;
+  return { minx, miny, maxx, maxy, n, skewX };
+}
+
+// **課題②(進行管理役の実測)**: `d20-generator`のクランク(半径0.05mの球)は
+// 舞台の高さに対し見かけの直径6.4%(35px/543px)にしかならず、「回っている」
+// が画面から読み取れなかった。上の「取っ手が回って見える(課題C)」は
+// three.jsの内部の`matrixWorld`(=物理として正しく回っていること)しか
+// 見ておらず、**画面に実際に何pxで映るか**は別の話——取っ手の3D位置が
+// 正しく円を描いていても、豆粒サイズならその円は画面上で見えない。
+// このテストはキャンバスの実ピクセルを読み、(a) 十分な大きさで描かれている
+// こと、(b) その取っ手の見かけの位置が時間とともに実際に動くこと、の両方を
+// 画面の側から確かめる。
+test("「手回し発電機」のクランクは、見える大きさで回って見える(課題②)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+  await page.waitForTimeout(1_000);
+
+  const canvas = page.locator("#scene-view canvas").first();
+  const stageBox = (await canvas.boundingBox())!;
+
+  const skews: number[] = [];
+  let firstBBox: ReturnType<typeof steelBodyMaskBBox> | null = null;
+  for (let i = 0; i < 6; i++) {
+    const shot = await canvas.screenshot();
+    const stats = steelBodyMaskBBox(decodePng(shot));
+    if (i === 0) firstBBox = stats;
+    skews.push(stats.skewX);
+    await page.waitForTimeout(150);
+  }
+
+  // (a) 大きさ: 修正前は舞台高さの6.4%だった(実測)。修正後は実測で約29%
+  // ——余裕を持って15%を下限にする(将来また豆粒化したら確実に落ちる)。
+  const diameterPx = Math.max(
+    firstBBox!.maxx - firstBBox!.minx,
+    firstBBox!.maxy - firstBBox!.miny,
+  );
+  expect(diameterPx / stageBox.height).toBeGreaterThan(0.15);
+
+  // (b) 回転: 取っ手の左右のずれ(skewX)が、正負どちらの向きにも現れる
+  // ——静止した飾り物や、たまたま同じ側にだけ寄って見えるカメラのブレでは
+  // 満たせない条件。振れ幅も、ノイズだけでは出ない大きさを要求する。
+  const skewRange = Math.max(...skews) - Math.min(...skews);
+  expect(skewRange).toBeGreaterThan(4);
+  expect(Math.max(...skews)).toBeGreaterThan(0);
+  expect(Math.min(...skews)).toBeLessThan(0);
+
   expect(errors).toEqual([]);
 });
 
