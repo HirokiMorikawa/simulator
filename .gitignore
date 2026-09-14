@@ -13,6 +13,9 @@ demo/pkg/
 # Playwright(demo/tests のスモークテスト実行時に生成される)
 demo/playwright-report/
 demo/test-results/
+# 利用者役が撮った画面写真の置き場(検証のための作業ファイル。リポジトリには
+# 入れない——一度うっかり 38 枚を混ぜてコミットしたので、明示的に除ける)。
+demo/persona-watch/
 
 # Python(scripts/ のヘルパを import して試した際に生成される)
 __pycache__/
