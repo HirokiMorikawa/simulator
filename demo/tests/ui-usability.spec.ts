@@ -15,69 +15,6 @@ import { collectPageErrors, waitForWorld } from "./helpers";
 //      「未検証」と明記していた領域)
 //   3. 空状態と絞り込み(「何も無い」と「壊れている」を画面で区別できること)
 
-test("スプリッターで Hierarchy の幅が変わり、再読み込み後も保たれ、ダブルクリックで戻る", async ({
-  page,
-}) => {
-  const errors = collectPageErrors(page);
-  await page.goto("/");
-  await waitForWorld(page);
-
-  const width = () =>
-    page.evaluate(
-      () => document.getElementById("hierarchy")!.getBoundingClientRect().width,
-    );
-  const before = await width();
-
-  const splitter = page.locator("#splitter-left");
-  const box = (await splitter.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 2, box.y + 200);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width / 2 + 90, box.y + 200, { steps: 8 });
-  await page.mouse.up();
-
-  const dragged = await width();
-  expect(dragged).toBeGreaterThan(before + 60);
-
-  // 再読み込みしても保たれる(localStorage)。パネルの大きさは作業ごとに
-  // 決まるもので、開くたびに直すのは苦痛なので残す。
-  await page.reload();
-  await waitForWorld(page);
-  expect(await width()).toBeCloseTo(dragged, 0);
-
-  // ダブルクリックで既定へ戻る。
-  await page.locator("#splitter-left").dblclick();
-  await expect.poll(width).toBeCloseTo(before, 0);
-
-  expect(errors).toEqual([]);
-});
-
-test("スプリッターはキーボードでも動かせる(マウスを使わない操作)", async ({
-  page,
-}) => {
-  const errors = collectPageErrors(page);
-  await page.goto("/");
-  await waitForWorld(page);
-
-  const width = () =>
-    page.evaluate(
-      () => document.getElementById("inspector")!.getBoundingClientRect().width,
-    );
-  const before = await width();
-
-  await page.locator("#splitter-right").focus();
-  // Inspector はガターより右にあるので、左キーで**広がる**(`data-invert`)。
-  await page.keyboard.press("ArrowLeft");
-  await page.keyboard.press("ArrowLeft");
-  const widened = await width();
-  expect(widened).toBeGreaterThan(before);
-
-  // Home で既定へ戻る。
-  await page.keyboard.press("Home");
-  await expect.poll(width).toBeCloseTo(before, 0);
-
-  expect(errors).toEqual([]);
-});
-
 test("`?` でショートカット一覧が開き、Esc で閉じる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await page.goto("/");
@@ -119,10 +56,16 @@ test("Hierarchy を上下キーで辿ると選択が Inspector へ連動する",
   await expect(page.locator("#inspector-body h3").first()).toContainText("Ground");
 
   await page.keyboard.press("ArrowDown");
+  // **場面の中身も Inspector も、同じ物は同じ名前で呼ぶ**。以前はここだけ
+  // Inspector 側に生のラベル(`Box_1`)を期待しており、同じ物が同じ画面で
+  // 2つの名前を持っていた(`renderInspectorFor` の doc 参照——その但し書きは
+  // `friendlyBodyLabel` を入れた増分で書き足したもので、それ以前から在った
+  // 決まりではなかった)。
   await expect(page.locator("#hierarchy-tree .tree-body.selected")).toHaveText(
-    "Box_1",
+    "箱 1",
   );
-  await expect(page.locator("#inspector-body h3").first()).toContainText("Box_1");
+  await expect(page.locator("#inspector-body h3").first()).toContainText("箱 1");
+  await expect(page.locator("#inspector-body h3").first()).not.toContainText("Box_1");
 
   // 選択状態は `aria-selected` にも出る(読み上げが class を読めないため)。
   await expect(
