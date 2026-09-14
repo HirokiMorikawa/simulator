@@ -4034,7 +4034,7 @@ test("d24-carでwheel_flとwheel_rrをCtrl+クリックで選んで「これを�
 // 「下へスクロールすれば出てくる」という自然な向きに揃っていることが要る。
 // **`locator.click()` は自動でスクロールするので「押せる=見えている」では
 // ない**(過去にこれで見逃した)。座標で確かめる。
-test("物を選んだままでも、「この場面を保存する」に下方向のスクロールで届く", async ({
+test("物を選んだままでも、「この場面を保存する」がスクロールせずに見えている", async ({
   page,
 }) => {
   const errors = collectPageErrors(page);
@@ -4067,20 +4067,20 @@ test("物を選んだままでも、「この場面を保存する」に下方�
 
   const before = await geometry();
   expect(before).not.toBeNull();
-  // **上へはみ出していないこと**が要点。上へ出ていると、下へいくら送っても
-  // 戻ってこない(直す前がこれだった)。
-  expect(before!.saveTop, "保存ボタンが列の上へ押し出されていない").toBeGreaterThanOrEqual(
-    before!.columnTop,
-  );
+  // **一度もスクロールせずに見えていること**。並び順を直した段階では
+  // 「下へ200px送れば出てくる」止まりで、作り終えたその瞬間にはまだ画面の外に
+  // いた——柱の下端に貼り付けて、送らなくても目に入るようにした
+  // (`style.css` の `#context .card[data-card="my-scenes"]` のdoc参照)。
+  expect(before!.visible, "スクロールせずに保存ボタンが見えている").toBe(true);
 
-  // 下端まで送れば必ず見えること(送る量に依存しない確かめ方)。
+  // 下端まで送っても、貼り付いたまま見えている(送ると隠れる、の逆も無い)。
   await page.evaluate(() => {
     const column = document.getElementById("context")!;
     column.scrollTop = column.scrollHeight;
   });
   await page.waitForTimeout(200);
   const after = await geometry();
-  expect(after!.visible, "下端まで送れば保存ボタンが見えている").toBe(true);
+  expect(after!.visible, "下端まで送っても保存ボタンが見えている").toBe(true);
   expect(errors).toEqual([]);
 });
 

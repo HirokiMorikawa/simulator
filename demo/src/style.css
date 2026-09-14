@@ -2038,6 +2038,25 @@ kbd {
   background: var(--surface-sunken);
   overflow: hidden;
 }
+
+/* **「この場面を保存する」は、右の柱の下端に貼り付けておく**。
+ *
+ * 物を置くとその物が自動で選ばれ、下へ伸びる「選んだもの」札へ画面が寄る。
+ * 保存カードを普通に並べておくと、**作り終えたその瞬間**——いちばん保存したい
+ * 瞬間——に画面の外にいる。並び順を直して「下へスクロールすれば出てくる」
+ * ところまでは持っていったが、実測ではまだ 200px ぶん送る必要があった
+ * (`savedScenesCard` の doc 参照)。送らなくても目に入るのが本当。
+ *
+ * 貼り付けるぶん、柱の下端を常に使う。それでも構わないと判断したのは、
+ * このカードが出るのは「つくる」側の粒度(`REVEAL.toolbar`)だけで、そこに
+ * いる人にとって「作ったものを取っておく」は最後に必ず通る道だから。 */
+#context .card[data-card="my-scenes"] {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: var(--surface-sunken);
+  box-shadow: 0 -8px 14px -10px rgb(0 0 0 / 55%);
+}
 #app .card-header {
   display: grid;
   grid-template-columns: 1fr auto;

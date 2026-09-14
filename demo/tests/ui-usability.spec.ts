@@ -56,13 +56,16 @@ test("Hierarchy を上下キーで辿ると選択が Inspector へ連動する",
   await expect(page.locator("#inspector-body h3").first()).toContainText("Ground");
 
   await page.keyboard.press("ArrowDown");
-  // Hierarchy(場面の中身)は読める名前を出す(`friendlyBodyLabel`)一方、
-  // Inspector(中を知っている人向けの生の値)は機械語のままにする——役割分担は
-  // `friendlyBodyLabel`のdoc参照。
+  // **場面の中身も Inspector も、同じ物は同じ名前で呼ぶ**。以前はここだけ
+  // Inspector 側に生のラベル(`Box_1`)を期待しており、同じ物が同じ画面で
+  // 2つの名前を持っていた(`renderInspectorFor` の doc 参照——その但し書きは
+  // `friendlyBodyLabel` を入れた増分で書き足したもので、それ以前から在った
+  // 決まりではなかった)。
   await expect(page.locator("#hierarchy-tree .tree-body.selected")).toHaveText(
     "箱 1",
   );
-  await expect(page.locator("#inspector-body h3").first()).toContainText("Box_1");
+  await expect(page.locator("#inspector-body h3").first()).toContainText("箱 1");
+  await expect(page.locator("#inspector-body h3").first()).not.toContainText("Box_1");
 
   // 選択状態は `aria-selected` にも出る(読み上げが class を読めないため)。
   await expect(

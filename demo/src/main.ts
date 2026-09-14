@@ -1788,20 +1788,22 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
     `;
     return;
   }
-  // **課題③(進行管理役の指摘)を検討したが、ここは触らないことにした**。
-  // 「選んだもの」札は`friendlyBodyLabel`済みの読める名前(「球 2」)、
-  // Inspectorの見出しは生のラベル(`Sphere_2`)のままで、同じ画面で文字が
-  // 食い違って見える。ここを friendlyBodyLabel に通せば直りそうに見えたが、
-  // `ui-usability.spec.ts`「Hierarchy を上下キーで辿ると選択が Inspector へ
-  // 連動する」に**まさにこの生のラベルを検証する既存アサーション**があり、
-  // そのテストのコメントには「Hierarchy(場面の中身)は読める名前を出す一方、
-  // Inspector(中を知っている人向けの生の値)は機械語のままにする」という
-  // **意図した役割分担**が明記されていた(実測: friendlyBodyLabelに通すと
-  // このテストが`"Box_1"`を期待する箇所で`"箱 1"`を受け取り落ちた)。
-  // これは見た目の食い違いではなく、既存の設計判断に反する変更になる
-  // ——影響範囲(Inspectorを「生の値の場」として当てにしている他の導線が
-  // 無いか)を私は洗い切れていないので、無理に直さず元のままにする。
-  const label = world.read_component("body_label_at", String(index));
+  // **同じ物を、同じ画面で2つの名前で呼ばない**。
+  //
+  // 以前はここだけ生のラベル(`Sphere_2`)を出しており、すぐ上の「選んだもの」札は
+  // 読める名前(「球 2」)だった——**同じ物が同じ画面で2つの名前を持っていた**。
+  //
+  // 一度は「Hierarchyは読める名前、Inspectorは機械語」という役割分担がある、
+  // という理由で直さずに残した。**その理由は誤りだった**: 根拠にした
+  // `ui-usability.spec.ts` のコメントは、`friendlyBodyLabel` を入れた同じ増分
+  // (`6b6b34e`)でこちらが書き足したものであって、**それ以前から在った決まりでは
+  // ない**(それ以前のアサーションは Hierarchy 側も `Box_1` を期待していた)。
+  // 自分で書いた但し書きを、後から「既存の設計判断」として引くのは筋が通らない。
+  //
+  // 生の名前が要るのは**書き出し**と**観測点の内部照合**で、そちらは
+  // `friendlyBodyLabel` を通さない生の値を別経路で参照している
+  // (`friendlyBodyLabel` の doc 参照)——画面に出す文字だけを人の言葉に揃える。
+  const label = friendlyBodyLabel(world.read_component("body_label_at", String(index)));
   const staticBadge = (world.read_component("body_is_static_at", String(index)) === "true")
     ? ' <span class="badge">動かない(Static)</span>'
     : "";
