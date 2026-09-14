@@ -1918,10 +1918,15 @@ test("つまみで変えた条件は、別のつまみを触っても残る", as
   const height = page.locator("#knob-height");
   await height.fill("50");
   await height.dispatchEvent("change");
+  // **読む欄は、並び順ではなく観測点の番号で選ぶ**(進行管理役の実測)。
+  // 以前は `.last()`——「いちばん下の数値」——で高さを読んでいたが、この実験に
+  // 「ボールの速さ」を足した(説明が言い切る値を確かめられるようにした増分)
+  // 途端、`.last()` が速さを指すようになって落ちた。欄は `data-probe` に
+  // 観測点の番号を持っている(`renderContext` 参照)ので、そちらで名指しする。
   const ballHeight = async () =>
     Number(
       (
-        (await page.locator("#context .readouts dd").last().textContent()) ?? ""
+        (await page.locator('#context .readouts dd[data-probe="0"]').first().textContent()) ?? ""
       ).replace(/[^0-9.]/g, ""),
     );
   await expect.poll(ballHeight, { timeout: 10_000 }).toBeGreaterThan(40);
@@ -4434,3 +4439,81 @@ test("時間を大きく早送りする場面は、その倍率が読める言�
   expect(text).toMatch(/×[\d,]+/);
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役「しらべる」の報告、進行管理役の実測)**: 代表実験
+// 「ボールを落とす」の説明は「高さ 20 m のときで…速さ約 20 m/s」と**断言する**
+// のに、その速さが「いまの数値」にもグラフにも書き出したCSVにも出ていなかった
+// (読めるのは経過時間と高さだけ)。数字で確かめに来た人が、まさに確かめたい
+// 数字だけ確かめられない。シーン側に観測点を1本足した(物理は変えていない)。
+test("「ボールを落とす」は、説明が言い切る速さを自分で確かめられる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // 説明は「速さ約 20 m/s」と言い切っている。
+  await expect(page.locator('.card[data-card="watch"]')).toContainText("速さ約 20 m/s");
+  // その速さが、数値としても出ている。
+  await expect(page.locator('.card[data-card="numbers"]')).toContainText("ボールの速さ");
+
+  // グラフの凡例からも読めて、言い切った値とつじつまが合う(20m落下の着地は
+  // 理論で約 19.8 m/s——最大値がその近くに来る)。
+  await expect
+    .poll(
+      async () => {
+        const legend = await page.evaluate(
+          () => (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend ?? [],
+        );
+        const line = legend.find((l) => l.includes("速さ")) ?? "";
+        const m = line.match(/max=([\d.]+)/);
+        return m ? Number.parseFloat(m[1]) : 0;
+      },
+      { timeout: 20_000 },
+    )
+    .toBeGreaterThan(18);
+  expect(errors).toEqual([]);
+});
+
+// **課題(同上)**: 記録する値を持たない実験(`d27-double-slit`)でも、グラフの
+// 空欄は「▶ うごかす を押すと…」と出したままだった。実測: **走っている最中
+// (Playing)なのに**この文が出ており、押せと言われたボタンはもう押してある。
+// しかもこの場面は記録する値が無いので、待っても線は出ない。
+test("線に描く値が無い実験では、押せと言われたボタンを押せとは言わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d27-double-slit"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.waitForTimeout(2_000);
+
+  const empty = page.locator("#probe-empty");
+  await expect(empty).toBeVisible();
+  await expect(empty).not.toContainText("うごかす");
+  await expect(empty).toContainText("記録していません");
+  expect(errors).toEqual([]);
+});
+
+// **課題(同上)**: 「場面の中身」に、中の言葉と内部の識別子がそのまま出ていた
+// ——`振り子 (DistanceJoint) (bob)`、材質名 `d6-density`。ここは何が入って
+// いるかを読む場所なので、人の言葉で書く。
+for (const [id, forbidden] of [
+  ["d11-pendulum", "DistanceJoint"],
+  ["d6-floating", "d6-"],
+] as const) {
+  test(`「場面の中身」に中の言葉が出ていない(${id}: ${forbidden})`, async ({ page }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+    await setGrain(page, 2);
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+    await page.waitForTimeout(1_000);
+
+    await expect(page.locator("#hierarchy-tree")).not.toContainText(forbidden);
+    expect(errors).toEqual([]);
+  });
+}

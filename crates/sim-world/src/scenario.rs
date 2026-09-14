@@ -3835,9 +3835,9 @@ mod tests {
         {
           "name": "d6-floating-box-f4",
           "world": { "gravity": 9.80665, "dt": 0.008333333 },
-          "materials": [ { "extends": "木材(松)", "name": "d6-density", "density": 598.92 } ],
+          "materials": [ { "extends": "木材(松)", "name": "木(密度 599)", "density": 598.92 } ],
           "bodies": [
-            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "d6-density",
+            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "木(密度 599)",
               "position": [0, -0.1, 0], "name": "box" }
           ]
         }
@@ -3855,7 +3855,7 @@ mod tests {
             .clone();
         let m = world
             .materials()
-            .get(world.materials().find_by_name("d6-density").unwrap());
+            .get(world.materials().find_by_name("木(密度 599)").unwrap());
         // 密度だけが差し替わり、他は基底(松)のまま = 増分C9以前と同じ挙動。
         assert_eq!(m.density, 598.92);
         assert_eq!(m.friction, pine.friction);

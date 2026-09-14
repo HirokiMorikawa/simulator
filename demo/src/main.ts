@@ -1398,8 +1398,12 @@ function setUpHierarchy(
     if (world.constraint_anchor_points_at(i).length < 6) continue;
     jointCount += 1;
     const item = document.createElement("li");
+    // **中の言葉を画面に出さない**(利用者役「しらべる」の報告): 以前は
+    // 「振り子 (DistanceJoint) (bob)」と、内部のクラス名がそのまま並んでいた。
+    // ここは「場面の中身」——何が入っているかを読む場所なので、人の言葉で
+    // 書く(長さの変わらないひもで吊るしてある、という意味)。
     item.textContent = friendlyBodyLabel(
-      `振り子 (DistanceJoint) (${world.read_component("body_label_at", String(i))})`,
+      `振り子のひも (${world.read_component("body_label_at", String(i))})`,
     );
     item.classList.add("tree-selectable");
     item.addEventListener("click", () => {
@@ -4941,7 +4945,28 @@ function setUpProbeGraph(): (
     // **空状態**(増分「UI 品質の底上げ」)。描ける系列(サンプル 2 点以上)が
     // 1 本も無いあいだは、黒い矩形ではなく「何をすれば線が出るか」を出す。
     const drawable = series.filter((s) => s.history.length >= 2);
-    if (emptyState) emptyState.hidden = drawable.length > 0;
+    if (emptyState) {
+      emptyState.hidden = drawable.length > 0;
+      // **画面と食い違う案内を出さない**(利用者役「しらべる」の報告、進行
+      // 管理役の実測)。以前はどんな場合でも「▶ うごかす を押すと…」と出して
+      // いたが、実測(`d27-double-slit` を粒度「しらべる」で開いて3秒走らせた):
+      // **走っている最中(Playing)なのに**この文が出たままで、「押せと言われた
+      // ボタンはもう押してある」状態だった。しかもこの場面はそもそも記録する
+      // 値を持っていないので、待っても線は出ない。場合を分けて、いま本当の
+      // ことだけを書く。走っているかどうかは、画面のボタンが持っている印
+      // (`#btn-run` の `data-playing`)をそのまま読む——別の真実を作らない。
+      const runningNow =
+        (document.getElementById("btn-run") as HTMLElement | null)?.dataset.playing === "true";
+      if (series.length === 0) {
+        emptyState.textContent =
+          "この実験は、線に描く値を記録していません。見どころは中央の3Dと、右の「いまの数値」です。";
+      } else if (runningNow) {
+        emptyState.textContent = "記録がたまるのを待っています…";
+      } else {
+        emptyState.textContent =
+          "まだデータがありません。「▶ うごかす」を押すと、いまの数値の動きがここに線で描かれます。";
+      }
+    }
     canvas.hidden = drawable.length === 0;
     csvButton.disabled = drawable.length === 0;
     if (drawable.length === 0) {

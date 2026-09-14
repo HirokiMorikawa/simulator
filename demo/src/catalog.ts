@@ -328,7 +328,16 @@ export const GUIDED_CATEGORIES: Category[] = [
         view: "3d",
         pace: 120,
         prepare: addGround,
-        readouts: [{ probe: 0, label: "ボールの高さ", unit: "m" }],
+        // **言い切った数字は、確かめられるようにする**(利用者役「しらべる」の
+        // 報告、進行管理役の実測)。上の `watch` は「速さ約 20 m/s」と断言する
+        // のに、「いまの数値」にもグラフにも書き出したCSVにも**速さがどこにも
+        // 出ていなかった**(読めるのは経過時間と高さだけ)。同じ分野の
+        // 「斜めに投げる」には速さが記録されているので、なおさら食い違って
+        // 見える。シーン側に観測点を1本足して(物理は変えない)、ここにも出す。
+        readouts: [
+          { probe: 0, label: "ボールの高さ", unit: "m" },
+          { probe: 1, label: "ボールの速さ", unit: "m/s" },
+        ],
         knobs: [heightKnob("ball", 20), gravityKnob()],
       },
       {
