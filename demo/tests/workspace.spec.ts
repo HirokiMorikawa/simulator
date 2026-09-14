@@ -2915,9 +2915,15 @@ test("動き方の選択肢とバッジ、「＋追加」メニューが人の�
   // 「＋追加」メニュー: DistanceJoint 等の型名は括弧の中だけ、主たる名前は日本語。
   await page.click("#btn-add");
   const menuTexts = await page.locator("#context-menu button").allTextContents();
-  expect(menuTexts).toContain("＋ 振り子 (DistanceJoint)");
+  // **中の言葉(`DistanceJoint`/`SPH`)は括弧の中からも外した**(利用者役
+  // 「つくる」の報告)。ここは「何が起きるか」で書く場所なので、固定の文言
+  // ではなく**中の言葉が出ていないこと**と、読んで分かる語が入っていることを
+  // 見る(文言そのものは後から良くしていける)。
+  expect(menuTexts.join(" / ")).not.toContain("DistanceJoint");
+  expect(menuTexts.join(" / ")).not.toContain("SPH");
+  expect(menuTexts).toContain("＋ 振り子(長さの変わらないひもで吊るす)");
   expect(menuTexts).toContain("＋ モーター (角度を指定して止まる。回り続けません)");
-  expect(menuTexts).toContain("＋ 流体 (SPH 水塊)");
+  expect(menuTexts).toContain("＋ 流体(水のかたまり)");
   await page.keyboard.press("Escape");
 
   // ↑ Nudge ボタンも人の言葉が主になり、内部の仕組み(Command経由)は
@@ -4517,3 +4523,40 @@ for (const [id, forbidden] of [
     expect(errors).toEqual([]);
   });
 }
+
+// **課題(利用者役「つくる」の報告、進行管理役の実測)**: 道具が全部出ている
+// 粒度でも、画面には中の言葉が残っていた——「＋ 振り子 (DistanceJoint)」
+// 「＋ 流体 (SPH 水塊)」「Fluids(SPH 水塊)」、パネルの見出し「Inspector」。
+// `DistanceJoint` はこの道具の中のクラス名、`SPH` は水を粒で解く計算のやり方の
+// 名前で、置く人には要らない。**何が起きるか**で書き直す。
+// (`Dynamic`/`Static`/`Kinematic` は「主が人の言葉、従が元の語」という既存の
+//  方針どおり括弧内に残す——`value` は保存データが参照するので変えない。)
+test("道具の名前に、中の言葉が出ていない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  await page.click("#btn-add");
+  const menu = page.locator("#context-menu");
+  await expect(menu).toBeVisible();
+  const items = (await menu.locator("button").allTextContents()).join(" / ");
+  expect(items, "追加メニューに中の言葉が出ていない").not.toContain("DistanceJoint");
+  expect(items, "追加メニューに中の言葉が出ていない").not.toContain("SPH");
+  expect(items).toContain("振り子");
+  expect(items).toContain("流体");
+  await page.keyboard.press("Escape");
+
+  // パネルの見出しも日本語で書く。
+  await expect(page.locator("#inspector h2")).not.toContainText("Inspector");
+  await expect(page.locator("#inspector h2")).toContainText("選んだもの");
+
+  // 「動き方」の言い方は、札と Inspector で揃っている(かなの揺れも含めて)。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-motion")).toBeVisible();
+  const cardTexts = await page.locator("#focus-motion option").allTextContents();
+  const inspectorTexts = await page.locator("#inspector-body-type option").allTextContents();
+  expect(cardTexts).toEqual(inspectorTexts);
+
+  expect(errors).toEqual([]);
+});

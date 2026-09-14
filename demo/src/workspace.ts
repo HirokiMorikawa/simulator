@@ -2449,7 +2449,7 @@ export function setUpWorkspace(
               const MOTIONS: [string, string][] = [
                 ["Dynamic", "動く(Dynamic)"],
                 ["Static", "動かない(Static)"],
-                ["Kinematic", "決めた通りに動く(Kinematic)"],
+                ["Kinematic", "決めたとおりに動く(Kinematic)"],
               ];
               if (pendingMotion && pendingMotion.index !== selected) pendingMotion = null;
               if (pendingMotion && pendingMotion.kind === readout.motion) pendingMotion = null;

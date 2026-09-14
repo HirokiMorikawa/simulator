@@ -1756,7 +1756,7 @@ function renderFluidSummaryInspector(world: WasmWorld): void {
   }
   body.innerHTML = `
     <div class="inspector-component">
-      <h3>Fluids(SPH 水塊)</h3>
+      <h3>流体(水のかたまり)</h3>
       <div class="inspector-field"><span>水塊の数</span><span>${blobCount}</span></div>
       <div class="inspector-field"><span>総粒子数</span><span>${particleCount}</span></div>
       ${extentRows}
@@ -10450,13 +10450,24 @@ async function setUpSceneView(
         title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
       },
       { separator: true },
-      { label: "＋ 振り子 (DistanceJoint)", onSelect: clickHidden("btn-spawn-pendulum") },
+      {
+        // **中の言葉ではなく、何が起きるかで書く**(利用者役「つくる」の報告):
+        // `DistanceJoint` はこの道具の中の名前で、置く人には何のことか分から
+        // ない。左の「場面の中身」側は既に「振り子のひも」と書いている。
+        label: "＋ 振り子(長さの変わらないひもで吊るす)",
+        onSelect: clickHidden("btn-spawn-pendulum"),
+      },
       {
         label: "＋ モーター (角度を指定して止まる。回り続けません)",
         onSelect: clickHidden("btn-spawn-motor"),
         title: "サーボのような動き方です。「うごかす」を押すといまの目標角度まで動いて止まり、ツールバーの「⟳ モーター切替」でその目標角度(0°⇔90°)を切り替えます。回転速度を設定する項目はありません(角度を保つ部品のため)",
       },
-      { label: "＋ 流体 (SPH 水塊)", onSelect: clickHidden("btn-spawn-fluid") },
+      {
+        // `SPH` は水を粒で解く計算のやり方の名前で、置く人には要らない
+        // (利用者役「つくる」の報告)。
+        label: "＋ 流体(水のかたまり)",
+        onSelect: clickHidden("btn-spawn-fluid"),
+      },
       { separator: true },
       {
         label: "＋ フレーム",

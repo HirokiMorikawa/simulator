@@ -1236,7 +1236,7 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
   await page.click("#btn-settings"); // ポップオーバーを閉じる。
 
   // SPHドメインは既存の「+ 流体」ボタン(スポーンパレット)で有効化する。
-  await addViaMenu(page, "＋ 流体 (SPH 水塊)");
+  await addViaMenu(page, "＋ 流体(水のかたまり)");
 
   // フィールドIDは`component_schema`が返す`add_*_coupling`の実引数名
   // そのもの(`#add-coupling-field-${name}`、B12〜B15でスキーマ駆動フォーム
