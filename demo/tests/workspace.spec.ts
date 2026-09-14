@@ -1814,13 +1814,28 @@ test("「手回し発電機」のクランクは、見える大きさで回っ�
   );
   expect(diameterPx / stageBox.height).toBeGreaterThan(0.15);
 
-  // (b) 回転: 取っ手の左右のずれ(skewX)が、正負どちらの向きにも現れる
-  // ——静止した飾り物や、たまたま同じ側にだけ寄って見えるカメラのブレでは
-  // 満たせない条件。振れ幅も、ノイズだけでは出ない大きさを要求する。
+  // (b) 回転: 取っ手の左右のずれ(skewX)が**行って戻る**こと。
+  //
+  // **符号(正負の両方に出ること)は見ない**(進行管理役の実測、Windows の CI
+  // で失敗): `Math.min(...skews)` が 0.79 で、14回すべて正側だった。skewX は
+  // 「青っぽい画素の重心 − バウンディングボックスの中心」で、どの画素を
+  // 青っぽいと数えるかは陰影に左右される——陰影は GPU/プラットフォームで
+  // 変わるため、**ゼロ点がどちらへ寄るかは環境ごとに違う**。「正にも負にも
+  // 出る」は、たまたま Linux でゼロ点が真ん中付近だっただけの条件だった。
+  //
+  // 回っていることの証拠として**環境に依らない**のは、値が「行って戻る」
+  // こと——単調に流れるカメラのブレや、静止した飾り物では満たせない。
+  // 差分の符号が変わった回数で見る(1往復で2回以上変わる)。振れ幅も
+  // 併せて要求して、ノイズだけで往復して見えるのを防ぐ。
   const skewRange = Math.max(...skews) - Math.min(...skews);
-  expect(skewRange).toBeGreaterThan(4);
-  expect(Math.max(...skews)).toBeGreaterThan(0);
-  expect(Math.min(...skews)).toBeLessThan(0);
+  expect(skewRange, "取っ手のずれの振れ幅").toBeGreaterThan(4);
+  const deltas = skews.slice(1).map((v, i) => v - skews[i]).filter((d) => Math.abs(d) > 0.5);
+  let turns = 0;
+  for (let i = 1; i < deltas.length; i++) {
+    if (Math.sign(deltas[i]) !== Math.sign(deltas[i - 1])) turns += 1;
+  }
+  expect(turns, `ずれが行って戻る(向きの変わった回数) skews=${skews.map((v) => v.toFixed(1))}`)
+    .toBeGreaterThanOrEqual(2);
 
   expect(errors).toEqual([]);
 });
