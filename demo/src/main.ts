@@ -11977,6 +11977,15 @@ async function setUpSceneView(
         // 前の材質で計算した質量が居座らないように(密度から計算し直す)。
         delete b.mass_override;
       }),
+    setBodyMotion: (index, kind) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      // Inspector の「動き方」と**同じ経路**(`push_set_body_type`)を通す
+      // ——別系統を作らない(`WorkspaceApi.setBodyMotion` の doc 参照)。
+      applyComponent(world, "push_set_body_type", { body_index: index, kind });
+      pushCommandLog(world, { kind: "SetBodyType", bodyIndex: index, bodyType: kind });
+      markUnsaved();
+      return true;
+    },
     setBodyPosition: (index, x, y, z) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return false;
       // **数値で打ち替えた分も「戻す」で戻せるようにする**(課題、進行管理役
@@ -12088,6 +12097,7 @@ async function setUpSceneView(
         shape: world.read_component("body_shape_label_at", String(index)),
         material: world.read_component("body_material_label_at", String(index)),
         mass: readNumber(world, "body_mass_at", String(index)),
+        motion: world.read_component("body_type_at", String(index)),
         position: [position[0], position[1], position[2]],
         rotation: [
           THREE.MathUtils.radToDeg(euler.x),

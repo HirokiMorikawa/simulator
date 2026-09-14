@@ -4325,3 +4325,112 @@ test("「みる」では、3Dが見どころの実験のグラフは開かない
   }
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役「さわる」の報告、進行管理役の実測)**: 「選んだもの」札は
+// 「坂として使うには、向きを 20〜40 度にしたうえで、下の『動き方』を
+// 『動かない(Static)』にしてください」と**名指しで操作を勧める**のに、その
+// 「動き方」は Inspector(粒度2.0〜)にしか無く、この札が出る「さわる」では
+// まだ畳まれていた。実測: 札はこの文を出す一方、`#inspector` は非表示。
+test("「さわる」でも、札が勧める「動き方」がその場で変えられる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1); // さわる
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d5-incline"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(1_200);
+
+  // この粒度では一覧もInspectorもまだ出ていない——舞台を直接クリックして選ぶ。
+  const box = (await page.locator("#scene-view-canvas-host canvas").first().boundingBox())!;
+  for (const [fx, fy] of [[0.5, 0.55], [0.5, 0.45], [0.45, 0.6]]) {
+    await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy);
+    await page.waitForTimeout(400);
+    if ((await page.locator('.card[data-card="focus"]').count()) > 0) break;
+  }
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  await expect(page.locator("#inspector")).toBeHidden(); // 勧められた先は畳まれたまま
+
+  const motion = page.locator("#focus-motion");
+  await expect(motion).toBeVisible();
+  await motion.selectOption("Static");
+  // 選んだ値がそのまま残る(次のstepまで world は前の値を返すので、戻って
+  // 見えないこと)。
+  await expect.poll(async () => motion.inputValue(), { timeout: 10_000 }).toBe("Static");
+  // ワールド側も実際に「動かない」になっている。
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const w = (window as unknown as {
+            __world: { read_component(k: string, a: string): string };
+          }).__world;
+          const n = Number(w.read_component("body_count", ""));
+          for (let i = 0; i < n; i++) {
+            if (w.read_component("body_label_at", String(i)) === "box") {
+              return w.read_component("body_type_at", String(i));
+            }
+          }
+          return "";
+        }),
+      { timeout: 10_000 },
+    )
+    .toBe("Static");
+  expect(errors).toEqual([]);
+});
+
+// **課題(同上)**: 材質は走っている間は変えられないのに、**選んだあとで初めて**
+// 「とめている間だけ変えられます」と出ていた。実測(走らせたまま球を選んで
+// 「ゴム(天然)」を選択): 表示は「コンクリート」のまま、重さも動かず。
+// 押したのに何も起きない画面は「壊れている」と読まれる。
+test("走っている間は材質を選べず、その理由が押す前に読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(1_200);
+  const box = (await page.locator("#scene-view-canvas-host canvas").first().boundingBox())!;
+  for (const [fx, fy] of [[0.5, 0.5], [0.5, 0.45], [0.5, 0.6]]) {
+    await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy);
+    await page.waitForTimeout(400);
+    if ((await page.locator("#focus-material").count()) > 0) break;
+  }
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect(page.locator("#focus-material")).toBeDisabled();
+  await expect(page.locator("#focus-material-note")).toContainText("とめている間だけ");
+
+  // とめれば押せるようになり、実際に変わる(札は再生/停止では組み直されない
+  // ので、毎フレーム揃え直している——固まったままにならないこと)。
+  await page.click("#btn-run");
+  await expect(page.locator("#focus-material")).toBeEnabled({ timeout: 10_000 });
+  const before = await page.locator("#focus-material").inputValue();
+  await page.locator("#focus-material").selectOption("ゴム(天然)");
+  await expect
+    .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
+    .toBe("ゴム(天然)");
+  expect(before).not.toBe("ゴム(天然)");
+  expect(errors).toEqual([]);
+});
+
+// **課題(同上)**: 「速さ ×1」のまま開いても、実効倍率が実験ごとに桁違いに
+// 出る(実測: 自由落下 ×1.02 / コーヒー ×2.02 / 軌道に乗せる ×754037.55)。
+// 数字は正しいが**何の比なのかが書いていない**ので「×1のはずなのに×70万」と
+// 読めて壊れて見える。桁が大きいときは一目で読める形に言い換える。
+test("時間を大きく早送りする場面は、その倍率が読める言葉で出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  const rate = page.locator("#run-actual-rate");
+  await expect.poll(async () => (await rate.textContent()) ?? "", { timeout: 20_000 })
+    .toContain("1 秒で");
+  const text = (await rate.textContent()) ?? "";
+  // 「1 秒で ◯◯ ぶん進む」と、生の倍率の両方が読める。
+  expect(text).toMatch(/1 秒で .+ぶん進む/);
+  expect(text).toMatch(/×[\d,]+/);
+  expect(errors).toEqual([]);
+});

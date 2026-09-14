@@ -223,7 +223,21 @@ export type WorkspaceApi = {
     /** 向き(x, y, z 軸まわりの度)。 */
     rotation: [number, number, number];
     speed: number;
+    /** 動き方(`Dynamic`/`Static`/`Kinematic` の生の名前)。 */
+    motion: string;
   } | null;
+  /**
+   * **動き方を変える**(`Dynamic`/`Static`/`Kinematic`)。
+   *
+   * Inspector(粒度2.0〜)にも同じ操作があるが、**「選んだもの」札の説明文が
+   * この操作を名指しで勧めている**(「坂として使うには…下の『動き方』を
+   * 『動かない(Static)』にしてください」)のに、その札が出る粒度
+   * (「さわる」)では Inspector がまだ畳まれていて手が届かなかった
+   * ——実測(進行管理役、粒度「さわる」で `d5-incline` の箱を舞台から選択):
+   * 札は上の文を出す一方、`#inspector` は非表示。**アプリ自身が勧める操作に
+   * 手が届かない**状態だったので、札からも同じことができるようにする。
+   */
+  setBodyMotion: (index: number, kind: string) => boolean;
 };
 
 export type WorkspaceApiRef = { current: WorkspaceApi | null };
@@ -677,6 +691,17 @@ export function setUpWorkspace(
    * 「みる」は「みる」のまま、現象(グラフ)だけが追いついて出る。
    */
   let forceAnalysisOpen = false;
+  /**
+   * **「動き方」で選んだ直後の値**(まだワールドが返してこない間だけ使う)。
+   *
+   * 動き方の変更は次の step の頭で効くので、選んだ直後に組み直すと
+   * `body_type_at` はまだ前の値を返し、欄が元へ戻って見える——実測(進行
+   * 管理役): 「動かない(Static)」を選ぶとワールド側は `box:Static` に
+   * なっているのに、札の欄は `Dynamic` に戻った。Inspector 側が
+   * `pendingBodyType` で同じ手当てをしている(`main.ts`)ので、札でも同じ
+   * ようにする。ワールドが追いついたら捨てる。
+   */
+  let pendingMotion: { index: number; kind: string } | null = null;
 
   /**
    * **グラフの段を、粒度に関わらず開いておくべきか**。
@@ -2250,6 +2275,16 @@ export function setUpWorkspace(
                 option.selected = name === readout.material;
                 select.appendChild(option);
               }
+              // **できないことは、押す前に分かるようにする**(進行管理役の実測)。
+              // 材質の差し替えは場面を組み直すので、走っている間は効かない。
+              // 以前は**選んだあとで初めて**「とめている間だけ変えられます」と
+              // 出ていた——実測(粒度「さわる」、`d1-free-fall` を走らせたまま
+              // 球を選んで「ゴム(天然)」を選択): 表示は「コンクリート」のまま、
+              // 重さも動かず、注記は選んだ後にしか出なかった。押したのに
+              // 何も起きない画面は「壊れている」と読まれる。走っている間は
+              // **選べなくして、理由を先に添える**。
+              const playing = api.isPlaying();
+              select.disabled = playing;
               select.addEventListener("change", () => {
                 if (api.setBodyMaterial(selected, select.value)) {
                   renderContext();
@@ -2267,12 +2302,26 @@ export function setUpWorkspace(
               const note = document.createElement("p");
               note.className = "card-note";
               note.id = "focus-material-note";
+              if (playing) {
+                // 走っている間は、まずこの一言を出す(上の `select.disabled`
+                // と対)。灰色になっている理由がその場で読める。
+                const why = document.createElement("strong");
+                why.textContent =
+                  "材質は、とめている間だけ変えられます(■ とめる を押してから)。";
+                note.appendChild(why);
+                note.appendChild(document.createElement("br"));
+              }
               // 場面が重さを直接決めていることがある(D24 の車体は 600 kg
               // 固定)。それを知らずに「鋼なのに密度が合わない」と読まれた
               // ので、いまの重さの出どころも書いておく(利用者役③の観察)。
-              note.textContent =
-                "いまの重さは場面が直接決めていることがあります。材質を選び直すと、" +
-                "そこからは密度で計算し直し、場面を最初から組み直します。";
+              // `textContent =` で入れると、上で足した「とめている間だけ」の
+              // 一言を消してしまう——足す形で書く。
+              note.appendChild(
+                document.createTextNode(
+                  "いまの重さは場面が直接決めていることがあります。材質を選び直すと、" +
+                    "そこからは密度で計算し直し、場面を最初から組み直します。",
+                ),
+              );
               body.appendChild(note);
             }
 
@@ -2376,6 +2425,54 @@ export function setUpWorkspace(
             turn.appendChild(turnNote);
             body.appendChild(turn);
             focusRotationInputs = turnInputs;
+
+            // **勧めた操作を、その場でできるようにする**(進行管理役の実測)。
+            // 上の文は「下の『動き方』を『動かない(Static)』にしてください」と
+            // 名指しで勧めるが、その操作は Inspector(粒度2.0〜)にしか無く、
+            // この札が出る「さわる」ではまだ畳まれている——実測(粒度
+            // 「さわる」で `d5-incline` の箱を舞台から選択): 札はこの文を出す
+            // 一方、`#inspector` は非表示だった。**アプリ自身が勧める操作に
+            // 手が届かない**のは、いちばん素直に詰む形。
+            //
+            // ゆか(無限平面)には出さない——上の文がそちらでは「ここでは
+            // 変えられません」と言っており、実際 `setBodyMotion` も効かない。
+            if (shapeHead(readout.shape) !== "plane") {
+              const motionRow = document.createElement("div");
+              motionRow.className = "focus-material";
+              const motionLabel = document.createElement("label");
+              motionLabel.textContent = "動き方";
+              motionLabel.htmlFor = "focus-motion";
+              const motionSelect = document.createElement("select");
+              motionSelect.id = "focus-motion";
+              // 人の言葉を先に、括弧で元の名前を添える——Inspector の
+              // 「Dynamic/Static/Kinematic」と同じものだと分かるように。
+              const MOTIONS: [string, string][] = [
+                ["Dynamic", "動く(Dynamic)"],
+                ["Static", "動かない(Static)"],
+                ["Kinematic", "決めた通りに動く(Kinematic)"],
+              ];
+              if (pendingMotion && pendingMotion.index !== selected) pendingMotion = null;
+              if (pendingMotion && pendingMotion.kind === readout.motion) pendingMotion = null;
+              const shownMotion =
+                pendingMotion && pendingMotion.index === selected
+                  ? pendingMotion.kind
+                  : readout.motion;
+              for (const [value, text] of MOTIONS) {
+                const option = document.createElement("option");
+                option.value = value;
+                option.textContent = text;
+                option.selected = value === shownMotion;
+                motionSelect.appendChild(option);
+              }
+              motionSelect.addEventListener("change", () => {
+                // 選んだ値をそのまま出しておく(`pendingMotion` の doc 参照)。
+                pendingMotion = { index: selected, kind: motionSelect.value };
+                api.setBodyMotion(selected, motionSelect.value);
+                renderContext();
+              });
+              motionRow.append(motionLabel, motionSelect);
+              body.appendChild(motionRow);
+            }
 
             // **この物もグラフに記録する**。記録が付くのは最初に置いた物だけで、
             // 2 つ目以降を比べたくても足す手段がどこにも無かった(利用者役④)。
@@ -2727,7 +2824,18 @@ export function setUpWorkspace(
       actualRate.textContent = `実際は ×${r.toFixed(2)}(重い計算)`;
       actualRate.classList.add("slow");
     } else if (r > 1.1) {
-      actualRate.textContent = `実際は ×${r.toFixed(2)}`;
+      // **桁が飛ぶ場面では、何の比なのかを書く**(利用者役「さわる」の報告、
+      // 進行管理役の実測): 同じ「速さ ×1」でも、`d1-free-fall` は
+      // 「実際もほぼ同じ(×1.02)」、`d9-cooling-coffee` は「実際は ×2.02」、
+      // `d35-orbital-insertion` は「実際は ×754037.55」と出る。天体の場面は
+      // 現実の時間で見ていたら何年もかかるので、場面の側が時間を大きく早送り
+      // している——正しい数字なのだが、**何の比なのかが書いていない**ため、
+      // 「×1のはずなのに×70万」と読めて壊れて見える。桁が大きいときだけ、
+      // 一目で読める形(「1秒で◯◯ぶん進む」)に言い換える。
+      actualRate.textContent =
+        r >= 1000
+          ? `実際は 1 秒で ${formatDuration(r, 1)}ぶん進む(×${Math.round(r).toLocaleString("ja-JP")})`
+          : `実際は ×${r.toFixed(2)}(現実の時間に対して)`;
       actualRate.classList.remove("slow");
     } else {
       actualRate.textContent = `実際もほぼ同じ(×${r.toFixed(2)})`;
@@ -2996,6 +3104,34 @@ export function setUpWorkspace(
           }
           if (focusNodes["重さ"]) {
             focusNodes["重さ"].textContent = `${readout.mass.toFixed(3)} kg`;
+          }
+          // **「とめたら押せる」も毎フレーム揃える**(進行管理役の実測)。
+          // 材質の欄は走っている間だけ押せない(理由は札の注記に出している)。
+          // 札は再生/一時停止では組み直されないので、組み立てたときの
+          // 状態のまま固まる——実測: 走行中に選んで灰色になったあと
+          // 「■ とめる」を押しても、欄は灰色のままだった。
+          const materialPicker = document.getElementById(
+            "focus-material",
+          ) as HTMLSelectElement | null;
+          if (materialPicker) {
+            const playingNow = api.isPlaying();
+            if (materialPicker.disabled !== playingNow) {
+              materialPicker.disabled = playingNow;
+              // 灰色の理由もその場で出し入れする(組み立て時と同じ文)。
+              const note = document.getElementById("focus-material-note");
+              const first = note?.firstElementChild;
+              const hasWhy = first?.tagName === "STRONG";
+              if (note && playingNow && !hasWhy) {
+                const why = document.createElement("strong");
+                why.textContent =
+                  "材質は、とめている間だけ変えられます(■ とめる を押してから)。";
+                note.insertBefore(document.createElement("br"), note.firstChild);
+                note.insertBefore(why, note.firstChild);
+              } else if (note && !playingNow && hasWhy) {
+                note.removeChild(note.firstChild!); // <strong>
+                if (note.firstChild?.nodeName === "BR") note.removeChild(note.firstChild);
+              }
+            }
           }
           // 置き場所の欄と材質の選びも、実際の値へ揃え直す(材質を変えた
           // 直後にこの札だけ前の材質を出していた——利用者役④の観察)。
