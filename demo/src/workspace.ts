@@ -637,6 +637,13 @@ export function setUpWorkspace(
   const dialHint = el<HTMLDivElement>("detail-hint");
   const crumbs = el<HTMLDivElement>("crumbs");
   const contextBody = el<HTMLDivElement>("context-body");
+  /**
+   * 柱の下端の器。スクロールする本体の**外側**にある(`style.css` の
+   * `#context-footer` のdoc参照)。ここへ出したものは、下の中身を隠さずに
+   * 常に見えている——重ねて貼り付けていたときは、その高さぶんが永久に
+   * 隠れていた。
+   */
+  const contextFooter = el<HTMLDivElement>("context-footer");
   const palette = el<HTMLDivElement>("palette");
   const paletteInput = el<HTMLInputElement>("palette-input");
   const paletteResults = el<HTMLDivElement>("palette-results");
@@ -680,6 +687,20 @@ export function setUpWorkspace(
   let paletteIndex = 0;
   let paletteMatches: PaletteEntry[] = [];
   let pendingStart = false;
+  /**
+   * **選んだ直後だけ、「選んだもの」札の操作の列を画面へ入れる**。
+   *
+   * 札は縦に長く、柱のスクロールできる高さは実測 174px しかない
+   * (1280×720、粒度「つくる」)。操作の列(追いかける/全体へ戻る/これを消す)が
+   * たまたま画面に入るかどうかは、**文字の幅がどれだけ折り返すか**に左右され、
+   * 環境で変わる——実際、手元では入るのに Windows の CI では入らず、
+   * 「これを消す」が実マウスで押せないまま落ちた。
+   * 入るかどうかを運に任せず、選び直したその瞬間に必ず見える所へ送る。
+   *
+   * **選択が変わったときだけ**にするのが要点。毎回送ると、下の欄へ数字を
+   * 打ちに行った人を上へ引き戻してしまう。
+   */
+  let revealFocusActions = false;
   /** 物理側の起動待ちで、開けずにいる自分の場面。 */
   let pendingOwnScene: SavedScene | null = null;
   /**
@@ -2079,6 +2100,7 @@ export function setUpWorkspace(
     const activeEnd = active?.selectionEnd ?? null;
 
     contextBody.innerHTML = "";
+    contextFooter.innerHTML = "";
     readoutNodes = [];
     focusNodes = {};
     focusPositionInputs = [];
@@ -2149,7 +2171,7 @@ export function setUpWorkspace(
       // ので、その状態で入口が見えないのはいちばん困る。用意された実験の側
       // (下方の`renderContext`)は元から「選んだもの」の**後**に置いており、
       // 並び順をそちらへ揃える。
-      contextBody.appendChild(buildCard(savedScenesCard()));
+      contextFooter.appendChild(buildCard(savedScenesCard()));
       syncCards();
       restoreFocus(activeId, activeStart, activeEnd);
       return;
@@ -2289,7 +2311,7 @@ export function setUpWorkspace(
     // (実験を選んでいない状態)のときしか保存の口を出しておらず、実験に物を
     // 足して衝突させた人が、それを取っておく場所を見つけられなかった
     // ——そのまま ⌘K で別の実験へ行き、戻る道が無くなった(利用者役④の観察)。
-    contextBody.appendChild(buildCard(savedScenesCard()));
+    contextFooter.appendChild(buildCard(savedScenesCard()));
     contextBody.appendChild(buildCard(viewCardSpec()));
     syncCards();
     restoreFocus(activeId, activeStart, activeEnd);
@@ -2807,6 +2829,14 @@ export function setUpWorkspace(
             // 来ても困らない——欄は目的があって触るものだが、「追いかける」
             // 「全体へ戻る」「消す」は選んだ直後にいちばん起きる用事だから。
             list.after(actions);
+            // 選び直した直後は、この列を必ず画面の中へ(`revealFocusActions`
+            // のdoc参照)。すでに見えていれば `block: "nearest"` は何もしない。
+            if (revealFocusActions) {
+              revealFocusActions = false;
+              requestAnimationFrame(() => {
+                if (actions.isConnected) actions.scrollIntoView({ block: "nearest" });
+              });
+            }
           },
         }));
       }
@@ -3304,6 +3334,7 @@ export function setUpWorkspace(
       const selected = api.selectedBody();
       if (selected !== lastSelection) {
         lastSelection = selected;
+        if (selected >= 0) revealFocusActions = true;
         // 別の物を選んだら、前の物へ打ちかけていた値は捨てる。
         focusPositionDraft = [null, null, null];
         focusPositionPending = [null, null, null];

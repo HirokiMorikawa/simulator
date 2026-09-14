@@ -4186,6 +4186,24 @@ test("物を選んだままでも、「この場面を保存する」がスク�
   await page.waitForTimeout(200);
   const after = await geometry();
   expect(after!.visible, "下端まで送っても保存ボタンが見えている").toBe(true);
+
+  // **重ねて貼り付けていない**こと。`position: sticky` で重ねていたときは、
+  // この札の高さ(実測 158px)ぶんだけ下の中身が永久に隠れ、「選んだもの」札の
+  // 「🗑 これを消す」が実マウスで押せなくなっていた(Windows の CI で再発)。
+  // スクロールする器の**外**に置いてあれば、重なりようがない。
+  const layout = await page.evaluate(() => {
+    const body = document.getElementById("context-body")!;
+    const footer = document.getElementById("context-footer")!;
+    const b = body.getBoundingClientRect();
+    const f = footer.getBoundingClientRect();
+    return {
+      saveInsideScroller: body.contains(document.getElementById("btn-save-scene")),
+      overlapPx: Math.max(0, Math.min(b.bottom, f.bottom) - Math.max(b.top, f.top)),
+    };
+  });
+  expect(layout.saveInsideScroller, "保存する札はスクロールする器の外にある").toBe(false);
+  expect(layout.overlapPx, "下端の器が、スクロールする器に重なっていない").toBeLessThanOrEqual(1);
+
   expect(errors).toEqual([]);
 });
 

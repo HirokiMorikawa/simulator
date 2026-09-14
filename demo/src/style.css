@@ -2045,6 +2045,17 @@ kbd {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  /* スクロールするのはここ(柱そのものではない)。`#context-footer` のdoc参照。 */
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+}
+/* **札を縮めない**。ここは縦のフレックスなので、高さが決まった途端に中の札が
+   既定(`flex-shrink: 1`)で押し潰される——`.card` は `overflow: hidden` なので、
+   潰れたぶんは**黙って消える**(スクロールしても出てこない)。自然な高さを
+   保たせて、あふれたぶんはこの器のスクロールに任せる。 */
+#context-body > * {
+  flex: 0 0 auto;
 }
 .card {
   border: 1px solid var(--border);
@@ -2053,7 +2064,7 @@ kbd {
   overflow: hidden;
 }
 
-/* **「この場面を保存する」は、右の柱の下端に貼り付けておく**。
+/* **「この場面を保存する」は、右の柱の下端に置いておく**。
  *
  * 物を置くとその物が自動で選ばれ、下へ伸びる「選んだもの」札へ画面が寄る。
  * 保存カードを普通に並べておくと、**作り終えたその瞬間**——いちばん保存したい
@@ -2061,15 +2072,32 @@ kbd {
  * ところまでは持っていったが、実測ではまだ 200px ぶん送る必要があった
  * (`savedScenesCard` の doc 参照)。送らなくても目に入るのが本当。
  *
- * 貼り付けるぶん、柱の下端を常に使う。それでも構わないと判断したのは、
- * このカードが出るのは「つくる」側の粒度(`REVEAL.toolbar`)だけで、そこに
- * いる人にとって「作ったものを取っておく」は最後に必ず通る道だから。 */
-#context .card[data-card="my-scenes"] {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  background: var(--surface-sunken);
+ * **`position: sticky` で重ねるのはやめた**。重ねると、その札の高さぶんだけ
+ * 下の中身が**どこまで送っても隠れる**——実測(1280×720、粒度「つくる」):
+ * 柱の見えている高さ 302px のうち 158px をこの札が占め、その裏に「選んだもの」
+ * 札の「🗑 これを消す」が入り込んで、実マウスでは押せなくなっていた
+ * (`elementFromPoint` がこの札を返す)。札を削って一度は逃げたが、それは
+ * 「あと何px 余裕があるか」に頼るやり方で、文字の幅が違う環境
+ * (Windows の CI)では同じ場所でまた隠れた。
+ *
+ * 重ねるのではなく、**スクロールする本体の外側に置く**。柱を縦のフレックスに
+ * して、本体(`#context-body`)がスクロールし、この器は下端に居座る。
+ * 本体の見える高さはその高さぶん減るが、**隠れる中身はひとつも無くなる**。 */
+#context {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#context-footer {
+  flex: 0 0 auto;
+  padding: 0 var(--space-4) var(--space-4);
+  background: var(--surface-panel);
   box-shadow: 0 -8px 14px -10px rgb(0 0 0 / 55%);
+}
+/* 何も出ていないとき(粒度が浅い・自分の場面ではない)に、影と余白だけが
+   残らないようにする。 */
+#context-footer:empty {
+  display: none;
 }
 #app .card-header {
   display: grid;
