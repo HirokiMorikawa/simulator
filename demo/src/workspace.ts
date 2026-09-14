@@ -1953,10 +1953,24 @@ export function setUpWorkspace(
           },
         },
         addBodyCard(),
-        savedScenesCard(),
       ];
       for (const spec of world) contextBody.appendChild(buildCard(spec));
       appendFocusCard();
+      // **「保存する」は「選んだもの」札の“下”に置く**(課題、進行管理役の実測)。
+      // 以前はここより前(`addBodyCard`の直後)に並べていたが、物を置くと
+      // その物が自動で選ばれ、下に伸びる「選んだもの」札へ画面が寄る。その
+      // 結果、**保存カードは視界の上へ押し出され、下へスクロールしても永遠に
+      // 出てこない**——実測(粒度3で新規シーンに箱を4つ置き、1つ選んだ状態):
+      //
+      //   保存ボタン top = 7px   右カラムの見える範囲 top = 133px
+      //   列の scrollTop = 575   下方向に残っているのは 41px だけ
+      //   (選択を外すと top = 433px となり見える)
+      //
+      // いちばん保存したい瞬間——作り終えた直後——は必ず何かが選ばれている
+      // ので、その状態で入口が見えないのはいちばん困る。用意された実験の側
+      // (下方の`renderContext`)は元から「選んだもの」の**後**に置いており、
+      // 並び順をそちらへ揃える。
+      contextBody.appendChild(buildCard(savedScenesCard()));
       syncCards();
       restoreFocus(activeId, activeStart, activeEnd);
       return;

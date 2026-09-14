@@ -4008,3 +4008,94 @@ test("d24-carでwheel_flとwheel_rrをCtrl+クリックで選んで「これを�
 
   expect(errors).toEqual([]);
 });
+
+// **課題(進行管理役の実測)**: 物を置くとその物が自動で選ばれ、下へ伸びる
+// 「選んだもの」札へ画面が寄る。以前は保存カードがその札より**前**に並んで
+// いたため、保存ボタンは視界の**上**へ押し出され、下へスクロールしても
+// 永遠に出てこなかった。実測(粒度3・新規シーン・箱4つ・1つ選択中):
+//
+//   直す前   保存ボタン top =   7px / 列の見える範囲 133〜542px
+//            列の scrollTop = 575、下方向の残りは 41px だけ → 出てこない
+//   直した後 保存ボタン top = 639px(=下にはみ出す側)
+//            列の scrollTop = 410、下方向の残りは 206px → 200px 1回で見える
+//
+// いちばん保存したい瞬間——作り終えた直後——は必ず何かが選ばれているので、
+// 「下へスクロールすれば出てくる」という自然な向きに揃っていることが要る。
+// **`locator.click()` は自動でスクロールするので「押せる=見えている」では
+// ない**(過去にこれで見逃した)。座標で確かめる。
+test("物を選んだままでも、「この場面を保存する」に下方向のスクロールで届く", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  for (let i = 0; i < 4; i++) {
+    await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+    await page.waitForTimeout(200);
+  }
+  // 置いた物が選ばれている(=「選んだもの」札が出ている)状態であること。
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+
+  const geometry = () =>
+    page.evaluate(() => {
+      const save = document.getElementById("btn-save-scene");
+      const column = document.getElementById("context");
+      if (!save || !column) return null;
+      const s = save.getBoundingClientRect();
+      const c = column.getBoundingClientRect();
+      return {
+        saveTop: s.top,
+        columnTop: c.top,
+        columnBottom: c.bottom,
+        scrollTop: column.scrollTop,
+        scrollMax: column.scrollHeight - column.clientHeight,
+        visible: s.top >= c.top && s.bottom <= c.bottom,
+      };
+    });
+
+  const before = await geometry();
+  expect(before).not.toBeNull();
+  // **上へはみ出していないこと**が要点。上へ出ていると、下へいくら送っても
+  // 戻ってこない(直す前がこれだった)。
+  expect(before!.saveTop, "保存ボタンが列の上へ押し出されていない").toBeGreaterThanOrEqual(
+    before!.columnTop,
+  );
+
+  // 下端まで送れば必ず見えること(送る量に依存しない確かめ方)。
+  await page.evaluate(() => {
+    const column = document.getElementById("context")!;
+    column.scrollTop = column.scrollHeight;
+  });
+  await page.waitForTimeout(200);
+  const after = await geometry();
+  expect(after!.visible, "下端まで送れば保存ボタンが見えている").toBe(true);
+  expect(errors).toEqual([]);
+});
+
+// **課題(進行管理役の実測)**: 取り消しの記録はギズモのドラッグだけが積んで
+// おり、**数値で打ち替えた置き場所・向きは戻せなかった**(実測: 箱を置いて
+// x を 1.500 → 10.000 に打ち替えたあと、`#btn-undo` は disabled のまま)。
+// 座標を打ち込んで組み立てる人には、戻す手段が一つも無かった。
+test("数値で打ち替えた置き場所も、「動かしたのを戻す」で戻せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+
+  const x = () => page.locator("#focus-pos-x").inputValue();
+  const before = await x();
+  expect(Number.parseFloat(before)).not.toBeNaN();
+
+  await page.locator("#focus-pos-x").fill("10");
+  await page.locator("#focus-pos-x").press("Tab");
+  await expect.poll(x, { timeout: 10_000 }).toBe("10.000");
+
+  // 打ち替えたことで「戻す」が押せるようになる(以前はここが disabled だった)。
+  await expect(page.locator("#btn-undo")).toBeEnabled();
+  await page.click("#btn-undo");
+  await expect.poll(x, { timeout: 10_000 }).toBe(before);
+  expect(errors).toEqual([]);
+});

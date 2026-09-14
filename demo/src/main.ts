@@ -8560,6 +8560,22 @@ async function setUpSceneView(
     };
   }
 
+  /**
+   * 取り消しの記録を1件積む(`editUndoStack`)。
+   *
+   * ギズモのドラッグ開始時に3か所で同じ4行(積む・上限で捨てる・redoを流す・
+   * ボタンを有効化)を書いていたので、1つにまとめた。**数値で打ち替える経路
+   * (`WorkspaceApi.setBodyPosition`/`setBodyRotation`)からも同じものを積む**
+   * ため——別系統の取り消しを作らないための共通の入口(そちらのdoc参照)。
+   */
+  function pushEditUndoEntry(entry: EditUndoEntry): void {
+    editUndoStack.push(entry);
+    if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
+    editRedoStack.length = 0;
+    undoButton.disabled = mode !== "edit";
+    redoButton.disabled = true;
+  }
+
   function projectToScreen(worldPos: THREE.Vector3): { x: number; y: number } {
     const ndc = worldPos.clone().project(camera);
     const rect = renderer.domElement.getBoundingClientRect();
@@ -8614,16 +8630,11 @@ async function setUpSceneView(
           event.clientY - rotateCenterScreen.y,
           event.clientX - rotateCenterScreen.x,
         );
-        editUndoStack.push({
+        pushEditUndoEntry({
           bodyIndex: selectedBodyIndex,
           kind: "rotation",
           rotation: rotateStartQuat.clone(),
         });
-        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY)
-          editUndoStack.shift();
-        editRedoStack.length = 0;
-        undoButton.disabled = mode !== "edit";
-        redoButton.disabled = true;
       } else if (pointerDownGizmoAxis) {
         isDragging = true;
         dragMode = "gizmo";
@@ -8633,16 +8644,11 @@ async function setUpSceneView(
           gizmoAxisDir.applyQuaternion(inspectorRotationQuat).normalize();
         gizmoDragStartPosition.copy(gizmoGroup.position);
         gizmoDragStartScalar = gizmoAxisDir.dot(gizmoDragStartPosition);
-        editUndoStack.push({
+        pushEditUndoEntry({
           bodyIndex: selectedBodyIndex,
           kind: "position",
           position: gizmoDragStartPosition.clone(),
         });
-        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY)
-          editUndoStack.shift();
-        editRedoStack.length = 0;
-        undoButton.disabled = mode !== "edit";
-        redoButton.disabled = true;
         camera.getWorldDirection(cameraDirection);
         let planeNormal = cameraDirection
           .clone()
@@ -8677,16 +8683,11 @@ async function setUpSceneView(
           10,
         );
         scaleDragStartValue = currentScale.get(selectedBodyIndex) ?? 1.0;
-        editUndoStack.push({
+        pushEditUndoEntry({
           bodyIndex: selectedBodyIndex,
           kind: "scale",
           scale: scaleDragStartValue,
         });
-        if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY)
-          editUndoStack.shift();
-        editRedoStack.length = 0;
-        undoButton.disabled = mode !== "edit";
-        redoButton.disabled = true;
       } else {
         // ここまで来たドラッグは、**掴む**か、**視点を回す**かのどちらか。
         //
@@ -11946,6 +11947,20 @@ async function setUpSceneView(
       }),
     setBodyPosition: (index, x, y, z) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      // **数値で打ち替えた分も「戻す」で戻せるようにする**(課題、進行管理役
+      // の実測)。取り消しの記録はこれまで**ギズモのドラッグだけ**が積んで
+      // いた(`pointerdown`のハンドラ参照)。そのため、座標を数値で打ち込んで
+      // 組み立てる人——まさに「いくつもの物を組み合わせて、それらしい世界を
+      // 作りたい」人——には**戻す手段が一つも無かった**。実測: 箱を置いて
+      // x を 1.500 → 10.000 に打ち替えたあと、`#btn-undo` は disabled のまま。
+      // ボタンの説明(`title`)には「それ以外の変更は戻せません」と正直に
+      // 書いてあるが、**ホバーしないと読めない**ので、組み立てている最中に
+      // 気づく道が無い。
+      //
+      // 別系統の取り消しは作らない——ギズモと同じ `editUndoStack` に、同じ形
+      // (`kind: "position"`)で積むだけ。だから「↶ 動かしたのを戻す」も
+      // Ctrl+Z も、そのまま効く。
+      pushEditUndoEntry(captureCurrentEntry(index, "position"));
       applyComponent(world, "set_body_position_at", { index, x, y, z });
       markUnsaved();
       // **置いた人が見失わないこと**。追従カメラが自分の操作で止まっている
@@ -11971,6 +11986,9 @@ async function setUpSceneView(
     },
     setBodyRotation: (index, degX, degY, degZ) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      // 置き場所と同じ理由で、向きの打ち替えも取り消せるようにする
+      // (`setBodyPosition` のdoc参照)。
+      pushEditUndoEntry(captureCurrentEntry(index, "rotation"));
       // 度 → クォータニオン。順序は Inspector の表示(XYZ)と同じ。
       const q = new THREE.Quaternion().setFromEuler(
         new THREE.Euler(
