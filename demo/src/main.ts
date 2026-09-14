@@ -18,6 +18,7 @@ import {
   type WorkspaceApi,
   type WorkspaceApiRef,
 } from "./workspace";
+import type { SceneDecoration } from "./catalog";
 
 // 統合エディタ(docs/23-frontend/01-editor.md)の骨格増分。
 //
@@ -3748,7 +3749,11 @@ function setUpProjectDrawer(
     // 追加実装が要るため見送った——`sim-em::Circuit`自体は任意のノード対応
     // 素子を既に自由に組める設計であり、本増分はそこへの配線が主眼)。
     const editorHeading = document.createElement("h4");
-    editorHeading.textContent = "自由配線回路エディタ";
+    // **回路の言葉を、回路を知らない人の言葉に置き換える**。
+    // 「GND」「Node1」「値2」は、この画面で初めて回路に触る人には読めない
+    // (利用者役の観察)。電気の理屈は変えず、呼び名だけを日常語にする:
+    // node → 「つなぎ目」、GND(node 0) → 「つなぎ目0(基準)」。
+    editorHeading.textContent = "自分で回路を組む";
     body.appendChild(editorHeading);
 
     const resetForm = document.createElement("div");
@@ -3756,7 +3761,7 @@ function setUpProjectDrawer(
     nodeCountInput.type = "number";
     nodeCountInput.min = "2";
     nodeCountInput.value = "3";
-    nodeCountInput.title = "GND(node 0)を含むノード総数";
+    nodeCountInput.title = "つなぎ目の数。0 番が基準(電圧のゼロ点)になります";
     const resetButton = document.createElement("button");
     resetButton.textContent = "リセット(新規回路)";
     resetButton.addEventListener("click", () => {
@@ -3775,7 +3780,11 @@ function setUpProjectDrawer(
       freeWiringComponents.length = 0;
       renderCircuitTab();
     });
-    resetForm.append("ノード数(GND含む): ", nodeCountInput, resetButton);
+    resetForm.append(
+      "つなぎ目の数(0番=基準を含む): ",
+      nodeCountInput,
+      resetButton,
+    );
     body.appendChild(resetForm);
 
     if (freeWiringNumNodes > 0) {
@@ -3784,24 +3793,24 @@ function setUpProjectDrawer(
       aInput.type = "number";
       aInput.min = "0";
       aInput.value = "0";
-      aInput.title = "ノードA(0=GND)";
+      aInput.title = "つなぎ目A の番号(0 は基準のつなぎ目)";
       aInput.id = "circuit-editor-node-a";
       const bInput = document.createElement("input");
       bInput.type = "number";
       bInput.min = "0";
       bInput.value = "1";
-      bInput.title = "ノードB(0=GND)";
+      bInput.title = "つなぎ目B の番号(0 は基準のつなぎ目)";
       bInput.id = "circuit-editor-node-b";
       const kindSelect = document.createElement("select");
       kindSelect.id = "circuit-editor-kind";
       for (const [value, label] of [
-        ["resistor", "抵抗 [Ω]"],
-        ["voltage_source", "電圧源 [V] (A=正極)"],
-        ["switch", "スイッチ"],
-        ["capacitor", "コンデンサ [F]"],
-        ["inductor", "インダクタ [H]"],
-        ["diode", "ダイオード (A=アノード)"],
-        ["dc_motor", "DCモーター [Ω] (逆起電力定数は別欄)"],
+        ["resistor", "抵抗(電気を流れにくくする)"],
+        ["voltage_source", "電池・電源(A側が＋)"],
+        ["switch", "スイッチ(入り切り)"],
+        ["capacitor", "コンデンサ(電気をためる)"],
+        ["inductor", "コイル(電流の変化をきらう)"],
+        ["diode", "ダイオード(A→B の一方通行)"],
+        ["dc_motor", "モーター"],
       ]) {
         const option = document.createElement("option");
         option.value = value;
@@ -3812,22 +3821,68 @@ function setUpProjectDrawer(
       valueInput.type = "number";
       valueInput.value = "100";
       valueInput.id = "circuit-editor-value";
-      valueInput.title =
-        "抵抗[Ω]/電圧[V]/コンデンサ[F]/インダクタ[H]/ダイオード飽和電流[A]/DCモーター巻線抵抗[Ω]";
       // コンデンサの初期電圧・インダクタの初期電流・ダイオードのnVt・
       // DCモーターの巻線インダクタンスに使う第2値(未使用の種別では無視される)。
       const value2Input = document.createElement("input");
       value2Input.type = "number";
       value2Input.value = "0";
       value2Input.id = "circuit-editor-value2";
-      value2Input.title =
-        "コンデンサ初期電圧[V]/インダクタ初期電流[A]/ダイオードnVt[V]/DCモーター巻線インダクタンス[H]";
       // DCモーターの逆起電力定数のみに使う第3値。
       const value3Input = document.createElement("input");
       value3Input.type = "number";
       value3Input.value = "0.1";
       value3Input.id = "circuit-editor-value3";
-      value3Input.title = "DCモーター逆起電力定数[V·s/rad]";
+
+      /**
+       * **欄の名前を、選んだ部品に合わせて書き換える**。
+       *
+       * 「値 / 値2 / 値3(DCモーターのみ)」という見出しは、どの部品を選んでも
+       * 同じ文字のままだった。抵抗を置くのに「値2」に何を入れればいいのか
+       * 画面のどこにも書いておらず、`title` に 6 種類ぶんを `/` で並べた
+       * 一行が隠れているだけ——読めるのは、既にどの数字が要るか知っている人
+       * だけ(利用者役の観察)。選んだ部品に要る欄だけを、その部品の言葉で
+       * 出す。使わない欄は消す(0 のまま送られても無視される値なので、
+       * 見えていること自体が迷いのもと)。
+       */
+      const FIELD_LABELS: Record<
+        string,
+        { v1: string; v2?: string; v3?: string }
+      > = {
+        resistor: { v1: "流れにくさ Ω" },
+        voltage_source: { v1: "電圧 V" },
+        switch: { v1: "" },
+        capacitor: { v1: "ためられる量 F", v2: "はじめの電圧 V" },
+        inductor: { v1: "コイルの強さ H", v2: "はじめの電流 A" },
+        diode: { v1: "流れ出す電流のめやす A", v2: "立ち上がりの電圧 V" },
+        dc_motor: {
+          v1: "巻線の流れにくさ Ω",
+          v2: "巻線のコイルの強さ H",
+          v3: "回す力の強さ V·s/rad",
+        },
+      };
+      const field = (input: HTMLInputElement) => {
+        const wrap = document.createElement("label");
+        wrap.className = "circuit-editor-field";
+        const caption = document.createElement("span");
+        wrap.append(caption, input);
+        return { wrap, caption };
+      };
+      const f1 = field(valueInput);
+      const f2 = field(value2Input);
+      const f3 = field(value3Input);
+      const syncFields = () => {
+        const spec = FIELD_LABELS[kindSelect.value] ?? { v1: "値" };
+        for (const [{ wrap, caption }, text] of [
+          [f1, spec.v1],
+          [f2, spec.v2],
+          [f3, spec.v3],
+        ] as const) {
+          wrap.hidden = !text;
+          caption.textContent = text ? `${text}: ` : "";
+        }
+      };
+      kindSelect.addEventListener("change", syncFields);
+      syncFields();
       const addButton = document.createElement("button");
       addButton.textContent = "素子を追加";
       addButton.addEventListener("click", () => {
@@ -3899,18 +3954,18 @@ function setUpProjectDrawer(
         renderCircuitTab();
       });
       addForm.append(
-        "A: ",
+        "つなぎ目A: ",
         aInput,
-        " B: ",
+        " つなぎ目B: ",
         bInput,
         " ",
         kindSelect,
-        " 値: ",
-        valueInput,
-        " 値2: ",
-        value2Input,
-        " 値3(DCモーターのみ): ",
-        value3Input,
+        " ",
+        f1.wrap,
+        " ",
+        f2.wrap,
+        " ",
+        f3.wrap,
         addButton,
       );
       body.appendChild(addForm);
@@ -3919,9 +3974,9 @@ function setUpProjectDrawer(
       for (const c of freeWiringComponents) {
         const item = document.createElement("li");
         if (c.kind === "resistor") {
-          item.textContent = `抵抗 ${c.a}-${c.b}: ${c.resistance}Ω`;
+          item.textContent = `抵抗 つなぎ目${c.a}—${c.b}: 流れにくさ ${c.resistance} Ω`;
         } else if (c.kind === "voltage_source") {
-          item.textContent = `電圧源 ${c.a}(+)-${c.b}(-): ${c.voltage}V`;
+          item.textContent = `電池・電源 つなぎ目${c.a}(＋)—${c.b}(−): ${c.voltage} V`;
         } else if (c.kind === "switch") {
           const switchCheckboxItem = document.createElement("input");
           switchCheckboxItem.type = "checkbox";
@@ -3930,29 +3985,43 @@ function setUpProjectDrawer(
             c.closed = switchCheckboxItem.checked;
             circuitEditorRef.current?.setSwitchClosed(c.index, c.closed);
           });
-          item.textContent = `スイッチ ${c.a}-${c.b}: `;
+          item.textContent = `スイッチ つなぎ目${c.a}—${c.b}(入れる): `;
           item.appendChild(switchCheckboxItem);
         } else if (c.kind === "capacitor") {
-          item.textContent = `コンデンサ ${c.a}-${c.b}: ${c.capacitance}F`;
+          item.textContent = `コンデンサ つなぎ目${c.a}—${c.b}: ためられる量 ${c.capacitance} F`;
         } else if (c.kind === "inductor") {
-          item.textContent = `インダクタ ${c.a}-${c.b}: ${c.inductance}H`;
+          item.textContent = `コイル つなぎ目${c.a}—${c.b}: 強さ ${c.inductance} H`;
         } else if (c.kind === "diode") {
-          item.textContent = `ダイオード ${c.a}(anode)-${c.b}(cathode)`;
+          item.textContent = `ダイオード つなぎ目${c.a} → ${c.b}(この向きにだけ流れる)`;
         } else {
           const speedInput = document.createElement("input");
           speedInput.type = "number";
           speedInput.value = "0";
-          speedInput.title = "角速度 [rad/s]";
+          speedInput.title =
+            "軸の回る速さ。単位は rad/s(1 回転 = 6.28 rad)";
+          // 「rad/s」という記号だけでは何の速さか分からないので、入れた値が
+          // 毎秒何回転にあたるかを隣に出す。渡す数字は rad/s のまま——
+          // 物理側(`setMotorSpeed`)が受け取る単位を勝手に変えると、逆起電力の
+          // 計算が合わなくなる。
+          const revSpan = document.createElement("span");
+          const paintRev = () => {
+            const rad = Number(speedInput.value) || 0;
+            revSpan.textContent = ` (毎秒 ${(rad / (Math.PI * 2)).toFixed(2)} 回転)`;
+          };
+          speedInput.addEventListener("input", paintRev);
           speedInput.addEventListener("change", () => {
+            paintRev();
             circuitEditorRef.current?.setMotorSpeed(
               c.index,
               Number(speedInput.value) || 0,
             );
           });
-          item.textContent = `DCモーター ${c.a}-${c.b}: 速度[rad/s] `;
+          paintRev();
+          item.textContent = `モーター つなぎ目${c.a}—${c.b}: 回す速さ rad/s `;
           item.appendChild(speedInput);
+          item.appendChild(revSpan);
           const currentSpan = document.createElement("span");
-          currentSpan.textContent = ` 電流: ${(circuitEditorRef.current?.motorCurrent(c.index) ?? 0).toFixed(3)}A`;
+          currentSpan.textContent = ` / 流れている電流 ${(circuitEditorRef.current?.motorCurrent(c.index) ?? 0).toFixed(3)} A`;
           item.appendChild(currentSpan);
         }
         componentList.appendChild(item);
@@ -3968,7 +4037,9 @@ function setUpProjectDrawer(
         const lines: string[] = [];
         for (let node = 0; node < freeWiringNumNodes; node++) {
           lines.push(
-            `Node${node}: ${circuitEditorRef.current.nodeVoltage(node).toFixed(3)}V`,
+            `つなぎ目${node}${node === 0 ? "(基準)" : ""}: ${circuitEditorRef.current
+              .nodeVoltage(node)
+              .toFixed(3)} V`,
           );
         }
         voltageTable.textContent = lines.join(" / ");
@@ -3981,13 +4052,13 @@ function setUpProjectDrawer(
 
     function refresh() {
       if (!circuitRef.current) {
-        voltageLine.textContent = "Node2電圧: 読み込み中...";
+        voltageLine.textContent = "つなぎ目2の電圧: 読み込み中...";
       } else {
         const voltage = circuitRef.current();
         const switchState = switchCheckbox?.checked ? "閉" : "開";
         voltageLine.textContent = circuitFreeWiringState.active
           ? "固定デモ回路は自由配線回路に置き換え済みです"
-          : `Node2電圧: ${voltage.toFixed(3)} V (スイッチ: ${switchState})`;
+          : `つなぎ目2の電圧: ${voltage.toFixed(3)} V (スイッチ: ${switchState})`;
       }
       circuitFreeWiringRefresh?.();
     }
@@ -5925,11 +5996,24 @@ async function setUpSceneView(
   // と対になる標準操作が無かった監査結果への対応。
   window.addEventListener("keydown", (event) => {
     const target = event.target as HTMLElement | null;
-    if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+    const inField =
+      !!target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName);
 
     const ctrlOrCmd = event.ctrlKey || event.metaKey;
     if (ctrlOrCmd && !event.altKey) {
-      switch (event.key.toLowerCase()) {
+      // **入力欄の中でも、戻す/やり直すだけは横取りする**。
+      //
+      // 置き場所を数値で打ち替えたあと、欄に文字カーソルを置いたまま Ctrl+Z を
+      // 押すと、ブラウザの「打った文字を戻す」が働いて**欄の数字だけが前の値へ
+      // 戻り、物はそのまま**になっていた(利用者役の実測: 欄が `-0.395` に
+      // 化けたのに、置いた物は動いたまま)。画面には「戻った」ように見えるので、
+      // そこから先の操作がぜんぶずれる。この2つだけは、欄の中にいても
+      // アプリの「動かしたのを戻す」へ送る。
+      // 他の Ctrl 組み合わせ(Ctrl+A の全選択など)は欄の中では横取りしない
+      // ——文字の全選択が効かなくなるほうが困る。
+      const key = event.key.toLowerCase();
+      if (inField && key !== "z" && key !== "y") return;
+      switch (key) {
         case "z":
           (event.shiftKey ? redoButton : undoButton).click();
           break;
@@ -5963,6 +6047,9 @@ async function setUpSceneView(
       event.preventDefault();
       return;
     }
+    // ここから下は修飾キー無しの1文字ショートカット。入力欄では横取りしない
+    // ——ブックマーク名や数値が打てなくなる。
+    if (inField) return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     switch (event.key.toLowerCase()) {
       case "w":
@@ -6170,9 +6257,32 @@ async function setUpSceneView(
    * 1 マスが 1 画素を切るほど遠く(あるいは分子のように小さな世界)では、
    * 線が潰れて面が白く濁るので、そのぶん薄める。方眼が見えないだけで、
    * 妙な模様は出ない。
+   *
+   * **マスの大きさは世界の大きさに合わせる**(`uCell`)。1 マス 1 m 固定
+   * だったので、0.2 m の世界(D26 静電気の風船)や µm の世界(D25)では線が
+   * 1 本も画面に入らず、面は結局のところ**ただの単色**に戻っていた——
+   * 「壁がある」と言われても、それが壁だと分かる手掛かりが画面に無い。
+   * 視距離から 10 のべき乗のマス目を選び直せば、どの大きさの世界でも
+   * 「面がそこにある」ことが読める。
+   *
+   * **床以外の面にも塗る**。方眼は水平な床だけに塗っていたが、面が面だと
+   * 分かることに床も壁も無い。塗る2軸(`right`/`up`)を面ごとに渡す。
    */
-  function paintFloorGrid(material: THREE.MeshStandardMaterial): void {
+  function paintFloorGrid(
+    material: THREE.MeshStandardMaterial,
+    right: THREE.Vector3 = new THREE.Vector3(1, 0, 0),
+    up: THREE.Vector3 = new THREE.Vector3(0, 0, 1),
+  ): void {
+    const uCell = { value: 1 };
+    // uniform はマテリアル自身に提げておく。場面を読み込み直すたびに増える
+    // 配列へ溜めると、捨てられたマテリアルのぶんが残り続ける。
+    material.userData.gridCell = uCell;
+    const uRight = { value: right.clone().normalize() };
+    const uUp = { value: up.clone().normalize() };
     material.onBeforeCompile = (shader) => {
+      shader.uniforms.uCell = uCell;
+      shader.uniforms.uGridRight = uRight;
+      shader.uniforms.uGridUp = uUp;
       shader.vertexShader = shader.vertexShader
         .replace(
           "#include <common>",
@@ -6185,14 +6295,14 @@ async function setUpSceneView(
       shader.fragmentShader = shader.fragmentShader
         .replace(
           "#include <common>",
-          "#include <common>\nvarying vec3 vFloorWorldPos;",
+          "#include <common>\nvarying vec3 vFloorWorldPos;\nuniform float uCell;\nuniform vec3 uGridRight;\nuniform vec3 uGridUp;",
         )
         .replace(
           "#include <dithering_fragment>",
           [
             "#include <dithering_fragment>",
             "{",
-            "  vec2 cell = vFloorWorldPos.xz;",
+            "  vec2 cell = vec2(dot(vFloorWorldPos, uGridRight), dot(vFloorWorldPos, uGridUp)) / max(uCell, 1e-9);",
             "  vec2 width = fwidth(cell);",
             "  vec2 toLine = abs(fract(cell - 0.5) - 0.5) / max(width, vec2(1e-6));",
             "  float line = 1.0 - min(min(toLine.x, toLine.y), 1.0);",
@@ -6205,6 +6315,72 @@ async function setUpSceneView(
     };
   }
   paintFloorGrid(ground.material as THREE.MeshStandardMaterial);
+
+  /**
+   * 方眼のマス目を、いま見ている世界の大きさへ合わせ直す。
+   *
+   * 画面の高さに 8〜80 マスが入るあたりを狙って、10 のべき乗から選ぶ
+   * (0.001 m・0.01 m・…・1 m・10 m…)。べき乗に丸めるのは、マスが
+   * 「1 m」「10 cm」のようにキリのいい長さであってほしいから——視距離に
+   * 比例させて連続に変えると、目盛りとしては読めない。
+   */
+  /**
+   * **見た目だけの飾り**(`SceneDecoration` の doc 参照)を置く場所。
+   *
+   * `bodyMeshes` には入れない——入れると当たり判定こそ無いままでも、画角を
+   * 決める箱(`contentBoundingBox`)や選択・Hierarchy の対象になってしまい、
+   * 「触れない物が一覧に並ぶ」ことになる。専用のグループへ分けて、描画の
+   * ためだけに持つ。
+   */
+  const decorGroup = new THREE.Group();
+  decorGroup.name = "decor";
+  scene.add(decorGroup);
+
+  function setSceneDecor(decor: readonly SceneDecoration[]): void {
+    for (const child of [...decorGroup.children]) {
+      decorGroup.remove(child);
+      const mesh = child as THREE.Mesh;
+      mesh.geometry?.dispose();
+      const material = mesh.material;
+      for (const one of Array.isArray(material) ? material : [material]) one?.dispose();
+    }
+    for (const item of decor) {
+      if (item.kind !== "tube") continue;
+      const axis = new THREE.Vector3(...item.axis);
+      if (axis.lengthSq() < 1e-12) continue;
+      axis.normalize();
+      const mesh = new THREE.Mesh(
+        // 両端を塞がない(`openEnded = true`)。蓋があると、磁石が中にいる
+        // あいだ手前の蓋に隠れて見えなくなる。
+        new THREE.CylinderGeometry(item.radius, item.radius, item.length, 32, 1, true),
+        new THREE.MeshStandardMaterial({
+          color: new THREE.Color(item.color),
+          metalness: 0.75,
+          roughness: 0.35,
+          transparent: true,
+          opacity: 0.32,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        }),
+      );
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
+      mesh.position.set(...(item.through ?? [0, 0, 0]));
+      decorGroup.add(mesh);
+    }
+  }
+
+  function updateGridCellSize(): void {
+    const span = Math.max(camera.position.distanceTo(orbit.target), 1e-9);
+    const cell = Math.pow(10, Math.round(Math.log10(span / 8)));
+    scene.traverse((object) => {
+      const material = (object as THREE.Mesh).material;
+      if (!material) return;
+      for (const one of Array.isArray(material) ? material : [material]) {
+        const cellUniform = one.userData?.gridCell as { value: number } | undefined;
+        if (cellUniform) cellUniform.value = cell;
+      }
+    });
+  }
 
   /**
    * `referenceGrid`(下記)の見た目——既存の床(`paintFloorGrid`)と同じ、
@@ -7329,6 +7505,61 @@ async function setUpSceneView(
    * 向きを使う、課題①のdoc参照)の両方がここへ合流する——仰角クランプ・
    * クリップ面の計算を二重に持たないため。
    */
+  /**
+   * **壁の裏側から覗かない**。
+   *
+   * 「静電気で風船がくっつく」(D26)は、壁(法線 +X の無限平面)の
+   * **反対側**にカメラが置かれていた——実測: カメラ x = −0.096 に対し、
+   * 風船は x = +0.019。壁は 400m 四方の板として描かれるので画面いっぱいの
+   * 暗い面になり、**主役の風船は一度も映らない**。タイトルが約束している物が
+   * 3D に出てこない、という報告の正体がこれだった。
+   *
+   * 向きのクランプ(仰角)は「床の下から見上げない」ためのもので、床以外の
+   * 面には効かない。ここでは面を一般に扱う——見ている対象と反対側にカメラが
+   * 来てしまったら、その面について**鏡像の位置**へ移す。距離も仰角の好みも
+   * 保たれ(面に垂直な成分の符号だけが変わる)、対象と同じ側に出る。
+   *
+   * 対象がちょうど面の上に乗っている(床の上の物など)ときは、どちら側かが
+   * 決まらないので何もしない。
+   */
+  function keepCameraOnTheContentSideOfPlanes(center: THREE.Vector3): void {
+    for (const [index, mesh] of bodyMeshes) {
+      if (world.read_component("body_shape_kind_at", String(index)) !== "plane") continue;
+      // 平面は `PlaneGeometry` をローカル +Z が法線になるよう回して置いてある
+      // (`meshFromShapeJson`)。その向きと位置から、面そのものを復元する。
+      const normal = new THREE.Vector3(0, 0, 1)
+        .applyQuaternion(mesh.quaternion)
+        .normalize();
+      // **床と天井は対象にしない**。上下方向は既に仰角クランプと高さの下限
+      // (このすぐ上)が「床の下から見上げない」ことを引き受けている。ここで
+      // 床まで見てしまうと、対象が床より下へ沈んだ場面(落ち続ける球など)で
+      // カメラを床下へ送り返すことになり、直そうとしている問題の裏返しを
+      // 作る。横向きの面(壁)だけを見る。
+      if (Math.abs(normal.y) > 0.5) continue;
+      const offset = normal.dot(mesh.position);
+      const contentSide = normal.dot(center) - offset;
+      if (Math.abs(contentSide) < 1e-6) continue;
+      const cameraSide = normal.dot(camera.position) - offset;
+      if (cameraSide * contentSide > 0) continue; // 同じ側。触らない。
+      camera.position.addScaledVector(normal, -2 * cameraSide);
+      // **面すれすれからも見ない**。鏡像へ移すだけだと、対象が面に貼り付いて
+      // いるとき(風船は壁から 0.019 m)カメラも面から 0.02 m の所に立つ。
+      // 面をほぼ真横から見ることになり、壁は細い帯にしか映らない——
+      // 「壁に引き寄せられている」という画にならない。見ている距離の 1/3 は
+      // 面から離す。**行き過ぎた側にいた場合だけ**の後始末なので、正しく
+      // 置けていた画角(既存の実測付きテストが押さえている)には触れない。
+      const viewingDistance = camera.position.distanceTo(center);
+      const minimumClearance = viewingDistance * 0.35;
+      const side = normal.dot(camera.position) - offset;
+      if (Math.abs(side) < minimumClearance) {
+        camera.position.addScaledVector(
+          normal,
+          Math.sign(side || contentSide) * (minimumClearance - Math.abs(side)),
+        );
+      }
+    }
+  }
+
   function positionCameraTowardTarget(
     center: THREE.Vector3,
     radius: number,
@@ -7400,6 +7631,7 @@ async function setUpSceneView(
     // ——分子の世界(D25 は 10 µm ほどの広がり)では 0.3 m は 3 万倍も遠く、
     // 対象が点にすらならず真っ黒になっていた(利用者役①の観察)。
     camera.position.y = Math.max(camera.position.y, Math.min(0.3, radius * 0.5));
+    keepCameraOnTheContentSideOfPlanes(center);
     // **見る対象の大きさに合わせて、手前と奥の切り取り面も動かす**。
     //
     // 手前の面は 0.1 m に固定してあったので、分子の運動(D25 ブラウン運動は
@@ -9384,11 +9616,11 @@ async function setUpSceneView(
         }),
       );
       mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
-      // 水平な床には方眼を塗る(`paintFloorGrid` の doc 参照)。壁など
-      // 横向きの面には塗らない。
-      if (normal.y > 0.9) {
-        paintFloorGrid(mesh.material as THREE.MeshStandardMaterial);
-      }
+      // **どの向きの面にも方眼を塗る**(`paintFloorGrid` の doc 参照)。
+      // 塗る2軸は面に沿って取る——床なら世界の X/Z、壁なら壁に沿った2方向。
+      const right = new THREE.Vector3(1, 0, 0).applyQuaternion(mesh.quaternion);
+      const up = new THREE.Vector3(0, 1, 0).applyQuaternion(mesh.quaternion);
+      paintFloorGrid(mesh.material as THREE.MeshStandardMaterial, right, up);
       mesh.position.copy(normal.multiplyScalar(shape.plane.d));
       return { mesh, isPlane: true };
     }
@@ -11634,14 +11866,16 @@ async function setUpSceneView(
     // QA不具合7: 読み込んだシーンが宣言したプローブを第一候補にする
     // (`selectHudProbes`のdoc参照)。宣言が無ければ従来の固定アクセサへ落ちる。
     const hudProbes = selectHudProbes(world);
-    let circuitLine = "circuit V = —";
+    // 回路の呼び名は、画面のほかの場所(Hierarchy・回路タブ)と同じ
+    // 「つなぎ目N」で書く。`circuit V[2]` は回路図の略記で、ここだけ別語だった。
+    let circuitLine = "回路の電圧 = —";
     if (hudProbes.circuit) {
       const volts = readNumber(world, "imported_probe_value_at", String(hudProbes.circuit.index));
-      circuitLine = `circuit V[${hudProbes.circuit.node}] = ${formatHudNumber(volts)} V`;
+      circuitLine = `つなぎ目${hudProbes.circuit.node}の電圧 = ${formatHudNumber(volts)} V`;
     } else if (hasCircuit) {
-      circuitLine = `circuit V[${CIRCUIT_DIVIDER_NODE_LABEL}] = ${formatHudNumber(readNumber(world, "circuit_divider_voltage"))} V`;
+      circuitLine = `つなぎ目${CIRCUIT_DIVIDER_NODE_LABEL}の電圧 = ${formatHudNumber(readNumber(world, "circuit_divider_voltage"))} V`;
     }
-    let temperatureLine = "heater T = —";
+    let temperatureLine = "発熱部の温度 = —";
     const sceneTemperature = hudProbes.temperature
       ? readNumber(world, "imported_probe_value_at", String(hudProbes.temperature.index))
       : heaterTemperature;
@@ -11669,10 +11903,10 @@ async function setUpSceneView(
       // ΔT を併記する——絶対値の桁が大きい(293 K)ので、微小変化は差分でしか
       // 読めない(D20 の ΔT = 1.25×10⁻⁴ K が「まったく動かない」と見えていた)。
       temperatureLine =
-        `heater T[${node}] = ${formatHudNumber(sceneTemperature)} K` +
+        `発熱部${node}の温度 = ${formatHudNumber(sceneTemperature)} K` +
         (delta === 0 ? "" : ` (Δ ${delta > 0 ? "+" : ""}${formatHudNumber(delta)})`);
     }
-    // 値の無い行(そのシーンに回路や熱ノードが無い)は出さない——「circuit V = —」
+    // 値の無い行(そのシーンに回路や熱ノードが無い)は出さない——「回路の電圧 = —」
     // が並ぶだけで、何が測れているのかが読み取れなくなる。
     hud.textContent = [
       `t = ${readNumber(world, "time").toFixed(3)} s`,
@@ -11739,6 +11973,7 @@ async function setUpSceneView(
     syncSettingsInputs();
     updateWaterPlane(world);
     updateReferenceGrid(world);
+    updateGridCellSize();
     updateTethers(world);
     if (guidedFollowCamera) updateGuidedFollowCamera();
     // enableDamping を使うので毎フレーム update が要る。
@@ -11989,6 +12224,50 @@ async function setUpSceneView(
       if (index < readNumber(world, "body_count")) selectBody(index);
     },
     bodyCount: () => readNumber(world, "body_count"),
+    bodyBounds: (index) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return null;
+      const mesh = bodyMeshes.get(index);
+      if (!mesh) return null;
+      // 無限平面(床・壁)は 400m 四方の板として描いてあるので、「どこから
+      // どこまで」を答えても意味が無い——上に物を置く相手にもしない。
+      if (world.read_component("body_shape_kind_at", String(index)) === "plane") return null;
+      const box = new THREE.Box3().setFromObject(mesh);
+      if (!Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) return null;
+      return {
+        min: [box.min.x, box.min.y, box.min.z],
+        max: [box.max.x, box.max.y, box.max.z],
+      };
+    },
+    addSphereAt: (x, y, z) => {
+      const index = spawnShapeAt("sphere", x, y, z);
+      if (index < 0) return false;
+      selectBody(index);
+      return true;
+    },
+    sphereRadius: () => SPAWN_SPHERE_RADIUS,
+    setDecor: (decor) => setSceneDecor(decor),
+    // **向きを選んで押す**(`WorkspaceApi.pushBody` の doc 参照)。
+    //
+    // 道具棚の `#btn-nudge` と同じ `push_apply_force` を通すが、力の大きさを
+    // **その物の重さから決める**ところが違う。固定の 400 kN は 1m³ の鋼の箱で
+    // 較正した値で、軽い物では吹き飛び、重い物ではびくともしない——同じ
+    // ボタンなのに効いたり効かなかったりに見える。力は 1 step だけ効くので、
+    // `F = m·Δv/dt` とすれば、重さによらず「押した直後に Δv だけ速くなる」。
+    pushBody: (index, direction, deltaV) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return false;
+      const [dx, dy, dz] = direction;
+      const length = Math.hypot(dx, dy, dz);
+      if (!Number.isFinite(length) || length === 0) return false;
+      const mass = readNumber(world, "body_mass_at", String(index));
+      const dt = readNumber(world, "dt");
+      if (!Number.isFinite(mass) || mass <= 0 || !Number.isFinite(dt) || dt <= 0)
+        return false;
+      const scale = (mass * deltaV) / dt / length;
+      const force = { fx: dx * scale, fy: dy * scale, fz: dz * scale };
+      applyComponent(world, "push_apply_force", { body_index: index, ...force });
+      pushCommandLog(world, { kind: "ApplyForce", bodyIndex: index, ...force });
+      return true;
+    },
     maxSpeed: () => readNumber(world, "max_body_speed"),
     stageIsEmpty: () => sceneViewElement.dataset.stageEmpty === "true",
     materialNames: () => [...SPAWN_MATERIALS],

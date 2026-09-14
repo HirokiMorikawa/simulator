@@ -32,6 +32,7 @@ import {
   type Category,
   type Experiment,
   type Knob,
+  type SceneDecoration,
   type SceneJson,
 } from "./catalog";
 
@@ -238,6 +239,51 @@ export type WorkspaceApi = {
    * 手が届かない**状態だったので、札からも同じことができるようにする。
    */
   setBodyMotion: (index: number, kind: string) => boolean;
+  /**
+   * **その物が、どこからどこまでを占めているか**(いま描かれている姿での
+   * 世界座標の箱)。無ければ `null`。
+   *
+   * 「選んだもの」札は中心の座標しか出しておらず、**上の面がどこか**が
+   * 分からなかった——実測(進行管理役、粒度「つくる」で 0.8m の箱を y=2.0 に
+   * 置いて30度傾けた): 札に出るのは「かたち 箱 0.80 × 0.80 × 0.80 m」と
+   * 「高さ 2.000 m」だけで、端を教える欄は無い。利用者役はこのせいで、球を
+   * 坂に当てるまで3回置き直した。
+   */
+  bodyBounds: (index: number) => { min: [number, number, number]; max: [number, number, number] } | null;
+  /**
+   * **その場所に球を1つ置いて、それを選ぶ**。
+   *
+   * 既存のスポーン経路(`spawnShapeAt`)をそのまま通す——置く場所だけこちらが
+   * 決める。「選んだものの上に置く」(`focus` 札)のための口。
+   */
+  addSphereAt: (x: number, y: number, z: number) => boolean;
+  /** 置く球の半径 [m](置き場所を決めるのに要る)。 */
+  sphereRadius: () => number;
+  /**
+   * **選んでいる物を、指した向きへそっと押す**。
+   *
+   * 押す道具は道具棚の「↑ 押し上げる」だけで、**真上にしか押せなかった**
+   * ——坂に置いた球を転がし始める、ドミノを倒す、といった「きっかけを作る」
+   * 操作が画面のどこにも無い(利用者役「つくる」の観察)。向きは
+   * 単位ベクトルで渡し、速さの変化は物の重さによらず一定にする(重い物ほど
+   * 動かないのでは、同じボタンが物によって効いたり効かなかったりに見える)。
+   *
+   * 力は次の一歩で効くので、止まっているあいだに押した場合は動かし始めた
+   * ところで効く(呼び出し側が `play()` する)。
+   *
+   * @param deltaV 押した直後に増える速さ [m/s]。
+   * @returns 押す先が実在したか(対象が無い・重さや刻み幅が読めないときは `false`)。
+   */
+  pushBody: (
+    index: number,
+    direction: [number, number, number],
+    deltaV: number,
+  ) => boolean;
+  /**
+   * **見た目だけの飾りを差し替える**(`SceneDecoration` の doc 参照)。
+   * 実験を読み込むたびに呼ぶ。飾りの無い実験では空の配列。
+   */
+  setDecor: (decor: readonly SceneDecoration[]) => void;
 };
 
 export type WorkspaceApiRef = { current: WorkspaceApi | null };
@@ -294,10 +340,36 @@ const GRAIN_STOPS = [
   // のように行為だけを書いていたので、この帯自体が実験のつまみだと読まれた
   // ——2 人続けて取り違えた(利用者役②の観察)。画面の話だと分かる書き方に
   // 統一し、現象は変わらないことを添える。
-  { at: 0, key: "watch", label: "みる", hint: "現象だけを大きく(道具は隠す)" },
-  { at: 1, key: "touch", label: "さわる", hint: "＋ 条件を変えるつまみ" },
-  { at: 2, key: "study", label: "しらべる", hint: "＋ グラフ・一覧・数値" },
-  { at: 3, key: "build", label: "つくる", hint: "＋ 自分で組み立てる道具ぜんぶ" },
+  //
+  // **行頭の「＋」をやめた**。「＋ 条件を変えるつまみ」は、深さが積み上がる
+  // ことを表す記号のつもりだったが、行頭の「＋」は畳まれた札を開く印に見える
+  // ——利用者役は実際にこの行を押しに行き、`div` なので何も起きなかった。
+  // 積み上がりは「〜に…を足した表示」と言葉で書けば、押せる物には見えない。
+  // どの段の説明かも頭に置く(見出しを兼ねる)。
+  {
+    at: 0,
+    key: "watch",
+    label: "みる",
+    hint: "みる:現象だけを大きく(道具は隠す)",
+  },
+  {
+    at: 1,
+    key: "touch",
+    label: "さわる",
+    hint: "さわる:みる に、条件を変えるつまみを足した表示",
+  },
+  {
+    at: 2,
+    key: "study",
+    label: "しらべる",
+    hint: "しらべる:さわる に、グラフ・一覧・数値を足した表示",
+  },
+  {
+    at: 3,
+    key: "build",
+    label: "つくる",
+    hint: "つくる:しらべる に、組み立ての道具をぜんぶ足した表示",
+  },
 ];
 
 // パネルが現れ始める粒度。CSS 側の補間と同じ値をここでも使う(表示の
@@ -858,7 +930,7 @@ export function setUpWorkspace(
     app.dataset.project = String(project > 0);
     dial.value = detail.toFixed(2);
     dial.setAttribute("aria-valuetext", nearestStop(detail).label);
-    dialHint.textContent = `${nearestStop(detail).hint}(現象は変わりません)`;
+    dialHint.textContent = grainHintText(nearestStop(detail));
     for (const button of dialStops.querySelectorAll("button")) {
       const at = Number((button as HTMLElement).dataset.at);
       button.classList.toggle("active", nearestStop(detail).at === at);
@@ -873,6 +945,17 @@ export function setUpWorkspace(
     syncCards();
     // Scene View の器が変わるので three.js のキャンバスを追従させる。
     requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+  }
+
+  /**
+   * 濃さの帯の下に出す一行。
+   *
+   * **必ずここを通す**。以前は `applyDetail` だけが「(現象は変わりません)」を
+   * 付けており、目盛りにマウスを載せると途中でその但し書きが消えていた
+   * ——同じ帯の同じ行なのに、触ると意味が変わって見える。
+   */
+  function grainHintText(stop: (typeof GRAIN_STOPS)[number]) {
+    return `${stop.hint}(現象は変わりません)`;
   }
 
   function nearestStop(value: number) {
@@ -893,13 +976,26 @@ export function setUpWorkspace(
     // どれを選ぶと何が起きるのかを、**選ぶ前に**読めるようにする。
     // (選んで初めて説明が出るのでは、初めての人には選びようがない)
     button.addEventListener("mouseenter", () => {
-      dialHint.textContent = stop.hint;
+      dialHint.textContent = grainHintText(stop);
     });
     button.addEventListener("mouseleave", () => {
-      dialHint.textContent = nearestStop(detail).hint;
+      dialHint.textContent = grainHintText(nearestStop(detail));
     });
     dialStops.appendChild(button);
   }
+  // 「戻す/やり直す」の直後は、欄に触れていても実際の値へ揃え直す
+  // (`resyncFieldsUntil` の doc 参照)。ボタンは道具棚のもので、粒度が浅い
+  // ときは畳まれているが、要素そのものは常に DOM にあるので一度で足りる。
+  // 頼んだ値を出し続ける仕掛け(`focusPositionPending`)も、戻したのなら
+  // 用済みなので捨てる——捨てないと、戻ったあとも打った値が居座る。
+  for (const id of ["btn-undo", "btn-redo"]) {
+    document.getElementById(id)?.addEventListener("click", () => {
+      resyncFieldsUntil = performance.now() + 800;
+      focusPositionPending = [null, null, null];
+      focusRotationPending = [null, null, null];
+    });
+  }
+
   dial.addEventListener("input", () => applyDetail(Number(dial.value)));
   window.addEventListener("resize", () => applyDetail(detail, false, false));
   // Project ドロワー(素材・回路・リプレイ)の開閉は、粒度とは別の局所的な
@@ -1459,6 +1555,7 @@ export function setUpWorkspace(
     const json = sceneJsonFor(current);
     if (!json) return;
     api.loadSceneJson(json);
+    api.setDecor(current.decor ?? []);
     api.setTethers(tethersOf(JSON.parse(json) as SceneJson));
     // 読み込み直後は**何も選ばれていない**状態から始める。エディタ側は内部
     // 都合で先頭のボディ(たいてい床)を選ぶが、利用者から見れば自分では
@@ -1582,6 +1679,19 @@ export function setUpWorkspace(
   let focusNodes: Record<string, HTMLElement> = {};
   /** 「選んだもの」の置き場所の入力欄(打っている最中は書き換えない)。 */
   let focusPositionInputs: HTMLInputElement[] = [];
+  /**
+   * **「戻す/やり直す」の直後だけは、欄に触れているあいだでも書き戻す**。
+   *
+   * 置き場所と向きの欄は、打っている最中に値をさらわれないよう
+   * 「その欄に文字カーソルがあるあいだは書き換えない」ようにしてある。
+   * ところが「戻す」は欄にカーソルを置いたまま押されることがあり(数値で
+   * 打ち替えた直後がまさにそれ)、そのとき**物は戻ったのに欄は打った値の
+   * まま**になる——実測: 物は x=1.5 へ戻っているのに、欄は 5 のまま。
+   * 画面のどちらを信じればいいのか分からなくなる、いちばん困る食い違い。
+   *
+   * 戻す/やり直すを押したあとの短い間だけ、この見張りを外す。
+   */
+  let resyncFieldsUntil = 0;
   /**
    * **いま置き直しを頼んだ値**(まだ物理側が追いついていないぶん)。
    *
@@ -1752,12 +1862,15 @@ export function setUpWorkspace(
       // 「つくる」に踏み込んだ人の道具。浅い粒度では出さない。
       reveal: REVEAL.toolbar,
       build: (body) => {
-        const note = document.createElement("p");
-        note.className = "card-note";
-        note.textContent =
-          "名前を付けて保存すると、次に開いたときそのまま続きから始められます。";
-        body.appendChild(note);
-
+        // **この札は柱の下端に貼り付いている**(`style.css` の
+        // `#context .card[data-card="my-scenes"]` のdoc参照)。貼り付いている
+        // ぶん、**高さがそのまま「下の方が永久に隠れる量」になる**——実測
+        // (1280×720、粒度「つくる」): 札の高さ 158px に対し、柱の見えている
+        // 高さは 302px しかなく、半分以上を覆っていた。その下に「選んだもの」
+        // 札の「🗑 これを消す」が入り込み、どこまでスクロールしても実マウスでは
+        // 押せない状態になっていた(`elementFromPoint` がこの札を返す)。
+        // 説明の一行は保存ボタンの説明(`title`)へ移し、知らせの行は言うことが
+        // あるときだけ出して、貼り付く高さを削る。
         const row = document.createElement("div");
         row.className = "card-actions";
         const nameInput = document.createElement("input");
@@ -1773,6 +1886,8 @@ export function setUpWorkspace(
         save.id = "btn-save-scene";
         save.className = "primary";
         save.textContent = "💾 保存する";
+        save.title =
+          "名前を付けて保存すると、次に開いたときそのまま続きから始められます。";
         save.addEventListener("click", () => {
           const api = apiRef.current;
           if (!api) return;
@@ -1790,6 +1905,7 @@ export function setUpWorkspace(
           const error = writeSavedScenes(scenes);
           if (error) {
             status.textContent = error;
+            status.hidden = false;
             status.dataset.tone = "warn";
             return;
           }
@@ -1813,6 +1929,10 @@ export function setUpWorkspace(
         const status = document.createElement("p");
         status.className = "card-note";
         status.id = "scene-save-status";
+        // 言うことが無いあいだは高さを取らない(上記の doc 参照)。中身が
+        // 入ったら `hidden` を外す——`#scene-save-status` を読むテストが
+        // 在ることも含め、要素そのものは常に置いておく。
+        status.hidden = true;
         // **取っておけたことを、画面で言う**。押しても何も変わらなかったので、
         // 保存できたのか押し損ねたのか分からず、「二度と開けないのでは」と
         // 読まれた(利用者役④の観察)。カードは保存のたびに組み直されるので、
@@ -1820,11 +1940,13 @@ export function setUpWorkspace(
         if (sceneSaveNote) {
           const shown = sceneSaveNote;
           status.textContent = shown;
+          status.hidden = false;
           status.dataset.tone = "ok";
           window.setTimeout(() => {
             if (sceneSaveNote === shown) sceneSaveNote = null;
             if (status.isConnected && status.textContent === shown) {
               status.textContent = "";
+              status.hidden = true;
               delete status.dataset.tone;
             }
           }, 6000);
@@ -1930,6 +2052,7 @@ export function setUpWorkspace(
       /* 覚えられなくても開くことはできる */
     }
     api.loadSceneJson(entry.json);
+    api.setDecor([]); // 自分で作った場面には、実験ごとの飾りは付かない。
     api.selectBody(-1);
     // `lastSelection` の不変条件(このファイル冒頭の doc 参照)。
     lastSelection = -1;
@@ -2474,6 +2597,104 @@ export function setUpWorkspace(
               body.appendChild(motionRow);
             }
 
+            // **「この上に置く」**(利用者役「つくる」が「いちばん困る」に
+            // 選んだもの、進行管理役の実測)。
+            //
+            // 札は中心の座標しか出しておらず、**上の面がどこか**が分からない
+            // ——実測(粒度「つくる」で 0.8m の箱を y=2.0 に置き 30 度傾けた):
+            // 出るのは「かたち 箱 0.80 × 0.80 × 0.80 m」「高さ 2.000 m」だけ。
+            // そのうえ「➕ 球を1つ足す」は原点のそばへ置く(実測: 坂が
+            // (0, 2.0, 0) にあるのに球は (-0.15, 1.37, 0.14))。**作った物の
+            // 上に置く**という、仕掛けを組むとき最初にやりたいことに道具が
+            // 無かった。利用者役は球を坂に当てるまで3回置き直している。
+            //
+            // 置く場所は、選んでいる物の**いま描かれている姿**の箱から決める
+            // (`bodyBounds`)——傾けた坂でも、その姿の上端が答えになる。
+            const bounds = api.bodyBounds(selected);
+            if (bounds) {
+              const top = bounds.max[1];
+              const cx = (bounds.min[0] + bounds.max[0]) / 2;
+              const cz = (bounds.min[2] + bounds.max[2]) / 2;
+              const topRow = document.createElement("p");
+              topRow.className = "card-note";
+              topRow.id = "focus-top-note";
+              topRow.textContent = `上の面の高さ ${top.toFixed(3)} m(ここに物を載せられます)`;
+              body.appendChild(topRow);
+
+              const placeActions = document.createElement("div");
+              placeActions.className = "card-actions";
+              const onTop = document.createElement("button");
+              onTop.type = "button";
+              onTop.id = "btn-place-on-top";
+              onTop.textContent = "⬆ この上に球を置く";
+              onTop.title = "選んでいる物のまん中・上の面のすぐ上へ、球をひとつ置きます";
+              onTop.addEventListener("click", () => {
+                // 触れるか触れないかの境目に置くと、そのまま食い込んで
+                // 弾かれる。球の半径ぶん + わずかな隙間だけ上へ。
+                const r = api.sphereRadius();
+                api.addSphereAt(cx, top + r + 0.05, cz);
+                renderContext();
+              });
+              placeActions.appendChild(onTop);
+              body.appendChild(placeActions);
+            }
+
+            // **きっかけを作る道具**。
+            //
+            // 押す道具は道具棚の「↑ 押し上げる」だけで、真上にしか押せな
+            // かった(`WorkspaceApi.pushBody` の doc 参照)。坂に置いた球を
+            // 転がし始めるには横から押すしかないのに、その手段が画面のどこにも
+            // 無い——利用者役は坂の角度を変えて滑り出すのを待つしかなかった。
+            //
+            // ゆか(無限平面)には出さない。押しても動かないボタンが並ぶだけで、
+            // 「押したのに何も起きない」を新しく作ることになる
+            // (`bodyBounds` が `null` を返すのが、まさにその「動かせない面」)。
+            // 「動かない(Static)」にしてある物も同じなので、そのときは押せない
+            // ようにして、理由を**押す前に**書く(材質の欄と同じ考え方)。
+            if (bounds) {
+              // **選んだ値で判断する**。`readout.motion` は物理側が組み直す
+              // まで前の値のままなので(`pendingMotion` の doc 参照)、ここで
+              // 生の値を見ると「動かない」を選んだ直後の一瞬だけ押せる
+              // ボタンが残る——選んだとおりに見えるほうを使う。
+              const motionShown =
+                pendingMotion && pendingMotion.index === selected
+                  ? pendingMotion.kind
+                  : readout.motion;
+              const staticNow = motionShown === "Static";
+              const pushRow = document.createElement("p");
+              pushRow.className = "card-note";
+              pushRow.id = "focus-push-note";
+              pushRow.textContent = staticNow
+                ? "そっと押して、きっかけを作る:(いまは「動かない(Static)」なので押せません。上の「動き方」を「動く(Dynamic)」にしてください)"
+                : "そっと押して、きっかけを作る:";
+              body.appendChild(pushRow);
+              const pushActions = document.createElement("div");
+              pushActions.className = "card-actions";
+              pushActions.id = "focus-push";
+              for (const [id, text, dir] of [
+                ["left", "⬅ 左へ", [-1, 0, 0]],
+                ["right", "➡ 右へ", [1, 0, 0]],
+                ["far", "⬆ 奥へ", [0, 0, -1]],
+                ["near", "⬇ 手前へ", [0, 0, 1]],
+                ["up", "🔼 上へ", [0, 1, 0]],
+              ] as const) {
+                const push = document.createElement("button");
+                push.type = "button";
+                push.id = `btn-push-${id}`;
+                push.textContent = text;
+                push.title = `選んでいる物を、この向きへ 1.5 m/s ぶん押します(重さによらず同じだけ速くなります)`;
+                push.disabled = staticNow;
+                push.addEventListener("click", () => {
+                  api.pushBody(selected, [...dir], 1.5);
+                  // 止まっているあいだに押すと、力は次の一歩まで効かない
+                  // ——押したのに何も起きないように見える。押したら動かす。
+                  if (!api.isPlaying()) api.play();
+                });
+                pushActions.appendChild(push);
+              }
+              body.appendChild(pushActions);
+            }
+
             // **この物もグラフに記録する**。記録が付くのは最初に置いた物だけで、
             // 2 つ目以降を比べたくても足す手段がどこにも無かった(利用者役④)。
             if (!api.hasBodyProbes(selected)) {
@@ -2571,7 +2792,21 @@ export function setUpWorkspace(
               });
               actions.appendChild(remove);
             }
-            body.appendChild(actions);
+            // **操作の列は、札の「上の方」に置く**。
+            //
+            // 組み立ての道具(置き場所・向き・動き方・上に置く・そっと押す)が
+            // 増えたぶん、この札は縦に長くなった——実測(1280×720、粒度
+            // 「つくる」、球を1つ置いた直後): 札の高さ 575px に対し、文脈の柱の
+            // 見えている高さは 302px しかない。いちばん下に置いていた
+            // 「🗑 これを消す」は、2画面ぶん近くスクロールしないと出てこない
+            // (実測では `elementFromPoint` が Inspector を返す=画面上には
+            // 出ていない)。
+            //
+            // 「何を選んでいるか(数値)→ それをどうするか(操作)→ どう変えるか
+            // (欄)」の順に読めるよう、操作の列を数値のすぐ下へ移す。欄より先に
+            // 来ても困らない——欄は目的があって触るものだが、「追いかける」
+            // 「全体へ戻る」「消す」は選んだ直後にいちばん起きる用事だから。
+            list.after(actions);
           },
         }));
       }
@@ -2696,7 +2931,13 @@ export function setUpWorkspace(
       const output = document.createElement("output");
       output.className = "knob-value";
       const paint = () => {
-        output.textContent = `${input.value}${knob.unit ? ` ${knob.unit}` : ""}`;
+        // `display` があれば、そちらに値の見せ方を任せる(`Knob.display` の
+        // doc 参照——専門単位に日常の言い換えを添えるための穴)。
+        const shown = Number(input.value);
+        output.textContent =
+          knob.display && Number.isFinite(shown)
+            ? knob.display(shown)
+            : `${input.value}${knob.unit ? ` ${knob.unit}` : ""}`;
       };
       paint();
       input.addEventListener("input", () => {
@@ -3135,8 +3376,9 @@ export function setUpWorkspace(
           }
           // 置き場所の欄と材質の選びも、実際の値へ揃え直す(材質を変えた
           // 直後にこの札だけ前の材質を出していた——利用者役④の観察)。
+          const forceResync = performance.now() < resyncFieldsUntil;
           for (const [i, input] of focusPositionInputs.entries()) {
-            if (document.activeElement === input) continue;
+            if (document.activeElement === input && !forceResync) continue;
             const actual = readout.position[i];
             const pending = focusPositionPending[i];
             if (pending !== null) {
@@ -3157,7 +3399,7 @@ export function setUpWorkspace(
           }
           // 向きの欄も、置き場所とまったく同じ規則で揃える。
           for (const [i, input] of focusRotationInputs.entries()) {
-            if (document.activeElement === input) continue;
+            if (document.activeElement === input && !forceResync) continue;
             const actual = readout.rotation[i];
             const pending = focusRotationPending[i];
             if (pending !== null) {

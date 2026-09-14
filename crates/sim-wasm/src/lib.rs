@@ -2045,48 +2045,73 @@ impl WasmWorld {
             .inner
             .circuit()
             .ok_or(WasmError::CircuitDomainNotEnabled)?;
+        // **記号ではなく、読める言葉で書く**。
+        //
+        // ここは以前 `V0: GND → N1 9 V` / `R: N1 – N2 1000 Ω` / `SW0: N1 – N4 (閉)`
+        // のように、回路図の略記をそのまま出していた。この文字列は Hierarchy と
+        // 回路タブに**そのまま**並ぶ画面表示で、回路を知らない人には
+        // `GND`(基準のつなぎ目)も `N1`(1番のつなぎ目)も `R`(抵抗)も読めない
+        // ——利用者役は「知らない記号しか出てこない」と言って読むのをやめた。
+        // 素子の呼び名と、つなぎ目の呼び方を日常語にする。番号は残す
+        // (同じ種類が複数あるときの区別と、`SetSwitch` などが取る index が
+        // 画面の番号と一致していることが要るため)。
+        //
+        // スイッチの「閉/開」も言い換える。電気の世界では「閉=つながる」だが、
+        // 日常の語感は逆(閉じる=止まる)で、初めての人がまず取り違える所。
         let node = |n: usize| {
             if n == sim_em::GROUND {
-                "GND".to_string()
+                format!("つなぎ目{n}(基準)")
             } else {
-                format!("N{n}")
+                format!("つなぎ目{n}")
             }
         };
         let mut i = index;
         for (k, (a, b, v)) in circuit.voltage_sources().iter().enumerate() {
             if i == 0 {
-                return Ok(format!("V{k}: {} → {} {v} V", node(*b), node(*a)));
+                return Ok(format!("電池・電源{k}: {} → {} {v} V", node(*b), node(*a)));
             }
             i -= 1;
         }
         for (a, b, r) in circuit.resistors() {
             if i == 0 {
-                return Ok(format!("R: {} – {} {r} Ω", node(*a), node(*b)));
+                return Ok(format!("抵抗: {} — {} {r} Ω", node(*a), node(*b)));
             }
             i -= 1;
         }
         for (a, b, c) in circuit.capacitors() {
             if i == 0 {
-                return Ok(format!("C: {} – {} {c} F", node(*a), node(*b)));
+                return Ok(format!("コンデンサ: {} — {} {c} F", node(*a), node(*b)));
             }
             i -= 1;
         }
         for (a, b, l) in circuit.inductors() {
             if i == 0 {
-                return Ok(format!("L: {} – {} {l} H", node(*a), node(*b)));
+                return Ok(format!("コイル: {} — {} {l} H", node(*a), node(*b)));
             }
             i -= 1;
         }
         for (a, k, _, _) in circuit.diodes() {
             if i == 0 {
-                return Ok(format!("D: {} → {}", node(*a), node(*k)));
+                return Ok(format!(
+                    "ダイオード: {} → {}(この向きにだけ流れる)",
+                    node(*a),
+                    node(*k)
+                ));
             }
             i -= 1;
         }
         for (k, (a, b, closed)) in circuit.switches().iter().enumerate() {
             if i == 0 {
-                let state = if *closed { "閉" } else { "開" };
-                return Ok(format!("SW{k}: {} – {} ({state})", node(*a), node(*b)));
+                let state = if *closed {
+                    "入・つながっている"
+                } else {
+                    "切・切れている"
+                };
+                return Ok(format!(
+                    "スイッチ{k}: {} — {} ({state})",
+                    node(*a),
+                    node(*b)
+                ));
             }
             i -= 1;
         }

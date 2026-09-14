@@ -247,34 +247,37 @@ test("D19(電気工作台)を読み込むと Circuit タブと Hierarchy が実�
   // HUD は分圧点(node2)の電圧を出す。E5 の解析解は 9V * 2k/(1k+2k) = 6.000V。
   // **読み込み直後は 0.000 V**——回路は`step()`で初めて解かれるため、1step進める。
   //
-  // 表記が `circuit V = ...` から **`circuit V[2] = ...`** に変わっているのは
+  // 表記が `circuit V = ...` から **「つなぎ目2の電圧 = ...」** に変わっているのは
   // QA不具合7の修正による。HUD は固定のノード番号ではなく**シーンが宣言した
   // プローブ**を読むようになり、どのノードを表示しているかを併記する
   // (D19 の `probes` 先頭が `circuit_node_voltage: 2` なのでノード 2)。
   await page.click("#btn-mode-play");
   await page.click("#btn-play"); // 一時停止(`setMode`が既に再生を始めている)
   await page.click("#btn-step");
-  await expect(page.locator("#hud")).toContainText("circuit V[2] = 6.0000 V");
+  await expect(page.locator("#hud")).toContainText("つなぎ目2の電圧 = 6.0000 V");
 
   // Hierarchy の Circuits サブツリーに実際の素子が並ぶ(葉ノードで検証する
   // ——"Circuits" の li は入れ子の ul を含むため exact 一致しない)。
   const hierarchy = page.locator("#hierarchy-tree");
-  await expect(hierarchy.getByText("V0: GND → N1 9 V", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("R: N1 – N2 1000 Ω", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("C: N3 – GND 0.001 F", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("SW0: N1 – N4 (閉)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("電池・電源0: つなぎ目0(基準) → つなぎ目1 9 V", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("抵抗: つなぎ目1 — つなぎ目2 1000 Ω", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("コンデンサ: つなぎ目3 — つなぎ目0(基準) 0.001 F", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("スイッチ0: つなぎ目1 — つなぎ目4 (入・つながっている)", { exact: true })).toBeVisible();
   // ダイオードは N4 直結から **470Ω の電流制限抵抗を挟んだ N5** へ移した
   // (QA不具合3: 直列抵抗が無く 9V 源をダイオードが短絡して −7.875×10⁶ A が
   // 流れていた)。
-  await expect(hierarchy.getByText("R: N4 – N5 470 Ω", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("D: N5 → GND", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("抵抗: つなぎ目4 — つなぎ目5 470 Ω", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("ダイオード: つなぎ目5 → つなぎ目0(基準)(この向きにだけ流れる)", { exact: true })).toBeVisible();
 
   // Circuit タブ本体も同じ実素子を出し、**固定デモ回路の嘘の数字は消えている**。
   await page.click('.project-tab[data-tab="circuit"]');
   const topology = page.locator("#project-body .circuit-topology");
   // 7件 → 8件: QA不具合3の修正で LED 枝へ電流制限抵抗 470Ω を足したぶん。
   await expect(topology).toContainText("回路の素子(実際に配線されているもの、8件)");
-  await expect(topology).toContainText("R: N1 – N2 1000 Ω");
+  await expect(topology).toContainText("抵抗: つなぎ目1 — つなぎ目2 1000 Ω");
+  // 記号のままの書き方は、もう画面に出ない。
+  await expect(topology).not.toContainText("GND");
+  await expect(topology).not.toContainText("N1");
   await expect(topology).not.toContainText("100Ω");
   await expect(topology).not.toContainText("10V 電源");
 

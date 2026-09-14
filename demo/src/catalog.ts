@@ -75,6 +75,14 @@ export type Knob = {
   max?: number;
   step?: number;
   unit?: string;
+  /**
+   * **`range` の値の見せ方を差し替える**(省略時は `値 単位`)。
+   *
+   * 単位が専門記号のときに使う。数字そのもの(シミュレーションに渡る値)は
+   * 変えずに、隣へ日常の言い換えを添えるためのもの——単位を勝手に換算して
+   * しまうと、シーン JSON や物理側の値と食い違う。
+   */
+  display?: (value: number) => string;
   /** `choice` のとき。値は文字列 or 数値。 */
   options?: { label: string; value: string | number }[];
   /** 初期値。 */
@@ -82,6 +90,33 @@ export type Knob = {
   /** つまみの意味を一行で。 */
   hint?: string;
   apply: (scene: SceneJson, value: string | number) => void;
+};
+
+/**
+ * **見た目だけの飾り**。物理には一切参加しない(当たり判定も質量も無い)。
+ *
+ * タイトルが約束している物が 3D に出てこない実験がある——「磁石が銅管を
+ * ゆっくり落ちる」の銅管がそれで、渦電流のブレーキは結合
+ * (`induction_coupling`)として効いているが、管そのものは剛体として存在
+ * しない(存在させると磁石が中を通れない)。**効いている場所を絵にする**
+ * ためだけの筒をここで宣言する。
+ *
+ * 物理を偽らないための約束: ブレーキは落ちるあいだずっと効いているので、
+ * 筒も見える範囲をずっと覆う長さで描く(途中で切れていると「ここから先は
+ * 効かない」と読めてしまう)。
+ */
+export type SceneDecoration = {
+  kind: "tube";
+  /** 筒の中心線の向き。 */
+  axis: [number, number, number];
+  /** 中心線が通る点(既定は原点)。 */
+  through?: [number, number, number];
+  /** 筒の内側の半径 [m]。 */
+  radius: number;
+  /** 筒の長さ [m]。 */
+  length: number;
+  /** 色(CSS 表記)。 */
+  color: string;
 };
 
 /** パース済みのシーン JSON。必要な部分だけを型として持つ(全体は Rust 側が検証する)。 */
@@ -155,6 +190,8 @@ export type Experiment = {
   pace: number;
   readouts?: Readout[];
   knobs?: Knob[];
+  /** 見た目だけの飾り(`SceneDecoration` の doc 参照)。 */
+  decor?: SceneDecoration[];
   /**
    * グラフの凡例に出す名前(プローブ番号 → 表示名)。
    * 「いまの数値」に出さないプローブや、複数プローブから作る値のもとになった
@@ -1353,6 +1390,11 @@ export const GUIDED_CATEGORIES: Category[] = [
             max: 30,
             step: 1,
             unit: "rad/s",
+            // 「rad/s」は初めての人には読めない(利用者役の観察: 何の
+            // 速さなのか分からない)。渡る数字は rad/s のまま——scene JSON の
+            // `angular_velocity` と同じ単位でなければ嘘になる——ので、
+            // 毎秒何回転にあたるかを隣に添えるだけにする。
+            display: (value) => `${value} rad/s(毎秒 ${(value / (Math.PI * 2)).toFixed(2)} 回転)`,
             value: 10,
             hint: "速く回すほど高い電圧が出ます(発電量は速さに比例)。",
             apply: (scene, value) => {
@@ -1377,10 +1419,26 @@ export const GUIDED_CATEGORIES: Category[] = [
           "自由落下より明らかに遅く、やがて一定の速さになります。",
           "銅の中に生まれた渦電流が、落下を邪魔しています。",
           "銅は磁石にくっつかないのに、ブレーキはかかります。",
-          "3D に映るのは落ちる磁石だけです(銅の管は描いていません)——見どころは下の「落ちる速さ」。",
+          "まわりの銅色の筒が銅管です(見た目だけで、当たり判定はありません)。ブレーキは落ちるあいだずっと効いています。",
         ],
         view: "graph",
         pace: 240,
+        // タイトルが約束している「銅管」を実際に描く。剛体として置くことは
+        // できない(磁石が中を通れなくなる)ので、見た目だけの筒として出す
+        // ——`SceneDecoration` の doc 参照。磁石(半径 0.01 m)が余裕をもって
+        // 通る内径にし、落ちるあいだずっと覆う長さにする(途中で切れていると
+        // 「ここから先はブレーキが効かない」と読めてしまうが、実際の結合は
+        // 落下中ずっと効いている)。
+        decor: [
+          {
+            kind: "tube",
+            axis: [0, 1, 0],
+            through: [0, 0, 0],
+            radius: 0.025,
+            length: 400,
+            color: "#b87333",
+          },
+        ],
         knobs: [
           {
             id: "magnet",

@@ -4560,3 +4560,365 @@ test("道具の名前に、中の言葉が出ていない", async ({ page }) => 
 
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役「つくる」が「いちばん困る」に選んだもの、進行管理役の実測)**:
+// 「選んだもの」札は中心の座標しか出しておらず、**上の面がどこか**が分からない
+// ——実測(0.8m の箱を y=2.0 に置いて30度傾けた): 出るのは「かたち 箱 0.80 ×
+// 0.80 × 0.80 m」「高さ 2.000 m」だけ。そのうえ「➕ 球を1つ足す」は原点のそばへ
+// 置く(坂が (0, 2.0, 0) にあるのに球は (-0.15, 1.37, 0.14))。**作った物の上に
+// 置く**という、仕掛けを組むとき最初にやりたいことに道具が無く、利用者役は球を
+// 坂に当てるまで3回置き直していた。
+test("作った坂の上に、球をその場で置ける(置き直しが要らない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+
+  // 坂を作る(画面の案内どおり: 傾けて「動かない」にする)。
+  for (const [id, value] of [
+    ["#focus-pos-x", "0"],
+    ["#focus-pos-y", "2"],
+    ["#focus-pos-z", "0"],
+    ["#focus-rot-z", "30"],
+  ] as const) {
+    await page.locator(id).fill(value);
+    await page.locator(id).press("Tab");
+    await page.waitForTimeout(150);
+  }
+  await page.locator("#focus-motion").selectOption("Static");
+  await page.waitForTimeout(500);
+
+  // **上の面がどこか**が読める(中心の高さ 2.000 m ではなく、傾けた姿の上端)。
+  const topNote = page.locator("#focus-top-note");
+  await expect(topNote).toBeVisible();
+  const topText = (await topNote.textContent()) ?? "";
+  const top = Number.parseFloat(topText.match(/([\d.]+) m/)?.[1] ?? "0");
+  expect(top, `上の面の高さ: ${topText}`).toBeGreaterThan(2.0);
+
+  // その上へ、1回で置ける。
+  await page.click("#btn-place-on-top");
+  await page.waitForTimeout(800);
+  const ball = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const last = Number(w.read_component("body_count", "")) - 1;
+      const q = w.body_position_at_f32(last);
+      return { x: q[0], y: q[1], z: q[2] };
+    });
+  const placed = await ball();
+  expect(placed.y, "坂の上端より上に置かれている").toBeGreaterThan(top);
+  expect(Math.abs(placed.x), "坂のまん中の真上に置かれている").toBeLessThan(0.3);
+
+  // **実際に坂の上に乗っていた**ことを、転がることで確かめる(横へ外れて
+  // いたら、そのまま真下へ落ちるだけで x は動かない)。
+  await page.click("#btn-run");
+  await expect.poll(async () => Math.abs((await ball()).x), { timeout: 15_000 })
+    .toBeGreaterThan(1.0);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の観察、進行管理役の再現)**: 濃さの帯の下の一行は
+// 「＋ 条件を変えるつまみ」のように**行頭が「＋」**だった。「＋」は畳まれた
+// 札を開く印に見えるので、利用者役はこの行を押しに行き——`div` なので何も
+// 起きなかった。「積み上がる」ことは言葉で書けば足り、押せる物には見えない。
+test("濃さの説明が、押せる札のふりをしていない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  const hint = page.locator("#detail-hint");
+  for (const [at, name] of [
+    [0, "みる"],
+    [1, "さわる"],
+    [2, "しらべる"],
+    [3, "つくる"],
+  ] as const) {
+    await setGrain(page, at);
+    const text = (await hint.textContent()) ?? "";
+    expect(text.trim().startsWith("＋"), `行頭が「＋」でない: ${text}`).toBe(false);
+    expect(text.trim().startsWith("+"), `行頭が「+」でない: ${text}`).toBe(false);
+    // どの段の話かが、その行だけ読めば分かる。
+    expect(text, `段の名前が入っている: ${text}`).toContain(name);
+    // 現象そのものは変わらない、という但し書きは常に付く(以前は目盛りに
+    // マウスを載せているあいだだけ消えていた)。
+    expect(text).toContain("現象は変わりません");
+  }
+
+  // 目盛りに触れているあいだも、同じ体裁のままでいる。
+  await page.locator('.detail-stop[data-at="2"]').hover();
+  const hovered = (await hint.textContent()) ?? "";
+  expect(hovered).toContain("しらべる");
+  expect(hovered).toContain("現象は変わりません");
+  expect(hovered.trim().startsWith("＋")).toBe(false);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の観察)**: 回転の速さが「10 rad/s」としか出ず、何の速さ
+// なのか読めない。数字そのもの(シミュレーションへ渡る値)は rad/s のまま——
+// シーン JSON の `angular_velocity` と単位が違えば嘘になる——で、毎秒何回転
+// にあたるかを隣へ添える。
+test("回す速さが、rad/s のままでも「毎秒何回転」で読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "手回し発電機");
+  await expect(page.locator(".palette-row").first()).toContainText("手回し発電機");
+  await page.keyboard.press("Enter");
+  await setGrain(page, 1);
+
+  const knob = page.locator('.knob[data-knob-id="crank"]');
+  await expect(knob).toBeVisible();
+  const value = knob.locator(".knob-value");
+  // 既定は 10 rad/s = 毎秒 1.59 回転。
+  await expect(value).toContainText("10 rad/s");
+  await expect(value).toContainText("毎秒 1.59 回転");
+
+  // 動かしても、両方の読み方が付いてくる。
+  const slider = knob.locator('input[type="range"]');
+  await slider.fill("20");
+  await expect(value).toContainText("20 rad/s");
+  await expect(value).toContainText("毎秒 3.18 回転");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の観察)**: 「自分で回路を組む」欄の見出しは、どの部品を
+// 選んでも「値 / 値2 / 値3(DCモーターのみ)」のままだった。抵抗を置くのに
+// 「値2」へ何を入れればいいのかは画面のどこにも書いておらず、`title` 属性に
+// 6 種類ぶんを `/` で並べた一行が隠れているだけ——読めるのは、どの数字が
+// 要るか既に知っている人だけ。加えて `GND` / `N1` という回路図の略記が、
+// 画面にそのまま並んでいた。
+test("自分で回路を組む欄が、選んだ部品の言葉で名前を出す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+
+  await page.click('.project-tab[data-tab="circuit"]');
+  const body = page.locator("#project-body");
+  await expect(body).toContainText("自分で回路を組む");
+  // 記号のままの言い方は出ていない。
+  await expect(body).not.toContainText("GND");
+  await expect(body).not.toContainText("ノード数");
+
+  // 3 つのつなぎ目で新しい回路を始める。
+  await body.locator('input[type="number"]').first().fill("3");
+  await body.getByRole("button", { name: "リセット(新規回路)" }).click();
+
+  const kind = page.locator("#circuit-editor-kind");
+  const caption = (id: string) =>
+    page.locator(`label.circuit-editor-field:has(#${id}) span`);
+
+  // 抵抗: 要る数字はひとつだけ。残りの欄は出ていない。
+  await kind.selectOption("resistor");
+  await expect(caption("circuit-editor-value")).toHaveText("流れにくさ Ω: ");
+  await expect(page.locator("label.circuit-editor-field:has(#circuit-editor-value2)")).toBeHidden();
+  await expect(page.locator("label.circuit-editor-field:has(#circuit-editor-value3)")).toBeHidden();
+
+  // コンデンサ: 2つめの欄が、その部品の言葉で現れる。
+  await kind.selectOption("capacitor");
+  await expect(caption("circuit-editor-value")).toHaveText("ためられる量 F: ");
+  await expect(caption("circuit-editor-value2")).toHaveText("はじめの電圧 V: ");
+  await expect(page.locator("label.circuit-editor-field:has(#circuit-editor-value3)")).toBeHidden();
+
+  // モーター: 3つめまで出る。
+  await kind.selectOption("dc_motor");
+  await expect(caption("circuit-editor-value3")).toHaveText("回す力の強さ V·s/rad: ");
+
+  // 実際に置いた素子も、読める言葉で並ぶ。
+  await kind.selectOption("resistor");
+  await page.locator("#circuit-editor-value").fill("100");
+  await page.locator("#circuit-editor-node-a").fill("0");
+  await page.locator("#circuit-editor-node-b").fill("1");
+  await body.getByRole("button", { name: "素子を追加" }).click();
+  await expect(body).toContainText("抵抗 つなぎ目0—1: 流れにくさ 100 Ω");
+  await expect(body).toContainText("つなぎ目0(基準):");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の観察、進行管理役の実測)**: タイトルが約束している物が
+// 3D に出てこない。
+//
+// 「静電気で風船がくっつく」(d26)は、壁(法線 +X の無限平面)の**反対側**に
+// カメラが置かれていた——実測: カメラ x = −0.096 に対し風船は x = +0.019。
+// 壁は 400m 四方の板として描かれるので画面は暗い面で埋まり、主役の風船は
+// 一度も映らなかった。壁の方眼も「床だけ」に塗っていたので、面がそこに
+// あるという手掛かりも無かった。
+test("壁のある実験で、壁の裏側から覗かない(主役が映る)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "静電気で風船");
+  await expect(page.locator(".palette-row").first()).toContainText("静電気");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2500);
+
+  const view = await page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: {
+        position: { x: number; y: number; z: number };
+        // three.js の Camera は project に必要な行列を持っている。
+      };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(k: string, a: string): string;
+        body_count?: unknown;
+        body_position_at_f32(i: number): Float32Array;
+      };
+    }).__world;
+    const count = Number(world.read_component("body_count", ""));
+    let balloon = -1;
+    for (let i = 0; i < count; i++) {
+      if (world.read_component("body_shape_kind_at", String(i)) === "sphere") balloon = i;
+    }
+    const p = world.body_position_at_f32(balloon);
+    return { cameraX: cam.position.x, balloonX: p[0] };
+  });
+  // 壁は x = 0、風船は x > 0 の側。カメラも同じ側にいる。
+  expect(view.balloonX, "風船は壁の表側にいる").toBeGreaterThan(0);
+  expect(view.cameraX, `カメラも壁の表側にいる(x=${view.cameraX})`).toBeGreaterThan(0);
+  // 壁から十分に離れて立っている(すれすれだと壁が細い帯にしか映らない)。
+  expect(view.cameraX).toBeGreaterThan(0.05);
+
+  // 舞台が真っ黒ではなく、面と物が描かれている。
+  const stats = await canvasLuminanceStats(page);
+  expect(stats.std, `輝度のばらつき: ${JSON.stringify(stats)}`).toBeGreaterThan(1.5);
+  expect(stats.brightRatio).toBeGreaterThan(0.01);
+
+  expect(errors).toEqual([]);
+});
+
+// 「磁石が銅管をゆっくり落ちる」(d21)は、渦電流のブレーキは結合として効いて
+// いるのに、**銅管そのものが剛体として存在しない**(置くと磁石が中を通れない)。
+// 3D には落ちる球が1つあるだけで、タイトルの「銅管」はどこにも無かった。
+// 見た目だけの飾り(`SceneDecoration`)として描き、当たり判定が無いことは
+// 「ここを見る」で断る。
+test("銅管の実験では、銅管が3Dに描かれる(当たり判定は持たない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "磁石が銅管");
+  await expect(page.locator(".palette-row").first()).toContainText("銅管");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2000);
+
+  const decor = await page.evaluate(() => {
+    const scene = (window as unknown as {
+      __scene: { getObjectByName(name: string): { children: unknown[] } | undefined };
+    }).__scene;
+    const group = scene.getObjectByName("decor");
+    return { found: !!group, children: group?.children.length ?? 0 };
+  });
+  expect(decor.found, "飾りのグループがある").toBe(true);
+  expect(decor.children, "筒が1本描かれている").toBe(1);
+
+  // 物理には増えていない——落ちる磁石ひとつのまま(当たり判定を持たない)。
+  const bodies = await page.evaluate(() =>
+    Number(
+      (window as unknown as { __world: { read_component(k: string, a: string): string } })
+        .__world.read_component("body_count", ""),
+    ),
+  );
+  expect(bodies, "剛体は増えていない").toBe(1);
+
+  // 見た目だけであることが、読む場所に書いてある。
+  await expect(page.locator("#context")).toContainText("見た目だけ");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「つくる」の観察)**: 押す道具は道具棚の「↑ 押し上げる」
+// だけで、**真上にしか押せなかった**。坂に置いた球を転がし始める、ドミノを
+// 倒す、といった「きっかけを作る」操作が画面のどこにも無く、利用者役は坂の
+// 角度を変えて勝手に滑り出すのを待つしかなかった。
+test("選んだ物を、横からも押せる(きっかけを作れる)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-push")).toBeVisible();
+
+  const x = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const last = Number(w.read_component("body_count", "")) - 1;
+      return w.body_position_at_f32(last)[0];
+    });
+  const before = await x();
+
+  // 止まっている状態で押しても、押した結果が見える(押したら動き出す)。
+  await page.click("#btn-push-right");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect.poll(async () => (await x()) - before, { timeout: 15_000 }).toBeGreaterThan(0.2);
+
+  // 反対向きにも押せる。
+  await page.click("#btn-push-left");
+  const afterRight = await x();
+  await expect.poll(async () => (await x()) - afterRight, { timeout: 15_000 }).toBeLessThan(0);
+
+  // **押しても動かない相手には、押せるふりをしない**。
+  // 「動かない(Static)」にすると灰色になり、理由が押す前に読める。
+  await page.click("#btn-run"); // いったんとめる
+  await page.locator("#focus-motion").selectOption("Static");
+  await page.waitForTimeout(500);
+  await expect(page.locator("#btn-push-right")).toBeDisabled();
+  await expect(page.locator("#focus-push-note")).toContainText("動かない(Static)");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の実測)**: 置き場所を数値で打ち替えたあと、欄に文字カーソル
+// を置いたまま Ctrl+Z を押すと、ブラウザの「打った文字を戻す」が働いて
+// **欄の数字だけが前の値へ戻り、物はそのまま**になっていた(欄が `-0.395` に
+// 化けたのに、置いた物は動いたまま)。画面には「戻った」ように見えるので、
+// そこから先の操作がぜんぶずれる。
+test("数値欄にカーソルを置いたままの Ctrl+Z でも、物が元へ戻る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  const field = page.locator("#focus-pos-x");
+  await expect(field).toBeVisible();
+
+  const x = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const last = Number(w.read_component("body_count", "")) - 1;
+      return w.body_position_at_f32(last)[0];
+    });
+  const before = await x();
+
+  await field.fill("5");
+  await field.press("Tab");
+  await page.waitForTimeout(300);
+  expect(await x(), "打ち替えた場所へ動いている").toBeCloseTo(5, 2);
+
+  // 欄の中へ戻ってから Ctrl+Z。物が戻る(欄の文字だけが戻るのではない)。
+  await field.click();
+  await field.press("ControlOrMeta+z");
+  await page.waitForTimeout(400);
+  expect(await x(), "物が元の場所へ戻っている").toBeCloseTo(before, 2);
+  expect(Number(await field.inputValue()), "欄も物と同じ値を出している").toBeCloseTo(before, 2);
+
+  expect(errors).toEqual([]);
+});

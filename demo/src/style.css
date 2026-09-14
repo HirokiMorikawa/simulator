@@ -1400,6 +1400,20 @@ body {
   border: 1px solid #364561;
 }
 
+/* 回路エディタの数値欄。見出しは選んだ部品に合わせて書き換わり、使わない欄は
+   `hidden` で消える(`FIELD_LABELS` の doc 参照)。行が詰まりすぎないよう、
+   欄ごとにひとまとまりとして並べる。 */
+.circuit-editor-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-right: var(--space-2);
+  white-space: nowrap;
+}
+.circuit-editor-field[hidden] {
+  display: none;
+}
+
 .circuit-topology {
   font-size: var(--text-base);
   font-family: var(--font-mono);
