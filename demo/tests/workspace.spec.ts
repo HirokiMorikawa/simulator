@@ -3886,11 +3886,22 @@ test("d24-carでwheel_flとwheel_rrをCtrl+クリックで選んで「これを�
   // wheel_fl(index 2)を選び、Ctrl+クリックで wheel_rr(index 5)を足す
   // (`d24-car.json`のボディ宣言順=Hierarchyの並び: ground=0, chassis=1,
   // wheel_fl=2, wheel_fr=3, wheel_rl=4, wheel_rr=5)。
+  //
+  // **修飾キーは`ControlOrMeta`で書く**(Linux/Windowsでは Ctrl、macOSでは ⌘)。
+  // `"Control"`固定だと**macOSのCIだけが落ちる**——macOSではControl+クリックが
+  // OSレベルで「副ボタンのクリック」として扱われ、`click`ではなく`contextmenu`
+  // が飛ぶため、行の右クリックハンドラ(選択に入っていない行なら選択をそこへ
+  // 移す)が走って複数選択が成立しない。実測(CI macos-latest、`4aa2dc2`):
+  // `wheel_fl`の class が `tree-selectable tree-body` のまま
+  // (`multi-selected`が付かない)で落ちた。画面の説明も「Ctrl / ⌘ + クリック」
+  // と両方を案内しており(`main.ts`のショートカット表)、アプリ側は
+  // `event.ctrlKey || event.metaKey` の両方を受けるので、テストだけが
+  // 片方の綴りに固定されていたのが誤り。
   await page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_fl" }).click();
   await page.waitForTimeout(200);
   await page
     .locator("#hierarchy-tree .tree-body", { hasText: "wheel_rr" })
-    .click({ modifiers: ["Control"] });
+    .click({ modifiers: ["ControlOrMeta"] });
   await page.waitForTimeout(200);
 
   // ①複数選択そのものは既存どおり壊れていないこと。
