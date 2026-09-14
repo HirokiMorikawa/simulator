@@ -7238,7 +7238,15 @@ async function setUpSceneView(
     // シーンでは最初に見つかったものを描く。
     const quantum2dSize = currentWorld.quantum_2d_size();
     if (quantum2dSize.length === 2) {
-      fieldTitle.textContent = `量子 2D |ψ|² (${quantum2dSize[0]}×${quantum2dSize[1]})`;
+      // **場のパネルの見出しは、画面に出る文字**。`|ψ|²` も `Ez` も
+      // `V(x)` も、この実験で初めて量子や電磁波に触れる人には読めない
+      // (利用者役の観察:「Ψ² のような数式記号や (256×128) の意味が全く
+      // 分からなかった」)。何が明るいのかを言葉で書き、元の記号は括弧で
+      // 添える——知っている人が見失わないように。ます目の数も「何のことか」
+      // を付ける。
+      fieldTitle.textContent =
+        `電子の見つかりやすさ(明るいほど見つかりやすい・|ψ|²)` +
+        ` — ${quantum2dSize[0]}×${quantum2dSize[1]} のます目で計算`;
       // ポテンシャル壁を暗く重ねたいが、まずは密度をそのまま出す
       // (壁は密度が 0 のまま残るので位置は読み取れる)。
       drawScalarField(
@@ -7257,14 +7265,18 @@ async function setUpSceneView(
     // コピーへ読み切っておく。
     const density = Float32Array.from(currentWorld.quantum_1d_density_f32());
     if (density.length > 0) {
-      fieldTitle.textContent = `量子 1D |ψ|² と V(x)(格子 ${density.length} 点)`;
+      fieldTitle.textContent =
+        `電子の見つかりやすさ(|ψ|²)と、越えられない坂の高さ(V(x))` +
+        ` — ${density.length} 点のます目で計算`;
       drawQuantum1d(density, currentWorld.quantum_1d_potential_f32());
       fieldPanel.hidden = false;
       return;
     }
     const fdtdSize = currentWorld.fdtd_size();
     if (fdtdSize.length === 2) {
-      fieldTitle.textContent = `FDTD Ez (${fdtdSize[0]}×${fdtdSize[1]}、青=負 赤=正)`;
+      fieldTitle.textContent =
+        `電波の強さ(Ez・赤と青は向きの違い)` +
+        ` — ${fdtdSize[0]}×${fdtdSize[1]} のます目で計算`;
       drawScalarField(
         currentWorld.fdtd_ez_f32(),
         fdtdSize[0],
@@ -7281,7 +7293,9 @@ async function setUpSceneView(
       // ±1 を ±1 の f32 に直して発散カラーマップへ渡す(上向き=赤・下向き=青)。
       const values = new Float32Array(spins.length);
       for (let i = 0; i < spins.length; i += 1) values[i] = spins[i] ? 1 : -1;
-      fieldTitle.textContent = `イジング スピン格子 (${isingSize}×${isingSize})`;
+      fieldTitle.textContent =
+        `小さな磁石の向き(上向き/下向き・イジング模型)` +
+        ` — ${isingSize}×${isingSize} のます目`;
       drawScalarField(values, isingSize, isingSize, divergingColor, "signed");
       fieldPanel.hidden = false;
       return;
@@ -12246,6 +12260,7 @@ async function setUpSceneView(
     },
     sphereRadius: () => SPAWN_SPHERE_RADIUS,
     setDecor: (decor) => setSceneDecor(decor),
+    circuitElements: () => circuitElementsRef.current?.() ?? [],
     // **向きを選んで押す**(`WorkspaceApi.pushBody` の doc 参照)。
     //
     // 道具棚の `#btn-nudge` と同じ `push_apply_force` を通すが、力の大きさを

@@ -855,19 +855,19 @@ test("群3: 量子・統計・FDTD がギャラリーに載り、場のパネル
   // 量子1D(D28 トンネル効果): |ψ|² と V(x) の折れ線。
   await page.click('.scene-gallery-list button[data-scene-file="d28-tunneling.json"]');
   await expect(fieldPanel).toBeVisible();
-  await expect(fieldTitle).toContainText("量子 1D");
+  await expect(fieldTitle).toContainText("見つかりやすさ"); // 量子1D(|ψ|² は括弧内に残る)
 
   // 量子2D(D27 二重スリット): |ψ|² の 2D 分布。
   await page.click('.scene-gallery-list button[data-scene-file="d27-double-slit.json"]');
-  await expect(fieldTitle).toContainText("量子 2D");
+  await expect(fieldTitle).toContainText("見つかりやすさ"); // 量子2D
 
   // FDTD(D29 電波の水槽): Ez 場。
   await page.click('.scene-gallery-list button[data-scene-file="d29-radio-tank.json"]');
-  await expect(fieldTitle).toContainText("FDTD Ez");
+  await expect(fieldTitle).toContainText("電波の強さ");
 
   // イジング(D32 相転移): スピン格子。
   await page.click('.scene-gallery-list button[data-scene-file="d32-magnet-transition.json"]');
-  await expect(fieldTitle).toContainText("イジング スピン格子");
+  await expect(fieldTitle).toContainText("小さな磁石の向き");
 
   // 気体(D30): 速さのヒストグラム + 粒子群が Scene View に出る。
   await page.click('.scene-gallery-list button[data-scene-file="d30-gas-box.json"]');
@@ -929,8 +929,8 @@ test("B9: エディタから量子ドメイン(1D/2D)をプリセットで新規
   await page.click("#btn-add-quantum-1d");
   await page.click("#btn-settings"); // ポップオーバーを閉じる。
   await expect(fieldPanel).toBeVisible();
-  await expect(fieldTitle).toContainText("量子 1D");
-  await expect(fieldTitle).toContainText("格子 128 点");
+  await expect(fieldTitle).toContainText("見つかりやすさ");
+  await expect(fieldTitle).toContainText("128 点のます目");
 
   // --- 2D: 二重スリット(D27と同じ構成、`quantum2dDoubleSlitPotential`のdoc参照)。
   // 場のパネルは2Dを優先して描く(`updateFieldPanel`のdoc「優先順位を固定する」)ので、
@@ -951,7 +951,7 @@ test("B9: エディタから量子ドメイン(1D/2D)をプリセットで新規
   await page.fill("#input-quantum2d-slit-separation", "2.0");
   await page.click("#btn-add-quantum-2d");
   await page.click("#btn-settings"); // ポップオーバーを閉じる。
-  await expect(fieldTitle).toContainText("量子 2D");
+  await expect(fieldTitle).toContainText("見つかりやすさ");
   await expect(fieldTitle).toContainText("64×64");
 
   expect(errors).toEqual([]);

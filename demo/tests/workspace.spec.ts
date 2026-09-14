@@ -4348,9 +4348,13 @@ test("「みる」では、3Dが見どころの実験のグラフは開かない
   await expect(page.locator("#probe-graphs")).toBeHidden();
   const watch = (await page.locator('.card[data-card="watch"]').textContent()) ?? "";
   // 「グラフの山の高さが…低くなっていきます」のような**断定**はしない。
-  // 触れるなら「ダイヤルを右へ回すと」と、出し方を添える形で。
+  // 触れるなら、出し方を添える形で。**指す先は画面に在る物の名前**にする
+  // ——以前は「ダイヤルを右へ回すと」と書いていたが、丸いダイヤルは画面の
+  // どこにも無く(実物は右上の「画面の詳しさ」の帯)、利用者役は探して
+  // 見つけられなかった。
   if (watch.includes("グラフ")) {
-    expect(watch, "グラフに触れるなら、出し方を添える").toContain("ダイヤルを右へ");
+    expect(watch, "グラフに触れるなら、出し方を添える").toContain("「画面の詳しさ」");
+    expect(watch, "画面に無い物(ダイヤル)を指さない").not.toContain("ダイヤル");
   }
   expect(errors).toEqual([]);
 });
@@ -4937,6 +4941,237 @@ test("数値欄にカーソルを置いたままの Ctrl+Z でも、物が元へ
   await page.waitForTimeout(400);
   expect(await x(), "物が元の場所へ戻っている").toBeCloseTo(before, 2);
   expect(Number(await field.inputValue()), "欄も物と同じ値を出している").toBeCloseTo(before, 2);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察、進行管理役の再現)**: 「みる」は自分で
+// 「現象だけを大きく(道具は隠す)」と名乗っている段なのに、そこで
+// 「➕ 球を1つ足す」を押すと、材質11種・置き場所 x,y,z・向き x,y,z・
+// 「坂として使うには…動かない(Static)に」・動き方・上の面の高さ・この上に
+// 置く・そっと押す5方向、が一度に出ていた(実測、粒度0で再現)。札そのものは
+// 選んだ瞬間に開いてよいが、中の道具まで全部出すのは、アプリが自分の言って
+// いることと逆をやっていることになる。
+test("「選んだもの」札の中身も、粒度に沿って増えていく", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.locator('.card[data-card="add-body"] .card-header').first().click();
+  await page.click("#btn-add-body-card");
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+
+  const shown = async () => {
+    const out: Record<string, boolean> = {};
+    for (const id of [
+      "focus-material",
+      "focus-pos-x",
+      "focus-rot-z",
+      "focus-motion",
+      "btn-place-on-top",
+      "btn-push-right",
+      "btn-record-body",
+      "btn-remove-body",
+      "btn-follow-body",
+    ]) {
+      out[id] = await page.locator(`#${id}`).isVisible().catch(() => false);
+    }
+    return out;
+  };
+
+  // みる: 何を選んだか(数値)と、見かたを変える操作だけ。
+  let s = await shown();
+  expect(s["btn-follow-body"], "追いかけるは出ている").toBe(true);
+  expect(s["btn-remove-body"], "足せる段では消せる").toBe(true);
+  for (const id of ["focus-material", "focus-pos-x", "focus-rot-z", "focus-motion", "btn-place-on-top", "btn-push-right", "btn-record-body"]) {
+    expect(s[id], `みるでは出ていない: ${id}`).toBe(false);
+  }
+
+  // さわる: 条件を変える操作(材質・動き方・そっと押す)が足される。
+  await setGrain(page, 1);
+  s = await shown();
+  expect(s["focus-material"]).toBe(true);
+  expect(s["focus-motion"]).toBe(true);
+  expect(s["btn-push-right"]).toBe(true);
+  expect(s["focus-pos-x"], "組み立ての欄はまだ出ない").toBe(false);
+  expect(s["btn-record-body"], "記録はまだ出ない").toBe(false);
+
+  // しらべる: 記録を増やす操作が足される。
+  await setGrain(page, 2);
+  s = await shown();
+  expect(s["btn-record-body"]).toBe(true);
+  expect(s["focus-pos-x"], "組み立ての欄はまだ出ない").toBe(false);
+
+  // つくる: 組み立ての道具がぜんぶ出る。
+  await setGrain(page, 3);
+  s = await shown();
+  for (const id of ["focus-pos-x", "focus-rot-z", "btn-place-on-top"]) {
+    expect(s[id], `つくるでは出ている: ${id}`).toBe(true);
+  }
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 「見え方」の「📈 グラフを出す」は、
+// 画面の詳しさそのものを動かす(実測: 「みる」で押すと帯が「さわる」へ)。
+// 押した人は「みる」の中のボタンを押したつもりなので、道具が増えたことに
+// 驚く。何をしたのかを、押す前(title)にも押した後(知らせ)にも言う。
+test("「グラフを出す」が帯を動かしたことを、画面で言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.waitForTimeout(1200);
+  await setGrain(page, 0);
+  await page.locator('.card[data-card="view"] .card-header').first().click();
+
+  const toggle = page.locator("#btn-toggle-analysis");
+  await expect(toggle).toContainText("グラフを出す");
+  expect(await toggle.getAttribute("title")).toContain("画面の詳しさ");
+  await expect(page.locator("#view-grain-note")).toBeHidden();
+
+  await toggle.click();
+  await expect(page.locator("#app")).toHaveAttribute("data-grain", "touch");
+  await expect(page.locator("#view-grain-note")).toContainText("さわる");
+  await expect(page.locator("#view-grain-note")).toContainText("画面の詳しさ");
+  await expect(toggle).toContainText("グラフをしまう");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 説明文が「ダイヤルを右へ回して」と言うが、
+// 丸いダイヤルは画面のどこにも無い(実物は右上の「画面の詳しさ」という帯)。
+// 利用者役は探して見つけられず、案内されたグラフを結局見られなかった。
+test("画面の文章が、無い物(ダイヤル)を指していない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  for (const id of ["d3-bounce", "d1-free-fall", "d38-two-balls"]) {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1200);
+    await setGrain(page, 1);
+    const text = await page.locator("#app").innerText();
+    expect(text, `${id} の画面に「ダイヤル」が出ていない`).not.toContain("ダイヤル");
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 回路の実験は舞台に何も映らず、グラフの
+// 凡例は「つなぎ目4の電圧」のように番号で呼ぶのに、その番号がどこなのかを
+// 知る手がかりが画面のどこにも無かった(素子の一覧は「つくる」の道具箱の
+// 中にしか無い)。
+test("回路の実験では、つないであるものが「みる」から読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "電気の工作台");
+  await expect(page.locator(".palette-row").first()).toContainText("電気");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2000);
+  await setGrain(page, 0);
+
+  const card = page.locator('.card[data-card="circuit"]');
+  await expect(card).toBeVisible();
+  const text = await card.innerText();
+  expect(text).toContain("つないであるもの");
+  expect(text).toContain("つなぎ目");
+  // 回路図の略記は出ていない。
+  expect(text).not.toContain("GND");
+  expect(text).not.toMatch(/\bN\d\b/);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 「ふりこ」は「往復します」と書いてあるのに
+// 揺れて見えない——出荷しているシーンの初期振れ角は 0.05 rad(2.9°、ひも 1m に
+// 対して左右 5cm)で、実測でも x は ±0.05 m しか動かない。小さいのには理由が
+// ある(Rust 側の受け入れテストが、この小振幅で「周期 = 2π√(長さ/重力)」を
+// 1% 以内で確かめている)ので、**シーンJSONは変えず**、理由を書いたうえで
+// 「振れはば」のつまみを渡す。
+test("ふりこは、振れはばを大きくすれば目で見て往復する", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d11-pendulum"]');
+  await page.waitForTimeout(1500);
+  await setGrain(page, 1);
+
+  // 小さいことと、その理由が読める。
+  await expect(page.locator("#context")).toContainText("わざと小さく");
+
+  const bobX = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const n = Number(w.read_component("body_count", ""));
+      for (let i = 0; i < n; i++) {
+        if (w.read_component("body_label_at", String(i)) === "bob") {
+          return w.body_position_at_f32(i)[0];
+        }
+      }
+      return 0;
+    });
+
+  const swing = page.locator('.knob[data-knob-id="swing"] input[type="range"]');
+  await expect(swing).toBeVisible();
+  await swing.fill("45");
+  await page.waitForTimeout(2000);
+
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < 25; i++) {
+    const x = await bobX();
+    min = Math.min(min, x);
+    max = Math.max(max, x);
+    await page.waitForTimeout(100);
+  }
+  // 45度なら、ひも 1m に対して左右およそ 0.7m ——点ではなく往復として見える。
+  expect(max - min, `振れはば45度での x の幅: ${min} 〜 ${max}`).toBeGreaterThan(1.0);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 場のパネルの見出しが `量子 2D |ψ|² (256×128)`
+// のように数式記号のままだった。「Ψ² のような数式記号や (256×128) の意味が
+// 全く分からなかった」。何が明るいのかを言葉で書き、元の記号は括弧で残す。
+test("場のパネルの見出しが、何を見ているかを言葉で言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "二重スリット");
+  await expect(page.locator(".palette-row").first()).toContainText("スリット");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2500);
+
+  const title = page.locator("#field-title");
+  await expect(title).toBeVisible();
+  const text = (await title.textContent()) ?? "";
+  expect(text, "何が明るいのかが言葉で書いてある").toContain("見つかりやすさ");
+  expect(text, "ます目の数が何のことか分かる").toContain("ます目");
+  expect(text.trim().startsWith("量子"), `見出し: ${text}`).toBe(false);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(進行管理役の実測、上の「下端の器」への作り替えで生まれた退行)**:
+// 保存の札をスクロールする器の外へ出したとき、開け閉めを決める `syncCards` が
+// `#context-body` だけを見ていたので、**この札だけが粒度を無視して開きっぱなし**
+// になっていた——「みる」(道具は隠す段)で名前の欄と保存ボタンが出ていた。
+test("下端に置いた「この場面を保存する」も、粒度に従って畳まれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  const card = page.locator('#context-footer .card[data-card="my-scenes"]');
+
+  await setGrain(page, 0);
+  await expect(card).toHaveAttribute("data-expanded", "false");
+  await expect(page.locator("#btn-save-scene")).toBeHidden();
+
+  await setGrain(page, 3);
+  await expect(card).toHaveAttribute("data-expanded", "true");
+  await expect(page.locator("#btn-save-scene")).toBeVisible();
 
   expect(errors).toEqual([]);
 });

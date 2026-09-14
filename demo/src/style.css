@@ -1400,6 +1400,18 @@ body {
   border: 1px solid #364561;
 }
 
+/* 「つないであるもの」札の一覧。回路が 3D に映らない実験で、何と何が
+   つながっているかを読む場所(`WorkspaceApi.circuitElements` のdoc参照)。 */
+.circuit-parts {
+  margin: 0;
+  padding-left: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--text-subtle);
+}
+
 /* 回路エディタの数値欄。見出しは選んだ部品に合わせて書き換わり、使わない欄は
    `hidden` で消える(`FIELD_LABELS` の doc 参照)。行が詰まりすぎないよう、
    欄ごとにひとまとまりとして並べる。 */
@@ -2034,6 +2046,30 @@ kbd {
   color: var(--text-subtle);
   text-align: center;
   min-height: 14px;
+}
+
+/* **「選んだもの」札の中身にも、同じグラデーションを掛ける**
+   (`workspace.ts` の `section(...)` のdoc参照)。
+
+   札そのものは選んだ瞬間に必ず開くが、中の道具まで常に全部出していたので、
+   「みる」——自分で「現象だけを大きく(道具は隠す)」と書いている段——で物を
+   1つ置いただけで、材質11種・座標6欄・動き方・押す5方向が一度に出ていた。
+   アプリが自分の言っていることと逆をやっている状態だった。
+
+   出し分けを JS ではなく CSS に置くのは、札が粒度の変化で組み直されないから
+   (`syncCards` は開閉を変えるだけ)。帯を動かした瞬間に中身も追従する。 */
+#app[data-grain="watch"] .focus-section[data-at="touch"],
+#app[data-grain="watch"] .focus-section[data-at="study"],
+#app[data-grain="watch"] .focus-section[data-at="build"],
+#app[data-grain="touch"] .focus-section[data-at="study"],
+#app[data-grain="touch"] .focus-section[data-at="build"],
+#app[data-grain="study"] .focus-section[data-at="build"] {
+  display: none;
+}
+.focus-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
 /* --- 文脈の柱(カード) --- */

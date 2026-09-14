@@ -284,6 +284,18 @@ export type WorkspaceApi = {
    * 実験を読み込むたびに呼ぶ。飾りの無い実験では空の配列。
    */
   setDecor: (decor: readonly SceneDecoration[]) => void;
+  /**
+   * **いま配線されている回路の素子**を、読める言葉で並べたもの
+   * (Rust 側の `circuit_element_label_at`。回路が無ければ空)。
+   *
+   * 回路の実験は舞台に形のある物が出ない——「電気の工作台」は画面の大半が
+   * 真っ黒のままで、電池も LED も出てこない。グラフの凡例は
+   * 「つなぎ目4の電圧」のように番号で呼ぶので、**その番号がどこなのかを
+   * 知る手がかりが画面のどこにも無かった**(利用者役の観察)。素子の一覧は
+   * これまで「つくる」の道具箱(回路タブ)の中にしか無く、「みる」からは
+   * 届かなかった。
+   */
+  circuitElements: () => string[];
 };
 
 export type WorkspaceApiRef = { current: WorkspaceApi | null };
@@ -1440,7 +1452,7 @@ export function setUpWorkspace(
     if (stageEmpty) {
       return graphOnScreen
         ? "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。"
-        : "📈 舞台には形のある物が出ません。右のパネルの数値を見てください(右上のダイヤルを右へ回すと、グラフも出ます)。";
+        : "📈 舞台には形のある物が出ません。右のパネルの数値を見てください(右上の「画面の詳しさ」を右へ動かすと、グラフも出ます)。";
     }
     if (experiment.view === "field") {
       return "👀 3D の中に出る「場」のパネルに、波や分布が描かれます。";
@@ -1448,7 +1460,7 @@ export function setUpWorkspace(
     if (experiment.view === "graph") {
       return graphOnScreen
         ? "👀 まん中の 3D と、下のグラフの両方に出ます。"
-        : "👀 まん中の 3D を見てください(右上のダイヤルを右へ回すと、下にグラフも出ます)。";
+        : "👀 まん中の 3D を見てください(右上の「画面の詳しさ」を右へ動かすと、下にグラフも出ます)。";
     }
     return "👀 まん中の 3D を見てください。";
   }
@@ -2250,6 +2262,33 @@ export function setUpWorkspace(
       },
     });
 
+    // **回路は、見えないなら書く**(`WorkspaceApi.circuitElements` の doc 参照)。
+    // 3D に出ない実験でも、何と何がつながっているかは読めるようにする。
+    const circuit = apiRef.current?.circuitElements() ?? [];
+    if (circuit.length > 0) {
+      specs.push({
+        id: "circuit",
+        title: "つないであるもの",
+        reveal: 0, // 舞台に映らないものの代わりなので、いちばん浅い段から出す。
+        summary: `${circuit.length}個`,
+        build: (body) => {
+          const note = document.createElement("p");
+          note.className = "card-note";
+          note.textContent =
+            "この場面の回路です。グラフや数値に出てくる「つなぎ目◯」は、ここに出てくる番号と同じところを指しています。";
+          body.appendChild(note);
+          const list = document.createElement("ul");
+          list.className = "circuit-parts";
+          for (const label of circuit) {
+            const item = document.createElement("li");
+            item.textContent = label;
+            list.appendChild(item);
+          }
+          body.appendChild(list);
+        },
+      });
+    }
+
     if (!experiment.knobs?.length) {
       // **つまみが無いことを、黙って隠さない**。「変えてみる」欄そのものが
       // 消えていたので、条件を変えられない実験があるとは思わず、探し回った
@@ -2365,6 +2404,36 @@ export function setUpWorkspace(
           title: `選んだもの — ${friendlyBodyLabel(readout.label)}${titleSuffix}`,
           reveal: 0, // 選ぶ行為そのものが局所への踏み込みなので、常に開く。
           build: (body) => {
+            /**
+             * **札の中身にも、同じグラデーションを掛ける**。
+             *
+             * 札そのものは常に開くが、中に入れる道具まで常に全部出していた。
+             * 実測(粒度「みる」=「現象だけを大きく(道具は隠す)」と自分で
+             * 書いている段で、「➕ 球を1つ足す」を押した直後): 材質の選択
+             * 11 種・置き場所 x,y,z・向き x,y,z・「坂として使うには…
+             * 動かない(Static)に」・動き方 Dynamic/Static/Kinematic・
+             * 上の面の高さ・この上に球を置く・そっと押す5方向、が一度に
+             * 出ていた。**アプリが自分の言っていることと逆をやっている**。
+             *
+             * どの段で出すかは、その道具が何をする物かで決める:
+             *   みる  … 何を選んだか(数値)と、見かたを変える操作
+             *           (追いかける/全体へ戻る/消す——足せる段では消せる)
+             *   さわる … 条件を変える操作(材質・動き方・そっと押す)
+             *   しらべる… 記録を増やす操作(グラフに記録)
+             *   つくる … 組み立てる操作(置き場所・向き・上に置く)
+             *
+             * 出し分けは CSS(`#app[data-grain]` × `.focus-section[data-at]`)
+             * に任せる。札は粒度が変わるたびに組み直されるわけではない
+             * (`syncCards` は開閉を変えるだけ)ので、JS で分岐すると、帯を
+             * 動かしても中身が前の段のままになる。
+             */
+            const section = (at: "touch" | "study" | "build") => {
+              const wrap = document.createElement("div");
+              wrap.className = "focus-section";
+              wrap.dataset.at = at;
+              body.appendChild(wrap);
+              return wrap;
+            };
             if (extraCount > 0) {
               const names = group
                 .filter((idx) => idx !== selected)
@@ -2443,7 +2512,8 @@ export function setUpWorkspace(
                 }
               });
               row.append(label, select);
-              body.appendChild(row);
+              const materialSection = section("touch");
+              materialSection.appendChild(row);
               const note = document.createElement("p");
               note.className = "card-note";
               note.id = "focus-material-note";
@@ -2467,7 +2537,7 @@ export function setUpWorkspace(
                     "そこからは密度で計算し直し、場面を最初から組み直します。",
                 ),
               );
-              body.appendChild(note);
+              materialSection.appendChild(note);
             }
 
             // **置き場所も、この札で決められる**。数値の欄は Inspector の
@@ -2512,7 +2582,8 @@ export function setUpWorkspace(
             };
             for (const input of inputs) input.addEventListener("change", push);
             place.appendChild(fields);
-            body.appendChild(place);
+            const placeSection = section("build");
+            placeSection.appendChild(place);
             focusPositionInputs = inputs;
 
             // **向きも数値で決められるようにする**(`setBodyRotation` の doc)。
@@ -2568,7 +2639,7 @@ export function setUpWorkspace(
                 ? "ここ(ゆか)の向きはここでは変えられません。坂を作るには、下の「＋ 追加」で箱などを置き、向きを 20〜40 度にしたうえで、動き方を「動かない(Static)」にしてください。"
                 : "坂として使うには、向きを 20〜40 度にしたうえで、下の「動き方」を「動かない(Static)」にしてください。動くままだと、重力で転がって平らに戻ります。";
             turn.appendChild(turnNote);
-            body.appendChild(turn);
+            placeSection.appendChild(turn);
             focusRotationInputs = turnInputs;
 
             // **勧めた操作を、その場でできるようにする**(進行管理役の実測)。
@@ -2616,7 +2687,7 @@ export function setUpWorkspace(
                 renderContext();
               });
               motionRow.append(motionLabel, motionSelect);
-              body.appendChild(motionRow);
+              section("touch").appendChild(motionRow);
             }
 
             // **「この上に置く」**(利用者役「つくる」が「いちばん困る」に
@@ -2641,7 +2712,8 @@ export function setUpWorkspace(
               topRow.className = "card-note";
               topRow.id = "focus-top-note";
               topRow.textContent = `上の面の高さ ${top.toFixed(3)} m(ここに物を載せられます)`;
-              body.appendChild(topRow);
+              const onTopSection = section("build");
+              onTopSection.appendChild(topRow);
 
               const placeActions = document.createElement("div");
               placeActions.className = "card-actions";
@@ -2658,7 +2730,7 @@ export function setUpWorkspace(
                 renderContext();
               });
               placeActions.appendChild(onTop);
-              body.appendChild(placeActions);
+              onTopSection.appendChild(placeActions);
             }
 
             // **きっかけを作る道具**。
@@ -2689,7 +2761,8 @@ export function setUpWorkspace(
               pushRow.textContent = staticNow
                 ? "そっと押して、きっかけを作る:(いまは「動かない(Static)」なので押せません。上の「動き方」を「動く(Dynamic)」にしてください)"
                 : "そっと押して、きっかけを作る:";
-              body.appendChild(pushRow);
+              const pushSection = section("touch");
+            pushSection.appendChild(pushRow);
               const pushActions = document.createElement("div");
               pushActions.className = "card-actions";
               pushActions.id = "focus-push";
@@ -2714,7 +2787,7 @@ export function setUpWorkspace(
                 });
                 pushActions.appendChild(push);
               }
-              body.appendChild(pushActions);
+              pushSection.appendChild(pushActions);
             }
 
             // **この物もグラフに記録する**。記録が付くのは最初に置いた物だけで、
@@ -2728,7 +2801,7 @@ export function setUpWorkspace(
                 api.addBodyProbes(selected);
                 renderContext();
               });
-              body.appendChild(record);
+              section("study").appendChild(record);
             }
             const actions = document.createElement("div");
             actions.className = "card-actions";
@@ -2860,17 +2933,38 @@ export function setUpWorkspace(
         const graphs = document.createElement("button");
         graphs.type = "button";
         graphs.id = "btn-toggle-analysis";
-        graphs.textContent =
-          detail >= ANALYSIS_READABLE ? "📈 グラフをしまう" : "📈 グラフを出す";
-        graphs.addEventListener("click", () =>
-          applyDetail(detail >= ANALYSIS_READABLE ? 0.8 : ANALYSIS_READABLE),
-        );
+        const paintGraphButton = () => {
+          graphs.textContent =
+            detail >= ANALYSIS_READABLE ? "📈 グラフをしまう" : "📈 グラフを出す";
+        };
+        paintGraphButton();
+        // **このボタンは画面の詳しさを動かす**。そのことを、押す前にも押した
+        // 後にも言う——黙って帯が動くので、「みる」のつもりのまま「さわる」に
+        // 変わっていることに気づかず、増えた道具に驚いた(利用者役の観察:
+        // 「自分は『みる』の中のボタンを押しただけのつもりだった」)。
+        graphs.title =
+          "グラフの段を開きます。開くぶん、右上の「画面の詳しさ」も動きます(帯を左へ戻せば元どおり)。";
+        graphs.addEventListener("click", () => {
+          const opening = detail < ANALYSIS_READABLE;
+          applyDetail(opening ? ANALYSIS_READABLE : 0.8);
+          paintGraphButton();
+          grainNote.textContent = opening
+            ? `グラフを出すために、右上の「画面の詳しさ」を「${nearestStop(detail).label}」まで動かしました(帯を左へ戻すと元に戻ります)。`
+            : `グラフをしまい、右上の「画面の詳しさ」を「${nearestStop(detail).label}」に戻しました。`;
+          grainNote.hidden = false;
+        });
         actions.append(camera, graphs);
         body.appendChild(actions);
+        const grainNote = document.createElement("p");
+        grainNote.className = "card-note";
+        grainNote.id = "view-grain-note";
+        grainNote.dataset.tone = "ok";
+        grainNote.hidden = true;
+        body.appendChild(grainNote);
         const note = document.createElement("p");
         note.className = "card-note";
         note.textContent =
-          "右上のダイヤルを右へ回すほど、一覧・グラフ・編集の道具が増えます。";
+          "右上の「画面の詳しさ」の帯を右へ動かすほど、一覧・グラフ・編集の道具が増えます。";
         body.appendChild(note);
       },
     };
@@ -2908,7 +3002,11 @@ export function setUpWorkspace(
 
   /** 大局の粒度と、カードごとの上書きから、各カードの開閉を決める。 */
   function syncCards(): void {
-    for (const card of contextBody.querySelectorAll<HTMLElement>(".card")) {
+    // **下端の器(`#context-footer`)の札も同じ規則で開け閉めする。**
+    // 保存の札をスクロールする器の外へ出したとき、ここが `#context-body` だけを
+    // 見ていたので、**その札だけが粒度を無視して開きっぱなし**になっていた
+    // ——「みる」(道具は隠す段)で名前の欄と保存ボタンが出ていた。
+    for (const card of document.querySelectorAll<HTMLElement>("#context .card")) {
       const id = card.dataset.card ?? "";
       const reveal = Number(card.dataset.reveal ?? "0");
       const override = cardOverrides.get(id);
