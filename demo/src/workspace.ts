@@ -198,8 +198,19 @@ export type WorkspaceApi = {
    * 未知の材質名には`NaN`を返す(呼び出し側は表示を省く)。
    */
   materialFriction: (name: string) => number;
-  /** 選択中の剛体(無ければ -1)。 */
+  /** 選択中の剛体(無ければ -1、最後にクリックしたもの——複数選択でも1件)。 */
   selectedBody: () => number;
+  /**
+   * **いま選ばれている剛体の全部**(課題2、進行管理役の実測)。
+   *
+   * Hierarchy(場面の中身)でCtrl+クリック・Shift+クリックにより複数選べる
+   * ようになっていたが、`selectedBody()`は最後にクリックした1件しか返さず、
+   * 「選んだもの」札も「👀 これを追いかける」もそれしか知らなかった
+   * (`d24-car`を粒度2で3秒走らせ、`wheel_fl`→Ctrl+クリックで`wheel_rr`を
+   * 選んで確かめた実測)。こちらは選ばれている**全部**(昇順、1件なら
+   * `[selectedBody()]`と同じ内容)を返す——単独選択の見た目・挙動は変えない。
+   */
+  selectedBodies: () => number[];
   selectBody: (index: number) => void;
   bodyCount: () => number;
   /** 選択中の剛体の「いまの姿」。UI 側は読むだけ。 */
@@ -2116,11 +2127,42 @@ export function setUpWorkspace(
     if (api && selected >= 0) {
       const readout = api.bodyReadout(selected);
       if (readout) {
+        // **複数選択の一般化(課題2、進行管理役の実測)**: `selected`
+        // (=`selectedBody()`)は昔から「最後にクリックした1件」で、その意味は
+        // 変えない——Inspectorの編集欄(位置・向き・材質)はどれも「1つの剛体」
+        // にしか意味を持たない値だから、`d24-car`で`wheel_fl`と`wheel_rr`を
+        // 一緒に選んでも、どちらか一方(代表=最後にクリックした方)の値を
+        // 出し続ける。ここで平均や片方だけを黙って出すと、選んだつもりの
+        // もう1件の値だと誤読されかねない(実測: 2輪はx,zが違うので、平均を
+        // 出すとどちらの実座標でもない値になる)。
+        //
+        // 変えたのは**件数が読めること**——`selectedBodies()`
+        // (`hierarchyMultiSelection`をそのまま使う、`main.ts`の
+        // `activeSelectionIndices`のdoc参照)が2件以上を返すときだけ、
+        // 見出しに「ほかN件」を足し、下に選択中の名前を並べる注記を出す。
+        // 1件だけのとき(`extraCount === 0`)は見出し・中身とも元のまま
+        // ——既存テスト・スクリーンショットの見た目を壊さない。
+        const group = api.selectedBodies();
+        const extraCount = Math.max(0, group.length - 1);
+        const titleSuffix = extraCount > 0 ? ` ほか${extraCount}件` : "";
         contextBody.appendChild(buildCard({
           id: "focus",
-          title: `選んだもの — ${friendlyBodyLabel(readout.label)}`,
+          title: `選んだもの — ${friendlyBodyLabel(readout.label)}${titleSuffix}`,
           reveal: 0, // 選ぶ行為そのものが局所への踏み込みなので、常に開く。
           build: (body) => {
+            if (extraCount > 0) {
+              const names = group
+                .filter((idx) => idx !== selected)
+                .map((idx) => friendlyBodyLabel(api.bodyReadout(idx)?.label ?? `#${idx}`));
+              const note = document.createElement("p");
+              note.className = "card-note";
+              note.id = "focus-multi-note";
+              note.textContent =
+                `${group.length}個選択中(${friendlyBodyLabel(readout.label)}, ${names.join(", ")})。` +
+                "「👀 これを追いかける」は選んだ物ぜんぶが入る画角を追います。" +
+                "下のかたち・位置・材質は、このうち最後に選んだ1件の値です。";
+              body.appendChild(note);
+            }
             const list = document.createElement("dl");
             list.className = "readouts";
             const rows: [string, string][] = [

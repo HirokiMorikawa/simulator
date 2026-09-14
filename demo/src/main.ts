@@ -7183,15 +7183,22 @@ async function setUpSceneView(
    * ではなく地面そのもの)。まわりに何も無ければ`null`を返し、呼び出し側は
    * 従来どおり直前のカメラの向きを保つ(孤立した球1個を追う既存のケースは
    * 変えない)。
+   *
+   * **複数選択への一般化(課題2)**: `excludeIndices`は追いかけている対象
+   * 全部の集合。対象自身を「押し返すべき近くの物」に含めると、2件選んで
+   * 追わせたとき対象どうしが互いを押し合って向きが暴れる(`wheel_fl`と
+   * `wheel_rr`を同時に追わせた場合、互いを押し返す力が乗ってしまう)ので、
+   * 対象全部を除外してから計算する——単独選択なら要素1個の集合になるだけで、
+   * 元の挙動と変わらない。
    */
   function chooseFollowDirection(
     targetCenter: THREE.Vector3,
-    excludeIndex: number,
+    excludeIndices: ReadonlySet<number>,
   ): THREE.Vector3 | null {
     const away = new THREE.Vector3();
     const toOther = new THREE.Vector3();
     for (const [idx, mesh] of bodyMeshes) {
-      if (idx === excludeIndex) continue;
+      if (excludeIndices.has(idx)) continue;
       if (!mesh.visible) continue;
       if (world.read_component("body_is_static_at", String(idx)) === "true") continue;
       toOther.copy(targetCenter).sub(mesh.position);
@@ -7214,17 +7221,22 @@ async function setUpSceneView(
    * 他の物の可視半径(`bodyVisibilityRadius`)の内側に入っていないかを
    * 確かめ、入っていれば**その物の手前**までしか寄らない(向こうへ抜けると
    * 今度はその物自体が視線を塞ぐ——手前で止まるのが正しい)。
+   *
+   * 複数選択への一般化(課題2、`chooseFollowDirection`のdoc参照と同じ理由):
+   * `excludeIndices`は追いかけている対象全部——対象自身を「手前で止まる壁」
+   * として扱うと、2件を並んで追わせたとき片方がもう片方の視線を遮って
+   * しまう。
    */
   function clearCameraFromNearbyBodies(
     targetCenter: THREE.Vector3,
     dir: THREE.Vector3,
     distance: number,
-    excludeIndex: number,
+    excludeIndices: ReadonlySet<number>,
   ): number {
     let result = distance;
     const toOther = new THREE.Vector3();
     for (const [idx, mesh] of bodyMeshes) {
-      if (idx === excludeIndex) continue;
+      if (excludeIndices.has(idx)) continue;
       if (!mesh.visible) continue;
       if (world.read_component("body_is_static_at", String(idx)) === "true") continue;
       toOther.copy(mesh.position).sub(targetCenter);
@@ -7253,7 +7265,7 @@ async function setUpSceneView(
     center: THREE.Vector3,
     radius: number,
     direction: THREE.Vector3,
-    options?: { excludeIndex: number },
+    options?: { excludeIndices: ReadonlySet<number> },
   ) {
     orbit.target.copy(center);
     const normalizedDirection = direction.clone();
@@ -7300,15 +7312,15 @@ async function setUpSceneView(
     }
     let distance = radius * 2.6;
     // **視線の途中にある物を突き抜けない**(課題①、`clearCameraFromNearbyBodies`
-    // のdoc参照)。単独追跡(`excludeIndex`が渡されたとき)だけ確かめる——
-    // `frameCameraOnContent`/`frameCameraOnPoint`の既存の挙動(実測済みの
+    // のdoc参照)。単独/複数追跡(`excludeIndices`が渡されたとき)だけ確かめる
+    // ——`frameCameraOnContent`/`frameCameraOnPoint`の既存の挙動(実測済みの
     // ピクセル数を伴うテストがある)は変えない。
     if (options) {
       distance = clearCameraFromNearbyBodies(
         center,
         normalizedDirection,
         distance,
-        options.excludeIndex,
+        options.excludeIndices,
       );
     }
     camera.position.copy(center).add(normalizedDirection.multiplyScalar(distance));
@@ -7409,7 +7421,13 @@ async function setUpSceneView(
    * 見えているか」を**アグリゲートの框付けとは別枠**で保証する——全体を追う
    * 既定そのものは、これが有効でないときは変えない。
    */
-  let followedBodyIndex = -1;
+  /**
+   * **課題2(進行管理役の実測)で単一の`number`から`number[]`へ一般化した**。
+   * 「置いたばかりの物」ガードは常に1件だけ(`[bodyIndex]`)なので、その場合の
+   * 挙動は変わらない。「👀 これを追いかける」だけが複数件を渡し得る
+   * (`followSelectedBody`のdoc参照)。空配列 = 単独追跡なし。
+   */
+  let followedBodyIndices: number[] = [];
   /**
    * **猶予は時間ではなく「利用者がまだ見ているか」で切る**(進行管理役の実測、
    * 課題6)。
@@ -7460,10 +7478,10 @@ async function setUpSceneView(
   const guidedFollowTarget = new THREE.Vector3();
   const guidedFollowDirection = new THREE.Vector3();
   /**
-   * **単独追跡している物1個だけの箱**。有効でなければ`null`(呼び出し側は
+   * **単独/複数追跡している物ぜんぶを包む箱**。有効でなければ`null`(呼び出し側は
    * アグリゲートな`contentBoundingBox()`にフォールバックする)。
    *
-   * `followedBodyIndex`のdoc参照——「置いたばかりの物を見失わない」ガードと
+   * `followedBodyIndices`のdoc参照——「置いたばかりの物を見失わない」ガードと
    * 「👀 これを追いかける」を同じ変数へ一般化した際、ここも一本化した。
    *
    * **試作1**: アグリゲートな框付けを**計算し終えたあと**、その物が画面から
@@ -7492,40 +7510,53 @@ async function setUpSceneView(
    * (直径172.9px前後)がそのまま単独追跡でも成り立つ。対象は毎フレーム
    * 新しい位置から計算し直すので、往復も起きない。
    */
+  /**
+   * **複数選択への一般化(課題2、進行管理役の実測)**。もとは対象1件の箱
+   * だけを返していたが、`followedBodyIndices`が2件以上のときは**選ばれて
+   * いる物全部を包む箱**を返す——呼び出し側(`updateGuidedFollowCamera`)は
+   * 元から「箱1つ」だけを見て中心・半径を出しているので、単独でも複数でも
+   * 同じ式がそのまま成り立つ(箱の合成=`Box3.union`を挟むだけ)。
+   */
   function followedBodyBox(): THREE.Box3 | null {
-    if (followedBodyIndex < 0 || cameraMovedSinceSpawn) return null;
-    // **覚えた番号は、場面が差し替わると存在しなくなる**。置いた直後に
-    // ⌘Kで別の実験へ移るのは普通の操作で、実際に起きた——実測
-    // (進行管理役): `d1-free-fall`(床0・球1)に箱を足してindex 2を
-    // 覚えた直後に別の実験へ移ると、新しい場面にはその番号の物が無く、
-    // `body_is_removed_at`が`body index 2 out of range`を投げてページ
-    // エラーになった。**個数とメッシュの両方で先に閉じてから**wasmに
-    // 尋ねる(閉じたら覚えるのをやめる——次のフレームでまた同じ例外を
-    // 踏まないため)。
-    const mesh = bodyMeshes.get(followedBodyIndex);
-    if (mesh === undefined || followedBodyIndex >= readNumber(world, "body_count")) {
-      followedBodyIndex = -1;
+    if (followedBodyIndices.length === 0 || cameraMovedSinceSpawn) return null;
+    let box: THREE.Box3 | null = null;
+    for (const index of followedBodyIndices) {
+      // **覚えた番号は、場面が差し替わると存在しなくなる**。置いた直後に
+      // ⌘Kで別の実験へ移るのは普通の操作で、実際に起きた——実測
+      // (進行管理役): `d1-free-fall`(床0・球1)に箱を足してindex 2を
+      // 覚えた直後に別の実験へ移ると、新しい場面にはその番号の物が無く、
+      // `body_is_removed_at`が`body index 2 out of range`を投げてページ
+      // エラーになった。**個数とメッシュの両方で先に閉じてから**wasmに
+      // 尋ねる(閉じたら覚えるのをやめる——次のフレームでまた同じ例外を
+      // 踏まないため)。
+      const mesh = bodyMeshes.get(index);
+      if (mesh === undefined || index >= readNumber(world, "body_count")) {
+        followedBodyIndices = [];
+        return null;
+      }
+      if (world.read_component("body_is_removed_at", String(index)) === "true") {
+        return null;
+      }
+      const r = bodyVisibilityRadius(index);
+      const bodyBox = new THREE.Box3(
+        new THREE.Vector3(mesh.position.x - r, mesh.position.y - r, mesh.position.z - r),
+        new THREE.Vector3(mesh.position.x + r, mesh.position.y + r, mesh.position.z + r),
+      );
+      box = box ? box.union(bodyBox) : bodyBox;
+    }
+    // **「まだ見ている」の近似は「まだ(同じ集合が)選ばれていること」**
+    // (置くと自動で選ばれる、`spawnShapeAt`のdoc参照)——ライブな判定で、
+    // 選び直せば外れる。単独のときと同じ考え方をそのまま集合の一致へ広げた
+    // ——`activeSelectionIndices()`/`followedBodyIndices`はどちらも昇順に
+    // 揃えてあるので、配列としての一致で比べればよい。
+    const current = activeSelectionIndices();
+    if (
+      current.length !== followedBodyIndices.length ||
+      current.some((value, i) => value !== followedBodyIndices[i])
+    ) {
       return null;
     }
-    if (world.read_component("body_is_removed_at", String(followedBodyIndex)) === "true") {
-      return null;
-    }
-    // **「まだ見ている」の近似は「まだ選ばれていること」**(置くと自動で
-    // 選ばれる、`spawnShapeAt`のdoc参照)——ライブな判定で、選び直せば外れる。
-    if (selectedBodyIndex !== followedBodyIndex) return null;
-    const r = bodyVisibilityRadius(followedBodyIndex);
-    return new THREE.Box3(
-      new THREE.Vector3(
-        mesh.position.x - r,
-        mesh.position.y - r,
-        mesh.position.z - r,
-      ),
-      new THREE.Vector3(
-        mesh.position.x + r,
-        mesh.position.y + r,
-        mesh.position.z + r,
-      ),
-    );
+    return box;
   }
   function updateGuidedFollowCamera() {
     // **単独追跡が有効な間は、アグリゲートな計算を一切通さない**
@@ -7546,11 +7577,15 @@ async function setUpSceneView(
         followedBox.getSize(new THREE.Vector3()).length() * 0.5,
         0.5,
       );
+      // 対象全部を「押し返すべき/塞ぐ近くの物」から除外する(`chooseFollowDirection`
+      // ・`clearCameraFromNearbyBodies`のdoc参照——複数選択で対象どうしが
+      // 互いを押し合わないため)。
+      const excludeIndices = new Set(followedBodyIndices);
       const direction =
-        chooseFollowDirection(center, followedBodyIndex) ??
+        chooseFollowDirection(center, excludeIndices) ??
         camera.position.clone().sub(center);
       positionCameraTowardTarget(center, radius, direction, {
-        excludeIndex: followedBodyIndex,
+        excludeIndices,
       });
       return;
     }
@@ -7959,6 +7994,41 @@ async function setUpSceneView(
   // 「呼べば例外」なので、呼ぶ前に弾く)。
   function hasSelectedBody(): boolean {
     return selectedBodyIndex >= 0 && selectedBodyIndex < readNumber(world, "body_count");
+  }
+  /**
+   * **いま「選ばれている」とみなす剛体の集合**(進行管理役の実測: `d24-car`を
+   * 粒度2で3秒走らせ、`wheel_fl`をクリック→Ctrl+クリックで`wheel_rr`を追加
+   * すると、Hierarchyの印は両方に付く(`.selected`/`.multi-selected`)のに、
+   * 「選んだもの」札も「👀 これを追いかける」も`wheel_rr`1件しか知らず、
+   * 押すとその1件だけに寄っていた)。
+   *
+   * `hierarchyMultiSelection`(このファイル冒頭のdoc参照)は元から複数選択の
+   * 実体を持っている——**ここでは新しい選択の仕組みを作らず、その集合を
+   * そのまま使い回す**。
+   *
+   * **`hierarchyMultiSelection`が`selectedBodyIndex`を含んでいるときだけ**
+   * 複数として扱い、含んでいなければ単独`[selectedBodyIndex]`へフォールバック
+   * する。これが要る理由は実測で確かめた: Scene View(3D側)を直接クリックする
+   * 経路(`selectBody`呼び出し)は`hierarchyMultiSelection`に一切触れない
+   * (`selectBody`のdoc参照)。そのため、Hierarchyで2件をCtrl+クリックした
+   * *あとに* 3D側で別の1件(例えば`chassis`)を直接クリックすると、
+   * `selectedBodyIndex`はその1件に変わるのに`hierarchyMultiSelection`は
+   * さっきの2件のまま古くなって残る——`has(selectedBodyIndex)`を確かめずに
+   * 集合をそのまま使うと、1件だけ選んだつもりなのに2件を追いかけてしまう。
+   */
+  function activeSelectionIndices(): number[] {
+    if (!hasSelectedBody()) return [];
+    if (hierarchyMultiSelection.size > 1 && hierarchyMultiSelection.has(selectedBodyIndex)) {
+      return [...hierarchyMultiSelection]
+        .filter(
+          (i) =>
+            i >= 0 &&
+            i < readNumber(world, "body_count") &&
+            world.read_component("body_is_removed_at", String(i)) !== "true",
+        )
+        .sort((a, b) => a - b);
+    }
+    return [selectedBodyIndex];
   }
   function selectBody(index: number) {
     selectedBodyIndex = index;
@@ -10156,12 +10226,13 @@ async function setUpSceneView(
     // しまう——置いた物が遠くの点にしか見えなかった原因(利用者役④の観察)。
     mesh.position.set(x, y, z);
     addSpawnedMesh(bodyIndex, mesh);
-    // **追従カメラに「いま置いた」と伝える**(`followedBodyIndex`のdoc参照
+    // **追従カメラに「いま置いた」と伝える**(`followedBodyIndices`のdoc参照
     // ——`updateGuidedFollowCamera`がこれを見て、アグリゲートの框付けとは
-    // 別枠でこの物を単独で追わせる)。片道スイッチの`cameraMovedSinceSpawn`
+    // 別枠でこの物を単独で追わせる)。常に1件だけを置くので単独追跡と同じ
+    // 形(要素1個の配列)になる。片道スイッチの`cameraMovedSinceSpawn`
     // も、新しく置いた物についてはまだ手を引いていない状態へ戻す
     // (`cameraMovedSinceSpawn`のdoc参照)。
-    followedBodyIndex = bodyIndex;
+    followedBodyIndices = [bodyIndex];
     cameraMovedSinceSpawn = false;
     // **置いた物の動きが、そのままグラフに出る**。観測点はシーンJSONが宣言した
     // ものしか無く、自分で置いた物には一本も付かなかったので、自作の場面では
@@ -11746,11 +11817,11 @@ async function setUpSceneView(
       guidedCameraSnap = true;
       guidedSceneStartBox = null;
       guidedSceneStartPending = true;
-      // **前の場面の「単独追跡」を持ち越さない**。`followedBodyIndex`は
+      // **前の場面の「単独追跡」を持ち越さない**。`followedBodyIndices`は
       // ボディ番号でしかないので、差し替わった新しい場面でたまたま同じ番号の
       // 別の物を指してしまう恐れがある(`followedBodyBox`の存在チェックだけ
       // では防げない事故)。場面が変わったら素直に外す。
-      followedBodyIndex = -1;
+      followedBodyIndices = [];
       cameraMovedSinceSpawn = false;
     },
     followCamera: (enabled) => {
@@ -11758,11 +11829,21 @@ async function setUpSceneView(
       guidedCameraSnap = enabled;
     },
     followSelectedBody: () => {
-      // **選んだ物があれば、その物を単独追跡へ渡す**(`followedBodyIndex`の
-      // doc参照——「置いたばかりの物を見失わない」仕組みの一般化)。
+      // **選んでいる物があれば、その全部を単独追跡へ渡す**(`followedBodyIndices`
+      // のdoc参照——「置いたばかりの物を見失わない」仕組みの一般化)。
+      //
+      // **課題2(進行管理役の実測)**: `d24-car`を粒度2で3秒走らせ、
+      // `wheel_fl`をクリック→Ctrl+クリックで`wheel_rr`を追加して押すと、
+      // 以前は`selectedBodyIndex`(最後にクリックした`wheel_rr`)しか渡さず、
+      // `wheel_fl`は追いかける先から漏れていた(距離: wheel_rr 1.44m/
+      // wheel_fl 3.63mと、選んだはずの2件が同じようには寄らなかった)。
+      // `activeSelectionIndices()`(Hierarchyの複数選択`hierarchyMultiSelection`
+      // をそのまま使う、doc参照)へ差し替え、選ばれている物**全部**を渡す
+      // ——単独選択なら要素1個の配列になるだけで、元の挙動と変わらない。
       // `cameraMovedSinceSpawn`も明示的な指示として解く(同上docの追記参照)。
-      if (selectedBodyIndex >= 0) {
-        followedBodyIndex = selectedBodyIndex;
+      const targets = activeSelectionIndices();
+      if (targets.length > 0) {
+        followedBodyIndices = targets;
         cameraMovedSinceSpawn = false;
       }
       // 選んでいる物が無ければ、これまでどおり「動く物ぜんぶ」を追う既定へ。
@@ -11817,6 +11898,7 @@ async function setUpSceneView(
     // 負のindexを「選択なし」として受ける(ボディが1つも無いギャラリーシーンで
     // 既に使っている状態表現と同じ、`selectedBodyIndex = -1`)。
     selectedBody: () => selectedBodyIndex,
+    selectedBodies: () => activeSelectionIndices(),
     selectBody: (index) => {
       if (index < 0) {
         selectedBodyIndex = -1;

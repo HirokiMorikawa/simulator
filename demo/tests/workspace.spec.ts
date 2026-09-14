@@ -606,6 +606,15 @@ test("秒より大きい単位で進む実験は、書き出したCSVの時刻�
   await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
   await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(1);
 
+  // **読む前に必ずとめる**。単位は「そのとき経過している時間」から選ばれるので、
+  // 走らせたままだと**画面を読んだ瞬間**と**CSVを書き出した瞬間**で経過時間が
+  // 違い、その間に単位の境目をまたぐと食い違って見える——実測で踏んだ:
+  // 画面が「時間」を返した直後に書き出したCSVの見出しが `time [日]` になり、
+  // このテストだけが落ちた(実装の食い違いではなく、2つの読みを別の時刻で
+  // 取っていたこのテストの側の欠陥)。とめれば両方が同じ時刻の値になる。
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
   // 画面の「経過した時間」が選んだ単位を、CSVも同じ単位で書いているかどうかの
   // 正解として使う——別々に単位を決める実装が2つ生まれると、今回のように
   // また食い違う。
@@ -1078,6 +1087,43 @@ async function apparentSphereDiameterPx(page: Page): Promise<number> {
     const RADIUS = 0.4; // SPAWN_SPHERE_RADIUS(main.ts)。
     return 2 * RADIUS * pxPerMeterAtDistance;
   });
+}
+
+/**
+ * **任意の1体の見かけの直径 [px]**(`apparentSphereDiameterPx`の一般化)。
+ *
+ * あちらは「直近に置いた球(半径0.4m固定)」専用だったが、課題2(複数選択の
+ * 追跡)の検証は`d24-car`の車輪(半径0.32m、`body_count - 1`ではない任意の
+ * index)を対象にする必要があった。距離とカメラの`fov`・canvas の高さから
+ * 見かけの直径を逆算する式そのものは同じで、対象の`index`と`radius`だけを
+ * 引数にして差し替えた。
+ */
+async function apparentDiameterPxOf(
+  page: Page,
+  index: number,
+  radius: number,
+): Promise<number> {
+  return page.evaluate(
+    ({ index, radius }) => {
+      const cam = (window as unknown as {
+        __camera: { position: { x: number; y: number; z: number }; fov: number };
+      }).__camera;
+      const world = (window as unknown as {
+        __world: { body_position_at_f32(index: number): Float32Array };
+      }).__world;
+      const p = world.body_position_at_f32(index);
+      const dx = cam.position.x - p[0];
+      const dy = cam.position.y - p[1];
+      const dz = cam.position.z - p[2];
+      const distance = Math.hypot(dx, dy, dz);
+      const canvas = document.querySelector("#scene-view-canvas-host canvas") as HTMLCanvasElement;
+      const heightPx = canvas.clientHeight;
+      const fovRad = (cam.fov * Math.PI) / 180;
+      const pxPerMeterAtDistance = heightPx / 2 / Math.tan(fovRad / 2) / distance;
+      return 2 * radius * pxPerMeterAtDistance;
+    },
+    { index, radius },
+  );
 }
 
 /**
@@ -3771,6 +3817,71 @@ test("d24-carでwheel_flを選んで「これを追いかける」を押すと�
   expect(after.camToWheel, "カメラ—wheel_fl 距離").toBeLessThan(after.camToChassis);
 
   // ③課題①: 画面中心付近が単色でつぶれていないこと。
+  const std = await canvasCenterLuminanceStd(page);
+  expect(std, "画面中心付近の輝度の標準偏差").toBeGreaterThan(8);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題2(進行管理役の実測)**: Hierarchy(場面の中身)はCtrl+クリックで
+// 複数選択できる(`.selected`/`.multi-selected`のクラスは両方に付く)のに、
+// 「これを追いかける」は最後にクリックした1件しか渡さず、もう1件は追わずに
+// 置き去りにしていた(実測: `d24-car`で`wheel_fl`→Ctrl+クリックで`wheel_rr`
+// を選んで押すと、「選んだもの」札は「wheel_rr」だけになり、押した後の距離は
+// wheel_rr 1.44m・wheel_fl 3.63mと片方しか寄らなかった)。
+//
+// ここでは
+//   ①Hierarchyの印(`.selected`/`.multi-selected`)が両方に付くこと(既存の
+//     複数選択そのものは壊れていないことの確認)
+//   ②「選んだもの」札の見出しが2件選ばれていることを言うこと
+//   ③押したあと、**両方**が画面に入り、どちらも見かけの直径が十分
+//     (既存テストと同じ40px超えの基準)であること
+//   ④画面中心付近が単色でつぶれていないこと(単独選択のテストと同じ観点)
+// を確かめる。
+test("d24-carでwheel_flとwheel_rrをCtrl+クリックで選んで「これを追いかける」を押すと、両方とも画面に十分な大きさで入る(課題2)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d24-car"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(3000); // 進行管理役の実測と同じく3秒走らせる。
+
+  // wheel_fl(index 2)を選び、Ctrl+クリックで wheel_rr(index 5)を足す
+  // (`d24-car.json`のボディ宣言順=Hierarchyの並び: ground=0, chassis=1,
+  // wheel_fl=2, wheel_fr=3, wheel_rl=4, wheel_rr=5)。
+  await page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_fl" }).click();
+  await page.waitForTimeout(200);
+  await page
+    .locator("#hierarchy-tree .tree-body", { hasText: "wheel_rr" })
+    .click({ modifiers: ["Control"] });
+  await page.waitForTimeout(200);
+
+  // ①複数選択そのものは既存どおり壊れていないこと。
+  const flRow = page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_fl" });
+  const rrRow = page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_rr" });
+  await expect(rrRow).toHaveClass(/selected/);
+  await expect(flRow).toHaveClass(/multi-selected/);
+
+  // ②「選んだもの」札が2件選ばれていることを言うこと(1件だけのときの
+  // 既存の見出し「選んだもの — <名前>」を壊さず、件数だけ足す)。
+  await expect(page.locator('[data-card="focus"] .card-title')).toHaveText(
+    "選んだもの — wheel_rr ほか1件",
+  );
+
+  await page.click("#btn-follow-body");
+  await page.waitForTimeout(1000);
+
+  // ③両方とも画面に十分な大きさで入ること(既存の単独選択テストと同じ
+  // 40pxの基準——両輪とも半径0.32m)。
+  const flDiameter = await apparentDiameterPxOf(page, 2, 0.32);
+  const rrDiameter = await apparentDiameterPxOf(page, 5, 0.32);
+  expect(flDiameter, "wheel_flの見かけの直径[px]").toBeGreaterThan(40);
+  expect(rrDiameter, "wheel_rrの見かけの直径[px]").toBeGreaterThan(40);
+
+  // ④画面中心付近が単色でつぶれていないこと(単独選択の課題①テストと同じ観点)。
   const std = await canvasCenterLuminanceStd(page);
   expect(std, "画面中心付近の輝度の標準偏差").toBeGreaterThan(8);
 
