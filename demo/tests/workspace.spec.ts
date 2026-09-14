@@ -4110,3 +4110,67 @@ test("数値で打ち替えた置き場所も、「動かしたのを戻す」�
   await expect.poll(x, { timeout: 10_000 }).toBe(before);
   expect(errors).toEqual([]);
 });
+
+// **課題(進行管理役の実測)**: 自分で置いた物に選べる材質は4種類(鋼・アルミ・
+// 木・ゴム)だけだった。一方、物性を持っている Rust 側の材質DBには13種類あり、
+// 見た目の色も13種類ぶん用意されていた——**持っているのに選ばせていなかった**。
+// 利用者役(「いくつもの物を組み合わせて、それらしい世界を組み上げたい」人)の
+// 観察:「材質は4種類のみで、色も決まっていた。自由な色や質感を選べる場所は
+// 見つけられなかった」。固体の11種類まで広げる(流体である「水」「空気」は
+// 別の道具があるので外す、`SPAWN_MATERIALS`のdoc参照)。
+test("自分で置いた物は、色も重さも違う材質から選べる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-material")).toBeVisible();
+
+  const options = await page.locator("#focus-material option").allTextContents();
+  // 4種類しか無かった頃には決して満たせない条件。個々の名前ではなく
+  // 「流体以外はひととおり選べる」ことを見る。
+  expect(options.length).toBeGreaterThan(8);
+  for (const name of ["ガラス", "銅", "発泡スチロール", "氷(0°C)"]) {
+    expect(options, `${name} が選べる`).toContain(name);
+  }
+  // 流体は固体の塊として置けないので、ここには出さない。
+  expect(options).not.toContain("水");
+  expect(options).not.toContain("空気");
+
+  // 実際に選ぶと、**画面の色**と**重さ**の両方が変わる(見た目と手触りが
+  // 食い違わない)。実測: 鋼 #9aa3ad / 4019.200 kg → 発泡スチロール
+  // #f0f0ea / 15.360 kg。
+  const drawnColor = () =>
+    page.evaluate(() => {
+      const meshFor = (window as unknown as {
+        __bodyMeshFor?: (i: number) => { traverse(cb: (o: unknown) => void): void } | undefined;
+      }).__bodyMeshFor;
+      const world = (window as unknown as {
+        __world: { read_component(k: string, a: string): string };
+      }).__world;
+      if (!meshFor) return null;
+      const mesh = meshFor(Number(world.read_component("body_count", "")) - 1);
+      if (!mesh) return null;
+      let hex: string | null = null;
+      mesh.traverse((object) => {
+        const m = object as { isMesh?: boolean; material?: { color?: { getHexString(): string } } };
+        if (m.isMesh && m.material?.color && hex === null) hex = m.material.color.getHexString();
+      });
+      return hex;
+    });
+  const massText = () => page.locator('.card[data-card="focus"] dd').nth(1).textContent();
+
+  const steelColor = await drawnColor();
+  const steelMass = Number.parseFloat((await massText()) ?? "0");
+  expect(steelColor).not.toBeNull();
+
+  await page.locator("#focus-material").selectOption("発泡スチロール");
+  await expect
+    .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
+    .toBe("発泡スチロール");
+  await expect.poll(drawnColor, { timeout: 10_000 }).not.toBe(steelColor);
+  const foamMass = Number.parseFloat((await massText()) ?? "0");
+  expect(foamMass, "発泡スチロールは鋼よりずっと軽い").toBeLessThan(steelMass / 10);
+
+  expect(errors).toEqual([]);
+});
