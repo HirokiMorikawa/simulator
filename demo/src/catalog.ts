@@ -922,6 +922,49 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         readouts: [{ probe: 0, label: "落ちる速さ", unit: "m/s" }],
       },
+      {
+        id: "d38-two-balls",
+        file: "d38-two-balls-fall.json",
+        icon: "⚖️",
+        title: "重い球と軽い球、どっちが先に落ちる?",
+        blurb: "高さ 160 m から、鉄の球と木の球を並べて落とします。",
+        watch: [
+          "空気があると、鉄の球が先に着地し、木の球は少し遅れて着地します。",
+          "「重い物のほうが速く落ちる」と感じるのはこのため——正体は重さの差ではなく、"
+            + "空気の抵抗の差です(軽い球ほど、同じ速さでも空気に強くブレーキをかけられます)。",
+          "空気を「なし」にすると、重さが15倍以上違っても、2 つの球はぴったり同時に着地します"
+            + "(実測: 空気ありは約 0.6 秒差、空気なしは差ゼロ)。",
+          "落ちる速さそのものは、重さでは決まりません。",
+        ],
+        view: "3d",
+        pace: 120,
+        prepare: addGround,
+        readouts: [
+          { probe: 0, label: "鉄の球の高さ", unit: "m" },
+          { probe: 1, label: "木の球の高さ", unit: "m" },
+        ],
+        knobs: [
+          {
+            id: "air",
+            label: "空気の有無",
+            kind: "choice",
+            options: [
+              { label: "🌬️ 空気あり", value: 1.225 },
+              { label: "🌌 空気なし(真空)", value: 0 },
+            ],
+            value: 1.225,
+            hint: "空気があると軽い木の球が遅れます。空気を無くすと、重さが違っても同時に着地します。",
+            apply: (scene, value) => {
+              const world = (scene.world ?? {}) as Record<string, unknown>;
+              const atmosphere = (world.atmosphere ?? {}) as Record<string, unknown>;
+              scene.world = {
+                ...world,
+                atmosphere: { ...atmosphere, density: Number(value) },
+              };
+            },
+          },
+        ],
+      },
     ],
   },
   {

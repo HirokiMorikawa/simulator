@@ -545,6 +545,40 @@ test("坂の実験の材質ヒントには、摩擦の説明が付く", async ({
   expect(errors).toEqual([]);
 });
 
+test("重い球と軽い球は、空気があると着地の時刻がずれ、無いと揃う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d38-two-balls"]');
+
+  // 重い球(probe 0)・軽い球(probe 1)の高さを**同じタイミングで**読む
+  // ——別々に読むと、その間にも球は落ち続けているため(着地間際は
+  // 秒速50m超)、読み取りの一瞬のずれ自体が数値の差になってしまう。
+  const heights = () =>
+    page.evaluate(() => {
+      const heavy = document.querySelector('#context dd[data-probe="0"]')?.textContent ?? "999";
+      const light = document.querySelector('#context dd[data-probe="1"]')?.textContent ?? "999";
+      return { heavy: Number.parseFloat(heavy), light: Number.parseFloat(light) };
+    });
+
+  // 既定(空気あり)では、鋼の球(重い)が先に地面近くまで落ちる一方、
+  // 木の球(軽い)はまだかなり高い——「重い物のほうが速く落ちる」がそのまま
+  // 画面に出る(実測: 鋼球が着地する瞬間、木球はまだ高さ約25.5mにいる)。
+  await expect.poll(async () => (await heights()).heavy, { timeout: 20_000 }).toBeLessThan(5);
+  const inAir = await heights();
+  expect(inAir.light).toBeGreaterThan(10);
+
+  // 空気を「なし」に切り替えると、同じ場面がやり直され、重さが15倍以上
+  // 違っても2つの球は揃って落ちる——鋼の球が地面近くまで来た瞬間、木の球も
+  // ほぼ同じ高さにいる。
+  await page.click("#knob-air .knob-choice-btn:nth-child(2)");
+  await expect.poll(async () => (await heights()).heavy, { timeout: 20_000 }).toBeLessThan(5);
+  const inVacuum = await heights();
+  expect(Math.abs(inVacuum.light - inVacuum.heavy)).toBeLessThan(3);
+
+  expect(errors).toEqual([]);
+});
+
 test("グラフを指すと、その時刻の値が読める", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
