@@ -1264,6 +1264,48 @@ async function apparentDiameterPxOf(
  *   直した後(`wheel_fl`が大きく映る、車体・他のタイヤも見える) 20.9
  * 中間よりだいぶ壊れていた側に寄せて、8を境目に取る。
  */
+/**
+ * **舞台ぜんぶが単色に潰れていないか**(輝度の標準偏差と、明るい画素の割合)。
+ *
+ * `canvasCenterLuminanceStd` は中心200px四方だけを見るので、**対象が中心に
+ * 居ない場面では使えない**(実測: `d7-terminal` を粒度「みる」で開くと中心
+ * 200px の標準偏差は 0.00——舞台には球も地平線も映っているのに、それらが
+ * 中心の窓に入っていないだけ)。こちらは canvas 全体を見る。
+ *
+ * **画素そのものを数える**のが要点。以前は「PNG のバイト数が 4500 を超える
+ * こと」で代用していたが、これは**舞台の大きさに依る**——グラフの段が開いて
+ * 舞台が縮むと、同じ絵でもバイト数が減って落ちる(実測でそうなった)。
+ */
+async function canvasLuminanceStats(
+  page: Page,
+): Promise<{ std: number; brightRatio: number; mean: number }> {
+  const canvas = page.locator("#scene-view-canvas-host canvas").first();
+  const b64 = (await canvas.screenshot()).toString("base64");
+  return page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = "data:image/png;base64," + b64;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, c.width, c.height).data;
+    let sum = 0;
+    let bright = 0;
+    const lum: number[] = [];
+    for (let i = 0; i < data.length; i += 4) {
+      const L = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      lum.push(L);
+      sum += L;
+      if (L > 24) bright += 1;
+    }
+    const mean = sum / lum.length;
+    const variance = lum.reduce((a, L) => a + (L - mean) * (L - mean), 0) / lum.length;
+    return { std: Math.sqrt(variance), brightRatio: bright / lum.length, mean };
+  }, b64);
+}
+
 async function canvasCenterLuminanceStd(page: Page, windowPx = 200): Promise<number> {
   const canvas = page.locator("#scene-view-canvas-host canvas").first();
   const buf = await canvas.screenshot();
@@ -2454,13 +2496,18 @@ test("床より下へ落ちていく物も、画面から見失わない", async
   });
   expect(framed).toBe(true);
 
-  // 画面のまん中あたりに、背景より明るいものが映っている。
-  const shot = await page
-    .locator("#scene-view canvas")
-    .first()
-    .screenshot({ scale: "css" });
-  // PNG が単色なら、ほぼ圧縮しきられて極端に小さくなる。
-  expect(shot.byteLength).toBeGreaterThan(4500);
+  // 舞台に、背景より明るいものが実際に映っている。
+  //
+  // **PNG のバイト数で代用しない**(進行管理役の実測、CI赤)。以前は
+  // 「4500バイトを超えること」で「単色ではない」を代用していたが、これは
+  // **舞台の大きさに依る**——`view: "graph"` の実験でグラフの段が開いて舞台が
+  // 縮んだ結果、同じ絵のままバイト数が 4500 付近まで下がり、実行ごとに
+  // 落ちたり通ったりした(手元でも3回に1回落ちた)。画素そのものを数える。
+  // 実測(粒度「みる」、グラフの段が開いた状態): 標準偏差 4.07 /
+  // 明るい画素 0.24% / 平均輝度 17.2。真っ黒なら標準偏差は 0 に潰れる。
+  const pixels = await canvasLuminanceStats(page);
+  expect(pixels.std, `舞台の輝度の標準偏差 ${JSON.stringify(pixels)}`).toBeGreaterThan(1.5);
+  expect(pixels.brightRatio, "背景より明るい画素がある").toBeGreaterThan(0.0002);
   expect(errors).toEqual([]);
 });
 
