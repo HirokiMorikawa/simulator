@@ -548,33 +548,109 @@ test("坂の実験の材質ヒントには、摩擦の説明が付く", async ({
 test("重い球と軽い球は、空気があると着地の時刻がずれ、無いと揃う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
+  // グラフの段(`REVEAL.analysis`=1.2)まで濃さを上げておく——既定の濃さ
+  // (「さわる」=1)のままだと `#btn-probe-csv` を含む分析パネルがまだ
+  // 畳まれていて見つからない。この実験は舞台に球が実際に描かれる
+  // (`stageEmpty`が偽)ため、D9(熱のみ)のような「舞台が空なら自動で開く」
+  // 救済(`forceAnalysisOpen`)も働かない——自分で開く必要がある。
+  await setGrain(page, 2);
   await page.keyboard.press("Control+k");
   await page.click('.palette-row[data-experiment-id="d38-two-balls"]');
 
-  // 重い球(probe 0)・軽い球(probe 1)の高さを**同じタイミングで**読む
-  // ——別々に読むと、その間にも球は落ち続けているため(着地間際は
-  // 秒速50m超)、読み取りの一瞬のずれ自体が数値の差になってしまう。
-  const heights = () =>
+  // **実時間で覗きに行かない**(進行管理役の実測、CI赤)。以前はここで
+  // 「鋼球の高さが5m以下になるまで `expect.poll` で待ち、その瞬間の木球の
+  // 高さを読む」という書き方をしていて、**CI の遅いランナーでだけ落ちた**
+  // (`b9ed9bb`/`fe34321` の Linux ジョブ: `expect(inAir.light)
+  // .toBeGreaterThan(10)` で失敗)。理由は2つあり、どちらも走らせている
+  // マシンの速さに依存する:
+  //   ①`expect.poll` が覗きに来る間隔はマシン次第で、「5m以下」に気づいた
+  //     時点では実際にはもっと時間が経っていて、木球も10mより下まで落ちている。
+  //   ②鋼球は着地後に跳ね返る(restitution 0.6)ので、「5m以下」は着地の
+  //     瞬間だけでなく跳ねている間も何度も真になり、狙った瞬間を指せない。
+  //
+  // そこで**記録された履歴から決める**。グラフは1ステップごとの値を持って
+  // いて、「数値をおとす」(`#btn-probe-csv`)がそれをそのまま書き出す
+  // ——いつ覗いたかに左右されず、跳ね返りの影響も受けない(Rust側の受け入れ
+  // テスト `run_headless_scenario_d38_two_balls_fall_*` と同じ考え方)。
+  const landingTimes = async () => {
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.click("#btn-probe-csv"),
+    ]);
+    const stream = await download.createReadStream();
+    const chunks: Buffer[] = [];
+    for await (const c of stream) chunks.push(c as Buffer);
+    const lines = Buffer.concat(chunks)
+      .toString("utf8")
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .slice(1); // 見出し行を落とす
+    // 列は [時刻, 鉄の球の高さ, 木の球の高さ](`readouts` の宣言順)。
+    // 「最初に地面へ触れた時刻」= 高さが球の半径(0.1m)以下になった最初の行。
+    const first = (column: number) => {
+      for (const line of lines) {
+        const cells = line.split(",");
+        if (Number.parseFloat(cells[column]) <= 0.15) return Number.parseFloat(cells[0]);
+      }
+      return Number.NaN;
+    };
+    return { heavy: first(1), light: first(2), rows: lines.length };
+  };
+
+  // 両方が着地しきるまで待ってから、とめて読む(とめるのは、書き出しの
+  // 最中にも履歴が伸び続けるのを避けるため)。
+  const bothLanded = async () =>
     page.evaluate(() => {
-      const heavy = document.querySelector('#context dd[data-probe="0"]')?.textContent ?? "999";
-      const light = document.querySelector('#context dd[data-probe="1"]')?.textContent ?? "999";
-      return { heavy: Number.parseFloat(heavy), light: Number.parseFloat(light) };
+      const w = (window as unknown as {
+        __world?: { read_component(k: string, a: string): string; body_position_at_f32(i: number): Float32Array };
+      }).__world;
+      if (!w) return false;
+      const count = Number(w.read_component("body_count", ""));
+      const ys: number[] = [];
+      for (let i = 0; i < count; i++) {
+        const name = w.read_component("body_label_at", String(i));
+        if (name === "heavy" || name === "light") ys.push(w.body_position_at_f32(i)[1]);
+      }
+      return ys.length === 2 && ys.every((y) => y <= 0.15);
     });
 
-  // 既定(空気あり)では、鋼の球(重い)が先に地面近くまで落ちる一方、
-  // 木の球(軽い)はまだかなり高い——「重い物のほうが速く落ちる」がそのまま
-  // 画面に出る(実測: 鋼球が着地する瞬間、木球はまだ高さ約25.5mにいる)。
-  await expect.poll(async () => (await heights()).heavy, { timeout: 20_000 }).toBeLessThan(5);
-  const inAir = await heights();
-  expect(inAir.light).toBeGreaterThan(10);
+  await expect.poll(bothLanded, { timeout: 30_000 }).toBe(true);
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  // 既定(空気あり)では、軽い木球が有意に遅れて着地する(実測: 鋼 5.742s /
+  // 木 6.375s、差 0.633s)。しきい値は実測の半分ほどに取って、ランナーの
+  // 速さではなく物理だけで決まる差を見る。
+  const inAir = await landingTimes();
+  expect(inAir.rows, "履歴が書き出せている").toBeGreaterThan(100);
+  expect(Number.isFinite(inAir.heavy) && Number.isFinite(inAir.light)).toBe(true);
+  expect(inAir.light - inAir.heavy, "空気ありは軽いほうが遅れる").toBeGreaterThan(0.3);
 
   // 空気を「なし」に切り替えると、同じ場面がやり直され、重さが15倍以上
-  // 違っても2つの球は揃って落ちる——鋼の球が地面近くまで来た瞬間、木の球も
-  // ほぼ同じ高さにいる。
+  // 違っても2つの球は**ぴったり同時に**着地する(理論上は厳密に同時で、
+  // 実測でも着地stepが完全一致する——Rust側テスト参照)。
   await page.click("#knob-air .knob-choice-btn:nth-child(2)");
-  await expect.poll(async () => (await heights()).heavy, { timeout: 20_000 }).toBeLessThan(5);
-  const inVacuum = await heights();
-  expect(Math.abs(inVacuum.light - inVacuum.heavy)).toBeLessThan(3);
+  // **つまみを動かした後は、止めた意思が引き継がれる**(`reload` の
+  // `keepPauseIntent`)。上で一度とめているので、そのままでは新しい場面が
+  // 走り出さず `bothLanded` が永遠に真にならない(実測でここが詰まった)。
+  // 明示的に走らせ直す。
+  await expect
+    .poll(async () => page.locator("#btn-run").getAttribute("data-playing"), { timeout: 10_000 })
+    .not.toBeNull();
+  if ((await page.locator("#btn-run").getAttribute("data-playing")) === "false") {
+    await page.click("#btn-run");
+  }
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect.poll(bothLanded, { timeout: 30_000 }).toBe(true);
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  const inVacuum = await landingTimes();
+  expect(Number.isFinite(inVacuum.heavy) && Number.isFinite(inVacuum.light)).toBe(true);
+  expect(
+    Math.abs(inVacuum.light - inVacuum.heavy),
+    "空気なしは同時に着地する",
+  ).toBeLessThan(0.05);
 
   expect(errors).toEqual([]);
 });
