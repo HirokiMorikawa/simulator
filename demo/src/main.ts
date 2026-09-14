@@ -6086,6 +6086,17 @@ async function setUpSceneView(
   bodyMeshes.set(BODY_INDEX_GROUND, ground);
   bodyMeshes.set(BODY_INDEX_BOX, box);
 
+  // テスト専用: bodyIndexから実際に描画しているメッシュを引けるようにする
+  // (`__camera`/`__world`/`__scene`/`__orbit`と同じ扱い、実行時の挙動には
+  // 影響しない)。「見えない大きさの物を見える大きさで描く」補正
+  // (`drawFloor`によるscaleFactor、後述)が掛かった場面では、**真の半径**
+  // から見かけの大きさを逆算すると実際の見え方と食い違う(進行管理役の
+  // 実測: D38で真の半径0.1mから計算すると0.3pxになるが、実際は26.7倍に
+  // 拡大描画されていて11.8px)。`mesh.scale`込みの値をここから取れるように
+  // する。
+  (window as unknown as { __bodyMeshFor?: (index: number) => THREE.Mesh | undefined })
+    .__bodyMeshFor = (index: number) => bodyMeshes.get(index);
+
   /**
    * **床に方眼を描く**(1 マス 1 m)。
    *
