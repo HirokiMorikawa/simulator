@@ -678,6 +678,37 @@ export function setUpWorkspace(
    */
   let forceAnalysisOpen = false;
 
+  /**
+   * **グラフの段を、粒度に関わらず開いておくべきか**。
+   *
+   * 条件は2つ。どちらかが立てば開く。
+   *
+   * ① **舞台に形のある物が出てこない**(`stageEmpty`)——「選んだのに何も
+   *    映らない」を残さないため。ただし「場」の実験(二重スリットなど、
+   *    `view: "field"`)は 3D の中の場のパネルに絵が出ているので除く。
+   *
+   * ② **実験の表が `view: "graph"` と宣言している**(利用者役「みる」の報告、
+   *    進行管理役の実測)。こちらは後から足した。舞台に物は映るが**見どころは
+   *    グラフだ**と実験の側が言っている場合、「みる」のままではその見どころが
+   *    画面に無いのに、説明文だけがグラフを指してしまう。実測(粒度「みる」で
+   *    開いて、グラフが画面に出ているか/説明がグラフに言及するかを数えた):
+   *
+   *      d34-solar-system  グラフ無し  「グラフの波 1 つが 1 年です」
+   *      d20-generator     グラフ無し  「見どころは下の数値とグラフ。」
+   *      d14/d15/d19/d36   同じ形の食い違い
+   *
+   *    `view: "graph"` と書いた実験は8本中7本が説明でグラフに触れており、
+   *    **書いた人は「ここはグラフが本体だ」と言っている**。だったら、いちばん
+   *    浅い見方を選んだ人にこそ、それが最初から見えているべき。
+   *
+   * どちらの場合も**グラフの段だけ**を開く——`detail`/`chosenDetail`/ダイヤルの
+   * 位置には触れないので、「みる」を選んだ人は「みる」のまま。
+   */
+  function shouldForceAnalysisOpen(stageEmpty: boolean): boolean {
+    if (current?.view === "graph") return true;
+    return stageEmpty && current?.view !== "field";
+  }
+
   // ---- 大局の粒度 -------------------------------------------------------------
   /**
    * `from` を超えたところから `span` かけて 0 → `to` まで伸びる寸法 [px]。
@@ -2810,7 +2841,15 @@ export function setUpWorkspace(
       // 本当に空だと決める。
       stageEmptyFrames = api.stageIsEmpty() ? stageEmptyFrames + 1 : 0;
       const stageEmptyNow = stageEmptyFrames > STAGE_EMPTY_FRAMES;
-      if (stageEmptyNow !== lastStageEmpty) {
+      // **旗そのものの変化でも組み直す**。`view: "graph"` の実験は舞台に物が
+      // 映るので `stageEmptyNow` は最初から最後まで false のまま動かない
+      // ——「空き具合が変わったときだけ」見ていると、条件②(下の
+      // `shouldForceAnalysisOpen` 参照)が一度も反映されない。
+      const nextForceAnalysisOpen = shouldForceAnalysisOpen(stageEmptyNow);
+      if (
+        stageEmptyNow !== lastStageEmpty ||
+        nextForceAnalysisOpen !== forceAnalysisOpen
+      ) {
         lastStageEmpty = stageEmptyNow;
         // 舞台に形のある物が**出てこない**と分かったときだけ、グラフの段を
         // 強制的に開く——「選んだのに何も映らない」を残さないため。実験の表に
@@ -2828,7 +2867,7 @@ export function setUpWorkspace(
         // 「場」の実験(二重スリットなど)は、形のある物こそ無いものの、
         // **3D の中の場のパネルに絵が出ている**。見に行く先がそこにある以上、
         // グラフを強制して出す必要はない。
-        forceAnalysisOpen = stageEmptyNow && current?.view !== "field";
+        forceAnalysisOpen = nextForceAnalysisOpen;
         applyDetail(detail, false, false);
       }
 

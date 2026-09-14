@@ -2183,10 +2183,42 @@ test("グラフがまだ出ていない濃さでは、グラフを見ろと言�
 
   // 「まん中の 3D と、下のグラフの両方に出ます」と書いてある下は真っ黒だった
   // ——「みる」ではグラフを出していないため(利用者役①)。
+  //
+  // **見るのは文言そのものではなく、文と画面が合っているか**。以前はここで
+  // 「『みる』では必ず『ダイヤル』と書いてある」を固定していたが、それは
+  // *当時の画面*(グラフが出ていない)を前提にした書き方だった。いまは
+  // `view: "graph"` の実験なら「みる」でもグラフが開く
+  // (`shouldForceAnalysisOpen` の doc 参照)ので、d34 では「両方に出ます」が
+  // **正しい文**になる。守りたい約束は最初から一つ:
+  // **出ていないものを、出ているかのように指さない**。
   const where = page.locator(".card-where");
-  await expect(where).toContainText("ダイヤル");
+  const promiseMatchesScreen = async () => {
+    const text = (await where.textContent()) ?? "";
+    const graphOnScreen = await page.locator("#probe-graphs").isVisible();
+    // 「下のグラフ」を**出し方を添えずに**指しているなら、本当に出ていること。
+    const claimsGraphIsThere = text.includes("下のグラフ") && !text.includes("ダイヤル");
+    return { text, graphOnScreen, ok: !claimsGraphIsThere || graphOnScreen };
+  };
+  {
+    const state = await promiseMatchesScreen();
+    expect(state.ok, `「みる」で文と画面が食い違う: ${state.text}`).toBe(true);
+  }
   await setGrain(page, 2);
   await expect(where).toContainText("下のグラフ");
+  {
+    const state = await promiseMatchesScreen();
+    expect(state.ok, `「しらべる」で文と画面が食い違う: ${state.text}`).toBe(true);
+  }
+
+  // 3D が見どころの実験(グラフは「みる」では開かない)でも、同じ約束を守る。
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d3-bounce"]');
+  await page.waitForTimeout(1500);
+  {
+    const state = await promiseMatchesScreen();
+    expect(state.ok, `d3-bounce の「みる」で文と画面が食い違う: ${state.text}`).toBe(true);
+  }
   expect(errors).toEqual([]);
 });
 
@@ -4172,5 +4204,62 @@ test("自分で置いた物は、色も重さも違う材質から選べる", as
   const foamMass = Number.parseFloat((await massText()) ?? "0");
   expect(foamMass, "発泡スチロールは鋼よりずっと軽い").toBeLessThan(steelMass / 10);
 
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の報告、進行管理役の実測)**: いちばん浅い粒度
+// 「みる」で開くと、説明文がグラフを断定形で指しているのに、そのグラフが画面に
+// 無い実験があった。実測(粒度「みる」で開き、`#probe-graphs` が見えているかと
+// 説明文がグラフに言及するかを数えた):
+//
+//   d34-solar-system  グラフ無し  「グラフの波 1 つが 1 年です」
+//   d20-generator     グラフ無し  「見どころは下の数値とグラフ。」
+//   d14/d15/d19/d36   同じ形の食い違い
+//
+// `view: "graph"` と宣言した実験は、書いた人が「ここはグラフが本体だ」と
+// 言っているのだから、いちばん浅い見方を選んだ人にこそ最初から見えているべき
+// (`shouldForceAnalysisOpen` の doc 参照)。
+for (const id of ["d34-solar-system", "d20-generator", "d7-terminal", "d38-two-balls"]) {
+  test(`「みる」のままでも、グラフが本体の実験(${id})はグラフが出ている`, async ({
+    page,
+  }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+    await setGrain(page, 0); // みる
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+    await expect(page.locator("#probe-graphs")).toBeVisible({ timeout: 10_000 });
+    // **ダイヤルは「みる」のまま**——グラフの段だけが開く旗なので、粒度そのもの
+    // (＝つまみ・一覧・道具)は連れてこない(`#app` の `data-grain` が
+    // いちばん浅い `watch` のままであることで見る)。
+    await expect(page.locator("#app")).toHaveAttribute("data-grain", "watch");
+    await expect(page.locator("#hierarchy")).toBeHidden();
+    await expect(page.locator("#toolbar")).toBeHidden();
+    expect(errors).toEqual([]);
+  });
+}
+
+// 逆に、3D が見どころの実験では「みる」でグラフを開かない(道具を勝手に
+// 増やさない)。文章の側も、出ていないものを断定形で指さない。
+test("「みる」では、3Dが見どころの実験のグラフは開かないし、文章もそれを断定しない", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d3-bounce"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(1_000);
+
+  await expect(page.locator("#probe-graphs")).toBeHidden();
+  const watch = (await page.locator('.card[data-card="watch"]').textContent()) ?? "";
+  // 「グラフの山の高さが…低くなっていきます」のような**断定**はしない。
+  // 触れるなら「ダイヤルを右へ回すと」と、出し方を添える形で。
+  if (watch.includes("グラフ")) {
+    expect(watch, "グラフに触れるなら、出し方を添える").toContain("ダイヤルを右へ");
+  }
   expect(errors).toEqual([]);
 });
