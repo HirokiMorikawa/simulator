@@ -1785,14 +1785,25 @@ test("「手回し発電機」のクランクは、見える大きさで回っ�
   const canvas = page.locator("#scene-view canvas").first();
   const stageBox = (await canvas.boundingBox())!;
 
+  // **覗く間隔をわざとばらす**(進行管理役の実測、CI赤)。以前は 150ms
+  // ちょうどで6回だけ覗いていて、**CIでだけ落ちた**(`1a5cb14` の Linux
+  // ジョブ: `expect(Math.min(...skews)).toBeLessThan(0)` で失敗——覗いた6回
+  // すべてで取っ手が同じ側に見えていた)。クランクは一定の速さで回り続ける
+  // ので、**等間隔で覗くと回転の周期と噛み合って、毎回ほぼ同じ姿勢ばかりを
+  // 拾ってしまう**(ストロボで回転を止めて見えるのと同じこと)。手元では
+  // たまたま噛み合わず通っていた。
+  //
+  // 間隔を4通りで回し、回数も増やす——等間隔でない以上、どの周期とも噛み
+  // 合いようがない。
+  const waits = [60, 90, 130, 210];
   const skews: number[] = [];
   let firstBBox: ReturnType<typeof steelBodyMaskBBox> | null = null;
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 14; i++) {
     const shot = await canvas.screenshot();
     const stats = steelBodyMaskBBox(decodePng(shot));
     if (i === 0) firstBBox = stats;
     skews.push(stats.skewX);
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(waits[i % waits.length]);
   }
 
   // (a) 大きさ: 修正前は舞台高さの6.4%だった(実測)。修正後は実測で約29%
