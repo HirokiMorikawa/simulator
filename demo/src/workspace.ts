@@ -929,11 +929,29 @@ export function setUpWorkspace(
     //   ② 残りを グラフ → 時間 → ログ の順に、望みの高さまで足していく。
     // 素材ドロワーを開いている間だけは、注意がそこにあるので舞台を少し譲る。
     const drawerOpen = project > projectBase;
-    // グラフは 150px を切ると、線を描く場所が 60px ほどしか残らず「出したのに
-    // 読めない」状態になる(実測)。用を成す最低限をここで決める。
+    // グラフの段の最低限は、**見出しと操作の行を実際に測ってから決める**。
+    //
+    // ここは 150px の決め打ちだった。手元(Linux)では見出し 15px + 操作の行
+    // 24px + 余白で 62px を使い、線を描く場所が 88px 残る。ところが macOS の
+    // CI では同じ 150px でも**キャンバスが 46px** しか残らなかった
+    // (`workspace.spec.ts:1636` が失敗)——文字幅が違うと操作の行が折り返し、
+    // 段の上側が厚くなるため。**「段の高さ」ではなく「線を描く場所の高さ」を
+    // 守らなければ意味がない**ので、上側の実測に必要な描画高さを足す。
+    // (この 90px は、手元で読めている 88px を丸めた値。)
+    const graphChrome = (() => {
+      const panel = document.getElementById("probe-graphs");
+      const canvas = document.getElementById("probe-canvas");
+      if (!panel || !canvas) return 62;
+      const chrome = panel.getBoundingClientRect().height - canvas.clientHeight;
+      return Number.isFinite(chrome) && chrome > 0 ? chrome : 62;
+    })();
     // 時間の段は、帯そのものに指で掴める高さ(22px)を与えたぶんだけ厚くする
     // ——最低限が薄いままだと、帯の下半分が段からはみ出して押せなくなる。
-    const floor = { analysis: 150, timeline: 62, console: 34 };
+    const floor = {
+      analysis: Math.max(150, Math.round(graphChrome) + 90),
+      timeline: 62,
+      console: 34,
+    };
     const wants = { analysis, timeline, console: consoleRow };
     const reserved =
       (wants.analysis > 0 ? floor.analysis : 0) +
@@ -2022,6 +2040,25 @@ export function setUpWorkspace(
         }
         body.appendChild(status);
 
+      },
+    };
+  }
+
+  /**
+   * **取っておいた場面と、ファイルの出し入れ**。
+   *
+   * 下端に貼り付く札(`savedScenesCard`)からは切り離してある。あちらは
+   * 「作り終えたその瞬間に名前を付けて保存する」ためだけの器で、**高さが
+   * そのまま上の中身を押し下げる**——実測(1280×720、粒度「つくる」): 下端の
+   * 器が 112px あると、「選んだもの」札の「向き」の欄が画面の外へ出た。
+   * 一覧と書き出し/読み込みは、急いで使うものではないので普通の流れに置く。
+   */
+  function savedScenesLibraryCard(): CardSpec {
+    return {
+      id: "my-scenes-library",
+      title: "取っておいた場面",
+      reveal: REVEAL.toolbar,
+      build: (body) => {
         const scenes = readSavedScenes();
         if (scenes.length > 0) {
           const list = document.createElement("ul");
@@ -2219,6 +2256,7 @@ export function setUpWorkspace(
       // ので、その状態で入口が見えないのはいちばん困る。用意された実験の側
       // (下方の`renderContext`)は元から「選んだもの」の**後**に置いており、
       // 並び順をそちらへ揃える。
+      contextBody.appendChild(buildCard(savedScenesLibraryCard()));
       contextFooter.appendChild(buildCard(savedScenesCard()));
       syncCards();
       restoreFocus(activeId, activeStart, activeEnd);
@@ -2386,6 +2424,7 @@ export function setUpWorkspace(
     // (実験を選んでいない状態)のときしか保存の口を出しておらず、実験に物を
     // 足して衝突させた人が、それを取っておく場所を見つけられなかった
     // ——そのまま ⌘K で別の実験へ行き、戻る道が無くなった(利用者役④の観察)。
+    contextBody.appendChild(buildCard(savedScenesLibraryCard()));
     contextFooter.appendChild(buildCard(savedScenesCard()));
     contextBody.appendChild(buildCard(viewCardSpec()));
     syncCards();

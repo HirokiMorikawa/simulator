@@ -5448,8 +5448,13 @@ test("帯が折り返しても、グラフの段はつぶれない(窓が狭く�
 
   // (a) 頭打ち(CSS の `max-height`)。青天井だと下の段が飢える。
   expect(layout.barHeight, `帯の高さ ${layout.barHeight}px`).toBeLessThanOrEqual(160);
-  // (b) 開いていると言うからには、読める高さがある。
-  expect(layout.canvasHeight, `グラフの高さ ${layout.canvasHeight}px`).toBeGreaterThan(50);
+  // (b) 開いていると言うからには、**線を描く場所**に読める高さがある。
+  //
+  // ここは段の高さではなくキャンバスの高さを見る。段に 150px あっても、
+  // 見出しと操作の行が折り返せば残りは 46px しかない——macOS の CI が
+  // まさにそれだった(手元は 88px)。段の最低限は上側の実測から決めて
+  // いる(`workspace.ts` の `graphChrome`)ので、どの環境でも 90px 前後が残る。
+  expect(layout.canvasHeight, `グラフの高さ ${layout.canvasHeight}px`).toBeGreaterThan(70);
   // (c) いま何を見ているかは、狭くても最後まで読める。
   expect(layout.crumbFits, "実験名が器からはみ出していない").toBe(true);
 
@@ -5473,7 +5478,13 @@ test("「つくる」では、置き場所と向きの欄が最初から見え�
   await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
   await page.waitForTimeout(600);
 
-  // **スクロールせずに**、器の中に入っていること。
+  // **固定の px を当てにしない**。文字の幅は環境で変わるので、「ここに何px で
+  // 出る」を押さえても環境ごとに違う答えになる(この確認自体、Windows と
+  // macOS の CI で一度落ちた)。押さえるのは**届くかどうか**:
+  //   ・柱が覗き穴(実測 174px)ではないこと
+  //   ・置き場所の欄は、スクロールせずに見えること
+  //   ・向きの欄は、**1画面ぶん以内**にあること(短く送れば届く)
+  // 直す前は柱 174px に対し向きが 342px 下——2画面ぶん先にいた。
   const seen = await page.evaluate(() => {
     const view = document.getElementById("context-scroll")!.getBoundingClientRect();
     const inView = (id: string) => {
@@ -5482,18 +5493,32 @@ test("「つくる」では、置き場所と向きの欄が最初から見え�
       const b = el.getBoundingClientRect();
       return b.top >= view.top - 1 && b.bottom <= view.bottom + 1;
     };
+    const below = (id: string) => {
+      const el = document.getElementById(id);
+      if (!el) return Number.POSITIVE_INFINITY;
+      return el.getBoundingClientRect().top - view.top;
+    };
     return {
       posX: inView("focus-pos-x"),
       posY: inView("focus-pos-y"),
-      rotZ: inView("focus-rot-z"),
+      rotZBelow: below("focus-rot-z"),
       viewHeight: view.height,
     };
   });
+  expect(seen.viewHeight, `柱の見えている高さ ${seen.viewHeight}px`).toBeGreaterThan(300);
   expect(seen.posX, "置き場所 x が見えている").toBe(true);
   expect(seen.posY, "置き場所 y が見えている").toBe(true);
-  expect(seen.rotZ, "向き z が見えている").toBe(true);
-  // 覗き穴(実測 174px)ではなくなっている。
-  expect(seen.viewHeight, `柱の見えている高さ ${seen.viewHeight}px`).toBeGreaterThan(300);
+  expect(
+    seen.rotZBelow,
+    `向きの欄の位置 ${Math.round(seen.rotZBelow)}px / 柱 ${Math.round(seen.viewHeight)}px`,
+  ).toBeLessThan(seen.viewHeight);
+
+  // 実際に短く送れば見える(=届く)。
+  await page.evaluate(() => {
+    document.getElementById("focus-rot-z")!.scrollIntoView({ block: "nearest" });
+  });
+  await page.waitForTimeout(200);
+  await expect(page.locator("#focus-rot-z")).toBeInViewport();
 
   expect(errors).toEqual([]);
 });
@@ -5555,6 +5580,48 @@ test("物の上に、物を積める(札からも、右クリックからも)", 
   await expect(page.locator("#context-menu")).toBeVisible();
   const items = await page.locator("#context-menu button").allTextContents();
   expect(items.join(" / "), `献立: ${items.slice(0, 3).join(" / ")}`).toContain("の上に");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(進行管理役の実測)**: いちばん上の帯を折り返せるようにしたとき、
+// **折り返す場所を内容任せにした**。パンくずは選んだ物の名前ぶん伸びるので、
+// 物を選んだだけで 1 行 ⇄ 2 行が切り替わり、**画面ぜんぶが 48px 飛ぶ**
+// ——実測: 舞台のキャンバスの上端が y=195 → 147。押そうとした場所が canvas の
+// 外へ出て、右クリックの献立が open かなくなった(`smoke.spec.ts` が失敗)。
+// 人から見れば「押したのに何も起きない」。折る場所を決め打ちにする。
+test("物を選んでも、画面が上下に飛ばない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.waitForTimeout(400);
+
+  const geometry = () =>
+    page.evaluate(() => {
+      const bar = document.getElementById("commandbar")!.getBoundingClientRect();
+      const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+      const c = canvas.getBoundingClientRect();
+      return { bar: Math.round(bar.height), canvasTop: Math.round(c.top) };
+    });
+
+  const before = await geometry();
+  // 物を置くと自動で選ばれ、パンくずに名前が入る(いちばん伸びる瞬間)。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  await page.waitForTimeout(600);
+  const selected = await geometry();
+  // 選択を外して元へ戻す。
+  await page.click("#btn-clear-selection");
+  await page.waitForTimeout(600);
+  const cleared = await geometry();
+
+  expect(selected.bar, `帯の高さ 選ぶ前=${before.bar} 選んだ後=${selected.bar}`).toBe(before.bar);
+  expect(cleared.bar, `帯の高さ 外した後=${cleared.bar}`).toBe(before.bar);
+  expect(
+    Math.abs(selected.canvasTop - before.canvasTop),
+    `舞台の上端 ${before.canvasTop} → ${selected.canvasTop}`,
+  ).toBeLessThanOrEqual(1);
 
   expect(errors).toEqual([]);
 });

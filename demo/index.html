@@ -76,6 +76,13 @@
           <div id="run-clock" class="run-clock" title="シミュレーション内の経過時間"></div>
         </div>
 
+        <!-- **ここで必ず行を折る**(`style.css` の `#commandbar` のdoc参照)。
+             折り返す場所を内容任せにすると、選んだ物の名前がパンくずに入った
+             だけで 1 行 ⇄ 2 行が切り替わり、**画面ぜんぶが 48px 飛ぶ**
+             (実測: 舞台のキャンバスの上端が y=195 → 147)。折る場所を決め打ち
+             にすれば、帯の高さはいつでも同じになる。 -->
+        <div class="commandbar-break" aria-hidden="true"></div>
+
         <!-- 右: 大局の粒度のダイヤル。連続値で、目盛りに名前が付いている。 -->
         <div id="detail-control" class="detail-control">
           <!-- **実験のつまみと取り違えられない**ようにする。利用者役が2人続けて
