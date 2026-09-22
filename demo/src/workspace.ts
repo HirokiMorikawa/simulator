@@ -772,8 +772,25 @@ export function setUpWorkspace(
   const SETTLED_SPEED = 0.05;
   /** 一度は動いたか(最初から動かない場面で「止まりました」と言わないため)。 */
   let everMoved = false;
-  /** 止まっているように見えた連続フレーム数(取りこぼしと一瞬の静止を分ける)。 */
-  let stillFrames = 0;
+  /**
+   * **静かになった最初の時刻**(シミュレーション時間 [s]、まだなら null)。
+   *
+   * ここは以前**連続フレーム数**(`stillFrames > 30`)で数えていた。フレームは
+   * 実時間で刻むので、**再生速度を変えると猶予の長さが変わってしまう**——
+   * 実測(`d1-free-fall`、高さ20m、同じ条件で「はじめから」を2回ずつ):
+   *
+   *   ふつう(×1) … ほぼ止まった時刻 3.39 秒 / 3.39 秒
+   *   はやい(×4) … ほぼ止まった時刻 5.39 秒 / 5.39 秒
+   *
+   * `dt` は 0.008333333 のまま、step 数が速さに比例して増えているだけで
+   * **物理は寸分違わず同じ**。それなのに「見る速さ」のボタンを押しただけで
+   * 現象の数字が 2 秒ずれて見えた(利用者役「しらべる」の観察:「速さボタンは
+   * 見る速さを変えるだけだと思っていたので、なぜ現象そのものの数字が変わる
+   * のか分からなかった」)。猶予はシミュレーション時間で測る。
+   */
+  let stillSince: number | null = null;
+  /** それだけ静かなままなら「止まった」と見なす [s](シミュレーション時間)。 */
+  const SETTLED_GRACE_SECONDS = 0.5;
   /** 直前のフレームで舞台が空だったか(「どこを見るか」の追いつき用)。 */
   let lastStageEmpty: boolean | null = null;
   /** 直前に出した「ここを見る」の一行(同じなら書き直さない)。 */
@@ -1608,7 +1625,7 @@ export function setUpWorkspace(
     // 変えた条件の結果と取り違える)。
     settledAt = null;
     everMoved = false;
-    stillFrames = 0;
+    stillSince = null;
     // 前の実験の「実際の速さ」を引きずらない(計算の重さは実験ごとに
     // まったく違うため、切り替えた瞬間に古い実測値が一瞬出るのを避ける)。
     actualRateSmoothed = null;
@@ -1621,6 +1638,21 @@ export function setUpWorkspace(
     } else {
       api.stopForEditing();
     }
+    // **札も組み直す**。
+    //
+    // すぐ上で `api.selectBody(-1)` して `lastSelection` も -1 に合わせて
+    // いるので、毎フレームの選択変更検出(`tick`)はもう「変わった」と気付け
+    // ない——**「選んだもの」札が前の選択のまま居座る**。実測(粒度
+    // 「しらべる」、`d1-free-fall` でボールを選んでから「はじめから」):
+    //
+    //   選んだもの札        … 「選んだもの — ball」(そのまま)
+    //   選んだものの詳しい値 … 「まだ何も選んでいません。」
+    //
+    // 同じ画面の2か所が、何を選んでいるかについて逆のことを言っていた
+    // (利用者役「しらべる」の観察:「最初どちらを信じればいいか分からな
+    // かった」)。つまみを動かしたとき(`reload` はそこからも来る)も同じ。
+    renderContext();
+    renderCrumbs();
     syncRun();
   }
 
@@ -3376,15 +3408,23 @@ export function setUpWorkspace(
         const fastest = api.maxSpeed();
         if (fastest > SETTLED_SPEED * 4) {
           everMoved = true;
-          stillFrames = 0;
+          stillSince = null;
           settledAt = null;
         } else if (everMoved && fastest < SETTLED_SPEED) {
-          stillFrames += 1;
-          // 一瞬の静止(跳ね返りの頂点、衝突の瞬間)を「止まった」と
-          // 読まないだけの猶予を置く。
-          if (stillFrames > 30 && settledAt === null) settledAt = seconds;
+          // 一瞬の静止(跳ね返りの頂点、衝突の瞬間)を「止まった」と読まない
+          // だけの猶予を置く。**猶予はシミュレーション時間で測る**
+          // (`stillSince` のdoc参照)。
+          if (stillSince === null) stillSince = seconds;
+          if (
+            settledAt === null &&
+            seconds - stillSince >= SETTLED_GRACE_SECONDS
+          ) {
+            // 出すのは**静かになった時刻**そのもの。猶予のぶん後ろへずれた
+            // 時刻を出すと、見出し(「0.05 m/s 以下」)と食い違う。
+            settledAt = stillSince;
+          }
         } else {
-          stillFrames = 0;
+          stillSince = null;
         }
       }
       const settledKey = document.getElementById("readout-settled-key");

@@ -4761,7 +4761,14 @@ function friendlyProbeLabel(raw: string, aliveBodyNames?: ReadonlySet<string>): 
     [/^SphParticleDensity/, "水の粒の密度"],
     [/^NodeTemp/, "温度"],
     [/^RodTemp/, "棒の温度"],
-    [/^CircuitCurrent/, "電流"],
+    // **何を流れている電流なのかを名前に書く**。「電流(0)」とだけ出ていて、
+    // その (0) がどの導線なのか画面のどこにも無かった(利用者役「しらべる」の
+    // 観察: 自分で見当をつけて計算した値と合わず、確かめようがなかった)。
+    // `ProbeTarget::CircuitCurrent(idx)` は `circuit.source_current(idx)`
+    // ——**電圧源(電池・電源)idx を流れる電流**(`sim-world` の `ProbeTarget`
+    // のdoc参照)。「つないであるもの」札に並ぶ「電池・電源0: …」と同じ
+    // 番号を指すので、番号から現物へたどれる。
+    [/^CircuitCurrent/, "電池・電源を流れる電流"],
     // Rust 側が出す生の名前は `CircuitV[4]`(`CircuitNodeVoltage` ではない)。
     // 取りこぼしていたので、電気の実験の凡例だけがコード風の名前で並んでいた
     // (利用者役①の観察)。
@@ -4924,12 +4931,23 @@ function probeSeriesToCsv(
   // 単位表記が無かった(生の秒しか書いていなかった)ので、他の列
   // (`[℃]`等)と同じ角括弧書きを素直に採用する。
   const timeHeader = timeUnit === "秒" ? "time_s" : `time [${timeUnit}]`;
+  // **単位が「秒」でないときは、生の秒の列も並べる**。
+  //
+  // 画面が「1.03 分」と出ているときは書き出しも「分」で揃える——そこは
+  // 変えない(画面とファイルで単位が違うと、後から見返したときに読み違える
+  // ——利用者役③の観察)。ただし列がひとつだけだと、見出しを読み飛ばした人に
+  // とって「1.03」が秒なのか分なのか見分けが付かない(利用者役「しらべる」の
+  // 観察:「同じ 1.03 という数字が秒なのか分なのか勘違いしそうで不安」)。
+  // **足す**ことで両方成り立たせる: 画面と同じ列が先、機械で読むための
+  // 生の秒がその次。単位が「秒」のときは同じ列が2本並ぶだけなので出さない。
+  const alsoSeconds = timeUnit !== "秒";
   // 見出しには**単位**も書く。画面には m / ℃ / V と出ているのに書き出した
   // ファイルには数字しか無く、後から見返すと「これ ℃ だっけ K だっけ」に
   // なると書かれた(利用者役③の観察)。
   const lines = [
     [
       timeHeader,
+      ...(alsoSeconds ? ["time_s"] : []),
       ...series.map((s) => (s.unit ? `${s.label} [${s.unit}]` : s.label)),
     ]
       .map(escape)
@@ -4938,6 +4956,7 @@ function probeSeriesToCsv(
   for (let i = 0; i < rows; i++) {
     const time = currentTime - (rows - 1 - i) * dt;
     const cells = [(time / timeFactor).toFixed(timeDigits)];
+    if (alsoSeconds) cells.push(time.toFixed(csvTimeDigits(dt, 1)));
     for (const s of series) {
       const at = i - (rows - s.history.length);
       cells.push(at >= 0 && at < s.history.length ? String(s.history[at]) : "");

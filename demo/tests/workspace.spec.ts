@@ -5296,3 +5296,114 @@ test("ふりこの説明とつまみが、同じ単位で同じものを指す",
 
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役「しらべる」の観察、進行管理役の実測)**: 「見る速さ」の
+// ボタンを押しただけで、現象そのものの数字が変わって見えた。
+//
+//   ふつう(×1) … ほぼ止まった時刻 3.39 秒 / 3.39 秒
+//   はやい(×4) … ほぼ止まった時刻 5.39 秒 / 5.39 秒
+//
+// `dt` は 0.008333333 のまま、step 数が速さに比例して増えているだけで物理は
+// 同じ。原因は「止まった」と決めるまでの猶予を**連続フレーム数**で数えて
+// いたこと——フレームは実時間で刻むので、再生速度を上げると猶予がその倍だけ
+// シミュレーション時間で長くなる。猶予はシミュレーション時間で測る。
+test("「ほぼ止まった時刻」は、見る速さを変えても同じ", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.waitForTimeout(1500);
+
+  const settledAtSpeed = async (label: string) => {
+    await page.locator("#run-speed button", { hasText: label }).click();
+    await page.click("#btn-restart");
+    const settled = page.locator("#readout-settled");
+    await expect(settled).toBeVisible({ timeout: 40_000 });
+    return Number(await settled.getAttribute("data-seconds"));
+  };
+
+  const normal = await settledAtSpeed("ふつう");
+  const fast = await settledAtSpeed("はやい");
+  expect(normal).toBeGreaterThan(0);
+  expect(fast).toBeGreaterThan(0);
+  // 覗く間隔のぶんの誤差しか残らない(修正前は 2 秒ずれていた)。
+  expect(Math.abs(fast - normal), `ふつう=${normal} / はやい=${fast}`).toBeLessThan(0.5);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「しらべる」の観察、進行管理役の実測)**: 物を選んでから
+// 「はじめから」を押すと、同じ画面の2か所が**逆のこと**を言っていた:
+//
+//   選んだもの札        … 「選んだもの — ball」(前のまま居座る)
+//   選んだものの詳しい値 … 「まだ何も選んでいません。」
+//
+// やり直しは選択を外す(`api.selectBody(-1)`)が、同時に `lastSelection` も
+// -1 に合わせるので、毎フレームの選択変更検出はもう「変わった」と気付けない
+// ——札だけが取り残されていた。つまみを動かしたときも同じ。
+test("やり直したあと、「選んだもの」と「詳しい値」が食い違わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.waitForTimeout(1500);
+
+  // 一覧から動く物を選ぶ(床ではない方)。
+  await page.locator("#hierarchy-tree .tree-body").nth(1).click();
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  await expect(page.locator("#inspector-body")).not.toContainText("まだ何も選んでいません");
+
+  // 「はじめから」で選択は外れる。**両方**が外れる。
+  await page.click("#btn-restart");
+  await page.waitForTimeout(1200);
+  await expect(page.locator("#inspector-body")).toContainText("まだ何も選んでいません");
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+
+  // つまみを動かして作り直したときも同じ。
+  await page.locator("#hierarchy-tree .tree-body").nth(1).click();
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  const knob = page.locator('.knob input[type="range"]').first();
+  await knob.fill("30");
+  await page.waitForTimeout(1500);
+  await expect(page.locator("#inspector-body")).toContainText("まだ何も選んでいません");
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「しらべる」の観察)**: 回路の実験のグラフ凡例に出る
+// 「電流(0)」が、どの導線を流れる電流なのか画面のどこにも書いていなかった
+// (電圧の方は「つなぎ目の電圧(4)」で場所が分かる)。自分で見当をつけて
+// 計算した値と合わず、確かめようがなかった。
+// `ProbeTarget::CircuitCurrent(idx)` は `circuit.source_current(idx)`
+// ——電圧源(電池・電源)を流れる電流なので、そう書く。
+test("回路の電流が、どこを流れる電流なのか名前で分かる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "電気の工作台");
+  await expect(page.locator(".palette-row").first()).toContainText("電気");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2500);
+
+  // 系列の名前は、書き出した CSV の見出しにそのまま並ぶ——グラフの凡例は
+  // canvas に描くので、同じ名前を**読める形で**取り出せるこちらで確かめる。
+  await expect.poll(() => elapsedSeconds(page), { timeout: 20_000 }).toBeGreaterThan(1);
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#btn-probe-csv"),
+  ]);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(c as Buffer);
+  const header = Buffer.concat(chunks).toString("utf8").split("\n")[0];
+  const currentColumn = header.split(",").find((c) => c.includes("電流")) ?? "";
+  expect(currentColumn, `見出し: ${header}`).toContain("電池・電源");
+  // 「つないであるもの」札にも同じ呼び名が並んでいて、番号から現物へたどれる。
+  await expect(page.locator('.card[data-card="circuit"]')).toContainText("電池・電源");
+
+  expect(errors).toEqual([]);
+});
