@@ -471,7 +471,12 @@ test("群1: Inspector が結合の種別・ジョイントの接続を実デー�
 
   // **Component が増えてパネル高を超えるので、スクロールで下端へ到達できること**を
   // 座標で確認する(増分E3のドロワー同様、到達不能なUIを作らないための回帰)。
-  const panel = page.locator("#inspector");
+  //
+  // スクロールするのは Inspector 自身ではなく**右の柱ごと**
+  // (`style.css` の `#context-scroll` のdoc参照)。Inspector は柱の中に入って
+  // いて、札と一続きに流れる——札の側が 174px の覗き穴になっていた問題を
+  // ひとつのスクロールにまとめて直したため。
+  const panel = page.locator("#context-scroll");
   const overflowing = await panel.evaluate((e) => e.scrollHeight > e.clientHeight);
   expect(overflowing).toBe(true);
   await panel.evaluate((e) => {
@@ -620,9 +625,9 @@ test("群2: 右クリックメニュー(Scene View スポーンパレット / Hi
   await page.mouse.click(box.x + box.width * 0.4, box.y + box.height * 0.75, { button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
   // メニューのラベルにクリック位置のワールド座標が入る(地面へ投影した点)。
-  await expect(page.locator("#context-menu button").first()).toContainText("ここに球を配置");
+  await expect(page.locator("#context-menu button").first()).toContainText("球を配置");
   const beforeSpawn = await rowCount();
-  await page.locator("#context-menu button", { hasText: "ここに箱を配置" }).click();
+  await page.locator("#context-menu button", { hasText: "箱を配置" }).click();
   await page.waitForTimeout(200);
   expect(await rowCount()).toBeGreaterThan(beforeSpawn);
 
@@ -1111,14 +1116,14 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
   await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.3, { button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
   await page
-    .locator("#context-menu button", { hasText: "ここに複合形状(L字)を配置" })
+    .locator("#context-menu button", { hasText: "複合形状(L字)を配置" })
     .click();
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 3);
 
   await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.3, { button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
-  await page.locator("#context-menu button", { hasText: "ここに凸包メッシュを配置" }).click();
+  await page.locator("#context-menu button", { hasText: "凸包メッシュを配置" }).click();
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 4);
 

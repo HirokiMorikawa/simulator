@@ -257,8 +257,12 @@ export type WorkspaceApi = {
    * 決める。「選んだものの上に置く」(`focus` 札)のための口。
    */
   addSphereAt: (x: number, y: number, z: number) => boolean;
+  /** `addSphereAt` の箱版(積み木を積むのに要る)。 */
+  addBoxAt: (x: number, y: number, z: number) => boolean;
   /** 置く球の半径 [m](置き場所を決めるのに要る)。 */
   sphereRadius: () => number;
+  /** 置く箱の半分の辺の長さ [m]。 */
+  boxHalfExtent: () => number;
   /**
    * **選んでいる物を、指した向きへそっと押す**。
    *
@@ -2749,19 +2753,27 @@ export function setUpWorkspace(
 
               const placeActions = document.createElement("div");
               placeActions.className = "card-actions";
-              const onTop = document.createElement("button");
-              onTop.type = "button";
-              onTop.id = "btn-place-on-top";
-              onTop.textContent = "⬆ この上に球を置く";
-              onTop.title = "選んでいる物のまん中・上の面のすぐ上へ、球をひとつ置きます";
-              onTop.addEventListener("click", () => {
-                // 触れるか触れないかの境目に置くと、そのまま食い込んで
-                // 弾かれる。球の半径ぶん + わずかな隙間だけ上へ。
-                const r = api.sphereRadius();
-                api.addSphereAt(cx, top + r + 0.05, cz);
-                renderContext();
-              });
-              placeActions.appendChild(onTop);
+              // **球だけでなく箱も置けるようにする**。積み木を積もうとした
+              // 利用者役は、置けるのが球だけなので積み上げようがなかった
+              // (右クリックの「ここに置く」も地面しか狙えていなかった——
+              // そちらは `main.ts` 側で物の上にも当たるようにした)。
+              for (const [id, text, half, add] of [
+                ["btn-place-on-top", "⬆ この上に球を置く", api.sphereRadius(), api.addSphereAt],
+                ["btn-place-box-on-top", "⬆ この上に箱を置く", api.boxHalfExtent(), api.addBoxAt],
+              ] as const) {
+                const onTop = document.createElement("button");
+                onTop.type = "button";
+                onTop.id = id;
+                onTop.textContent = text;
+                onTop.title = "選んでいる物のまん中・上の面のすぐ上へ置きます";
+                onTop.addEventListener("click", () => {
+                  // 触れるか触れないかの境目に置くと、そのまま食い込んで
+                  // 弾かれる。半分の高さぶん + わずかな隙間だけ上へ。
+                  add(cx, top + half + 0.05, cz);
+                  renderContext();
+                });
+                placeActions.appendChild(onTop);
+              }
               onTopSection.appendChild(placeActions);
             }
 

@@ -4192,12 +4192,14 @@ test("物を選んだままでも、「この場面を保存する」がスク�
   // 「🗑 これを消す」が実マウスで押せなくなっていた(Windows の CI で再発)。
   // スクロールする器の**外**に置いてあれば、重なりようがない。
   const layout = await page.evaluate(() => {
-    const body = document.getElementById("context-body")!;
+    // スクロールする器は `#context-scroll`(札と Inspector をひと続きに
+    // 流す、`style.css` の doc 参照)。重なりはこの器と下端の器で見る。
+    const scroller = document.getElementById("context-scroll")!;
     const footer = document.getElementById("context-footer")!;
-    const b = body.getBoundingClientRect();
+    const b = scroller.getBoundingClientRect();
     const f = footer.getBoundingClientRect();
     return {
-      saveInsideScroller: body.contains(document.getElementById("btn-save-scene")),
+      saveInsideScroller: scroller.contains(document.getElementById("btn-save-scene")),
       overlapPx: Math.max(0, Math.min(b.bottom, f.bottom) - Math.max(b.top, f.top)),
     };
   });
@@ -5450,6 +5452,109 @@ test("帯が折り返しても、グラフの段はつぶれない(窓が狭く�
   expect(layout.canvasHeight, `グラフの高さ ${layout.canvasHeight}px`).toBeGreaterThan(50);
   // (c) いま何を見ているかは、狭くても最後まで読める。
   expect(layout.crumbFits, "実験名が器からはみ出していない").toBe(true);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「つくる」の観察、進行管理役の実測)**: 「つくる」は組み立て
+// のための段なのに、**組み立てる欄が一度も画面に入らなかった**。
+//
+// 右の柱は「選んだもの」札の段と「選んだものの詳しい値」の段に分かれており、
+// 札の側に使える高さは実測 174px。札そのものは 600px あるので、置き場所
+// (札の上から 293px)も向き(342px)も動き方(435px)も覗き穴の外にいた。
+// 利用者役は「位置を数字で直接入力する欄も見当たらなかった」「角度を数字で
+// 確認する欄もなかった」と書き、仕掛けを2つとも完成させられていない。
+test("「つくる」では、置き場所と向きの欄が最初から見えている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  await page.waitForTimeout(600);
+
+  // **スクロールせずに**、器の中に入っていること。
+  const seen = await page.evaluate(() => {
+    const view = document.getElementById("context-scroll")!.getBoundingClientRect();
+    const inView = (id: string) => {
+      const el = document.getElementById(id);
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return b.top >= view.top - 1 && b.bottom <= view.bottom + 1;
+    };
+    return {
+      posX: inView("focus-pos-x"),
+      posY: inView("focus-pos-y"),
+      rotZ: inView("focus-rot-z"),
+      viewHeight: view.height,
+    };
+  });
+  expect(seen.posX, "置き場所 x が見えている").toBe(true);
+  expect(seen.posY, "置き場所 y が見えている").toBe(true);
+  expect(seen.rotZ, "向き z が見えている").toBe(true);
+  // 覗き穴(実測 174px)ではなくなっている。
+  expect(seen.viewHeight, `柱の見えている高さ ${seen.viewHeight}px`).toBeGreaterThan(300);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「つくる」の観察)**: 積み木が積めなかった。舞台の右クリックは
+// 地面(y=0)だけを狙っていたので、**既に置いた箱の上を押しても出てくるのは
+// 地面の座標**——クリックする場所を3回変えても毎回地面に置かれ、3個の箱が
+// すべて高さ 0.400m の同じ場所に重なった(画面には1個にしか見えない)。
+// 札の「この上に置く」も球しか置けなかった。
+test("物の上に、物を積める(札からも、右クリックからも)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  const bodies = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const n = Number(w.read_component("body_count", ""));
+      const out: { label: string; y: number }[] = [];
+      for (let i = 0; i < n; i++) {
+        out.push({
+          label: w.read_component("body_label_at", String(i)),
+          y: w.body_position_at_f32(i)[1],
+        });
+      }
+      return out;
+    });
+
+  // 土台の箱を地面へ置いて固定する。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.locator("#focus-pos-y").fill("0.4");
+  await page.locator("#focus-pos-y").press("Tab");
+  await page.waitForTimeout(400);
+  await page.locator("#focus-motion").selectOption("Static");
+  await page.waitForTimeout(500);
+
+  // 札から2段積む。**同じ高さに重ならない**こと。
+  await page.click("#btn-place-box-on-top");
+  await page.waitForTimeout(800);
+  await page.click("#btn-place-box-on-top");
+  await page.waitForTimeout(800);
+  const stacked = (await bodies()).filter((b) => b.label !== "ground");
+  expect(stacked.length, "3個ある").toBe(3);
+  const heights = stacked.map((b) => b.y).sort((a, b) => a - b);
+  expect(heights[1] - heights[0], `段の間隔 ${JSON.stringify(heights)}`).toBeGreaterThan(0.5);
+  expect(heights[2] - heights[1], `段の間隔 ${JSON.stringify(heights)}`).toBeGreaterThan(0.5);
+
+  // 右クリックの献立も「◯◯の上に」と言う(地面の座標ではない)。
+  const canvas = (await page.locator("#scene-view canvas").first().boundingBox())!;
+  await page.mouse.click(canvas.x + canvas.width * 0.5, canvas.y + canvas.height * 0.5, {
+    button: "right",
+  });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  const items = await page.locator("#context-menu button").allTextContents();
+  expect(items.join(" / "), `献立: ${items.slice(0, 3).join(" / ")}`).toContain("の上に");
 
   expect(errors).toEqual([]);
 });

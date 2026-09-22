@@ -200,17 +200,10 @@ body {
   grid-column: 2;
   grid-row: 5;
 }
+/* **右の柱は、上から下までひと続き**(`#context-scroll` のdoc参照)。
+ * Inspector はこの柱の中に入っているので、独立した段は持たない。 */
 #context {
   grid-column: 3;
-  grid-row: 3 / 5;
-}
-#inspector {
-  grid-column: 3;
-  grid-row: 5;
-}
-/* Inspector がまだ現れていない粒度では、文脈の柱が右列を最後まで使う
- * ——空白の帯を作らない。 */
-#app[data-inspector="false"] #context {
   grid-row: 3 / 6;
 }
 #console-panel {
@@ -230,7 +223,6 @@ body {
 #app[data-analysis="false"] #probe-graphs,
 #app[data-console="false"] #console-panel,
 #app[data-project="false"] #project-drawer,
-#app[data-inspector="false"] #inspector,
 #app[data-timeline="false"] #timeline {
   visibility: hidden;
   pointer-events: none;
@@ -268,8 +260,7 @@ body {
 #hierarchy {
   border-right: 1px solid var(--border);
 }
-#context,
-#inspector {
+#context {
   border-left: 1px solid var(--border);
 }
 #timeline,
@@ -776,7 +767,15 @@ body {
 
 /* --- Inspector ------------------------------------------------------- */
 
+/* 右の柱の中に入っている(`#context-scroll` のdoc参照)。自分ではスクロール
+   せず、柱ごと動く。粒度が足りないときは場所ごと消す——縦に積んでいるので、
+   `visibility: hidden` では空白だけが残ってしまう。 */
 #inspector {
+  overflow: visible;
+  background: transparent;
+}
+#app[data-inspector="false"] #inspector {
+  display: none;
 }
 
 #inspector-body {
@@ -2134,15 +2133,33 @@ kbd {
 #context {
   padding-bottom: var(--space-6);
 }
+/* **右の柱の、スクロールする中身ぜんぶ**。
+ *
+ * 「選んだもの」札(`#context-body`)と「選んだものの詳しい値」(`#inspector`)は
+ * もともと別々の段に分かれていた。そのせいで札の側に使える高さは実測 174px
+ * しかなく、札そのものは 600px ある——置き場所(293px)も向き(342px)も動き方
+ * (435px)も、**一度も画面に入らない**。「つくる」の利用者役は「位置を数字で
+ * 直接入力する欄も見当たらなかった」「角度を数字で確認する欄もなかった」と
+ * 書き、仕掛けを2つとも完成させられなかった。**組み立てる段で、組み立てる
+ * 欄が見えない**のは、この画面がいちばんしてはいけないこと。
+ *
+ * 2つの段をひとつのスクロールにまとめる。右の柱の高さはそのままだが、
+ * 174px の覗き穴ではなくなる(実測でおよそ 400px 連続)。 */
+#context-scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#context-scroll > * {
+  flex: 0 0 auto;
+}
 #context-body {
   padding: var(--space-4) var(--space-4) var(--space-6);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  /* スクロールするのはここ(柱そのものではない)。`#context-footer` のdoc参照。 */
-  flex: 1 1 auto;
-  overflow: auto;
-  min-height: 0;
 }
 /* **札を縮めない**。ここは縦のフレックスなので、高さが決まった途端に中の札が
    既定(`flex-shrink: 1`)で押し潰される——`.card` は `overflow: hidden` なので、

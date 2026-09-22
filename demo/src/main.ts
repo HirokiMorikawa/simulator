@@ -10803,14 +10803,51 @@ async function setUpSceneView(
     const hasHit =
       raycaster.ray.intersectPlane(groundPlane, groundHit) !== null;
     const fallback = nextSpawnPosition();
-    // グリッドスナップを効かせる(Settings で 0 にすれば連続)。
-    const x = hasHit ? snapToGrid(groundHit.x) : fallback.x;
-    const z = hasHit ? snapToGrid(groundHit.z) : fallback.z;
+    // **物の上にも置けるようにする**。
+    //
+    // ここは地面(y=0)だけを狙っていたので、**既に置いた箱の上を右クリックして
+    // も、出てくるのは地面の座標**だった——「つくる」の利用者役は積み木を
+    // 積もうとして、クリックする場所を3回変えても毎回地面に置かれ、3個の箱が
+    // すべて高さ 0.400m の同じ場所に重なった(画面には1個にしか見えない)。
+    // 積み木の仕掛けはそこで断念されている。
+    //
+    // 光線が物に当たっていたら、その物の**上の面**へ載せる。無限平面(床・壁)は
+    // 「地面」のままの扱いにする——床の上に置くのは今までどおり。
+    const hitBody = (() => {
+      const meshes = [...bodyMeshes.values()];
+      if (meshes.length === 0) return null;
+      for (const hit of raycaster.intersectObjects(meshes, true)) {
+        let node: THREE.Object3D | null = hit.object;
+        let index = -1;
+        while (node && index < 0) {
+          for (const [i, mesh] of bodyMeshes) if (mesh === node) index = i;
+          node = node.parent;
+        }
+        if (index < 0) continue;
+        if (world.read_component("body_shape_kind_at", String(index)) === "plane") continue;
+        const mesh = bodyMeshes.get(index);
+        if (!mesh) continue;
+        const box = new THREE.Box3().setFromObject(mesh);
+        if (!Number.isFinite(box.max.y)) continue;
+        return { index, top: box.max.y, x: hit.point.x, z: hit.point.z };
+      }
+      return null;
+    })();
+    // 物の上へ置くときはグリッドに吸わせない——マス目へ寄せると、狙って
+    // 押した面から外れて落ちてしまう。地面のときは今までどおり吸わせる。
+    const x = hitBody ? hitBody.x : hasHit ? snapToGrid(groundHit.x) : fallback.x;
+    const z = hitBody ? hitBody.z : hasHit ? snapToGrid(groundHit.z) : fallback.z;
     const place = (kind: SpawnShapeKind, restHeight: number) => () => {
-      // 地面にちょうど乗る高さで置く(めり込ませない/落とさない)。
-      const bodyIndex = spawnShapeAt(kind, x, restHeight, z);
+      // 地面にちょうど乗る高さで置く(めり込ませない/落とさない)。物の上なら
+      // その上の面のすぐ上へ(触れるか触れないかの境目に置くと食い込んで
+      // 弾かれるので、わずかに浮かせる)。
+      const y = hitBody ? hitBody.top + restHeight + 0.05 : restHeight;
+      const bodyIndex = spawnShapeAt(kind, x, y, z);
       selectBody(bodyIndex);
     };
+    const onLabel = hitBody
+      ? `${friendlyBodyLabel(world.read_component("body_label_at", String(hitBody.index)))}の上に`
+      : "ここに";
     // **粒度が浅いと、内部語彙と生座標は読めない**(進行管理役の実測、課題4)。
     // 「ここに球を配置 (-20.30, -33.80)」のような生の座標、「複合形状(L字)」
     // 「凸包メッシュ」のような内部のシェイプ名は、「つくる」まで踏み込んだ
@@ -10825,15 +10862,15 @@ async function setUpSceneView(
     const shapeItems: ContextMenuItem[] = isBuildGrain
       ? [
           {
-            label: `ここに球を配置 (${x.toFixed(2)}, ${z.toFixed(2)})`,
+            label: `${onLabel}球を配置 (${x.toFixed(2)}, ${z.toFixed(2)})`,
             onSelect: place("sphere", SPAWN_SPHERE_RADIUS),
           },
           {
-            label: "ここに箱を配置",
+            label: `${onLabel}箱を配置`,
             onSelect: place("box", SPAWN_BOX_HALF_EXTENT),
           },
           {
-            label: "ここにカプセルを配置",
+            label: `${onLabel}カプセルを配置`,
             onSelect: place(
               "capsule",
               SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
@@ -10841,21 +10878,21 @@ async function setUpSceneView(
             title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
           },
           {
-            label: "ここに複合形状(L字)を配置",
+            label: `${onLabel}複合形状(L字)を配置`,
             onSelect: place("compound", SPAWN_COMPOUND_L_SHAPE_REST_OFFSET),
             title: "Shape::Compound(Box×2の子)",
           },
           {
-            label: "ここに凸包メッシュを配置",
+            label: `${onLabel}凸包メッシュを配置`,
             onSelect: place("convex_mesh", SPAWN_CONVEX_MESH_HALF),
             title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
           },
         ]
       : [
-          { label: "ここに球を置く", onSelect: place("sphere", SPAWN_SPHERE_RADIUS) },
-          { label: "ここに箱を置く", onSelect: place("box", SPAWN_BOX_HALF_EXTENT) },
+          { label: `${onLabel}球を置く`, onSelect: place("sphere", SPAWN_SPHERE_RADIUS) },
+          { label: `${onLabel}箱を置く`, onSelect: place("box", SPAWN_BOX_HALF_EXTENT) },
           {
-            label: "ここにカプセルを置く",
+            label: `${onLabel}カプセルを置く`,
             onSelect: place(
               "capsule",
               SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
@@ -12282,7 +12319,14 @@ async function setUpSceneView(
       selectBody(index);
       return true;
     },
+    addBoxAt: (x, y, z) => {
+      const index = spawnShapeAt("box", x, y, z);
+      if (index < 0) return false;
+      selectBody(index);
+      return true;
+    },
     sphereRadius: () => SPAWN_SPHERE_RADIUS,
+    boxHalfExtent: () => SPAWN_BOX_HALF_EXTENT,
     setDecor: (decor) => setSceneDecor(decor),
     circuitElements: () => circuitElementsRef.current?.() ?? [],
     // **向きを選んで押す**(`WorkspaceApi.pushBody` の doc 参照)。

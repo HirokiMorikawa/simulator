@@ -104,7 +104,20 @@
       <!-- 右の柱: いま見ているものの文脈。カードは大局の粒度で自動的に開き、
            ヘッダを押せばその1枚だけ大局と無関係に開閉できる(局所の粒度)。 -->
       <aside id="context" class="panel">
-        <div id="context-body"></div>
+        <!-- **右の柱は、ひとつのスクロールにまとめる**。
+             「選んだもの」札と「選んだものの詳しい値」(Inspector)は別々の段に
+             分かれていて、札の側に使える高さは実測 174px しかなかった——札は
+             600px あるので、置き場所や向きの欄は画面のはるか外。「つくる」の
+             利用者役は**数値で位置を直す欄が見つからない**と書いた
+             (`style.css` の `#context-scroll` のdoc参照)。 -->
+        <div id="context-scroll">
+          <div id="context-body"></div>
+          <aside id="inspector" class="panel">
+            <h2>選んだものの詳しい値</h2>
+            <div id="inspector-body"></div>
+            <div id="prediction-panel" style="display: none"></div>
+          </aside>
+        </div>
         <!-- **柱の下端に置く札**(「この場面を保存する」)。スクロールする
              本体とは別の器に出す——重ねて貼り付けると、その高さぶんだけ下の
              中身が永久に隠れる(`style.css` の `#context-footer` のdoc参照)。 -->
@@ -430,12 +443,6 @@
           </div>
         </section>
       </main>
-
-      <aside id="inspector" class="panel">
-        <h2>選んだものの詳しい値</h2>
-        <div id="inspector-body"></div>
-        <div id="prediction-panel" style="display: none"></div>
-      </aside>
 
       <section id="timeline" class="panel">
         <div class="timeline-header">
