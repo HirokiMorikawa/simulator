@@ -5407,3 +5407,49 @@ test("回路の電流が、どこを流れる電流なのか名前で分かる",
 
   expect(errors).toEqual([]);
 });
+
+// **課題(macOS の CI、進行管理役の実測)**: いちばん上の帯を折り返せるように
+// したとき、**高さの上限を置かなかった**。この行はグリッドでは高さ `auto` で、
+// 下の段の高さは「窓の高さ − 帯の高さ」から分け合う。折り返しは項目ごとに
+// 起きるので、幅がほんの少し足りないだけで 1 行 1 項目までばらける——macOS の
+// CI では帯が 492px まで伸び、グラフの段が潰れて**キャンバスの高さが 6px**に
+// なった(手元の Linux では 117px / 88px で通っていた)。
+//
+// 文字の幅は環境で変わるので、「手元で何px か」を確かめても意味がない。
+// **狭い窓で折り返しを実際に起こしたうえで**、(a) 帯の高さが頭打ちになること、
+// (b) それでもグラフが読める高さを保つこと、(c) 実験名が切れないことを見る。
+test("帯が折り返しても、グラフの段はつぶれない(窓が狭くても)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await page.setViewportSize({ width: 1024, height: 600 });
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d19-electric-workbench"]');
+  await expect
+    .poll(() => page.evaluate(() => document.getElementById("app")!.dataset.analysis), {
+      timeout: 10_000,
+    })
+    .toBe("true");
+  await page.waitForTimeout(500);
+
+  const layout = await page.evaluate(() => {
+    const bar = document.getElementById("commandbar")!.getBoundingClientRect();
+    const canvas = document.getElementById("probe-canvas") as HTMLCanvasElement | null;
+    const crumbs = document.getElementById("crumbs")!.getBoundingClientRect();
+    const chip = document.getElementById("crumb-experiment")!.getBoundingClientRect();
+    return {
+      barHeight: bar.height,
+      canvasHeight: canvas ? canvas.clientHeight : 0,
+      crumbFits: chip.left >= crumbs.left - 1 && chip.right <= crumbs.right + 1,
+    };
+  });
+
+  // (a) 頭打ち(CSS の `max-height`)。青天井だと下の段が飢える。
+  expect(layout.barHeight, `帯の高さ ${layout.barHeight}px`).toBeLessThanOrEqual(160);
+  // (b) 開いていると言うからには、読める高さがある。
+  expect(layout.canvasHeight, `グラフの高さ ${layout.canvasHeight}px`).toBeGreaterThan(50);
+  // (c) いま何を見ているかは、狭くても最後まで読める。
+  expect(layout.crumbFits, "実験名が器からはみ出していない").toBe(true);
+
+  expect(errors).toEqual([]);
+});
