@@ -6359,7 +6359,12 @@ async function setUpSceneView(
           roughness: 0.35,
           transparent: true,
           opacity: 0.32,
-          side: THREE.DoubleSide,
+          // **手前の壁は描かない**(`BackSide` = 奥側の内壁だけ)。両面を
+          // 描いていたときは、中にいる物の上に銅色の膜が掛かった——
+          // 手回し発電機では、取っ手の見え方を測る画素の振れ幅が 4 以上から
+          // 0.69 まで落ちた(実測)。**中の物を見せるための飾り**が中の物を
+          // 隠しては本末転倒なので、筒は必ず向こう側になる。
+          side: THREE.BackSide,
           depthWrite: false,
         }),
       );

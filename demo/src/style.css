@@ -1849,21 +1849,41 @@ kbd {
  * ==================================================================== */
 
 /* --- コマンドバー: 「どこを見ているか」「動かす」「どこまで踏み込むか」 --- */
+/* **帯の中身がウィンドウ幅を超えたら、折り返す**。
+ *
+ * 1 行に固定していたので、幅が足りないぶんは**縮められる唯一の要素**である
+ * パンくずが全部かぶった——実測(1280×720、粒度「さわる」、`d1-free-fall`):
+ * パンくずの器は 12〜224px しかなく、実験名は 164〜295px に置かれて
+ * 「◎ 実験をさがす ⌘K › 🎯 ボー」で切れていた。**いま何を見ているかが
+ * 読めない**のは、この帯がいちばんしてはいけないこと。
+ *
+ * 道具棚(`#toolbar`)が同じ問題を `flex-wrap: wrap` で解いている
+ * (QA不具合1、そちらのdoc参照)。グリッドのこの行は高さ `auto` なので、
+ * 折り返せばその分だけ背が伸びて、全部が必ず画面の中に収まる。 */
 #commandbar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-6);
   padding: var(--space-3) var(--space-5);
   background: var(--surface-panel);
   min-height: 48px;
 }
 
+/* **パンくずは、最後まで読めるだけの幅を確保する**。
+ *
+ * `min-width: 0` で「いくらでも縮む」側に置いていたので、同じ帯の右にいる
+ * 読み取り値(`.run-actual-rate`。天体の場面では「実際は 1 秒で 43.79 日ぶん
+ * 進む(×3,783,435)」という長い一行になる)に幅を全部持っていかれ、
+ * **「◎ 実験をさ…」で切れていた**(利用者役「さわる」の観察、実測:
+ * `d34-solar-system` でこの器が 212px → 79px)。いま何を見ているかは、
+ * 数値の読み取りより先に読めなければならない。読み取り値の側を縮める。 */
 .crumbs {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 auto;
+  min-width: 22ch;
   overflow: hidden;
 }
 #app #commandbar button {
@@ -1963,6 +1983,10 @@ kbd {
   margin-left: var(--space-2);
   cursor: default;
   user-select: none;
+  /* 幅が足りないときに縮むのはこちら(`.crumbs` のdoc参照)。 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* **実際に進んでいる速さ**(正直に伝える、`run-actual-rate` のdoc参照)。
    計算が重くて指定どおりに進んでいないときだけ目立たせる(`slow`)——
@@ -1976,6 +2000,10 @@ kbd {
   margin-left: var(--space-2);
   cursor: default;
   user-select: none;
+  /* 幅が足りないときに縮むのはこちら(`.crumbs` のdoc参照)。 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .run-actual-rate.slow {
   color: var(--warn);
@@ -1996,6 +2024,10 @@ kbd {
   gap: 2px;
   justify-items: stretch;
   width: 320px;
+  /* 帯が折り返しても、この操作面は右端に居続ける(`#commandbar` のdoc参照)。
+     折り返した行は左詰めになるので、余白をこちらへ寄せて右へ送る——
+     「画面の詳しさは右上」という置き場所は、折り返しても変えない。 */
+  margin-left: auto;
 }
 .detail-head {
   display: flex;

@@ -5175,3 +5175,124 @@ test("下端に置いた「この場面を保存する」も、粒度に従っ�
 
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役「さわる」の観察、進行管理役の実測)**: いちばん上の帯は
+// 1 行に固定されていたので、幅が足りないぶんを**縮められる唯一の要素**である
+// パンくずが全部かぶっていた——実測(1280×720、粒度「さわる」、`d1-free-fall`):
+// パンくずの器は 12〜224px しかないのに実験名は 164〜295px に置かれ、
+// 「◎ 実験をさがす ⌘K › 🎯 ボー」で切れていた。天体の場面
+// (`d34-solar-system`)は右の読み取り値がいちばん長くなるので、器は 79px まで
+// 潰れ、利用者役には「◎実験をさ」しか見えなかった。
+test("いま何を見ているかが、いちばん上の帯で最後まで読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  for (const id of ["d34-solar-system", "d1-free-fall", "d20-generator"]) {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1500);
+    await setGrain(page, 1);
+    const fit = await page.evaluate(() => {
+      const box = document.getElementById("crumbs")!.getBoundingClientRect();
+      const chip = document.getElementById("crumb-experiment")!.getBoundingClientRect();
+      return {
+        left: chip.left - box.left,
+        right: box.right - chip.right,
+        text: document.getElementById("crumb-experiment")!.textContent ?? "",
+      };
+    });
+    expect(fit.left, `${id}: 実験名の左端が器の中にある`).toBeGreaterThanOrEqual(-1);
+    expect(fit.right, `${id}: 実験名の右端が器の中にある(${fit.text})`).toBeGreaterThanOrEqual(-1);
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「さわる」の観察)**: 計算が追いつかないときに出る
+// 「実際は ×0.75(重い計算)」の「重い計算」が何のことか分からない——
+// 「自分の PC が重いのか、何か直したほうがいいのか」。説明は `title` の
+// ツールチップにしかなく、触る画面では開かない。
+test("計算が追いつかないときの言い方に、専門用語を使わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+  await page.waitForTimeout(2500);
+  const rate = page.locator("#run-actual-rate");
+  await expect(rate).toBeVisible();
+  const text = (await rate.textContent()) ?? "";
+  expect(text, `読み取り値: ${text}`).not.toContain("重い計算");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「さわる」の観察)**: 「手回し発電機」の 3D には回る軸しか
+// 映っておらず、発電機らしきものが何も無い。説明は正直に断ってあるが、
+// 3D を中心に見る人には「何も起きていない」「これで合っているのか」と読まれる。
+// コイルは剛体としては存在しない(`motor_coupling` が回転と電圧の関係だけを
+// 持つ)ので、見た目だけの筒として描く。
+test("手回し発電機では、軸を囲むコイルが3Dに描かれる(当たり判定は持たない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+  await page.waitForTimeout(2000);
+
+  const decor = await page.evaluate(() => {
+    const scene = (window as unknown as {
+      __scene: { getObjectByName(n: string): { children: unknown[] } | undefined };
+    }).__scene;
+    return scene.getObjectByName("decor")?.children.length ?? 0;
+  });
+  expect(decor, "筒が1本描かれている").toBe(1);
+
+  // **描かれた姿より大きいこと**。物理の寸法(半径 0.05 m)で描くと、
+  // 見えるように引き伸ばされた軸(描画半径 0.3 m)の内側へ丸ごと埋まって
+  // 一本も見えない——実際に一度そうなった。
+  const size = await page.evaluate(() => {
+    const scene = (window as unknown as {
+      __scene: { getObjectByName(n: string): { children: { geometry: { parameters: { radiusTop: number } } }[] } | undefined };
+    }).__scene;
+    const tube = scene.getObjectByName("decor")!.children[0];
+    const mesh = (window as unknown as {
+      __bodyMeshFor: (i: number) => { scale: { x: number }; geometry: { parameters: { radius: number } } } | undefined;
+    }).__bodyMeshFor(0)!;
+    return {
+      tubeRadius: tube.geometry.parameters.radiusTop,
+      drawnRadius: mesh.geometry.parameters.radius * mesh.scale.x,
+    };
+  });
+  expect(size.tubeRadius, `筒 ${size.tubeRadius} / 描かれた軸 ${size.drawnRadius}`)
+    .toBeGreaterThan(size.drawnRadius);
+
+  // 剛体は増えていない。
+  const bodies = await page.evaluate(() =>
+    Number(
+      (window as unknown as { __world: { read_component(k: string, a: string): string } })
+        .__world.read_component("body_count", ""),
+    ),
+  );
+  expect(bodies, "剛体は増えていない").toBe(1);
+  await expect(page.locator("#context")).toContainText("見た目だけ");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「さわる」の観察)**: 「ふりこ」の説明は「左右 5cm」、つまみは
+// 「3 度」と別の単位で書いてあり、「5cm ってどこを見ればいいんだろう」と
+// 迷わせた。同じものを指していることが読めるように、単位をそろえる。
+test("ふりこの説明とつまみが、同じ単位で同じものを指す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d11-pendulum"]');
+  await page.waitForTimeout(1500);
+  await setGrain(page, 1);
+
+  const watch = await page.locator('.card[data-card="watch"]').innerText();
+  const value = await page.locator('.knob[data-knob-id="swing"] .knob-value').innerText();
+  // 説明にもつまみにも「度」と「cm」の両方が出ていて、突き合わせられる。
+  expect(watch).toContain("3 度");
+  expect(watch).toContain("5cm");
+  expect(value).toContain("度");
+  expect(value).toContain("cm");
+
+  expect(errors).toEqual([]);
+});
