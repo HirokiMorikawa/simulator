@@ -7687,7 +7687,17 @@ async function setUpSceneView(
    */
   function frameCameraOnBox(box: THREE.Box3) {
     const center = box.getCenter(new THREE.Vector3());
-    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 0.5);
+    // **いちばん小さい見どころの大きさを 0.5m で床止めしない**。
+    //
+    // ここは `Math.max(..., 0.5)` だった。1m より小さい場面は**すべて**
+    // 「1m の広がりがある」ことにされ、その分だけカメラが遠のく。実測:
+    //   ・D25 ブラウン運動(粒の散らばり 0.3m) → 3 倍遠く、粒は 3px の線
+    //   ・D26 静電気の風船(半径 0.02m)        → 25 倍遠く、壁が画面を覆う
+    //   ・D18 氷が融ける                      → 氷が画面の 1 割
+    // 「0.5m」はこのアプリのボール(半径 0.3m)の都合であって、10µm の世界にも
+    // 1cm の世界にも根拠が無い。見どころの大きさは**見どころが決める**。
+    // 0 割りを避けるためだけの下限にする。
+    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 1e-6);
     // 現在の視線方向を保ったまま距離だけ合わせる(向きの好みを壊さない)。
     const direction = camera.position.clone().sub(center);
     positionCameraTowardTarget(center, radius, direction);
@@ -7713,6 +7723,9 @@ async function setUpSceneView(
    * 画角を作り直す。
    */
   function frameCameraOnPoint(x: number, y: number, z: number, radius: number) {
+    // 点そのものには大きさが無いので、ここだけは「その物の半径」を使う
+    // (0 だと画角が決まらない)。0.05m の下限は、置いたばかりの小さな物へ
+    // 寄りすぎないための最小限。
     const r = Math.max(radius, 0.05);
     frameCameraOnBox(
       new THREE.Box3(
@@ -7945,10 +7958,14 @@ async function setUpSceneView(
     // 始まりの広がりも含める(`guidedSceneStartBox` の doc 参照)。
     if (guidedSceneStartBox) box.union(guidedSceneStartBox);
     box.getCenter(guidedFollowTarget);
-    const radius = Math.max(
-      box.getSize(new THREE.Vector3()).length() * 0.5,
-      0.5,
-    );
+    // **ここも 0.5m で床止めしない**。すぐ下の doc が自分で書いているとおり、
+    // この場面の寸法は 1e-7m の分子から 1e11m の公転まで振れる。なのに広がりに
+    // 0.5m の下限を置いていたので、**1m より小さい場面はすべて**「1m ある」
+    // ことにされ、その分だけカメラが引いていた。実測(D25 ブラウン運動、
+    // 粒の散らばり 0.3m): 本来 0.54m のところを 1.79m まで引き、直径 1cm に
+    // 描いた粒が 3px の線になって「画面には灰色の格子しか無い」状態だった。
+    // 0 割りを避けるためだけの下限にする。
+    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 1e-9);
     // 対象の 3.6 倍まで引く。「対象が大きく映ること」より**まわりが見えること**を
     // 優先する——坂を滑る箱は、坂が画面に入っていなければ何が起きているのか
     // 分からない(倍率ではなく比で決めるのは、シーンの寸法が 1e-7 m の分子から

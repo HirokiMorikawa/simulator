@@ -5787,3 +5787,89 @@ test("移動の矢印を大きく引いても、物が視界の外へ飛んで�
     `x ${before.pos[0].toFixed(2)} → ${after.pos[0].toFixed(2)}`,
   ).toBeLessThan(200);
 });
+
+// **課題(進行管理役の実測)**: 「うごかすと 3D に何も映らないことがある」という
+// 報告を、46 の実験ぜんぶで測り直した。真っ黒な実験は無かったが、**見どころが
+// 画面のほんの数 % にしかならない**実験がいくつもあった——人から見ればこれは
+// 「何も映っていない」と同じことだ。原因は画角の計算に 2 か所あった
+// `Math.max(広がり, 0.5)`(いずれも `main.ts` の該当箇所のdoc参照)。1m より
+// 小さい場面はすべて「1m ある」ことにされ、その分だけカメラが引いていた。
+// 実測(直す前 → 直した後、画面の高さに対する見どころの割合):
+//   ・D25 ブラウン運動  6% → 21%
+//   ・D18 氷が融ける   10% → 50%
+//   ・D23 水を注ぐ     37% → 70%
+// この下限を測り続ける——画角の計算に「このアプリのボールの大きさ」のような
+// 絶対の長さが混ざると、小さい世界がまた同じように遠ざかるため。
+test("どの実験も、見どころが画面の一割より小さくならない", async ({ page }) => {
+  test.setTimeout(10 * 60 * 1000);
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+
+  /** 床・壁を除いた描画物が、画面の縦横のどちらかを占める割合。 */
+  const coverage = () =>
+    page.evaluate(() => {
+      const w = window as unknown as Record<string, any>;
+      const camera = w.__camera;
+      const mul = (m: number[], v: number[]) => [
+        m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+        m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+        m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+        m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+      ];
+      const corners: number[][] = [];
+      w.__scene.traverseVisible((o: any) => {
+        const g = o.geometry;
+        if (!g || g.type === "PlaneGeometry") return;
+        if (!g.boundingBox) g.computeBoundingBox?.();
+        const bb = g.boundingBox;
+        if (!bb) return;
+        for (const x of [bb.min.x, bb.max.x])
+          for (const y of [bb.min.y, bb.max.y])
+            for (const z of [bb.min.z, bb.max.z])
+              corners.push(mul(o.matrixWorld.elements, [x, y, z, 1]));
+      });
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      let seen = 0;
+      for (const c of corners) {
+        const eye = mul(camera.matrixWorldInverse.elements, c);
+        if (eye[2] > -1e-4) continue;
+        const clip = mul(camera.projectionMatrix.elements, eye);
+        const x = clip[0] / clip[3];
+        const y = clip[1] / clip[3];
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+        seen += 1;
+      }
+      if (!seen) return 0;
+      const clamp = (v: number) => Math.min(1, Math.max(-1, v));
+      return Math.max((clamp(maxX) - clamp(minX)) / 2, (clamp(maxY) - clamp(minY)) / 2);
+    });
+
+  const tooSmall: string[] = [];
+  for (const category of CATEGORIES) {
+    for (const experiment of category.experiments) {
+      await page.keyboard.press("Control+k");
+      await expect(page.locator("#palette")).toBeVisible();
+      await page.fill("#palette-input", experiment.title.replace(/[()（）]/g, " ").trim().slice(0, 5));
+      await expect(page.locator(".palette-row").first()).toBeVisible();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#palette")).toBeHidden();
+      await page.waitForTimeout(2200);
+      // 形のある物を持たない実験(熱・量子・回路など)は、舞台ではなく
+      // グラフと場のパネルが見どころ。そちらは別のテストが見ている。
+      if ((await page.getAttribute("#scene-view", "data-stage-empty")) === "true") continue;
+      const fraction = await coverage();
+      if (fraction < 0.09) {
+        tooSmall.push(`${experiment.id} / ${experiment.title} → 画面の ${(fraction * 100).toFixed(0)}%`);
+      }
+    }
+  }
+  expect(tooSmall, tooSmall.join("\n")).toEqual([]);
+  expect(errors).toEqual([]);
+});
