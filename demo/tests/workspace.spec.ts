@@ -5666,3 +5666,124 @@ test("物を選んでも、画面が上下に飛ばない", async ({ page }) => 
 
   expect(errors).toEqual([]);
 });
+
+/** 空の場面に箱を1つ置き、その番号を返す。 */
+async function freshBox(page: Page): Promise<number> {
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.waitForTimeout(400);
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.waitForTimeout(400);
+  return page.evaluate(
+    () => Number((window as any).__world.read_component("body_count", "")) - 1,
+  );
+}
+
+/** 物の位置から軸方向へ `along` [m] 進んだ点の、画面座標。 */
+async function axisPointOnScreen(
+  page: Page,
+  index: number,
+  axis: "x" | "y" | "z",
+  along: number,
+) {
+  return page.evaluate(
+    ({ index, axis, along }) => {
+      const w = window as any;
+      const camera = w.__camera;
+      const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+      const rect = canvas.getBoundingClientRect();
+      const p = w.__world.body_position_at_f32(index);
+      const dir = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }[axis]!;
+      const target = [p[0] + dir[0] * along, p[1] + dir[1] * along, p[2] + dir[2] * along];
+      const apply = (m: number[], v: number[]) => [
+        m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12],
+        m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13],
+        m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14],
+        m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15],
+      ];
+      const clip = apply(camera.projectionMatrix.elements, apply(camera.matrixWorldInverse.elements, target));
+      return {
+        x: rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width,
+        y: rect.top + ((1 - clip[1] / clip[3]) / 2) * rect.height,
+        pos: [p[0], p[1], p[2]] as number[],
+      };
+    },
+    { index, axis, along },
+  );
+}
+
+// **課題(利用者役「つくる」の観察 + 進行管理役の再現)**: 移動の矢印を
+// 掴んで動かす操作が、2 つの意味で使い物にならなかった。
+//   ① **効きすぎる**——矢印の途中(根元から 0.7m のあたり)を掴むと、指を
+//      動かす前に物がその 0.7m ぶん先へ飛ぶ。掴み直すたびにまた飛ぶので、
+//      60px 引いただけで 1.5m → 1.8m → 2.1m と増えていった。
+//   ② **持ち直すと効かない**——矢印の当たり判定は半径 0.03m の「線」しか
+//      なく、数ピクセル狙いを外すとドラッグが黙って視点回しに化けた。
+test("移動の矢印は、少し狙いが外れても掴めて、指と同じだけ動く", async ({ page }) => {
+  await boot(page);
+  const box = await freshBox(page);
+
+  // ① 指と同じだけ動く。掴んだ点が、引いたぶんだけ画面を移動している
+  //    (= 物が指より先へ飛んでいない)。
+  const grab = await axisPointOnScreen(page, box, "x", 0.7);
+  await page.mouse.move(grab.x, grab.y);
+  await page.mouse.down();
+  await page.mouse.move(grab.x + 60, grab.y, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  const moved = await axisPointOnScreen(page, box, "x", 0.7);
+  expect(
+    Math.abs(moved.x - (grab.x + 60)),
+    `掴んだ点 ${grab.x.toFixed(0)}px → ${moved.x.toFixed(0)}px(指は ${(grab.x + 60).toFixed(0)}px まで動かした)`,
+  ).toBeLessThan(16);
+});
+
+test("移動の矢印は、狙いが数ピクセル外れても掴める", async ({ page }) => {
+  await boot(page);
+  const box = await freshBox(page);
+
+  for (const off of [6, -6]) {
+    const before = await axisPointOnScreen(page, box, "x", 0);
+    const grab = await axisPointOnScreen(page, box, "x", 0.55);
+    await page.mouse.move(grab.x, grab.y + off);
+    await page.mouse.down();
+    await page.mouse.move(grab.x + 50, grab.y + off, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+    const after = await axisPointOnScreen(page, box, "x", 0);
+    expect(
+      Math.abs(after.pos[0] - before.pos[0]),
+      `${off}px 外して掴んだとき x ${before.pos[0].toFixed(2)} → ${after.pos[0].toFixed(2)}`,
+    ).toBeGreaterThan(0.2);
+  }
+});
+
+test("移動の矢印を大きく引いても、物が視界の外へ飛んでいかない", async ({ page }) => {
+  await boot(page);
+  const box = await freshBox(page);
+
+  // **矢印をほぼ真正面から見る**向きに視点を移す。この向きだとドラッグ面が
+  // 画面と垂直に近くなり、指を横へ大きく引くとレイが面を擦る——交点が発散する
+  // (利用者役の実測: 2800px 引いたら -808.5m へ飛んだ)。
+  await page.evaluate((index) => {
+    const w = window as any;
+    const p = w.__world.body_position_at_f32(index);
+    w.__orbit.target.set(p[0], p[1], p[2]);
+    w.__camera.position.set(p[0] + 14, p[1] + 0.6, p[2] + 0.5);
+    w.__orbit.update();
+  }, box);
+  await page.waitForTimeout(300);
+
+  const before = await axisPointOnScreen(page, box, "x", 0);
+  const grab = await axisPointOnScreen(page, box, "x", 0.6);
+  await page.mouse.move(grab.x, grab.y);
+  await page.mouse.down();
+  await page.mouse.move(grab.x + 2400, grab.y, { steps: 40 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  const after = await axisPointOnScreen(page, box, "x", 0);
+  expect(
+    Math.abs(after.pos[0] - before.pos[0]),
+    `x ${before.pos[0].toFixed(2)} → ${after.pos[0].toFixed(2)}`,
+  ).toBeLessThan(200);
+});

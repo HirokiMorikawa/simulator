@@ -976,17 +976,26 @@ export function setUpWorkspace(
     const barBorders =
       (Number.parseFloat(barStyle.borderTopWidth) || 0) +
       (Number.parseFloat(barStyle.borderBottomWidth) || 0);
-    const naturalBar = Math.min(160, Math.ceil(commandbar.scrollHeight + barBorders));
     const barKey = `${detail.toFixed(2)}|${width}`;
-    // 粒度か窓の幅が変わったときは、素直に測り直す(帯の中身そのものが変わる)。
-    // 同じ粒度・同じ幅のあいだは、**1 行ぶん(16px)以上ちがうときだけ**留め値を
-    // 更新する——「行が増えた」なら場所を渡すべきだが、名前が 1 文字伸びた程度の
-    // 数 px のゆらぎで舞台を動かしてはいけない。
-    if (commandbarRow === 0 || barKey !== commandbarKey || Math.abs(naturalBar - commandbarRow) >= 16) {
-      commandbarRow = naturalBar;
+    if (commandbarRow === 0 || barKey !== commandbarKey) {
+      // 粒度か窓の幅が変わったら、素直に測り直す(帯の中身そのものが変わる)。
+      // いったん `auto` に戻してから測るので、前より低くもなれる。
+      app.style.setProperty("--row-commandbar", "auto");
+      commandbarRow = Math.min(160, Math.ceil(commandbar.scrollHeight + barBorders));
       commandbarKey = barKey;
+      app.style.setProperty("--row-commandbar", `${commandbarRow}px`);
+    } else {
+      // 同じ粒度・同じ幅のあいだは留めたまま。**1 行ぶん(16px)以上はみ出した
+      // ときだけ**場所を渡す——行が増えたなら渡すべきだが、名前が 1 文字伸びた
+      // 程度の数 px のゆらぎで舞台を動かしてはいけない。
+      // (留めているあいだの `scrollHeight` は、はみ出したぶんを含んだ中身の
+      // 実寸を返す。)
+      const wanted = Math.min(160, Math.ceil(commandbar.scrollHeight + barBorders));
+      if (wanted - commandbarRow >= 16) {
+        commandbarRow = wanted;
+        app.style.setProperty("--row-commandbar", `${commandbarRow}px`);
+      }
     }
-    app.style.setProperty("--row-commandbar", `${commandbarRow}px`);
     const outside = commandbarRow + toolbar + project;
     const minStage = Math.max(
       160,

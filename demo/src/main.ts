@@ -8181,9 +8181,7 @@ async function setUpSceneView(
     { axis: new THREE.Vector3(0, 0, 1), color: 0x4488ff, name: "z" },
   ];
   const gizmoGroup = new THREE.Group();
-  const gizmoHandleMeshes: { mesh: THREE.Mesh; axisName: "x" | "y" | "z" }[] =
-    [];
-  for (const { axis, color, name } of GIZMO_AXES) {
+  for (const { axis, color } of GIZMO_AXES) {
     const shaftLength = GIZMO_AXIS_LENGTH - GIZMO_HEAD_LENGTH;
     const material = new THREE.MeshBasicMaterial({ color });
     const shaft = new THREE.Mesh(
@@ -8205,10 +8203,6 @@ async function setUpSceneView(
     axisGroup.add(shaft, head);
     axisGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
     gizmoGroup.add(axisGroup);
-    gizmoHandleMeshes.push(
-      { mesh: shaft, axisName: name },
-      { mesh: head, axisName: name },
-    );
   }
   gizmoGroup.visible = false;
   scene.add(gizmoGroup);
@@ -8745,6 +8739,11 @@ async function setUpSceneView(
   const dragPlaneHit = new THREE.Vector3();
   const cameraDirection = new THREE.Vector3();
   const DRAG_THRESHOLD_PX = 4;
+  /**
+   * ドラッグ面を「見ている」と認めるいちばん浅い角度(法線との内積)。
+   * 0.05 はおよそ 3 度。これより浅いとドラッグ面との交点が発散する。
+   */
+  const DRAG_PLANE_MIN_FACING = 0.05;
 
   function updatePointerNdc(event: PointerEvent) {
     const rect = renderer.domElement.getBoundingClientRect();
@@ -8787,16 +8786,80 @@ async function setUpSceneView(
     return picked ? { picked, worldPoint: hit.point } : null;
   }
 
+  /**
+   * どの矢印を掴んだかを、**画面の上でいちばん近い矢印**で決める。
+   *
+   * ここは 3D のレイキャストだった。見えている軸の半径は 0.03——長さ 1.2 の
+   * 矢印に対して当たり判定が実質「線」しかなく、数ピクセル狙いを外すだけで
+   * 掴めず、ドラッグが黙って視点回しに化けた(利用者役の観察:「持ち直すと
+   * 効かない」。実測: 矢印の中ほどから 3px 外して 8 回引き、1mm も動かず)。
+   * かといって当たり判定だけ太らせると、手前に伸びている軸が奥の軸より先に
+   * 当たり、**X を掴んだつもりで Z が動く**(実測済み)。
+   *
+   * 人は「カーソルがどの矢印に近いか」で掴んでいる。だから同じ測り方をする:
+   * 3 本の軸を線分として画面へ落とし、カーソルからの距離がいちばん近いものを
+   * 選ぶ。奥行きではなく見た目で決まるので、手前の軸が奥の軸を横取りしない。
+   * 画面に落とすと、こちらを向いている軸は短く潰れる——つまり「ほとんど点に
+   * 見えている軸」は自然に選ばれにくくなる(それも人の見え方と同じ)。
+   */
+  const GIZMO_PICK_RADIUS_PX = 12;
+  /** これだけの差は「同じくらい近い」とみなす [px]。 */
+  const GIZMO_PICK_TIE_PX = 4;
   function hitGizmo(event: PointerEvent): "x" | "y" | "z" | null {
     if (!gizmoGroup.visible) return null;
-    updatePointerNdc(event);
-    raycaster.setFromCamera(pointerNdc, camera);
-    const hits = raycaster.intersectObjects(
-      gizmoHandleMeshes.map((h) => h.mesh),
+    const origin = projectToScreenVisible(gizmoGroup.position);
+    if (!origin) return null;
+    const pointer = { x: event.clientX, y: event.clientY };
+    const candidates: { name: "x" | "y" | "z"; distance: number; along: number }[] = [];
+    for (const { axis, name } of GIZMO_AXES) {
+      const direction = axis.clone();
+      if (gizmoSpace === "local") direction.applyQuaternion(gizmoGroup.quaternion);
+      const tip = projectToScreenVisible(
+        gizmoGroup.position.clone().addScaledVector(direction, GIZMO_AXIS_LENGTH),
+      );
+      if (!tip) continue;
+      const near = nearestPointOnScreenSegment(pointer, origin, tip);
+      if (near.distance < GIZMO_PICK_RADIUS_PX) {
+        candidates.push({ name, distance: near.distance, along: near.along });
+      }
+    }
+    if (!candidates.length) return null;
+    // **重なって見えているときは、根元から遠いほうを選ぶ**。
+    //
+    // 3 本の矢印は根元で交わっているので、見る向きによっては画面の上で
+    // ほとんど重なる(実測: 物が視界の端へ寄ると、X の矢印が 53px まで縮む
+    // 一方で Z は 237px に伸び、X の途中を狙った指が Z からも 1px の距離に
+    // 来ていた)。どちらも「近い」なら、**その矢印の先のほうに指がある**ほうが
+    // 狙われた矢印だ——もう一方は、たまたま根元をかすめているだけ。
+    const closest = Math.min(...candidates.map((c) => c.distance));
+    const tied = candidates.filter((c) => c.distance <= closest + GIZMO_PICK_TIE_PX);
+    tied.sort((a, b) => b.along - a.along);
+    return tied[0].name;
+  }
+
+  /**
+   * 線分(画面座標)のうち点にいちばん近いところ。`distance` は点との距離 [px]、
+   * `along` は根元(`from`)からそこまでの距離 [px]。
+   */
+  function nearestPointOnScreenSegment(
+    point: { x: number; y: number },
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+  ): { distance: number; along: number } {
+    const vx = to.x - from.x;
+    const vy = to.y - from.y;
+    const lengthSq = vx * vx + vy * vy;
+    if (lengthSq < 1e-6) {
+      return { distance: Math.hypot(point.x - from.x, point.y - from.y), along: 0 };
+    }
+    const t = Math.min(
+      1,
+      Math.max(0, ((point.x - from.x) * vx + (point.y - from.y) * vy) / lengthSq),
     );
-    if (!hits.length) return null;
-    const handle = gizmoHandleMeshes.find((h) => h.mesh === hits[0].object);
-    return handle ? handle.axisName : null;
+    return {
+      distance: Math.hypot(point.x - (from.x + vx * t), point.y - (from.y + vy * t)),
+      along: t * Math.sqrt(lengthSq),
+    };
   }
 
   function hitRotationGizmo(event: PointerEvent): "x" | "y" | "z" | null {
@@ -8903,6 +8966,19 @@ async function setUpSceneView(
     redoButton.disabled = true;
   }
 
+  /**
+   * 画面座標へ落とす。**カメラの後ろにある点は `null`**——`project` は後ろの
+   * 点も符号を反転させて「前」に置いてしまうので、そのまま距離を測ると
+   * 見えていない軸を掴めることになる。
+   */
+  function projectToScreenVisible(
+    worldPos: THREE.Vector3,
+  ): { x: number; y: number } | null {
+    const viewZ = worldPos.clone().applyMatrix4(camera.matrixWorldInverse).z;
+    if (viewZ > -1e-4) return null;
+    return projectToScreen(worldPos);
+  }
+
   function projectToScreen(worldPos: THREE.Vector3): { x: number; y: number } {
     const ndc = worldPos.clone().project(camera);
     const rect = renderer.domElement.getBoundingClientRect();
@@ -8970,7 +9046,6 @@ async function setUpSceneView(
         if (gizmoSpace === "local")
           gizmoAxisDir.applyQuaternion(inspectorRotationQuat).normalize();
         gizmoDragStartPosition.copy(gizmoGroup.position);
-        gizmoDragStartScalar = gizmoAxisDir.dot(gizmoDragStartPosition);
         pushEditUndoEntry({
           bodyIndex: selectedBodyIndex,
           kind: "position",
@@ -8998,6 +9073,20 @@ async function setUpSceneView(
           planeNormal,
           gizmoDragStartPosition,
         );
+        // **基準は「物の位置」ではなく「掴んだ点」**。
+        //
+        // ここは物の位置をそのまま基準にしていた。矢印は物から 1.2m 伸びて
+        // いるので、その途中(たとえば 0.7m のあたり)を掴むと、指を動かす前に
+        // **物がその 0.7m ぶん先へ飛ぶ**。しかも掴み直すたびにまた飛ぶので、
+        // 60px 引いただけで 1.5m → 1.8m → 2.1m と、引いた量より大きく・
+        // 回を追うごとに大きく動いて見えた(利用者役の観察:「効きすぎる」。
+        // 実測: 310px 引いて 12.0m → 9.9m)。掴んだ点を基準にすれば、物は
+        // **指と同じだけ**動く。
+        updatePointerNdc(event);
+        raycaster.setFromCamera(pointerNdc, camera);
+        gizmoDragStartScalar = raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)
+          ? gizmoAxisDir.dot(dragPlaneHit)
+          : gizmoAxisDir.dot(gizmoDragStartPosition);
       } else if (pointerDownScaleHit) {
         isDragging = true;
         dragMode = "scale";
@@ -9114,6 +9203,13 @@ async function setUpSceneView(
     }
     updatePointerNdc(event);
     raycaster.setFromCamera(pointerNdc, camera);
+    // **レイが面と擦れているあいだは動かさない**。ドラッグ面を真横から見る
+    // 角度に近づくと、交点は数ピクセルで何百メートルも走る(実測: 2800px
+    // 引いたら -808.5m へ飛んだ)。戻ってくる術が無いので、擦れている間は
+    // そのまま止める——止まっているほうが、飛んでいくよりずっと直せる。
+    const grazing =
+      Math.abs(raycaster.ray.direction.dot(dragPlane.normal)) < DRAG_PLANE_MIN_FACING;
+    if (grazing) return;
     if (!raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)) return;
     if (dragMode === "gizmo") {
       const t = gizmoAxisDir.dot(dragPlaneHit);

@@ -174,9 +174,13 @@ body {
     var(--row-commandbar) var(--row-toolbar) minmax(0, 1fr)
     var(--row-timeline) var(--row-analysis) var(--row-console) var(--row-project);
   background: var(--surface-app);
-  transition:
-    grid-template-columns var(--motion-slow) ease,
-    grid-template-rows var(--motion-slow) ease;
+  /* **段の高さは補間しない**。ここには `grid-template-rows` も書いてあったが、
+     1 段目が `auto` だったあいだは補間できず(長さでない値が 1 つでもあると
+     アニメーションは discrete になる)、実際には一度も動いていなかった。
+     全段を px にした今そのまま残すと、粒度を変えるたびに 180ms かけて段が
+     伸び縮みし、そのあいだ 3D のキャンバスが**毎フレーム作り直される**。
+     見た目の滑らかさと引き換えにできるものではない。 */
+  transition: grid-template-columns var(--motion-slow) ease;
 }
 
 #commandbar {
