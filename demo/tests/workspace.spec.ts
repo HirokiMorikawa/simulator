@@ -5873,3 +5873,90 @@ test("どの実験も、見どころが画面の一割より小さくならな�
   expect(tooSmall, tooSmall.join("\n")).toEqual([]);
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役⑨の観察 + 進行管理役の再現)**: 「コーヒーが冷める」を開くと、
+// いちばん大きい場所(3D の舞台 1008×459px)には最後まで何も出ず、見どころの
+// 折れ線は下端の 984×90px に押し込まれていた——面積で 5 倍、見せたいものが
+// 小さいほうにある。初めての人は「まん中が本編、下の帯はおまけ」と思って
+// 見るので、本編が空だと「壊れている」と読んで閉じる。
+test("舞台に何も映らない実験では、グラフのほうが舞台より大きい", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  await page.waitForTimeout(1500);
+
+  const stage = (await page.locator("#scene-view").boundingBox())!;
+  const canvas = (await page.locator("#probe-canvas").boundingBox())!;
+  expect(
+    canvas.height,
+    `折れ線を描く高さ ${Math.round(canvas.height)}px / 空の舞台 ${Math.round(stage.height)}px`,
+  ).toBeGreaterThan(stage.height);
+  // 舞台は畳んでも、案内が読めるだけは残す。
+  await expect(page.locator("#stage-empty-note")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: 二重スリットは舞台の中に 984×431px の縞模様が
+// **ちゃんと出ている**のに、画面の言葉は「舞台には形のある物が出ません。右の
+// パネルの数値を見てください」「見どころは下のグラフとパネルです」と、いちばん
+// 大きく出ている絵から目をそらさせていた。言われて右を見ると、数値は
+// 「経過した時間」1 行だけ。出ている物を指す。
+test("舞台の中に絵が出ている実験は、画面の言葉がその絵を指す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "二重スリ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("二重スリット");
+  await page.waitForTimeout(1200);
+
+  // 絵は舞台の中に、舞台の幅いっぱいで出ている。
+  const panel = (await page.locator("#field-panel").boundingBox())!;
+  const stage = (await page.locator("#scene-view").boundingBox())!;
+  expect(panel.width).toBeGreaterThan(stage.width * 0.7);
+  // その絵を指す言葉になっている(「下を見て」でも「数値を見て」でもない)。
+  await expect(page.locator("#stage-empty-note")).toContainText("この中に出ている絵");
+  await expect(page.locator('.card[data-card="watch"]')).toContainText("まん中に出ている絵");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: 見どころの文が長い実験(「重い球と軽い球」は
+// 1 項目が 260 字)では「ここを見る」札だけで 734px になり、すぐ下の
+// 「いまの数値」は y=857——柱のスクロール窓(109→660)の外だった。しかも
+// その文自身が「右の『いまの数値』で、2つの高さがみるみる離れていきます」と
+// 見えない所を指していた。読む文は一度読めばよく、数値は見ている間ずっと要る。
+test("長い「ここを見る」が、「いまの数値」を画面の外へ押し出さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "重い球と軽");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("重い球");
+  await page.waitForTimeout(1200);
+
+  const where = await page.evaluate(() => {
+    const scroll = document.getElementById("context-scroll")!.getBoundingClientRect();
+    const numbers = document
+      .querySelector('.card[data-card="numbers"]')!
+      .getBoundingClientRect();
+    const watch = document.querySelector('.card[data-card="watch"]')!.getBoundingClientRect();
+    return {
+      scrollTop: Math.round(scroll.top),
+      scrollBottom: Math.round(scroll.bottom),
+      numbersTop: Math.round(numbers.top),
+      watchHeight: Math.round(watch.height),
+    };
+  });
+  expect(
+    where.numbersTop,
+    `「いまの数値」の上端 ${where.numbersTop}px / 窓 ${where.scrollTop}→${where.scrollBottom} / 「ここを見る」の高さ ${where.watchHeight}px`,
+  ).toBeLessThan(where.scrollBottom);
+  await expect(page.locator('.card[data-card="numbers"]')).toBeInViewport();
+  expect(errors).toEqual([]);
+});

@@ -4746,6 +4746,45 @@ function timeAxisFormatter(
  * (利用者役①の一番の不満)。**括弧の中身は残す**——どの物の値なのかは
  * その人にとっても手掛かりになるため。
  */
+/**
+ * **観測点の名前に出るボディ名を、人の言葉にする**。
+ *
+ * 場面ファイルのボディ名は作る側の識別子(`ice_cube` / `chassis` / `bob`)で、
+ * それがグラフの凡例や観測点の一覧にそのまま出ていた——いちばん浅い「みる」
+ * でも「速さ(ice_cube)」と英語の内部名が並ぶ(利用者役⑨の観察)。読めない
+ * 言葉がひとつ混じるだけで「自分向けの画面ではない」と読まれる。
+ *
+ * 訳さない名前はそのまま返す(`s0`〜`s49` のような連番や、人が自分で置いた
+ * 物の名前)。**物理にも記録にも触れない**——画面に出す文字だけの話。
+ */
+const BODY_NAME_WORDS: Record<string, string> = {
+  ball: "ボール",
+  balloon: "風船",
+  bob: "おもり",
+  box: "箱",
+  box1: "箱1",
+  box2: "箱2",
+  box3: "箱3",
+  brake_pad: "ブレーキパッド",
+  chassis: "車体",
+  head: "頭",
+  torso: "胴体",
+  arm_left: "左腕",
+  arm_right: "右腕",
+  heavy: "重い球",
+  light: "軽い球",
+  ice_cube: "氷",
+  obstacle: "じゃま物",
+  piston: "ピストン",
+  rod: "磁石",
+  shell: "弾",
+  floor: "床",
+};
+
+function bodyNameInWords(raw: string): string {
+  return BODY_NAME_WORDS[raw] ?? raw;
+}
+
 function friendlyProbeLabel(raw: string, aliveBodyNames?: ReadonlySet<string>): string {
   const NAMES: [RegExp, string][] = [
     [/^BodyPosY/, "高さ"],
@@ -4807,7 +4846,8 @@ function friendlyProbeLabel(raw: string, aliveBodyNames?: ReadonlySet<string>): 
       aliveBodyNames !== undefined &&
       targetName !== null &&
       !aliveBodyNames.has(targetName);
-    return gone ? `${name}(${detail[1]}・消えた物)` : `${name}(${detail[1]})`;
+    const shown = bodyNameInWords(detail[1]);
+    return gone ? `${name}(${shown}・消えた物)` : `${name}(${shown})`;
   }
   return raw;
 }
@@ -11855,7 +11895,21 @@ async function setUpSceneView(
       contentBoundingBox() === null &&
       (!fieldPanel.hidden || readNumber(world, "imported_probe_count") > 0);
     sceneViewElement.dataset.stageEmpty = String(stageEmpty);
-    if (stageEmptyNote) stageEmptyNote.hidden = !stageEmpty;
+    // **絵が出ているときは「下を見て」と言わない**。場のパネルは**舞台の中**
+    // に描かれる(二重スリットの縞模様は 984×431px、画面のほぼ半分)。なのに
+    // 案内はそれを覆って「見どころは下のグラフとパネルです」と下を指していた
+    // ので、いちばん大きく出ている絵を素通りして、1 行しかない数値の欄を
+    // 見に行くことになっていた(利用者役⑨の観察)。案内そのものは要る
+    // ——「形のある物は出てこない」ことは、やはり最初に言っておきたい
+    // ——ので、**行き先だけを、出ている場所に合わせて言い換える**。
+    if (stageEmptyNote) {
+      stageEmptyNote.hidden = !stageEmpty;
+      const here = !fieldPanel.hidden;
+      const next = here
+        ? "👀 見どころは<strong>この中に出ている絵</strong>です。<br />形のある物は出てきません——色と数値の動きとして見てください。"
+        : "👀 見どころは<strong>下のグラフ</strong>です。<br />形のある物は出てきません——数値の動きとして見てください。";
+      if (stageEmptyNote.innerHTML !== next) stageEmptyNote.innerHTML = next;
+    }
 
     // **2026-07-28のD9/D34/D35増分で追加したガード**: `hasSelectedBody()`が
     // falseのとき(D9/D34/D35のように力学ボディを1つも持たないギャラリー

@@ -933,6 +933,19 @@ export function setUpWorkspace(
     //   ② 残りを グラフ → 時間 → ログ の順に、望みの高さまで足していく。
     // 素材ドロワーを開いている間だけは、注意がそこにあるので舞台を少し譲る。
     const drawerOpen = project > projectBase;
+    // **舞台に何も映らない実験では、面積の配分を逆にする**。
+    //
+    // 「コーヒーが冷める」を開くと、いちばん大きい場所(3D の舞台 1008×459px)
+    // には最後まで何も出ず、見どころの折れ線は下端の 984×90px に押し込まれて
+    // いた——面積で 5 倍、見せたいものが小さいほうにある。初めての人は
+    // 「まん中が本編、下の帯はおまけ」と思って見るので、本編が空だと
+    // 「壊れている」と読んで閉じる(利用者役⑨の観察、実測値はこの通り)。
+    // 注意書きで「下を見て」と言っても、面積がそう言っていない。
+    //
+    // 「場」のパネルは**舞台の中**に描かれる(二重スリットの絵は 984×431px)
+    // ので、そちらは舞台を渡したまま。絵の行き先が下のグラフしか無いときだけ、
+    // 舞台を案内が入るだけの高さに畳んで、残りをグラフへ渡す。
+    const stageShowsNothing = lastStageEmpty === true && current?.view !== "field";
     // グラフの段の最低限は、**見出しと操作の行を実際に測ってから決める**。
     //
     // ここは 150px の決め打ちだった。手元(Linux)では見出し 15px + 操作の行
@@ -997,10 +1010,12 @@ export function setUpWorkspace(
       }
     }
     const outside = commandbarRow + toolbar + project;
-    const minStage = Math.max(
-      160,
-      Math.min(drawerOpen ? 200 : 240, window.innerHeight - outside - reserved),
-    );
+    const minStage = stageShowsNothing
+      ? 132 // 「見どころは下のグラフとパネルです」の案内(51px)が入る高さ。
+      : Math.max(
+          160,
+          Math.min(drawerOpen ? 200 : 240, window.innerHeight - outside - reserved),
+        );
     let room = Math.max(0, window.innerHeight - outside - minStage);
 
     // 最低限すら入らないほど窮屈なときは、**どれかを 0 にするのではなく
@@ -1018,7 +1033,8 @@ export function setUpWorkspace(
       room -= extra;
       return Math.round(have + extra);
     };
-    analysis = topUp(analysis, wants.analysis);
+    // 舞台を畳んだぶんは、まるごとグラフへ渡す(`stageShowsNothing` のdoc参照)。
+    analysis = topUp(analysis, stageShowsNothing ? window.innerHeight : wants.analysis);
     timeline = topUp(timeline, wants.timeline);
     consoleRow = topUp(consoleRow, wants.console);
 
@@ -1527,13 +1543,19 @@ export function setUpWorkspace(
     // にする——実際にグラフの段が見えているのに「ダイヤルを右へ回すと出ます」
     // と書くのは、それこそ舞台の実際と食い違う。
     const graphOnScreen = detail >= REVEAL.analysis || forceAnalysisOpen;
+    // **「場」の実験を、空の舞台より先に見る**。二重スリットは剛体こそ
+    // 持たないが、舞台の中に 984×431px の縞模様が**ちゃんと出ている**。
+    // なのに空の舞台の文面が先に返っていたので、画面は「形のある物は出ません。
+    // 右のパネルの数値を見てください」と言い、言われて右を見ると数値は
+    // 「経過した時間」1 行だけ——いちばん大きく出ている絵を素通りさせていた
+    // (利用者役⑨の観察)。出ている物を指す。
+    if (experiment.view === "field") {
+      return "👀 まん中に出ている絵(波や分布)が見どころです。";
+    }
     if (stageEmpty) {
       return graphOnScreen
         ? "📈 舞台には形のある物が出ません。下のグラフとパネルを見てください。"
         : "📈 舞台には形のある物が出ません。右のパネルの数値を見てください(右上の「画面の詳しさ」を右へ動かすと、グラフも出ます)。";
-    }
-    if (experiment.view === "field") {
-      return "👀 3D の中に出る「場」のパネルに、波や分布が描かれます。";
     }
     if (experiment.view === "graph") {
       return graphOnScreen

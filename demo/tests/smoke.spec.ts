@@ -171,8 +171,8 @@ test("Hierarchy に Probes サブツリーが出る(D11 は body_pos_x/y の2本
   await page.click('.scene-gallery-list button[data-scene-file="d11-pendulum.json"]');
 
   // ラベルは sim-wasm の probe_target_label が生成する(ボディ名 "bob" 込み)。
-  await expect(hierarchy.getByText("横の位置(bob)", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("高さ(bob)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("横の位置(おもり)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(おもり)", { exact: true })).toBeVisible();
 
   expect(errors).toEqual([]);
 });
@@ -195,7 +195,7 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
   // `JointJson::Ball`(本増分で追加)経由でパースできることの確認でもある。
   await page.click('.scene-gallery-list button[data-scene-file="d12-ragdoll.json"]');
   await expect(hierarchy.getByText("torso", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("高さ(head)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(頭)", { exact: true })).toBeVisible();
 
   // D8 散乱: 床 + 球50個 = 51体。ギャラリー中で最大のシーン。
   await page.click('.scene-gallery-list button[data-scene-file="d8-scatter.json"]');
@@ -355,7 +355,7 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   await expect(
     inspector.getByText("記録している値 (Probe)", { exact: true }),
   ).toBeVisible();
-  await expect(inspector.getByText("横の位置(bob)", { exact: true })).toBeVisible();
+  await expect(inspector.getByText("横の位置(おもり)", { exact: true })).toBeVisible();
   // 近似バッジ(**群1で各ソルバの自己申告へ移行**)。
   // 移行前はWorld側が「どのドメインが有効か」から推測しており、力学ソルバ自身の
   // 近似(PGS+Baumgarte・マニフォールド4点)は**1件も挙がっていなかった**ため
