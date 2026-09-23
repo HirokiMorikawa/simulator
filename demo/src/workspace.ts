@@ -877,6 +877,10 @@ export function setUpWorkspace(
    * 実験の都合で一時的に上げるとき(舞台に何も映らない場面)は偽で呼ぶ——
    * そうしないと、一度そういう実験を開いただけで「みる」に戻れなくなる。
    */
+  /** 留めてある帯の高さ [px] と、それを測ったときの粒度・幅。0 は未測定。 */
+  let commandbarRow = 0;
+  let commandbarKey = "";
+
   function applyDetail(next: number, persist = true, byPerson = true): void {
     detail = Math.min(3, Math.max(0, next));
     if (byPerson) chosenDetail = detail;
@@ -957,7 +961,33 @@ export function setUpWorkspace(
       (wants.analysis > 0 ? floor.analysis : 0) +
       (wants.timeline > 0 ? floor.timeline : 0) +
       (wants.console > 0 ? floor.console : 0);
-    const outside = commandbar.offsetHeight + toolbar + project;
+    // **帯の高さを測って留める**。
+    //
+    // いちばん上の帯だけが「中身任せ(`auto`)」の段だった。つまり舞台の上端が、
+    // パンくずに何と書いてあるかに預けられていた——物を選んで名前が 1 つ増えた
+    // だけで段の高さが変わり、**画面ぜんぶが上下に動く**。手元(Linux)では
+    // 動かなくても、文字の幅が違う環境では動く(macOS の CI で 187px → 189px)。
+    // 折る場所を決め打ちにしただけでは足りない。ここで実測して px に留め、
+    // 舞台の上端は**粒度と窓の大きさだけ**で決まるようにする。
+    // 留めた高さに中身が入りきらないときは、帯の中で縦にスクロールできる
+    // (`#commandbar` の `overflow-y`)——消さずに、画面は動かさない。
+    app.style.setProperty("--row-commandbar", "auto");
+    const barStyle = getComputedStyle(commandbar);
+    const barBorders =
+      (Number.parseFloat(barStyle.borderTopWidth) || 0) +
+      (Number.parseFloat(barStyle.borderBottomWidth) || 0);
+    const naturalBar = Math.min(160, Math.ceil(commandbar.scrollHeight + barBorders));
+    const barKey = `${detail.toFixed(2)}|${width}`;
+    // 粒度か窓の幅が変わったときは、素直に測り直す(帯の中身そのものが変わる)。
+    // 同じ粒度・同じ幅のあいだは、**1 行ぶん(16px)以上ちがうときだけ**留め値を
+    // 更新する——「行が増えた」なら場所を渡すべきだが、名前が 1 文字伸びた程度の
+    // 数 px のゆらぎで舞台を動かしてはいけない。
+    if (commandbarRow === 0 || barKey !== commandbarKey || Math.abs(naturalBar - commandbarRow) >= 16) {
+      commandbarRow = naturalBar;
+      commandbarKey = barKey;
+    }
+    app.style.setProperty("--row-commandbar", `${commandbarRow}px`);
+    const outside = commandbarRow + toolbar + project;
     const minStage = Math.max(
       160,
       Math.min(drawerOpen ? 200 : 240, window.innerHeight - outside - reserved),

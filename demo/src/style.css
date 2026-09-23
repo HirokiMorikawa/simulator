@@ -158,6 +158,9 @@ body {
   --detail: 0.6;
   --col-outline: 0px;
   --col-context: 300px;
+  /* いちばん上の帯の高さ。`auto`(=中身任せ)で始め、`applyDetail` が実測して
+     px で固定する(`workspace.ts` の「帯の高さを測って留める」参照)。 */
+  --row-commandbar: auto;
   --row-toolbar: 0px;
   --row-timeline: 0px;
   --row-analysis: 0px;
@@ -168,7 +171,7 @@ body {
   height: 100vh;
   grid-template-columns: var(--col-outline) minmax(0, 1fr) var(--col-context);
   grid-template-rows:
-    auto var(--row-toolbar) minmax(0, 1fr)
+    var(--row-commandbar) var(--row-toolbar) minmax(0, 1fr)
     var(--row-timeline) var(--row-analysis) var(--row-console) var(--row-project);
   background: var(--surface-app);
   transition:

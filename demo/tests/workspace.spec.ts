@@ -5597,12 +5597,47 @@ test("物を選んでも、画面が上下に飛ばない", async ({ page }) => 
   await page.click("#btn-new-scene");
   await page.waitForTimeout(400);
 
+  // 失敗したときに**どこが動いたのか**がそのまま読めるように、上端までの
+  // 積み上げ(帯 → ツールバーの段 → 舞台)をまとめて持ち帰る。macOS の CI で
+  // 「帯の高さは同じなのに舞台の上端だけ 2px 動く」という、手元(Linux)では
+  // 再現しない食い違いが出たため——どの数字が動いたか分からないまま当てずっぽうで
+  // 直すと、また同じところで転ぶ。
   const geometry = () =>
     page.evaluate(() => {
-      const bar = document.getElementById("commandbar")!.getBoundingClientRect();
+      const app = document.getElementById("app")!;
+      const barEl = document.getElementById("commandbar")!;
+      const bar = barEl.getBoundingClientRect();
       const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
       const c = canvas.getBoundingClientRect();
-      return { bar: Math.round(bar.height), canvasTop: Math.round(c.top) };
+      const px = (n: number) => Number(n.toFixed(2));
+      // 帯が何行で組まれているか(= 子の上端が何種類あるか)。人が気づく「飛び」は
+      // 行が増減したときで、数 px のゆらぎではない。
+      const lines = new Set(
+        [...barEl.children].map((child) =>
+          Math.round(child.getBoundingClientRect().top),
+        ),
+      ).size;
+      return {
+        bar: Math.round(bar.height),
+        lines,
+        canvasTop: Math.round(c.top),
+        detail: {
+          barTop: px(bar.top),
+          barHeight: px(bar.height),
+          barLines: [...barEl.children]
+            .map((child) => {
+              const b = child.getBoundingClientRect();
+              return `${child.className || child.id}@${px(b.top)}+${px(b.height)}`;
+            })
+            .join(" "),
+          appTop: px(app.getBoundingClientRect().top),
+          docScrollTop: px(document.scrollingElement?.scrollTop ?? 0),
+          rows: getComputedStyle(app).gridTemplateRows,
+          sceneTop: px(document.getElementById("scene-view")!.getBoundingClientRect().top),
+          canvasTopRaw: px(c.top),
+          canvasId: canvas.id || canvas.parentElement?.id || "?",
+        },
+      };
     });
 
   const before = await geometry();
@@ -5616,11 +5651,17 @@ test("物を選んでも、画面が上下に飛ばない", async ({ page }) => 
   await page.waitForTimeout(600);
   const cleared = await geometry();
 
-  expect(selected.bar, `帯の高さ 選ぶ前=${before.bar} 選んだ後=${selected.bar}`).toBe(before.bar);
-  expect(cleared.bar, `帯の高さ 外した後=${cleared.bar}`).toBe(before.bar);
+  expect(selected.lines, `帯の行数 選ぶ前=${before.lines} 選んだ後=${selected.lines}`).toBe(
+    before.lines,
+  );
+  const where = `\n  選ぶ前: ${JSON.stringify(before.detail)}\n  選んだ後: ${JSON.stringify(selected.detail)}\n  外した後: ${JSON.stringify(cleared.detail)}`;
+  expect(selected.bar, `帯の高さ 選ぶ前=${before.bar} 選んだ後=${selected.bar}${where}`).toBe(
+    before.bar,
+  );
+  expect(cleared.bar, `帯の高さ 外した後=${cleared.bar}${where}`).toBe(before.bar);
   expect(
     Math.abs(selected.canvasTop - before.canvasTop),
-    `舞台の上端 ${before.canvasTop} → ${selected.canvasTop}`,
+    `舞台の上端 ${before.canvasTop} → ${selected.canvasTop}${where}`,
   ).toBeLessThanOrEqual(1);
 
   expect(errors).toEqual([]);
