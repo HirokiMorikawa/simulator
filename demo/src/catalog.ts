@@ -1961,9 +1961,21 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
+        // **K も Pa も、隣に馴染みのある目盛りを添える**。「312.7 K」
+        // 「1736 Pa」とだけ出ていて、暖かいのか冷たいのか、強いのか弱いのかが
+        // 読めなかった(利用者役⑨の観察)。値そのものは変えず、換算を添える。
         readouts: [
-          { probe: 0, label: "温度", unit: "K", digits: 1 },
-          { probe: 1, label: "圧力", unit: "Pa", digits: 0 },
+          {
+            probe: 0,
+            label: "温度",
+            format: (value) => `${value.toFixed(1)} K(${(value - 273.15).toFixed(1)} ℃)`,
+          },
+          {
+            probe: 1,
+            label: "圧力",
+            format: (value) =>
+              `${value.toFixed(0)} Pa(ふだんの空気の ${((value / 101325) * 100).toFixed(1)}%)`,
+          },
         ],
       },
       {
@@ -1978,7 +1990,20 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 120,
-        readouts: [{ probe: 0, label: "広がりの大きさ", digits: 4 }],
+        // **m² の生の値を、そのまま出さない**。観測点が返すのは平均二乗変位
+        // (単位 m²)で、値は 1.96e-17 のあたり——画面には「広がりの大きさ =
+        // 1.96e-17」と単位も付かずに出ていて、大きくなったのか小さくなったのか
+        // すら読めなかった(利用者役⑨の観察)。その平方根は「平均して動いた
+        // 距離」そのもので、同じ測定から一切の仮定なしに出る。人が読める
+        // 桁(ナノメートル)で出す。
+        readouts: [
+          {
+            probe: 0,
+            label: "平均して動いた距離",
+            format: (value) =>
+              value <= 0 ? "0 nm" : `${(Math.sqrt(value) * 1e9).toFixed(1)} nm`,
+          },
+        ],
       },
       {
         id: "d32-magnet-transition",

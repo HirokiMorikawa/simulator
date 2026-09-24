@@ -459,9 +459,29 @@ export function readoutNumber(value: number, digits: number): string {
   if (!Number.isFinite(value)) return "—";
   const abs = Math.abs(value);
   if (abs !== 0 && (abs < 0.5 * 10 ** -digits || abs >= 1e7)) {
-    return value.toExponential(2);
+    return humanExponent(value.toExponential(2));
   }
   return value.toFixed(digits);
+}
+
+/**
+ * `1.96e-17` を `1.96×10⁻¹⁷` に書き直す。
+ *
+ * 桁の離れた値は指数で書くほかないが、`e-17` は**プログラムの書き方**で
+ * あって理科の書き方ではない。「1.96e-17」とだけ出ていて、大きくなったのか
+ * 小さくなったのかすら読めなかった(利用者役⑨の観察)。教科書と同じ形に
+ * すれば、少なくとも「10 の何乗か」は読める。**値は変えない**。
+ */
+function humanExponent(exponential: string): string {
+  const match = exponential.match(/^(-?[\d.]+)e([+-])(\d+)$/);
+  if (!match) return exponential;
+  const SUPERSCRIPT: Record<string, string> = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+  };
+  const sign = match[2] === "-" ? "⁻" : "";
+  const digits = [...match[3]].map((d) => SUPERSCRIPT[d] ?? d).join("");
+  return `${match[1]}×10${sign}${digits}`;
 }
 
 /**
@@ -3338,7 +3358,21 @@ export function setUpWorkspace(
       // PC が重いのか、何か直したほうがいいのか分からない」)。説明は
       // `title` のツールチップにしか無く、触る画面では開かない。
       // 短いまま、何が起きているかだけを書く。
-      actualRate.textContent = `実際は ×${r.toFixed(2)}(これがこの機械の精一杯)`;
+      // **どれだけ待つことになるのかを書く**。「×0.06」だけでは、止まって
+      // いるのか遅いのかの区別も、あと何秒待てばいいのかも分からず、途中で
+      // 閉じることになっていた(利用者役⑨の観察: 「水を注ぐ」は 6.5 秒
+      // 待って時計が 0.09 → 0.40 秒)。倍率を、人が待つ秒数に直して添える。
+      const secondsPerSimSecond = r > 0 ? 1 / r : Infinity;
+      // **待ち方は、その場面の時間の尺度で言う**。「画面の 1 秒ぶんに◯秒」は
+      // 人の尺度で進む場面(水を注ぐ: 17 秒)では読める言い方だが、ピコ秒で
+      // 進む分子の場面では「8544144718 秒」という、意味を成さない数になる。
+      // 2 分を超える待ちになったら、逆から——「1 秒待つとどれだけ進むか」で
+      // 言う(桁の大きい側で使っている言い方と同じ)。
+      const cost =
+        !Number.isFinite(secondsPerSimSecond) || secondsPerSimSecond > 120
+          ? `1 秒待って ${formatDuration(r, api.stepSeconds())}ぶん進む`
+          : `画面の 1 秒ぶんに ${secondsPerSimSecond < 10 ? secondsPerSimSecond.toFixed(1) : Math.round(secondsPerSimSecond)} 秒`;
+      actualRate.textContent = `実際は ×${r.toFixed(2)}(${cost})`;
       actualRate.classList.add("slow");
     } else if (r > 1.1) {
       // **桁が飛ぶ場面では、何の比なのかを書く**(利用者役「さわる」の報告、

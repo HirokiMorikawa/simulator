@@ -16,6 +16,19 @@ import { GUIDED_CATEGORIES as CATEGORIES } from "../src/catalog";
 // **初めて開いた人**を再現するために空の storageState を使う。
 test.use({ storageState: { cookies: [], origins: [] } });
 
+/**
+ * 画面に出ている数字を数に戻す。「2.21×10⁻¹⁷ ℃」「0.0040 ℃」のどちらも読む
+ * ——指数は理科の書き方(`readoutNumber` の `humanExponent` のdoc参照)で
+ * 出るので、`Number.parseFloat` だけでは仮数しか取れない。
+ */
+function parseShownNumber(text: string): number {
+  const SUPERSCRIPT = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+  const match = text.match(/(-?[\d.]+)×10(⁻?)([⁰¹²³⁴⁵⁶⁷⁸⁹]+)/);
+  if (!match) return Number.parseFloat(text);
+  const exponent = [...match[3]].map((c) => SUPERSCRIPT.indexOf(c)).join("");
+  return Number.parseFloat(match[1]) * 10 ** (Number(exponent) * (match[2] ? -1 : 1));
+}
+
 async function boot(page: Page) {
   await page.goto("/");
   await expect(page.locator("#boot-overlay")).toBeHidden({ timeout: 30_000 });
@@ -497,8 +510,8 @@ test("棒の材質を変えると、熱の伝わり方が実際に変わる", as
   // 木は熱をほとんど伝えない——同じ時間でも温度が上がらない。
   await page.click("#knob-material .knob-choice-btn:nth-child(4)");
   await page.waitForTimeout(4000);
-  const wood = Number.parseFloat((await near.textContent()) ?? "99");
-  expect(wood).toBeLessThan(1);
+  const woodText = (await near.textContent()) ?? "99";
+  expect(parseShownNumber(woodText), `木のときの温度: ${woodText}`).toBeLessThan(1);
   expect(errors).toEqual([]);
 });
 
@@ -2363,13 +2376,22 @@ test("桁の離れた値が、0 に潰れない", async ({ page }) => {
 
   // 実際は 1.5e-22 → 1.9e-17 と 5 桁動いているのに、パネルは「0.0000」の
   // まま止まって見えた(利用者役③)。
+  // いまは平均二乗変位(m²)の生値ではなく、その平方根を人の桁(nm)で出す
+  // (利用者役⑨の観察、`catalog.ts` の d31 のdoc参照)ので、**0 に潰れずに
+  // 増えていく**ことで同じものを確かめる。
+  const spread = page.locator('#context dd[data-probe="0"]');
   await expect
-    .poll(
-      async () =>
-        (await page.locator('#context dd[data-probe="0"]').textContent()) ?? "",
-      { timeout: 20_000 },
-    )
-    .toMatch(/e[+-]?\d/);
+    .poll(async () => parseShownNumber((await spread.textContent()) ?? "0"), {
+      timeout: 20_000,
+    })
+    .toBeGreaterThan(0);
+  await expect(spread).toContainText("nm");
+  const first = parseShownNumber((await spread.textContent()) ?? "0");
+  await expect
+    .poll(async () => parseShownNumber((await spread.textContent()) ?? "0"), {
+      timeout: 20_000,
+    })
+    .toBeGreaterThan(first);
   expect(errors).toEqual([]);
 });
 
@@ -2407,9 +2429,11 @@ test("グラフの凡例の数値が、右の「いまの数値」と同じ書�
   // この瞬間の生の最大値がちょうど指数表記の境目付近にあるはずで、これが
   // まさに退行(生の指数がずれて出る)が起きた領域。ここで止めて凡例を読む
   // ——パネル側の読み取りは、もう検査には使わない(冒頭のコメント参照)。
+  // 指数は理科の書き方(`2.21×10⁻¹⁷`)で出る——`readoutNumber` の
+  // `humanExponent` のdoc参照。
   await expect
     .poll(async () => (await near.textContent()) ?? "", { timeout: 60_000 })
-    .toMatch(/e[+-]?\d/);
+    .toMatch(/×10⁻?[⁰¹²³⁴⁵⁶⁷⁸⁹]/);
   await page.click("#btn-run");
   await page.waitForTimeout(200);
 
@@ -6067,5 +6091,72 @@ test("ふりこは、何も触らなくても目で見て往復する", async ({
   }
   const swing = Math.round(Math.max(...xs) - Math.min(...xs));
   expect(swing, `画面上の往復の幅 ${swing}px`).toBeGreaterThan(60);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: いちばん浅い「みる」のままで、理科の数字として
+// 読めない表記が出ていた——「広がりの大きさ = 1.96e-17」(単位なし)、
+// 「温度 = 312.7 K」「圧力 = 1736 Pa」。1.96e-17 も 312.7 K も中学校では
+// 見ない書き方で、「大きくなった/小さくなった」すら読み取れない。
+test("「みる」に出る数字は、読める単位と桁で書いてある", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "インクが広");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("インク");
+  await page.waitForTimeout(2500);
+  const ink = await page.locator('.card[data-card="numbers"]').innerText();
+  // 平均二乗変位(m²)の生値ではなく、その平方根を人の桁で。
+  expect(ink, ink).toContain("平均して動いた距離");
+  expect(ink, ink).toContain("nm");
+  expect(ink, `指数のまま出ている: ${ink}`).not.toMatch(/\de[+-]\d/);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "気体の分子");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("気体");
+  await page.waitForTimeout(2500);
+  const gas = await page.locator('.card[data-card="numbers"]').innerText();
+  // K と Pa は残したまま、隣に馴染みのある目盛りを添える。
+  expect(gas, gas).toContain("K");
+  expect(gas, gas).toContain("℃");
+  expect(gas, gas).toContain("Pa");
+  expect(gas, gas).toContain("ふだんの空気の");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: 計算が重い実験では時計がほとんど進まないのに、
+// 画面は「実際は ×0.06(これがこの機械の精一杯)」としか言わず、「あと何秒
+// 待てばいいのか」が分からないので途中で閉じることになっていた(「水を注ぐ」は
+// 6.5 秒待って時計が 0.09 → 0.40 秒)。倍率を、人が待つ時間に直して添える。
+test("計算が重い実験では、どれだけ待つことになるのかが書いてある", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  // 人の尺度で進む場面: 「画面の 1 秒ぶんに ◯ 秒」。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "水を注ぐ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("水を注ぐ");
+  await page.waitForTimeout(3000);
+  const water = await page.locator("#run-actual-rate").innerText();
+  expect(water, water).toMatch(/画面の 1 秒ぶんに [\d.]+ 秒/);
+
+  // ピコ秒で進む場面で同じ言い方をすると「8544144718 秒」になる。
+  // そちらは逆から——「1 秒待つとどれだけ進むか」で言う。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "気体の分子");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("気体");
+  await page.waitForTimeout(3000);
+  const gas = await page.locator("#run-actual-rate").innerText();
+  expect(gas, gas).toContain("1 秒待って");
+  expect(gas, `秒で言うと意味を成さない桁になる: ${gas}`).not.toMatch(/ぶんに \d{4,} 秒/);
+
   expect(errors).toEqual([]);
 });
