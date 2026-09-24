@@ -6227,3 +6227,35 @@ test("天体の実験では、回った跡が軌道として描かれる", async
   expect(arc.height, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(60);
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役⑨の観察)**: 「煙が流れる(3D)」の説明は「球のまわりを煙が
+// 流れていきます」「球の裏側で巻き込まれ」と書いていたのに、**この場面に球は
+// 無い**(場面ファイルの `bodies` は空、格子流体の境界も流入だけ)。利用者役は
+// 「球はどこにも見えません」と書いた。在るものを書く。
+test("画面に無い物を、説明が約束していない(煙の場面に球は無い)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "煙が流れ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("煙");
+  await page.waitForTimeout(1500);
+
+  // 剛体はひとつも無い(=「球」は物理にも描画にも存在しない)。
+  const bodies = await page.evaluate(() => {
+    const world = (window as unknown as Record<string, any>).__world;
+    const count = Number(world.read_component("body_count", ""));
+    let solid = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (world.read_component("body_shape_kind_at", String(i)) !== "plane") solid += 1;
+    }
+    return solid;
+  });
+  expect(bodies, "この場面の剛体の数").toBe(0);
+
+  const watch = await page.locator('.card[data-card="watch"]').innerText();
+  expect(watch, `無い物を指している: ${watch}`).not.toContain("球");
+  expect(watch).toContain("煙");
+  expect(errors).toEqual([]);
+});
