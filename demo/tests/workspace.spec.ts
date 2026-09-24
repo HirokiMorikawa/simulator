@@ -6259,3 +6259,66 @@ test("画面に無い物を、説明が約束していない(煙の場面に球�
   expect(watch).toContain("煙");
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役⑨の観察)**: 「坂はすべる? 止まる?」を開くと、平らなマス目の
+// 地面に灰色の箱が 1 つ立っているだけで、傾いた坂はどこにも見えない。8 秒
+// 待っても何も動かない(実測: 「箱の速さ = 0.00 m/s」が 1.89 秒から 8.09 秒
+// までずっと 0.00)。タイトルが「すべる? 止まる?」と問いかけているのに、坂が
+// 見えないので、答えが「止まる」なのか「そもそも始まっていない」のかが
+// 判断できなかった。既定のかたむきが 10° だったため。
+test("「坂はすべる?」は、坂だと目で分かるところから始まる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "坂はすべ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("坂");
+  await page.waitForTimeout(1500);
+
+  /** 床の面が、水平からどれだけ傾いているか [度]。 */
+  const slopeDegrees = () =>
+    page.evaluate(() => {
+      const w = window as unknown as Record<string, any>;
+      const world = w.__world;
+      const count = Number(world.read_component("body_count", ""));
+      for (let i = 0; i < count; i += 1) {
+        if (world.read_component("body_shape_kind_at", String(i)) !== "plane") continue;
+        const mesh = w.__bodyMeshFor?.(i);
+        if (!mesh) continue;
+        // 平面は「ローカル +Z が法線」になるよう回して置いてある。
+        const q = mesh.quaternion;
+        const n = { x: 0, y: 0, z: 1 };
+        // クォータニオンで (0,0,1) を回す。
+        const ix = q.w * n.x + q.y * n.z - q.z * n.y;
+        const iy = q.w * n.y + q.z * n.x - q.x * n.z;
+        const iz = q.w * n.z + q.x * n.y - q.y * n.x;
+        const iw = -q.x * n.x - q.y * n.y - q.z * n.z;
+        const y = iy * q.w + iw * -q.y + iz * -q.x - ix * -q.z;
+        return (Math.acos(Math.min(1, Math.abs(y))) * 180) / Math.PI;
+      }
+      return 0;
+    });
+
+  // 坂だと目で分かる(水平から 20° 以上)。
+  const degrees = await slopeDegrees();
+  expect(degrees, `坂のかたむき ${degrees.toFixed(1)}°`).toBeGreaterThan(20);
+
+  // それでも箱は止まっている——摩擦が勝っている、が答え。
+  await expect(page.locator('#context dd[data-probe="0"]')).toContainText("0.00");
+
+  // つまみを滑り出す角度まで上げれば、ちゃんと滑る。
+  await page.locator('.knob[data-knob-id="slope"] input[type="range"]').fill("40");
+  await page.waitForTimeout(2500);
+  await expect
+    .poll(
+      async () =>
+        parseShownNumber(
+          (await page.locator('#context dd[data-probe="0"]').textContent()) ?? "0",
+        ),
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(1);
+
+  expect(errors).toEqual([]);
+});
