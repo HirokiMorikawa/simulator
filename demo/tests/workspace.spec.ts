@@ -6062,6 +6062,107 @@ test("投げた物は、通った跡が画面に残る(カメラが追いかけ�
   expect(errors).toEqual([]);
 });
 
+// **課題#35(進行管理役の実測)**: 「斜めに投げる」は題名も説明も放物線の
+// 軌跡を約束しているのに、追いかけるカメラが球から 2.74〜3.42m しか離れず、
+// 球が世界で 0m → 75m 進むあいだ画面には地面の格子が流れるだけだった。
+// 跡が残るようになっても、その跡は画角の外にあった(跡の点 153 個のうち
+// 舞台の中は 19 個)。**上がって下りる形が画面に入っていること**を測る
+// ——横に広いだけなら、まっすぐ飛んだのと区別がつかない。
+test("投げた物は、上がって下りる形ごと画面に入る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+  await page.waitForTimeout(3000); // 着地(約2.9秒)まで待って、放物線を一本ぶん描かせる。
+
+  const arc = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const camera = w.__camera;
+    const host = document.querySelector<HTMLElement>("#scene-view-canvas-host")!;
+    const rect = host.getBoundingClientRect();
+    const shown: { x: number; y: number }[] = [];
+    for (const [px, py, pz] of w.__trailPoints() as number[][]) {
+      const p = { x: px, y: py, z: pz };
+      // three の Vector3.project と同じ計算を、その場で手で書く。
+      const m = camera.matrixWorldInverse.elements;
+      const eye = [
+        m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12],
+        m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13],
+        m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14],
+        m[3] * p.x + m[7] * p.y + m[11] * p.z + m[15],
+      ];
+      if (eye[2] > -1e-4) continue;
+      const q = camera.projectionMatrix.elements;
+      const clip = [
+        q[0] * eye[0] + q[4] * eye[1] + q[8] * eye[2] + q[12] * eye[3],
+        q[1] * eye[0] + q[5] * eye[1] + q[9] * eye[2] + q[13] * eye[3],
+        q[2] * eye[0] + q[6] * eye[1] + q[10] * eye[2] + q[14] * eye[3],
+        q[3] * eye[0] + q[7] * eye[1] + q[11] * eye[2] + q[15] * eye[3],
+      ];
+      const x = ((clip[0] / clip[3] + 1) / 2) * rect.width;
+      const y = ((1 - clip[1] / clip[3]) / 2) * rect.height;
+      if (x < 0 || x > rect.width || y < 0 || y > rect.height) continue;
+      shown.push({ x, y });
+    }
+    if (shown.length < 5) return { points: shown.length, width: 0, rise: 0 };
+    shown.sort((a, b) => a.x - b.x);
+    const left = shown[0];
+    const right = shown[shown.length - 1];
+    // 弦(両端を結んだ線)から、いちばん高く外れた点までの縦の隔たり。
+    // 放物線ならここが頂点になる。まっすぐなら 0 に近い。
+    let rise = 0;
+    for (const p of shown) {
+      const t = (p.x - left.x) / Math.max(right.x - left.x, 1e-6);
+      const chordY = left.y + (right.y - left.y) * t;
+      rise = Math.max(rise, chordY - p.y); // 画面の y は下向き。
+    }
+    return { points: shown.length, width: Math.round(right.x - left.x), rise: Math.round(rise) };
+  });
+
+  expect(arc.points, "舞台の中に見えている跡の点の数").toBeGreaterThan(20);
+  expect(arc.width, `舞台の中での跡の横幅 ${arc.width}px`).toBeGreaterThan(300);
+  expect(arc.rise, `弦からの立ち上がり ${arc.rise}px(=放物線の高さ)`).toBeGreaterThan(50);
+  expect(errors).toEqual([]);
+});
+
+// **同じ課題の裏側**: 放物線が全部入る距離まで引くと、直径 0.2m の球は画面で
+// 1px 未満になって消える(実測: カメラ距離 130m で 0.95px)。点にしか見えない
+// 物には、画面で必ず一定の大きさに見える輪を添える(`updateVisibilityMark` の
+// doc 参照)。**十分大きく映っている場面では出ない**ことも一緒に確かめる
+// ——出っぱなしなら、ただの飾りになってしまう。
+test("点にしか見えない物には、見失わないための輪がつく(大きく映る物には付かない)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+  await expect
+    .poll(
+      () => page.evaluate(() => (window as unknown as Record<string, any>).__visibilityMarkCount()),
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "積み木");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("積み木");
+  await page.waitForTimeout(2500);
+  const marks = await page.evaluate(() =>
+    (window as unknown as Record<string, any>).__visibilityMarkCount(),
+  );
+  expect(marks, "積み木のように大きく映る場面で出ている輪の数").toBe(0);
+  expect(errors).toEqual([]);
+});
+
 // **課題(利用者役⑨の実測)**: 「ふりこ」を開いても、おもりはほぼ真下で
 // 止まって見えた——画面上の往復は 17px(おもりの直径 57px の 1/3 未満、
 // 舞台の幅の 1.7%)。既定の振れはばが 3 度だったため。「ふりこ」を選んだ人が

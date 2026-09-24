@@ -7886,6 +7886,72 @@ async function setUpSceneView(
    */
   let guidedSceneStartBox: THREE.Box3 | null = null;
   let guidedSceneStartPending = false;
+  /**
+   * **曲がって進んだ道すじを包む箱**。
+   *
+   * 追いかけるカメラは「対象が豆粒にならない距離」を上限に持っている
+   * (`updateGuidedFollowCamera` の `APPARENT_MIN`)。これは走る車のように
+   * **物そのものが見どころ**の場面では正しい——車が画面の点になったら
+   * サスペンションの沈みは読めない。ところが同じ上限を小さな球に当てると、
+   * 「斜めに投げる」で実測 2.74〜3.42m まで寄ったまま球が世界で 0m → 75m
+   * 進み、**題名と説明が約束している放物線が一度も画面に入らなかった**
+   * (進行管理役の再現、`window.__camera` で計測)。球の直径は 0.2m なので、
+   * 上限は 0.17m × 16 ≈ 2.8m にしかならない。
+   *
+   * 見どころが「物」なのか「道すじ」なのかを、場面ごとの決め打ちではなく
+   * **道すじの形そのもの**から決める: 始点と終点を結んだ弦から、通った点が
+   * どれだけ膨らんだか(弦の長さに対する比)。放物線は頂点で弦の 1/4 ほど
+   * 膨らむ。まっすぐ走り去る車は 0 に近い。**曲がっている道すじは、それ自体
+   * が形であり見せる価値がある**——だから曲がりを見つけたら、その道すじを
+   * 包む箱を「見どころの大きさ」に足す(=上限がゆるみ、全体が画角に入る)。
+   *
+   * 箱は**足していくだけ**で縮めない。跡は一定の点数で古い方から捨てられる
+   * ので(`extendTrail`)、着地して滑り続けるとせっかく出した放物線が跡から
+   * 消え、カメラだけがまた寄り直す「行ったり来たり」になるため。場面を
+   * 読み込み直すと消える。
+   */
+  let guidedCurvedPathBox: THREE.Box3 | null = null;
+  /** 弦に対する膨らみがこの比を超えたら「曲がっている」と見なす。 */
+  const CURVED_PATH_BULGE = 0.08;
+  /** 形と呼べるだけの点数。数点では丸め誤差が膨らみに見える。 */
+  const CURVED_PATH_MIN_POINTS = 8;
+  /**
+   * いま残っている跡のうち「曲がっているもの」を `guidedCurvedPathBox` に
+   * 足す。跡は描画のためだけの線なので、ここでも読むだけで書き換えない。
+   */
+  function collectCurvedPaths(): void {
+    const from = new THREE.Vector3();
+    const chord = new THREE.Vector3();
+    const point = new THREE.Vector3();
+    const arm = new THREE.Vector3();
+    for (const [index, trail] of trails) {
+      // 天体の軌道は `updateAstroOverlay` が別に画角を決めているので触らない。
+      if (index >= ASTRO_TRAIL_INDEX_BASE) continue;
+      if (trail.count < CURVED_PATH_MIN_POINTS) continue;
+      const last = (trail.count - 1) * 3;
+      from.set(trail.positions[0], trail.positions[1], trail.positions[2]);
+      chord
+        .set(trail.positions[last], trail.positions[last + 1], trail.positions[last + 2])
+        .sub(from);
+      const chordLength = chord.length();
+      if (chordLength <= 0) continue;
+      chord.divideScalar(chordLength);
+      let bulge = 0;
+      for (let i = 1; i < trail.count - 1; i += 1) {
+        point.set(trail.positions[i * 3], trail.positions[i * 3 + 1], trail.positions[i * 3 + 2]);
+        arm.copy(point).sub(from);
+        // 弦に沿った成分を引くと、残りが弦からの垂線(膨らみ)になる。
+        arm.addScaledVector(chord, -arm.dot(chord));
+        bulge = Math.max(bulge, arm.length());
+      }
+      if (bulge / chordLength < CURVED_PATH_BULGE) continue;
+      for (let i = 0; i < trail.count; i += 1) {
+        point.set(trail.positions[i * 3], trail.positions[i * 3 + 1], trail.positions[i * 3 + 2]);
+        if (guidedCurvedPathBox) guidedCurvedPathBox.expandByPoint(point);
+        else guidedCurvedPathBox = new THREE.Box3(point.clone(), point.clone());
+      }
+    }
+  }
   const guidedFollowTarget = new THREE.Vector3();
   const guidedFollowDirection = new THREE.Vector3();
   /**
@@ -8017,6 +8083,11 @@ async function setUpSceneView(
     box.expandByPoint(new THREE.Vector3(0, 0, 0));
     // 始まりの広がりも含める(`guidedSceneStartBox` の doc 参照)。
     if (guidedSceneStartBox) box.union(guidedSceneStartBox);
+    // 曲がって進んだ道すじも含める(`guidedCurvedPathBox` の doc 参照)。
+    // **`radius` を出すより先に**足す——さもないと道すじは画角の計算に
+    // 一切入らない。
+    collectCurvedPaths();
+    if (guidedCurvedPathBox) box.union(guidedCurvedPathBox);
     box.getCenter(guidedFollowTarget);
     // **ここも 0.5m で床止めしない**。すぐ下の doc が自分で書いているとおり、
     // この場面の寸法は 1e-7m の分子から 1e11m の公転まで振れる。なのに広がりに
@@ -8045,8 +8116,19 @@ async function setUpSceneView(
     // 6〜7% ——まわりが見えることは保ちつつ、何が走っているのか分かる大きさ。
     // 全体が入る場面では `fit` の方が小さいので、この上限は効かない。
     const APPARENT_MIN = 16;
+    // **見どころが「物」ではなく「道すじ」の場面では、道すじの大きさで
+    // 上限を決める**(`guidedCurvedPathBox` の doc 参照)。曲がって進んだ跡が
+    // 残っていれば、その広がりを見どころの大きさに足す——「斜めに投げる」は
+    // これで 2.8m から放物線全体が入る距離まで開く。まっすぐ走り去る車では
+    // 跡が曲がらないので、上限はこれまでどおり車の大きさで決まる。
+    const subjectRadius = guidedCurvedPathBox
+      ? Math.max(
+          movingRadius,
+          guidedCurvedPathBox.getSize(new THREE.Vector3()).length() * 0.5,
+        )
+      : movingRadius;
     const fit = radius * 3.6;
-    const cap = Math.max(movingRadius * 6, movingRadius * APPARENT_MIN);
+    const cap = Math.max(subjectRadius * 6, subjectRadius * APPARENT_MIN);
     const desired = Math.min(fit, cap);
     // **全部は入らないと決めたなら、注視点も寄せる**。距離だけ縮めて注視点を
     // 全体の中心に置いたままだと、対象が画角の外へ出て「何も映っていない
@@ -10067,6 +10149,7 @@ async function setUpSceneView(
     bodyMeshes.clear();
     // 場面を入れ替えたら、前の場面の跡は残さない(`clearTrails` のdoc参照)。
     clearTrails();
+    clearVisibilityMarks();
     for (const line of constraintLines.values()) {
       scene.remove(line);
     }
@@ -11833,6 +11916,95 @@ async function setUpSceneView(
     trails.clear();
   }
 
+  // ---------------------------------------------------------------------------
+  // **見失わないための輪**
+  //
+  // 画角は「現象が読めること」で決まる——「斜めに投げる」なら放物線が全部
+  // 入る距離まで引く(`guidedCurvedPathBox` の doc 参照)。ところが 40m の
+  // 放物線を画角に入れると、直径 0.2m の球は画面で 1px 未満になり、**主役が
+  // 消える**(実測: カメラ距離 130m で 0.95px)。同じことは 1cm の磁石(D21)、
+  // 10µm の粒(D25)でも起きていて、これまでは「カメラを寄せる」ことで対処
+  // していたが、寄せると今度はまわりが見えなくなる——どちらも立てられない。
+  //
+  // 物の**見た目の大きさ**と**画角**を切り離す。小さすぎて点になる物には、
+  // 画面で必ず一定の大きさに見える輪を添える。輪は物より大きくならない
+  // (十分大きく映っていれば出ない)ので、ふだんの場面では一本も増えない。
+  // 物の形・色・大きさには一切触らないので、**物理にも見た目の寸法にも嘘を
+  // つかない**——「ここに居る」とだけ言う印。
+  /**
+   * **点にしか見えない**と判断する画面上の半径 [px]。これを下回る物にだけ
+   * 輪が出る。9px から下げた——50個ばらまく場面の球は画面で半径 4px ほど
+   * あり、球として十分見えているのに輪が(先頭6個にだけ)付いて、選ばれて
+   * いるように見えた(実測・スクリーンショット)。3px = 直径6px は、球か
+   * 点かの境目。
+   */
+  const VISIBILITY_MARK_DOT_PX = 3;
+  /** 出すと決めたときの輪の半径 [px]。点を囲んで見つけられる大きさ。 */
+  const VISIBILITY_MARK_RADIUS_PX = 7;
+  const visibilityMarks = new Map<number, THREE.Mesh>();
+  const visibilityMarkGeometry = new THREE.RingGeometry(0.78, 1, 32);
+  // 試験から「いま何個の輪が出ているか」と「跡の点」を読めるようにする
+  // (`__bodyMeshFor` と同じ扱い、実行時の見た目には影響しない)。
+  (window as unknown as { __visibilityMarkCount?: () => number }).__visibilityMarkCount =
+    () => [...visibilityMarks.values()].filter((mark) => mark.visible).length;
+  (window as unknown as { __trailPoints?: () => number[][] }).__trailPoints = () => {
+    const out: number[][] = [];
+    for (const [index, trail] of trails) {
+      if (index >= ASTRO_TRAIL_INDEX_BASE) continue;
+      for (let i = 0; i < trail.count; i += 1) {
+        out.push([trail.positions[i * 3], trail.positions[i * 3 + 1], trail.positions[i * 3 + 2]]);
+      }
+    }
+    return out;
+  };
+  function clearVisibilityMarks(): void {
+    for (const mark of visibilityMarks.values()) {
+      trailGroup.remove(mark);
+      (mark.material as THREE.Material).dispose();
+    }
+    visibilityMarks.clear();
+  }
+  /**
+   * 1 つの物の輪を今のカメラに合わせる。画面での半径が下限を上回っていれば
+   * 輪は消える(= 物そのものが見えているので印は要らない)。
+   */
+  function updateVisibilityMark(bodyIndex: number, at: THREE.Vector3): void {
+    const height = renderer.domElement.clientHeight;
+    const distance = camera.position.distanceTo(at);
+    if (height <= 0 || distance <= 0) return;
+    // 画面 1px が世界で何 m か。透視投影なので距離に比例する。
+    const worldPerPixel =
+      (2 * distance * Math.tan((camera.fov * Math.PI) / 360)) / height;
+    const bodyPixels = bodyVisibilityRadius(bodyIndex) / worldPerPixel;
+    let mark = visibilityMarks.get(bodyIndex);
+    if (bodyPixels >= VISIBILITY_MARK_DOT_PX) {
+      if (mark) mark.visible = false;
+      return;
+    }
+    if (!mark) {
+      mark = new THREE.Mesh(
+        visibilityMarkGeometry,
+        new THREE.MeshBasicMaterial({
+          color: 0xffd08a,
+          transparent: true,
+          opacity: 0.8,
+          side: THREE.DoubleSide,
+          depthTest: false,
+        }),
+      );
+      // 物の手前に出す(点にしかならない物が輪に隠れては本末転倒なので、
+      // 輪は中身の空いた線だけ)。
+      mark.renderOrder = 2;
+      trailGroup.add(mark);
+      visibilityMarks.set(bodyIndex, mark);
+    }
+    mark.visible = true;
+    mark.position.copy(at);
+    // いつもカメラを正面から向く(板を回すだけなので、どの角度でも円に見える)。
+    mark.quaternion.copy(camera.quaternion);
+    mark.scale.setScalar(VISIBILITY_MARK_RADIUS_PX * worldPerPixel);
+  }
+
   /**
    * 点の間隔 [m]。「いま見ている距離」の 1/220 ——カメラが引けば粗く、寄れば
    * 細かくなるので、1e-7m の分子から 1e11m の公転まで同じ見た目の線になる。
@@ -11916,6 +12088,9 @@ async function setUpSceneView(
       // 決める——1e-7m の分子から 1e11m の公転まで同じ線の密度で描くため。
       if (world.read_component("body_is_static_at", String(bodyIndex)) !== "true") {
         extendTrail(bodyIndex, mesh.position, trailStep);
+        // 点にしかならない大きさなら、見失わないための輪を添える
+        // (`updateVisibilityMark` のdoc参照)。跡と同じ「動く物」だけが対象。
+        if (trails.has(bodyIndex)) updateVisibilityMark(bodyIndex, mesh.position);
       }
     }
 
@@ -12485,6 +12660,7 @@ async function setUpSceneView(
       guidedCameraSnap = true;
       guidedSceneStartBox = null;
       guidedSceneStartPending = true;
+      guidedCurvedPathBox = null;
       // **前の場面の「単独追跡」を持ち越さない**。`followedBodyIndices`は
       // ボディ番号でしかないので、差し替わった新しい場面でたまたま同じ番号の
       // 別の物を指してしまう恐れがある(`followedBodyBox`の存在チェックだけ
