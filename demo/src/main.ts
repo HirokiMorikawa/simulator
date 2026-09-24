@@ -12299,13 +12299,19 @@ async function setUpSceneView(
       if (timelineHint) {
         timelineHint.textContent =
           snapshotCount > 1
-            ? `⏪ つまむと ${formatDuration(
+            // **飛び飛びであることを言う**。記録は 1 秒ごとなので、帯は
+            // 連続には動かず、記録した時点にしか止まらない。「〜 のあいだへ
+            // 戻せます」とだけ書いてあったので、好きな瞬間へ戻せるものと
+            // 読まれ、「ぶつかる瞬間に止められない」と書かれた(利用者役⑩の
+            // 観察: 2 秒で終わる落下に対し、止まれるのは 1/2/3/4 秒ちょうどの
+            // 4 か所だけ)。いくつの時点へ戻れるのかを先に書く。
+            ? `⏪ つまむと、記録した ${snapshotCount} つの時点(${formatDuration(
                 readNumber(world, "snapshot_time_at", "0"),
                 readNumber(world, "dt"),
               )} 〜 ${formatDuration(
                 readNumber(world, "snapshot_time_at", String(latestIndex)),
                 readNumber(world, "dt"),
-              )} のあいだへ戻せます`
+              )}、1 秒ごと)へ戻せます`
             : "⏪ つまむと、記録した時点へ戻せます";
       }
       // 走らせている間は最新に追従し、止めている間は人が置いた場所に留まる

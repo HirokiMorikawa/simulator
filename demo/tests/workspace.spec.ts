@@ -1976,7 +1976,9 @@ test("時間の帯は、どこまで戻れるのかを言う", async ({ page }) 
     .poll(async () => (await page.locator("#timeline-hint").textContent()) ?? "", {
       timeout: 20_000,
     })
-    .toMatch(/つまむと .+ 〜 .+ のあいだへ戻せます/);
+    // 飛び飛びであることも言う(下の「時間を戻す帯は、飛び飛びであることを
+    // 先に言う」のdoc参照)。
+    .toMatch(/つまむと、記録した \d+ つの時点\(.+ 〜 .+、1 秒ごと\)へ戻せます/);
   expect(errors).toEqual([]);
 });
 
@@ -6031,6 +6033,13 @@ test("投げた物は、通った跡が画面に残る(カメラが追いかけ�
         if (eye[2] > -1e-4) continue;
         const clip = mul(camera.projectionMatrix.elements, eye);
         const x = rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width;
+        const y = rect.top + ((1 - clip[1] / clip[3]) / 2) * rect.height;
+        // **舞台の中に入っている点だけを数える**。画面の外の点まで含めて
+        // 「広がり」を測ると、跡のほとんどが画角の外に出ていても数字だけは
+        // 大きくなる——最初はそう測っていて、見えていないものを見えていると
+        // report していた(進行管理役の測り直しで発覚: 跡の点 153 個のうち
+        // 舞台に入っていたのは 19 個)。
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue;
         minX = Math.min(minX, x);
         maxX = Math.max(maxX, x);
         points += 1;
@@ -6038,8 +6047,8 @@ test("投げた物は、通った跡が画面に残る(カメラが追いかけ�
     });
     return { points, width: points ? Math.round(maxX - minX) : 0 };
   });
-  expect(spread.points, "跡の点の数").toBeGreaterThan(20);
-  expect(spread.width, `跡の画面上の広がり ${spread.width}px`).toBeGreaterThan(300);
+  expect(spread.points, "舞台の中に見えている跡の点の数").toBeGreaterThan(5);
+  expect(spread.width, `舞台の中に見えている跡の広がり ${spread.width}px`).toBeGreaterThan(300);
   expect(errors).toEqual([]);
 });
 
@@ -6208,6 +6217,10 @@ test("天体の実験では、回った跡が軌道として描かれる", async
         const clip = mul(camera.projectionMatrix.elements, eye);
         const x = rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width;
         const y = rect.top + ((1 - clip[1] / clip[3]) / 2) * rect.height;
+        // 舞台の中に入っている点だけを数える(上の「通った跡」のテストと
+        // 同じ理由——画面の外の点まで含めると、見えていないものが見えている
+        // ことになる)。
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue;
         minX = Math.min(minX, x);
         maxX = Math.max(maxX, x);
         minY = Math.min(minY, y);
@@ -6221,7 +6234,7 @@ test("天体の実験では、回った跡が軌道として描かれる", async
       height: points ? Math.round(maxY - minY) : 0,
     };
   });
-  expect(arc.points, "軌道の点の数").toBeGreaterThan(20);
+  expect(arc.points, "舞台の中に見えている軌道の点の数").toBeGreaterThan(20);
   // まっすぐな線ではなく、**曲がって**いる(縦にも横にも広がっている)。
   expect(arc.width, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(150);
   expect(arc.height, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(60);
@@ -6320,5 +6333,107 @@ test("「坂はすべる?」は、坂だと目で分かるところから始ま�
     )
     .toBeGreaterThan(1);
 
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の実測)**: 「電気の工作台」で「電池の電圧」を 1.5 V にしても
+// 12 V にしても、「コンデンサの電圧」がまったく同じ数字になり、しかも
+// 1.5 V を選んでいるのにグラフの凡例は `max=8.852 V` ——乾電池 1 本より大きい
+// 電圧が出ていた。コンデンサは電池へつながっていない放電枝に居て、初期電圧が
+// 9.0 V に焼き込まれていたため。あわせて、つまみの説明が約束している「電流」と
+// 「発熱」が「いまの数値」のどこにも無かった。
+test("電池のつまみが、回路のどの数値にも効く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d19-electric-workbench"]');
+  await expect(page.locator("#crumb-experiment")).toContainText("電気の工作台");
+  await page.waitForTimeout(1200);
+
+  const read = async (volts: string) => {
+    await page.locator("#context .knob-choice-btn", { hasText: volts }).first().click();
+    await page.click("#btn-restart");
+    await page.waitForTimeout(2200);
+    const legend: string[] = await page.evaluate(
+      () => (window as unknown as Record<string, any>).__probeGraphLegend ?? [],
+    );
+    const capacitorPeak = legend.find((l) => l.startsWith("コンデンサの電圧")) ?? "";
+    return {
+      panel: await page.locator('.card[data-card="numbers"]').innerText(),
+      capacitorPeak,
+    };
+  };
+
+  const low = await read("1.5 V");
+  const high = await read("12 V");
+
+  // コンデンサは、選んだ電池で充電された状態から始まる——1.5 V の乾電池から
+  // 8.852 V が出る、ということが起きない。
+  const peak = (line: string) => Number.parseFloat(line.match(/max=([\d.]+)/)?.[1] ?? "0");
+  expect(peak(low.capacitorPeak), low.capacitorPeak).toBeLessThan(2);
+  expect(peak(high.capacitorPeak), high.capacitorPeak).toBeGreaterThan(9);
+
+  // つまみの説明が約束している電流と温度が、画面にあって、ちゃんと動く。
+  for (const label of ["電池・電源0 から流れる電流", "抵抗の温度"]) {
+    expect(low.panel, `${label} が「いまの数値」に無い`).toContain(label);
+  }
+  const current = (panel: string) =>
+    Number.parseFloat(panel.match(/電池・電源0 から流れる電流\s*([\d.]+) mA/)?.[1] ?? "0");
+  const celsius = (panel: string) =>
+    Number.parseFloat(panel.match(/抵抗の温度\s*[\d.]+ K\(([-\d.]+) ℃\)/)?.[1] ?? "0");
+  expect(current(high.panel), `電流 ${current(low.panel)} → ${current(high.panel)} mA`).toBeGreaterThan(
+    current(low.panel) * 2,
+  );
+  expect(celsius(high.panel), `温度 ${celsius(low.panel)} → ${celsius(high.panel)} ℃`).toBeGreaterThan(
+    celsius(low.panel) + 1,
+  );
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の観察)**: 時間を戻す帯は「つまむと 1.00 秒 〜 4.00 秒 の
+// あいだへ戻せます」と書いてあり、好きな瞬間へ戻せるように読める。実際は
+// 記録が 1 秒ごとなので、止まれるのは 4 か所だけ——2 秒で終わる落下では
+// 「ぶつかる瞬間をもう一度」が押さえられない。飛び飛びであることを先に言う。
+test("時間を戻す帯は、飛び飛びであることを先に言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.waitForTimeout(5000);
+  await page.click("#btn-run"); // とめる
+
+  const hint = await page.locator("#timeline-hint").innerText();
+  expect(hint, hint).toContain("記録した");
+  expect(hint, hint).toContain("1 秒ごと");
+  // 帯が実際に止まれる数と、文が言う数が合っている。
+  const stops = await page.evaluate(() => {
+    const el = document.getElementById("timeline-scrubber") as HTMLInputElement | null;
+    if (!el) return 0;
+    return Number(el.max) - Number(el.min) + 1;
+  });
+  expect(hint, `帯は ${stops} か所で止まる: ${hint}`).toContain(`${stops} つの時点`);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の観察)**: 「氷が融ける」は、回すつまみが「飲み物の温度
+// 350 K」、すぐ隣の「いまの数値」が「飲み物の温度 76.7 ℃」——同じ量なのに
+// 単位が違い、350 と 76.7 が同じことを指していると気づくのに時間がかかった。
+test("つまみと数値が、同じ量を同じ目盛りで言う(飲み物の温度)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "氷が融け");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("氷");
+  await page.waitForTimeout(1500);
+
+  const knob = await page.locator('.knob[data-knob-id="drink"] .knob-value').innerText();
+  const panel = await page.locator('.card[data-card="numbers"]').innerText();
+  // つまみは K のまま(場面が使う目盛り)、℃ を添えて突き合わせられる。
+  expect(knob, knob).toContain("K");
+  expect(knob, knob).toContain("℃");
+  expect(panel, panel).toContain("℃");
   expect(errors).toEqual([]);
 });
