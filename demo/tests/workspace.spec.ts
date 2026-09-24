@@ -6062,6 +6062,193 @@ test("投げた物は、通った跡が画面に残る(カメラが追いかけ�
   expect(errors).toEqual([]);
 });
 
+// **課題(利用者役⑪の実測、進行管理役の再現)**: うごきのグラフには目盛りの
+// 付いた縦軸が無く、線が 2 本以上あると**それぞれ自分の範囲へ正規化して**
+// 重ねていた。ふりこの「横位置」は振れ幅 0.716 m、「高さ」は 0.066 m ——
+// 実際は 10.8 倍違うのに、画面では 2 本とも帯いっぱいの同じ高さの波。0 が
+// どこかも分からない(「高さ」は全区間が負)。量ごとに段を分ける。
+test("グラフは、量ごとに段を分けて、それぞれの上限と下限を出す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
+  await expect(page.locator("#probe-canvas")).toBeVisible();
+
+  const bands = await page
+    .locator("#probe-canvas")
+    .evaluate(async () => {
+      const w = window as unknown as Record<string, any>;
+      for (let i = 0; i < 60 && (w.__probeGraphBands ?? []).length < 2; i += 1) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return w.__probeGraphBands ?? [];
+    });
+
+  expect(bands.length, "段の数(=量の数)").toBeGreaterThanOrEqual(2);
+  // 段どうしは重ならない——重ねないことが、この直しのすべて。
+  const sorted = [...bands].sort((a, b) => a.top - b.top);
+  for (let i = 1; i < sorted.length; i += 1) {
+    expect(
+      sorted[i].top,
+      `${sorted[i].label} の段が ${sorted[i - 1].label} の段と重ならない`,
+    ).toBeGreaterThanOrEqual(sorted[i - 1].top + sorted[i - 1].height);
+  }
+  // それぞれの段は、自分の上限と下限を持っている(目盛りとして描いている値)。
+  for (const band of bands) {
+    expect(Number.isFinite(band.min) && Number.isFinite(band.max)).toBe(true);
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題#36 と利用者役⑪の実測**: 「1 回跳ねるごとに高さが決まった割合で
+// 減ります」と書いてあるのに、跳ね返った高さが画面に無かった。しかも
+// 「ボールを跳ねさせる」は 1 コマで 1 秒ぶん進むので、画面の更新に合わせて
+// 値を覗くやり方では**跳ね返り 1 往復をまたぎ越す**——同じ設定で 1.30 m と
+// 0.84 m(=2 回目の跳ね返り)の両方が出ていた。記録そのものから読む。
+test("跳ね返った高さが出て、同じ設定なら何度読んでも同じ", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "跳ねさせる");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("跳ねさせる");
+
+  const peak = async () => {
+    const text = await page.locator("#context").innerText();
+    const hit = text.match(/1 回目に跳ね返った高さ\n([^\n]+)/);
+    return hit ? hit[1].trim() : "";
+  };
+  await expect.poll(peak, { timeout: 20_000 }).toMatch(/^[\d.]+ m$/);
+  const first = await peak();
+  await page.waitForTimeout(2500);
+  const later = await peak();
+  expect(later, "同じ回の中で、あとから読んでも同じ").toBe(first);
+
+  // 落とした高さ 2 m に対して、跳ね返りは決まった割合(ゴムでおよそ 0.65)。
+  const ratio = Number.parseFloat(first) / 2;
+  expect(ratio, `跳ね返りの割合 ${ratio.toFixed(3)}`).toBeGreaterThan(0.45);
+  expect(ratio, `跳ね返りの割合 ${ratio.toFixed(3)}`).toBeLessThan(0.85);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測)**: 「45° がいちばん遠くまで飛びます」「飛距離と
+// 滞空時間の関係が見えます」と言うのに、飛距離がどこにも無かった。球は
+// 着地後も転がり続けるので、いまの横位置では答えにならない(t=2.79s で
+// 38.8m、t=7.59s で 86.8m)。着いた瞬間の値で止める。
+test("投げた物の飛距離が出て、教科書の式と合う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+
+  const range = async () => {
+    const text = await page.locator("#context").innerText();
+    const hit = text.match(/着いたときの横の距離\(飛距離\)\n([^\n]+)/);
+    return hit ? hit[1].trim() : "";
+  };
+  await expect.poll(range, { timeout: 20_000 }).toMatch(/^[\d.]+ m$/);
+  const shown = Number.parseFloat(await range());
+  // 秒速 20 m・45°・y=0.2 m から投げて y=0.3 m まで: 40.62 m(手計算)。
+  expect(shown, `飛距離 ${shown} m`).toBeGreaterThan(39.5);
+  expect(shown, `飛距離 ${shown} m`).toBeLessThan(41.5);
+  // 読み続けても動かない(転がっていく横位置とは別物であること)。
+  await page.waitForTimeout(2500);
+  expect(Number.parseFloat(await range())).toBe(shown);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測)**: 動ける物が 1 つも無い場面(コーヒーが冷める・
+// 電気の工作台)にまで「ほぼ止まった時刻(0.05 m/s 以下)」の行が出て、永久に
+// 「まだ止まっていません」と言い続けていた。止まる・止まらないという問いが
+// そもそも無い。逆に 25°の坂では箱が 0.00 m/s で張り付いているのに
+// 「まだ止まっていません」と出て、すぐ上の速さと矛盾していた。
+test("止まる・止まらないを、問える場面でだけ問う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  await page.waitForTimeout(5000);
+  await expect(
+    page.locator("#readout-settled-key"),
+    "動ける物が無い場面に、止まった時刻の行は出ない",
+  ).toBeHidden();
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "坂はすべる");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("坂");
+  await expect(page.locator("#readout-settled")).toBeVisible({ timeout: 20_000 });
+  const settled = await page.locator("#readout-settled").innerText();
+  const context = await page.locator("#context").innerText();
+  if (/箱の速さ\n0\.00 m\/s/.test(context)) {
+    expect(settled, "0.00 m/s のとなりで「まだ止まっていません」と言わない").not.toBe(
+      "まだ止まっていません",
+    );
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題#32(進行管理役の実測)**: 「50個の球をばらまく」は 5.3秒で全部の球が
+// y=0.20 に落ち着くのに、カメラは距離 25.19m・注視点 y=6.01 のまま動かず、
+// 球の塊は舞台 1132×715px のうち 134×67px ——面積で 1.1% しか使っていな
+// かった。残りは空の格子と黒い空。落ちる途中の高さは、落ち終われば見どころ
+// ではない(`guidedStillBox` の doc 参照)。
+test("落ちきったら、落下の高さぶん画角を取られたままにならない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ばらまく");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ばらまく");
+
+  const spread = async () =>
+    page.evaluate(() => {
+      const w = window as unknown as Record<string, any>;
+      const host = document.querySelector<HTMLElement>("#scene-view-canvas-host")!;
+      const rect = host.getBoundingClientRect();
+      let minX = Infinity;
+      let maxX = -Infinity;
+      for (let i = 0; i < 80; i += 1) {
+        const mesh = w.__bodyMeshFor(i);
+        if (!mesh) continue;
+        if (w.__world.read_component("body_is_static_at", String(i)) === "true") continue;
+        const v = mesh.position.clone().project(w.__camera);
+        const x = (v.x * 0.5 + 0.5) * rect.width;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+      }
+      return {
+        width: Number.isFinite(minX) ? Math.round(maxX - minX) : 0,
+        stage: Math.round(rect.width),
+        targetY: w.__orbit.target.y,
+      };
+    });
+
+  // 落ち着くのに約5秒、手放すのに 1.5 秒、寄り切るのに数秒。
+  await expect
+    .poll(async () => (await spread()).width, { timeout: 30_000 })
+    .toBeGreaterThan(200);
+  const after = await spread();
+  expect(
+    after.width / after.stage,
+    `落ち着いたあと、球の塊が舞台の横幅に占める割合(${after.width}/${after.stage}px)`,
+  ).toBeGreaterThan(0.18);
+  expect(after.targetY, "落ち着いたあとの注視点の高さ").toBeLessThan(1.5);
+  expect(errors).toEqual([]);
+});
+
 // **課題#35(進行管理役の実測)**: 「斜めに投げる」は題名も説明も放物線の
 // 軌跡を約束しているのに、追いかけるカメラが球から 2.74〜3.42m しか離れず、
 // 球が世界で 0m → 75m 進むあいだ画面には地面の格子が流れるだけだった。

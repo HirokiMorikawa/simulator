@@ -5011,7 +5011,10 @@ function probeSeriesToCsv(
 // 固定とは限らない)。乱数は決定論を重視するこのプロジェクトの流儀に反するため
 // 使わず、この配列を`index % PROBE_GRAPH_COLORS.length`で決定的に巡回させる
 // (`render()`内の`isGalleryScene`分岐参照)。
-const PROBE_GRAPH_COLORS = ["#9cf", "#fc6", "#f9c", "#9fc", "#c9f", "#ffcc99"];
+// 6 本目は `#ffcc99` で、2 本目の `#fc6`(=#ffcc66)と**赤と緑が完全に同じ**
+// ——違うのは青成分だけ(153 対 104)で、電気の工作台ではコンデンサの電圧と
+// 抵抗の温度が見分けられなかった(実測・利用者役⑪)。色相をずらす。
+const PROBE_GRAPH_COLORS = ["#9cf", "#fc6", "#f9c", "#9fc", "#c9f", "#6fd8c8"];
 
 function setUpProbeGraph(): (
   series: ProbeSeries[],
@@ -5119,6 +5122,8 @@ function setUpProbeGraph(): (
     // どこが何秒か」が読めなかった。
     const AXIS_BAND = 15;
     const plotH = Math.max(20, h - AXIS_BAND);
+    /** 横の目盛り線(段組みでないときだけ引く。下の `horizontalGrid` 参照)。 */
+    let horizontalGrid: () => void = () => {};
 
     // 系列は**右端(=いま)で揃える**。長さが違っても最後のサンプルはどの系列
     // でも現在時刻なので、右詰めだけが横軸の時刻と辻褄が合う(左詰めや
@@ -5141,14 +5146,25 @@ function setUpProbeGraph(): (
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let i = 1; i < 4; i++) {
-      const y = Math.round((plotH * i) / 4) + 0.5;
-      ctx.moveTo(0, y);
-      ctx.lineTo(w, y);
       const x = Math.round((w * i) / 4) + 0.5;
       ctx.moveTo(x, 0);
       ctx.lineTo(x, plotH);
     }
     ctx.stroke();
+    // 横の目盛り線は**段組みでないときだけ**。段組みでは、段ごとに上限・
+    // 下限・0 の線が入るので、そこに無関係な 1/4 の線を足すと、どれが値の
+    // 線なのか分からなくなる(`useBands` のdoc参照)。
+    horizontalGrid = () => {
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 1; i < 4; i++) {
+        const y = Math.round((plotH * i) / 4) + 0.5;
+        ctx.moveTo(0, y);
+        ctx.lineTo(w, y);
+      }
+      ctx.stroke();
+    };
 
     // 文字は折れ線や格子に重なるので、**濃い縁取りを先に引いてから**塗る
     // (素の塗りだけだと、線と同系色の場所で文字が読めなかった)。
@@ -5196,6 +5212,9 @@ function setUpProbeGraph(): (
       plotMax: number;
       /** ずっと同じ値だった系列を引く高さ(変化する系列は null)。 */
       flatY: number | null;
+      /** 段組みのとき、この系列に割り当てられた段の上端と高さ。 */
+      bandTop: number;
+      bandHeight: number;
     };
     /**
      * 値を縦の位置へ。
@@ -5212,11 +5231,13 @@ function setUpProbeGraph(): (
       plotMin: number,
       plotMax: number,
       flatY: number | null,
+      top = 0,
+      height = plotH,
     ) => {
       if (flatY !== null) return flatY;
       const span = plotMax - plotMin;
-      if (!(span > 0)) return plotH / 2;
-      return plotH - ((value - plotMin) / span) * plotH;
+      if (!(span > 0)) return top + height / 2;
+      return top + height - ((value - plotMin) / span) * height;
     };
     // **「同じ値」かどうかは、桁に対して見る**。差の絶対値で見ていたので、
     // インクの広がり(1.5e-22 → 1.9e-17)のように**桁が 5 つも動いている**系列
@@ -5242,6 +5263,38 @@ function setUpProbeGraph(): (
     let flatSeen = 0;
     const drawn: Drawn[] = [];
 
+    /**
+     * **量ごとに段を分けて描く**(「段組み」)。
+     *
+     * もとは全部の線を 1 枚に重ね、**それぞれ自分の範囲に正規化**していた。
+     * つまり大きさの違う 2 本が画面では同じ振幅で重なる。実測(利用者役⑪):
+     * ふりこの「横位置」は振れ幅 0.716 m、「高さ」は 0.066 m —— 実際は
+     * 10.8 倍違うのに、画面では 2 本とも帯いっぱいの同じ高さの波だった。
+     * 電気の工作台はもっとひどく、V と A と K の 6 本が 16px 間隔の平行線に
+     * なっていた。おまけに 0 がどこかも分からない(ふりこの「高さ」は
+     * 全区間が負なのに、画面からはそうと読めない)。
+     *
+     * 重ねるのをやめて、**1 つの量に 1 つの段**を与える。段ごとに
+     * 名前(左)・上限と下限(右)・0 の線(範囲に 0 を含むときだけ)を描けば、
+     * どの線が何をいくつ指しているかが、中を知らなくても読める。
+     * 段が痩せすぎる(浅い粒度で本数が多い)ときだけ、これまでの重ね描きに戻す
+     * ——26px は名前と 2 つの目盛りが重ならずに入る高さとして実測で決めた。
+     */
+    const bandCandidates = series.filter((s) => s.history.length >= 2).length;
+    const BAND_MIN_H = 30;
+    const useBands = bandCandidates > 1 && plotH / bandCandidates >= BAND_MIN_H;
+    const bandH = useBands ? plotH / bandCandidates : plotH;
+    /**
+     * 段と段のあいだの隙間。線が隣の段へはみ出して見えないように——そして
+     * **いちばん下の段の線が、時刻の目盛り帯に触れないように**。6px では
+     * 最下段の下端が目盛り帯のすぐ上に来てしまい、自分の下限をなぞっている
+     * 線が「潰れて寝ている線」と見分けられなかった(回帰テスト
+     * 「ずっと同じ値の線も、グラフの上に見える」が拾った)。
+     */
+    const BAND_GAP = 10;
+    let bandIndex = 0;
+    if (!useBands) horizontalGrid();
+
     for (const s of series) {
       if (s.history.length < 2) continue;
 
@@ -5257,8 +5310,14 @@ function setUpProbeGraph(): (
       const plot = (v: number) => (useLog ? signedLog(v) : v);
       const plotMin = Math.min(plot(min), plot(max));
       const plotMax = Math.max(plot(min), plot(max));
+      const bandTop = useBands ? bandIndex * bandH + BAND_GAP / 2 : 0;
+      const bandHeight = useBands ? bandH - BAND_GAP : plotH;
+      // 段組みでは「ずっと同じ値」も自分の段のまん中に引けばよい(他の線と
+      // 重ならないので、ずらして避ける必要がない)。
       const flatY = isFlat(s)
-        ? plotH / 2 + (flatSeen++ - (flatCount - 1) / 2) * flatGap
+        ? useBands
+          ? bandTop + bandHeight / 2
+          : plotH / 2 + (flatSeen++ - (flatCount - 1) / 2) * flatGap
         : null;
 
       const offset = longest - s.history.length;
@@ -5267,19 +5326,80 @@ function setUpProbeGraph(): (
       ctx.beginPath();
       for (let i = 0; i < s.history.length; i++) {
         const x = longest > 1 ? ((offset + i) / (longest - 1)) * w : w;
-        const y = plotY(plot(s.history[i]), plotMin, plotMax, flatY);
+        const y = plotY(plot(s.history[i]), plotMin, plotMax, flatY, bandTop, bandHeight);
         if (i === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
-      drawn.push({ series: s, min, max, plotMin, plotMax, flatY });
+      drawn.push({ series: s, min, max, plotMin, plotMax, flatY, bandTop, bandHeight });
+      bandIndex += 1;
     }
 
     // **1本だけのときは、縦軸に実際の目盛りを描く**。各系列を自分の範囲へ
     // 正規化して重ねる作りなので、複数本のときに共通の縦軸は引けない
     // ——が、1本ならその写像は一対一で、目盛りは正確に引ける。対数表示でも
     // `signedExp`で戻せば**実測値**を書けるので、ここで軸を消さない。
-    if (drawn.length === 1) {
+    if (useBands) {
+      // **段ごとに、名前と目盛りと 0 の線**。これがあって初めて「どの線が
+      // 何を、いくつ指しているか」が画面だけで読める(`useBands` のdoc参照)。
+      const back = (v: number) => (useLog ? signedExp(v) : v);
+      for (const [bandOrder, d] of drawn.entries()) {
+        const unit = d.series.unit ? ` ${d.series.unit}` : "";
+        const top = d.bandTop;
+        const bottom = d.bandTop + d.bandHeight;
+        // 段の区切り(下端)。データより沈む明るさで。**いちばん下の段には
+        // 引かない**——そこはもう時刻の目盛り帯との境で、区切るものが無い。
+        // (引くと、折れ線を描く範囲の下端に横いっぱいの線が寝ることになり、
+        // 「一定値の線が潰れて寝ている」のと画面上で見分けが付かない。)
+        if (bandOrder < drawn.length - 1) {
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.10)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(0, Math.round(bottom + BAND_GAP / 2) + 0.5);
+          ctx.lineTo(w, Math.round(bottom + BAND_GAP / 2) + 0.5);
+          ctx.stroke();
+        }
+        // **0 の線**。ふりこの「高さ」は全区間が負(-1.000〜-0.934)なのに、
+        // 0 がどこか分からないので「水面下」だと読めなかった(利用者役⑪)。
+        // 範囲に 0 があれば引き、無ければ「0 はこの外」と分かるよう引かない。
+        if (d.flatY === null && d.plotMin < 0 && d.plotMax > 0) {
+          const zeroY = plotY(0, d.plotMin, d.plotMax, null, top, d.bandHeight);
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(0, Math.round(zeroY) + 0.5);
+          ctx.lineTo(w, Math.round(zeroY) + 0.5);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          outlined("0", w - 6, Math.min(bottom - 1, zeroY - 2), "#8b929c", "right");
+        }
+        // 名前は自分の段の左上に置く。重ねて描かないので、上の線を隠さない。
+        outlined(
+          `${d.series.label}${d.flatY !== null ? "(ずっと同じ値)" : ""}${useLog ? " [log]" : ""}`,
+          4,
+          top + 11,
+          d.series.color,
+        );
+        if (d.flatY !== null) {
+          outlined(`${legendNumber(d.series, d.max)}${unit}`, w - 6, top + 11, "#8b929c", "right");
+        } else {
+          outlined(
+            `${legendNumber(d.series, back(d.plotMax))}${unit}`,
+            w - 6,
+            top + 11,
+            "#8b929c",
+            "right",
+          );
+          outlined(
+            `${legendNumber(d.series, back(d.plotMin))}${unit}`,
+            w - 6,
+            bottom - 3,
+            "#8b929c",
+            "right",
+          );
+        }
+      }
+    } else if (drawn.length === 1) {
       const only = drawn[0];
       const unit = only.series.unit ? ` ${only.series.unit}` : "";
       const back = (v: number) => (useLog ? signedExp(v) : v);
@@ -5300,7 +5420,12 @@ function setUpProbeGraph(): (
     // 折れ線が読めなかった(利用者役①の観察)。入り切らないときは、名前だけを
     // 横に流す。数値はグラフを指せば読める(`hoverX` の doc 参照)。
     const LEGEND_LINE = 13;
-    const compactLegend = (drawn.length + 1) * LEGEND_LINE > plotH * 0.55;
+    // 段組みでは、名前は各段の中に書いてある(`useBands` のdoc参照)。上に
+    // 別の凡例を重ねると、いちばん大事な線の出だしをまた隠してしまう
+    // ——実測(利用者役⑪): 凡例の箱がグラフ幅 1064px の左 270px × 上 90px を
+    // 覆い、落下実験の最大値(20.00 m / 19.61 m/s)の立ち上がりが箱の下に
+    // 入っていた。
+    const compactLegend = !useBands && (drawn.length + 1) * LEGEND_LINE > plotH * 0.55;
     /**
      * **凡例の下に帯を敷く**。縁取りだけでは、値が上下に大きく振れる系列
      * (振り子・ロープ・積み木)で線が文字の上を何本も横切り、色と線が入り
@@ -5314,11 +5439,13 @@ function setUpProbeGraph(): (
     };
 
     let legendY = 12;
-    legendBackdrop(
-      compactLegend
-        ? Math.ceil(drawn.length / 3) + (drawn.length > 1 ? 1 : 0)
-        : drawn.length + (drawn.length > 1 ? 1 : 0),
-    );
+    if (!useBands) {
+      legendBackdrop(
+        compactLegend
+          ? Math.ceil(drawn.length / 3) + (drawn.length > 1 ? 1 : 0)
+          : drawn.length + (drawn.length > 1 ? 1 : 0),
+      );
+    }
     if (compactLegend) {
       let x = 4;
       for (const { series: s, flatY } of drawn) {
@@ -5358,7 +5485,10 @@ function setUpProbeGraph(): (
     // 露出する(`__probeGraphLegend`と同じ扱い、実行時の見た目には影響しない)。
     const legendRawForTest: { label: string; unit?: string; digits?: number; max: number; min: number }[] = [];
     for (const { series: s, min, max, flatY } of drawn) {
-      if (compactLegend) break;
+      // **描かないときも、文字は組み立てる**。凡例の文字列は回帰テストが
+      // 「右のパネルと同じ書式か」を確かめる唯一の手がかりなので、段組みでも
+      // 中身は同じものを残す(`__probeGraphLegend` の下のdoc参照)。
+      const drawHere = !compactLegend && !useBands;
       // 一定値の線はまん中に引く(`plotY` の doc)。高さを値と読み違えない
       // よう、凡例でそう言っておく。
       const suffix =
@@ -5371,11 +5501,29 @@ function setUpProbeGraph(): (
       const legendText =
         `${s.label}: max=${legendNumber(s, max)}${unitSuffix} ` +
         `min=${legendNumber(s, min)}${unitSuffix}${suffix}`;
-      outlined(legendText, 4, legendY, s.color);
-      legendY += 13;
+      if (drawHere) {
+        outlined(legendText, 4, legendY, s.color);
+        legendY += 13;
+      }
       legendLinesForTest.push(legendText);
       legendRawForTest.push({ label: s.label, unit: s.unit, digits: s.digits, max, min });
     }
+    // 段組みの配置もテスト専用で露出する(`__probeGraphLegend` と同じ扱い)。
+    // 「量ごとに段が分かれ、上限と下限が付いているか」は canvas の絵からは
+    // 読めないため。
+    (
+      window as unknown as {
+        __probeGraphBands?: { label: string; top: number; height: number; min: number; max: number }[];
+      }
+    ).__probeGraphBands = useBands
+      ? drawn.map((d) => ({
+          label: d.series.label,
+          top: d.bandTop,
+          height: d.bandHeight,
+          min: d.min,
+          max: d.max,
+        }))
+      : [];
     (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend =
       legendLinesForTest;
     (
@@ -5387,7 +5535,7 @@ function setUpProbeGraph(): (
     // 複数本を重ねるときは、**縦の位置を見比べても意味がない**ことを明示する
     // (黙っていると「こちらの線の方が大きい」と読まれる)。凡例の直下に置くの
     // は、下端が時刻の目盛り帯になったため。
-    if (!compactLegend && drawn.length > 1) {
+    if (!compactLegend && !useBands && drawn.length > 1) {
       outlined("各線はそれぞれの範囲に合わせて描いています", 4, legendY, "#6f757e");
       legendY += 13;
     }
@@ -7910,6 +8058,26 @@ async function setUpSceneView(
    * 消え、カメラだけがまた寄り直す「行ったり来たり」になるため。場面を
    * 読み込み直すと消える。
    */
+  /**
+   * **止まったら、始まりの広がりを手放す**。
+   *
+   * `guidedSceneStartBox` は「落下は床まで、公転は中心の星まで見えて初めて
+   * 現象として読める」ために始まりの広がりを画角へ残す仕組みだが、**現象が
+   * 終わったあとも残り続けていた**。実測(50個の球をばらまく): 5.3秒で全部の
+   * 球が y=0.20 に落ち着いたのに、カメラは距離 25.19m・注視点 y=6.01 のまま
+   * 動かず、球の塊は舞台 1132×715px のうち 134×67px ——**面積で 1.1%**。
+   * 残りは空の格子と黒い空だった。
+   *
+   * 落ちる途中の高さは、落ち終われば見どころではない。動く物の箱がしばらく
+   * 変わらなくなったら、始まりの広がりを捨てて「いまある物」に合わせ直す。
+   * また動き出せば箱は普通に広がるので、捨てたことで見失うことはない。
+   * 曲がった道すじ(`guidedCurvedPathBox`)は捨てない——止まった球の放物線は、
+   * 止まったあとこそ見どころだから。
+   */
+  let guidedStillBox: THREE.Box3 | null = null;
+  let guidedStillSince = 0;
+  /** これだけの間ずっと変わらなければ「終わった」と見なす [秒]。 */
+  const GUIDED_STILL_SECONDS = 1.5;
   let guidedCurvedPathBox: THREE.Box3 | null = null;
   /** 弦に対する膨らみがこの比を超えたら「曲がっている」と見なす。 */
   const CURVED_PATH_BULGE = 0.08;
@@ -8080,6 +8248,22 @@ async function setUpSceneView(
     );
     // 原点を必ず含める。落下は「床(y=0)まで」、公転は「中心の星まで」が
     // 見えて初めて現象として読めるため。
+    // 動く物の箱が変わらなくなったら、始まりの広がりを手放す
+    // (`guidedStillBox` の doc 参照)。判定は**まだ広げていない箱**で行う
+    // ——原点や始まりを足したあとの箱は、中身が止まっていても手放した瞬間に
+    // 変わるので、自分の判定を自分で壊してしまう。
+    const stillTolerance = movingRadius * 0.02;
+    const nowSeconds = performance.now() / 1000;
+    if (
+      guidedStillBox &&
+      guidedStillBox.min.distanceTo(box.min) < stillTolerance &&
+      guidedStillBox.max.distanceTo(box.max) < stillTolerance
+    ) {
+      if (nowSeconds - guidedStillSince > GUIDED_STILL_SECONDS) guidedSceneStartBox = null;
+    } else {
+      guidedStillBox = box.clone();
+      guidedStillSince = nowSeconds;
+    }
     box.expandByPoint(new THREE.Vector3(0, 0, 0));
     // 始まりの広がりも含める(`guidedSceneStartBox` の doc 参照)。
     if (guidedSceneStartBox) box.union(guidedSceneStartBox);
@@ -11616,6 +11800,7 @@ async function setUpSceneView(
         if (heaterToggle.checked) applyComponent(world, "push_heat_source", { watts: HEATER_WATTS });
         applyThrustForStep();
         world.step();
+        noteSettleAfterStep();
       }
       appendConsoleEntries(world.drain_events_text());
       // 診断バッジ(増分K)。毎フレーム最新の残差・最大速度で更新する。
@@ -11885,6 +12070,50 @@ async function setUpSceneView(
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // **「ほぼ止まった時刻」を、1 歩ごとに見る**
+  //
+  // これまでは画面の更新に合わせて「いちばん速い物の速さ」を覗いていた。
+  // ところが実験の進む速さは場面ごとに違い、「ボールを落とす」は 1 コマで
+  // 1 秒ぶん(120 歩)進む——つまり**秒に 1 回しか見ていない**。同じ設定で
+  // 回すたびに 2.71 / 2.74 秒とばらつき、書き出した記録(2.69 秒)より
+  // 0.02 秒遅れ、ひどいときは 4.01 秒と 1 秒以上ずれた(実測・利用者役⑪と
+  // 進行管理役の再現)。2 桁目まで読める数字として出しているのに 2 桁目が
+  // 毎回違うのでは、書き写せない。
+  //
+  // 歩を進めるその場で見れば、取りこぼさない。物理には一切触らない
+  // ——読むだけ。
+  const SETTLED_SPEED = 0.05;
+  const SETTLED_TRIGGER_SPEED = SETTLED_SPEED * 4;
+  /** 一瞬の静止(跳ね返りの頂点・衝突の瞬間)を「止まった」と読まない猶予[秒]。 */
+  const SETTLED_GRACE = 0.5;
+  let settledEverMoved = false;
+  let settledStillSince: number | null = null;
+  let settledAtTime: number | null = null;
+  function resetSettleWatch(): void {
+    settledEverMoved = false;
+    settledStillSince = null;
+    settledAtTime = null;
+  }
+  function noteSettleAfterStep(): void {
+    const fastest = readNumber(world, "max_body_speed");
+    const now = readNumber(world, "time");
+    if (fastest > SETTLED_TRIGGER_SPEED) {
+      settledEverMoved = true;
+      settledStillSince = null;
+      settledAtTime = null;
+    } else if (settledEverMoved && fastest < SETTLED_SPEED) {
+      if (settledStillSince === null) settledStillSince = now;
+      // 出すのは**静かになった時刻**そのもの。猶予のぶん後ろへずれた時刻を
+      // 出すと、見出し(「0.05 m/s 以下」)と食い違う。
+      if (settledAtTime === null && now - settledStillSince >= SETTLED_GRACE) {
+        settledAtTime = settledStillSince;
+      }
+    } else {
+      settledStillSince = null;
+    }
+  }
+
   const inspectorPosition = new THREE.Vector3();
   const inspectorRotationQuat = new THREE.Quaternion();
   const inspectorRotation = new THREE.Euler();
@@ -12074,6 +12303,16 @@ async function setUpSceneView(
     // 上書きされてしまう——統合の際に発見し、床メッシュの見た目が壊れる前に
     // 気付いて対処した)。Planeは静的なので同期しなくても正しい。
     const trailStep = trailStepForCamera();
+    // **数えられる数の物にだけ跡を描く**。上限(6本)を超える場面で先頭から
+    // 6個だけ描くと、50個の球のうち4〜6個にだけ線が伸び、その球が選ばれて
+    // いるように見えた(実測・スクリーンショット)。どれも同じように落ちて
+    // いるのだから、一部だけ印をつけるのは嘘に近い。多いときは一本も描かない
+    // ——塊そのものが見えているので、跡が無くても読める。
+    let movingBodies = 0;
+    for (const bodyIndex of bodyMeshes.keys()) {
+      if (world.read_component("body_is_static_at", String(bodyIndex)) !== "true") movingBodies += 1;
+    }
+    const drawTrails = movingBodies <= TRAIL_MAX_BODIES;
     for (const [bodyIndex, mesh] of bodyMeshes) {
       if (world.read_component("body_shape_kind_at", String(bodyIndex)) === "plane") continue;
       const sp = world.body_position_at_f32(bodyIndex);
@@ -12086,7 +12325,7 @@ async function setUpSceneView(
       // 通った跡を伸ばす(`extendTrail` のdoc参照)。動かせない物(床・壁)は
       // 通らないので描かない。点の間隔は、いま見ている広がりに対する比で
       // 決める——1e-7m の分子から 1e11m の公転まで同じ線の密度で描くため。
-      if (world.read_component("body_is_static_at", String(bodyIndex)) !== "true") {
+      if (drawTrails && world.read_component("body_is_static_at", String(bodyIndex)) !== "true") {
         extendTrail(bodyIndex, mesh.position, trailStep);
         // 点にしかならない大きさなら、見失わないための輪を添える
         // (`updateVisibilityMark` のdoc参照)。跡と同じ「動く物」だけが対象。
@@ -12573,6 +12812,7 @@ async function setUpSceneView(
         if (heaterToggle.checked) applyComponent(world, "push_heat_source", { watts: HEATER_WATTS });
         applyThrustForStep();
         world.step();
+        noteSettleAfterStep();
         if (guidedPace === null) accumulator -= dt;
         steps += 1;
       }
@@ -12661,6 +12901,8 @@ async function setUpSceneView(
       guidedSceneStartBox = null;
       guidedSceneStartPending = true;
       guidedCurvedPathBox = null;
+      guidedStillBox = null;
+      resetSettleWatch();
       // **前の場面の「単独追跡」を持ち越さない**。`followedBodyIndices`は
       // ボディ番号でしかないので、差し替わった新しい場面でたまたま同じ番号の
       // 別の物を指してしまう恐れがある(`followedBodyBox`の存在チェックだけ
@@ -12736,6 +12978,7 @@ async function setUpSceneView(
     probeCount: () => readNumber(world, "imported_probe_count"),
     probeValue: (index) =>
       readNumber(world, "imported_probe_value_at", String(index)),
+    probeHistory: (index) => Float64Array.from(world.imported_probe_history_f64(index)),
     time: () => readNumber(world, "time"),
     stepSeconds: () => readNumber(world, "dt"),
     // **局所へ入る/出る**。パンくずの「全体へ戻る」は選択を解く操作なので、
@@ -12753,6 +12996,14 @@ async function setUpSceneView(
       if (index < readNumber(world, "body_count")) selectBody(index);
     },
     bodyCount: () => readNumber(world, "body_count"),
+    movableBodyCount: () => {
+      const total = readNumber(world, "body_count");
+      let movable = 0;
+      for (let i = 0; i < total; i += 1) {
+        if (world.read_component("body_is_static_at", String(i)) !== "true") movable += 1;
+      }
+      return movable;
+    },
     bodyBounds: (index) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return null;
       const mesh = bodyMeshes.get(index);
@@ -12806,6 +13057,8 @@ async function setUpSceneView(
       return true;
     },
     maxSpeed: () => readNumber(world, "max_body_speed"),
+    settledTime: () => settledAtTime,
+    settledEverMoved: () => settledEverMoved,
     stageIsEmpty: () => sceneViewElement.dataset.stageEmpty === "true",
     materialNames: () => [...SPAWN_MATERIALS],
     // **課題B**: 材質ボタンの隣に添える摩擦係数。でっち上げず、Rust側の材質DB

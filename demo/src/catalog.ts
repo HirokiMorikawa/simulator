@@ -77,6 +77,35 @@ export type Readout = {
    * 実験を読み込み直すと測り直す。
    */
   extreme?: "min" | "max";
+  /**
+   * **ある出来事が起きた瞬間の値で止める**。
+   *
+   * 「斜めに投げる」は説明も見どころも「45° がいちばん遠くまで飛びます」
+   * 「飛距離と滞空時間の関係が見えます」と**飛距離**を約束しているのに、
+   * 飛距離はどこにも出ていなかった(実測・利用者役⑪: 画面にもグラフにも
+   * CSV にも横位置の列が無い)。横位置を出しても、球は着地後も転がり続けて
+   * 止まらないので(t=2.79s で 38.8m、t=7.59s で 86.8m)、いつ読んでも
+   * 違う数字になる。
+   *
+   * 知りたいのは「**着いたときの**横の距離」。別のプローブ(ここでは高さ)が
+   * ある値を下回った最初の瞬間の値を覚えて、そのあとはそれを出し続ける。
+   * 実験を読み込み直すと測り直す。
+   */
+  freezeWhen?: { probe: number; below: number };
+  /**
+   * **出来事と出来事のあいだで、いちばん届いたところ**。
+   *
+   * 「ボールを跳ねさせる」は「1 回跳ねるごとに高さが決まった割合で減ります」
+   * と言うのに、その**跳ね返った高さ**が画面に無かった。`extreme: "max"` は
+   * 落とした高さ(いちばん最初の山)を出すだけで、跳ね返りには届かない
+   * (課題#36)。
+   *
+   * `probe` が `below` を下回った最初の瞬間(=1 回目の着地)から数え始め、
+   * いちど上へ離れてからまた下回った瞬間(=2 回目の着地)で止める。その間の
+   * 最大値、つまり**1 回目の跳ね返りの高さ**が残る。実験を読み込み直すと
+   * 測り直す。
+   */
+  peakBetween?: { probe: number; below: number };
 };
 
 /** つまみ 1 個。`apply` がシーン JSON(パース済みオブジェクト)を直接書き換える。 */
@@ -242,12 +271,21 @@ function body(scene: SceneJson, name: string) {
   return scene.bodies?.find((b) => b.name === name);
 }
 
-/** 重力[m/s²]。天体シーン(`astro`)は自前の万有引力を使うので対象外。 */
+/**
+ * 重力[m/s²]。天体シーン(`astro`)は自前の万有引力を使うので対象外。
+ *
+ * **札の数字と、実際に使う数字を揃える**。もとは「🌙 月 (1.6)」と書いて
+ * 1.62 を使っていたので、札を信じて手計算した人は必ず 1〜2% 合わなかった
+ * ——実測(利用者役⑪): 20m の落下で接地は 4.9333 秒、札の 1.6 なら 4.9617 秒
+ * (0.028 秒ずれ)、1.62 なら 4.9310 秒で合う。自分の計算間違いなのかアプリの
+ * ずれなのか、画面からは区別できない。丸めるなら**使う値も丸める**べきだが、
+ * 月の重力は 1.62 が本当の値なので、札のほうを本当の値に直す。
+ */
 const GRAVITY_OPTIONS = [
-  { label: "🌍 地球 (9.8)", value: 9.80665 },
-  { label: "🌙 月 (1.6)", value: 1.62 },
-  { label: "🔴 火星 (3.7)", value: 3.71 },
-  { label: "🪐 木星 (24.8)", value: 24.79 },
+  { label: "🌍 地球 (9.81)", value: 9.80665 },
+  { label: "🌙 月 (1.62)", value: 1.62 },
+  { label: "🔴 火星 (3.71)", value: 3.71 },
+  { label: "🪐 木星 (24.79)", value: 24.79 },
   { label: "🌌 無重力 (0)", value: 0 },
 ];
 
@@ -299,6 +337,29 @@ function materialKnob(
   };
 }
 
+/**
+ * 球の半径 [m](球でなければ 0)。「落とす高さ」を**球の下端**で数えるために要る
+ * (`heightKnob` のdoc参照)。
+ */
+function sphereRadiusOf(target: { shape?: unknown } | undefined): number {
+  const shape = target?.shape as { sphere?: { radius?: number } } | undefined;
+  return typeof shape?.sphere?.radius === "number" ? shape.sphere.radius : 0;
+}
+
+/**
+ * 「落とす高さ」。
+ *
+ * **数えるのは球の下端から床まで**。もとは剛体の位置(=球の中心)をそのまま
+ * 置いていたので、「20 m から落とす」と言いながら実際に落ちるのは
+ * 20 − 0.3 = 19.7 m だった。教科書どおり √(2×20/9.8) = 2.019 秒を期待した人の
+ * 実測は 2.000 秒で、0.02 秒ずれる——なぜずれるのかは画面のどこにも書いて
+ * いない(実測・利用者役⑪)。跳ね返りの実験ではもっとはっきり出て、球の
+ * 中心の高さで比を取ると 0.68 → 0.93 とばらけ、「1 回跳ねるごとに決まった
+ * 割合で減ります」という説明が**画面の数字では確かめられなかった**
+ * (半径 0.1 m を引くと 0.651〜0.666 でぴたりと揃う)。
+ *
+ * 人が「高さ」と言うときに指しているのは床までの隙間なので、そちらで数える。
+ */
 function heightKnob(bodyName: string, initial: number): Knob {
   return {
     id: "height",
@@ -309,11 +370,38 @@ function heightKnob(bodyName: string, initial: number): Knob {
     step: 1,
     unit: "m",
     value: initial,
-    hint: "高いほど、着地までの時間も着地の速さも大きくなります。",
+    hint: "床から球の下までの高さです。高いほど、着地までの時間も着地の速さも大きくなります。",
     apply: (scene, value) => {
       const target = body(scene, bodyName);
-      if (target) target.position = [0, Number(value), 0];
+      if (target) target.position = [0, Number(value) + sphereRadiusOf(target), 0];
     },
+  };
+}
+
+/**
+ * 「床から球の下までの高さ」で読む読み値(`heightKnob` のdoc参照)。
+ * 観測点は球の中心を返すので、半径ぶんを引いて画面・グラフ・CSV の全部に
+ * 同じ量を渡す。
+ */
+function floorGapReadout(
+  probe: number,
+  label: string,
+  radius: number,
+  digits = 2,
+): Readout {
+  return {
+    probe,
+    label,
+    unit: "m",
+    digits,
+    // 床に着いて静止した球は、半径ぶんを引くとわずかに負になる(めり込みの
+    // 許容量)。そのまま書くと「-0.00 m」と出て壊れて見えるので、表示の桁で
+    // 見て 0 なら 0 と書く。
+    format: (value) => {
+      const gap = value - radius;
+      return `${(Math.abs(gap) < 0.5 * 10 ** -digits ? 0 : gap).toFixed(digits)} m`;
+    },
+    graph: { unit: "m", convert: (value) => value - radius },
   };
 }
 
@@ -387,7 +475,7 @@ export const GUIDED_CATEGORIES: Category[] = [
         // 「斜めに投げる」には速さが記録されているので、なおさら食い違って
         // 見える。シーン側に観測点を1本足して(物理は変えない)、ここにも出す。
         readouts: [
-          { probe: 0, label: "ボールの高さ", unit: "m" },
+          floorGapReadout(0, "ボールの高さ(床から球の下まで)", 0.3),
           { probe: 1, label: "ボールの速さ", unit: "m/s" },
         ],
         knobs: [heightKnob("ball", 20), gravityKnob()],
@@ -399,7 +487,8 @@ export const GUIDED_CATEGORIES: Category[] = [
         title: "ボールを跳ねさせる",
         blurb: "ゴムの球を落として、跳ね返る高さを見ます。",
         watch: [
-          "1 回跳ねるごとに高さが決まった割合で減ります。",
+          "1 回跳ねるごとに高さが決まった割合で減ります"
+            + "(「落とす高さ」と「1 回目に跳ね返った高さ」を割り算すると、その割合です)。",
           "材質を鋼や木に変えると、跳ね方がはっきり変わります。",
           // **画面に無いものを指さない**(利用者役「みる」の報告、進行管理役の
           // 実測)。この実験は `view: "3d"`——見どころは跳ねる球そのもので、
@@ -413,7 +502,21 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "3d",
         pace: 240,
-        readouts: [{ probe: 0, label: "ボールの高さ", unit: "m" }],
+        readouts: [
+          floorGapReadout(0, "ボールの高さ(床から球の下まで)", 0.1),
+          {
+            probe: 0,
+            // 「決まった割合で減る」を数字で確かめられるようにする(課題#36)。
+            // 0.15 は「球の半径 0.1 m より少し上」——着地したことの合図として
+            // 使う高さ(`Readout.peakBetween` のdoc参照)。
+            label: "1 回目に跳ね返った高さ",
+            peakBetween: { probe: 0, below: 0.15 },
+            unit: "m",
+            digits: 2,
+            format: (value) => `${(value - 0.1).toFixed(2)} m`,
+            graph: { unit: "m", convert: (value) => value - 0.1 },
+          },
+        ],
         knobs: [heightKnob("ball", 2), materialKnob("ball", "ボールの材質", "ゴム(天然)")],
       },
       {
@@ -423,9 +526,10 @@ export const GUIDED_CATEGORIES: Category[] = [
         title: "斜めに投げる",
         blurb: "秒速 20 m で 45° に投げ上げた球の軌跡。",
         watch: [
-          "上りと下りが左右対称の放物線になります。",
-          "45° がいちばん遠くまで飛びます(空気抵抗なしのとき)。",
-          "角度を変えると、飛距離と滞空時間の関係が見えます。",
+          "上りと下りが左右対称の放物線になります(通った跡が線で残ります)。",
+          "「着いたときの横の距離」が飛距離です。角度を変えて比べると、"
+            + "45° がいちばん遠くまで飛びます(空気抵抗なしのとき)。",
+          "45° より浅くても深くても短くなります。例えば 30° と 60° は同じ距離です。",
         ],
         view: "3d",
         pace: 120,
@@ -439,6 +543,24 @@ export const GUIDED_CATEGORIES: Category[] = [
         readouts: [
           { probe: 0, label: "球の高さ", unit: "m" },
           { probe: 1, label: "速さ", unit: "m/s" },
+          {
+            probe: 0,
+            label: "いちばん高く上がった高さ",
+            extreme: "max",
+            unit: "m",
+            digits: 2,
+          },
+          {
+            probe: 2,
+            // 着いた瞬間で止める(`Readout.freezeWhen` のdoc参照)。球は床の
+            // 上を転がり続けるので、いまの横位置では飛距離にならない。
+            // 0.3 m は「球の半径 0.1 m + 床でのはずみ」を見込んだ高さ。
+            label: "着いたときの横の距離(飛距離)",
+            freezeWhen: { probe: 0, below: 0.3 },
+            unit: "m",
+            digits: 1,
+          },
+          { probe: 2, label: "いまの横の距離", unit: "m", digits: 1 },
         ],
         knobs: [
           {
@@ -1519,7 +1641,13 @@ export const GUIDED_CATEGORIES: Category[] = [
             // 並ぶ名前と同じ——番号から現物へたどれるようにするための呼び名
             // なので、短くしない(`friendlyProbeLabel` の該当doc参照)。
             label: "電池・電源0 から流れる電流",
-            format: (value) => `${(Math.abs(value) * 1000).toFixed(1)} mA`,
+            // **画面と書き出しで符号を食い違わせない**。`Math.abs` で大きさ
+            // だけ出していたので、画面は +20.9 mA、CSV は -0.021 A になって
+            // いた(実測・利用者役⑪)。同じ名前の同じ量が、場所によって符号が
+            // 違う。向きの取り替え(内部の約束 → 名前が言っている向き)は
+            // **1 か所で行い、画面・グラフ・CSV の全部に同じ値を渡す**。
+            format: (value) => `${(-value * 1000).toFixed(1)} mA`,
+            graph: { unit: "mA", convert: (value) => -value * 1000 },
           },
           {
             probe: 5,
@@ -2076,11 +2204,17 @@ export const GUIDED_CATEGORIES: Category[] = [
           {
             probe: 0,
             label: "温度",
+            // 単位を書かないと、書き出したファイルだけ「温度,圧力」と裸に
+            // なる(実測・利用者役⑪: 312.0 が K なのか ℃ なのかファイルから
+            // 決められない)。画面の整形は `format` が持つので、`unit` は
+            // グラフの目盛りと CSV の見出しにだけ効く。
+            unit: "K",
             format: (value) => `${value.toFixed(1)} K(${(value - 273.15).toFixed(1)} ℃)`,
           },
           {
             probe: 1,
             label: "圧力",
+            unit: "Pa",
             format: (value) =>
               `${value.toFixed(0)} Pa(ふだんの空気の ${((value / 101325) * 100).toFixed(1)}%)`,
           },

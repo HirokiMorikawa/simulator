@@ -57,6 +57,17 @@ export type WorkspaceApi = {
   setPace: (stepsPerSecond: number | null) => void;
   probeCount: () => number;
   probeValue: (index: number) => number;
+  /**
+   * **その観測点のこれまで全部**。
+   *
+   * 「いちばん届いたところ」「着いた瞬間の値」「跳ね返った高さ」は、いまの
+   * 値を毎コマ見ているだけでは出せない。実験の進む速さは場面ごとに違い
+   * (「ボールを跳ねさせる」は 1 コマで 1 秒ぶん進む)、**跳ね返り 1 往復が
+   * まるごとコマとコマの間に入る**ことがあるため——実測では、同じ実験の
+   * 同じ設定で「1 回目に跳ね返った高さ」が 1.30 m と 0.84 m(=2 回目の
+   * 跳ね返り)の両方を出した。記録そのものから読めば、取りこぼさない。
+   */
+  probeHistory: (index: number) => Float64Array;
   time: () => number;
   /** 1 step の刻み [s]。時間の表示単位を決めるのに使う。 */
   stepSeconds: () => number;
@@ -149,6 +160,15 @@ export type WorkspaceApi = {
    * 読むだけの値)。
    */
   maxSpeed: () => number;
+  /**
+   * **「ほぼ止まった時刻」**。歩を進めるその場で見ているので、場面が
+   * 1 コマで何歩進もうと取りこぼさない(main 側 `noteSettleAfterStep` のdoc
+   * 参照)。まだ止まっていなければ `null`。
+   */
+  settledTime: () => number | null;
+  /** いちどでも動いたか(`settledTime` と対。止まる・止まらないの問いが
+   *  そもそも成り立つ場面かを見分ける)。 */
+  settledEverMoved: () => boolean;
   /** 舞台に描くものが無いか(案内を出しているのと同じ判断)。 */
   stageIsEmpty: () => boolean;
   /**
@@ -214,6 +234,14 @@ export type WorkspaceApi = {
   selectedBodies: () => number[];
   selectBody: (index: number) => void;
   bodyCount: () => number;
+  /**
+   * **動ける物の数**(床や壁のような静的な物を除く)。
+   *
+   * 「ほぼ止まった時刻」の行を出すかどうかの判断に使う——コーヒーが冷める
+   * 場面や回路の場面には動ける物が 1 つも無いので、「まだ止まっていません」
+   * と言われても答えようがない(実測・利用者役⑪)。
+   */
+  movableBodyCount: () => number;
   /** 選択中の剛体の「いまの姿」。UI 側は読むだけ。 */
   bodyReadout: (index: number) => {
     label: string;
@@ -792,29 +820,22 @@ export function setUpWorkspace(
    * 判定はいちばん速い物の速さがしきい値を下回り続けたかどうかで行う。
    */
   let settledAt: number | null = null;
-  /** いちばん速い物の速さが、この値を下回っていれば「止まっている」と見なす [m/s]。 */
-  const SETTLED_SPEED = 0.05;
   /** 一度は動いたか(最初から動かない場面で「止まりました」と言わないため)。 */
   let everMoved = false;
-  /**
-   * **静かになった最初の時刻**(シミュレーション時間 [s]、まだなら null)。
+  /*
+   * **しきい値と猶予は main 側が持つ**(`noteSettleAfterStep` のdoc参照)。
    *
-   * ここは以前**連続フレーム数**(`stillFrames > 30`)で数えていた。フレームは
-   * 実時間で刻むので、**再生速度を変えると猶予の長さが変わってしまう**——
-   * 実測(`d1-free-fall`、高さ20m、同じ条件で「はじめから」を2回ずつ):
+   * ここには以前、同じ判定(しきい値 0.05 m/s・猶予 0.5 秒)の写しがあった。
+   * 猶予をフレーム数で数えていた時代の名残で、**再生速度を変えると猶予の
+   * 長さが変わる**という不具合をシミュレーション時間に直した場所でもある
+   * ——実測(`d1-free-fall`、高さ20m、同じ条件で「はじめから」を2回ずつ):
    *
    *   ふつう(×1) … ほぼ止まった時刻 3.39 秒 / 3.39 秒
    *   はやい(×4) … ほぼ止まった時刻 5.39 秒 / 5.39 秒
    *
-   * `dt` は 0.008333333 のまま、step 数が速さに比例して増えているだけで
-   * **物理は寸分違わず同じ**。それなのに「見る速さ」のボタンを押しただけで
-   * 現象の数字が 2 秒ずれて見えた(利用者役「しらべる」の観察:「速さボタンは
-   * 見る速さを変えるだけだと思っていたので、なぜ現象そのものの数字が変わる
-   * のか分からなかった」)。猶予はシミュレーション時間で測る。
+   * いまは歩を進めるその場で数えるので、見る速さにもコマ落ちにも左右され
+   * ない。判定を二か所に置くと必ず食い違うので、ここには残さない。
    */
-  let stillSince: number | null = null;
-  /** それだけ静かなままなら「止まった」と見なす [s](シミュレーション時間)。 */
-  const SETTLED_GRACE_SECONDS = 0.5;
   /**
    * これだけ走っても止まらなければ、「まだ止まっていません」と言う。
    * 始まってすぐ言うと、落ちている最中の物にまで「止まっていません」と
@@ -1711,8 +1732,8 @@ export function setUpWorkspace(
     // 場面へは移らない——確認が要る呼び出し元(`start`)はそちらで済ませて
     // いる。
     const wasPaused = options?.keepPauseIntent === true && !api.isPlaying();
-    // 端の値を出す読み値は、読み込み直したら測り直す(`Readout.extreme`)。
-    readoutExtremes.clear();
+    // 端の値も出来事の値も、記録そのものから読み直す(`probeHistory` の
+    // doc参照)ので、ここで消しておく覚え書きはもう無い。
     const json = sceneJsonFor(current);
     if (!json) return;
     api.loadSceneJson(json);
@@ -1736,7 +1757,6 @@ export function setUpWorkspace(
     // 変えた条件の結果と取り違える)。
     settledAt = null;
     everMoved = false;
-    stillSince = null;
     // 前の実験の「実際の速さ」を引きずらない(計算の重さは実験ごとに
     // まったく違うため、切り替えた瞬間に古い実測値が一瞬出るのを避ける)。
     actualRateSmoothed = null;
@@ -1856,7 +1876,6 @@ export function setUpWorkspace(
    * `Readout.extreme` を出すための、これまでの端の値(読み値ごと)。
    * 実験を読み込み直したら測り直すので、`reload()` で空にする。
    */
-  const readoutExtremes = new Map<string, number>();
   let focusNodes: Record<string, HTMLElement> = {};
   /** 「選んだもの」の置き場所の入力欄(打っている最中は書き換えない)。 */
   let focusPositionInputs: HTMLInputElement[] = [];
@@ -3563,29 +3582,12 @@ export function setUpWorkspace(
       // (`settledAt` のdoc参照)。判定は「いちばん速い物の速さ」だけを見る
       // ——止まり続けた場面(振り子・惑星)では永久に出ないし、そもそも
       // 動く物が無い場面(熱・量子)でも出ない。
-      if (api.isPlaying()) {
-        const fastest = api.maxSpeed();
-        if (fastest > SETTLED_SPEED * 4) {
-          everMoved = true;
-          stillSince = null;
-          settledAt = null;
-        } else if (everMoved && fastest < SETTLED_SPEED) {
-          // 一瞬の静止(跳ね返りの頂点、衝突の瞬間)を「止まった」と読まない
-          // だけの猶予を置く。**猶予はシミュレーション時間で測る**
-          // (`stillSince` のdoc参照)。
-          if (stillSince === null) stillSince = seconds;
-          if (
-            settledAt === null &&
-            seconds - stillSince >= SETTLED_GRACE_SECONDS
-          ) {
-            // 出すのは**静かになった時刻**そのもの。猶予のぶん後ろへずれた
-            // 時刻を出すと、見出し(「0.05 m/s 以下」)と食い違う。
-            settledAt = stillSince;
-          }
-        } else {
-          stillSince = null;
-        }
-      }
+      // 判定そのものは main 側が 1 歩ごとに行う(`WorkspaceApi.settledTime`
+      // のdoc参照)。ここは読むだけ——画面の更新に合わせて覗いていたときは、
+      // 1 コマで 1 秒ぶん進む場面で秒に 1 回しか見ておらず、同じ設定で
+      // 2.71 / 2.74 / 4.01 秒と答えが変わっていた(実測)。
+      settledAt = api.settledTime();
+      everMoved = api.settledEverMoved();
       const settledKey = document.getElementById("readout-settled-key");
       const settledNode = document.getElementById("readout-settled");
       if (settledKey && settledNode) {
@@ -3597,14 +3599,27 @@ export function setUpWorkspace(
         // 書かれた(利用者役⑩の観察)。最初から空欄を置かない理由(埋まらない
         // 欄が気になって現象から目が離れる)はそのままに、**しばらく走った
         // あとは、止まっていないことも言う**——消えるよりずっと読める。
-        const readyToTell = settledAt !== null || seconds > SETTLED_TELL_AFTER_SECONDS;
+        // **答えようのない場面では、そもそも問わない**。「まだ止まっていません」
+        // を出すようにしたとき、動ける物が 1 つも無い場面(コーヒーが冷める・
+        // 電気の工作台)にまで m/s の行が出て、永久に「まだ止まっていません」と
+        // 言い続けるようになっていた(実測・利用者役⑪)。動ける物が無いなら、
+        // 止まる・止まらないという問い自体が無い。
+        const movable = api.movableBodyCount() > 0;
+        const readyToTell =
+          settledAt !== null || (movable && seconds > SETTLED_TELL_AFTER_SECONDS);
         settledKey.hidden = !readyToTell;
         settledNode.hidden = !readyToTell;
         if (settledAt !== null) {
           settledNode.textContent = formatDuration(settledAt as number, scale);
           settledNode.dataset.seconds = String(settledAt);
         } else if (readyToTell) {
-          settledNode.textContent = "まだ止まっていません";
+          // **一度も動いていない場面と、動いていて止まらない場面は違う**。
+          // 25°の坂では箱が 0.00 m/s のまま張り付いているのに「まだ止まって
+          // いません」と出ていて、すぐ上の速さと矛盾して読めた(実測・
+          // 利用者役⑪)。動き出していないなら、そう言う。
+          settledNode.textContent = everMoved
+            ? "まだ止まっていません"
+            : "はじめから動いていません";
           delete settledNode.dataset.seconds;
         }
       }
@@ -3619,23 +3634,97 @@ export function setUpWorkspace(
           }
           const values = sources.map((i) => api.probeValue(i));
           const current = readout.derive ? readout.derive(values) : values[0];
-          // **端の値を出す読み値**(`Readout.extreme` のdoc参照)。一瞬で
-          // 過ぎる現象では、いまの値からはつまみの効きが読めないので、
-          // どこまで届いたかを覚えておいて出す。
+          // **端の値・出来事の値は、記録そのものから読む**(`probeHistory`
+          // のdoc参照)。いまの値を毎コマ見るやり方では、1 コマで 1 秒ぶん
+          // 進む場面(「ボールを跳ねさせる」)で跳ね返り 1 往復をまたぎ越して
+          // しまい、同じ設定で違う答えが出ていた(実測: 1.30 m と 0.84 m)。
           let value = current;
-          if (readout.extreme && Number.isFinite(current)) {
-            // 同じプローブを「いまの値」と「端の値」の両方で出す実験が
-            // あるので、向きも鍵に含める(片方の更新がもう片方を上書きしない)。
-            const key = `${readout.probe}|${readout.extreme}`;
-            const seen = readoutExtremes.get(key);
-            const next =
-              seen === undefined
-                ? current
+          if (readout.extreme && !readout.derive) {
+            const history = api.probeHistory(readout.probe);
+            let found = Number.NaN;
+            for (const v of history) {
+              if (!Number.isFinite(v)) continue;
+              found = Number.isNaN(found)
+                ? v
                 : readout.extreme === "min"
-                  ? Math.min(seen, current)
-                  : Math.max(seen, current);
-            readoutExtremes.set(key, next);
-            value = next;
+                  ? Math.min(found, v)
+                  : Math.max(found, v);
+            }
+            if (!Number.isNaN(found)) value = found;
+          }
+          // **出来事が起きた瞬間の値**(`Readout.freezeWhen` のdoc参照)。
+          if (readout.freezeWhen && !readout.derive) {
+            const below = readout.freezeWhen.below;
+            const trigger = api.probeHistory(readout.freezeWhen.probe);
+            const source = api.probeHistory(readout.probe);
+            // 記録は右端(=いま)で揃っているので、後ろから数えた位置で対応づける。
+            const lag = trigger.length - source.length;
+            let rose = false;
+            let hit: number | null = null;
+            for (let i = 0; i < trigger.length; i += 1) {
+              const t = trigger[i];
+              if (!Number.isFinite(t)) continue;
+              if (t > below) {
+                rose = true;
+                continue;
+              }
+              if (!rose) continue;
+              const at = i - lag;
+              if (at < 1 || at >= source.length) break;
+              // またいだ瞬間まで戻して読む(コマの刻みぶんの遅れを消す)。
+              const before = trigger[i - 1];
+              const ratio =
+                before > below && before !== t ? (before - below) / (before - t) : 1;
+              hit = source[at - 1] + (source[at] - source[at - 1]) * ratio;
+              break;
+            }
+            if (hit === null) {
+              // まだ起きていないうちは、数字を出さない——出したら「これが
+              // 答えだ」と読まれてしまう。
+              node.textContent = "まだです";
+              continue;
+            }
+            value = hit;
+          }
+          // **出来事と出来事のあいだで、いちばん届いたところ**
+          // (`Readout.peakBetween` のdoc参照)。
+          if (readout.peakBetween && !readout.derive) {
+            const gate = readout.peakBetween.below;
+            const trigger = api.probeHistory(readout.peakBetween.probe);
+            const source = api.probeHistory(readout.probe);
+            const lag = trigger.length - source.length;
+            let phase: "before" | "peak" | "done" = "before";
+            let rose = false;
+            let peak = Number.NaN;
+            for (let i = 0; i < trigger.length; i += 1) {
+              const t = trigger[i];
+              if (!Number.isFinite(t)) continue;
+              if (phase === "before") {
+                if (t > gate * 1.2) rose = true;
+                else if (rose && t <= gate) {
+                  phase = "peak";
+                  rose = false;
+                }
+                continue;
+              }
+              const at = i - lag;
+              if (at >= 0 && at < source.length && Number.isFinite(source[at])) {
+                peak = Number.isNaN(peak) ? source[at] : Math.max(peak, source[at]);
+              }
+              if (t > gate * 1.2) rose = true;
+              else if (rose && t <= gate) {
+                phase = "done";
+                break;
+              }
+            }
+            // **上りきるまでは数字を出さない**。登っている途中の値を出すと、
+            // 読むたびに増えていく数字になる(実測: 1.29 m → 1.30 m)。
+            // 「1 回目に跳ね返った高さ」は、下りてくるまで決まらない。
+            if (phase !== "done" || Number.isNaN(peak)) {
+              node.textContent = "まだです";
+              continue;
+            }
+            value = peak;
           }
           // **その量にとって「ほぼ 0」なら、0 と書く**。桁の離れた量を指数で
           // 書くようにしたら、こんどは止まりかけた箱の速さが「8.67e-19 m/s」と
