@@ -1,0 +1,7007 @@
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import { addViaMenu, collectPageErrors, decodePng } from "./helpers";
+import { GUIDED_CATEGORIES as CATEGORIES } from "../src/catalog";
+
+// ワークスペース(`src/workspace.ts`)の E2E。
+//
+// **ここが守るもの**: 画面はひとつのまま、粒度が「大局 ⇄ 局所」に連続して
+// 動くこと。具体的には
+//   - 初めて開いた人が、空白ではなく**動いている現象**から始められる
+//   - どこからでも 1 手で開く窓(⌘K)から、打つ/選ぶで目的の現象へ届く
+//   - 見る深さのダイヤルを右へ回すほど、一覧 → グラフ → 道具が順に現れる
+//   - 全体の深さを変えずに、カード 1 枚だけ深く開ける(局所の粒度)
+//   - ひとつの対象を選ぶと文脈がそこへ寄り、「全体へ戻る」で戻れる
+//
+// 既定の storageState(`playwright.config.ts`)は深さ 3 なので、ここでは
+// **初めて開いた人**を再現するために空の storageState を使う。
+test.use({ storageState: { cookies: [], origins: [] } });
+
+/**
+ * 画面に出ている数字を数に戻す。「2.21×10⁻¹⁷ ℃」「0.0040 ℃」のどちらも読む
+ * ——指数は理科の書き方(`readoutNumber` の `humanExponent` のdoc参照)で
+ * 出るので、`Number.parseFloat` だけでは仮数しか取れない。
+ */
+function parseShownNumber(text: string): number {
+  const SUPERSCRIPT = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+  const match = text.match(/(-?[\d.]+)×10(⁻?)([⁰¹²³⁴⁵⁶⁷⁸⁹]+)/);
+  if (!match) return Number.parseFloat(text);
+  const exponent = [...match[3]].map((c) => SUPERSCRIPT.indexOf(c)).join("");
+  return Number.parseFloat(match[1]) * 10 ** (Number(exponent) * (match[2] ? -1 : 1));
+}
+
+async function boot(page: Page) {
+  await page.goto("/");
+  await expect(page.locator("#boot-overlay")).toBeHidden({ timeout: 30_000 });
+}
+
+/** 「経過した時間」を秒で読む(表示は桁に合わせて単位が変わる)。 */
+async function elapsedSeconds(page: Page): Promise<number> {
+  const raw = await page.locator("#readout-time").getAttribute("data-seconds");
+  return Number.parseFloat(raw ?? "0") || 0;
+}
+
+async function setGrain(page: Page, at: 0 | 1 | 2 | 3) {
+  await page.click(`.detail-stop[data-at="${at}"]`);
+}
+
+test("初めて開くと、空白ではなく動いている現象から始まる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 画面はひとつ。上にパンくずと走行、右に文脈、まん中が舞台。
+  await expect(page.locator("#commandbar")).toBeVisible();
+  await expect(page.locator("#context")).toBeVisible();
+  await expect(page.locator("#scene-view")).toBeVisible();
+  // 何を見ているかがパンくずに出ている。
+  await expect(page.locator("#crumb-experiment")).toBeVisible();
+  // すでに走っている(押させない)。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0);
+  // 何も選んでいないので「選んだもの」は出ない(内部都合の床が選ばれない)。
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("⌘K → 打つ → Enter の3手で、目的の現象が走り出す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  await page.keyboard.press("Control+k"); // ①どこからでも開く
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.fill("#palette-input", "コーヒー"); // ②絞る
+  await expect(page.locator(".palette-row").first()).toContainText("コーヒー");
+  await page.keyboard.press("Enter"); // ③選ぶ = 走り出す
+
+  await expect(page.locator("#palette")).toBeHidden();
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  await expect(page.locator("#context")).toContainText("コーヒーの温度");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+test("見る深さを右へ回すほど、道具が順に現れる(連続した粒度)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  await setGrain(page, 0);
+  await expect(page.locator("#hierarchy")).toBeHidden();
+  await expect(page.locator("#probe-graphs")).toBeHidden();
+  await expect(page.locator("#toolbar")).toBeHidden();
+  await expect(page.locator("#project-drawer")).toBeHidden();
+
+  await setGrain(page, 1);
+  await expect(page.locator("#timeline")).toBeVisible();
+  await expect(page.locator("#hierarchy")).toBeHidden();
+
+  await setGrain(page, 2);
+  await expect(page.locator("#probe-graphs")).toBeVisible();
+  await expect(page.locator("#hierarchy")).toBeVisible();
+  await expect(page.locator("#inspector")).toBeVisible();
+  await expect(page.locator("#toolbar")).toBeHidden();
+
+  await setGrain(page, 3);
+  await expect(page.locator("#toolbar")).toBeVisible();
+  await expect(page.locator("#console-panel")).toBeVisible();
+  await expect(page.locator("#project-drawer")).toBeVisible();
+
+  // 深さは覚えている(毎回入り直させない)。
+  await page.reload();
+  await expect(page.locator("#boot-overlay")).toBeHidden({ timeout: 30_000 });
+  await expect(page.locator("#toolbar")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("全体は浅いまま、カード1枚だけ深く開ける(局所の粒度)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  const knobs = page.locator('.card[data-card="knobs"]');
+  await expect(knobs).toHaveAttribute("data-expanded", "false");
+  await knobs.locator(".card-header").click();
+  await expect(knobs).toHaveAttribute("data-expanded", "true");
+  await expect(page.locator("#knob-height")).toBeVisible();
+
+  // 局所を開いても、大局は「みる」のまま——一覧やグラフは出てこない。
+  await expect(page.locator("#hierarchy")).toBeHidden();
+  await expect(page.locator("#probe-graphs")).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("ひとつの対象を選ぶと文脈がそこへ寄り、全体へ戻れる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+
+  // 一覧から実体を選ぶ(3D のクリックでも同じ状態になる)。
+  await page.locator("#hierarchy-tree .tree-body").nth(1).click();
+  await expect(page.locator("#crumb-body")).toBeVisible();
+  const focus = page.locator('.card[data-card="focus"]');
+  await expect(focus).toBeVisible();
+  await expect(focus).toContainText("かたち");
+
+  await page.click("#btn-clear-selection");
+  await expect(page.locator("#crumb-body")).toHaveCount(0);
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("つまみを動かすと、その設定でやり直す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0);
+
+  const slider = page.locator("#knob-height");
+  await slider.fill("5");
+  await slider.dispatchEvent("change");
+
+  const height = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => Number.parseFloat((await height.textContent()) ?? "99"), {
+      timeout: 10_000,
+    })
+    .toBeLessThan(6);
+  expect(errors).toEqual([]);
+});
+
+test("dt の桁が極端なシーンでも、待たずに現象が進む", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // D34(太陽系儀)は 1 step が 31555 秒。時間倍率では上限でも 1 step 4 分。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星");
+  await page.keyboard.press("Enter");
+
+  await expect
+    .poll(() => elapsedSeconds(page), { timeout: 20_000 })
+    .toBeGreaterThan(1_000_000);
+  await expect(page.locator("#readout-time")).toContainText("日");
+  expect(errors).toEqual([]);
+});
+
+test("3Dに何も描かれない実験を選ぶと、グラフが見える深さまで自動で開く", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+
+  // 選んだのに何も映らない、を残さない。
+  await expect(page.locator("#probe-graphs")).toBeVisible();
+  await expect(page.locator("#context")).toContainText("下のグラフ");
+  expect(errors).toEqual([]);
+});
+
+test("形の無い現象では、空の3Dを見せずに見る場所へ送る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "熱が棒");
+  await page.keyboard.press("Enter");
+
+  // 力学ボディが1つも無いシーン。「読み込みに失敗した」と読ませない。
+  await expect(page.locator("#stage-empty-note")).toBeVisible();
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-stage-empty",
+    "true",
+  );
+  // 場のパネルは隅の小窓ではなく、空いた舞台の幅をもらう。
+  const panel = await page.locator("#field-panel").boundingBox();
+  const stage = await page.locator("#scene-view").boundingBox();
+  expect(panel!.width).toBeGreaterThan(stage!.width * 0.7);
+  // 題に「いま何度か」が出ている(色の帯だけで数値を当てさせない)。
+  await expect(page.locator("#field-title")).toContainText("℃");
+
+  // 物のあるシーンへ移ると、案内は引っ込む。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを落とす");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#stage-empty-note")).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+// 「つくる」の粒度——**自分で組み立てる人**が行き止まりに当たらないこと。
+// 利用者役④(粒度「つくる」)が実際に詰まった順に並べてある。
+test("自分で置いた物を、そのまま「うごかす」で落とせる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await expect(page.locator("#crumb-own-scene")).toContainText("じぶんの場面");
+
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.click("#btn-run");
+
+  // カタログの実験を選んでいなくても、パレットではなく**場面が走る**。
+  await expect(page.locator("#palette")).toBeHidden();
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+test("材質を選び直すと、重さもその材質のものになる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.locator("#hierarchy-tree .tree-body").last().click();
+
+  const mass = () =>
+    page.locator("#inspector-mass").inputValue().then((v) => Number.parseFloat(v));
+  const steel = await mass();
+  expect(steel).toBeGreaterThan(0);
+
+  await page.selectOption("#inspector-material", "ゴム(天然)");
+  await expect
+    .poll(async () => page.locator("#inspector-material").inputValue(), { timeout: 10_000 })
+    .toBe("ゴム(天然)");
+  // 密度が違えば重さも違う——選び直した材質で計算し直されている。
+  await expect.poll(mass, { timeout: 10_000 }).toBeLessThan(steel);
+
+  // 名前は連番へ作り変わらない(書き出し→読み直しで消えていた)。
+  await expect(page.locator("#hierarchy-tree")).toContainText("球 1");
+  expect(errors).toEqual([]);
+});
+
+test("打ち込んだ重さが、とめている間でもその場で効く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.locator("#hierarchy-tree .tree-body").last().click();
+
+  await page.fill("#inspector-mass", "10");
+  await page.locator("#inspector-mass").dispatchEvent("change");
+  await expect
+    .poll(
+      async () => Number.parseFloat(await page.locator("#inspector-mass").inputValue()),
+      { timeout: 10_000 },
+    )
+    .toBeCloseTo(10, 3);
+  expect(errors).toEqual([]);
+});
+
+test("名前を付けて保存した場面は、開き直しても残っている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  const bodies = await page.locator("#hierarchy-tree .tree-body").count();
+
+  await page.fill("#input-scene-name", "テストの場面");
+  await page.click("#btn-save-scene");
+  await expect(page.locator(".saved-scene-open")).toContainText("テストの場面");
+  await expect(page.locator("#crumb-own-scene")).toContainText("テストの場面");
+
+  // 更新しただけで作ったものが消える、を残さない。
+  await page.reload();
+  await expect(page.locator("#boot-overlay")).toBeHidden({ timeout: 30_000 });
+  await expect(page.locator("#crumb-own-scene")).toContainText("テストの場面");
+  await expect
+    .poll(() => page.locator("#hierarchy-tree .tree-body").count(), { timeout: 15_000 })
+    .toBe(bodies);
+  expect(errors).toEqual([]);
+});
+
+test("保存した場面は、⌘K からどこにいても開き直せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.fill("#input-scene-name", "わたしの場面");
+  await page.click("#btn-save-scene");
+  await expect(page.locator("#crumb-own-scene")).toContainText("わたしの場面");
+
+  // 用意された実験へ行ってから、名前で探して戻る。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "わたし");
+  await expect(page.locator(".palette-row").first()).toContainText("わたしの場面");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-own-scene")).toContainText("わたしの場面");
+  await expect(page.locator("#palette")).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("つなぎ目のある場面も、保存して開き直せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-pendulum")!.click());
+  await expect(page.locator("#hierarchy-tree")).toContainText("つなぎ目");
+  const bodies = await page.locator("#hierarchy-tree .tree-body").count();
+
+  await page.fill("#input-scene-name", "ふりこの場面");
+  await page.click("#btn-save-scene");
+  await expect(page.locator("#crumb-own-scene")).toContainText("ふりこの場面");
+
+  // 用意された実験へ行ってから、名前で探して戻る。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこの場面");
+  await expect(page.locator(".palette-row").first()).toContainText("ふりこの場面");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-own-scene")).toContainText("ふりこの場面");
+  // 物もつなぎ目も、保存したときのまま戻ってくる。書き出しがボディの名前だけを
+  // 画面の名前へ書き換えていた頃は、つなぎ目が消えた名前を指したままになり、
+  // 読み込みが `UnknownBodyName` で落ちて**画面が何も変わらなかった**。
+  await expect
+    .poll(() => page.locator("#hierarchy-tree .tree-body").count(), { timeout: 15_000 })
+    .toBe(bodies);
+  await expect(page.locator("#hierarchy-tree")).toContainText("つなぎ目");
+  expect(errors).toEqual([]);
+});
+
+test("自分で置いた物の動きが、そのままグラフと CSV に出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 置いた物には観測点が付く——用意された実験でだけグラフが出る、を残さない。
+  await page.click("#btn-run");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(0.5);
+  await page.click("#btn-run");
+
+  await expect(page.locator("#probe-empty")).toBeHidden();
+  await expect(page.locator("#btn-probe-csv")).toBeEnabled();
+  await expect(page.locator("#probe-time-range")).toContainText("t =");
+  expect(errors).toEqual([]);
+});
+
+test("材質を変えても、場面の名前と選んでいた物は変わらない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.fill("#input-scene-name", "名前つきの場面");
+  await page.click("#btn-save-scene");
+
+  await page.locator("#hierarchy-tree .tree-body").last().click();
+  await page.selectOption("#inspector-material", "ゴム(天然)");
+  await expect
+    .poll(async () => page.locator("#inspector-material").inputValue(), { timeout: 10_000 })
+    .toBe("ゴム(天然)");
+
+  // 組み直しは「同じ場面の編集」であって差し替えではない。
+  await expect(page.locator("#crumb-own-scene")).toContainText("名前つきの場面");
+  await expect(page.locator('.card[data-card="focus"]')).toContainText("球 1");
+  expect(errors).toEqual([]);
+});
+
+test("描かれている現象に「形では見えません」と言わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 天体は剛体を1つも持たないが、確かに描かれている。剛体の数で判断して
+  // いたときは、見えているのに「形では見えません」と出ていた。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("惑星");
+  await expect(page.locator("#stage-empty-note")).toBeHidden();
+
+  // 棒の温度は本当に何も描かれない——こちらでは案内を出す。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "熱が棒");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#stage-empty-note")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("動きが止まったら、その時刻が数値に出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 落として跳ねて止まるまで待つ。時計は回り続けるが、止まった時刻は別に出る。
+  // **止まったかどうかは `data-seconds` の有無で見る**——行そのものは、
+  // しばらく走れば「まだ止まっていません」を出すために先に現れる
+  // (下の「止まらない場面でも、…行が消えない」参照)。
+  const settled = page.locator("#readout-settled");
+  await expect
+    .poll(async () => await settled.getAttribute("data-seconds"), { timeout: 30_000 })
+    .not.toBeNull();
+  const settledSeconds = Number(await settled.getAttribute("data-seconds"));
+  expect(settledSeconds).toBeGreaterThan(0);
+  // 経過時間はそのあとも進む——「止まった時刻」と取り違えないための別欄。
+  await expect
+    .poll(() => elapsedSeconds(page), { timeout: 15_000 })
+    .toBeGreaterThan(settledSeconds);
+
+  // 回り続ける現象では時刻を出さない——ただし行は残し、止まっていないと言う
+  // (黙って消すと、崩れたのか数値が壊れたのか分からない)。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
+  await page.waitForTimeout(5000);
+  await expect(settled).toContainText("まだ止まっていません");
+  expect(await settled.getAttribute("data-seconds"), "止まっていないのに時刻が残っている").toBeNull();
+  expect(errors).toEqual([]);
+});
+
+test("グラフの単位が、表の数値と同じ量になっている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+
+  // 表は ℃。グラフだけ生のケルビン(300 台)では同じ量だと気付けない。
+  const readout = page.locator('#context dd[data-probe="0"]');
+  await expect.poll(async () => (await readout.textContent()) ?? "", { timeout: 15_000 })
+    .toContain("℃");
+  const shown = Number.parseFloat((await readout.textContent()) ?? "999");
+  expect(shown).toBeLessThan(150); // ケルビンなら 300 台になる
+
+  // 桁の小さい時刻も指数表記にしない。
+  await expect(page.locator("#probe-time-range")).not.toContainText("e-");
+  expect(errors).toEqual([]);
+});
+
+test("つまみが無い実験は、無いと言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 場の中身そのものが記録された状態から始まる実験には、変えるつまみが無い。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d27-double-slit"]');
+  const knobs = page.locator('.card[data-card="knobs"]');
+  await expect(knobs).toBeVisible();
+  await expect(knobs).toContainText("見るだけ");
+
+  // 逆に、つまみを足した実験では実物が出る。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
+  await expect(page.locator("#knob-material")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("棒の材質を変えると、熱の伝わり方が実際に変わる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
+
+  const near = page.locator('#context dd[data-probe="1"]');
+  await expect
+    .poll(async () => Number.parseFloat((await near.textContent()) ?? "0"), {
+      timeout: 20_000,
+    })
+    .toBeGreaterThan(5);
+
+  // 木は熱をほとんど伝えない——同じ時間でも温度が上がらない。
+  await page.click("#knob-material .knob-choice-btn:nth-child(4)");
+  await page.waitForTimeout(4000);
+  const woodText = (await near.textContent()) ?? "99";
+  expect(parseShownNumber(woodText), `木のときの温度: ${woodText}`).toBeLessThan(1);
+  expect(errors).toEqual([]);
+});
+
+test("熱が棒を伝わるの材質ヒントに、摩擦の説明が付かない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
+
+  // `562eb88` の退行: 「材質ボタンに摩擦係数を添える」変更のヒント文が、
+  // 摩擦と何の関係も無いこの実験にまで漏れていた。この実験の材質つまみは
+  // 熱拡散率(数値)を選ぶだけで、ボタンにも摩擦の数字は付かない
+  // ——ヒントにも付いてはいけない。
+  const buttons = page.locator("#knob-material .knob-choice-btn");
+  await expect(buttons).toHaveCount(4);
+  for (const button of await buttons.all()) {
+    expect(await button.getAttribute("data-friction")).toBeNull();
+  }
+  const hint = page.locator("#knob-material").locator(
+    "xpath=following-sibling::p[contains(@class,'knob-hint')]",
+  );
+  await expect(hint).not.toContainText("摩擦");
+  await expect(hint).toContainText("木はほとんど伝わりません");
+  expect(errors).toEqual([]);
+});
+
+test("坂の実験の材質ヒントには、摩擦の説明が付く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d5-incline"]');
+
+  // こちらは材質つまみの値がそのまま材質名で、ボタンにも実際の摩擦係数が
+  // 添えられる実験——摩擦の読み方の一言はここでこそ意味を持つ。
+  const buttons = page.locator("#knob-material .knob-choice-btn");
+  await expect(buttons).toHaveCount(6);
+  for (const button of await buttons.all()) {
+    expect(await button.getAttribute("data-friction")).not.toBeNull();
+  }
+  const hint = page.locator("#knob-material").locator(
+    "xpath=following-sibling::p[contains(@class,'knob-hint')]",
+  );
+  await expect(hint).toContainText("摩擦の数字が小さいほどよく滑ります");
+  expect(errors).toEqual([]);
+});
+
+test("重い球と軽い球は、空気があると着地の時刻がずれ、無いと揃う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  // グラフの段(`REVEAL.analysis`=1.2)まで濃さを上げておく——既定の濃さ
+  // (「さわる」=1)のままだと `#btn-probe-csv` を含む分析パネルがまだ
+  // 畳まれていて見つからない。この実験は舞台に球が実際に描かれる
+  // (`stageEmpty`が偽)ため、D9(熱のみ)のような「舞台が空なら自動で開く」
+  // 救済(`forceAnalysisOpen`)も働かない——自分で開く必要がある。
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d38-two-balls"]');
+
+  // **実時間で覗きに行かない**(進行管理役の実測、CI赤)。以前はここで
+  // 「鋼球の高さが5m以下になるまで `expect.poll` で待ち、その瞬間の木球の
+  // 高さを読む」という書き方をしていて、**CI の遅いランナーでだけ落ちた**
+  // (`b9ed9bb`/`fe34321` の Linux ジョブ: `expect(inAir.light)
+  // .toBeGreaterThan(10)` で失敗)。理由は2つあり、どちらも走らせている
+  // マシンの速さに依存する:
+  //   ①`expect.poll` が覗きに来る間隔はマシン次第で、「5m以下」に気づいた
+  //     時点では実際にはもっと時間が経っていて、木球も10mより下まで落ちている。
+  //   ②鋼球は着地後に跳ね返る(restitution 0.6)ので、「5m以下」は着地の
+  //     瞬間だけでなく跳ねている間も何度も真になり、狙った瞬間を指せない。
+  //
+  // そこで**記録された履歴から決める**。グラフは1ステップごとの値を持って
+  // いて、「数値をおとす」(`#btn-probe-csv`)がそれをそのまま書き出す
+  // ——いつ覗いたかに左右されず、跳ね返りの影響も受けない(Rust側の受け入れ
+  // テスト `run_headless_scenario_d38_two_balls_fall_*` と同じ考え方)。
+  const landingTimes = async () => {
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.click("#btn-probe-csv"),
+    ]);
+    const stream = await download.createReadStream();
+    const chunks: Buffer[] = [];
+    for await (const c of stream) chunks.push(c as Buffer);
+    const lines = Buffer.concat(chunks)
+      .toString("utf8")
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .slice(1); // 見出し行を落とす
+    // 列は [時刻, 鉄の球の高さ, 木の球の高さ](`readouts` の宣言順)。
+    // 「最初に地面へ触れた時刻」= 高さが球の半径(0.1m)以下になった最初の行。
+    const first = (column: number) => {
+      for (const line of lines) {
+        const cells = line.split(",");
+        if (Number.parseFloat(cells[column]) <= 0.15) return Number.parseFloat(cells[0]);
+      }
+      return Number.NaN;
+    };
+    return { heavy: first(1), light: first(2), rows: lines.length };
+  };
+
+  // 両方が着地しきるまで待ってから、とめて読む(とめるのは、書き出しの
+  // 最中にも履歴が伸び続けるのを避けるため)。
+  const bothLanded = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world?: { read_component(k: string, a: string): string; body_position_at_f32(i: number): Float32Array };
+      }).__world;
+      if (!w) return false;
+      const count = Number(w.read_component("body_count", ""));
+      const ys: number[] = [];
+      for (let i = 0; i < count; i++) {
+        const name = w.read_component("body_label_at", String(i));
+        if (name === "heavy" || name === "light") ys.push(w.body_position_at_f32(i)[1]);
+      }
+      return ys.length === 2 && ys.every((y) => y <= 0.15);
+    });
+
+  await expect.poll(bothLanded, { timeout: 30_000 }).toBe(true);
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  // 既定(空気あり)では、軽い木球が有意に遅れて着地する(実測: 鋼 5.742s /
+  // 木 6.375s、差 0.633s)。しきい値は実測の半分ほどに取って、ランナーの
+  // 速さではなく物理だけで決まる差を見る。
+  const inAir = await landingTimes();
+  expect(inAir.rows, "履歴が書き出せている").toBeGreaterThan(100);
+  expect(Number.isFinite(inAir.heavy) && Number.isFinite(inAir.light)).toBe(true);
+  expect(inAir.light - inAir.heavy, "空気ありは軽いほうが遅れる").toBeGreaterThan(0.3);
+
+  // 空気を「なし」に切り替えると、同じ場面がやり直され、重さが15倍以上
+  // 違っても2つの球は**ぴったり同時に**着地する(理論上は厳密に同時で、
+  // 実測でも着地stepが完全一致する——Rust側テスト参照)。
+  await page.click("#knob-air .knob-choice-btn:nth-child(2)");
+  // **つまみを動かした後は、止めた意思が引き継がれる**(`reload` の
+  // `keepPauseIntent`)。上で一度とめているので、そのままでは新しい場面が
+  // 走り出さず `bothLanded` が永遠に真にならない(実測でここが詰まった)。
+  // 明示的に走らせ直す。
+  await expect
+    .poll(async () => page.locator("#btn-run").getAttribute("data-playing"), { timeout: 10_000 })
+    .not.toBeNull();
+  if ((await page.locator("#btn-run").getAttribute("data-playing")) === "false") {
+    await page.click("#btn-run");
+  }
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect.poll(bothLanded, { timeout: 30_000 }).toBe(true);
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  const inVacuum = await landingTimes();
+  expect(Number.isFinite(inVacuum.heavy) && Number.isFinite(inVacuum.light)).toBe(true);
+  expect(
+    Math.abs(inVacuum.light - inVacuum.heavy),
+    "空気なしは同時に着地する",
+  ).toBeLessThan(0.05);
+
+  expect(errors).toEqual([]);
+});
+
+test("グラフを指すと、その時刻の値が読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(1);
+
+  // 巻き戻しは 1 秒ごとの記録にしか飛べない。コンマ何秒の値は、細かく持って
+  // いる側(グラフ)を指して読む。
+  const canvas = page.locator("#probe-canvas");
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.35, box.y + box.height * 0.5);
+  await page.waitForTimeout(300);
+
+  // 十字線と読み取り値が乗ったぶん、キャンバスの絵が変わる。
+  const before = await canvas.screenshot();
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height * 0.5);
+  await page.waitForTimeout(300);
+  const after = await canvas.screenshot();
+  expect(Buffer.compare(before, after)).not.toBe(0);
+  expect(errors).toEqual([]);
+});
+
+test("書き出した数値には単位が付いている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(1);
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#btn-probe-csv"),
+  ]);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(c as Buffer);
+  const header = Buffer.concat(chunks).toString("utf8").split("\n")[0];
+  // 画面には ℃ と出ているのにファイルは数字だけ、を残さない。
+  expect(header).toContain("[℃]");
+  expect(header.startsWith("time_s,")).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+// **課題①(進行管理役の実測)**: `d34-solar-system`を粒度2で開いて数秒走らせ
+// 「数値をおとす」を押すと、画面は「経過した時間 187.36 日」なのに、書き出した
+// CSVの時刻列は`31554.896928761154`のような生の秒・16桁だった——画面と
+// 突き合わせられない。上のテスト(コーヒー、秒のまま)は「余計な変換をしない」
+// ほうしか見ていないので、こちらは「変換が要る場面で実際に変換されているか」
+// を別に確かめる。
+test("秒より大きい単位で進む実験は、書き出したCSVの時刻も画面と同じ単位になる", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(1);
+
+  // **読む前に必ずとめる**。単位は「そのとき経過している時間」から選ばれるので、
+  // 走らせたままだと**画面を読んだ瞬間**と**CSVを書き出した瞬間**で経過時間が
+  // 違い、その間に単位の境目をまたぐと食い違って見える——実測で踏んだ:
+  // 画面が「時間」を返した直後に書き出したCSVの見出しが `time [日]` になり、
+  // このテストだけが落ちた(実装の食い違いではなく、2つの読みを別の時刻で
+  // 取っていたこのテストの側の欠陥)。とめれば両方が同じ時刻の値になる。
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  // 画面の「経過した時間」が選んだ単位を、CSVも同じ単位で書いているかどうかの
+  // 正解として使う——別々に単位を決める実装が2つ生まれると、今回のように
+  // また食い違う。
+  const readout = (await page.locator("#readout-time").textContent()) ?? "";
+  const unitMatch = readout.match(/([^\d.\-\s]+)\s*$/);
+  expect(unitMatch).not.toBeNull();
+  const unit = unitMatch![1];
+  // 太陽系(粒度2、数秒)は必ず「秒」より大きい単位に上がる実験なので、
+  // ここが「秒」のままなら実測の前提が崩れている(=テスト自体が無意味になる)。
+  expect(unit).not.toBe("秒");
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#btn-probe-csv"),
+  ]);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(c as Buffer);
+  const lines = Buffer.concat(chunks)
+    .toString("utf8")
+    .split("\n")
+    .filter((l) => l.length > 0);
+
+  // 見出し1列目は画面と同じ単位を角括弧で書く。`time_s`ではない
+  // (`time_s`は「秒のときだけ」の書き方——下のコメント参照)。
+  const header = lines[0].split(",");
+  expect(header[0]).toBe(`time [${unit}]`);
+
+  const times = lines.slice(1).map((l) => Number.parseFloat(l.split(",")[0]));
+  expect(times.length).toBeGreaterThan(5);
+  expect(times.every((t) => Number.isFinite(t))).toBe(true);
+
+  // 桁数: 生の秒だと16桁(`31554896.928761154`級)だった。画面と同じ
+  // 読みやすさに揃えたので、小数点以下は2桁以上10桁以下に収まる
+  // (`csvTimeDigits`のdoc参照——歩幅に応じて2桁より増えることはあるが、
+  // 生の浮動小数点の全桁がそのまま出ることはない)。
+  for (const line of lines.slice(1, 6)) {
+    const cell = line.split(",")[0];
+    const fractionDigits = cell.includes(".") ? cell.split(".")[1].length : 0;
+    expect(fractionDigits).toBeGreaterThanOrEqual(2);
+    expect(fractionDigits).toBeLessThanOrEqual(10);
+  }
+
+  // **丸めすぎて同じ値の行が並んでいないか**(`csvTimeDigits`が本来防ぐはず
+  // のこと)。グラフは1ステップごとの細かさを持っており、CSVはそれを
+  // 持ち出すための道具——時刻が隣同士で潰れていたら、その細かさを捨てて
+  // いることになる。時刻は単調に増えるはずなので、差が正であることを
+  // 全行で確かめる。
+  for (let i = 1; i < times.length; i++) {
+    expect(times[i]).toBeGreaterThan(times[i - 1]);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("動く物が無い実験でも、真っ黒な3Dを説明なしに残さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  // 場のパネルすら無い(熱のノードとグラフだけの)場面でも案内は出る。
+  await expect(page.locator("#stage-empty-note")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("選んだものの札から、材質をその場で変えられる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 目の前の札で完結する——Inspector の 750px 下まで潜らせない。
+  const select = page.locator("#focus-material");
+  await expect(select).toBeVisible();
+  const mass = () =>
+    page
+      .locator('[data-focus="重さ"]')
+      .textContent()
+      .then((t) => Number.parseFloat(t ?? "0"));
+  // 札の値が埋まるまで待つ。埋まる前に読むと 0 を掴み、「軽くなったか」の
+  // 比較そのものが意味を失う(遅い実行環境で実際に踏んだ)。
+  await expect.poll(mass, { timeout: 15_000 }).toBeGreaterThan(0);
+  const steel = await mass();
+  await select.selectOption("ゴム(天然)");
+  await expect.poll(mass, { timeout: 15_000 }).toBeLessThan(steel);
+  expect(errors).toEqual([]);
+});
+
+test("置いた物は、置いた瞬間に画面で見える大きさで映る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+
+  // 置いた物のところまで画角が寄る(以前は原点を見たままで、数ピクセルの
+  // 点にしか見えなかった)。
+  const near = await page.evaluate(() => {
+    const hud = document.getElementById("hud");
+    return hud?.textContent ?? "";
+  });
+  expect(near).toContain("12.0000 m");
+  // 走らせなくても、そこに在ることが分かる。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+  expect(errors).toEqual([]);
+});
+
+test("水と分子の実験が、舞台に実際に描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 水の粒は「+ 流体」で置いたときしか描いておらず、水を含むシーンを
+  // 読み込むと一粒も出なかった。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d23-pouring-water"]');
+  await expect(page.locator("#crumb-experiment")).toContainText("水を注ぐ");
+  await expect(page.locator("#stage-empty-note")).toBeHidden();
+
+  // 分子は実寸だと 1 画素にも満たず、真っ黒に見えていた。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d25-brownian"]');
+  await expect(page.locator("#stage-empty-note")).toBeHidden();
+  // 実物より大きく描いていることは、隠さず書く。
+  await expect(page.locator("#context")).toContainText("実物より大きく描いています");
+  expect(errors).toEqual([]);
+});
+
+test("止めている間は、時間の帯をつまんだ場所に留まる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  // スナップショットが貯まるまで走らせる。
+  await expect.poll(() => elapsedSeconds(page), { timeout: 30_000 }).toBeGreaterThan(5);
+
+  const scrubber = page.locator("#timeline-scrubber");
+  const box = (await scrubber.boundingBox())!;
+  const state = () =>
+    scrubber.evaluate((el) => ({
+      value: (el as HTMLInputElement).value,
+      max: (el as HTMLInputElement).max,
+    }));
+  const before = await state();
+  expect(Number(before.max)).toBeGreaterThan(1);
+
+  await page.mouse.move(box.x + box.width - 6, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.3, box.y + box.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(400);
+
+  const after = await state();
+  // つまみは離した場所に留まり(以前は右端へ戻っていた)、
+  expect(Number(after.value)).toBeLessThan(Number(before.value));
+  // 記録した先の時点も消えない(以前は巻き戻した瞬間に捨てていた)。走らせて
+  // いる間は記録が1つ増えることがあるので、**減っていないこと**を見る。
+  expect(Number(after.max)).toBeGreaterThanOrEqual(Number(before.max));
+  expect(errors).toEqual([]);
+});
+
+// 利用者役「しらべる」の観察: つまみの `step` が空(既定値の1が黙って効く)に
+// 見えて、「0 と 1 の2箇所にしか止まらない/途中の時刻が拾えない」と読まれた。
+// 再現すると、`value`/`max` はスナップショットの**index**(常に整数)であり、
+// 記録が2つしか無い立ち上がり直後だけ実際に0と1の2択になる——記録が貯まれば
+// 端でない位置(index)へも動かせ、そこに対応する**端でない時刻**が読める。
+// `step` は「index が整数である」ことを画面にも明示するため 1 を明示する
+// (`index.html` 側のdoc参照)。
+test("つまみを途中の位置へ動かすと、その時刻の値が読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  // リングバッファ(最大8個)が複数貯まるまで走らせる——端点2つだけでなく
+  // 「途中」と呼べる位置が実在することを確かめたい。
+  await expect.poll(() => elapsedSeconds(page), { timeout: 30_000 }).toBeGreaterThan(6);
+
+  const scrubber = page.locator("#timeline-scrubber");
+  await expect(scrubber).toHaveAttribute("step", "1");
+  const max = Number(await scrubber.getAttribute("max"));
+  expect(max).toBeGreaterThan(2);
+
+  const box = (await scrubber.boundingBox())!;
+  // 止める。
+  await page.mouse.move(box.x + box.width - 6, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+
+  // 端(0 / max)ではない、途中の位置へつまみを動かす。
+  await page.mouse.move(box.x + box.width - 6, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+
+  const value = Number(await scrubber.inputValue());
+  expect(value).toBeGreaterThan(0);
+  expect(value).toBeLessThan(max);
+
+  // その位置に対応する、端でない時刻が画面に読める(飾りの帯ではない)。
+  const timeText = await page.locator("#timeline-time").textContent();
+  const match = timeText?.match(/t = ([\d.]+) 秒/);
+  expect(match).not.toBeNull();
+  const shownTime = Number(match![1]);
+
+  const [minTime, maxTime] = await Promise.all([
+    scrubber.evaluate(() =>
+      Number((window as any).__world.read_component("snapshot_time_at", "0")),
+    ),
+    scrubber.evaluate((_el, m) =>
+      Number((window as any).__world.read_component("snapshot_time_at", String(m))),
+      max,
+    ),
+  ]);
+  // 案内文が約束する範囲(min〜max)の**内側**が読める——端点の使い回しではない。
+  expect(shownTime).toBeGreaterThan(minTime);
+  expect(shownTime).toBeLessThan(maxTime);
+  expect(errors).toEqual([]);
+});
+
+test("つまみは、壊れた結果しか出ない値を渡さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d24-car"]');
+
+  // 1.0 Hz まで下げられたときは車体が底づきして横倒しになり、走り出す前に
+  // 止まっていた(進んだ距離 0.00 m のまま)。下限をその手前で止める。
+  const knob = page.locator("#knob-suspension");
+  await expect(knob).toHaveAttribute("min", "1.5");
+
+  // いちばん柔らかい設定でも、車はちゃんと走る。
+  await knob.fill("1.5");
+  await knob.dispatchEvent("change");
+  const distance = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => Number.parseFloat((await distance.textContent()) ?? "0"), {
+      timeout: 20_000,
+    })
+    .toBeGreaterThan(1);
+  expect(errors).toEqual([]);
+});
+
+test("つまみの端でも、数値が発散しない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d17-piston"]');
+
+  // 2.0 m/s まで押せたときは気体がほぼ 0 まで潰れて圧力が発散し、位置が
+  // -5.4e7 m、速さが 2.1e7 m/s という壊れた数字になった(利用者役②)。
+  const knob = page.locator("#knob-push");
+  await expect(knob).toHaveAttribute("max", "1.5");
+  await knob.fill("1.5");
+  await knob.dispatchEvent("change");
+  await page.waitForTimeout(6000);
+  const values = await page.locator("#context .readouts dd").allTextContents();
+  for (const text of values) {
+    const n = Number.parseFloat(text.replace(/[^0-9.eE+-]/g, ""));
+    if (Number.isFinite(n)) expect(Math.abs(n)).toBeLessThan(1e5);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("無くなった物の値を、壊れた数字で出さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d18b-ice-melts"]');
+  await page.waitForTimeout(800);
+
+  // 融け切った氷は内部で遠方(-1e9 m)へ退避する。その値がそのまま
+  // 「氷の高さ -1,000,000,000.000 m」と出ていた(利用者役②)。
+  await page.evaluate(() => {
+    const r = document.querySelector<HTMLInputElement>(
+      '.knob input[type="range"]',
+    );
+    if (!r) return;
+    r.value = r.max;
+    r.dispatchEvent(new Event("input", { bubbles: true }));
+    r.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.click('button:has-text("はやい")');
+  await expect
+    .poll(
+      async () =>
+        (await page.locator("#context .readouts").textContent()) ?? "",
+      { timeout: 40_000 },
+    )
+    .toContain("もう在りません");
+  expect(errors).toEqual([]);
+});
+
+test("時間の帯には、何をするものか書いてある", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  // 浅い粒度では時刻も step も隠していたので、ただの飾りの線に見えていた。
+  await expect(page.locator("#timeline-hint")).toBeVisible();
+  await expect(page.locator("#timeline-time")).toBeVisible();
+  // 深い粒度では生の値がその場所を使う。
+  await setGrain(page, 3);
+  await expect(page.locator("#timeline-hint")).toBeHidden();
+  await expect(page.locator("#timeline-step")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("見えている物が選べない場面では、その理由を言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+
+  // 惑星は目の前を回っているのに、以前は「動く物がありません」とだけ出ていた。
+  const inspector = page.locator("#inspector-body");
+  await expect(inspector).toContainText("天体");
+  await expect(inspector).toContainText("クリックしても選べません");
+  await expect(inspector).toContainText("いまの数値");
+
+  // 横軸は**軸ぜんぶで同じ単位**(左端が「時間」で右端が「日」になっていた)。
+  const range = (await page.locator("#probe-time-range").textContent()) ?? "";
+  // 単位の書き方は右パネルの「経過した時間」と同じ日本語(空白を挟む)。
+  const units = [
+    ...range.matchAll(/[0-9.]+\s*(年|日|時間|分|秒|ミリ秒|マイクロ秒|ナノ秒|ピコ秒)/g),
+  ].map((m) => m[1]);
+  expect(units.length).toBe(2);
+  expect(units[0]).toBe(units[1]);
+  expect(errors).toEqual([]);
+});
+
+test("選んだものの札から、置き場所を数値で決められる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 座標の欄は Inspector のずっと下にあり、見つけられないまま「2つの物を
+  // ぶつける」を諦めていた。目の前の札で決められるようにした。
+  const x = page.locator("#focus-pos-x");
+  await expect(x).toBeVisible();
+  await x.fill("3");
+  // **打ちかけの値は、札が組み直されても消えない**。組み直しが打った直後に
+  // 挟まると、欄が元の位置に戻り、そのまま「決定」されて別の場所へ動いていた。
+  await page.waitForTimeout(1200);
+  await expect(x).toHaveValue("3");
+  await x.dispatchEvent("change");
+  await expect.poll(async () => Number(await x.inputValue()), { timeout: 10_000 })
+    .toBeCloseTo(3, 2);
+  expect(errors).toEqual([]);
+});
+
+/**
+ * 選んだ物が、いまの画角に**ちゃんと映っているか**を`main.ts`の
+ * `isWellVisible`と同じ判定(投影した点が画角の内側にあるか)で読む。
+ * `window.__camera`/`window.__world`はテスト専用に露出されている。
+ */
+async function bodyOnScreen(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: {
+        matrixWorldInverse: { elements: number[] };
+        projectionMatrix: { elements: number[] };
+      };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(kind: string, arg: string): string;
+        body_position_at_f32(index: number): Float32Array;
+      };
+    }).__world;
+    const index = Number(world.read_component("body_count", "")) - 1; // 直近に置いた物
+    const p = world.body_position_at_f32(index);
+    const mulMat4Vec4 = (e: number[], v: number[]) => {
+      const out = [0, 0, 0, 0];
+      for (let r = 0; r < 4; r += 1) {
+        out[r] = e[r] * v[0] + e[4 + r] * v[1] + e[8 + r] * v[2] + e[12 + r] * v[3];
+      }
+      return out;
+    };
+    const view = mulMat4Vec4(cam.matrixWorldInverse.elements, [p[0], p[1], p[2], 1]);
+    const clip = mulMat4Vec4(cam.projectionMatrix.elements, view);
+    if (clip[3] <= 0) return false; // カメラの後ろ
+    const ndc = [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]];
+    return Math.abs(ndc[0]) <= 1 && Math.abs(ndc[1]) <= 1 && ndc[2] <= 1;
+  });
+}
+
+test("置き場所を数値で変えても、その物は画面から消えない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+
+  // 置いた直後は物のすぐ近くまで画角が寄っている(至近距離)。ここから
+  // 数値で大きく動かすと、以前は画角が一切追随せず、物だけが動いて画面には
+  // 何も映らない床だけが残った(利用者役①の報告:「数値は正しく変わって
+  // いるのに、画面には何もない床だけが残る」)。
+  await expect.poll(() => bodyOnScreen(page), { timeout: 5_000 }).toBe(true);
+
+  const y = page.locator("#focus-pos-y");
+  await y.fill("9");
+  await y.dispatchEvent("change");
+  await page.waitForTimeout(800);
+
+  expect(await bodyOnScreen(page)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+/**
+ * カメラから**直近に置いた物**への向きの、水平面に対する仰角(sin)と距離。
+ * `frameCameraOnContent`/`updateGuidedFollowCamera`が向きを決めるのに使って
+ * いるのと同じ量(`window.__camera`/`window.__world`はテスト専用に露出)。
+ */
+async function cameraToLastBody(page: Page): Promise<{ elevation: number; distance: number }> {
+  return page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: { position: { x: number; y: number; z: number } };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(kind: string, arg: string): string;
+        body_position_at_f32(index: number): Float32Array;
+      };
+    }).__world;
+    const index = Number(world.read_component("body_count", "")) - 1;
+    const p = world.body_position_at_f32(index);
+    const dx = cam.position.x - p[0];
+    const dy = cam.position.y - p[1];
+    const dz = cam.position.z - p[2];
+    const distance = Math.hypot(dx, dy, dz);
+    return { elevation: distance > 1e-9 ? dy / distance : 0, distance };
+  });
+}
+
+/**
+ * **選んだ物の見かけの直径 [px]**(課題2: 進行管理役がスクリーンショットで
+ * 直接測ったのと同じ量——距離とカメラの`fov`・canvas の高さから逆算する。
+ * 実測: `d1-free-fall`で粒度2から右クリックで2個目の球を置いたとき、
+ * 距離47.3m・見かけの直径9.9pxだった)。直近に置いた物(`body_count - 1`)を
+ * 対象にする。半径は`main.ts`の`SPAWN_SPHERE_RADIUS`と同じ0.4m決め打ち
+ * ——このファイルのテストは球しか置かないため。
+ */
+async function apparentSphereDiameterPx(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: { position: { x: number; y: number; z: number }; fov: number };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(kind: string, arg: string): string;
+        body_position_at_f32(index: number): Float32Array;
+      };
+    }).__world;
+    const index = Number(world.read_component("body_count", "")) - 1;
+    const p = world.body_position_at_f32(index);
+    const dx = cam.position.x - p[0];
+    const dy = cam.position.y - p[1];
+    const dz = cam.position.z - p[2];
+    const distance = Math.hypot(dx, dy, dz);
+    const canvas = document.querySelector("#scene-view-canvas-host canvas") as HTMLCanvasElement;
+    const heightPx = canvas.clientHeight;
+    const fovRad = (cam.fov * Math.PI) / 180;
+    const pxPerMeterAtDistance = heightPx / 2 / Math.tan(fovRad / 2) / distance;
+    const RADIUS = 0.4; // SPAWN_SPHERE_RADIUS(main.ts)。
+    return 2 * RADIUS * pxPerMeterAtDistance;
+  });
+}
+
+/**
+ * **任意の1体の見かけの直径 [px]**(`apparentSphereDiameterPx`の一般化)。
+ *
+ * あちらは「直近に置いた球(半径0.4m固定)」専用だったが、課題2(複数選択の
+ * 追跡)の検証は`d24-car`の車輪(半径0.32m、`body_count - 1`ではない任意の
+ * index)を対象にする必要があった。距離とカメラの`fov`・canvas の高さから
+ * 見かけの直径を逆算する式そのものは同じで、対象の`index`と`radius`だけを
+ * 引数にして差し替えた。
+ */
+async function apparentDiameterPxOf(
+  page: Page,
+  index: number,
+  radius: number,
+): Promise<number> {
+  return page.evaluate(
+    ({ index, radius }) => {
+      const cam = (window as unknown as {
+        __camera: { position: { x: number; y: number; z: number }; fov: number };
+      }).__camera;
+      const world = (window as unknown as {
+        __world: { body_position_at_f32(index: number): Float32Array };
+      }).__world;
+      const p = world.body_position_at_f32(index);
+      const dx = cam.position.x - p[0];
+      const dy = cam.position.y - p[1];
+      const dz = cam.position.z - p[2];
+      const distance = Math.hypot(dx, dy, dz);
+      const canvas = document.querySelector("#scene-view-canvas-host canvas") as HTMLCanvasElement;
+      const heightPx = canvas.clientHeight;
+      const fovRad = (cam.fov * Math.PI) / 180;
+      const pxPerMeterAtDistance = heightPx / 2 / Math.tan(fovRad / 2) / distance;
+      return 2 * radius * pxPerMeterAtDistance;
+    },
+    { index, radius },
+  );
+}
+
+/**
+ * **舞台の画面(canvas)中心付近の、輝度のばらつき(標準偏差)**。
+ *
+ * **課題①(進行管理役の実測・スクリーンショットでの指摘、2026-09-09)**:
+ * 「これを追いかける」を直した最初のバージョンは、注視点・距離の数値は
+ * 正しかった(`d24-car`で`wheel_fl`を追わせると距離21.0m→1.4m)のに、
+ * **カメラが車体(chassis)の内側に入り込み、画面には地面の稜線しか映って
+ * いなかった**。距離・注視点だけを見るテストはこれを見逃す——進行管理役の
+ * 言葉で言えば「数値は完璧で画面は真っ暗」。ここでは実際にレンダリングされた
+ * 画素を読み、単色でつぶれていないかを確かめる。
+ *
+ * `canvas`はWebGLで`preserveDrawingBuffer`を立てていないため、
+ * `getContext("webgl").readPixels()`は次のフレームの前にはもう内容が
+ * 消えている(実測: 呼ぶと常に`[0,0,0,0]`)。かわりに Playwright の
+ * `locator.screenshot()`(実際に画面へ出た画素をキャプチャする、コンポジタ
+ * 越しの撮影)を取り、`<img>`要素で読み込んで別の2Dキャンバスへ描き直し、
+ * `getImageData`で読む——ブラウザ標準のPNGデコーダをそのまま使うので、
+ * 自前のPNGパーサは要らない。
+ *
+ * しきい値は実測で較正した(中心の一辺`windowPx`四方の輝度の標準偏差、
+ * 既定200px)。60px四方だと、直った後でもタイヤの陰影が少ない滑らかな面
+ * だけが窓に収まることがあり(実測2.66、壊れていたときの0.54と十分離れて
+ * いない)、境目の取り方に無理が出た。200px四方まで広げると、対象の輪郭や
+ * まわりの地面・他の部品まで窓に入るため、差がはっきりする:
+ *   壊れていたとき(カメラが車体の内側)                     4.5(ほぼ単色)
+ *   直した後(`wheel_fl`が大きく映る、車体・他のタイヤも見える) 20.9
+ * 中間よりだいぶ壊れていた側に寄せて、8を境目に取る。
+ */
+/**
+ * **舞台ぜんぶが単色に潰れていないか**(輝度の標準偏差と、明るい画素の割合)。
+ *
+ * `canvasCenterLuminanceStd` は中心200px四方だけを見るので、**対象が中心に
+ * 居ない場面では使えない**(実測: `d7-terminal` を粒度「みる」で開くと中心
+ * 200px の標準偏差は 0.00——舞台には球も地平線も映っているのに、それらが
+ * 中心の窓に入っていないだけ)。こちらは canvas 全体を見る。
+ *
+ * **画素そのものを数える**のが要点。以前は「PNG のバイト数が 4500 を超える
+ * こと」で代用していたが、これは**舞台の大きさに依る**——グラフの段が開いて
+ * 舞台が縮むと、同じ絵でもバイト数が減って落ちる(実測でそうなった)。
+ */
+async function canvasLuminanceStats(
+  page: Page,
+): Promise<{ std: number; brightRatio: number; mean: number }> {
+  const canvas = page.locator("#scene-view-canvas-host canvas").first();
+  const b64 = (await canvas.screenshot()).toString("base64");
+  return page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = "data:image/png;base64," + b64;
+    await img.decode();
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, c.width, c.height).data;
+    let sum = 0;
+    let bright = 0;
+    const lum: number[] = [];
+    for (let i = 0; i < data.length; i += 4) {
+      const L = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      lum.push(L);
+      sum += L;
+      if (L > 24) bright += 1;
+    }
+    const mean = sum / lum.length;
+    const variance = lum.reduce((a, L) => a + (L - mean) * (L - mean), 0) / lum.length;
+    return { std: Math.sqrt(variance), brightRatio: bright / lum.length, mean };
+  }, b64);
+}
+
+async function canvasCenterLuminanceStd(page: Page, windowPx = 200): Promise<number> {
+  const canvas = page.locator("#scene-view-canvas-host canvas").first();
+  const buf = await canvas.screenshot();
+  const b64 = buf.toString("base64");
+  return page.evaluate(
+    async ({ b64, windowPx }) => {
+      const img = new Image();
+      img.src = "data:image/png;base64," + b64;
+      await img.decode();
+      const c = document.createElement("canvas");
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      const ctx = c.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      const cx = Math.floor(c.width / 2);
+      const cy = Math.floor(c.height / 2);
+      const half = Math.floor(windowPx / 2);
+      const data = ctx.getImageData(
+        Math.max(0, cx - half),
+        Math.max(0, cy - half),
+        windowPx,
+        windowPx,
+      ).data;
+      let sum = 0;
+      let sumSq = 0;
+      let n = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        sum += lum;
+        sumSq += lum * lum;
+        n += 1;
+      }
+      const mean = sum / n;
+      return Math.sqrt(Math.max(sumSq / n - mean * mean, 0));
+    },
+    { b64, windowPx },
+  );
+}
+
+test("置き場所を数値で高さを変えても、地平線が画角の外に消えない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+
+  // **真上から床を覗き込む向きにならないこと**。以前は前の画角(スポーン直後の
+  // 見上げ位置)をそのまま引き継いで合わせ直していたので、置き場所を数値で
+  // y=3のような低い高さへ打ち替えると、仰角が0.9を超える(ほぼ真上からの
+  // 見下ろし)ことがあった——地平線が画角の外へ出て、物が「宙に浮いている」
+  // のか「床の上にある」のかが画面から読めなくなる(進行管理側の実測)。
+  const y = page.locator("#focus-pos-y");
+  await y.fill("3");
+  await y.dispatchEvent("change");
+  await page.waitForTimeout(500);
+  expect(await bodyOnScreen(page)).toBe(true);
+  const afterHigh = await cameraToLastBody(page);
+  expect(afterHigh.elevation).toBeLessThan(0.6);
+
+  // 低い高さ(y=0.5)へ変えても同じく崩れないこと。
+  await y.fill("0.5");
+  await y.dispatchEvent("change");
+  await page.waitForTimeout(500);
+  expect(await bodyOnScreen(page)).toBe(true);
+  const afterLow = await cameraToLastBody(page);
+  expect(afterLow.elevation).toBeLessThan(0.6);
+  expect(errors).toEqual([]);
+});
+
+test("『全体へ戻る』を押しても、選んでいた物が豆粒にならない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+  await expect.poll(() => bodyOnScreen(page), { timeout: 5_000 }).toBe(true);
+
+  const clear = page.locator("#btn-clear-selection");
+  await expect(clear).toBeVisible();
+  await clear.click();
+  await page.waitForTimeout(1000);
+
+  // 追従カメラ(`updateGuidedFollowCamera`)をそのまま流用すると、原点(床)も
+  // 画角に収めようとして大きく引いたあげく、「対象を見失わない」ための
+  // 見かけの大きさの下限がそのまま効き、直前まで大きく見えていた球が豆粒に
+  // なっていた(利用者役の報告、実測で再現)。半径0.4mの球なら、
+  // `isWellVisible`と同じ「半径の20倍(=8m)より遠いと画面の高さの1割にも
+  // 満たない粒になる」という基準に照らして、十分近いままであること。
+  const after = await cameraToLastBody(page);
+  expect(after.distance).toBeLessThan(6);
+  expect(await bodyOnScreen(page)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test("「斜めに投げる」を開いた直後から、球が着地まで画面に映り続ける", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+
+  // 秒速 20m・45°で水平に14m/s超で飛ぶ球。追従カメラの注視点(orbit.target)
+  // が対象へ追いつく前の遅れが際限なく育つと、カメラの向きの都合でその遅れが
+  // 真横方向に出て、球は画角の外へ出たまま二度と戻らない——案内は「まん中の
+  // 3D を見てください」と言うのに、床のグリッドしか映らなかった(進行管理役
+  // の実測: t=1.17〜7.12秒でカメラは球から2.3〜2.8mしか離れていないのに
+  // 画面には映っていなかった)。「見え方」の「カメラを合わせ直す」を押して
+  // 初めて映る、では遅い——**開いた直後から**映っていること。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d2-ballistic"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // 開いた直後(合わせ直しボタンに触れる前)。
+  await expect.poll(() => bodyOnScreen(page), { timeout: 5_000 }).toBe(true);
+
+  // 打ち上げ(約10m)から着地(飛行時間 約2.9秒)まで、複数時点で映り続ける。
+  for (const waitMs of [400, 500, 500, 500, 500, 500, 500]) {
+    await page.waitForTimeout(waitMs);
+    expect(await bodyOnScreen(page)).toBe(true);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("とめている間なら、材質を変えられる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 走らせて、止める。「止めているのに『とめている間だけ』と断られる」を
+  // 残さない。
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  await page.selectOption("#focus-material", "ゴム(天然)");
+  await expect
+    .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
+    .toBe("ゴム(天然)");
+  expect(errors).toEqual([]);
+});
+
+test("とめてから重力のつまみを動かしても、止まったまま", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+
+  // 利用者役の報告: 「とめる」で一時停止していたのに、重力のつまみ(選択式)
+  // を押したら勝手に再生が始まった。ツールチップは「動かすと、その設定で
+  // 最初からやり直します」としか言っておらず、「止めていたのに動き出す」
+  // ことまでは書いていなかった——止めた意思を尊重し、止めたままやり直す
+  // ようにした。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  await page.click('#knob-gravity button[data-value="1.62"]'); // 月
+  await page.waitForTimeout(500);
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  // 止めたままでも、つまみそのものはちゃんと効いている(見た目の状態だけ
+  // 差し替えて、中身が古いまま、ではないこと)。
+  await expect(page.locator('#knob-gravity button[data-value="1.62"]')).toHaveClass(
+    /active/,
+  );
+  expect(errors).toEqual([]);
+});
+
+test("グラフに、プログラムの変数名を出さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+
+  // カタログが名前を与えていない系列は、Rust 側の生ラベル(`AstroPosX[0]`、
+  // `BodySpeed(chassis)`)がそのまま凡例に出ていた。やさしい日本語の画面に
+  // 突然変数名が現れ、「壊れてるのかな」と読まれた。
+  for (const id of ["d36-swingby", "d24-car"]) {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1500);
+    const tree = (await page.locator("#hierarchy-tree").textContent()) ?? "";
+    expect(tree).not.toMatch(/AstroPos|AstroVel|BodyPosY|BodyPosX|BodySpeed/);
+  }
+
+  // 時間の表示も、右の「経過した時間」と同じ言葉にそろえる。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d30-gas-box"]');
+  await expect
+    .poll(async () => (await page.locator("#timeline-time").textContent()) ?? "", {
+      timeout: 15_000,
+    })
+    .toContain("ピコ秒");
+  expect(errors).toEqual([]);
+});
+
+test("つまみが指す値と、走っている値が食い違わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+
+  // 範囲入力は目盛りに乗らない既定値を表示のときに丸める。帯が 75 を指して
+  // いるのに中身は 77 のまま、という食い違いを残さない。
+  const shown = Number(await page.locator("#knob-temperature").inputValue());
+  await expect
+    .poll(
+      async () =>
+        Number.parseFloat(
+          (await page.locator('#context dd[data-probe="0"]').textContent()) ?? "0",
+        ),
+      { timeout: 15_000 },
+    )
+    .toBeLessThanOrEqual(shown + 0.5);
+  expect(errors).toEqual([]);
+});
+
+test("時間の単位が、画面のどこでも同じ", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d30-gas-box"]');
+
+  // 右は「373.00 ピコ秒」なのに下とグラフ軸は「0.4ns」、が起きていた。
+  const unitOf = (text: string) =>
+    text.match(/(年|日|時間|分|秒|ミリ秒|マイクロ秒|ナノ秒|ピコ秒)/)?.[1];
+  await expect
+    .poll(async () => (await page.locator("#timeline-time").textContent()) ?? "", {
+      timeout: 15_000,
+    })
+    .toContain("ピコ秒");
+  const elapsed = (await page.locator("#readout-time").textContent()) ?? "";
+  const timeline = (await page.locator("#timeline-time").textContent()) ?? "";
+  const range = (await page.locator("#probe-time-range").textContent()) ?? "";
+  expect(unitOf(timeline)).toBe(unitOf(elapsed));
+  expect(unitOf(range)).toBe(unitOf(elapsed));
+
+  // まだ 1 step も進んでいない瞬間でも食い違わない。「0 秒」と決め打ちして
+  // いたので、開いた直後だけ右が「0 秒」・下が「0.00 ピコ秒」になっていた
+  // (遅い機械の CI で実際に踏んだ)。
+  await page.click("#btn-restart");
+  await expect
+    .poll(async () => (await page.locator("#readout-time").textContent()) ?? "", {
+      timeout: 10_000,
+    })
+    .toContain("ピコ秒");
+  expect(errors).toEqual([]);
+});
+
+test("用意された実験に足したものも、名前を付けて取っておける", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  // 以前は「自分の場面」のときしか保存の口が無く、実験に物を足した人は
+  // 取っておく場所を見つけられないまま別の実験へ移り、戻れなくなった。
+  await page.fill("#input-scene-name", "ぶつける実験");
+  await page.click("#btn-save-scene");
+  await expect(page.locator(".saved-scene-open")).toContainText("ぶつける実験");
+
+  // 別の実験へ寄り道してから、⌘K で戻ってこられる。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "跳ね");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("跳ね");
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ぶつける");
+  await expect(page.locator(".palette-row").first()).toContainText("ぶつける実験");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-own-scene")).toContainText("ぶつける実験");
+  expect(errors).toEqual([]);
+});
+
+test("「みる」を選んだら、実験を選び直しても「みる」のまま", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  // 「みる」にしても、実験を選ぶたびに「さわる」へ戻っていた——見るだけの
+  // 人が実験ひとつごとにダイヤルを押し直す羽目になっていた(利用者役①)。
+  const grain = () =>
+    page.evaluate(() => document.getElementById("app")!.dataset.grain);
+  const openExperiment = async (id: string) => {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1200);
+  };
+
+  // 3D に物が映る実験は、いくつ選び直しても「みる」のまま。
+  for (const id of ["d34-solar-system", "d12-ragdoll", "d6-floating"]) {
+    await openExperiment(id);
+    expect(await grain()).toBe("watch");
+  }
+
+  // 舞台に形のある物が出ない実験(D9)でも、いまは「みる」のまま
+  // ——課題A(利用者役の報告)より前は、グラフを見せるために大局の粒度
+  // そのものを「さわる」まで押し上げていて、「変えてみる」(つまみ)まで
+  // 一緒に開いてしまっていた。いまはグラフの段だけを個別に強制する
+  // (`forceAnalysisOpen`、workspace.tsのdoc参照)ので、「みる」は「みる」の
+  // まま——次の「電気の工作台」のテストで、グラフだけが開くことを見る。
+  await openExperiment("d9-cooling-coffee");
+  await expect.poll(grain, { timeout: 10_000 }).toBe("watch");
+
+  // 3D の実験へ移っても、引き続き「みる」のまま。
+  await openExperiment("d1-free-fall");
+  await expect.poll(grain, { timeout: 10_000 }).toBe("watch");
+  expect(errors).toEqual([]);
+});
+
+// 課題A(利用者役の報告・進行管理役の裏取り): 「電気の工作台」は3Dに映る物が
+// ひとつも無い(回路のみのシーン)。以前は「みる」で開いても、グラフが出る
+// ころには大局の粒度が「さわる」まで上がっていて、「変えてみる」(つまみ)
+// まで開いてしまっていた——「みる」の画面が道具だらけになる、という別の
+// 問題を生んでいた。いまは大局の粒度(ダイヤル・「変えてみる」の開閉)には
+// 触れず、グラフの段だけを強制的に開く。
+test("舞台に形のある物が無い実験は、「みる」のままグラフの段だけが開く(課題A)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d19-electric-workbench"]');
+
+  const grain = () =>
+    page.evaluate(() => document.getElementById("app")!.dataset.grain);
+  const analysisOpen = () =>
+    page.evaluate(() => document.getElementById("app")!.dataset.analysis);
+  const knobsExpanded = () =>
+    page.evaluate(() =>
+      document
+        .querySelector('.card[data-card="knobs"]')
+        ?.getAttribute("data-expanded"),
+    );
+
+  // 「舞台が空」と決まるまで数十フレーム待つ(誤検出の防止、
+  // `STAGE_EMPTY_FRAMES`のdoc参照)ので、ここは`poll`で待ち合わせる。
+  await expect.poll(analysisOpen, { timeout: 5_000 }).toBe("true");
+
+  // グラフの段が開いても、「みる」のまま。つまみの「変えてみる」は畳まれた
+  // ままで、大局の粒度が引きずられて開くことはない。
+  expect(await grain()).toBe("watch");
+  expect(await knobsExpanded()).toBe("false");
+
+  // 「ここを見る」の文面も、実際に出ているグラフを指す(ダイヤルを回せとは
+  // もう言わない)。
+  await expect(page.locator(".card-where")).toContainText("下のグラフ");
+
+  // グラフの実データ(色分けした折れ線)が実際に描かれている。
+  const canvas = page.locator("#probe-canvas");
+  await expect(canvas).toBeVisible();
+  const canvasHeight = await canvas.evaluate((el) => el.clientHeight);
+  expect(canvasHeight).toBeGreaterThan(50);
+
+  // 3D に物が映る実験へ移れば、グラフの段は畳まれ、「みる」のまま。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.waitForTimeout(500);
+  expect(await grain()).toBe("watch");
+  await expect.poll(analysisOpen, { timeout: 5_000 }).toBe("false");
+  expect(errors).toEqual([]);
+});
+
+// 課題B(利用者役の報告): 「氷が水に変わる」の氷は床が無く、永遠に落ち続けて
+// いた(2.5秒で y=-17.91、進行管理役の実測)。「氷の高さ」がどんどん大きな
+// 負の値になるのは、融解とは無関係のノイズでしかなかった。SPHの器の床
+// (`sph.raw_state.boundary_position`、y=-0.05)に合わせた静止した床を
+// シーンJSONへ足し、氷がその場に留まるようにした。
+test("「氷が水に変わる」の氷は、床の上に留まって落ち続けない(課題B)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d18b-ice-melts"]');
+  await page.waitForTimeout(3_000);
+
+  const iceHeight = await page.evaluate(() => {
+    const w = window.__world as {
+      body_position_at_f32: (i: number) => Float32Array;
+    };
+    return w.body_position_at_f32(0)[1];
+  });
+  // 落ち続けていれば数メートル単位の負の値になる(進行管理役の実測: 2.5秒で
+  // -17.91m)。床に留まっていれば、氷の半分の厚み程度(0.05m)を大きくは
+  // 超えない。
+  expect(Math.abs(iceHeight)).toBeLessThan(0.2);
+
+  // 案内文も、もう「液体の粒が生まれます」とは書かない(粒は物理には実在
+  // するが、生成直後に物理側の不具合で弾け飛び、正しい姿を描ける状態では
+  // ない——Rustは今回の増分の対象外なので、確実に見える範囲だけを書く)。
+  const watchText = await page
+    .locator(".card-watch")
+    .evaluate((el) => el.textContent ?? "");
+  expect(watchText).not.toContain("液体の粒が生まれます");
+  expect(errors).toEqual([]);
+});
+
+// 課題C(利用者役の報告): 「手回し発電機」の3Dに映る「軸」は模様の無い灰色の
+// 球で、実際には回っていても見た目に手掛かりが無かった。物理の回転自体は
+// 正しく進んでいる(実測で四元数が毎秒変わることを確認済み)ので、形状・
+// 質量・慣性には触れず、描画だけに取っ手を足して回転を見えるようにした。
+test("「手回し発電機」の軸は、取っ手が回って見える(課題C)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+  await page.waitForTimeout(1_000);
+
+  // 取っ手(課題C、`meshFromShapeJson`のdoc参照)は球の子として足しているので、
+  // その`matrixWorld`の並進成分(4列目)を直接読む——`THREE.Vector3`を
+  // 新しく作らずに済む(evaluate内で`THREE`のグローバルが要らない)。
+  const handleWorldX = async () => {
+    return page.evaluate(() => {
+      const scene = (
+        window as unknown as {
+          __scene: { traverse: (fn: (obj: any) => void) => void };
+        }
+      ).__scene;
+      let x: number | null = null;
+      scene.traverse((obj: any) => {
+        if (obj.type === "Mesh" && obj.children.length === 1) {
+          const handle = obj.children[0];
+          if (handle.type === "Mesh") {
+            handle.updateWorldMatrix(true, false);
+            x = handle.matrixWorld.elements[12];
+          }
+        }
+      });
+      return x;
+    });
+  };
+
+  const x1 = await handleWorldX();
+  expect(x1).not.toBeNull();
+  await page.waitForTimeout(800);
+  const x2 = await handleWorldX();
+  expect(x2).not.toBeNull();
+  // 回っていれば、取っ手の世界座標は時間とともに変わる(円を描く)。
+  expect(Math.abs((x1 as number) - (x2 as number))).toBeGreaterThan(0.01);
+  expect(errors).toEqual([]);
+});
+
+/**
+ * `steelBodyMaskBBox`: 「手回し発電機」のクランク(材質は鋼、
+ * `MATERIAL_COLORS`で0x9aa3ad=青みがかった灰色)だけを、背景の方眼・地の色
+ * (どちらもRGBが揃った無彩色、`scene.background = 0x111111`のdoc参照)から
+ * 切り分ける。閾値(b-r>=8 かつ r>30)は実測(前後のスクリーンショットを
+ * ピクセル単位で読み、鋼の陰影がどの明るさでもR-B差が8前後を下回らない一方、
+ * 方眼線・背景はR=G=Bにほぼ揃うことを確認済み)で決めた——この実験専用の
+ * 較正値であり、他の材質色を判定する汎用しきい値ではない。
+ */
+function steelBodyMaskBBox(img: { width: number; height: number; data: Uint8Array }) {
+  const { width, height, data } = img;
+  let minx = width;
+  let miny = height;
+  let maxx = -1;
+  let maxy = -1;
+  let sumx = 0;
+  let n = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const r = data[i];
+      const b = data[i + 2];
+      if (b - r >= 8 && r > 30) {
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+        sumx += x;
+        n++;
+      }
+    }
+  }
+  // skewX: 画素の重心(sumx/n)が、バウンディングボックスの幾何中心から
+  // どれだけ左右にずれているか。球そのものは軸対称なので、球だけなら常に
+  // ほぼ0——取っ手(球の中心から半径ぶん突き出た飾り、`meshFromShapeJson`の
+  // `markSpin`のdoc参照)がどちら向きに突き出ているかによってのみこの値が
+  // 動く。回っていれば符号込みで揺れ、静止画なら(たまたま同じ姿勢のまま)
+  // 一定値に張り付く。
+  const skewX = n > 0 ? sumx / n - (minx + maxx) / 2 : 0;
+  return { minx, miny, maxx, maxy, n, skewX };
+}
+
+// **課題②(進行管理役の実測)**: `d20-generator`のクランク(半径0.05mの球)は
+// 舞台の高さに対し見かけの直径6.4%(35px/543px)にしかならず、「回っている」
+// が画面から読み取れなかった。上の「取っ手が回って見える(課題C)」は
+// three.jsの内部の`matrixWorld`(=物理として正しく回っていること)しか
+// 見ておらず、**画面に実際に何pxで映るか**は別の話——取っ手の3D位置が
+// 正しく円を描いていても、豆粒サイズならその円は画面上で見えない。
+// このテストはキャンバスの実ピクセルを読み、(a) 十分な大きさで描かれている
+// こと、(b) その取っ手の見かけの位置が時間とともに実際に動くこと、の両方を
+// 画面の側から確かめる。
+test("「手回し発電機」のクランクは、見える大きさで回って見える(課題②)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+  await page.waitForTimeout(1_000);
+
+  const canvas = page.locator("#scene-view canvas").first();
+  const stageBox = (await canvas.boundingBox())!;
+
+  // **覗く間隔をわざとばらす**(進行管理役の実測、CI赤)。以前は 150ms
+  // ちょうどで6回だけ覗いていて、**CIでだけ落ちた**(`1a5cb14` の Linux
+  // ジョブ: `expect(Math.min(...skews)).toBeLessThan(0)` で失敗——覗いた6回
+  // すべてで取っ手が同じ側に見えていた)。クランクは一定の速さで回り続ける
+  // ので、**等間隔で覗くと回転の周期と噛み合って、毎回ほぼ同じ姿勢ばかりを
+  // 拾ってしまう**(ストロボで回転を止めて見えるのと同じこと)。手元では
+  // たまたま噛み合わず通っていた。
+  //
+  // 間隔を4通りで回し、回数も増やす——等間隔でない以上、どの周期とも噛み
+  // 合いようがない。
+  const waits = [60, 90, 130, 210];
+  const skews: number[] = [];
+  let firstBBox: ReturnType<typeof steelBodyMaskBBox> | null = null;
+  for (let i = 0; i < 14; i++) {
+    const shot = await canvas.screenshot();
+    const stats = steelBodyMaskBBox(decodePng(shot));
+    if (i === 0) firstBBox = stats;
+    skews.push(stats.skewX);
+    await page.waitForTimeout(waits[i % waits.length]);
+  }
+
+  // (a) 大きさ: 修正前は舞台高さの6.4%だった(実測)。修正後は実測で約29%
+  // ——余裕を持って15%を下限にする(将来また豆粒化したら確実に落ちる)。
+  const diameterPx = Math.max(
+    firstBBox!.maxx - firstBBox!.minx,
+    firstBBox!.maxy - firstBBox!.miny,
+  );
+  expect(diameterPx / stageBox.height).toBeGreaterThan(0.15);
+
+  // (b) 回転: 取っ手の左右のずれ(skewX)が**行って戻る**こと。
+  //
+  // **符号(正負の両方に出ること)は見ない**(進行管理役の実測、Windows の CI
+  // で失敗): `Math.min(...skews)` が 0.79 で、14回すべて正側だった。skewX は
+  // 「青っぽい画素の重心 − バウンディングボックスの中心」で、どの画素を
+  // 青っぽいと数えるかは陰影に左右される——陰影は GPU/プラットフォームで
+  // 変わるため、**ゼロ点がどちらへ寄るかは環境ごとに違う**。「正にも負にも
+  // 出る」は、たまたま Linux でゼロ点が真ん中付近だっただけの条件だった。
+  //
+  // 回っていることの証拠として**環境に依らない**のは、値が「行って戻る」
+  // こと——単調に流れるカメラのブレや、静止した飾り物では満たせない。
+  // 差分の符号が変わった回数で見る(1往復で2回以上変わる)。振れ幅も
+  // 併せて要求して、ノイズだけで往復して見えるのを防ぐ。
+  const skewRange = Math.max(...skews) - Math.min(...skews);
+  expect(skewRange, "取っ手のずれの振れ幅").toBeGreaterThan(4);
+  const deltas = skews.slice(1).map((v, i) => v - skews[i]).filter((d) => Math.abs(d) > 0.5);
+  let turns = 0;
+  for (let i = 1; i < deltas.length; i++) {
+    if (Math.sign(deltas[i]) !== Math.sign(deltas[i - 1])) turns += 1;
+  }
+  expect(turns, `ずれが行って戻る(向きの変わった回数) skews=${skews.map((v) => v.toFixed(1))}`)
+    .toBeGreaterThanOrEqual(2);
+
+  expect(errors).toEqual([]);
+});
+
+test("3D を引っぱっても、選んだものの札が勝手に開かない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.waitForTimeout(1500);
+
+  // 画面の大半を占める床の上でドラッグすると、視点が回らずに床が「選んだ
+  // もの」として開いていた——見回そうとしただけで材質や座標の欄が出てきた
+  // (利用者役①)。動かせない物の上の引っぱりは、視点回しに譲る。
+  // 引っぱり始めは**画面の隅の床**にする。まん中は落ちてくる物が通るので、
+  // そこを掴むのは「動かせる物を掴む」という別の機能(そちらは選んで正しい)。
+  const box = (await page.locator("#scene-view canvas").first().boundingBox())!;
+  const startX = box.x + box.width * 0.12;
+  const startY = box.y + box.height * 0.88;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  for (let i = 1; i <= 12; i += 1) {
+    await page.mouse.move(startX + i * 14, startY - i * 2);
+  }
+  await page.mouse.up();
+  await page.waitForTimeout(500);
+  await expect(page.locator("#focus-material")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("つまみで変えた条件は、別のつまみを触っても残る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+
+  // 「落とす高さ」を 50 m にしてから重力を月へ変えると、高さだけが 20 m へ
+  // 戻っていた——高さのつまみが、名前を変えたあとのボディを指していなくて
+  // 何も起きていなかった(利用者役②)。二つの条件を重ねて確かめられない。
+  const height = page.locator("#knob-height");
+  await height.fill("50");
+  await height.dispatchEvent("change");
+  // **読む欄は、並び順ではなく観測点の番号で選ぶ**(進行管理役の実測)。
+  // 以前は `.last()`——「いちばん下の数値」——で高さを読んでいたが、この実験に
+  // 「ボールの速さ」を足した(説明が言い切る値を確かめられるようにした増分)
+  // 途端、`.last()` が速さを指すようになって落ちた。欄は `data-probe` に
+  // 観測点の番号を持っている(`renderContext` 参照)ので、そちらで名指しする。
+  const ballHeight = async () =>
+    Number(
+      (
+        (await page.locator('#context .readouts dd[data-probe="0"]').first().textContent()) ?? ""
+      ).replace(/[^0-9.]/g, ""),
+    );
+  await expect.poll(ballHeight, { timeout: 10_000 }).toBeGreaterThan(40);
+
+  await page.click("#knob-gravity button:has-text('月')");
+  // 月にしても高さは 50 m のまま。落ち方だけが変わる。
+  await expect.poll(ballHeight, { timeout: 10_000 }).toBeGreaterThan(40);
+  await expect(height).toHaveValue("50");
+  expect(errors).toEqual([]);
+});
+
+test("説明にゴムと書いてある実験は、ゴムで始まる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d3-bounce"]');
+
+  // 「ゴムの球を落として、跳ね返る高さを見ます」と書いてある隣で、つまみの
+  // 初期値が鋼を場面へ書き戻していた(利用者役②)。
+  await expect(
+    page.locator("#knob-material button.active"),
+  ).toHaveText(/ゴム/);
+  expect(errors).toEqual([]);
+});
+
+test("時間の帯は、どこまで戻れるのかを言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 記録は直近の数秒ぶんしか残らないので、帯の左端は 0 秒ではない。それを
+  // 言わずにいたので「位置と時刻が対応していない」と読まれた(利用者役②)。
+  await expect
+    .poll(async () => (await page.locator("#timeline-hint").textContent()) ?? "", {
+      timeout: 20_000,
+    })
+    // 飛び飛びであることも言う(下の「時間を戻す帯は、飛び飛びであることを
+    // 先に言う」のdoc参照)。
+    .toMatch(/つまむと、記録した \d+ つの時点\(.+ 〜 .+、1 秒ごと\)へ戻せます/);
+  expect(errors).toEqual([]);
+});
+
+test("ずっと同じ値の線も、グラフの上に見える", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+
+  // 一定値の系列は、幅ゼロの範囲を割った結果いつも**下端**に描かれ、時刻の
+  // 目盛り帯に重なって 1 本まるごと見えなかった(利用者役③:「電圧の線が
+  // どこにあるのか全く見えない」)。まん中あたりに、重ならないよう引く。
+  const canvas = page.locator("#probe-canvas");
+  await expect(canvas).toBeVisible();
+  await page.waitForTimeout(3000);
+
+  // 一定値であることは凡例が言う(高さを値と読み違えないため)。
+  // 折れ線を描く範囲の**下端**(時刻の目盛り帯のすぐ上)に、横いっぱいの
+  // 明るい線が寝ていないことを見る。これが一定値の線が潰れていた場所。
+  const bottomRun = await page.evaluate(() => {
+    const c = document.getElementById("probe-canvas") as HTMLCanvasElement;
+    const ctx = c.getContext("2d")!;
+    const AXIS_BAND = 15;
+    const plotBottom = c.height - AXIS_BAND;
+    let worst = 0;
+    for (let y = plotBottom - 3; y <= plotBottom; y += 1) {
+      if (y < 0 || y >= c.height) continue;
+      const row = ctx.getImageData(0, y, c.width, 1).data;
+      let lit = 0;
+      for (let x = 0; x < c.width; x += 1) {
+        const i = x * 4;
+        if (row[i] + row[i + 1] + row[i + 2] > 260) lit += 1;
+      }
+      worst = Math.max(worst, lit);
+    }
+    return { worst, width: c.width };
+  });
+  expect(bottomRun.worst).toBeLessThan(bottomRun.width * 0.5);
+  expect(errors).toEqual([]);
+});
+
+test("場面の中身は、日本語で並ぶ", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+
+  // 数値とグラフを見に来た人の目に「World Root」「Bodies」「Probes」といった
+  // 中の言葉が並んでいた(利用者役③)。
+  const tree = page.locator("#hierarchy-tree");
+  await expect(tree).toContainText("この場面ぜんぶ");
+  await expect(tree).toContainText("物");
+  await expect(tree).not.toContainText("World Root");
+  await expect(tree).not.toContainText("Bodies");
+  expect(errors).toEqual([]);
+});
+
+test("粒が何百個もある場面でも、一覧が壁にならない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d25-brownian"]');
+
+  // ブラウン運動は粒が 300 個あり、左が 300 行の壁になっていた(利用者役③)。
+  await expect
+    .poll(
+      async () =>
+        await page.locator("#hierarchy-tree .tree-body:visible").count(),
+      { timeout: 15_000 },
+    )
+    .toBeLessThan(100);
+  expect(errors).toEqual([]);
+});
+
+test("固定にした物でも、画面から見失わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-pos-y")).toBeVisible();
+
+  // 動き方を「固定」にすると、カメラが画角を決める手がかりを失って一歩も
+  // 動けなくなり、置き場所を数値で変えた物は画面の外へ消えたきりだった。
+  // 舞台まで「形のある物は出てきません」と言い張っていた(利用者役④)。
+  await page.selectOption("#inspector-body-type", "Static");
+  // 選んだ値は、次の step で効くまでのあいだも欄に残る。
+  await expect(page.locator("#inspector-body-type")).toHaveValue("Static");
+  await page.click("#btn-run");
+  await page.waitForTimeout(700);
+  await page.click("#btn-run");
+
+  const y = page.locator("#focus-pos-y");
+  await y.fill("1.5");
+  await y.dispatchEvent("change");
+  await page.waitForTimeout(1200);
+  // 形のある物が在るのだから、そうは言わない。
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-stage-empty",
+    "false",
+  );
+  // 「全体へ戻る」は名前どおり画角も戻す。
+  await page.click("#btn-clear-selection");
+  await page.waitForTimeout(1200);
+  expect(errors).toEqual([]);
+});
+
+test("取っておけたことが、画面に出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 押しても何も変わらず、保存できたのか押し損ねたのか分からなかった
+  // (利用者役④)。名前は書き出す文書にも残す。
+  await page.fill("#input-scene-name", "わたしの落下じっけん");
+  await page.click("#btn-save-scene");
+  await expect(page.locator("#scene-save-status")).toContainText(
+    "わたしの落下じっけん",
+  );
+  const storedName = await page.evaluate(() => {
+    const raw = localStorage.getItem("simulator.scenes.saved") ?? "[]";
+    return JSON.parse(JSON.parse(raw)[0].json).name as string;
+  });
+  expect(storedName).toBe("わたしの落下じっけん");
+
+  // 名前で呼び出せる。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "わたしの");
+  await expect(page.locator(".palette-row").first()).toContainText(
+    "わたしの落下じっけん",
+  );
+  expect(errors).toEqual([]);
+});
+
+test("用意された実験に足した物は、その場面の大きさで出てくる", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d11-pendulum"]');
+  await page.waitForTimeout(1500);
+
+  // 置く高さが 12 m 固定で、振れ幅 ±1 m ほどのふりこに足した箱が、遠い空から
+  // 降ってくる豆粒にしかならなかった(利用者役④)。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-pos-y")).toBeVisible();
+  const y = Number(await page.locator("#focus-pos-y").inputValue());
+  expect(y).toBeLessThan(8);
+  expect(y).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+test("水を注ぐ実験は、受け止める器も描く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d23-pouring-water"]');
+  await page.waitForTimeout(3000);
+
+  // 「水のかたまりが落ちて、容器に溜まります」と書いてある隣で、真っ暗な空間に
+  // 水色の塊が浮いているだけに見えた——器は物理側に境界粒子として在るのに、
+  // 画面に描いていなかった(利用者役①)。
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-fluid-boundary",
+    "true",
+  );
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-stage-empty",
+    "false",
+  );
+  expect(errors).toEqual([]);
+});
+
+test("水を注ぐ実験は、着水後もRustの受け入れ基準どおり床を抜けない", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d23-pouring-water"]');
+  await page.waitForTimeout(500);
+
+  // 前回(127077e)は「粒が容器の外へ弾け飛ばない」ことを期待して
+  // `viscosity_alpha` を 0.08→0.5 に変えたが、これは間違いだった——弱圧縮性が
+  // 崩れ、内部粒子の密度が静止密度から25%も下振れし、Rustの受け入れテスト
+  // (`scenario.rs`の`run_headless_scenario_pouring_water_keeps_interior_density_
+  // near_rest_density`)が落ちた。`viscosity_alpha`は0.08へ戻した。
+  //
+  // 0.08に戻すと、実測(`cargo run --example`で手動追跡)では次のことが分かる:
+  //   - 着水の瞬間に一部の粒が秒速7〜9mほどまで跳ね上がる。理論上の落下速度
+  //     (この高さからの自由落下では秒速2.6〜2.8m程度)より明らかに大きく、
+  //     格子状に並んだ粒がほぼ同時に着水することで起きる衝撃的な速度スパイク
+  //     ——SPHの初期条件に起因する既知の限界であって、`viscosity_alpha`だけで
+  //     消せるものではない(前回それを消そうとして密度テストを壊した)。
+  //   - この粒は静止画ではなく実際に放物線を描いて動いている。人の目に「浮いた
+  //     まま止まって見える」のは、頂点(放物運動で一瞬速さが0になる場所)を
+  //     見ているだけ。
+  //   - Rust側の受け入れテストが直接保証しているのは「1秒(2000ステップ)の
+  //     観測窓では、どの粒も床(y<-0.04)を突き抜けない」ことだけで、横や上に
+  //     器の外へ出ることは禁じていない(むしろ許容している——器の外へ出た粒が
+  //     その後長い時間をかけてどこへ行くかはこのテストの範囲外)。
+  //
+  // そこでこのE2Eも、Rust側が実際に保証している性質と同じもの
+  // ——「観測窓の中では床を抜けない」「粒は静止画ではなく動いている」
+  // ——だけを検証する。「容器の外に出ない」という、実測で偽だと分かった主張は
+  // 書かない。
+  const { minYBefore, minYAfter, maxDelta } = await page.evaluate(() => {
+    const world = (
+      window as unknown as {
+        __world: {
+          step(): void;
+          fluid_particle_positions_f32(): Float32Array;
+        };
+      }
+    ).__world;
+    const before = world.fluid_particle_positions_f32().slice();
+    let minYBefore = Infinity;
+    for (let i = 0; i < before.length / 3; i += 1) {
+      minYBefore = Math.min(minYBefore, before[i * 3 + 1]);
+    }
+    // Rustの受け入れテスト(`scenario.rs`)と同じ観測窓: 2000ステップ。
+    for (let s = 0; s < 2000; s += 1) world.step();
+    const after = world.fluid_particle_positions_f32();
+    let minYAfter = Infinity;
+    let maxDelta = 0;
+    for (let i = 0; i < after.length; i += 1) {
+      maxDelta = Math.max(maxDelta, Math.abs(after[i] - before[i]));
+      if (i % 3 === 1) minYAfter = Math.min(minYAfter, after[i]);
+    }
+    return { minYBefore, minYAfter, maxDelta };
+  });
+  // Rustの受け入れ基準と同じ: 境界の床(y=-0.04)を突き抜けた粒はいない。
+  expect(minYAfter).toBeGreaterThan(-0.04);
+  // 静止画ではなく、実際に(器の高さ0.34mを超えるくらい大きく)動いている。
+  expect(maxDelta).toBeGreaterThan(0.3);
+  expect(minYBefore).toBeLessThan(Infinity);
+  expect(errors).toEqual([]);
+});
+
+test("水を注ぐ実験は、実際の遅さを隠さず見せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d23-pouring-water"]');
+
+  // 「速さ ×1」は人が選んだ相対倍率でしかなく、実際にどれだけ実時間より
+  // 遅く進んでいるかは計算の重さ次第——それを隠さず出す(進行管理役③の
+  // 実測: 「ふつう」「速さ ×1」としか出ていないのに、実時間20.9秒でも
+  // シミュレーション内は1.25秒(=0.06倍)しか進まなかった)。
+  const rate = page.locator("#run-actual-rate");
+  await expect(rate).toBeVisible({ timeout: 10_000 });
+  await expect
+    .poll(async () => await rate.textContent(), { timeout: 15_000 })
+    .toMatch(/実際は ×0\.\d+/);
+  await expect(rate).toHaveClass(/slow/);
+  // この注記のぶんツールバーが混み合っても、パンくずの実験名が省略されて
+  // 消えない(横幅を奪い合って「水を注」まで切れていたのを直した)。
+  await expect(page.locator("#crumb-experiment")).toContainText("水を注ぐ");
+  expect(errors).toEqual([]);
+});
+
+test("グラフがまだ出ていない濃さでは、グラフを見ろと言わない", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+  await page.waitForTimeout(2000);
+
+  // 「まん中の 3D と、下のグラフの両方に出ます」と書いてある下は真っ黒だった
+  // ——「みる」ではグラフを出していないため(利用者役①)。
+  //
+  // **見るのは文言そのものではなく、文と画面が合っているか**。以前はここで
+  // 「『みる』では必ず『ダイヤル』と書いてある」を固定していたが、それは
+  // *当時の画面*(グラフが出ていない)を前提にした書き方だった。いまは
+  // `view: "graph"` の実験なら「みる」でもグラフが開く
+  // (`shouldForceAnalysisOpen` の doc 参照)ので、d34 では「両方に出ます」が
+  // **正しい文**になる。守りたい約束は最初から一つ:
+  // **出ていないものを、出ているかのように指さない**。
+  const where = page.locator(".card-where");
+  const promiseMatchesScreen = async () => {
+    const text = (await where.textContent()) ?? "";
+    const graphOnScreen = await page.locator("#probe-graphs").isVisible();
+    // 「下のグラフ」を**出し方を添えずに**指しているなら、本当に出ていること。
+    const claimsGraphIsThere = text.includes("下のグラフ") && !text.includes("ダイヤル");
+    return { text, graphOnScreen, ok: !claimsGraphIsThere || graphOnScreen };
+  };
+  {
+    const state = await promiseMatchesScreen();
+    expect(state.ok, `「みる」で文と画面が食い違う: ${state.text}`).toBe(true);
+  }
+  await setGrain(page, 2);
+  await expect(where).toContainText("下のグラフ");
+  {
+    const state = await promiseMatchesScreen();
+    expect(state.ok, `「しらべる」で文と画面が食い違う: ${state.text}`).toBe(true);
+  }
+
+  // 3D が見どころの実験(グラフは「みる」では開かない)でも、同じ約束を守る。
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d3-bounce"]');
+  await page.waitForTimeout(1500);
+  {
+    const state = await promiseMatchesScreen();
+    expect(state.ok, `d3-bounce の「みる」で文と画面が食い違う: ${state.text}`).toBe(true);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("数値は、途中で折り返さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d12-ragdoll"]');
+
+  // 「6.72 秒」が「6.7 / 2 / 秒」と三行に割れていた(利用者役①)。名前の列が
+  // 長いぶんを値の列から奪っていたため。
+  await expect
+    .poll(
+      async () =>
+        await page.evaluate(() => {
+          const dds = [
+            ...document.querySelectorAll("#context .readouts dd"),
+          ] as HTMLElement[];
+          if (dds.length === 0) return -1;
+          return Math.max(...dds.map((d) => d.getBoundingClientRect().height));
+        }),
+      { timeout: 15_000 },
+    )
+    .toBeLessThan(28);
+  expect(errors).toEqual([]);
+});
+
+test("真空にしても、落ちる速さが数値で出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d7-terminal"]');
+  await page.waitForTimeout(1500);
+  await page.click("#knob-air button:has-text('真空')");
+
+  // 密度 0 では Re=0 → Cd=24/Re=∞ となり、抗力が NaN になって速さが数値で
+  // なくなっていた(利用者役③)。真空なら抗力ゼロ、つまり素の自由落下。
+  const speedNode = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(
+      async () => Number.parseFloat((await speedNode.textContent()) ?? "NaN"),
+      { timeout: 20_000 },
+    )
+    .toBeGreaterThan(10);
+
+  // 自由落下 v = g t と噛み合う。
+  const seconds = await elapsedSeconds(page);
+  const speed = Number.parseFloat((await speedNode.textContent()) ?? "NaN");
+  expect(speed).toBeGreaterThan(9.0 * seconds - 3);
+  expect(speed).toBeLessThan(9.81 * seconds + 3);
+  expect(errors).toEqual([]);
+});
+
+test("3D の煙が、舞台に描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d14c-smoke-3d"]');
+
+  // 煙は格子の中の数値としてしか存在せず、舞台は最初から最後まで真っ暗だった
+  // ——「まん中の 3D を見てください」と案内している隣で何も映らなかった
+  // (利用者役③)。
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-smoke",
+    "true",
+    { timeout: 20_000 },
+  );
+  expect(errors).toEqual([]);
+});
+
+test("桁の離れた値が、0 に潰れない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d31-diffusion-ink"]');
+
+  // 実際は 1.5e-22 → 1.9e-17 と 5 桁動いているのに、パネルは「0.0000」の
+  // まま止まって見えた(利用者役③)。
+  // いまは平均二乗変位(m²)の生値ではなく、その平方根を人の桁(nm)で出す
+  // (利用者役⑨の観察、`catalog.ts` の d31 のdoc参照)ので、**0 に潰れずに
+  // 増えていく**ことで同じものを確かめる。
+  const spread = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => parseShownNumber((await spread.textContent()) ?? "0"), {
+      timeout: 20_000,
+    })
+    .toBeGreaterThan(0);
+  await expect(spread).toContainText("nm");
+  const first = parseShownNumber((await spread.textContent()) ?? "0");
+  await expect
+    .poll(async () => parseShownNumber((await spread.textContent()) ?? "0"), {
+      timeout: 20_000,
+    })
+    .toBeGreaterThan(first);
+  expect(errors).toEqual([]);
+});
+
+test("グラフの凡例の数値が、右の「いまの数値」と同じ書式のルールで書かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
+  await page.locator('#knob-material .knob-choice-btn', { hasText: "木" }).click();
+
+  // --- このテストが前回落ちた理由と、書き直した理由 ---
+  // 元のテストは、右の「いまの数値」パネルのテキストと、グラフ凡例の
+  // `max=`(=これまでの最大値)のテキストを**文字どおり同じであること**で
+  // 検査していた。だがこの2つはそもそも別の量: パネルは「いまこの瞬間の
+  // 値」、凡例の `max=` は「これまでに観測した最大値」で、熱が棒を伝わって
+  // いく途中は一致するとは限らない。加えてパネル側だけに、`renderContext`の
+  // `negligible`(その系列がこれまでに取った大きさに比べて無視できるほど
+  // 小さいときだけ 0 と書く)という、凡例には無い丸めが入っている。
+  // 実機でも「パネルは 0.0 ℃・凡例は max=1.24e-17 ℃」のような食い違いが
+  // 普通に起きる(進行管理役の裏取り)。遅い macOS CI では、たまたまこの
+  // 「パネル側だけ0に丸まった直後」を捉えて `147 passed / 1 failed` に
+  // なっていた——製品の不具合ではなく、比べてはいけないものを比べていた。
+  //
+  // 本当に確かめたいのは値の一致ではなく**書式(桁の選び方・指数か固定
+  // 小数か)が同じルールで決まっていること**。そこで、凡例が実際に使った
+  // 「生の値」と「桁数」をテスト専用に露出させ(`__probeGraphLegendRaw`)、
+  // パネルが使っているのと**同じ`readoutNumber`関数**(複製ではなく本物、
+  // `__readoutNumberForTest`)にその生の値を通した結果と、凡例の描画済み
+  // 文字列を比べる。同じ値どうしを比べるので、時間経過によるズレは起きない。
+
+  // 「熱源から 0.25 m」は届いた温度が桁として最も大きく、指数表記から固定
+  // 小数へ切り替わる境目(`readoutNumber` のdoc参照)をいちばん早く通る。
+  const near = page.locator('#context dd[data-probe="1"]');
+  // この瞬間の生の最大値がちょうど指数表記の境目付近にあるはずで、これが
+  // まさに退行(生の指数がずれて出る)が起きた領域。ここで止めて凡例を読む
+  // ——パネル側の読み取りは、もう検査には使わない(冒頭のコメント参照)。
+  // 指数は理科の書き方(`2.21×10⁻¹⁷`)で出る——`readoutNumber` の
+  // `humanExponent` のdoc参照。
+  await expect
+    .poll(async () => (await near.textContent()) ?? "", { timeout: 60_000 })
+    .toMatch(/×10⁻?[⁰¹²³⁴⁵⁶⁷⁸⁹]/);
+  await page.click("#btn-run");
+  await page.waitForTimeout(200);
+
+  // canvas に直接ラスタライズされる凡例の文字はDOMから読めない
+  // (`smoke.spec.ts` の「canvas の中身は直接検証できない」注記と同じ理由)ので、
+  // テスト専用に露出した `window.__probeGraphLegend`/`__probeGraphLegendRaw`
+  // (`__camera`/`__world`と同じ扱い)を読む。
+  const { legendLines, legendRaw } = await page.evaluate(() => {
+    const w = window as unknown as {
+      __probeGraphLegend?: string[];
+      __probeGraphLegendRaw?: {
+        label: string;
+        unit?: string;
+        digits?: number;
+        max: number;
+        min: number;
+      }[];
+    };
+    return {
+      legendLines: w.__probeGraphLegend ?? [],
+      legendRaw: w.__probeGraphLegendRaw ?? [],
+    };
+  });
+  expect(legendLines.length).toBe(3);
+  expect(legendRaw.length).toBe(3);
+
+  // 凡例の `min=` は、生の指数(`0.0e+0`)ではなく、パネルと同じ「0.0」の
+  // 書き方であること(木の実験は0.25m以外どこもまだ届いていないので、遠い
+  // 2本の min は必ず、始まりのまま=0 のはず)。
+  for (const line of legendLines) {
+    expect(line).not.toMatch(/e\+0/);
+  }
+
+  // 本体: 元の不具合は「凡例が `readoutNumber` を使わず、桁数を知らない
+  // 独自の書式(生の指数 `9.3e-67` 等)で書いていた」こと(`legendNumber`の
+  // doc参照)。ここでは、凡例が実際に描いた文字列を、**同じ生の値**を
+  // パネルと同じ`readoutNumber`関数に通した結果と比べることで、それが
+  // 直っていることを検査する——値の一致ではなく、書式のルールの一致。
+  const readoutNumberInPage = async (value: number, digits: number) =>
+    page.evaluate(
+      ([v, d]) =>
+        (
+          window as unknown as {
+            __readoutNumberForTest?: (value: number, digits: number) => string;
+          }
+        ).__readoutNumberForTest?.(v, d) ?? "",
+      [value, digits] as const,
+    );
+
+  const near25 = legendRaw.find((s) => s.label.includes("0.25 m"));
+  expect(near25).toBeDefined();
+  expect(near25?.digits).toBeDefined();
+  const expectedMaxText = await readoutNumberInPage(near25!.max, near25!.digits!);
+  const expectedMinText = await readoutNumberInPage(near25!.min, near25!.digits!);
+  expect(expectedMaxText).toBeTruthy();
+
+  const nearLine = legendLines.find((l) => l.includes("0.25 m"));
+  expect(nearLine).toBeDefined();
+  expect(nearLine).toContain(`max=${expectedMaxText} ℃`);
+  expect(nearLine).toContain(`min=${expectedMinText} ℃`);
+
+  // 退行時の実測を再現しないことも確かめる: 凡例の `max=` が生の指数
+  // (`toExponential`のデフォルト書式や、桁数を無視した `formatTickValue`)
+  // に戻っていないこと。`readoutNumber`が返す指数は必ず小数点以下2桁
+  // (`toExponential(2)`)なので、それ以外の指数書式(桁数違い)は退行の
+  // 兆候になる。
+  const maxMatch = nearLine?.match(/max=(-?\d(?:\.\d+)?e[+-]?\d+)/);
+  if (maxMatch) {
+    expect(maxMatch[1]).toMatch(/^-?\d\.\d{2}e[+-]?\d+$/);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("床より下へ落ちていく物も、画面から見失わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d7-terminal"]');
+  await page.waitForTimeout(4000);
+
+  // 床の下へ潜らないための高さの下限を無条件に当てていたので、床の無い場面
+  // (5 mm の球が y=0 から落ち続ける)では対象が -170 m まで沈んでもカメラ
+  // だけが y≒0 に残り、200 m 以上離れた球を見ることになって画面が真っ黒
+  // だった。潜り込む床がそもそも無い場面では当てない。
+  const framed = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas");
+    return canvas ? canvas.width > 0 : false;
+  });
+  expect(framed).toBe(true);
+
+  // 舞台に、背景より明るいものが実際に映っている。
+  //
+  // **PNG のバイト数で代用しない**(進行管理役の実測、CI赤)。以前は
+  // 「4500バイトを超えること」で「単色ではない」を代用していたが、これは
+  // **舞台の大きさに依る**——`view: "graph"` の実験でグラフの段が開いて舞台が
+  // 縮んだ結果、同じ絵のままバイト数が 4500 付近まで下がり、実行ごとに
+  // 落ちたり通ったりした(手元でも3回に1回落ちた)。画素そのものを数える。
+  // 実測(粒度「みる」、グラフの段が開いた状態): 標準偏差 4.07 /
+  // 明るい画素 0.24% / 平均輝度 17.2。真っ黒なら標準偏差は 0 に潰れる。
+  const pixels = await canvasLuminanceStats(page);
+  expect(pixels.std, `舞台の輝度の標準偏差 ${JSON.stringify(pixels)}`).toBeGreaterThan(1.5);
+  expect(pixels.brightRatio, "背景より明るい画素がある").toBeGreaterThan(0.0002);
+  expect(errors).toEqual([]);
+});
+
+test("向きも、数値で決められる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  // 向きは輪をドラッグするしか手が無く、掴む場所がわずかに違うだけでどの軸が
+  // 回るか変わるので、狙った角度の坂を作れなかった(利用者役④)。
+  const z = page.locator("#focus-rot-z");
+  await expect(z).toBeVisible();
+  await z.fill("30");
+  await z.dispatchEvent("change");
+  await expect
+    .poll(async () => Number(await z.inputValue()), { timeout: 10_000 })
+    .toBeCloseTo(30, 0);
+  expect(errors).toEqual([]);
+});
+
+test("「＋新規シーン」の直後は、床が「選んだもの」として出ない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  // エディタ側(`main.ts`)は内部都合で先頭のボディ(床)を選んだ状態のまま
+  // 「場面が差し替わった」と知らせてくる。以前はワークスペース側がそれを
+  // そのまま受け取っていたため、「＋新規シーン」の直後に一瞬だけ「選んだもの
+  // — ground」の札(置き場所・向きの入力欄つき)が実在した。遅い機械では、
+  // 続けて物を1つ置いたときの選択の切り替わり(床→置いた物)がこの後に
+  // 来るまでの間にちょうど入力が割り込むと、床の欄へ打った値が「本物の
+  // 選択変更」として正しく捨てられてしまい、置いた物には既定値(0)が
+  // 送られていた(「向きも、数値で決められる」がmacOS CIだけで
+  // 「入力欄が0のまま」と落ちた原因)。「選んだもの」札は**人が対象を
+  // クリックしたときだけ**出るべきで、床が一瞬でも出てはいけない。
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+
+  // 続けて物を置いたときは、その物(床ではない)が選ばれて出る——選択の
+  // 切り替わりが「なし→置いた物」の1回だけで済み、床を経由しない。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  const focus = page.locator('.card[data-card="focus"]');
+  await expect(focus).toBeVisible();
+  await expect(focus).toContainText("箱 1");
+  await expect(focus).not.toContainText("ground");
+  expect(errors).toEqual([]);
+});
+
+test("2つ目に置いた物も、グラフに記録できる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.waitForTimeout(600);
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+
+  // 記録が付くのは最初に置いた物だけで、2 つ目以降を比べたくても足す手段が
+  // どこにも無かった(利用者役④)。
+  const record = page.locator("#btn-record-body");
+  await expect(record).toBeVisible();
+  await record.click();
+  await expect(page.locator("#hierarchy-tree")).toContainText("高さ(球 2)");
+  // 付いたら、そのボタンはもう出ない。
+  await expect(page.locator("#btn-record-body")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("モーターは、置いて動かせば回る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-motor")!.click());
+
+  // 目標角度を腕の初期姿勢のまま置いていたので、足して「うごかす」を押しても
+  // 微動だにせず、ツールバーの「モーター切替」を見つけるまで壊れているように
+  // しか見えなかった(利用者役④)。
+  const z = page.locator("#focus-rot-z");
+  await expect(z).toBeVisible();
+  await page.click("#btn-run");
+  await expect
+    .poll(async () => Math.abs(Number(await z.inputValue())), { timeout: 20_000 })
+    .toBeGreaterThan(30);
+  expect(errors).toEqual([]);
+});
+
+test("気体の実験には、箱の枠が描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d30-gas-box"]');
+
+  // 「400 個の分子が箱の中で飛び回ります」と書いてあるのに、枠も壁も無く、
+  // 点が真っ黒な空間に浮いているだけに見えた(利用者役①)。
+  await expect(page.locator("#scene-view")).toHaveAttribute(
+    "data-gas-box",
+    "true",
+    { timeout: 20_000 },
+  );
+  expect(errors).toEqual([]);
+});
+
+test("遠くを回っている物を「もう在りません」と言わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+
+  // 退避した剛体の目印を「桁が大きい値」で見ていたので、太陽から 1.5e11 m を
+  // 回っている惑星の距離まで「もう在りません」と書き、目の前を回っている物を
+  // 指して消えたと言う画面になっていた(利用者役①)。
+  const distance = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => (await distance.textContent()) ?? "", { timeout: 15_000 })
+    .toMatch(/[0-9]/);
+  await expect(distance).not.toContainText("もう在りません");
+  expect(errors).toEqual([]);
+});
+
+test("止まりかけた値は、指数ではなく 0 と書く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d10-brake-heat"]');
+  await page.waitForTimeout(1000);
+  await page.evaluate(() => {
+    const r = document.querySelector<HTMLInputElement>(
+      '.knob input[type="range"]',
+    );
+    if (!r) return;
+    r.value = r.max;
+    r.dispatchEvent(new Event("input", { bubbles: true }));
+    r.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  // 桁の離れた量を指数で書くようにしたら、こんどは止まりかけた箱の速さが
+  // 「8.67e-19 m/s」と出るようになった(利用者役②)。その量がこれまでに
+  // 取った大きさと比べて無視できるなら 0 と書く。
+  const speed = page.locator('#context dd[data-probe="0"]');
+  await expect
+    .poll(async () => (await speed.textContent()) ?? "", { timeout: 25_000 })
+    .toMatch(/^0\.00 m\/s$/);
+  expect(errors).toEqual([]);
+});
+
+test("大きさの表示と重さが噛み合う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  // 内部表記は半分の長さなので、`Box(0.4000, …)` の箱が 4019 kg になり
+  // 「表示と重さが合わない」と読まれた。人が言う一辺の長さで書く。
+  const shape = page.locator('[data-focus="かたち"]');
+  await expect(shape).toContainText("0.80 × 0.80 × 0.80 m");
+
+  // 一辺 0.8m の鋼(密度 7850)は約 4019 kg——数と重さが噛み合う。
+  const mass = Number.parseFloat(
+    (await page.locator('[data-focus="重さ"]').textContent()) ?? "0",
+  );
+  expect(mass).toBeGreaterThan(3900);
+  expect(mass).toBeLessThan(4100);
+  expect(errors).toEqual([]);
+});
+
+test("大きさの表示が、札と Inspector で食い違わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  const shape = page.locator('[data-focus="かたち"]');
+  const inspector = page.locator("#inspector-body");
+
+  // **球**: 「選んだもの」札は既定スポーン半径0.4mを「直径 0.80 m」の
+  // 人の言葉で書く。Inspectorは同じ球の半径をwasmの生の値のまま出すが
+  // (`body_shape_label_at`は半径を返す)、以前は「Sphere(0.4000)」と単位も
+  // 「半径」の断りも無く出ていたため、札の「直径0.80m」と数字だけ見比べると
+  // 半分にずれて見えた(利用者役の報告)。半径だと分かるラベルが付き、
+  // 0.4000 × 2 = 0.80 と暗算できることを確かめる。
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await expect(shape).toContainText("直径 0.80 m");
+  await expect(inspector).toContainText("Sphere(半径 0.4000 m)");
+
+  // **箱**: 札は一辺の長さ(半辺の2倍)。Inspectorは半辺をそのまま返すので
+  // 「半辺」と書いて区別する。
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(shape).toContainText("0.80 × 0.80 × 0.80 m");
+  await expect(inspector).toContainText("Box(半辺 x=0.4000, y=0.4000, z=0.4000 m)");
+
+  // **カプセル**: wasm側に専用の整形が無く(`Shape::Capsule`は
+  // `body_shape_label_at_impl`で`{other:?}`のRust Debug文字列
+  // `Capsule { radius: 0.2, half_height: 0.35 }`に落ちる)、以前は札側の
+  // 整形(`friendlyShape`)がこの`{`区切りの形を`(`区切り前提で読み損ね、
+  // 生のRust Debug文字列がそのまま「選んだもの」札にも出ていた
+  // (Inspectorだけでなく人向けの札まで壊れていた、より重い食い違い)。
+  // 札は「太さ・長さ」の人の言葉、Inspectorは「半径・半分の高さ」の
+  // ラベル付き生値になることを確かめる。
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-capsule")!.click());
+  await expect(shape).toContainText("太さ 0.40 m・長さ 0.70 m");
+  await expect(shape).not.toContainText("radius:");
+  await expect(inspector).toContainText("Capsule(半径 0.2 m, 半分の高さ 0.35 m)");
+
+  expect(errors).toEqual([]);
+});
+
+test("「うごかす」を押すと、自分で置いた球が落下から着地まで画面に映り続ける", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(300);
+
+  // 置いた直後(高さ12m)は`frameCameraOnContent`が至近距離まで寄せてくれる
+  // ので映っている。問題はここから——「うごかす」を押した瞬間、以前は
+  // 追従カメラ(組み立て中は`followCamera(false)`のまま、`playButton`の
+  // クリックハンドラのdoc参照)が誰も起きないまま置き去りにされ、球は
+  // 落ち始めた次のフレームで画角の外へ出て、着地はおろか落下そのものが
+  // 一度も見えなかった(進行管理役の実測: 高さ12.0m→10.16mの間にndc.yが
+  // 0→-1.61まで飛び出す)。
+  await expect.poll(() => bodyOnScreen(page), { timeout: 5_000 }).toBe(true);
+  await page.click("#btn-run");
+
+  // 落ち始め・着地までの複数時点で映り続けること。
+  for (const waitMs of [200, 300, 300, 300, 300, 500]) {
+    await page.waitForTimeout(waitMs);
+    expect(await bodyOnScreen(page)).toBe(true);
+  }
+  expect(errors).toEqual([]);
+});
+
+test("一時停止中に自分でカメラを動かしても、「うごかす」で再開した瞬間に戻されない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(300);
+  await page.click("#btn-run"); // 走らせる(追従カメラが起きる)。
+  await page.waitForTimeout(400);
+  await page.click("#btn-run"); // 一時停止。
+
+  // 一時停止中に自分でカメラを操作する(=追従カメラを自分の意思で止める、
+  // `orbit.addEventListener("start", ...)`の既存の仕組み)。左ボタンは選択・
+  // ギズモ操作に割り当て済みで OrbitControls には繋がっていないため
+  // (`orbit.mouseButtons`のdoc参照)、実際に視点operationに使う中ボタンで
+  // 回転ドラッグする(`camera-gizmo-interaction.spec.ts`と同じ流儀)。
+  const box = await page.locator("#scene-view-canvas-host").boundingBox();
+  if (!box) throw new Error("scene-view-canvas-host not found");
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(cx + 150, cy - 60, { steps: 12 });
+  await page.mouse.up({ button: "middle" });
+  // `orbit.enableDamping`(慣性)がドラッグ後もしばらくカメラを動かし続ける
+  // ので、その減衰が収まるまで待ってから基準位置を取る——ここで待たずに
+  // 比べると、慣性による動きを「追従が起きてしまった」と誤検出する。
+  await page.waitForTimeout(1500);
+  const camAfterOrbit = await page.evaluate(() => {
+    const cam = (window as unknown as { __camera: { position: { x: number; y: number; z: number } } }).__camera;
+    return { x: cam.position.x, y: cam.position.y, z: cam.position.z };
+  });
+
+  // 再開しても、自分で動かしたカメラの位置がその場で覆されないこと
+  // (`isEditing()`がmode==="play"のままなので偽になり、追従が再度起きない)。
+  await page.click("#btn-run");
+  await page.waitForTimeout(50);
+  const camAfterResume = await page.evaluate(() => {
+    const cam = (window as unknown as { __camera: { position: { x: number; y: number; z: number } } }).__camera;
+    return { x: cam.position.x, y: cam.position.y, z: cam.position.z };
+  });
+  const moved = Math.hypot(
+    camAfterResume.x - camAfterOrbit.x,
+    camAfterResume.y - camAfterOrbit.y,
+    camAfterResume.z - camAfterOrbit.z,
+  );
+  expect(moved).toBeLessThan(0.05);
+  expect(errors).toEqual([]);
+});
+
+test("消した物の観測点は、左の「記録している値」に残っても消えた物だと分かる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(300);
+
+  const probes = page.locator("#hierarchy-tree");
+  await expect(probes).toContainText("高さ(球 1)");
+  await expect(probes).not.toContainText("消えた物");
+
+  // 3D と一覧からは消える一方、グラフに描いた過去データを黙って捨てるのは
+  // 乱暴なので、「記録している値」には残す——ただし**もう無い物だと分かる**
+  // ように注記する(課題B、`friendlyProbeLabel`のdoc参照)。
+  await page.locator("#hierarchy-tree li", { hasText: "球 1" }).first().click();
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(300);
+
+  await expect(probes).toContainText("高さ(球 1・消えた物)");
+  await expect(probes).toContainText("速さ(球 1・消えた物)");
+  // 3D・一覧からは実際に消えていること(一覧の食い違いそのものは直っている)。
+  await expect(page.locator("#hierarchy-tree")).not.toContainText("↳ 球 1");
+  expect(errors).toEqual([]);
+});
+
+// 課題A(進行管理役の裏取り済み): 「坂を作るなら20〜40度に」という案内どおりに
+// やっても坂にならなかった(床は向きを変えても傾かない・箱は動くままだと転がって
+// 平らに戻る)。案内を実態に合わせ、実際にその手順で坂ができることを確かめる。
+test("床(ゆか)を選ぶと、向きはここでは変えられないと正直に書かれている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.locator("#hierarchy-tree .tree-body").first().click();
+
+  const note = page.locator("#focus-rotation-note");
+  await expect(note).toContainText("ここ(ゆか)の向きはここでは変えられません");
+
+  // 実際に打っても傾かないことも確かめる(利用者役の報告どおり、進行管理役の
+  // 裏取りでも`Plane(normal=(0,1,0), d=0)`のままだった)。
+  const rotX = page.locator("#focus-rot-x");
+  await rotX.fill("30");
+  await rotX.dispatchEvent("change");
+  await page.waitForTimeout(500);
+  await expect(page.locator("#inspector-body")).toContainText("Plane(normal=(0,1,0), d=0)");
+  expect(errors).toEqual([]);
+});
+
+test("案内どおりに箱を置いて傾け、動かないようにすると、実際に坂になる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  const y = page.locator("#focus-pos-y");
+  await y.fill("0.5");
+  await y.dispatchEvent("change");
+  const rotX = page.locator("#focus-rot-x");
+  await rotX.fill("30");
+  await rotX.dispatchEvent("change");
+
+  // 案内が「動かない(Static)」にする所まで届いている(課題B の言葉と揃えて
+  // いること自体も、この文言で確かめる)。
+  const note = page.locator("#focus-rotation-note");
+  await expect(note).toContainText("動かない(Static)");
+
+  await page.selectOption("#inspector-body-type", "Static");
+  await expect(page.locator("#inspector-body-type")).toHaveValue("Static");
+
+  await page.click("#btn-run");
+  await page.waitForTimeout(3000);
+
+  // 動くままだと重力で転がって平らに戻る(直す前の実際の症状)が、
+  // Static にしたので 30 度のまま——3手(置く→傾ける→動かなくする)で
+  // 坂が組み上がる。
+  await expect
+    .poll(async () => Number(await rotX.inputValue()), { timeout: 10_000 })
+    .toBeCloseTo(30, 0);
+  expect(errors).toEqual([]);
+});
+
+// 課題B: プログラムの言葉(Dynamic/Static/Kinematic・DistanceJoint等)が
+// 説明なしにそのまま画面へ出ていた。人の言葉を主に、元の語を括弧へ落とす。
+test("動き方の選択肢とバッジ、「＋追加」メニューが人の言葉で読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  // 動き方(Body type): 主が人の言葉、従が元の語。`value`(保存データ・
+  // 他のテストが参照する)は元の英単語のまま変えていない。
+  const bodyTypeTexts = await page.locator("#inspector-body-type option").allTextContents();
+  expect(bodyTypeTexts).toEqual([
+    "動く(Dynamic)",
+    "動かない(Static)",
+    "決めたとおりに動く(Kinematic)",
+  ]);
+  await page.selectOption("#inspector-body-type", "Static");
+  await expect(page.locator("#inspector-body-type")).toHaveValue("Static");
+
+  // INSPECTOR の名前横のバッジも同じ言葉。バッジは選び直した瞬間ではなく
+  // 選択の再描画で出るので、既定でStaticな床を選び直して確かめる。
+  await page.locator("#hierarchy-tree .tree-body").first().click();
+  await expect(page.locator("#inspector-body .badge")).toHaveText("動かない(Static)");
+
+  // 「＋追加」メニュー: DistanceJoint 等の型名は括弧の中だけ、主たる名前は日本語。
+  await page.click("#btn-add");
+  const menuTexts = await page.locator("#context-menu button").allTextContents();
+  // **中の言葉(`DistanceJoint`/`SPH`)は括弧の中からも外した**(利用者役
+  // 「つくる」の報告)。ここは「何が起きるか」で書く場所なので、固定の文言
+  // ではなく**中の言葉が出ていないこと**と、読んで分かる語が入っていることを
+  // 見る(文言そのものは後から良くしていける)。
+  expect(menuTexts.join(" / ")).not.toContain("DistanceJoint");
+  expect(menuTexts.join(" / ")).not.toContain("SPH");
+  expect(menuTexts).toContain("＋ 振り子(長さの変わらないひもで吊るす)");
+  expect(menuTexts).toContain("＋ モーター (角度を指定して止まる。回り続けません)");
+  expect(menuTexts).toContain("＋ 流体(水のかたまり)");
+  await page.keyboard.press("Escape");
+
+  // ↑ Nudge ボタンも人の言葉が主になり、内部の仕組み(Command経由)は
+  // 利用者向けの説明から落ちている。
+  await expect(page.locator("#btn-nudge")).toContainText("押し上げる");
+  const nudgeTitle = await page.locator("#btn-nudge").getAttribute("title");
+  expect(nudgeTitle ?? "").not.toContain("Command");
+  expect(errors).toEqual([]);
+});
+
+// 課題C: 「Undo」は位置/向き/大きさしか戻せないのに「Undo」とだけ書かれ、
+// 何でも戻せると期待させていた。また、消す手段がDeleteキーだけで画面に
+// 書かれていなかった(利用者役は自動テストで偶然見つけた)。
+test("「Undo」は、できること(動かしたのを戻す)に合わせた名前になっている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+
+  await expect(page.locator("#btn-undo")).toContainText("動かしたのを戻す");
+  await expect(page.locator("#btn-redo")).toContainText("戻したのをやり直す");
+  expect(errors).toEqual([]);
+});
+
+/**
+ * ロケータの `.click()` は要素を自前でスクロールして見える位置へ持って
+ * いってから押すため、「ボタンは在るのに画面上は別パネルに隠れて実マウスで
+ * 押せない」という壊れ方(課題A、進行管理役の実測)があっても素通りして
+ * しまう。ここでは本物のマウス操作に近い形で、
+ *   1. 要素の中心座標で `elementFromPoint` を引き、実際に**その要素自身が
+ *      画面上に見えている**ことを確かめてから
+ *   2. その座標へ低レベル `page.mouse` で押す
+ * ことで、見た目には存在するのに他パネルに隠れて反応しない壊れ方を
+ * 実際に検出できるようにする。
+ */
+async function realClickVerifyingVisible(page: Page, locator: Locator) {
+  const box = await locator.boundingBox();
+  if (!box) throw new Error("要素の位置が取れない(非表示?)");
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  const atPoint = await page.evaluate(
+    ({ x, y, id }) => document.elementFromPoint(x, y)?.id === id,
+    { x, y, id: await locator.evaluate((el) => el.id) },
+  );
+  expect(
+    atPoint,
+    "ボタンの座標を実マウスで押しても、画面上ではその場所に別の要素が" +
+      "描かれていて届かない(他パネルに隠れている可能性)",
+  ).toBe(true);
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.up();
+}
+
+test("置いた物は、選んだ札の「これを消す」から見つけて消せる(押し間違い対策つき)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 球");
+  const sphereRow = page.locator("#hierarchy-tree .tree-body", { hasText: "球 1" });
+  await expect(sphereRow).toHaveCount(1);
+
+  const removeBtn = page.locator("#btn-remove-body");
+  await expect(removeBtn).toBeVisible();
+  await expect(removeBtn).toContainText("これを消す");
+
+  // **実マウスの座標で**1回押す。1回押しただけでは消えない
+  // (押し間違い対策——確認してから消す)。
+  await realClickVerifyingVisible(page, removeBtn);
+  await expect(sphereRow).toHaveCount(1);
+  await expect(removeBtn).toContainText("本当に消しますか");
+
+  // 確認文言は元のラベルよりずっと長い。ここで座標を取り直さず
+  // **前回と同じボタンが同じ場所にまだあること**を確かめてから続けて押す
+  // ——ラベルが伸びて別のボタンを押し場所ごと動かしていたら、ここで
+  // 「別の要素に隠れている」として落ちる(課題Aの回帰そのものの形)。
+  await realClickVerifyingVisible(page, removeBtn);
+  // 続けてもう一度押すと、実際に消える(「物」の一覧から消える。記録済みの
+  // グラフは、消えた物だと分かる注記つきで残る——別のテストが確かめる対象)。
+  await expect(sphereRow).toHaveCount(0);
+  // 消した直後は選択も外れる(床が代わりに選ばれたままにはしない)。
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+
+  // 床(ゆか)は場面の基準面なので、消す対象には出ない。
+  await page.locator("#hierarchy-tree .tree-body").first().click();
+  await expect(page.locator("#btn-remove-body")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+// **課題B**: 保存していない作りかけを、確認なく黙って捨てる導線が無いか。
+//
+// 「新規シーン」・Toolbarのシーン選択・⌘Kでの実験選び直し・保存済み場面を
+// 開く、はどれも「いま見ている場面をその場で丸ごと差し替える」処理を経由
+// する(`workspace.ts`の`confirmDiscardIfNeeded`のdoc参照)。**保存していない
+// 自分の作りかけがあるときだけ**確認し(実験を選んだだけ・まっさらな状態
+// では聞かない)、キャンセルすれば実際には何も変わらないことを確かめる。
+test("「新規シーン」は、作りかけが無ければ確認なしに進む", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    void d.dismiss();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  // 起動直後(実験を選んだだけ・何も編集していない)は「作りかけ」ではない。
+  await page.click("#btn-new-scene");
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1); // 床のみ
+  expect(dialogs).toEqual([]);
+
+  // 「新規シーン」を押した直後(まだ何も置いていない、まっさらな状態)も
+  // 同様に確認なしで進む。
+  await page.click("#btn-new-scene");
+  expect(dialogs).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test("「新規シーン」は、置いた物があれば確認し、キャンセルすれば何も消えない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    void d.dismiss(); // キャンセル
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
+  await expect(row).toHaveCount(1);
+
+  await page.click("#btn-new-scene");
+  expect(dialogs.length).toBe(1);
+  expect(dialogs[0]).toContain("消えます");
+  // キャンセルしたので、置いた箱はそのまま残っている。
+  await expect(row).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test("「新規シーン」は、置いた物があっても確認してOKすれば実際に空になる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  let dialogCount = 0;
+  page.on("dialog", (d) => {
+    dialogCount++;
+    void d.accept();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
+  await expect(row).toHaveCount(1);
+
+  await page.click("#btn-new-scene");
+  expect(dialogCount).toBe(1);
+  // OKしたので、実際に空(床のみ)へ差し替わっている。
+  await expect(row).toHaveCount(0);
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+test("⌘Kで別の実験を選び直すときも、作りかけがあれば確認し、キャンセルすれば場面もパンくずも食い違わない", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  let dialogCount = 0;
+  page.on("dialog", (d) => {
+    dialogCount++;
+    void d.dismiss(); // キャンセル
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
+  await expect(row).toHaveCount(1);
+
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette")).toBeVisible();
+  await page.locator("#palette-results button").first().click();
+
+  expect(dialogCount).toBe(1);
+  // キャンセルしたので、置いた箱も「じぶんの場面」の表示も両方そのまま
+  // ——パンくずだけ新しい実験名に化けて、実物(Hierarchy)は前のまま、
+  // という食い違いが起きていないことを確かめる。
+  await expect(row).toHaveCount(1);
+  await expect(page.locator("#crumb-own-scene")).toHaveCount(1);
+  await expect(page.locator("#crumb-experiment")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("保存済みの場面を開くときも、作りかけがあれば確認する", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    void d.dismiss();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+
+  // まず1つ場面を保存しておく。
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 球");
+  await page.fill("#input-scene-name", "テスト保存場面A");
+  await page.click("#btn-save-scene");
+  await expect(page.locator("#crumb-own-scene")).toContainText("テスト保存場面A");
+
+  // 新規シーンへ切り替え、別の物を置く(=直近の保存より後の、未保存の作りかけ)。
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const boxRow = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
+  await expect(boxRow).toHaveCount(1);
+
+  // ⌘Kから、さっき保存した場面を開こうとする。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "テスト保存場面A");
+  await expect(page.locator(".palette-row").first()).toContainText("テスト保存場面A");
+  await page.keyboard.press("Enter");
+
+  expect(dialogs.length).toBe(1);
+  // キャンセルしたので、箱を置いた今の場面のまま(保存済み場面には切り替わらない)。
+  await expect(boxRow).toHaveCount(1);
+  await expect(page.locator("#crumb-own-scene")).not.toContainText("テスト保存場面A");
+  expect(errors).toEqual([]);
+});
+
+test("Toolbarのシーン選択も、作りかけがあれば確認し、キャンセルすれば切り替わらない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  let dialogCount = 0;
+  page.on("dialog", (d) => {
+    dialogCount++;
+    void d.dismiss();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
+  await expect(row).toHaveCount(1);
+
+  await page.selectOption("#select-scene", { index: 1 });
+  expect(dialogCount).toBe(1);
+  // キャンセルしたので、置いた箱はそのまま。ドロップダウンの選択も戻る。
+  await expect(row).toHaveCount(1);
+  await expect(page.locator("#select-scene")).toHaveValue("");
+  expect(errors).toEqual([]);
+});
+
+test("Projectドロワーの「シーン」タブから読み込むときも、作りかけがあれば確認する", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  let dialogCount = 0;
+  page.on("dialog", (d) => {
+    dialogCount++;
+    void d.dismiss();
+  });
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 箱");
+  const row = page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" });
+  await expect(row).toHaveCount(1);
+
+  await page.click('.project-tab[data-tab="scenes"]');
+  await page.click('.scene-gallery-list button[data-scene-file="d4-box-stack.json"]');
+
+  expect(dialogCount).toBe(1);
+  // キャンセルしたので、D4(4体)には差し替わらず、箱を置いた今の場面のまま。
+  await expect(row).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+// **退行(進行管理役の実測)**: `51dca5c` で「保存していない作りかけを捨てる
+// 前に確認する」を入れた範囲が広すぎ、「はじめから」(このアプリ自身の
+// 「やり直す」ボタンで、別の場面へは移らない)まで、材質を変えた直後だけ
+// 「保存していない作りかけがあります。このまま進めると消えます(元には
+// 戻せません)。」という強い確認を出してしまっていた。Playwrightは
+// `page.on("dialog", ...)` を登録しないと未処理のダイアログを自動で閉じる
+// ため、登録しない実測(利用者役が「アプリが固まった」と読んだのと同じ状況)
+// と、登録した実測の両方で確かめる。
+test("「はじめから」は、材質を変えたあとでも確認を出さない(退行)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  const dialogs: string[] = [];
+  page.on("dialog", (d) => {
+    dialogs.push(d.message());
+    void d.accept();
+  });
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // とめる → 球を選ぶ → 材質を変える(`hasUnsavedWork()` が立つ、
+  // `setBodyMaterial` の doc 参照)。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+  await page.locator("#hierarchy-tree .tree-body").last().click();
+  await page.selectOption("#focus-material", "木材(松)");
+  await expect
+    .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
+    .toBe("木材(松)");
+
+  // ある程度時間を進めてから、もう一度とめて値を固定する(「はじめから」は
+  // 止めた意思を引き継がず必ず動かすので、`before` を動いたまま読むと
+  // 「はじめから」後にさらに進んだ分と競合し、まれに `after` が `before` を
+  // 追い越しかねない——`before` は止めて固定した値で読む)。しきい値を高めに
+  // 取り、「はじめから」後 500ms 経っても追い付かない余裕を持たせる。
+  await page.click("#btn-run");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 10_000 }).toBeGreaterThan(1.0);
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+  const before = await elapsedSeconds(page);
+  expect(before).toBeGreaterThan(1.0);
+
+  await page.click("#btn-restart");
+  await page.waitForTimeout(500);
+
+  // 確認は一切出ない。
+  expect(dialogs).toEqual([]);
+  // 「はじめから」は実際に効いている——経過時刻がいったん頭へ戻り、
+  // 止めて固定した値より小さいところから再び進む(ダイアログに阻まれて
+  // 無反応、ではないことの実測)。
+  const after = await elapsedSeconds(page);
+  expect(after).toBeLessThan(before);
+  expect(errors).toEqual([]);
+});
+
+// カタログの全実験が、パレットから選んで実際に動くことを分野ごとに確認する。
+for (const category of CATEGORIES) {
+  test(`分野「${category.title}」の実験がすべて動く`, async ({ page }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+
+    for (const experiment of category.experiments) {
+      await page.keyboard.press("Control+k");
+      await expect(page.locator("#palette")).toBeVisible();
+      await page.click(`.palette-row[data-experiment-id="${experiment.id}"]`);
+      await expect(page.locator("#crumb-experiment")).toContainText(experiment.title);
+      await expect
+        .poll(() => elapsedSeconds(page), { timeout: 15_000 })
+        .toBeGreaterThan(0);
+    }
+    expect(errors).toEqual([]);
+  });
+}
+
+/** `__scene` から`referenceGrid`(課題A)の`visible`を読む。無ければ`null`。 */
+async function referenceGridVisible(page: Page): Promise<boolean | null> {
+  return page.evaluate(() => {
+    const scene = (window as unknown as { __scene: any }).__scene;
+    let grid: any = null;
+    scene.traverse((o: any) => {
+      if (o.userData?.isReferenceGrid) grid = o;
+    });
+    return grid ? (grid.visible as boolean) : null;
+  });
+}
+
+/**
+ * 3D舞台(`#scene-view-canvas-host`)を`gapMs`あけて2枚撮り、**画素が実際に
+ * どれだけ変わったか**を割合(0〜100)で返す。
+ *
+ * 「板を置いた」「座標上はカメラの近くにある」だけでは、線が1〜2本しか
+ * 見えず実質止まって見える状態でも通ってしまう(進行管理役の実測による
+ * 差し戻し: 座標ベースの裏取りだけのテストは green のまま、画面は
+ * ほぼ静止していた)。**見比べて動いていると分かるか**を直接測る。
+ */
+async function screenshotDiffPercent(page: Page, gapMs: number): Promise<number> {
+  const stage = page.locator("#scene-view-canvas-host");
+  const before = await stage.screenshot();
+  await page.waitForTimeout(gapMs);
+  const after = await stage.screenshot();
+  return page.evaluate(
+    async ({ a, b }) => {
+      function loadImg(dataUrl: string): Promise<HTMLImageElement> {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve(img);
+          img.onerror = reject;
+          img.src = dataUrl;
+        });
+      }
+      const [imgA, imgB] = await Promise.all([
+        loadImg("data:image/png;base64," + a),
+        loadImg("data:image/png;base64," + b),
+      ]);
+      const w = imgA.width;
+      const h = imgA.height;
+      const draw = (img: HTMLImageElement) => {
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d")!;
+        ctx.drawImage(img, 0, 0);
+        return ctx.getImageData(0, 0, w, h).data;
+      };
+      const d1 = draw(imgA);
+      const d2 = draw(imgB);
+      let diff = 0;
+      const total = w * h;
+      const THRESHOLD = 12; // 微小なAA/ノイズ差は無視する
+      for (let i = 0; i < d1.length; i += 4) {
+        const dr = Math.abs(d1[i] - d2[i]);
+        const dg = Math.abs(d1[i + 1] - d2[i + 1]);
+        const db = Math.abs(d1[i + 2] - d2[i + 2]);
+        if (dr + dg + db > THRESHOLD) diff++;
+      }
+      return (diff / total) * 100;
+    },
+    { a: before.toString("base64"), b: after.toString("base64") },
+  );
+}
+
+// 課題A: 磁石が銅管を落ちる・空気をばねにする・氷が水に変わるは、床も水面も
+// 無いまま対象だけが動く。かんたんモードの追従カメラは対象を画面の同じ場所へ
+// 置き続けるので、数値は動いていても絵が1ピクセルも変わらなかった
+// (利用者役・進行管理役の実測)。板(`referenceGrid`)を対象の背後・カメラの
+// 近くへ置き直し続けることで直した——ただし、板を置いただけ・座標上カメラの
+// 近くにあるだけでは足りない。線の間隔が固定の1mだと、カメラが対象の
+// 数十cm手前まで寄るこの3実験では視界に線が1〜2本しか入らず、実質止まって
+// 見えたまま(進行管理役の差し戻し)。線の間隔を毎フレーム画角に対して
+// 一定本数(`REFERENCE_GRID_CELLS_ACROSS_VIEW`)になるよう決め直すことで
+// 直した(`demo/src/main.ts`の`updateReferenceGrid`のdoc参照)。ここでは
+// 座標ではなく**実際に画面の画素が変わった割合**で裏取りする。
+//
+// 「氷が水に変わる」(d18b-ice-melts)は元はこの一覧にいたが、課題B
+// (利用者役の報告: 氷が床も無く永遠に落ち続けていた)への対応でSPHの器の
+// 床に合わせた静止した床(`type: "static"`の`plane`)をシーンJSONへ足した
+// ——これで**本物の基準**(床)ができたので、もう「基準の無い場面」では
+// ない。方眼を追加で出さないことは、下の「床のある場面では、方眼を追加で
+// 出さない」に移して確かめる。
+for (const id of ["d21-copper-tube", "d17-piston"]) {
+  test(`基準の無い場面(${id})は、1秒で画面の5%以上の画素が変わる(課題A)`, async ({ page }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1500);
+
+    expect(await referenceGridVisible(page)).toBe(true);
+    const diffPct = await screenshotDiffPercent(page, 1000);
+    expect(diffPct).toBeGreaterThan(5);
+    expect(errors).toEqual([]);
+  });
+}
+
+test("床のある場面では、方眼を追加で出さない(課題Aの回帰防止)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  for (const id of ["d1-free-fall", "d2-ballistic", "d18b-ice-melts"]) {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1000);
+    // 座標ではなく`visible`そのもの——方眼を追加で出す条件のコードパスに
+    // 一切入らないことを直接確かめる(見た目が変わらないことの一番確かな
+    // 保証。物理のタイミングは実行ごとにぶれるため、床のある実験は
+    // ピクセル差分では比較しない)。
+    expect(await referenceGridVisible(page)).toBe(false);
+  }
+  expect(errors).toEqual([]);
+});
+
+// 課題B: 「氷が水に変わる」(d18b-ice-melts)は氷が融ける熱の現象なのに
+// 「🚗 のりもの・機械」に分類されていた。「🔥 熱・温度」へ移した。
+test("「氷が水に変わる」は「熱・温度」に分類され、「のりもの・機械」からは消えている(課題B)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // カタログのデータそのものの裏取り。
+  const heat = CATEGORIES.find((c) => c.id === "heat");
+  const machine = CATEGORIES.find((c) => c.id === "machine");
+  expect(heat?.experiments.some((e) => e.id === "d18b-ice-melts")).toBe(true);
+  expect(machine?.experiments.some((e) => e.id === "d18b-ice-melts")).toBe(false);
+
+  // 実際にそのタブから見つかることを画面で確かめる。
+  await page.keyboard.press("Control+k");
+  await page.click('[data-category-id="heat"]');
+  await expect(
+    page.locator('.palette-row[data-experiment-id="d18b-ice-melts"]'),
+  ).toBeVisible();
+  await page.click('[data-category-id="heat"]'); // フィルタ解除
+  await page.click('[data-category-id="machine"]');
+  await expect(
+    page.locator('.palette-row[data-experiment-id="d18b-ice-melts"]'),
+  ).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+/**
+ * ボディの中心をワールド座標から画面座標(CSSピクセル)へ投影する。
+ * `bodyOnScreen`/`cameraToLastBody`と同じ、テスト専用に露出された
+ * `window.__camera`/`window.__world`を使う投影計算(このファイル冒頭の
+ * doc参照)。実際にクリックする画面座標を作るための版(あちらは画角内かの
+ * 判定のみ)。
+ */
+async function screenPointForBody(
+  page: Page,
+  bodyIndex: number,
+): Promise<{ x: number; y: number }> {
+  return page.evaluate((index) => {
+    const cam = (window as unknown as {
+      __camera: {
+        matrixWorldInverse: { elements: number[] };
+        projectionMatrix: { elements: number[] };
+      };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: { body_position_at_f32(index: number): Float32Array };
+    }).__world;
+    const p = world.body_position_at_f32(index);
+    const mulMat4Vec4 = (e: number[], v: number[]) => {
+      const out = [0, 0, 0, 0];
+      for (let r = 0; r < 4; r += 1) {
+        out[r] = e[r] * v[0] + e[4 + r] * v[1] + e[8 + r] * v[2] + e[12 + r] * v[3];
+      }
+      return out;
+    };
+    const view = mulMat4Vec4(cam.matrixWorldInverse.elements, [p[0], p[1], p[2], 1]);
+    const clip = mulMat4Vec4(cam.projectionMatrix.elements, view);
+    const ndcX = clip[0] / clip[3];
+    const ndcY = clip[1] / clip[3];
+    const canvas = document.querySelector("canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (ndcX * 0.5 + 0.5) * rect.width + rect.left,
+      y: (-ndcY * 0.5 + 0.5) * rect.height + rect.top,
+    };
+  }, bodyIndex);
+}
+
+// 課題A: 「坂はすべる? 止まる?」の箱をクリックしても「選んだもの」が出な
+// かった。実測すると、稜線を足す`addEdgeLines`が付けた`THREE.LineSegments`
+// (面と同じ位置にある、見た目だけの飾り)が`raycaster.intersectObjects`の
+// 既定(再帰的)に拾われ、既定の太さ判定(ワールド座標で1m)のせいで面より
+// **近い**当たりとして割り込んでいた。`hitTest`はいちばん近い当たりの持ち主を
+// `pickables`から探すが、稜線は登録されていないため見つからず、当たっている
+// のに`null`を返して黙って何も起きなかった(利用者役の観察の再現)。
+// 稜線の当たり判定を切り、`hitTest`が親を辿って持ち主を探すようにして直した。
+test("坂の実験で、箱をクリックすると「選んだもの」が出る(課題A)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  // 再生中のクリックと、とめてからのクリックの両方(利用者役の実測の表と
+  // 同じ2条件)。毎回、実験を選び直してまっさらな状態(未選択)から試す。
+  for (const playing of [true, false]) {
+    await page.keyboard.press("Control+k");
+    await page.click('.palette-row[data-experiment-id="d5-incline"]');
+    await page.waitForTimeout(800);
+
+    const playBtn = page.locator("#btn-run");
+    const isPlaying = (await playBtn.getAttribute("data-playing")) === "true";
+    if (isPlaying !== playing) await playBtn.click();
+    await page.waitForTimeout(150);
+
+    const point = await screenPointForBody(page, 1); // index 1 = box
+    await page.mouse.click(point.x, point.y);
+    await page.waitForTimeout(300);
+    await expect(page.locator('.card[data-card="focus"]')).toHaveCount(1);
+    await expect(page.locator('.card[data-card="focus"]')).toContainText("box");
+  }
+  expect(errors).toEqual([]);
+});
+
+// 他の実験でクリック選択が壊れていないことの確認(課題Aの回帰防止)。
+// ボール落下・積み木・跳ねるボール——いずれも「選んだもの」札が出る。
+for (const [id, bodyLabel] of [
+  ["d1-free-fall", "ball"],
+  ["d4-box-stack", "box"],
+  ["d3-bounce", "ball"],
+] as const) {
+  test(`${id} で、動く物をクリックすると「選んだもの」が出る(課題Aの回帰防止)`, async ({ page }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(800);
+
+    const playBtn = page.locator("#btn-run");
+    if ((await playBtn.getAttribute("data-playing")) === "true") await playBtn.click();
+    await page.waitForTimeout(150);
+
+    const point = await screenPointForBody(page, 1); // index 0 = 床、1 = 動く物
+    await page.mouse.click(point.x, point.y);
+    await page.waitForTimeout(300);
+    await expect(page.locator('.card[data-card="focus"]')).toHaveCount(1);
+    await expect(page.locator('.card[data-card="focus"]')).toContainText(bodyLabel);
+    expect(errors).toEqual([]);
+  });
+}
+
+// 課題B: 「箱の材質」ボタン(鋼・ゴム・木・氷・発泡スチロール・アルミ)は
+// どれがよく滑るのかが画面のどこにも書いておらず、利用者は「氷が滑りやすい
+// だろう」と勘で選ぶしかなかった。数値をでっち上げず、アプリが実際に使って
+// いる摩擦係数(Rust側の材質DB、`material_properties_f64`)をボタンへ添えた。
+test("材質ボタンに、実際の摩擦係数が添えてある(課題B)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d5-incline"]');
+  await page.waitForTimeout(500);
+
+  const buttons = page.locator("#knob-material .knob-choice-btn");
+  await expect(buttons).toHaveCount(6);
+
+  // 6つとも、でっち上げでない実数(data-friction、`materialFriction`が
+  // 返した値)を持っている。
+  const frictions: Record<string, number> = {};
+  const count = await buttons.count();
+  for (let i = 0; i < count; i += 1) {
+    const btn = buttons.nth(i);
+    const label = (await btn.textContent()) ?? "";
+    const raw = await btn.getAttribute("data-friction");
+    expect(raw).not.toBeNull();
+    const value = Number.parseFloat(raw ?? "NaN");
+    expect(Number.isFinite(value)).toBe(true);
+    // ボタンの文字にも同じ値が(小数第2位で)見えている。
+    expect(label).toContain(value.toFixed(2));
+    frictions[label] = value;
+  }
+
+  // 実測(進行管理役の裏取り): 氷がいちばん摩擦係数が小さく(=いちばん
+  // よく滑り)、ゴムがいちばん大きい(=いちばん滑りにくい)。
+  const iceEntry = Object.entries(frictions).find(([label]) => label.includes("氷"));
+  const rubberEntry = Object.entries(frictions).find(([label]) => label.includes("ゴム"));
+  expect(iceEntry).toBeDefined();
+  expect(rubberEntry).toBeDefined();
+  const allValues = Object.values(frictions);
+  expect(iceEntry![1]).toBe(Math.min(...allValues));
+  expect(iceEntry![1]).toBeLessThan(rubberEntry![1]);
+
+  // 数字の読み方が、既存の一言補足の隣に短く添えてある。
+  const hint = page.locator('[data-knob-id="material"] .knob-hint');
+  await expect(hint).toContainText("重さ・跳ね返り・すべりやすさが一度に変わります");
+  await expect(hint).toContainText("小さいほどよく滑ります");
+  expect(errors).toEqual([]);
+});
+
+// 課題A(利用者役の報告): 「モーター」という名前から「回り続ける」動きを
+// 期待して置いたのに、実際は目標角度まで振れてそこで止まる(サーボと同じ)
+// 動きだった。物理は変えず(回り続けるようにするのは受け入れテストに
+// 関わる別件)、実際の動きを置いた直後に言葉で伝える。
+test("モーターを追加すると、回り続けないことがその場で分かる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "モーター");
+
+  // 置いた直後のトーストで、実際の動き(角度まで動いて止まる)と
+  // 「⟳ モーター切替」が何をするボタンなのかが分かる。
+  const toast = page.locator(".toast-message");
+  await expect(toast).toContainText("回り続ける");
+  await expect(toast).toContainText("止まります");
+  await expect(toast).toContainText("モーター切替");
+
+  // ツールバーのボタン自体にも「回り続けない」ことが書いてある(押す前に
+  // 分かる、ホバーだけに頼らない)。
+  await expect(page.locator("#btn-motor-toggle")).toContainText("0°⇔90°");
+  expect(errors).toEqual([]);
+});
+
+/**
+ * 流体粒子(全体)のバウンディングボックスを、画面座標(CSSピクセル)での
+ * 対角の大きさへ投影する。`bodyOnScreen`/`screenPointForBody`と同じ、
+ * テスト専用に露出された`window.__camera`/`window.__world`を使う投影計算
+ * (このファイル冒頭付近のdoc参照)——「見えているか」ではなく「どれだけの
+ * 大きさに見えているか」を測る版。
+ */
+async function fluidProjectedDiagonalPx(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: {
+        matrixWorldInverse: { elements: number[] };
+        projectionMatrix: { elements: number[] };
+      };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(kind: string, arg: string): string;
+        fluid_particle_positions_f32(): Float32Array;
+      };
+    }).__world;
+    const count = Number(world.read_component("fluid_particle_count", ""));
+    const pos = world.fluid_particle_positions_f32();
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < count; i += 1) {
+      const x = pos[i * 3];
+      const y = pos[i * 3 + 1];
+      const z = pos[i * 3 + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    const mulMat4Vec4 = (e: number[], v: number[]) => {
+      const out = [0, 0, 0, 0];
+      for (let r = 0; r < 4; r += 1) {
+        out[r] = e[r] * v[0] + e[4 + r] * v[1] + e[8 + r] * v[2] + e[12 + r] * v[3];
+      }
+      return out;
+    };
+    const canvas = document.querySelector("canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    const project = (x: number, y: number, z: number) => {
+      const view = mulMat4Vec4(cam.matrixWorldInverse.elements, [x, y, z, 1]);
+      const clip = mulMat4Vec4(cam.projectionMatrix.elements, view);
+      const ndcX = clip[0] / clip[3];
+      const ndcY = clip[1] / clip[3];
+      return {
+        x: (ndcX * 0.5 + 0.5) * rect.width,
+        y: (-ndcY * 0.5 + 0.5) * rect.height,
+      };
+    };
+    const p0 = project(minX, minY, minZ);
+    const p1 = project(maxX, maxY, maxZ);
+    return Math.hypot(p1.x - p0.x, p1.y - p0.y);
+  });
+}
+
+// 課題B(利用者役の報告): 「＋ 流体」を置くと物理的には生成されるが、
+// 既定のカメラ距離では1〜2ピクセルの点にしか見えず、「置けたこと」が
+// 画面から読めなかった。ボディのスポーンと同じ理由で、画面にちゃんと
+// 入っていないときだけ画角を寄せる。
+test("流体を追加すると、置いた直後から画面でちゃんと見える大きさになる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "流体");
+  await page.waitForTimeout(300);
+
+  // 直したのは「1〜2ピクセルの点」——十分大きな余裕を見て、1桁ピクセルより
+  // はっきり大きいことだけを求める(画角の細かい合わせ方までは縛らない)。
+  const diagonal = await fluidProjectedDiagonalPx(page);
+  expect(diagonal).toBeGreaterThan(15);
+  expect(errors).toEqual([]);
+});
+
+// 課題B(利用者役の報告)続き: 一覧の「Fluids」をクリックしてもInspectorが
+// 「まだ何も選んでいません」のままで、押しても何も起きなかった。個々の
+// 粒子や塊は(SPH流体がボディのような個別IDを持たないため)他のボディと
+// 同じInspectorでは選べないが、それは「押しても無反応」の理由にはならない
+// ——せめて数量が読め、選べない理由も画面で言う。
+test("Fluidsの一覧行を選ぶと、数量と選べない理由が読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "流体");
+  await page.waitForTimeout(200);
+
+  const fluidRow = page.locator("#hierarchy-tree li", { hasText: "Fluids" }).last();
+  await fluidRow.click();
+
+  const inspector = page.locator("#inspector-body");
+  await expect(inspector).not.toContainText("まだ何も選んでいません");
+  await expect(inspector).toContainText("水塊の数");
+  await expect(inspector).toContainText("総粒子数");
+  await expect(inspector).toContainText("選べません");
+  // クリックした行自体も「選んだ」見た目になる(押しても無反応、をやめた証拠)。
+  await expect(fluidRow).toHaveClass(/selected/);
+  expect(errors).toEqual([]);
+});
+
+// 課題C(利用者役の報告): 「まだ何も選んでいません」に出る個数が、消した
+// はずのボディを数え続けていた(`remove_body_at`はindexのずれを避けるため
+// スロットを残すだけなので、生死問わず数える`body_count`をそのまま出すと
+// 消した分だけ多く見える)。画面に出す個数は、いま生きている物の数にする。
+test("消した物のあとの個数表示は、生きている数だけを数える", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene"); // ground だけの場面。
+  await addViaMenu(page, "箱");
+  await page.waitForTimeout(200);
+
+  const box = page.locator("#hierarchy-tree .tree-body", { hasText: "箱" });
+  await box.click({ button: "right" });
+  await page.locator("#context-menu button", { hasText: "削除" }).first().click();
+  await page.waitForTimeout(200);
+
+  // 生きているボディは ground だけ(1体)。
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+
+  // 選択を解いて、空状態の個数表示を見る——消した箱を含めた「2」ではなく
+  // 「1」でなければならない。
+  await page.click("#btn-clear-selection");
+  await expect(page.locator("#inspector-body")).toContainText("1 個あります");
+  await expect(page.locator("#inspector-body")).not.toContainText("2 個あります");
+  expect(errors).toEqual([]);
+});
+
+// **課題2(進行管理役の実測)**: 置いた物が、他の物が遠くにあると豆粒にしか
+// ならない不具合。`d1-free-fall`を粒度2「しらべる」で開き、右クリックで
+// 2個目の球を置いたところ、既存の球が遠く(実測: 距離47.3m)へ落ちて
+// 止まっていたため、`frameCameraOnContent`が両方を入れる画角に引いてしまい、
+// 新しい球は見かけの直径9.9pxにしかならなかった(「置いたのに何も起きな
+// かった」と読まれて当然の大きさ)。ここでは同じ状況(遠くに他の物がある
+// 場面で新しく1個置く)を、粒度3「つくる」の数値欄で確実に再現する。
+test("置いた物は、他の物が遠くにあっても十分な大きさで見える(実測: 修正前は距離47.3m・直径9.9px)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  // 1個目を置いて、進行管理役の実測と同じ桁(30〜40m)まで遠ざける
+  // ——`contentBoundingBox`がこれも含めて画角を決める、「他の遠い物」役。
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+  await page.locator("#focus-pos-x").fill("40");
+  await page.locator("#focus-pos-y").fill("0.4");
+  const farZ = page.locator("#focus-pos-z");
+  await farZ.fill("40");
+  // **`dispatchEvent("change")` ではなく `Tab` で本物のフォーカス移動を
+  // 起こして確定させる**。手で `dispatchEvent` すると、ブラウザ内部の
+  // 「まだ確定していない」という印は消えないまま残り、この直後に別の要素
+  // (下の2個目のスポーンボタン)をクリックしてフォーカスを奪った瞬間、
+  // ブラウザが**もう一度**本物の`change`を同じ値で発火させてしまう
+  // (実測で踏んだ: この2回目の`change`が`setBodyPosition`をもう一度呼び、
+  // そちらの可視性フォールバックが1個目に画角を引き戻して、この後の
+  // 「2個目が見える」検証を汚染していた)。`Tab`ならその場で一度だけ確定する。
+  await farZ.press("Tab");
+  await page.waitForTimeout(500);
+
+  // 2個目を、進行管理役の実測と同じ状況(遠くに他の物がある場面)で置く。
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(500);
+
+  // 直近に置いた物(2個目)が、十分な大きさで見えること。しきい値は
+  // 「読める点」との境目として安全側の40pxに取る(修正後の実測は250px前後、
+  // 修正前の実測は9.9px)。
+  const diameter = await apparentSphereDiameterPx(page);
+  expect(diameter).toBeGreaterThan(40);
+  expect(errors).toEqual([]);
+});
+
+// **課題1・3・4(進行管理役の実測)**: 粒度2「しらべる」で`d1-free-fall`を
+// 開いた状態の再現。ツールバー(`#btn-add`)は畳まれているのに、「選んだ
+// もの」札の「🗑 これを消す」は選ぶだけで出る——**消す手段は見えるのに
+// 足す手段が見えない**という非対称。右クリックすれば実は置けるが、
+// 「ここに球を配置 (-20.30, -33.80)」のような生座標や「複合形状(L字)」
+// 「凸包メッシュ」のような内部語彙はこの粒度の人には読めない。置いた物の
+// 名前も`Sphere_2`という機械語のままだった。
+test("粒度2「しらべる」でも、足す手段が見つかり、置いた物の名前が読める", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // 実測どおりの前提: この粒度ではツールバーがまだ畳まれている。
+  await expect(page.locator("#toolbar")).toBeHidden();
+
+  // とめてから足す(物理が進んでいる最中の測定でぶれないように)。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  // ①「足す」導線が、この粒度でも見つかること(課題1)。
+  await expect(page.locator('.card[data-card="add-body"]')).toBeVisible();
+  const addButton = page.locator("#btn-add-body-card");
+  await expect(addButton).toBeVisible();
+  const before = await page.locator("#hierarchy-tree .tree-body").count();
+  await addButton.click();
+  await page.waitForTimeout(500);
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(before + 1);
+
+  // ②置いた物が、機械語(`Sphere_2`)ではなく読める名前で出ること——場面の
+  // 中身・パンくず・「選んだもの」札の3箇所(課題3)。
+  await expect(page.locator("#hierarchy-tree")).not.toContainText("Sphere_");
+  const crumb = page.locator("#crumb-body");
+  await expect(crumb).toBeVisible();
+  await expect(crumb).not.toContainText("Sphere_");
+  await expect(crumb).toContainText("球");
+  const focus = page.locator('.card[data-card="focus"]');
+  await expect(focus).toBeVisible();
+  await expect(focus).not.toContainText("Sphere_");
+  await expect(focus).toContainText("球");
+
+  // ③置いた物が、置いた本人に見える大きさになること(課題2、単独テストは
+  // 上の「置いた物は、他の物が遠くにあっても…」参照)。
+  expect(await apparentSphereDiameterPx(page)).toBeGreaterThan(40);
+
+  // ④右クリックのスポーンパレットも、この粒度では平易な言葉になっている
+  // こと——生座標・「複合形状(L字)」「凸包メッシュ」のような内部語彙は
+  // 出さない(「つくる」粒度専用のまま、課題4)。
+  const canvas = page.locator("#scene-view-canvas-host canvas").first();
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.6, {
+    button: "right",
+  });
+  const menu = page.locator("#context-menu");
+  await expect(menu).toBeVisible();
+  await expect(menu).toContainText("ここに球を置く");
+  await expect(menu).not.toContainText("複合形状");
+  await expect(menu).not.toContainText("凸包メッシュ");
+  await expect(menu).not.toContainText("配置 (");
+  await page.keyboard.press("Escape");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題6(進行管理役の実測)**: 上のテストは「とめてから足す」経路
+// (`#btn-run`を押して一時停止してから`#btn-add-body-card`を押す)しか通らず、
+// これは常に緑だった。ところが実際の不具合は**走らせたまま**足したときだけ
+// 起きる——`updateGuidedFollowCamera`が「置いたばかりの物」を見失わない
+// ようにする猶予を`performance.now()`との差(`RECENT_SPAWN_GUARD_MS`=1500ms)
+// で切っていたため、走行中は猶予が切れた瞬間に、まだ高い所から落ち続ける
+// 元の球を画角へ収めようとするアグリゲートな框付けへ引き戻される。
+// 実測(修正前、進行管理役):
+//   +0.9s 距離 5.9m 直径 79.6px  +1.7s 距離 7.6m 直径 61.3px
+//   +2.8s 距離32.7m 直径14.2px  +7.8s 距離44.3m 直径10.5px
+// 「置いた物が1秒半だけ見えて、また消える」——時間の長さをどれだけ伸ばしても
+// 同じ崖が来る(`cameraMovedSinceSpawn`のdoc参照)。ここでは走らせたまま足し、
+// 8秒後まで見失われないことを確かめる。
+test("走らせたまま足した球は、8秒後も見失われない(猶予を時間ではなく「まだ見ているか」で切る)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // **走らせたまま**(とめない)。実測の状況と同じく、元の球がある程度
+  // 落ちてから足す。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.waitForTimeout(1500);
+
+  const addButton = page.locator("#btn-add-body-card");
+  await expect(addButton).toBeVisible();
+  await addButton.click();
+  const t0 = Date.now();
+
+  // 修正後の実測(進行管理役): +0.9s/+1.7s/+2.8s/+7.8sのいずれも約172.9px
+  // (選択も保たれ、カメラも動かしていないため、`updateGuidedFollowCamera`の
+  // 「置いたばかりの物を見失わない」枠がそのまま効き続ける)。しきい値は
+  // 上の「置いた物は、他の物が遠くにあっても…」と同じ40px(「読める点」との
+  // 境目)に取る。
+  for (const checkpointSeconds of [0.9, 1.7, 2.8, 7.8]) {
+    const waitMs = checkpointSeconds * 1000 - (Date.now() - t0);
+    if (waitMs > 0) await page.waitForTimeout(waitMs);
+    const diameter = await apparentSphereDiameterPx(page);
+    expect(diameter, `+${checkpointSeconds}s time`).toBeGreaterThan(40);
+  }
+
+  expect(errors).toEqual([]);
+});
+
+// **課題6続き**: 上のガードは「選ばれている」「カメラを自分で動かしていない」
+// の2条件で保っている。どちらかが崩れたら、素直に「動く物ぜんぶを追う」既定
+// (=遠くに引くアグリゲートな框付け)に戻ることを確かめる——「選ぶと
+// ずっと特別扱いのまま」という別の不具合を作らないため。検証の手段として
+// 「カメラを合わせ直す」(`btn-refocus`)を使う理由は、テスト本体のコメント
+// (「もとはここで…」から始まる段落)を参照——「これを追いかける」
+// (`btn-follow-body`)は別タスクで「選んだ物を単独で追う」意味に直っており
+// (`main.ts`の`followSelectedBody`のdoc参照)、この検証にはもう使えない。
+test("自分でカメラを動かしたら、置いた物への特別扱いをやめて既定の追従に戻る", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.waitForTimeout(1500);
+
+  await page.click("#btn-add-body-card");
+  await page.waitForTimeout(500);
+  // ガードが効いている間は十分な大きさ(実測: 約172.9px)。
+  expect(await apparentSphereDiameterPx(page)).toBeGreaterThan(40);
+
+  // 自分でカメラを操作する(中ボタンドラッグ——左ボタンは選択・ギズモに
+  // 割り当て済みのため、既存の「一時停止中に自分でカメラを動かしても…」
+  // テストと同じ流儀を使う)。
+  const box = await page.locator("#scene-view-canvas-host").boundingBox();
+  if (!box) throw new Error("scene-view-canvas-host not found");
+  const cx = box.x + box.width / 2;
+  const cy = box.y + box.height / 2;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(cx + 150, cy - 60, { steps: 12 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForTimeout(1500); // 慣性(damping)が収まるまで。
+
+  // **ここで確かめたいのは「手を動かした後は片道スイッチが戻らない」ことで、
+  // ボタンを押すこと自体が目的ではない**。まず何も押さずに時間を進めるだけで
+  // 再現するか実測した——`__dbgCam`(`updateGuidedFollowCamera`のdocが出す
+  // デバッグログ)を20秒間観測しても0行のままで、`updateGuidedFollowCamera`
+  // 自体が一度も走っていないと確認できた。`orbit`の`start`イベントは
+  // `guidedFollowCamera`も`false`にする(操作を横取りしない、既存の設計)ため、
+  // 手を動かした後は**カメラがその場に凍結される**——直径は球がまだ落ち続けて
+  // いる間だけ変わり(172.9px→86px前後)、着地後は20秒待っても変化しない。
+  // つまり「何もしないで待つ」だけでは、アグリゲートな框付けへ戻る場面
+  // そのものが起きない。戻る場面を作るには、追従を再び起こす必要がある。
+  //
+  // **もとはここで`followCamera(true)`を呼ぶだけの「👀 これを追いかける」
+  // (`btn-follow-body`)を借りていた**——当時のこのボタンは「選んだ物」では
+  // なく「動く物ぜんぶ」を追う既定へ戻すだけで、ボタン名と挙動が食い違って
+  // いたので、「片道スイッチが解けていないなら、押しても選んだ物には戻らず
+  // アグリゲートな框付けのまま(=豆粒)」という**副作用**を検証手段として
+  // 使えた(進行管理役の指摘、2026-09-09)。
+  //
+  // **その食い違いを直す別タスクで`btn-follow-body`は「選んだ物を単独で
+  // 追わせる」ボタンになった**(`main.ts`の`followedBodyIndex`/
+  // `followSelectedBody`のdoc参照)——選んでいる球はここでもまだ選ばれた
+  // ままなので、いま`btn-follow-body`を押すと**明示的な指示**として
+  // `cameraMovedSinceSpawn`を意図的に解き、球へ単独で追従し直す(押すと
+  // 大きく見えるのが直った後の正しい姿で、この2本目のテストにとっては
+  // 「片道スイッチが解けないこと」の検証手段として使えなくなった、というだけ)。
+  // ここでは`btn-follow-body`の代わりに、選択の有無に関係なく常に出ている
+  // 「見え方」札の「👀 カメラを合わせ直す」(`btn-refocus`)を使う——中身は
+  // 変わらず`api.followCamera(true)`だけで、`followedBodyIndex`/
+  // `cameraMovedSinceSpawn`には一切触れない(`workspace.ts`の該当ボタン参照)。
+  // 実測: この置き換え後も、押すと直径は40px未満まで引く(下のアサーション)
+  // ——`cameraMovedSinceSpawn`の片道スイッチは`btn-refocus`のような素朴な
+  // 再追従では解けないことが、引き続き確かめられている。
+  await page.click("#btn-refocus");
+  await page.waitForTimeout(2000);
+  // 実測(進行管理役): ガード中172.9px→「カメラを合わせ直す」後、直径5.8px・
+  // 距離53.7mまで引く(`btn-follow-body`を借りていた頃と同じアグリゲートな
+  // 框付けに戻る——`api.followCamera(true)`の中身は変えていないため)。
+  // これは「片道スイッチが解けなかった」ことの確認であり、`btn-refocus`の
+  // 挙動を追認する意図ではない。
+  expect(await apparentSphereDiameterPx(page)).toBeLessThan(40);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題①(進行管理役の実測・スクリーンショットでの指摘、2026-09-09)**:
+// 「これを追いかける」を選んだ物へ向けて直した本編の検証が1本も無かった
+// (依頼にあった「`d24-car`で`wheel_fl`を選んで押したあと、注視点がその物の
+// そばに来て、距離が押す前より縮む」がテストとして残っていなかった)。加えて
+// 最初の直し方は、距離・注視点の数値こそ正しかったが、**カメラが車体
+// (chassis)の内側に入り込み、画面には地面の稜線しか映っていなかった**
+// (スクリーンショットで発覚)。距離・注視点だけを見るテストはこの不具合を
+// 見逃す(進行管理役の言葉で言えば「数値は完璧で画面は真っ暗」)ので、ここでは
+//   ①注視点がその物のそばに来て、距離が縮む(依頼の原文どおりの数値)
+//   ②「追っている物」より「すぐ隣の別の物(車体)」に近づいていないこと
+//     (埋まっていれば入れ替わる——実測: 壊れていたとき wheel=1.44m/
+//     chassis=1.19m、直した後 wheel=1.44m/chassis=2.51m)
+//   ③画面中心付近が単色でつぶれていないこと(`canvasCenterLuminanceStd`の
+//     doc参照——実測: 壊れていたとき標準偏差4.5、直した後20.9)
+// の3つを確かめる。②③は「距離だけでは見逃す」ことへの直接の対策。
+test("d24-carでwheel_flを選んで「これを追いかける」を押すと、そばへ寄り、車体の内側に埋まらない(課題①)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d24-car"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(3000); // 進行管理役の実測と同じく3秒走らせる。
+
+  // wheel_fl を選ぶ(ground=0, chassis=1, wheel_fl=2——`d24-car.json`の
+  // ボディ宣言順そのままで、Hierarchy の並びとも一致する)。
+  await page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_fl" }).click();
+  await page.waitForTimeout(300);
+
+  const readState = () =>
+    page.evaluate(() => {
+      const cam = (window as unknown as {
+        __camera: { position: { x: number; y: number; z: number } };
+      }).__camera;
+      const orbit = (window as unknown as {
+        __orbit: { target: { x: number; y: number; z: number } };
+      }).__orbit;
+      const world = (window as unknown as {
+        __world: { body_position_at_f32(index: number): Float32Array };
+      }).__world;
+      // `body_position_at_f32`はwasm側の使い回しバッファを指すことがあるので、
+      // 呼ぶたびに`Array.from`でコピーしてから次を呼ぶ(2本目の呼び出しが
+      // 1本目の配列の中身まで書き換えてしまう実測ずみの落とし穴)。
+      const wheel = Array.from(world.body_position_at_f32(2));
+      const chassis = Array.from(world.body_position_at_f32(1));
+      const camPos = [cam.position.x, cam.position.y, cam.position.z];
+      const target = [orbit.target.x, orbit.target.y, orbit.target.z];
+      const dist = (a: number[], b: number[]) =>
+        Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+      return {
+        camToWheel: dist(camPos, wheel),
+        camToChassis: dist(camPos, chassis),
+        camToTarget: dist(camPos, target),
+        targetToWheel: dist(target, wheel),
+      };
+    });
+
+  const before = await readState();
+
+  await page.click("#btn-follow-body");
+  await page.waitForTimeout(1000);
+
+  const after = await readState();
+
+  // ①依頼の原文どおり: 注視点がその物のそばに来て、距離が押す前より縮む。
+  expect(after.targetToWheel, "注視点とwheel_flの距離").toBeLessThan(0.5);
+  expect(after.camToTarget, "押した後のカメラ距離").toBeLessThan(before.camToTarget);
+
+  // ②課題①: 埋まっていれば、追っているはずのwheel_flより車体に近づく
+  // (=不等号が逆転する)。
+  expect(after.camToWheel, "カメラ—wheel_fl 距離").toBeLessThan(after.camToChassis);
+
+  // ③課題①: 画面中心付近が単色でつぶれていないこと。
+  const std = await canvasCenterLuminanceStd(page);
+  expect(std, "画面中心付近の輝度の標準偏差").toBeGreaterThan(8);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題2(進行管理役の実測)**: Hierarchy(場面の中身)はCtrl+クリックで
+// 複数選択できる(`.selected`/`.multi-selected`のクラスは両方に付く)のに、
+// 「これを追いかける」は最後にクリックした1件しか渡さず、もう1件は追わずに
+// 置き去りにしていた(実測: `d24-car`で`wheel_fl`→Ctrl+クリックで`wheel_rr`
+// を選んで押すと、「選んだもの」札は「wheel_rr」だけになり、押した後の距離は
+// wheel_rr 1.44m・wheel_fl 3.63mと片方しか寄らなかった)。
+//
+// ここでは
+//   ①Hierarchyの印(`.selected`/`.multi-selected`)が両方に付くこと(既存の
+//     複数選択そのものは壊れていないことの確認)
+//   ②「選んだもの」札の見出しが2件選ばれていることを言うこと
+//   ③押したあと、**両方**が画面に入り、どちらも見かけの直径が十分
+//     (既存テストと同じ40px超えの基準)であること
+//   ④画面中心付近が単色でつぶれていないこと(単独選択のテストと同じ観点)
+// を確かめる。
+test("d24-carでwheel_flとwheel_rrをCtrl+クリックで選んで「これを追いかける」を押すと、両方とも画面に十分な大きさで入る(課題2)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2); // しらべる(進行管理役の実測と同じ粒度)。
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d24-car"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(3000); // 進行管理役の実測と同じく3秒走らせる。
+
+  // wheel_fl(index 2)を選び、Ctrl+クリックで wheel_rr(index 5)を足す
+  // (`d24-car.json`のボディ宣言順=Hierarchyの並び: ground=0, chassis=1,
+  // wheel_fl=2, wheel_fr=3, wheel_rl=4, wheel_rr=5)。
+  //
+  // **修飾キーは`ControlOrMeta`で書く**(Linux/Windowsでは Ctrl、macOSでは ⌘)。
+  // `"Control"`固定だと**macOSのCIだけが落ちる**——macOSではControl+クリックが
+  // OSレベルで「副ボタンのクリック」として扱われ、`click`ではなく`contextmenu`
+  // が飛ぶため、行の右クリックハンドラ(選択に入っていない行なら選択をそこへ
+  // 移す)が走って複数選択が成立しない。実測(CI macos-latest、`4aa2dc2`):
+  // `wheel_fl`の class が `tree-selectable tree-body` のまま
+  // (`multi-selected`が付かない)で落ちた。画面の説明も「Ctrl / ⌘ + クリック」
+  // と両方を案内しており(`main.ts`のショートカット表)、アプリ側は
+  // `event.ctrlKey || event.metaKey` の両方を受けるので、テストだけが
+  // 片方の綴りに固定されていたのが誤り。
+  await page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_fl" }).click();
+  await page.waitForTimeout(200);
+  await page
+    .locator("#hierarchy-tree .tree-body", { hasText: "wheel_rr" })
+    .click({ modifiers: ["ControlOrMeta"] });
+  await page.waitForTimeout(200);
+
+  // ①複数選択そのものは既存どおり壊れていないこと。
+  const flRow = page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_fl" });
+  const rrRow = page.locator("#hierarchy-tree .tree-body", { hasText: "wheel_rr" });
+  await expect(rrRow).toHaveClass(/selected/);
+  await expect(flRow).toHaveClass(/multi-selected/);
+
+  // ②「選んだもの」札が2件選ばれていることを言うこと(1件だけのときの
+  // 既存の見出し「選んだもの — <名前>」を壊さず、件数だけ足す)。
+  await expect(page.locator('[data-card="focus"] .card-title')).toHaveText(
+    "選んだもの — wheel_rr ほか1件",
+  );
+
+  await page.click("#btn-follow-body");
+  await page.waitForTimeout(1000);
+
+  // ③両方とも画面に十分な大きさで入ること(既存の単独選択テストと同じ
+  // 40pxの基準——両輪とも半径0.32m)。
+  const flDiameter = await apparentDiameterPxOf(page, 2, 0.32);
+  const rrDiameter = await apparentDiameterPxOf(page, 5, 0.32);
+  expect(flDiameter, "wheel_flの見かけの直径[px]").toBeGreaterThan(40);
+  expect(rrDiameter, "wheel_rrの見かけの直径[px]").toBeGreaterThan(40);
+
+  // ④画面中心付近が単色でつぶれていないこと(単独選択の課題①テストと同じ観点)。
+  const std = await canvasCenterLuminanceStd(page);
+  expect(std, "画面中心付近の輝度の標準偏差").toBeGreaterThan(8);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(進行管理役の実測)**: 物を置くとその物が自動で選ばれ、下へ伸びる
+// 「選んだもの」札へ画面が寄る。以前は保存カードがその札より**前**に並んで
+// いたため、保存ボタンは視界の**上**へ押し出され、下へスクロールしても
+// 永遠に出てこなかった。実測(粒度3・新規シーン・箱4つ・1つ選択中):
+//
+//   直す前   保存ボタン top =   7px / 列の見える範囲 133〜542px
+//            列の scrollTop = 575、下方向の残りは 41px だけ → 出てこない
+//   直した後 保存ボタン top = 639px(=下にはみ出す側)
+//            列の scrollTop = 410、下方向の残りは 206px → 200px 1回で見える
+//
+// いちばん保存したい瞬間——作り終えた直後——は必ず何かが選ばれているので、
+// 「下へスクロールすれば出てくる」という自然な向きに揃っていることが要る。
+// **`locator.click()` は自動でスクロールするので「押せる=見えている」では
+// ない**(過去にこれで見逃した)。座標で確かめる。
+test("物を選んだままでも、「この場面を保存する」がスクロールせずに見えている", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  for (let i = 0; i < 4; i++) {
+    await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+    await page.waitForTimeout(200);
+  }
+  // 置いた物が選ばれている(=「選んだもの」札が出ている)状態であること。
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+
+  const geometry = () =>
+    page.evaluate(() => {
+      const save = document.getElementById("btn-save-scene");
+      const column = document.getElementById("context");
+      if (!save || !column) return null;
+      const s = save.getBoundingClientRect();
+      const c = column.getBoundingClientRect();
+      return {
+        saveTop: s.top,
+        columnTop: c.top,
+        columnBottom: c.bottom,
+        scrollTop: column.scrollTop,
+        scrollMax: column.scrollHeight - column.clientHeight,
+        visible: s.top >= c.top && s.bottom <= c.bottom,
+      };
+    });
+
+  const before = await geometry();
+  expect(before).not.toBeNull();
+  // **一度もスクロールせずに見えていること**。並び順を直した段階では
+  // 「下へ200px送れば出てくる」止まりで、作り終えたその瞬間にはまだ画面の外に
+  // いた——柱の下端に貼り付けて、送らなくても目に入るようにした
+  // (`style.css` の `#context .card[data-card="my-scenes"]` のdoc参照)。
+  expect(before!.visible, "スクロールせずに保存ボタンが見えている").toBe(true);
+
+  // 下端まで送っても、貼り付いたまま見えている(送ると隠れる、の逆も無い)。
+  await page.evaluate(() => {
+    const column = document.getElementById("context")!;
+    column.scrollTop = column.scrollHeight;
+  });
+  await page.waitForTimeout(200);
+  const after = await geometry();
+  expect(after!.visible, "下端まで送っても保存ボタンが見えている").toBe(true);
+
+  // **重ねて貼り付けていない**こと。`position: sticky` で重ねていたときは、
+  // この札の高さ(実測 158px)ぶんだけ下の中身が永久に隠れ、「選んだもの」札の
+  // 「🗑 これを消す」が実マウスで押せなくなっていた(Windows の CI で再発)。
+  // スクロールする器の**外**に置いてあれば、重なりようがない。
+  const layout = await page.evaluate(() => {
+    // スクロールする器は `#context-scroll`(札と Inspector をひと続きに
+    // 流す、`style.css` の doc 参照)。重なりはこの器と下端の器で見る。
+    const scroller = document.getElementById("context-scroll")!;
+    const footer = document.getElementById("context-footer")!;
+    const b = scroller.getBoundingClientRect();
+    const f = footer.getBoundingClientRect();
+    return {
+      saveInsideScroller: scroller.contains(document.getElementById("btn-save-scene")),
+      overlapPx: Math.max(0, Math.min(b.bottom, f.bottom) - Math.max(b.top, f.top)),
+    };
+  });
+  expect(layout.saveInsideScroller, "保存する札はスクロールする器の外にある").toBe(false);
+  expect(layout.overlapPx, "下端の器が、スクロールする器に重なっていない").toBeLessThanOrEqual(1);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(進行管理役の実測)**: 取り消しの記録はギズモのドラッグだけが積んで
+// おり、**数値で打ち替えた置き場所・向きは戻せなかった**(実測: 箱を置いて
+// x を 1.500 → 10.000 に打ち替えたあと、`#btn-undo` は disabled のまま)。
+// 座標を打ち込んで組み立てる人には、戻す手段が一つも無かった。
+test("数値で打ち替えた置き場所も、「動かしたのを戻す」で戻せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+
+  const x = () => page.locator("#focus-pos-x").inputValue();
+  const before = await x();
+  expect(Number.parseFloat(before)).not.toBeNaN();
+
+  await page.locator("#focus-pos-x").fill("10");
+  await page.locator("#focus-pos-x").press("Tab");
+  await expect.poll(x, { timeout: 10_000 }).toBe("10.000");
+
+  // 打ち替えたことで「戻す」が押せるようになる(以前はここが disabled だった)。
+  await expect(page.locator("#btn-undo")).toBeEnabled();
+  await page.click("#btn-undo");
+  await expect.poll(x, { timeout: 10_000 }).toBe(before);
+  expect(errors).toEqual([]);
+});
+
+// **課題(進行管理役の実測)**: 自分で置いた物に選べる材質は4種類(鋼・アルミ・
+// 木・ゴム)だけだった。一方、物性を持っている Rust 側の材質DBには13種類あり、
+// 見た目の色も13種類ぶん用意されていた——**持っているのに選ばせていなかった**。
+// 利用者役(「いくつもの物を組み合わせて、それらしい世界を組み上げたい」人)の
+// 観察:「材質は4種類のみで、色も決まっていた。自由な色や質感を選べる場所は
+// 見つけられなかった」。固体の11種類まで広げる(流体である「水」「空気」は
+// 別の道具があるので外す、`SPAWN_MATERIALS`のdoc参照)。
+test("自分で置いた物は、色も重さも違う材質から選べる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-material")).toBeVisible();
+
+  const options = await page.locator("#focus-material option").allTextContents();
+  // 4種類しか無かった頃には決して満たせない条件。個々の名前ではなく
+  // 「流体以外はひととおり選べる」ことを見る。
+  expect(options.length).toBeGreaterThan(8);
+  for (const name of ["ガラス", "銅", "発泡スチロール", "氷(0°C)"]) {
+    expect(options, `${name} が選べる`).toContain(name);
+  }
+  // 流体は固体の塊として置けないので、ここには出さない。
+  expect(options).not.toContain("水");
+  expect(options).not.toContain("空気");
+
+  // 実際に選ぶと、**画面の色**と**重さ**の両方が変わる(見た目と手触りが
+  // 食い違わない)。実測: 鋼 #9aa3ad / 4019.200 kg → 発泡スチロール
+  // #f0f0ea / 15.360 kg。
+  const drawnColor = () =>
+    page.evaluate(() => {
+      const meshFor = (window as unknown as {
+        __bodyMeshFor?: (i: number) => { traverse(cb: (o: unknown) => void): void } | undefined;
+      }).__bodyMeshFor;
+      const world = (window as unknown as {
+        __world: { read_component(k: string, a: string): string };
+      }).__world;
+      if (!meshFor) return null;
+      const mesh = meshFor(Number(world.read_component("body_count", "")) - 1);
+      if (!mesh) return null;
+      let hex: string | null = null;
+      mesh.traverse((object) => {
+        const m = object as { isMesh?: boolean; material?: { color?: { getHexString(): string } } };
+        if (m.isMesh && m.material?.color && hex === null) hex = m.material.color.getHexString();
+      });
+      return hex;
+    });
+  const massText = () => page.locator('.card[data-card="focus"] dd').nth(1).textContent();
+
+  const steelColor = await drawnColor();
+  const steelMass = Number.parseFloat((await massText()) ?? "0");
+  expect(steelColor).not.toBeNull();
+
+  await page.locator("#focus-material").selectOption("発泡スチロール");
+  await expect
+    .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
+    .toBe("発泡スチロール");
+  await expect.poll(drawnColor, { timeout: 10_000 }).not.toBe(steelColor);
+  const foamMass = Number.parseFloat((await massText()) ?? "0");
+  expect(foamMass, "発泡スチロールは鋼よりずっと軽い").toBeLessThan(steelMass / 10);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の報告、進行管理役の実測)**: いちばん浅い粒度
+// 「みる」で開くと、説明文がグラフを断定形で指しているのに、そのグラフが画面に
+// 無い実験があった。実測(粒度「みる」で開き、`#probe-graphs` が見えているかと
+// 説明文がグラフに言及するかを数えた):
+//
+//   d34-solar-system  グラフ無し  「グラフの波 1 つが 1 年です」
+//   d20-generator     グラフ無し  「見どころは下の数値とグラフ。」
+//   d14/d15/d19/d36   同じ形の食い違い
+//
+// `view: "graph"` と宣言した実験は、書いた人が「ここはグラフが本体だ」と
+// 言っているのだから、いちばん浅い見方を選んだ人にこそ最初から見えているべき
+// (`shouldForceAnalysisOpen` の doc 参照)。
+for (const id of ["d34-solar-system", "d20-generator", "d7-terminal", "d38-two-balls"]) {
+  test(`「みる」のままでも、グラフが本体の実験(${id})はグラフが出ている`, async ({
+    page,
+  }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+    await setGrain(page, 0); // みる
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+    await expect(page.locator("#probe-graphs")).toBeVisible({ timeout: 10_000 });
+    // **ダイヤルは「みる」のまま**——グラフの段だけが開く旗なので、粒度そのもの
+    // (＝つまみ・一覧・道具)は連れてこない(`#app` の `data-grain` が
+    // いちばん浅い `watch` のままであることで見る)。
+    await expect(page.locator("#app")).toHaveAttribute("data-grain", "watch");
+    await expect(page.locator("#hierarchy")).toBeHidden();
+    await expect(page.locator("#toolbar")).toBeHidden();
+    expect(errors).toEqual([]);
+  });
+}
+
+// 逆に、3D が見どころの実験では「みる」でグラフを開かない(道具を勝手に
+// 増やさない)。文章の側も、出ていないものを断定形で指さない。
+test("「みる」では、3Dが見どころの実験のグラフは開かないし、文章もそれを断定しない", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d3-bounce"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(1_000);
+
+  await expect(page.locator("#probe-graphs")).toBeHidden();
+  const watch = (await page.locator('.card[data-card="watch"]').textContent()) ?? "";
+  // 「グラフの山の高さが…低くなっていきます」のような**断定**はしない。
+  // 触れるなら、出し方を添える形で。**指す先は画面に在る物の名前**にする
+  // ——以前は「ダイヤルを右へ回すと」と書いていたが、丸いダイヤルは画面の
+  // どこにも無く(実物は右上の「画面の詳しさ」の帯)、利用者役は探して
+  // 見つけられなかった。
+  if (watch.includes("グラフ")) {
+    expect(watch, "グラフに触れるなら、出し方を添える").toContain("「画面の詳しさ」");
+    expect(watch, "画面に無い物(ダイヤル)を指さない").not.toContain("ダイヤル");
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「さわる」の報告、進行管理役の実測)**: 「選んだもの」札は
+// 「坂として使うには、向きを 20〜40 度にしたうえで、下の『動き方』を
+// 『動かない(Static)』にしてください」と**名指しで操作を勧める**のに、その
+// 「動き方」は Inspector(粒度2.0〜)にしか無く、この札が出る「さわる」では
+// まだ畳まれていた。実測: 札はこの文を出す一方、`#inspector` は非表示。
+test("「さわる」でも、札が勧める「動き方」がその場で変えられる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1); // さわる
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d5-incline"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(1_200);
+
+  // この粒度では一覧もInspectorもまだ出ていない——舞台を直接クリックして選ぶ。
+  const box = (await page.locator("#scene-view-canvas-host canvas").first().boundingBox())!;
+  for (const [fx, fy] of [[0.5, 0.55], [0.5, 0.45], [0.45, 0.6]]) {
+    await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy);
+    await page.waitForTimeout(400);
+    if ((await page.locator('.card[data-card="focus"]').count()) > 0) break;
+  }
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  await expect(page.locator("#inspector")).toBeHidden(); // 勧められた先は畳まれたまま
+
+  const motion = page.locator("#focus-motion");
+  await expect(motion).toBeVisible();
+  await motion.selectOption("Static");
+  // 選んだ値がそのまま残る(次のstepまで world は前の値を返すので、戻って
+  // 見えないこと)。
+  await expect.poll(async () => motion.inputValue(), { timeout: 10_000 }).toBe("Static");
+  // ワールド側も実際に「動かない」になっている。
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => {
+          const w = (window as unknown as {
+            __world: { read_component(k: string, a: string): string };
+          }).__world;
+          const n = Number(w.read_component("body_count", ""));
+          for (let i = 0; i < n; i++) {
+            if (w.read_component("body_label_at", String(i)) === "box") {
+              return w.read_component("body_type_at", String(i));
+            }
+          }
+          return "";
+        }),
+      { timeout: 10_000 },
+    )
+    .toBe("Static");
+  expect(errors).toEqual([]);
+});
+
+// **課題(同上)**: 材質は走っている間は変えられないのに、**選んだあとで初めて**
+// 「とめている間だけ変えられます」と出ていた。実測(走らせたまま球を選んで
+// 「ゴム(天然)」を選択): 表示は「コンクリート」のまま、重さも動かず。
+// 押したのに何も起きない画面は「壊れている」と読まれる。
+test("走っている間は材質を選べず、その理由が押す前に読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForTimeout(1_200);
+  const box = (await page.locator("#scene-view-canvas-host canvas").first().boundingBox())!;
+  for (const [fx, fy] of [[0.5, 0.5], [0.5, 0.45], [0.5, 0.6]]) {
+    await page.mouse.click(box.x + box.width * fx, box.y + box.height * fy);
+    await page.waitForTimeout(400);
+    if ((await page.locator("#focus-material").count()) > 0) break;
+  }
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect(page.locator("#focus-material")).toBeDisabled();
+  await expect(page.locator("#focus-material-note")).toContainText("とめている間だけ");
+
+  // とめれば押せるようになり、実際に変わる(札は再生/停止では組み直されない
+  // ので、毎フレーム揃え直している——固まったままにならないこと)。
+  await page.click("#btn-run");
+  await expect(page.locator("#focus-material")).toBeEnabled({ timeout: 10_000 });
+  const before = await page.locator("#focus-material").inputValue();
+  await page.locator("#focus-material").selectOption("ゴム(天然)");
+  await expect
+    .poll(async () => page.locator("#focus-material").inputValue(), { timeout: 10_000 })
+    .toBe("ゴム(天然)");
+  expect(before).not.toBe("ゴム(天然)");
+  expect(errors).toEqual([]);
+});
+
+// **課題(同上)**: 「速さ ×1」のまま開いても、実効倍率が実験ごとに桁違いに
+// 出る(実測: 自由落下 ×1.02 / コーヒー ×2.02 / 軌道に乗せる ×754037.55)。
+// 数字は正しいが**何の比なのかが書いていない**ので「×1のはずなのに×70万」と
+// 読めて壊れて見える。桁が大きいときは一目で読める形に言い換える。
+test("時間を大きく早送りする場面は、その倍率が読める言葉で出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  const rate = page.locator("#run-actual-rate");
+  await expect.poll(async () => (await rate.textContent()) ?? "", { timeout: 20_000 })
+    .toContain("1 秒で");
+  const text = (await rate.textContent()) ?? "";
+  // 「1 秒で ◯◯ ぶん進む」と、生の倍率の両方が読める。
+  expect(text).toMatch(/1 秒で .+ぶん進む/);
+  expect(text).toMatch(/×[\d,]+/);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「しらべる」の報告、進行管理役の実測)**: 代表実験
+// 「ボールを落とす」の説明は「高さ 20 m のときで…速さ約 20 m/s」と**断言する**
+// のに、その速さが「いまの数値」にもグラフにも書き出したCSVにも出ていなかった
+// (読めるのは経過時間と高さだけ)。数字で確かめに来た人が、まさに確かめたい
+// 数字だけ確かめられない。シーン側に観測点を1本足した(物理は変えていない)。
+test("「ボールを落とす」は、説明が言い切る速さを自分で確かめられる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+
+  // 説明は「速さ約 20 m/s」と言い切っている。
+  await expect(page.locator('.card[data-card="watch"]')).toContainText("速さ約 20 m/s");
+  // その速さが、数値としても出ている。
+  await expect(page.locator('.card[data-card="numbers"]')).toContainText("ボールの速さ");
+
+  // グラフの凡例からも読めて、言い切った値とつじつまが合う(20m落下の着地は
+  // 理論で約 19.8 m/s——最大値がその近くに来る)。
+  await expect
+    .poll(
+      async () => {
+        const legend = await page.evaluate(
+          () => (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend ?? [],
+        );
+        const line = legend.find((l) => l.includes("速さ")) ?? "";
+        const m = line.match(/max=([\d.]+)/);
+        return m ? Number.parseFloat(m[1]) : 0;
+      },
+      { timeout: 20_000 },
+    )
+    .toBeGreaterThan(18);
+  expect(errors).toEqual([]);
+});
+
+// **課題(同上)**: 記録する値を持たない実験(`d27-double-slit`)でも、グラフの
+// 空欄は「▶ うごかす を押すと…」と出したままだった。実測: **走っている最中
+// (Playing)なのに**この文が出ており、押せと言われたボタンはもう押してある。
+// しかもこの場面は記録する値が無いので、待っても線は出ない。
+test("線に描く値が無い実験では、押せと言われたボタンを押せとは言わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d27-double-slit"]');
+  await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await page.waitForTimeout(2_000);
+
+  const empty = page.locator("#probe-empty");
+  await expect(empty).toBeVisible();
+  await expect(empty).not.toContainText("うごかす");
+  await expect(empty).toContainText("記録していません");
+  expect(errors).toEqual([]);
+});
+
+// **課題(同上)**: 「場面の中身」に、中の言葉と内部の識別子がそのまま出ていた
+// ——`振り子 (DistanceJoint) (bob)`、材質名 `d6-density`。ここは何が入って
+// いるかを読む場所なので、人の言葉で書く。
+for (const [id, forbidden] of [
+  ["d11-pendulum", "DistanceJoint"],
+  ["d6-floating", "d6-"],
+] as const) {
+  test(`「場面の中身」に中の言葉が出ていない(${id}: ${forbidden})`, async ({ page }) => {
+    const errors = collectPageErrors(page);
+    await boot(page);
+    await setGrain(page, 2);
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.locator("#crumb-experiment").waitFor({ state: "visible", timeout: 10_000 });
+    await page.waitForTimeout(1_000);
+
+    await expect(page.locator("#hierarchy-tree")).not.toContainText(forbidden);
+    expect(errors).toEqual([]);
+  });
+}
+
+// **課題(利用者役「つくる」の報告、進行管理役の実測)**: 道具が全部出ている
+// 粒度でも、画面には中の言葉が残っていた——「＋ 振り子 (DistanceJoint)」
+// 「＋ 流体 (SPH 水塊)」「Fluids(SPH 水塊)」、パネルの見出し「Inspector」。
+// `DistanceJoint` はこの道具の中のクラス名、`SPH` は水を粒で解く計算のやり方の
+// 名前で、置く人には要らない。**何が起きるか**で書き直す。
+// (`Dynamic`/`Static`/`Kinematic` は「主が人の言葉、従が元の語」という既存の
+//  方針どおり括弧内に残す——`value` は保存データが参照するので変えない。)
+test("道具の名前に、中の言葉が出ていない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  await page.click("#btn-add");
+  const menu = page.locator("#context-menu");
+  await expect(menu).toBeVisible();
+  const items = (await menu.locator("button").allTextContents()).join(" / ");
+  expect(items, "追加メニューに中の言葉が出ていない").not.toContain("DistanceJoint");
+  expect(items, "追加メニューに中の言葉が出ていない").not.toContain("SPH");
+  expect(items).toContain("振り子");
+  expect(items).toContain("流体");
+  await page.keyboard.press("Escape");
+
+  // パネルの見出しも日本語で書く。
+  await expect(page.locator("#inspector h2")).not.toContainText("Inspector");
+  await expect(page.locator("#inspector h2")).toContainText("選んだもの");
+
+  // 「動き方」の言い方は、札と Inspector で揃っている(かなの揺れも含めて)。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-motion")).toBeVisible();
+  const cardTexts = await page.locator("#focus-motion option").allTextContents();
+  const inspectorTexts = await page.locator("#inspector-body-type option").allTextContents();
+  expect(cardTexts).toEqual(inspectorTexts);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「つくる」が「いちばん困る」に選んだもの、進行管理役の実測)**:
+// 「選んだもの」札は中心の座標しか出しておらず、**上の面がどこか**が分からない
+// ——実測(0.8m の箱を y=2.0 に置いて30度傾けた): 出るのは「かたち 箱 0.80 ×
+// 0.80 × 0.80 m」「高さ 2.000 m」だけ。そのうえ「➕ 球を1つ足す」は原点のそばへ
+// 置く(坂が (0, 2.0, 0) にあるのに球は (-0.15, 1.37, 0.14))。**作った物の上に
+// 置く**という、仕掛けを組むとき最初にやりたいことに道具が無く、利用者役は球を
+// 坂に当てるまで3回置き直していた。
+test("作った坂の上に、球をその場で置ける(置き直しが要らない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+
+  // 坂を作る(画面の案内どおり: 傾けて「動かない」にする)。
+  for (const [id, value] of [
+    ["#focus-pos-x", "0"],
+    ["#focus-pos-y", "2"],
+    ["#focus-pos-z", "0"],
+    ["#focus-rot-z", "30"],
+  ] as const) {
+    await page.locator(id).fill(value);
+    await page.locator(id).press("Tab");
+    await page.waitForTimeout(150);
+  }
+  await page.locator("#focus-motion").selectOption("Static");
+  await page.waitForTimeout(500);
+
+  // **上の面がどこか**が読める(中心の高さ 2.000 m ではなく、傾けた姿の上端)。
+  const topNote = page.locator("#focus-top-note");
+  await expect(topNote).toBeVisible();
+  const topText = (await topNote.textContent()) ?? "";
+  const top = Number.parseFloat(topText.match(/([\d.]+) m/)?.[1] ?? "0");
+  expect(top, `上の面の高さ: ${topText}`).toBeGreaterThan(2.0);
+
+  // その上へ、1回で置ける。
+  await page.click("#btn-place-on-top");
+  await page.waitForTimeout(800);
+  const ball = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const last = Number(w.read_component("body_count", "")) - 1;
+      const q = w.body_position_at_f32(last);
+      return { x: q[0], y: q[1], z: q[2] };
+    });
+  const placed = await ball();
+  expect(placed.y, "坂の上端より上に置かれている").toBeGreaterThan(top);
+  expect(Math.abs(placed.x), "坂のまん中の真上に置かれている").toBeLessThan(0.3);
+
+  // **実際に坂の上に乗っていた**ことを、転がることで確かめる(横へ外れて
+  // いたら、そのまま真下へ落ちるだけで x は動かない)。
+  await page.click("#btn-run");
+  await expect.poll(async () => Math.abs((await ball()).x), { timeout: 15_000 })
+    .toBeGreaterThan(1.0);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の観察、進行管理役の再現)**: 濃さの帯の下の一行は
+// 「＋ 条件を変えるつまみ」のように**行頭が「＋」**だった。「＋」は畳まれた
+// 札を開く印に見えるので、利用者役はこの行を押しに行き——`div` なので何も
+// 起きなかった。「積み上がる」ことは言葉で書けば足り、押せる物には見えない。
+test("濃さの説明が、押せる札のふりをしていない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+
+  const hint = page.locator("#detail-hint");
+  for (const [at, name] of [
+    [0, "みる"],
+    [1, "さわる"],
+    [2, "しらべる"],
+    [3, "つくる"],
+  ] as const) {
+    await setGrain(page, at);
+    const text = (await hint.textContent()) ?? "";
+    expect(text.trim().startsWith("＋"), `行頭が「＋」でない: ${text}`).toBe(false);
+    expect(text.trim().startsWith("+"), `行頭が「+」でない: ${text}`).toBe(false);
+    // どの段の話かが、その行だけ読めば分かる。
+    expect(text, `段の名前が入っている: ${text}`).toContain(name);
+    // 現象そのものは変わらない、という但し書きは常に付く(以前は目盛りに
+    // マウスを載せているあいだだけ消えていた)。
+    expect(text).toContain("現象は変わりません");
+  }
+
+  // 目盛りに触れているあいだも、同じ体裁のままでいる。
+  await page.locator('.detail-stop[data-at="2"]').hover();
+  const hovered = (await hint.textContent()) ?? "";
+  expect(hovered).toContain("しらべる");
+  expect(hovered).toContain("現象は変わりません");
+  expect(hovered.trim().startsWith("＋")).toBe(false);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の観察)**: 回転の速さが「10 rad/s」としか出ず、何の速さ
+// なのか読めない。数字そのもの(シミュレーションへ渡る値)は rad/s のまま——
+// シーン JSON の `angular_velocity` と単位が違えば嘘になる——で、毎秒何回転
+// にあたるかを隣へ添える。
+test("回す速さが、rad/s のままでも「毎秒何回転」で読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "手回し発電機");
+  await expect(page.locator(".palette-row").first()).toContainText("手回し発電機");
+  await page.keyboard.press("Enter");
+  await setGrain(page, 1);
+
+  const knob = page.locator('.knob[data-knob-id="crank"]');
+  await expect(knob).toBeVisible();
+  const value = knob.locator(".knob-value");
+  // 既定は 10 rad/s = 毎秒 1.59 回転。
+  await expect(value).toContainText("10 rad/s");
+  await expect(value).toContainText("毎秒 1.59 回転");
+
+  // 動かしても、両方の読み方が付いてくる。
+  const slider = knob.locator('input[type="range"]');
+  await slider.fill("20");
+  await expect(value).toContainText("20 rad/s");
+  await expect(value).toContainText("毎秒 3.18 回転");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の観察)**: 「自分で回路を組む」欄の見出しは、どの部品を
+// 選んでも「値 / 値2 / 値3(DCモーターのみ)」のままだった。抵抗を置くのに
+// 「値2」へ何を入れればいいのかは画面のどこにも書いておらず、`title` 属性に
+// 6 種類ぶんを `/` で並べた一行が隠れているだけ——読めるのは、どの数字が
+// 要るか既に知っている人だけ。加えて `GND` / `N1` という回路図の略記が、
+// 画面にそのまま並んでいた。
+test("自分で回路を組む欄が、選んだ部品の言葉で名前を出す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+
+  await page.click('.project-tab[data-tab="circuit"]');
+  const body = page.locator("#project-body");
+  await expect(body).toContainText("自分で回路を組む");
+  // 記号のままの言い方は出ていない。
+  await expect(body).not.toContainText("GND");
+  await expect(body).not.toContainText("ノード数");
+
+  // 3 つのつなぎ目で新しい回路を始める。
+  await body.locator('input[type="number"]').first().fill("3");
+  await body.getByRole("button", { name: "リセット(新規回路)" }).click();
+
+  const kind = page.locator("#circuit-editor-kind");
+  const caption = (id: string) =>
+    page.locator(`label.circuit-editor-field:has(#${id}) span`);
+
+  // 抵抗: 要る数字はひとつだけ。残りの欄は出ていない。
+  await kind.selectOption("resistor");
+  await expect(caption("circuit-editor-value")).toHaveText("流れにくさ Ω: ");
+  await expect(page.locator("label.circuit-editor-field:has(#circuit-editor-value2)")).toBeHidden();
+  await expect(page.locator("label.circuit-editor-field:has(#circuit-editor-value3)")).toBeHidden();
+
+  // コンデンサ: 2つめの欄が、その部品の言葉で現れる。
+  await kind.selectOption("capacitor");
+  await expect(caption("circuit-editor-value")).toHaveText("ためられる量 F: ");
+  await expect(caption("circuit-editor-value2")).toHaveText("はじめの電圧 V: ");
+  await expect(page.locator("label.circuit-editor-field:has(#circuit-editor-value3)")).toBeHidden();
+
+  // モーター: 3つめまで出る。
+  await kind.selectOption("dc_motor");
+  await expect(caption("circuit-editor-value3")).toHaveText("回す力の強さ V·s/rad: ");
+
+  // 実際に置いた素子も、読める言葉で並ぶ。
+  await kind.selectOption("resistor");
+  await page.locator("#circuit-editor-value").fill("100");
+  await page.locator("#circuit-editor-node-a").fill("0");
+  await page.locator("#circuit-editor-node-b").fill("1");
+  await body.getByRole("button", { name: "素子を追加" }).click();
+  await expect(body).toContainText("抵抗 つなぎ目0—1: 流れにくさ 100 Ω");
+  await expect(body).toContainText("つなぎ目0(基準):");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の観察、進行管理役の実測)**: タイトルが約束している物が
+// 3D に出てこない。
+//
+// 「静電気で風船がくっつく」(d26)は、壁(法線 +X の無限平面)の**反対側**に
+// カメラが置かれていた——実測: カメラ x = −0.096 に対し風船は x = +0.019。
+// 壁は 400m 四方の板として描かれるので画面は暗い面で埋まり、主役の風船は
+// 一度も映らなかった。壁の方眼も「床だけ」に塗っていたので、面がそこに
+// あるという手掛かりも無かった。
+test("壁のある実験で、壁の裏側から覗かない(主役が映る)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "静電気で風船");
+  await expect(page.locator(".palette-row").first()).toContainText("静電気");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2500);
+
+  const view = await page.evaluate(() => {
+    const cam = (window as unknown as {
+      __camera: {
+        position: { x: number; y: number; z: number };
+        // three.js の Camera は project に必要な行列を持っている。
+      };
+    }).__camera;
+    const world = (window as unknown as {
+      __world: {
+        read_component(k: string, a: string): string;
+        body_count?: unknown;
+        body_position_at_f32(i: number): Float32Array;
+      };
+    }).__world;
+    const count = Number(world.read_component("body_count", ""));
+    let balloon = -1;
+    for (let i = 0; i < count; i++) {
+      if (world.read_component("body_shape_kind_at", String(i)) === "sphere") balloon = i;
+    }
+    const p = world.body_position_at_f32(balloon);
+    return { cameraX: cam.position.x, balloonX: p[0] };
+  });
+  // 壁は x = 0、風船は x > 0 の側。カメラも同じ側にいる。
+  expect(view.balloonX, "風船は壁の表側にいる").toBeGreaterThan(0);
+  expect(view.cameraX, `カメラも壁の表側にいる(x=${view.cameraX})`).toBeGreaterThan(0);
+  // 壁から十分に離れて立っている(すれすれだと壁が細い帯にしか映らない)。
+  expect(view.cameraX).toBeGreaterThan(0.05);
+
+  // 舞台が真っ黒ではなく、面と物が描かれている。
+  const stats = await canvasLuminanceStats(page);
+  expect(stats.std, `輝度のばらつき: ${JSON.stringify(stats)}`).toBeGreaterThan(1.5);
+  expect(stats.brightRatio).toBeGreaterThan(0.01);
+
+  expect(errors).toEqual([]);
+});
+
+// 「磁石が銅管をゆっくり落ちる」(d21)は、渦電流のブレーキは結合として効いて
+// いるのに、**銅管そのものが剛体として存在しない**(置くと磁石が中を通れない)。
+// 3D には落ちる球が1つあるだけで、タイトルの「銅管」はどこにも無かった。
+// 見た目だけの飾り(`SceneDecoration`)として描き、当たり判定が無いことは
+// 「ここを見る」で断る。
+test("銅管の実験では、銅管が3Dに描かれる(当たり判定は持たない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "磁石が銅管");
+  await expect(page.locator(".palette-row").first()).toContainText("銅管");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2000);
+
+  const decor = await page.evaluate(() => {
+    const scene = (window as unknown as {
+      __scene: { getObjectByName(name: string): { children: unknown[] } | undefined };
+    }).__scene;
+    const group = scene.getObjectByName("decor");
+    return { found: !!group, children: group?.children.length ?? 0 };
+  });
+  expect(decor.found, "飾りのグループがある").toBe(true);
+  expect(decor.children, "筒が1本描かれている").toBe(1);
+
+  // 物理には増えていない——落ちる磁石ひとつのまま(当たり判定を持たない)。
+  const bodies = await page.evaluate(() =>
+    Number(
+      (window as unknown as { __world: { read_component(k: string, a: string): string } })
+        .__world.read_component("body_count", ""),
+    ),
+  );
+  expect(bodies, "剛体は増えていない").toBe(1);
+
+  // 見た目だけであることが、読む場所に書いてある。
+  await expect(page.locator("#context")).toContainText("見た目だけ");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「つくる」の観察)**: 押す道具は道具棚の「↑ 押し上げる」
+// だけで、**真上にしか押せなかった**。坂に置いた球を転がし始める、ドミノを
+// 倒す、といった「きっかけを作る」操作が画面のどこにも無く、利用者役は坂の
+// 角度を変えて勝手に滑り出すのを待つしかなかった。
+test("選んだ物を、横からも押せる(きっかけを作れる)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator("#focus-push")).toBeVisible();
+
+  const x = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const last = Number(w.read_component("body_count", "")) - 1;
+      return w.body_position_at_f32(last)[0];
+    });
+  const before = await x();
+
+  // 止まっている状態で押しても、押した結果が見える(押したら動き出す)。
+  await page.click("#btn-push-right");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "true");
+  await expect.poll(async () => (await x()) - before, { timeout: 15_000 }).toBeGreaterThan(0.2);
+
+  // 反対向きにも押せる。
+  await page.click("#btn-push-left");
+  const afterRight = await x();
+  await expect.poll(async () => (await x()) - afterRight, { timeout: 15_000 }).toBeLessThan(0);
+
+  // **押しても動かない相手には、押せるふりをしない**。
+  // 「動かない(Static)」にすると灰色になり、理由が押す前に読める。
+  await page.click("#btn-run"); // いったんとめる
+  await page.locator("#focus-motion").selectOption("Static");
+  await page.waitForTimeout(500);
+  await expect(page.locator("#btn-push-right")).toBeDisabled();
+  await expect(page.locator("#focus-push-note")).toContainText("動かない(Static)");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役の実測)**: 置き場所を数値で打ち替えたあと、欄に文字カーソル
+// を置いたまま Ctrl+Z を押すと、ブラウザの「打った文字を戻す」が働いて
+// **欄の数字だけが前の値へ戻り、物はそのまま**になっていた(欄が `-0.395` に
+// 化けたのに、置いた物は動いたまま)。画面には「戻った」ように見えるので、
+// そこから先の操作がぜんぶずれる。
+test("数値欄にカーソルを置いたままの Ctrl+Z でも、物が元へ戻る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  const field = page.locator("#focus-pos-x");
+  await expect(field).toBeVisible();
+
+  const x = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const last = Number(w.read_component("body_count", "")) - 1;
+      return w.body_position_at_f32(last)[0];
+    });
+  const before = await x();
+
+  await field.fill("5");
+  await field.press("Tab");
+  await page.waitForTimeout(300);
+  expect(await x(), "打ち替えた場所へ動いている").toBeCloseTo(5, 2);
+
+  // 欄の中へ戻ってから Ctrl+Z。物が戻る(欄の文字だけが戻るのではない)。
+  await field.click();
+  await field.press("ControlOrMeta+z");
+  await page.waitForTimeout(400);
+  expect(await x(), "物が元の場所へ戻っている").toBeCloseTo(before, 2);
+  expect(Number(await field.inputValue()), "欄も物と同じ値を出している").toBeCloseTo(before, 2);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察、進行管理役の再現)**: 「みる」は自分で
+// 「現象だけを大きく(道具は隠す)」と名乗っている段なのに、そこで
+// 「➕ 球を1つ足す」を押すと、材質11種・置き場所 x,y,z・向き x,y,z・
+// 「坂として使うには…動かない(Static)に」・動き方・上の面の高さ・この上に
+// 置く・そっと押す5方向、が一度に出ていた(実測、粒度0で再現)。札そのものは
+// 選んだ瞬間に開いてよいが、中の道具まで全部出すのは、アプリが自分の言って
+// いることと逆をやっていることになる。
+test("「選んだもの」札の中身も、粒度に沿って増えていく", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.locator('.card[data-card="add-body"] .card-header').first().click();
+  await page.click("#btn-add-body-card");
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+
+  const shown = async () => {
+    const out: Record<string, boolean> = {};
+    for (const id of [
+      "focus-material",
+      "focus-pos-x",
+      "focus-rot-z",
+      "focus-motion",
+      "btn-place-on-top",
+      "btn-push-right",
+      "btn-record-body",
+      "btn-remove-body",
+      "btn-follow-body",
+    ]) {
+      out[id] = await page.locator(`#${id}`).isVisible().catch(() => false);
+    }
+    return out;
+  };
+
+  // みる: 何を選んだか(数値)と、見かたを変える操作だけ。
+  let s = await shown();
+  expect(s["btn-follow-body"], "追いかけるは出ている").toBe(true);
+  expect(s["btn-remove-body"], "足せる段では消せる").toBe(true);
+  for (const id of ["focus-material", "focus-pos-x", "focus-rot-z", "focus-motion", "btn-place-on-top", "btn-push-right", "btn-record-body"]) {
+    expect(s[id], `みるでは出ていない: ${id}`).toBe(false);
+  }
+
+  // さわる: 条件を変える操作(材質・動き方・そっと押す)が足される。
+  await setGrain(page, 1);
+  s = await shown();
+  expect(s["focus-material"]).toBe(true);
+  expect(s["focus-motion"]).toBe(true);
+  expect(s["btn-push-right"]).toBe(true);
+  expect(s["focus-pos-x"], "組み立ての欄はまだ出ない").toBe(false);
+  expect(s["btn-record-body"], "記録はまだ出ない").toBe(false);
+
+  // しらべる: 記録を増やす操作が足される。
+  await setGrain(page, 2);
+  s = await shown();
+  expect(s["btn-record-body"]).toBe(true);
+  expect(s["focus-pos-x"], "組み立ての欄はまだ出ない").toBe(false);
+
+  // つくる: 組み立ての道具がぜんぶ出る。
+  await setGrain(page, 3);
+  s = await shown();
+  for (const id of ["focus-pos-x", "focus-rot-z", "btn-place-on-top"]) {
+    expect(s[id], `つくるでは出ている: ${id}`).toBe(true);
+  }
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 「見え方」の「📈 グラフを出す」は、
+// 画面の詳しさそのものを動かす(実測: 「みる」で押すと帯が「さわる」へ)。
+// 押した人は「みる」の中のボタンを押したつもりなので、道具が増えたことに
+// 驚く。何をしたのかを、押す前(title)にも押した後(知らせ)にも言う。
+test("「グラフを出す」が帯を動かしたことを、画面で言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.waitForTimeout(1200);
+  await setGrain(page, 0);
+  await page.locator('.card[data-card="view"] .card-header').first().click();
+
+  const toggle = page.locator("#btn-toggle-analysis");
+  await expect(toggle).toContainText("グラフを出す");
+  expect(await toggle.getAttribute("title")).toContain("画面の詳しさ");
+  await expect(page.locator("#view-grain-note")).toBeHidden();
+
+  await toggle.click();
+  await expect(page.locator("#app")).toHaveAttribute("data-grain", "touch");
+  await expect(page.locator("#view-grain-note")).toContainText("さわる");
+  await expect(page.locator("#view-grain-note")).toContainText("画面の詳しさ");
+  await expect(toggle).toContainText("グラフをしまう");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 説明文が「ダイヤルを右へ回して」と言うが、
+// 丸いダイヤルは画面のどこにも無い(実物は右上の「画面の詳しさ」という帯)。
+// 利用者役は探して見つけられず、案内されたグラフを結局見られなかった。
+test("画面の文章が、無い物(ダイヤル)を指していない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  for (const id of ["d3-bounce", "d1-free-fall", "d38-two-balls"]) {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1200);
+    await setGrain(page, 1);
+    const text = await page.locator("#app").innerText();
+    expect(text, `${id} の画面に「ダイヤル」が出ていない`).not.toContain("ダイヤル");
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 回路の実験は舞台に何も映らず、グラフの
+// 凡例は「つなぎ目4の電圧」のように番号で呼ぶのに、その番号がどこなのかを
+// 知る手がかりが画面のどこにも無かった(素子の一覧は「つくる」の道具箱の
+// 中にしか無い)。
+test("回路の実験では、つないであるものが「みる」から読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "電気の工作台");
+  await expect(page.locator(".palette-row").first()).toContainText("電気");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2000);
+  await setGrain(page, 0);
+
+  const card = page.locator('.card[data-card="circuit"]');
+  await expect(card).toBeVisible();
+  const text = await card.innerText();
+  expect(text).toContain("つないであるもの");
+  expect(text).toContain("つなぎ目");
+  // 回路図の略記は出ていない。
+  expect(text).not.toContain("GND");
+  expect(text).not.toMatch(/\bN\d\b/);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 「ふりこ」は「往復します」と書いてあるのに
+// 揺れて見えなかった。いまは既定の振れはば自体を目で見える 21 度にしてあり
+// (上の「何も触らなくても目で見て往復する」が押さえている)、ここでは
+// **つまみで大きくすればそのぶん大きく振れる**ことと、ぴったりを確かめたい人へ
+// 「小さくするほど関係がぴったりになる」と案内していることを見る。
+// **シーンJSONは変えない**——Rust 側の受け入れテストが、このファイルの小振幅で
+// 「周期 = 2π√(長さ/重力)」を 1% 以内で確かめている。
+test("ふりこは、振れはばを大きくすれば目で見て往復する", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d11-pendulum"]');
+  await page.waitForTimeout(1500);
+  await setGrain(page, 1);
+
+  // ぴったり確かめたい人への道が読める。
+  await expect(page.locator("#context")).toContainText("小さくするほど");
+
+  const bobX = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const n = Number(w.read_component("body_count", ""));
+      for (let i = 0; i < n; i++) {
+        if (w.read_component("body_label_at", String(i)) === "bob") {
+          return w.body_position_at_f32(i)[0];
+        }
+      }
+      return 0;
+    });
+
+  const swing = page.locator('.knob[data-knob-id="swing"] input[type="range"]');
+  await expect(swing).toBeVisible();
+  await swing.fill("45");
+  await page.waitForTimeout(2000);
+
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i < 25; i++) {
+    const x = await bobX();
+    min = Math.min(min, x);
+    max = Math.max(max, x);
+    await page.waitForTimeout(100);
+  }
+  // 45度なら、ひも 1m に対して左右およそ 0.7m ——点ではなく往復として見える。
+  expect(max - min, `振れはば45度での x の幅: ${min} 〜 ${max}`).toBeGreaterThan(1.0);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「みる」の観察)**: 場のパネルの見出しが `量子 2D |ψ|² (256×128)`
+// のように数式記号のままだった。「Ψ² のような数式記号や (256×128) の意味が
+// 全く分からなかった」。何が明るいのかを言葉で書き、元の記号は括弧で残す。
+test("場のパネルの見出しが、何を見ているかを言葉で言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "二重スリット");
+  await expect(page.locator(".palette-row").first()).toContainText("スリット");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2500);
+
+  const title = page.locator("#field-title");
+  await expect(title).toBeVisible();
+  const text = (await title.textContent()) ?? "";
+  expect(text, "何が明るいのかが言葉で書いてある").toContain("見つかりやすさ");
+  expect(text, "ます目の数が何のことか分かる").toContain("ます目");
+  expect(text.trim().startsWith("量子"), `見出し: ${text}`).toBe(false);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(進行管理役の実測、上の「下端の器」への作り替えで生まれた退行)**:
+// 保存の札をスクロールする器の外へ出したとき、開け閉めを決める `syncCards` が
+// `#context-body` だけを見ていたので、**この札だけが粒度を無視して開きっぱなし**
+// になっていた——「みる」(道具は隠す段)で名前の欄と保存ボタンが出ていた。
+test("下端に置いた「この場面を保存する」も、粒度に従って畳まれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  const card = page.locator('#context-footer .card[data-card="my-scenes"]');
+
+  await setGrain(page, 0);
+  await expect(card).toHaveAttribute("data-expanded", "false");
+  await expect(page.locator("#btn-save-scene")).toBeHidden();
+
+  await setGrain(page, 3);
+  await expect(card).toHaveAttribute("data-expanded", "true");
+  await expect(page.locator("#btn-save-scene")).toBeVisible();
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「さわる」の観察、進行管理役の実測)**: いちばん上の帯は
+// 1 行に固定されていたので、幅が足りないぶんを**縮められる唯一の要素**である
+// パンくずが全部かぶっていた——実測(1280×720、粒度「さわる」、`d1-free-fall`):
+// パンくずの器は 12〜224px しかないのに実験名は 164〜295px に置かれ、
+// 「◎ 実験をさがす ⌘K › 🎯 ボー」で切れていた。天体の場面
+// (`d34-solar-system`)は右の読み取り値がいちばん長くなるので、器は 79px まで
+// 潰れ、利用者役には「◎実験をさ」しか見えなかった。
+test("いま何を見ているかが、いちばん上の帯で最後まで読める", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  for (const id of ["d34-solar-system", "d1-free-fall", "d20-generator"]) {
+    await page.keyboard.press("Control+k");
+    await page.click(`.palette-row[data-experiment-id="${id}"]`);
+    await page.waitForTimeout(1500);
+    await setGrain(page, 1);
+    const fit = await page.evaluate(() => {
+      const box = document.getElementById("crumbs")!.getBoundingClientRect();
+      const chip = document.getElementById("crumb-experiment")!.getBoundingClientRect();
+      return {
+        left: chip.left - box.left,
+        right: box.right - chip.right,
+        text: document.getElementById("crumb-experiment")!.textContent ?? "",
+      };
+    });
+    expect(fit.left, `${id}: 実験名の左端が器の中にある`).toBeGreaterThanOrEqual(-1);
+    expect(fit.right, `${id}: 実験名の右端が器の中にある(${fit.text})`).toBeGreaterThanOrEqual(-1);
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「さわる」の観察)**: 計算が追いつかないときに出る
+// 「実際は ×0.75(重い計算)」の「重い計算」が何のことか分からない——
+// 「自分の PC が重いのか、何か直したほうがいいのか」。説明は `title` の
+// ツールチップにしかなく、触る画面では開かない。
+test("計算が追いつかないときの言い方に、専門用語を使わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d34-solar-system"]');
+  await page.waitForTimeout(2500);
+  const rate = page.locator("#run-actual-rate");
+  await expect(rate).toBeVisible();
+  const text = (await rate.textContent()) ?? "";
+  expect(text, `読み取り値: ${text}`).not.toContain("重い計算");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「さわる」の観察)**: 「手回し発電機」の 3D には回る軸しか
+// 映っておらず、発電機らしきものが何も無い。説明は正直に断ってあるが、
+// 3D を中心に見る人には「何も起きていない」「これで合っているのか」と読まれる。
+// コイルは剛体としては存在しない(`motor_coupling` が回転と電圧の関係だけを
+// 持つ)ので、見た目だけの筒として描く。
+test("手回し発電機では、軸を囲むコイルが3Dに描かれる(当たり判定は持たない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+  await page.waitForTimeout(2000);
+
+  const decor = await page.evaluate(() => {
+    const scene = (window as unknown as {
+      __scene: { getObjectByName(n: string): { children: unknown[] } | undefined };
+    }).__scene;
+    return scene.getObjectByName("decor")?.children.length ?? 0;
+  });
+  expect(decor, "筒が1本描かれている").toBe(1);
+
+  // **描かれた姿より大きいこと**。物理の寸法(半径 0.05 m)で描くと、
+  // 見えるように引き伸ばされた軸(描画半径 0.3 m)の内側へ丸ごと埋まって
+  // 一本も見えない——実際に一度そうなった。
+  const size = await page.evaluate(() => {
+    const scene = (window as unknown as {
+      __scene: { getObjectByName(n: string): { children: { geometry: { parameters: { radiusTop: number } } }[] } | undefined };
+    }).__scene;
+    const tube = scene.getObjectByName("decor")!.children[0];
+    const mesh = (window as unknown as {
+      __bodyMeshFor: (i: number) => { scale: { x: number }; geometry: { parameters: { radius: number } } } | undefined;
+    }).__bodyMeshFor(0)!;
+    return {
+      tubeRadius: tube.geometry.parameters.radiusTop,
+      drawnRadius: mesh.geometry.parameters.radius * mesh.scale.x,
+    };
+  });
+  expect(size.tubeRadius, `筒 ${size.tubeRadius} / 描かれた軸 ${size.drawnRadius}`)
+    .toBeGreaterThan(size.drawnRadius);
+
+  // 剛体は増えていない。
+  const bodies = await page.evaluate(() =>
+    Number(
+      (window as unknown as { __world: { read_component(k: string, a: string): string } })
+        .__world.read_component("body_count", ""),
+    ),
+  );
+  expect(bodies, "剛体は増えていない").toBe(1);
+  await expect(page.locator("#context")).toContainText("見た目だけ");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「さわる」の観察)**: 「ふりこ」の説明は「左右 5cm」、つまみは
+// 「3 度」と別の単位で書いてあり、「5cm ってどこを見ればいいんだろう」と
+// 迷わせた。同じものを指していることが読めるように、単位をそろえる。
+test("ふりこの説明とつまみが、同じ単位で同じものを指す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d11-pendulum"]');
+  await page.waitForTimeout(1500);
+  await setGrain(page, 1);
+
+  const watch = await page.locator('.card[data-card="watch"]').innerText();
+  const value = await page.locator('.knob[data-knob-id="swing"] .knob-value').innerText();
+  // 説明にもつまみにも「度」と「cm」の両方が出ていて、突き合わせられる。
+  expect(watch).toContain("21 度");
+  expect(watch).toContain("36cm");
+  expect(value).toContain("度");
+  expect(value).toContain("cm");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「しらべる」の観察、進行管理役の実測)**: 「見る速さ」の
+// ボタンを押しただけで、現象そのものの数字が変わって見えた。
+//
+//   ふつう(×1) … ほぼ止まった時刻 3.39 秒 / 3.39 秒
+//   はやい(×4) … ほぼ止まった時刻 5.39 秒 / 5.39 秒
+//
+// `dt` は 0.008333333 のまま、step 数が速さに比例して増えているだけで物理は
+// 同じ。原因は「止まった」と決めるまでの猶予を**連続フレーム数**で数えて
+// いたこと——フレームは実時間で刻むので、再生速度を上げると猶予がその倍だけ
+// シミュレーション時間で長くなる。猶予はシミュレーション時間で測る。
+test("「ほぼ止まった時刻」は、見る速さを変えても同じ", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.waitForTimeout(1500);
+
+  const settledAtSpeed = async (label: string) => {
+    await page.locator("#run-speed button", { hasText: label }).click();
+    await page.click("#btn-restart");
+    const settled = page.locator("#readout-settled");
+    // 行は「まだ止まっていません」でも現れるので、時刻が入るまで待つ。
+    await expect
+      .poll(async () => await settled.getAttribute("data-seconds"), { timeout: 40_000 })
+      .not.toBeNull();
+    return Number(await settled.getAttribute("data-seconds"));
+  };
+
+  const normal = await settledAtSpeed("ふつう");
+  const fast = await settledAtSpeed("はやい");
+  expect(normal).toBeGreaterThan(0);
+  expect(fast).toBeGreaterThan(0);
+  // 覗く間隔のぶんの誤差しか残らない(修正前は 2 秒ずれていた)。
+  expect(Math.abs(fast - normal), `ふつう=${normal} / はやい=${fast}`).toBeLessThan(0.5);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「しらべる」の観察、進行管理役の実測)**: 物を選んでから
+// 「はじめから」を押すと、同じ画面の2か所が**逆のこと**を言っていた:
+//
+//   選んだもの札        … 「選んだもの — ball」(前のまま居座る)
+//   選んだものの詳しい値 … 「まだ何も選んでいません。」
+//
+// やり直しは選択を外す(`api.selectBody(-1)`)が、同時に `lastSelection` も
+// -1 に合わせるので、毎フレームの選択変更検出はもう「変わった」と気付けない
+// ——札だけが取り残されていた。つまみを動かしたときも同じ。
+test("やり直したあと、「選んだもの」と「詳しい値」が食い違わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
+  await page.waitForTimeout(1500);
+
+  // 一覧から動く物を選ぶ(床ではない方)。
+  await page.locator("#hierarchy-tree .tree-body").nth(1).click();
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  await expect(page.locator("#inspector-body")).not.toContainText("まだ何も選んでいません");
+
+  // 「はじめから」で選択は外れる。**両方**が外れる。
+  await page.click("#btn-restart");
+  await page.waitForTimeout(1200);
+  await expect(page.locator("#inspector-body")).toContainText("まだ何も選んでいません");
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+
+  // つまみを動かして作り直したときも同じ。
+  await page.locator("#hierarchy-tree .tree-body").nth(1).click();
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  const knob = page.locator('.knob input[type="range"]').first();
+  await knob.fill("30");
+  await page.waitForTimeout(1500);
+  await expect(page.locator("#inspector-body")).toContainText("まだ何も選んでいません");
+  await expect(page.locator('.card[data-card="focus"]')).toHaveCount(0);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「しらべる」の観察)**: 回路の実験のグラフ凡例に出る
+// 「電流(0)」が、どの導線を流れる電流なのか画面のどこにも書いていなかった
+// (電圧の方は「つなぎ目の電圧(4)」で場所が分かる)。自分で見当をつけて
+// 計算した値と合わず、確かめようがなかった。
+// `ProbeTarget::CircuitCurrent(idx)` は `circuit.source_current(idx)`
+// ——電圧源(電池・電源)を流れる電流なので、そう書く。
+test("回路の電流が、どこを流れる電流なのか名前で分かる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "電気の工作台");
+  await expect(page.locator(".palette-row").first()).toContainText("電気");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(2500);
+
+  // 系列の名前は、書き出した CSV の見出しにそのまま並ぶ——グラフの凡例は
+  // canvas に描くので、同じ名前を**読める形で**取り出せるこちらで確かめる。
+  await expect.poll(() => elapsedSeconds(page), { timeout: 20_000 }).toBeGreaterThan(1);
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#btn-probe-csv"),
+  ]);
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(c as Buffer);
+  const header = Buffer.concat(chunks).toString("utf8").split("\n")[0];
+  const currentColumn = header.split(",").find((c) => c.includes("電流")) ?? "";
+  expect(currentColumn, `見出し: ${header}`).toContain("電池・電源");
+  // 「つないであるもの」札にも同じ呼び名が並んでいて、番号から現物へたどれる。
+  await expect(page.locator('.card[data-card="circuit"]')).toContainText("電池・電源");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(macOS の CI、進行管理役の実測)**: いちばん上の帯を折り返せるように
+// したとき、**高さの上限を置かなかった**。この行はグリッドでは高さ `auto` で、
+// 下の段の高さは「窓の高さ − 帯の高さ」から分け合う。折り返しは項目ごとに
+// 起きるので、幅がほんの少し足りないだけで 1 行 1 項目までばらける——macOS の
+// CI では帯が 492px まで伸び、グラフの段が潰れて**キャンバスの高さが 6px**に
+// なった(手元の Linux では 117px / 88px で通っていた)。
+//
+// 文字の幅は環境で変わるので、「手元で何px か」を確かめても意味がない。
+// **狭い窓で折り返しを実際に起こしたうえで**、(a) 帯の高さが頭打ちになること、
+// (b) それでもグラフが読める高さを保つこと、(c) 実験名が切れないことを見る。
+test("帯が折り返しても、グラフの段はつぶれない(窓が狭くても)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await page.setViewportSize({ width: 1024, height: 600 });
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d19-electric-workbench"]');
+  await expect
+    .poll(() => page.evaluate(() => document.getElementById("app")!.dataset.analysis), {
+      timeout: 10_000,
+    })
+    .toBe("true");
+  await page.waitForTimeout(500);
+
+  const layout = await page.evaluate(() => {
+    const bar = document.getElementById("commandbar")!.getBoundingClientRect();
+    const canvas = document.getElementById("probe-canvas") as HTMLCanvasElement | null;
+    const crumbs = document.getElementById("crumbs")!.getBoundingClientRect();
+    const chip = document.getElementById("crumb-experiment")!.getBoundingClientRect();
+    return {
+      barHeight: bar.height,
+      canvasHeight: canvas ? canvas.clientHeight : 0,
+      crumbFits: chip.left >= crumbs.left - 1 && chip.right <= crumbs.right + 1,
+    };
+  });
+
+  // (a) 頭打ち(CSS の `max-height`)。青天井だと下の段が飢える。
+  expect(layout.barHeight, `帯の高さ ${layout.barHeight}px`).toBeLessThanOrEqual(160);
+  // (b) 開いていると言うからには、**線を描く場所**に読める高さがある。
+  //
+  // ここは段の高さではなくキャンバスの高さを見る。段に 150px あっても、
+  // 見出しと操作の行が折り返せば残りは 46px しかない——macOS の CI が
+  // まさにそれだった(手元は 88px)。段の最低限は上側の実測から決めて
+  // いる(`workspace.ts` の `graphChrome`)ので、どの環境でも 90px 前後が残る。
+  expect(layout.canvasHeight, `グラフの高さ ${layout.canvasHeight}px`).toBeGreaterThan(70);
+  // (c) いま何を見ているかは、狭くても最後まで読める。
+  expect(layout.crumbFits, "実験名が器からはみ出していない").toBe(true);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「つくる」の観察、進行管理役の実測)**: 「つくる」は組み立て
+// のための段なのに、**組み立てる欄が一度も画面に入らなかった**。
+//
+// 右の柱は「選んだもの」札の段と「選んだものの詳しい値」の段に分かれており、
+// 札の側に使える高さは実測 174px。札そのものは 600px あるので、置き場所
+// (札の上から 293px)も向き(342px)も動き方(435px)も覗き穴の外にいた。
+// 利用者役は「位置を数字で直接入力する欄も見当たらなかった」「角度を数字で
+// 確認する欄もなかった」と書き、仕掛けを2つとも完成させられていない。
+test("「つくる」では、置き場所と向きの欄が最初から見えている", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  await page.waitForTimeout(600);
+
+  // **固定の px を当てにしない**。文字の幅は環境で変わるので、「ここに何px で
+  // 出る」を押さえても環境ごとに違う答えになる(この確認自体、Windows と
+  // macOS の CI で一度落ちた)。押さえるのは**届くかどうか**:
+  //   ・柱が覗き穴(実測 174px)ではないこと
+  //   ・置き場所の欄は、スクロールせずに見えること
+  //   ・向きの欄は、**1画面ぶん以内**にあること(短く送れば届く)
+  // 直す前は柱 174px に対し向きが 342px 下——2画面ぶん先にいた。
+  const seen = await page.evaluate(() => {
+    const view = document.getElementById("context-scroll")!.getBoundingClientRect();
+    const inView = (id: string) => {
+      const el = document.getElementById(id);
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return b.top >= view.top - 1 && b.bottom <= view.bottom + 1;
+    };
+    const below = (id: string) => {
+      const el = document.getElementById(id);
+      if (!el) return Number.POSITIVE_INFINITY;
+      return el.getBoundingClientRect().top - view.top;
+    };
+    return {
+      posX: inView("focus-pos-x"),
+      posY: inView("focus-pos-y"),
+      rotZBelow: below("focus-rot-z"),
+      viewHeight: view.height,
+    };
+  });
+  expect(seen.viewHeight, `柱の見えている高さ ${seen.viewHeight}px`).toBeGreaterThan(300);
+  expect(seen.posX, "置き場所 x が見えている").toBe(true);
+  expect(seen.posY, "置き場所 y が見えている").toBe(true);
+  expect(
+    seen.rotZBelow,
+    `向きの欄の位置 ${Math.round(seen.rotZBelow)}px / 柱 ${Math.round(seen.viewHeight)}px`,
+  ).toBeLessThan(seen.viewHeight);
+
+  // 実際に短く送れば見える(=届く)。
+  await page.evaluate(() => {
+    document.getElementById("focus-rot-z")!.scrollIntoView({ block: "nearest" });
+  });
+  await page.waitForTimeout(200);
+  await expect(page.locator("#focus-rot-z")).toBeInViewport();
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役「つくる」の観察)**: 積み木が積めなかった。舞台の右クリックは
+// 地面(y=0)だけを狙っていたので、**既に置いた箱の上を押しても出てくるのは
+// 地面の座標**——クリックする場所を3回変えても毎回地面に置かれ、3個の箱が
+// すべて高さ 0.400m の同じ場所に重なった(画面には1個にしか見えない)。
+// 札の「この上に置く」も球しか置けなかった。
+test("物の上に、物を積める(札からも、右クリックからも)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+
+  const bodies = async () =>
+    page.evaluate(() => {
+      const w = (window as unknown as {
+        __world: {
+          read_component(k: string, a: string): string;
+          body_position_at_f32(i: number): Float32Array;
+        };
+      }).__world;
+      const n = Number(w.read_component("body_count", ""));
+      const out: { label: string; y: number }[] = [];
+      for (let i = 0; i < n; i++) {
+        out.push({
+          label: w.read_component("body_label_at", String(i)),
+          y: w.body_position_at_f32(i)[1],
+        });
+      }
+      return out;
+    });
+
+  // 土台の箱を地面へ置いて固定する。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.locator("#focus-pos-y").fill("0.4");
+  await page.locator("#focus-pos-y").press("Tab");
+  await page.waitForTimeout(400);
+  await page.locator("#focus-motion").selectOption("Static");
+  await page.waitForTimeout(500);
+
+  // 札から2段積む。**同じ高さに重ならない**こと。
+  await page.click("#btn-place-box-on-top");
+  await page.waitForTimeout(800);
+  await page.click("#btn-place-box-on-top");
+  await page.waitForTimeout(800);
+  const stacked = (await bodies()).filter((b) => b.label !== "ground");
+  expect(stacked.length, "3個ある").toBe(3);
+  const heights = stacked.map((b) => b.y).sort((a, b) => a - b);
+  expect(heights[1] - heights[0], `段の間隔 ${JSON.stringify(heights)}`).toBeGreaterThan(0.5);
+  expect(heights[2] - heights[1], `段の間隔 ${JSON.stringify(heights)}`).toBeGreaterThan(0.5);
+
+  // 右クリックの献立も「◯◯の上に」と言う(地面の座標ではない)。
+  const canvas = (await page.locator("#scene-view canvas").first().boundingBox())!;
+  await page.mouse.click(canvas.x + canvas.width * 0.5, canvas.y + canvas.height * 0.5, {
+    button: "right",
+  });
+  await expect(page.locator("#context-menu")).toBeVisible();
+  const items = await page.locator("#context-menu button").allTextContents();
+  expect(items.join(" / "), `献立: ${items.slice(0, 3).join(" / ")}`).toContain("の上に");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(進行管理役の実測)**: いちばん上の帯を折り返せるようにしたとき、
+// **折り返す場所を内容任せにした**。パンくずは選んだ物の名前ぶん伸びるので、
+// 物を選んだだけで 1 行 ⇄ 2 行が切り替わり、**画面ぜんぶが 48px 飛ぶ**
+// ——実測: 舞台のキャンバスの上端が y=195 → 147。押そうとした場所が canvas の
+// 外へ出て、右クリックの献立が open かなくなった(`smoke.spec.ts` が失敗)。
+// 人から見れば「押したのに何も起きない」。折る場所を決め打ちにする。
+test("物を選んでも、画面が上下に飛ばない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.waitForTimeout(400);
+
+  // 失敗したときに**どこが動いたのか**がそのまま読めるように、上端までの
+  // 積み上げ(帯 → ツールバーの段 → 舞台)をまとめて持ち帰る。macOS の CI で
+  // 「帯の高さは同じなのに舞台の上端だけ 2px 動く」という、手元(Linux)では
+  // 再現しない食い違いが出たため——どの数字が動いたか分からないまま当てずっぽうで
+  // 直すと、また同じところで転ぶ。
+  const geometry = () =>
+    page.evaluate(() => {
+      const app = document.getElementById("app")!;
+      const barEl = document.getElementById("commandbar")!;
+      const bar = barEl.getBoundingClientRect();
+      const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+      const c = canvas.getBoundingClientRect();
+      const px = (n: number) => Number(n.toFixed(2));
+      // 帯が何行で組まれているか(= 子の上端が何種類あるか)。人が気づく「飛び」は
+      // 行が増減したときで、数 px のゆらぎではない。
+      const lines = new Set(
+        [...barEl.children].map((child) =>
+          Math.round(child.getBoundingClientRect().top),
+        ),
+      ).size;
+      return {
+        bar: Math.round(bar.height),
+        lines,
+        canvasTop: Math.round(c.top),
+        detail: {
+          barTop: px(bar.top),
+          barHeight: px(bar.height),
+          barLines: [...barEl.children]
+            .map((child) => {
+              const b = child.getBoundingClientRect();
+              return `${child.className || child.id}@${px(b.top)}+${px(b.height)}`;
+            })
+            .join(" "),
+          appTop: px(app.getBoundingClientRect().top),
+          docScrollTop: px(document.scrollingElement?.scrollTop ?? 0),
+          rows: getComputedStyle(app).gridTemplateRows,
+          sceneTop: px(document.getElementById("scene-view")!.getBoundingClientRect().top),
+          canvasTopRaw: px(c.top),
+          canvasId: canvas.id || canvas.parentElement?.id || "?",
+        },
+      };
+    });
+
+  const before = await geometry();
+  // 物を置くと自動で選ばれ、パンくずに名前が入る(いちばん伸びる瞬間)。
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
+  await page.waitForTimeout(600);
+  const selected = await geometry();
+  // 選択を外して元へ戻す。
+  await page.click("#btn-clear-selection");
+  await page.waitForTimeout(600);
+  const cleared = await geometry();
+
+  expect(selected.lines, `帯の行数 選ぶ前=${before.lines} 選んだ後=${selected.lines}`).toBe(
+    before.lines,
+  );
+  const where = `\n  選ぶ前: ${JSON.stringify(before.detail)}\n  選んだ後: ${JSON.stringify(selected.detail)}\n  外した後: ${JSON.stringify(cleared.detail)}`;
+  expect(selected.bar, `帯の高さ 選ぶ前=${before.bar} 選んだ後=${selected.bar}${where}`).toBe(
+    before.bar,
+  );
+  expect(cleared.bar, `帯の高さ 外した後=${cleared.bar}${where}`).toBe(before.bar);
+  expect(
+    Math.abs(selected.canvasTop - before.canvasTop),
+    `舞台の上端 ${before.canvasTop} → ${selected.canvasTop}${where}`,
+  ).toBeLessThanOrEqual(1);
+
+  expect(errors).toEqual([]);
+});
+
+/** 空の場面に箱を1つ置き、その番号を返す。 */
+async function freshBox(page: Page): Promise<number> {
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.waitForTimeout(400);
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.waitForTimeout(400);
+  return page.evaluate(
+    () => Number((window as any).__world.read_component("body_count", "")) - 1,
+  );
+}
+
+/** 物の位置から軸方向へ `along` [m] 進んだ点の、画面座標。 */
+async function axisPointOnScreen(
+  page: Page,
+  index: number,
+  axis: "x" | "y" | "z",
+  along: number,
+) {
+  return page.evaluate(
+    ({ index, axis, along }) => {
+      const w = window as any;
+      const camera = w.__camera;
+      const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+      const rect = canvas.getBoundingClientRect();
+      const p = w.__world.body_position_at_f32(index);
+      const dir = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] }[axis]!;
+      const target = [p[0] + dir[0] * along, p[1] + dir[1] * along, p[2] + dir[2] * along];
+      const apply = (m: number[], v: number[]) => [
+        m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12],
+        m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13],
+        m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14],
+        m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15],
+      ];
+      const clip = apply(camera.projectionMatrix.elements, apply(camera.matrixWorldInverse.elements, target));
+      return {
+        x: rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width,
+        y: rect.top + ((1 - clip[1] / clip[3]) / 2) * rect.height,
+        pos: [p[0], p[1], p[2]] as number[],
+      };
+    },
+    { index, axis, along },
+  );
+}
+
+// **課題(利用者役「つくる」の観察 + 進行管理役の再現)**: 移動の矢印を
+// 掴んで動かす操作が、2 つの意味で使い物にならなかった。
+//   ① **効きすぎる**——矢印の途中(根元から 0.7m のあたり)を掴むと、指を
+//      動かす前に物がその 0.7m ぶん先へ飛ぶ。掴み直すたびにまた飛ぶので、
+//      60px 引いただけで 1.5m → 1.8m → 2.1m と増えていった。
+//   ② **持ち直すと効かない**——矢印の当たり判定は半径 0.03m の「線」しか
+//      なく、数ピクセル狙いを外すとドラッグが黙って視点回しに化けた。
+test("移動の矢印は、少し狙いが外れても掴めて、指と同じだけ動く", async ({ page }) => {
+  await boot(page);
+  const box = await freshBox(page);
+
+  // ① 指と同じだけ動く。掴んだ点が、引いたぶんだけ画面を移動している
+  //    (= 物が指より先へ飛んでいない)。
+  const grab = await axisPointOnScreen(page, box, "x", 0.7);
+  await page.mouse.move(grab.x, grab.y);
+  await page.mouse.down();
+  await page.mouse.move(grab.x + 60, grab.y, { steps: 10 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  const moved = await axisPointOnScreen(page, box, "x", 0.7);
+  expect(
+    Math.abs(moved.x - (grab.x + 60)),
+    `掴んだ点 ${grab.x.toFixed(0)}px → ${moved.x.toFixed(0)}px(指は ${(grab.x + 60).toFixed(0)}px まで動かした)`,
+  ).toBeLessThan(16);
+});
+
+test("移動の矢印は、狙いが数ピクセル外れても掴める", async ({ page }) => {
+  await boot(page);
+  const box = await freshBox(page);
+
+  for (const off of [6, -6]) {
+    const before = await axisPointOnScreen(page, box, "x", 0);
+    const grab = await axisPointOnScreen(page, box, "x", 0.55);
+    await page.mouse.move(grab.x, grab.y + off);
+    await page.mouse.down();
+    await page.mouse.move(grab.x + 50, grab.y + off, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+    const after = await axisPointOnScreen(page, box, "x", 0);
+    expect(
+      Math.abs(after.pos[0] - before.pos[0]),
+      `${off}px 外して掴んだとき x ${before.pos[0].toFixed(2)} → ${after.pos[0].toFixed(2)}`,
+    ).toBeGreaterThan(0.2);
+  }
+});
+
+test("移動の矢印を大きく引いても、物が視界の外へ飛んでいかない", async ({ page }) => {
+  await boot(page);
+  const box = await freshBox(page);
+
+  // **矢印をほぼ真正面から見る**向きに視点を移す。この向きだとドラッグ面が
+  // 画面と垂直に近くなり、指を横へ大きく引くとレイが面を擦る——交点が発散する
+  // (利用者役の実測: 2800px 引いたら -808.5m へ飛んだ)。
+  await page.evaluate((index) => {
+    const w = window as any;
+    const p = w.__world.body_position_at_f32(index);
+    w.__orbit.target.set(p[0], p[1], p[2]);
+    w.__camera.position.set(p[0] + 14, p[1] + 0.6, p[2] + 0.5);
+    w.__orbit.update();
+  }, box);
+  await page.waitForTimeout(300);
+
+  const before = await axisPointOnScreen(page, box, "x", 0);
+  const grab = await axisPointOnScreen(page, box, "x", 0.6);
+  await page.mouse.move(grab.x, grab.y);
+  await page.mouse.down();
+  await page.mouse.move(grab.x + 2400, grab.y, { steps: 40 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  const after = await axisPointOnScreen(page, box, "x", 0);
+  expect(
+    Math.abs(after.pos[0] - before.pos[0]),
+    `x ${before.pos[0].toFixed(2)} → ${after.pos[0].toFixed(2)}`,
+  ).toBeLessThan(200);
+});
+
+// **課題(進行管理役の実測)**: 「うごかすと 3D に何も映らないことがある」という
+// 報告を、46 の実験ぜんぶで測り直した。真っ黒な実験は無かったが、**見どころが
+// 画面のほんの数 % にしかならない**実験がいくつもあった——人から見ればこれは
+// 「何も映っていない」と同じことだ。原因は画角の計算に 2 か所あった
+// `Math.max(広がり, 0.5)`(いずれも `main.ts` の該当箇所のdoc参照)。1m より
+// 小さい場面はすべて「1m ある」ことにされ、その分だけカメラが引いていた。
+// 実測(直す前 → 直した後、画面の高さに対する見どころの割合):
+//   ・D25 ブラウン運動  6% → 21%
+//   ・D18 氷が融ける   10% → 50%
+//   ・D23 水を注ぐ     37% → 70%
+// この下限を測り続ける——画角の計算に「このアプリのボールの大きさ」のような
+// 絶対の長さが混ざると、小さい世界がまた同じように遠ざかるため。
+test("どの実験も、見どころが画面の一割より小さくならない", async ({ page }) => {
+  test.setTimeout(10 * 60 * 1000);
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+
+  /** 床・壁を除いた描画物が、画面の縦横のどちらかを占める割合。 */
+  const coverage = () =>
+    page.evaluate(() => {
+      const w = window as unknown as Record<string, any>;
+      const camera = w.__camera;
+      const mul = (m: number[], v: number[]) => [
+        m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+        m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+        m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+        m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+      ];
+      const corners: number[][] = [];
+      w.__scene.traverseVisible((o: any) => {
+        const g = o.geometry;
+        if (!g || g.type === "PlaneGeometry") return;
+        if (!g.boundingBox) g.computeBoundingBox?.();
+        const bb = g.boundingBox;
+        if (!bb) return;
+        for (const x of [bb.min.x, bb.max.x])
+          for (const y of [bb.min.y, bb.max.y])
+            for (const z of [bb.min.z, bb.max.z])
+              corners.push(mul(o.matrixWorld.elements, [x, y, z, 1]));
+      });
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      let seen = 0;
+      for (const c of corners) {
+        const eye = mul(camera.matrixWorldInverse.elements, c);
+        if (eye[2] > -1e-4) continue;
+        const clip = mul(camera.projectionMatrix.elements, eye);
+        const x = clip[0] / clip[3];
+        const y = clip[1] / clip[3];
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+        seen += 1;
+      }
+      if (!seen) return 0;
+      const clamp = (v: number) => Math.min(1, Math.max(-1, v));
+      return Math.max((clamp(maxX) - clamp(minX)) / 2, (clamp(maxY) - clamp(minY)) / 2);
+    });
+
+  const tooSmall: string[] = [];
+  for (const category of CATEGORIES) {
+    for (const experiment of category.experiments) {
+      await page.keyboard.press("Control+k");
+      await expect(page.locator("#palette")).toBeVisible();
+      await page.fill("#palette-input", experiment.title.replace(/[()（）]/g, " ").trim().slice(0, 5));
+      await expect(page.locator(".palette-row").first()).toBeVisible();
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#palette")).toBeHidden();
+      await page.waitForTimeout(2200);
+      // 形のある物を持たない実験(熱・量子・回路など)は、舞台ではなく
+      // グラフと場のパネルが見どころ。そちらは別のテストが見ている。
+      if ((await page.getAttribute("#scene-view", "data-stage-empty")) === "true") continue;
+      const fraction = await coverage();
+      if (fraction < 0.09) {
+        tooSmall.push(`${experiment.id} / ${experiment.title} → 画面の ${(fraction * 100).toFixed(0)}%`);
+      }
+    }
+  }
+  expect(tooSmall, tooSmall.join("\n")).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察 + 進行管理役の再現)**: 「コーヒーが冷める」を開くと、
+// いちばん大きい場所(3D の舞台 1008×459px)には最後まで何も出ず、見どころの
+// 折れ線は下端の 984×90px に押し込まれていた——面積で 5 倍、見せたいものが
+// 小さいほうにある。初めての人は「まん中が本編、下の帯はおまけ」と思って
+// 見るので、本編が空だと「壊れている」と読んで閉じる。
+test("舞台に何も映らない実験では、グラフのほうが舞台より大きい", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  await page.waitForTimeout(1500);
+
+  const stage = (await page.locator("#scene-view").boundingBox())!;
+  const canvas = (await page.locator("#probe-canvas").boundingBox())!;
+  expect(
+    canvas.height,
+    `折れ線を描く高さ ${Math.round(canvas.height)}px / 空の舞台 ${Math.round(stage.height)}px`,
+  ).toBeGreaterThan(stage.height);
+  // 舞台は畳んでも、案内が読めるだけは残す。
+  await expect(page.locator("#stage-empty-note")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: 二重スリットは舞台の中に 984×431px の縞模様が
+// **ちゃんと出ている**のに、画面の言葉は「舞台には形のある物が出ません。右の
+// パネルの数値を見てください」「見どころは下のグラフとパネルです」と、いちばん
+// 大きく出ている絵から目をそらさせていた。言われて右を見ると、数値は
+// 「経過した時間」1 行だけ。出ている物を指す。
+test("舞台の中に絵が出ている実験は、画面の言葉がその絵を指す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "二重スリ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("二重スリット");
+  await page.waitForTimeout(1200);
+
+  // 絵は舞台の中に、舞台の幅いっぱいで出ている。
+  const panel = (await page.locator("#field-panel").boundingBox())!;
+  const stage = (await page.locator("#scene-view").boundingBox())!;
+  expect(panel.width).toBeGreaterThan(stage.width * 0.7);
+  // その絵を指す言葉になっている(「下を見て」でも「数値を見て」でもない)。
+  await expect(page.locator("#stage-empty-note")).toContainText("この中に出ている絵");
+  await expect(page.locator('.card[data-card="watch"]')).toContainText("まん中に出ている絵");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: 見どころの文が長い実験(「重い球と軽い球」は
+// 1 項目が 260 字)では「ここを見る」札だけで 734px になり、すぐ下の
+// 「いまの数値」は y=857——柱のスクロール窓(109→660)の外だった。しかも
+// その文自身が「右の『いまの数値』で、2つの高さがみるみる離れていきます」と
+// 見えない所を指していた。読む文は一度読めばよく、数値は見ている間ずっと要る。
+test("長い「ここを見る」が、「いまの数値」を画面の外へ押し出さない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "重い球と軽");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("重い球");
+  await page.waitForTimeout(1200);
+
+  const where = await page.evaluate(() => {
+    const scroll = document.getElementById("context-scroll")!.getBoundingClientRect();
+    const numbers = document
+      .querySelector('.card[data-card="numbers"]')!
+      .getBoundingClientRect();
+    const watch = document.querySelector('.card[data-card="watch"]')!.getBoundingClientRect();
+    return {
+      scrollTop: Math.round(scroll.top),
+      scrollBottom: Math.round(scroll.bottom),
+      numbersTop: Math.round(numbers.top),
+      watchHeight: Math.round(watch.height),
+    };
+  });
+  expect(
+    where.numbersTop,
+    `「いまの数値」の上端 ${where.numbersTop}px / 窓 ${where.scrollTop}→${where.scrollBottom} / 「ここを見る」の高さ ${where.watchHeight}px`,
+  ).toBeLessThan(where.scrollBottom);
+  await expect(page.locator('.card[data-card="numbers"]')).toBeInViewport();
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察 + 進行管理役の再現)**: 「斜めに投げる」は 45° に
+// 投げ上げた球の**放物線**を見せる実験なのに、画面では球が上がって下りるだけに
+// 見えていた。追いかけるカメラが球を画面のまん中に置き続けるからで、実測では
+// 球が世界で 9.8m → 59.6m と 50m 進むあいだ、画面の横位置は 681〜740px の
+// 40px の帯から出ない。カメラは正しい——足りないのは**どこを通ってきたか**の
+// ほうなので、通った跡を残す。
+test("投げた物は、通った跡が画面に残る(カメラが追いかけても形が読める)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+  await page.waitForTimeout(1500);
+
+  const spread = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const camera = w.__camera;
+    const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    const mul = (m: number[], v: number[]) => [
+      m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+      m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+      m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+      m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+    ];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let points = 0;
+    w.__scene.traverseVisible((o: any) => {
+      if (!o.isLine || !o.geometry?.drawRange) return;
+      const n = o.geometry.drawRange.count;
+      if (!n || n === Infinity) return;
+      const arr = o.geometry.attributes.position.array as Float32Array;
+      for (let i = 0; i < n; i += 1) {
+        const eye = mul(camera.matrixWorldInverse.elements, [
+          arr[i * 3],
+          arr[i * 3 + 1],
+          arr[i * 3 + 2],
+          1,
+        ]);
+        if (eye[2] > -1e-4) continue;
+        const clip = mul(camera.projectionMatrix.elements, eye);
+        const x = rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width;
+        const y = rect.top + ((1 - clip[1] / clip[3]) / 2) * rect.height;
+        // **舞台の中に入っている点だけを数える**。画面の外の点まで含めて
+        // 「広がり」を測ると、跡のほとんどが画角の外に出ていても数字だけは
+        // 大きくなる——最初はそう測っていて、見えていないものを見えていると
+        // report していた(進行管理役の測り直しで発覚: 跡の点 153 個のうち
+        // 舞台に入っていたのは 19 個)。
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        points += 1;
+      }
+    });
+    return { points, width: points ? Math.round(maxX - minX) : 0 };
+  });
+  expect(spread.points, "舞台の中に見えている跡の点の数").toBeGreaterThan(5);
+  expect(spread.width, `舞台の中に見えている跡の広がり ${spread.width}px`).toBeGreaterThan(300);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測、進行管理役の再現)**: うごきのグラフには目盛りの
+// 付いた縦軸が無く、線が 2 本以上あると**それぞれ自分の範囲へ正規化して**
+// 重ねていた。ふりこの「横位置」は振れ幅 0.716 m、「高さ」は 0.066 m ——
+// 実際は 10.8 倍違うのに、画面では 2 本とも帯いっぱいの同じ高さの波。0 が
+// どこかも分からない(「高さ」は全区間が負)。量ごとに段を分ける。
+test("グラフは、量ごとに段を分けて、それぞれの上限と下限を出す", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
+  await expect(page.locator("#probe-canvas")).toBeVisible();
+
+  const bands = await page
+    .locator("#probe-canvas")
+    .evaluate(async () => {
+      const w = window as unknown as Record<string, any>;
+      for (let i = 0; i < 60 && (w.__probeGraphBands ?? []).length < 2; i += 1) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      return w.__probeGraphBands ?? [];
+    });
+
+  expect(bands.length, "段の数(=量の数)").toBeGreaterThanOrEqual(2);
+  // 段どうしは重ならない——重ねないことが、この直しのすべて。
+  const sorted = [...bands].sort((a, b) => a.top - b.top);
+  for (let i = 1; i < sorted.length; i += 1) {
+    expect(
+      sorted[i].top,
+      `${sorted[i].label} の段が ${sorted[i - 1].label} の段と重ならない`,
+    ).toBeGreaterThanOrEqual(sorted[i - 1].top + sorted[i - 1].height);
+  }
+  // それぞれの段は、自分の上限と下限を持っている(目盛りとして描いている値)。
+  for (const band of bands) {
+    expect(Number.isFinite(band.min) && Number.isFinite(band.max)).toBe(true);
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題#36 と利用者役⑪の実測**: 「1 回跳ねるごとに高さが決まった割合で
+// 減ります」と書いてあるのに、跳ね返った高さが画面に無かった。しかも
+// 「ボールを跳ねさせる」は 1 コマで 1 秒ぶん進むので、画面の更新に合わせて
+// 値を覗くやり方では**跳ね返り 1 往復をまたぎ越す**——同じ設定で 1.30 m と
+// 0.84 m(=2 回目の跳ね返り)の両方が出ていた。記録そのものから読む。
+test("跳ね返った高さが出て、同じ設定なら何度読んでも同じ", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "跳ねさせる");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("跳ねさせる");
+
+  const peak = async () => {
+    const text = await page.locator("#context").innerText();
+    const hit = text.match(/1 回目に跳ね返った高さ\n([^\n]+)/);
+    return hit ? hit[1].trim() : "";
+  };
+  await expect.poll(peak, { timeout: 20_000 }).toMatch(/^[\d.]+ m$/);
+  const first = await peak();
+  await page.waitForTimeout(2500);
+  const later = await peak();
+  expect(later, "同じ回の中で、あとから読んでも同じ").toBe(first);
+
+  // 落とした高さ 2 m に対して、跳ね返りは決まった割合(ゴムでおよそ 0.65)。
+  const ratio = Number.parseFloat(first) / 2;
+  expect(ratio, `跳ね返りの割合 ${ratio.toFixed(3)}`).toBeGreaterThan(0.45);
+  expect(ratio, `跳ね返りの割合 ${ratio.toFixed(3)}`).toBeLessThan(0.85);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測)**: 「45° がいちばん遠くまで飛びます」「飛距離と
+// 滞空時間の関係が見えます」と言うのに、飛距離がどこにも無かった。球は
+// 着地後も転がり続けるので、いまの横位置では答えにならない(t=2.79s で
+// 38.8m、t=7.59s で 86.8m)。着いた瞬間の値で止める。
+test("投げた物の飛距離が出て、教科書の式と合う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+
+  const range = async () => {
+    const text = await page.locator("#context").innerText();
+    const hit = text.match(/着いたときの横の距離\(飛距離\)\n([^\n]+)/);
+    return hit ? hit[1].trim() : "";
+  };
+  await expect.poll(range, { timeout: 20_000 }).toMatch(/^[\d.]+ m$/);
+  const shown = Number.parseFloat(await range());
+  // 秒速 20 m・45°・y=0.2 m から投げて y=0.3 m まで: 40.62 m(手計算)。
+  expect(shown, `飛距離 ${shown} m`).toBeGreaterThan(39.5);
+  expect(shown, `飛距離 ${shown} m`).toBeLessThan(41.5);
+  // 読み続けても動かない(転がっていく横位置とは別物であること)。
+  await page.waitForTimeout(2500);
+  expect(Number.parseFloat(await range())).toBe(shown);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測)**: 動ける物が 1 つも無い場面(コーヒーが冷める・
+// 電気の工作台)にまで「ほぼ止まった時刻(0.05 m/s 以下)」の行が出て、永久に
+// 「まだ止まっていません」と言い続けていた。止まる・止まらないという問いが
+// そもそも無い。逆に 25°の坂では箱が 0.00 m/s で張り付いているのに
+// 「まだ止まっていません」と出て、すぐ上の速さと矛盾していた。
+test("止まる・止まらないを、問える場面でだけ問う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒー");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  await page.waitForTimeout(5000);
+  await expect(
+    page.locator("#readout-settled-key"),
+    "動ける物が無い場面に、止まった時刻の行は出ない",
+  ).toBeHidden();
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "坂はすべる");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("坂");
+  await expect(page.locator("#readout-settled")).toBeVisible({ timeout: 20_000 });
+  const settled = await page.locator("#readout-settled").innerText();
+  const context = await page.locator("#context").innerText();
+  if (/箱の速さ\n0\.00 m\/s/.test(context)) {
+    expect(settled, "0.00 m/s のとなりで「まだ止まっていません」と言わない").not.toBe(
+      "まだ止まっていません",
+    );
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測)**: どの実験で何秒目に保存しても、書き出した
+// ファイルの名前は必ず `probes.csv`。中にも「どの実験を、どの高さ・どの
+// 重力で回したか」は入っていない。3〜4 個ぶん落とすと、どれがどれだか
+// 分からなくなる。中身(列)は機械で読むためのものなので触らず、名前で
+// 見分けられるようにする。
+test("書き出したファイルの名前が、どの実験のどの設定か言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    w.__lastDownload = null;
+    const original = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      if (this.download) w.__lastDownload = this.download;
+      return original.apply(this, arguments as never);
+    };
+  });
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを落とす");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ボールを落とす");
+  await expect(page.locator("#btn-probe-csv")).toBeEnabled({ timeout: 20_000 });
+  await page.click("#btn-probe-csv");
+
+  const name = await page.evaluate(
+    () => (window as unknown as Record<string, any>).__lastDownload as string,
+  );
+  expect(name, `書き出した名前 ${name}`).toContain("ボールを落とす");
+  expect(name, "効いているつまみも名前に入る").toContain("落とす高さ");
+  expect(name).toMatch(/\.csv$/);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測)**: グラフの横軸は常に 0 から現在までで、範囲を
+// 選ぶ手段が無かった。ふりこを 1.04 分回すと同じ幅に約 31 往復が詰まり、
+// 青と橙の縞模様になって周期が読めない(10 秒の時点では 2.0236 秒/往復と
+// 読めていた)。戻す方法も無かった。
+test("グラフの見る範囲を選べる(記録そのものは減らない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
+
+  const spanSeconds = async () => {
+    const text = await page.locator("#probe-time-range").innerText();
+    const hit = text.match(/t = ([\d.]+) 秒 〜 ([\d.]+) 秒/);
+    return hit ? Number.parseFloat(hit[2]) - Number.parseFloat(hit[1]) : 0;
+  };
+  // 20 秒ぶんまで溜まるのを待つ(「直近 10 秒」との差がはっきり出る長さ)。
+  await expect.poll(spanSeconds, { timeout: 60_000 }).toBeGreaterThan(20);
+
+  await page.selectOption("#probe-window", "10");
+  await expect.poll(spanSeconds, { timeout: 10_000 }).toBeLessThan(12);
+  expect(await spanSeconds(), "選んだ範囲ぶんは描かれている").toBeGreaterThan(8);
+
+  // 書き出す表は切らない——記録そのものは減っていないこと。
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    w.__lastCsvRows = null;
+    const original = Blob;
+    (window as unknown as { Blob: unknown }).Blob = function (
+      parts: BlobPart[],
+      options?: BlobPropertyBag,
+    ) {
+      if (typeof parts?.[0] === "string") w.__lastCsvRows = parts[0].split("\n").length;
+      return new original(parts, options);
+    } as unknown as typeof Blob;
+  });
+  await page.click("#btn-probe-csv");
+  const rows = await page.evaluate(
+    () => (window as unknown as Record<string, any>).__lastCsvRows as number,
+  );
+  // 10 秒ぶんは 1/120 秒刻みで 1200 行ほど。それより明らかに多ければ、
+  // 表は「見る範囲」で切られていない。
+  expect(rows, `書き出した行数 ${rows}`).toBeGreaterThan(2000);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測、進行管理役の再現)**: 同じ瞬間の同じ量が、画面の
+// 2 か所で食い違っていた——「選んだもの」札の『置き場所 x』と Inspector の
+// 『位置 x』。秒速 9.6m で飛ぶ球で 44.571 m と 45.055 m(差 0.48m)。
+// どちらを書き写せばいいのか決められない。
+test("同じ量は、画面のどこで読んでも同じ数字", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+  await page.locator("#hierarchy-tree").getByText("shell", { exact: false }).first().click();
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+
+  for (let i = 0; i < 5; i += 1) {
+    await page.waitForTimeout(400);
+    const both = await page.evaluate(() => ({
+      card: (document.getElementById("focus-pos-x") as HTMLInputElement | null)?.value ?? null,
+      inspector:
+        (document.getElementById("inspector-position-x") as HTMLInputElement | null)?.value ??
+        null,
+    }));
+    if (both.card === null || both.inspector === null) continue;
+    expect(
+      Number.parseFloat(both.inspector),
+      `札 ${both.card} と Inspector ${both.inspector}`,
+    ).toBeCloseTo(Number.parseFloat(both.card), 3);
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題#33(進行管理役の実測)**: 「氷が融ける」は「融けている間に熱を
+// 奪われる」と説明するのに、42 秒待っても「飲み物 76 ℃」のまま動かず、
+// 氷も 17% しか縮まなかった。飲み物の熱容量が 200000 J/K ——水にすると
+// 48 kg で、0.9 kg の氷を一杯のドリンクではなく風呂に浮かべているのと
+// 同じだった。飲み物らしい大きさ(水 3.6 kg 相当)に直した。
+test("氷が融けるあいだに、飲み物が目に見えて冷える", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "氷が融ける");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("氷が融ける");
+
+  const drinkCelsius = async () => {
+    const text = await page.locator("#context").innerText();
+    const hit = text.match(/飲み物の温度\n(-?[\d.]+) ℃/);
+    return hit ? Number.parseFloat(hit[1]) : Number.NaN;
+  };
+  await expect.poll(drinkCelsius, { timeout: 20_000 }).toBeGreaterThan(70);
+  const started = await drinkCelsius();
+
+  // 40 秒ぶん進むまで待つ(この場面は 1 コマで 2 秒ぶん進む)。
+  await expect.poll(() => elapsedSeconds(page), { timeout: 60_000 }).toBeGreaterThan(40);
+  const now = await drinkCelsius();
+  expect(
+    started - now,
+    `40 秒で冷えた幅 ${(started - now).toFixed(1)} ℃(76.9 → 64.5 ℃ が実測)`,
+  ).toBeGreaterThan(8);
+  expect(errors).toEqual([]);
+});
+
+// **課題#31(利用者役の観察と進行管理役の再現)**: 静電気の風船は、壁が
+// 無限平面のまま 400m 四方で描かれていた。場面ぜんぶの広がりは 0.2m、
+// カメラは 0.41m の距離。そこへ 400m の面を斜め 27° から見るので面が画面を
+// 端から端まで埋め、「カメラが壁と平行で、何を見ているか分からない」と
+// 書かれた。壁は場面の大きさに合わせて描き、縁が画面に入るようにする。
+test("壁のある実験では、壁が「立っている板」として画面に入る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "静電気");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("風船");
+  await page.waitForTimeout(3000);
+
+  const wall = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const mesh = w.__bodyMeshFor(0);
+    const params = mesh?.geometry?.parameters as { width?: number } | undefined;
+    const host = document.querySelector<HTMLElement>("#scene-view-canvas-host")!;
+    const rect = host.getBoundingClientRect();
+    let cornersOnScreen = 0;
+    if (mesh && params?.width) {
+      const half = params.width / 2;
+      for (const [a, b] of [
+        [-half, -half],
+        [half, -half],
+        [-half, half],
+        [half, half],
+      ]) {
+        const local = new mesh.position.constructor(a, b, 0);
+        const world = local.applyMatrix4(mesh.matrixWorld);
+        const v = world.project(w.__camera);
+        const x = (v.x * 0.5 + 0.5) * rect.width;
+        const y = (-v.y * 0.5 + 0.5) * rect.height;
+        if (v.z < 1 && x >= 0 && x <= rect.width && y >= 0 && y <= rect.height) {
+          cornersOnScreen += 1;
+        }
+      }
+    }
+    return { width: params?.width ?? 0, cornersOnScreen };
+  });
+
+  expect(wall.width, `壁の板の大きさ ${wall.width} m`).toBeLessThan(5);
+  expect(wall.width, "小さすぎて板に見えなくならない").toBeGreaterThan(0.2);
+  expect(wall.cornersOnScreen, "板の角が画面に入っている(=縁が見える)").toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+// **課題#32(進行管理役の実測)**: 「50個の球をばらまく」は 5.3秒で全部の球が
+// y=0.20 に落ち着くのに、カメラは距離 25.19m・注視点 y=6.01 のまま動かず、
+// 球の塊は舞台 1132×715px のうち 134×67px ——面積で 1.1% しか使っていな
+// かった。残りは空の格子と黒い空。落ちる途中の高さは、落ち終われば見どころ
+// ではない(`guidedStillBox` の doc 参照)。
+test("落ちきったら、落下の高さぶん画角を取られたままにならない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ばらまく");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ばらまく");
+
+  const spread = async () =>
+    page.evaluate(() => {
+      const w = window as unknown as Record<string, any>;
+      const host = document.querySelector<HTMLElement>("#scene-view-canvas-host")!;
+      const rect = host.getBoundingClientRect();
+      let minX = Infinity;
+      let maxX = -Infinity;
+      for (let i = 0; i < 80; i += 1) {
+        const mesh = w.__bodyMeshFor(i);
+        if (!mesh) continue;
+        if (w.__world.read_component("body_is_static_at", String(i)) === "true") continue;
+        const v = mesh.position.clone().project(w.__camera);
+        const x = (v.x * 0.5 + 0.5) * rect.width;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+      }
+      return {
+        width: Number.isFinite(minX) ? Math.round(maxX - minX) : 0,
+        stage: Math.round(rect.width),
+        targetY: w.__orbit.target.y,
+      };
+    });
+
+  // 落ち着くのに約5秒、手放すのに 1.5 秒、寄り切るのに数秒。
+  await expect
+    .poll(async () => (await spread()).width, { timeout: 30_000 })
+    .toBeGreaterThan(200);
+  const after = await spread();
+  expect(
+    after.width / after.stage,
+    `落ち着いたあと、球の塊が舞台の横幅に占める割合(${after.width}/${after.stage}px)`,
+  ).toBeGreaterThan(0.18);
+  expect(after.targetY, "落ち着いたあとの注視点の高さ").toBeLessThan(1.5);
+  expect(errors).toEqual([]);
+});
+
+// **課題#35(進行管理役の実測)**: 「斜めに投げる」は題名も説明も放物線の
+// 軌跡を約束しているのに、追いかけるカメラが球から 2.74〜3.42m しか離れず、
+// 球が世界で 0m → 75m 進むあいだ画面には地面の格子が流れるだけだった。
+// 跡が残るようになっても、その跡は画角の外にあった(跡の点 153 個のうち
+// 舞台の中は 19 個)。**上がって下りる形が画面に入っていること**を測る
+// ——横に広いだけなら、まっすぐ飛んだのと区別がつかない。
+test("投げた物は、上がって下りる形ごと画面に入る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+  await page.waitForTimeout(3000); // 着地(約2.9秒)まで待って、放物線を一本ぶん描かせる。
+
+  const arc = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const camera = w.__camera;
+    const host = document.querySelector<HTMLElement>("#scene-view-canvas-host")!;
+    const rect = host.getBoundingClientRect();
+    const shown: { x: number; y: number }[] = [];
+    for (const [px, py, pz] of w.__trailPoints() as number[][]) {
+      const p = { x: px, y: py, z: pz };
+      // three の Vector3.project と同じ計算を、その場で手で書く。
+      const m = camera.matrixWorldInverse.elements;
+      const eye = [
+        m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12],
+        m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13],
+        m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14],
+        m[3] * p.x + m[7] * p.y + m[11] * p.z + m[15],
+      ];
+      if (eye[2] > -1e-4) continue;
+      const q = camera.projectionMatrix.elements;
+      const clip = [
+        q[0] * eye[0] + q[4] * eye[1] + q[8] * eye[2] + q[12] * eye[3],
+        q[1] * eye[0] + q[5] * eye[1] + q[9] * eye[2] + q[13] * eye[3],
+        q[2] * eye[0] + q[6] * eye[1] + q[10] * eye[2] + q[14] * eye[3],
+        q[3] * eye[0] + q[7] * eye[1] + q[11] * eye[2] + q[15] * eye[3],
+      ];
+      const x = ((clip[0] / clip[3] + 1) / 2) * rect.width;
+      const y = ((1 - clip[1] / clip[3]) / 2) * rect.height;
+      if (x < 0 || x > rect.width || y < 0 || y > rect.height) continue;
+      shown.push({ x, y });
+    }
+    if (shown.length < 5) return { points: shown.length, width: 0, rise: 0 };
+    shown.sort((a, b) => a.x - b.x);
+    const left = shown[0];
+    const right = shown[shown.length - 1];
+    // 弦(両端を結んだ線)から、いちばん高く外れた点までの縦の隔たり。
+    // 放物線ならここが頂点になる。まっすぐなら 0 に近い。
+    let rise = 0;
+    for (const p of shown) {
+      const t = (p.x - left.x) / Math.max(right.x - left.x, 1e-6);
+      const chordY = left.y + (right.y - left.y) * t;
+      rise = Math.max(rise, chordY - p.y); // 画面の y は下向き。
+    }
+    return { points: shown.length, width: Math.round(right.x - left.x), rise: Math.round(rise) };
+  });
+
+  expect(arc.points, "舞台の中に見えている跡の点の数").toBeGreaterThan(20);
+  expect(arc.width, `舞台の中での跡の横幅 ${arc.width}px`).toBeGreaterThan(300);
+  expect(arc.rise, `弦からの立ち上がり ${arc.rise}px(=放物線の高さ)`).toBeGreaterThan(50);
+  expect(errors).toEqual([]);
+});
+
+// **同じ課題の裏側**: 放物線が全部入る距離まで引くと、直径 0.2m の球は画面で
+// 1px 未満になって消える(実測: カメラ距離 130m で 0.95px)。点にしか見えない
+// 物には、画面で必ず一定の大きさに見える輪を添える(`updateVisibilityMark` の
+// doc 参照)。**十分大きく映っている場面では出ない**ことも一緒に確かめる
+// ——出っぱなしなら、ただの飾りになってしまう。
+test("点にしか見えない物には、見失わないための輪がつく(大きく映る物には付かない)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+  await expect
+    .poll(
+      () => page.evaluate(() => (window as unknown as Record<string, any>).__visibilityMarkCount()),
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "積み木");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("積み木");
+  await page.waitForTimeout(2500);
+  const marks = await page.evaluate(() =>
+    (window as unknown as Record<string, any>).__visibilityMarkCount(),
+  );
+  expect(marks, "積み木のように大きく映る場面で出ている輪の数").toBe(0);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の実測)**: 「ふりこ」を開いても、おもりはほぼ真下で
+// 止まって見えた——画面上の往復は 17px(おもりの直径 57px の 1/3 未満、
+// 舞台の幅の 1.7%)。既定の振れはばが 3 度だったため。「ふりこ」を選んだ人が
+// まず見たいのは往復そのものなので、既定を目で見て分かる大きさにする
+// (21 度。1 往復の時間が「ひもの長さだけで決まる」関係は 0.8% のずれで
+// 成り立ったまま——`catalog.ts` の該当つまみのdoc参照)。
+test("ふりこは、何も触らなくても目で見て往復する", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
+  await page.waitForTimeout(400);
+
+  const xs: number[] = [];
+  for (let i = 0; i < 14; i += 1) {
+    xs.push(
+      await page.evaluate(() => {
+        const w = window as unknown as Record<string, any>;
+        const world = w.__world;
+        const camera = w.__camera;
+        const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+        const rect = canvas.getBoundingClientRect();
+        const count = Number(world.read_component("body_count", ""));
+        for (let i = 0; i < count; i += 1) {
+          if (world.read_component("body_label_at", String(i)) !== "bob") continue;
+          const p = world.body_position_at_f32(i);
+          const mul = (m: number[], v: number[]) => [
+            m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+            m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+            m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+            m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+          ];
+          const clip = mul(
+            camera.projectionMatrix.elements,
+            mul(camera.matrixWorldInverse.elements, [p[0], p[1], p[2], 1]),
+          );
+          return rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width;
+        }
+        return 0;
+      }),
+    );
+    await page.waitForTimeout(220);
+  }
+  const swing = Math.round(Math.max(...xs) - Math.min(...xs));
+  expect(swing, `画面上の往復の幅 ${swing}px`).toBeGreaterThan(60);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: いちばん浅い「みる」のままで、理科の数字として
+// 読めない表記が出ていた——「広がりの大きさ = 1.96e-17」(単位なし)、
+// 「温度 = 312.7 K」「圧力 = 1736 Pa」。1.96e-17 も 312.7 K も中学校では
+// 見ない書き方で、「大きくなった/小さくなった」すら読み取れない。
+test("「みる」に出る数字は、読める単位と桁で書いてある", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "インクが広");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("インク");
+  await page.waitForTimeout(2500);
+  const ink = await page.locator('.card[data-card="numbers"]').innerText();
+  // 平均二乗変位(m²)の生値ではなく、その平方根を人の桁で。
+  expect(ink, ink).toContain("平均して動いた距離");
+  expect(ink, ink).toContain("nm");
+  expect(ink, `指数のまま出ている: ${ink}`).not.toMatch(/\de[+-]\d/);
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "気体の分子");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("気体");
+  await page.waitForTimeout(2500);
+  const gas = await page.locator('.card[data-card="numbers"]').innerText();
+  // K と Pa は残したまま、隣に馴染みのある目盛りを添える。
+  expect(gas, gas).toContain("K");
+  expect(gas, gas).toContain("℃");
+  expect(gas, gas).toContain("Pa");
+  expect(gas, gas).toContain("ふだんの空気の");
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: 計算が重い実験では時計がほとんど進まないのに、
+// 画面は「実際は ×0.06(これがこの機械の精一杯)」としか言わず、「あと何秒
+// 待てばいいのか」が分からないので途中で閉じることになっていた(「水を注ぐ」は
+// 6.5 秒待って時計が 0.09 → 0.40 秒)。倍率を、人が待つ時間に直して添える。
+test("計算が重い実験では、どれだけ待つことになるのかが書いてある", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+
+  // 人の尺度で進む場面: 「画面の 1 秒ぶんに ◯ 秒」。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "水を注ぐ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("水を注ぐ");
+  await page.waitForTimeout(3000);
+  const water = await page.locator("#run-actual-rate").innerText();
+  expect(water, water).toMatch(/画面の 1 秒ぶんに [\d.]+ 秒/);
+
+  // ピコ秒で進む場面で同じ言い方をすると「8544144718 秒」になる。
+  // そちらは逆から——「1 秒待つとどれだけ進むか」で言う。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "気体の分子");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("気体");
+  await page.waitForTimeout(3000);
+  const gas = await page.locator("#run-actual-rate").innerText();
+  expect(gas, gas).toContain("1 秒待って");
+  expect(gas, `秒で言うと意味を成さない桁になる: ${gas}`).not.toMatch(/ぶんに \d{4,} 秒/);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の実測)**: 「惑星が太陽を回る」を開いても、画面に出て
+// いるのは黒地に 2 つの点だけ(惑星 10×10px、舞台の 99.7% が背景色)で、
+// **軌道はどこにも描かれていなかった**——タイトルが約束している「回る」が
+// 絵になっていない。通った跡は剛体にだけ付けていたが、天体は別の仕組みで
+// 描かれているので素通りしていた。同じ跡を天体にも残す。
+test("天体の実験では、回った跡が軌道として描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星が太");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("惑星");
+  await page.waitForTimeout(3500);
+
+  const arc = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const camera = w.__camera;
+    const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    const mul = (m: number[], v: number[]) => [
+      m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+      m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+      m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+      m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+    ];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let points = 0;
+    w.__scene.traverseVisible((o: any) => {
+      if (!o.isLine || !o.geometry?.drawRange) return;
+      const n = o.geometry.drawRange.count;
+      if (!n || n === Infinity) return;
+      const arr = o.geometry.attributes.position.array as Float32Array;
+      for (let i = 0; i < n; i += 1) {
+        const eye = mul(camera.matrixWorldInverse.elements, [
+          arr[i * 3],
+          arr[i * 3 + 1],
+          arr[i * 3 + 2],
+          1,
+        ]);
+        if (eye[2] > -1e-4) continue;
+        const clip = mul(camera.projectionMatrix.elements, eye);
+        const x = rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width;
+        const y = rect.top + ((1 - clip[1] / clip[3]) / 2) * rect.height;
+        // 舞台の中に入っている点だけを数える(上の「通った跡」のテストと
+        // 同じ理由——画面の外の点まで含めると、見えていないものが見えている
+        // ことになる)。
+        if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) continue;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+        points += 1;
+      }
+    });
+    return {
+      points,
+      width: points ? Math.round(maxX - minX) : 0,
+      height: points ? Math.round(maxY - minY) : 0,
+    };
+  });
+  expect(arc.points, "舞台の中に見えている軌道の点の数").toBeGreaterThan(20);
+  // まっすぐな線ではなく、**曲がって**いる(縦にも横にも広がっている)。
+  expect(arc.width, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(150);
+  expect(arc.height, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(60);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: 「煙が流れる(3D)」の説明は「球のまわりを煙が
+// 流れていきます」「球の裏側で巻き込まれ」と書いていたのに、**この場面に球は
+// 無い**(場面ファイルの `bodies` は空、格子流体の境界も流入だけ)。利用者役は
+// 「球はどこにも見えません」と書いた。在るものを書く。
+test("画面に無い物を、説明が約束していない(煙の場面に球は無い)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "煙が流れ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("煙");
+  await page.waitForTimeout(1500);
+
+  // 剛体はひとつも無い(=「球」は物理にも描画にも存在しない)。
+  const bodies = await page.evaluate(() => {
+    const world = (window as unknown as Record<string, any>).__world;
+    const count = Number(world.read_component("body_count", ""));
+    let solid = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (world.read_component("body_shape_kind_at", String(i)) !== "plane") solid += 1;
+    }
+    return solid;
+  });
+  expect(bodies, "この場面の剛体の数").toBe(0);
+
+  const watch = await page.locator('.card[data-card="watch"]').innerText();
+  expect(watch, `無い物を指している: ${watch}`).not.toContain("球");
+  expect(watch).toContain("煙");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察)**: 「坂はすべる? 止まる?」を開くと、平らなマス目の
+// 地面に灰色の箱が 1 つ立っているだけで、傾いた坂はどこにも見えない。8 秒
+// 待っても何も動かない(実測: 「箱の速さ = 0.00 m/s」が 1.89 秒から 8.09 秒
+// までずっと 0.00)。タイトルが「すべる? 止まる?」と問いかけているのに、坂が
+// 見えないので、答えが「止まる」なのか「そもそも始まっていない」のかが
+// 判断できなかった。既定のかたむきが 10° だったため。
+test("「坂はすべる?」は、坂だと目で分かるところから始まる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "坂はすべ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("坂");
+  await page.waitForTimeout(1500);
+
+  /** 床の面が、水平からどれだけ傾いているか [度]。 */
+  const slopeDegrees = () =>
+    page.evaluate(() => {
+      const w = window as unknown as Record<string, any>;
+      const world = w.__world;
+      const count = Number(world.read_component("body_count", ""));
+      for (let i = 0; i < count; i += 1) {
+        if (world.read_component("body_shape_kind_at", String(i)) !== "plane") continue;
+        const mesh = w.__bodyMeshFor?.(i);
+        if (!mesh) continue;
+        // 平面は「ローカル +Z が法線」になるよう回して置いてある。
+        const q = mesh.quaternion;
+        const n = { x: 0, y: 0, z: 1 };
+        // クォータニオンで (0,0,1) を回す。
+        const ix = q.w * n.x + q.y * n.z - q.z * n.y;
+        const iy = q.w * n.y + q.z * n.x - q.x * n.z;
+        const iz = q.w * n.z + q.x * n.y - q.y * n.x;
+        const iw = -q.x * n.x - q.y * n.y - q.z * n.z;
+        const y = iy * q.w + iw * -q.y + iz * -q.x - ix * -q.z;
+        return (Math.acos(Math.min(1, Math.abs(y))) * 180) / Math.PI;
+      }
+      return 0;
+    });
+
+  // 坂だと目で分かる(水平から 20° 以上)。
+  const degrees = await slopeDegrees();
+  expect(degrees, `坂のかたむき ${degrees.toFixed(1)}°`).toBeGreaterThan(20);
+
+  // それでも箱は止まっている——摩擦が勝っている、が答え。
+  await expect(page.locator('#context dd[data-probe="0"]')).toContainText("0.00");
+
+  // つまみを滑り出す角度まで上げれば、ちゃんと滑る。
+  await page.locator('.knob[data-knob-id="slope"] input[type="range"]').fill("40");
+  await page.waitForTimeout(2500);
+  await expect
+    .poll(
+      async () =>
+        parseShownNumber(
+          (await page.locator('#context dd[data-probe="0"]').textContent()) ?? "0",
+        ),
+      { timeout: 15_000 },
+    )
+    .toBeGreaterThan(1);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の実測)**: 「電気の工作台」で「電池の電圧」を 1.5 V にしても
+// 12 V にしても、「コンデンサの電圧」がまったく同じ数字になり、しかも
+// 1.5 V を選んでいるのにグラフの凡例は `max=8.852 V` ——乾電池 1 本より大きい
+// 電圧が出ていた。コンデンサは電池へつながっていない放電枝に居て、初期電圧が
+// 9.0 V に焼き込まれていたため。あわせて、つまみの説明が約束している「電流」と
+// 「発熱」が「いまの数値」のどこにも無かった。
+test("電池のつまみが、回路のどの数値にも効く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d19-electric-workbench"]');
+  await expect(page.locator("#crumb-experiment")).toContainText("電気の工作台");
+  await page.waitForTimeout(1200);
+
+  const read = async (volts: string) => {
+    await page.locator("#context .knob-choice-btn", { hasText: volts }).first().click();
+    await page.click("#btn-restart");
+    await page.waitForTimeout(2200);
+    const legend: string[] = await page.evaluate(
+      () => (window as unknown as Record<string, any>).__probeGraphLegend ?? [],
+    );
+    const capacitorPeak = legend.find((l) => l.startsWith("コンデンサの電圧")) ?? "";
+    return {
+      panel: await page.locator('.card[data-card="numbers"]').innerText(),
+      capacitorPeak,
+    };
+  };
+
+  const low = await read("1.5 V");
+  const high = await read("12 V");
+
+  // コンデンサは、選んだ電池で充電された状態から始まる——1.5 V の乾電池から
+  // 8.852 V が出る、ということが起きない。
+  const peak = (line: string) => Number.parseFloat(line.match(/max=([\d.]+)/)?.[1] ?? "0");
+  expect(peak(low.capacitorPeak), low.capacitorPeak).toBeLessThan(2);
+  expect(peak(high.capacitorPeak), high.capacitorPeak).toBeGreaterThan(9);
+
+  // つまみの説明が約束している電流と温度が、画面にあって、ちゃんと動く。
+  for (const label of ["電池・電源0 から流れる電流", "抵抗の温度"]) {
+    expect(low.panel, `${label} が「いまの数値」に無い`).toContain(label);
+  }
+  const current = (panel: string) =>
+    Number.parseFloat(panel.match(/電池・電源0 から流れる電流\s*([\d.]+) mA/)?.[1] ?? "0");
+  const celsius = (panel: string) =>
+    Number.parseFloat(panel.match(/抵抗の温度\s*[\d.]+ K\(([-\d.]+) ℃\)/)?.[1] ?? "0");
+  expect(current(high.panel), `電流 ${current(low.panel)} → ${current(high.panel)} mA`).toBeGreaterThan(
+    current(low.panel) * 2,
+  );
+  expect(celsius(high.panel), `温度 ${celsius(low.panel)} → ${celsius(high.panel)} ℃`).toBeGreaterThan(
+    celsius(low.panel) + 1,
+  );
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の観察)**: 時間を戻す帯は「つまむと 1.00 秒 〜 4.00 秒 の
+// あいだへ戻せます」と書いてあり、好きな瞬間へ戻せるように読める。実際は
+// 記録が 1 秒ごとなので、止まれるのは 4 か所だけ——2 秒で終わる落下では
+// 「ぶつかる瞬間をもう一度」が押さえられない。飛び飛びであることを先に言う。
+test("時間を戻す帯は、飛び飛びであることを先に言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.waitForTimeout(5000);
+  await page.click("#btn-run"); // とめる
+
+  const hint = await page.locator("#timeline-hint").innerText();
+  expect(hint, hint).toContain("記録した");
+  expect(hint, hint).toContain("1 秒ごと");
+  // 帯が実際に止まれる数と、文が言う数が合っている。
+  const stops = await page.evaluate(() => {
+    const el = document.getElementById("timeline-scrubber") as HTMLInputElement | null;
+    if (!el) return 0;
+    return Number(el.max) - Number(el.min) + 1;
+  });
+  expect(hint, `帯は ${stops} か所で止まる: ${hint}`).toContain(`${stops} つの時点`);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の観察)**: 「氷が融ける」は、回すつまみが「飲み物の温度
+// 350 K」、すぐ隣の「いまの数値」が「飲み物の温度 76.7 ℃」——同じ量なのに
+// 単位が違い、350 と 76.7 が同じことを指していると気づくのに時間がかかった。
+test("つまみと数値が、同じ量を同じ目盛りで言う(飲み物の温度)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "氷が融け");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("氷");
+  await page.waitForTimeout(1500);
+
+  const knob = await page.locator('.knob[data-knob-id="drink"] .knob-value').innerText();
+  const panel = await page.locator('.card[data-card="numbers"]').innerText();
+  // つまみは K のまま(場面が使う目盛り)、℃ を添えて突き合わせられる。
+  expect(knob, knob).toContain("K");
+  expect(knob, knob).toContain("℃");
+  expect(panel, panel).toContain("℃");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の実測)**: 「空気をばねにする」で「押し込む速さ」を 0.1 m/s に
+// しても、画面の「ピストンの速さ」は 0.815 m/s ——つまみと 8 倍以上ずれる。
+// どちらも「速さ(m/s)」なので、効いていないのか読み違えたのか分からない。
+// 実際には押し込みから押し返しまでが 0.1 秒ほどで終わり、そのあと数値に
+// 出ているのは**外へ出ていく速さ**だった。つまみが実際に決めているのは
+// 「どこまで押し込めたか」なので、それを出す。
+test("一瞬で終わる現象でも、つまみの効きが数値で読める(ピストン)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "空気をばね");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("空気をばね");
+  await page.waitForTimeout(1200);
+
+  const deepest = async (speed: string) => {
+    await page.locator('.knob[data-knob-id="push"] input[type="range"]').fill(speed);
+    await page.waitForTimeout(2500);
+    const panel = await page.locator('.card[data-card="numbers"]').innerText();
+    const match = panel.match(/いちばん深く押し込めたところ\s*(-?[\d.]+) m/);
+    expect(match, `「いちばん深く押し込めたところ」が読めない: ${panel}`).not.toBeNull();
+    return Number.parseFloat(match![1]);
+  };
+
+  // 強く押すほど深い(負の向きへ大きい)。実測: 0.1 m/s で -0.002 m、
+  // 1.5 m/s で -0.086 m。
+  const hard = await deepest("1.5");
+  const gentle = await deepest("0.1");
+  expect(hard, `強く ${hard} m / やさしく ${gentle} m`).toBeLessThan(gentle - 0.02);
+  // **深いほうの値が居座らない**。つまみを戻したら測り直す——ここが効いて
+  // いないと、一度強く押しただけで以後ずっと深い値を指したままになる
+  // (つまみを動かすと実験は読み込み直される)。
+  expect(gentle, `強く押した後にやさしくしたら ${gentle} m`).toBeGreaterThan(-0.01);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の観察)**: 3 段の積み木(すぐ止まる)では「ほぼ止まった時刻」
+// の行が出るのに、8 段(崩れ続けて止まらない)に上げると**行ごと消える**ので、
+// 崩れたのか数値が壊れたのか分からなかった。いちど出た行を黙って消さない。
+// あわせて、段数の上限 8 では「高く積むほど崩れやすい」を試しきれなかった。
+test("止まらない場面でも、「ほぼ止まった時刻」の行が消えない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "積み木");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("積み木");
+
+  const floors = page.locator('.knob[data-knob-id="floors"] input[type="range"]');
+  const settled = page.locator("#readout-settled");
+  // 高い塔は崩れ続ける。**行は残り、止まっていないと言う**——ここが本題。
+  // (止まったときに時刻が出ることは「動きが止まったら、その時刻が数値に
+  // 出る」が見ている。低い塔も必ず静止するとは限らない——3 段でも接触が
+  // 微妙に震え続けることがあり、実測で 30 秒待っても止まらない回があった
+  // ので、こちらの前提には使わない。)
+  await floors.fill("16");
+  await expect
+    .poll(async () => await settled.textContent(), { timeout: 30_000 })
+    .toContain("まだ止まっていません");
+  await expect(page.locator("#readout-settled-key")).toBeVisible();
+  expect(await settled.getAttribute("data-seconds"), "止まっていないのに時刻がある").toBeNull();
+
+  // 16 段まで積める(上限 8 では崩れ方の違いを試しきれなかった)。
+  const bodies = await page.evaluate(() =>
+    Number((window as unknown as Record<string, any>).__world.read_component("body_count", "")),
+  );
+  expect(bodies, `積んだ数 ${bodies}(床を含む)`).toBeGreaterThanOrEqual(17);
+
+  expect(errors).toEqual([]);
+});

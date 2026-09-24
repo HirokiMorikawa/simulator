@@ -13,9 +13,18 @@ demo/pkg/
 # Playwright(demo/tests のスモークテスト実行時に生成される)
 demo/playwright-report/
 demo/test-results/
+# 利用者役が撮った画面写真の置き場(検証のための作業ファイル。リポジトリには
+# 入れない——一度うっかり 38 枚を混ぜてコミットしたので、明示的に除ける)。
+demo/persona-*/
 
 # Python(scripts/ のヘルパを import して試した際に生成される)
 __pycache__/
 
 # Claude Code のローカル作業用ディレクトリ(サブエージェント用worktree等)
 .claude/
+
+# UI をユーザー視点で操作して確かめるための使い捨てスクリプト。
+# ペルソナ検証時に demo/ 直下へ置いて実行するもので、名前は毎回まちまち
+# (`explore1.mjs` など)。`demo/tests/` の本物のテストと違い、その場限りの
+# 観察用なので残さない。
+demo/*.mjs

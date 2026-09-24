@@ -7,5 +7,5 @@
       "linear_velocity": [14.142135623730951, 14.14213562373095, 0.0],
       "name": "shell" }
   ],
-  "probes": [ { "body_pos_y": "shell" }, { "body_speed": "shell" } ]
+  "probes": [ { "body_pos_y": "shell" }, { "body_speed": "shell" }, { "body_pos_x": "shell" } ]
 }

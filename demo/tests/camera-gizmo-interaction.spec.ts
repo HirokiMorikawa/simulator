@@ -88,7 +88,9 @@ test("右クリック(ドラッグなし)ならスポーンパレットが開く
   await page.mouse.click(center.cx, center.cy, { button: "right" });
   await page.waitForTimeout(300);
   expect(await paletteOpen(page)).toBe(true);
-  await expect(page.locator("#context-menu, .context-menu")).toContainText("ここに箱を配置");
+  // 見出しは押した場所で変わる(地面なら「ここに」、物の上なら「箱 1の上に」)。
+  // 変わらないのは「何を置くか」なので、そちらで指す。
+  await expect(page.locator("#context-menu, .context-menu")).toContainText("箱を配置");
 });
 
 test("Rotate Gizmo のリングを掴んでドラッグすると姿勢が変わる", async ({ page }) => {

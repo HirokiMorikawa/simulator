@@ -3835,9 +3835,9 @@ mod tests {
         {
           "name": "d6-floating-box-f4",
           "world": { "gravity": 9.80665, "dt": 0.008333333 },
-          "materials": [ { "extends": "木材(松)", "name": "d6-density", "density": 598.92 } ],
+          "materials": [ { "extends": "木材(松)", "name": "木(密度 599)", "density": 598.92 } ],
           "bodies": [
-            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "d6-density",
+            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "木(密度 599)",
               "position": [0, -0.1, 0], "name": "box" }
           ]
         }
@@ -3855,7 +3855,7 @@ mod tests {
             .clone();
         let m = world
             .materials()
-            .get(world.materials().find_by_name("d6-density").unwrap());
+            .get(world.materials().find_by_name("木(密度 599)").unwrap());
         // 密度だけが差し替わり、他は基底(松)のまま = 増分C9以前と同じ挙動。
         assert_eq!(m.density, 598.92);
         assert_eq!(m.friction, pine.friction);
@@ -5722,8 +5722,23 @@ mod tests {
         );
 
         // 台帳(効率): 発電電力がそのままジュール熱として熱ノードへ入る。
+        //
+        // 熱容量は**シーンから読む**。ここに数値を直接書いていたときは、
+        // シーンの熱ノードを現実的な値へ調整した(1000 J/K = 水 1 kg 相当では
+        // 温度上昇が毎秒 0.000025 ℃ で、画面上「上がる」と書いてあるのに
+        // 確かめようがなかった)だけでこのテストが落ちた。確かめたいのは
+        // 「発電した電力がそのまま熱になる」ことであって、熱容量の値そのもの
+        // ではない。
+        let scenario: Scenario = serde_json::from_str(json).expect("valid scenario JSON");
+        let heat_capacity = scenario
+            .thermal
+            .as_ref()
+            .and_then(|t| t.nodes.first())
+            .map(|n| n.heat_capacity)
+            .expect("d20 は熱ノードを1つ持つ");
         let dt = 0.008333333;
-        let expected_delta_t = expected_emf * expected_current * (steps as f64 * dt) / 1000.0;
+        let expected_delta_t =
+            expected_emf * expected_current * (steps as f64 * dt) / heat_capacity;
         let delta_t = last(2) - 293.15;
         assert!(
             (delta_t - expected_delta_t).abs() / expected_delta_t < 0.02,
@@ -5820,9 +5835,19 @@ mod tests {
     /// **増分H3** D18(氷と飲み物): 浮いた氷が`couplings[].phase_change_morph`で
     /// 融解して質量を失い、**喫水が浅くなって浮き上がる**(アルキメデスとの統合)。
     ///
-    /// 実測(6000step = 50秒): 質量 0.900 → 0.3545 kg(61%融解)、
-    /// 重心 y = -0.0402 → +0.0098(浮き上がり)、飲み物 350.0 → 349.04 K。
+    /// 実測(6000step = 50秒): 質量 0.900 → 0.2540 kg(72%融解)、
+    /// 重心 y = -0.0402 → +0.0281(浮き上がり)、飲み物 350.0 → 335.01 K。
     /// 「水位不変」は自由表面を追跡しない本実装の対象外(既存の記載どおり)。
+    ///
+    /// **飲み物の熱容量と熱伝導を、飲み物らしい大きさに直した**
+    /// (`scenes/d18-ice-in-drink.json`、進行管理役の実測)。もとは
+    /// 熱容量 200000 J/K ——水にすると **48 kg**、つまり 0.9 kg の氷を
+    /// 一杯のドリンクではなく風呂に浮かべているのと同じで、融かしても
+    /// 温度が 1 K も動かなかった。画面では 42 秒待っても「飲み物 76 ℃」の
+    /// まま、氷も 17% しか縮まない——説明文が約束している「融けている間に
+    /// 熱を奪われる」が、数字のどこにも現れない。15000 J/K(= 水 3.6 kg、
+    /// 10cm の氷塊に見合う大きさ)と 65 W/K に直すと、実測で 40 秒に
+    /// 59% 融解・76.9 → 64.5 ℃、1.2 分で融け切って 56.2 ℃ に落ち着く。
     #[test]
     fn run_headless_scenario_melting_ice_rises_as_it_loses_mass() {
         let json = include_str!("../../../scenes/d18-ice-in-drink.json");
@@ -6888,5 +6913,93 @@ mod tests {
         "#;
         let scenario = Scenario::from_json(json).unwrap();
         assert!(scenario.pass_criteria.is_empty());
+    }
+
+    /// D38「重い球と軽い球を並べて落とす」(かんたんモードの新規実験)。
+    ///
+    /// 「重い物のほうが速く落ちる」という誤解の正体を見せる実験で、理論は
+    /// 2つに分かれる:
+    /// - **空気が無ければ**、重力加速度は質量によらないので、密度比15.7倍
+    ///   (鋼7850 kg/m³ / 木材(松)500 kg/m³)の2球でも**同時に**着地する。
+    /// - **空気があれば**、抗力(`sim_fluid::drag_force_sphere`、
+    ///   0.5ρCdA|v|v)は質量に依存しないぶん、軽い球ほど加速度への影響が
+    ///   相対的に大きく、**軽いほうが遅れて**着地する。
+    ///
+    /// 着地時刻は`body_pos_y`プローブの履歴で「y が球の半径以下になった
+    /// 最初のstep」を探して求める(半径は`scenes/d38-two-balls-fall.json`と
+    /// 同じ 0.1 m)。この場面は出荷アセット(`scenes/d38-two-balls-fall.json`、
+    /// かんたんモードのカタログ`d38-two-balls`が読み込む実物)をそのまま使う
+    /// ——アセットが壊れれば直ちにこのテストがRedになる。
+    fn d38_landing_step(history: &[f64], radius: f64) -> Option<usize> {
+        history.iter().position(|&y| y <= radius)
+    }
+
+    /// 空気ありの場合(シーンJSONの既定`atmosphere.density = 1.225`、
+    /// かんたんモードの「空気あり」つまみと同じ)。実測(dt=1/120、半径0.1m、
+    /// 高さ160m): 鋼球は約5.74秒、木球は約6.37秒で着地し、その差は約0.63秒
+    /// ——数値誤差(1step=1/120秒)よりずっと大きく、画面でもはっきり見える
+    /// 差になるよう高さ・半径を実測で選んである(進行管理役の見込みだった
+    /// 高さ20mでは、終端速度に対して落下速度が低く差がほぼ出なかったため、
+    /// 高さ160m・半径0.1mへ実測で調整した)。
+    #[test]
+    fn run_headless_scenario_d38_two_balls_fall_light_ball_lags_behind_in_air() {
+        let json = include_str!("../../../scenes/d38-two-balls-fall.json");
+        let radius = 0.1;
+        let dt = 0.008333333;
+        let steps = 900; // 7.5秒分、両方の着地に十分な余裕
+
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
+        assert_eq!(result.probe_histories.len(), 2);
+
+        let heavy_step =
+            d38_landing_step(&result.probe_histories[0], radius).expect("鋼球は着地するはず");
+        let light_step =
+            d38_landing_step(&result.probe_histories[1], radius).expect("木球は着地するはず");
+
+        let heavy_time = heavy_step as f64 * dt;
+        let light_time = light_step as f64 * dt;
+        assert!(
+            light_time - heavy_time > 0.3,
+            "空気があるとき、軽い木球は鋼球より有意に遅れて着地すべき: \
+             heavy={heavy_time:.3}s light={light_time:.3}s"
+        );
+        // 実測値(0.633秒)を大きく外れていないことも確認する。
+        assert!(
+            (0.4..0.9).contains(&(light_time - heavy_time)),
+            "着地時刻の差が実測(約0.63秒)から大きくずれている: {}",
+            light_time - heavy_time
+        );
+    }
+
+    /// 空気なしの場合(かんたんモードの「空気なし(真空)」つまみがシーンの
+    /// `atmosphere.density`を書き換えるのと同じ操作を、テスト側で再現する)。
+    /// 質量に依存しない一様重力の下では、密度が15.7倍違っても2球は
+    /// **ぴったり同時に**着地するはずで、実測でも差は文字通りゼロ
+    /// (両者とも同一の離散化された軌道をたどるため)。
+    #[test]
+    fn run_headless_scenario_d38_two_balls_fall_land_together_in_vacuum() {
+        let json = include_str!("../../../scenes/d38-two-balls-fall.json");
+        let mut scene: serde_json::Value =
+            serde_json::from_str(json).expect("d38 シーンは valid JSON");
+        // かんたんモードの「空気なし(真空)」つまみと同じ書き換え
+        // (`demo/src/catalog.ts`の`d38-two-balls`実験、`air`つまみの`apply`)。
+        scene["world"]["atmosphere"]["density"] = serde_json::json!(0.0);
+        let vacuum_json = serde_json::to_string(&scene).expect("再シリアライズできる");
+
+        let radius = 0.1;
+        let steps = 900;
+
+        let result = run_headless_scenario(&vacuum_json, steps).expect("valid scenario JSON");
+        assert_eq!(result.probe_histories.len(), 2);
+
+        let heavy_step =
+            d38_landing_step(&result.probe_histories[0], radius).expect("鋼球は着地するはず");
+        let light_step =
+            d38_landing_step(&result.probe_histories[1], radius).expect("木球は着地するはず");
+
+        assert_eq!(
+            heavy_step, light_step,
+            "真空中では、重さが違っても同時に着地すべき(理論上は厳密に同時)"
+        );
     }
 }
