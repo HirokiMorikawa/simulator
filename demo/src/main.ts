@@ -10113,6 +10113,22 @@ async function setUpSceneView(
   function meshFromShapeJson(
     shape: ImportedShapeJson | undefined,
     markSpin = false,
+    /**
+     * **壁を描く大きさ [m]**(`0` なら既定の 400m)。
+     *
+     * 無限平面は 400m 四方で描いている。床ならそれでいい——遠くまで飛ぶ物が
+     * 端を越えて黒い虚空に出ないため。ところが**立っている面(壁)**では、
+     * これが画面いっぱいの地面にしか見えなかった。実測(D26 静電気の風船):
+     * 場面ぜんぶの広がりが 0.2m、カメラは 0.41m の距離。そこへ 400m の面を
+     * 斜め 27° から見るので、**面が画面を端から端まで埋め**、風船が床に
+     * 転がっているようにしか読めない(利用者役の観察:「カメラが壁と平行で、
+     * 何を見ているか分からない」)。
+     *
+     * 壁は場面の大きさに合わせて描く。縁が画面に入れば、そこで初めて
+     * 「立っている板」に見える。方眼の目の大きさはカメラの距離で決まる
+     * (`updateGridCellSize`)ので、小さくしても目が粗くなることはない。
+     */
+    wallSpan = 0,
   ): {
     mesh: THREE.Mesh;
     isPlane: boolean;
@@ -10120,10 +10136,11 @@ async function setUpSceneView(
     if (shape && "plane" in shape) {
       const [nx, ny, nz] = shape.plane.normal;
       const normal = new THREE.Vector3(nx, ny, nz).normalize();
-      // 無限平面の見た目。20m 四方だと、遠くまで飛ぶ/走るものが端を越えて
-      // その先が黒い虚空になる(利用者役の観察)。物理は無限なので広く描く。
+      // 水平から 45° 以上傾いた面を「壁」と見なす。
+      const isWall = Math.abs(normal.y) < 0.7;
+      const span = isWall && wallSpan > 0 ? wallSpan : 400;
       const mesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(400, 400),
+        new THREE.PlaneGeometry(span, span),
         new THREE.MeshStandardMaterial({
           color: 0x777755,
           side: THREE.DoubleSide,
@@ -10451,11 +10468,19 @@ async function setUpSceneView(
       return Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
     })();
     const drawFloor = spread > 0 ? spread / 60 : 0;
+    // 壁は場面の大きさに合わせて描く(`meshFromShapeJson` の `wallSpan` の
+    // doc参照)。6 倍は「縁が画角に入るが、板の外に出てしまうほど小さくは
+    // ない」ところ——実測(D26、広がり 0.2m)で 1.2m。下限は、小さすぎて
+    // 板に見えなくなるのを防ぐため。
+    // 6 倍では縁がまだ画角の外で、地面と見分けが付かなかった(実測)。
+    // 2.5 倍なら右と下の縁が画面に入り、「立っている板」として読める。
+    const wallSpan = spread > 0 ? Math.min(400, Math.max(0.4, spread * 2.5)) : 0;
 
     for (let bodyIndex = 0; bodyIndex < bodies.length; bodyIndex++) {
       const { mesh, isPlane } = meshFromShapeJson(
         bodies[bodyIndex]?.shape,
         bodies[bodyIndex]?.type === "kinematic",
+        wallSpan,
       );
       if (isPlane) {
         addSpawnedMesh(bodyIndex, mesh);

@@ -6314,6 +6314,87 @@ test("同じ量は、画面のどこで読んでも同じ数字", async ({ page 
   expect(errors).toEqual([]);
 });
 
+// **課題#33(進行管理役の実測)**: 「氷が融ける」は「融けている間に熱を
+// 奪われる」と説明するのに、42 秒待っても「飲み物 76 ℃」のまま動かず、
+// 氷も 17% しか縮まなかった。飲み物の熱容量が 200000 J/K ——水にすると
+// 48 kg で、0.9 kg の氷を一杯のドリンクではなく風呂に浮かべているのと
+// 同じだった。飲み物らしい大きさ(水 3.6 kg 相当)に直した。
+test("氷が融けるあいだに、飲み物が目に見えて冷える", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "氷が融ける");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("氷が融ける");
+
+  const drinkCelsius = async () => {
+    const text = await page.locator("#context").innerText();
+    const hit = text.match(/飲み物の温度\n(-?[\d.]+) ℃/);
+    return hit ? Number.parseFloat(hit[1]) : Number.NaN;
+  };
+  await expect.poll(drinkCelsius, { timeout: 20_000 }).toBeGreaterThan(70);
+  const started = await drinkCelsius();
+
+  // 40 秒ぶん進むまで待つ(この場面は 1 コマで 2 秒ぶん進む)。
+  await expect.poll(() => elapsedSeconds(page), { timeout: 60_000 }).toBeGreaterThan(40);
+  const now = await drinkCelsius();
+  expect(
+    started - now,
+    `40 秒で冷えた幅 ${(started - now).toFixed(1)} ℃(76.9 → 64.5 ℃ が実測)`,
+  ).toBeGreaterThan(8);
+  expect(errors).toEqual([]);
+});
+
+// **課題#31(利用者役の観察と進行管理役の再現)**: 静電気の風船は、壁が
+// 無限平面のまま 400m 四方で描かれていた。場面ぜんぶの広がりは 0.2m、
+// カメラは 0.41m の距離。そこへ 400m の面を斜め 27° から見るので面が画面を
+// 端から端まで埋め、「カメラが壁と平行で、何を見ているか分からない」と
+// 書かれた。壁は場面の大きさに合わせて描き、縁が画面に入るようにする。
+test("壁のある実験では、壁が「立っている板」として画面に入る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "静電気");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("風船");
+  await page.waitForTimeout(3000);
+
+  const wall = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const mesh = w.__bodyMeshFor(0);
+    const params = mesh?.geometry?.parameters as { width?: number } | undefined;
+    const host = document.querySelector<HTMLElement>("#scene-view-canvas-host")!;
+    const rect = host.getBoundingClientRect();
+    let cornersOnScreen = 0;
+    if (mesh && params?.width) {
+      const half = params.width / 2;
+      for (const [a, b] of [
+        [-half, -half],
+        [half, -half],
+        [-half, half],
+        [half, half],
+      ]) {
+        const local = new mesh.position.constructor(a, b, 0);
+        const world = local.applyMatrix4(mesh.matrixWorld);
+        const v = world.project(w.__camera);
+        const x = (v.x * 0.5 + 0.5) * rect.width;
+        const y = (-v.y * 0.5 + 0.5) * rect.height;
+        if (v.z < 1 && x >= 0 && x <= rect.width && y >= 0 && y <= rect.height) {
+          cornersOnScreen += 1;
+        }
+      }
+    }
+    return { width: params?.width ?? 0, cornersOnScreen };
+  });
+
+  expect(wall.width, `壁の板の大きさ ${wall.width} m`).toBeLessThan(5);
+  expect(wall.width, "小さすぎて板に見えなくならない").toBeGreaterThan(0.2);
+  expect(wall.cornersOnScreen, "板の角が画面に入っている(=縁が見える)").toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
 // **課題#32(進行管理役の実測)**: 「50個の球をばらまく」は 5.3秒で全部の球が
 // y=0.20 に落ち着くのに、カメラは距離 25.19m・注視点 y=6.01 のまま動かず、
 // 球の塊は舞台 1132×715px のうち 134×67px ——面積で 1.1% しか使っていな

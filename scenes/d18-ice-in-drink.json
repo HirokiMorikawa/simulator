@@ -45,7 +45,7 @@
     "nodes": [
       {
         "temperature": 350.0,
-        "heat_capacity": 200000.0
+        "heat_capacity": 15000.0
       }
     ]
   },
@@ -59,7 +59,7 @@
         "specific_heat_solid": 2100.0,
         "specific_heat_liquid": 4186.0,
         "initial_mass": 0.9000000000000002,
-        "conductance": 50.0,
+        "conductance": 65.0,
         "initial_enthalpy": -10000.0
       }
     }
