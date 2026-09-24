@@ -815,6 +815,12 @@ export function setUpWorkspace(
   let stillSince: number | null = null;
   /** それだけ静かなままなら「止まった」と見なす [s](シミュレーション時間)。 */
   const SETTLED_GRACE_SECONDS = 0.5;
+  /**
+   * これだけ走っても止まらなければ、「まだ止まっていません」と言う。
+   * 始まってすぐ言うと、落ちている最中の物にまで「止まっていません」と
+   * 出て騒がしいので、少し待つ。
+   */
+  const SETTLED_TELL_AFTER_SECONDS = 3;
   /** 直前のフレームで舞台が空だったか(「どこを見るか」の追いつき用)。 */
   let lastStageEmpty: boolean | null = null;
   /** 直前に出した「ここを見る」の一行(同じなら書き直さない)。 */
@@ -3583,12 +3589,23 @@ export function setUpWorkspace(
       const settledKey = document.getElementById("readout-settled-key");
       const settledNode = document.getElementById("readout-settled");
       if (settledKey && settledNode) {
-        const show = settledAt !== null;
-        settledKey.hidden = !show;
-        settledNode.hidden = !show;
-        if (show) {
+        // **いちど出た行を、黙って消さない**。
+        //
+        // ここは「止まったと分かってから出す」だけの作りだった。3 段の積み木
+        // (すぐ止まる)では出るのに、8 段(崩れ続けて止まらない)に上げると
+        // **行ごと消える**ので、崩れたのか数値が壊れたのか分からない、と
+        // 書かれた(利用者役⑩の観察)。最初から空欄を置かない理由(埋まらない
+        // 欄が気になって現象から目が離れる)はそのままに、**しばらく走った
+        // あとは、止まっていないことも言う**——消えるよりずっと読める。
+        const readyToTell = settledAt !== null || seconds > SETTLED_TELL_AFTER_SECONDS;
+        settledKey.hidden = !readyToTell;
+        settledNode.hidden = !readyToTell;
+        if (settledAt !== null) {
           settledNode.textContent = formatDuration(settledAt as number, scale);
           settledNode.dataset.seconds = String(settledAt);
+        } else if (readyToTell) {
+          settledNode.textContent = "まだ止まっていません";
+          delete settledNode.dataset.seconds;
         }
       }
 

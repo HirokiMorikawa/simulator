@@ -436,8 +436,13 @@ test("動きが止まったら、その時刻が数値に出る", async ({ page 
   await boot(page);
 
   // 落として跳ねて止まるまで待つ。時計は回り続けるが、止まった時刻は別に出る。
+  // **止まったかどうかは `data-seconds` の有無で見る**——行そのものは、
+  // しばらく走れば「まだ止まっていません」を出すために先に現れる
+  // (下の「止まらない場面でも、…行が消えない」参照)。
   const settled = page.locator("#readout-settled");
-  await expect(settled).toBeVisible({ timeout: 30_000 });
+  await expect
+    .poll(async () => await settled.getAttribute("data-seconds"), { timeout: 30_000 })
+    .not.toBeNull();
   const settledSeconds = Number(await settled.getAttribute("data-seconds"));
   expect(settledSeconds).toBeGreaterThan(0);
   // 経過時間はそのあとも進む——「止まった時刻」と取り違えないための別欄。
@@ -445,13 +450,15 @@ test("動きが止まったら、その時刻が数値に出る", async ({ page 
     .poll(() => elapsedSeconds(page), { timeout: 15_000 })
     .toBeGreaterThan(settledSeconds);
 
-  // 回り続ける現象では出さない。
+  // 回り続ける現象では時刻を出さない——ただし行は残し、止まっていないと言う
+  // (黙って消すと、崩れたのか数値が壊れたのか分からない)。
   await page.keyboard.press("Control+k");
   await page.fill("#palette-input", "ふりこ");
   await page.keyboard.press("Enter");
   await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
-  await page.waitForTimeout(4000);
-  await expect(settled).toBeHidden();
+  await page.waitForTimeout(5000);
+  await expect(settled).toContainText("まだ止まっていません");
+  expect(await settled.getAttribute("data-seconds"), "止まっていないのに時刻が残っている").toBeNull();
   expect(errors).toEqual([]);
 });
 
@@ -5348,7 +5355,10 @@ test("「ほぼ止まった時刻」は、見る速さを変えても同じ", as
     await page.locator("#run-speed button", { hasText: label }).click();
     await page.click("#btn-restart");
     const settled = page.locator("#readout-settled");
-    await expect(settled).toBeVisible({ timeout: 40_000 });
+    // 行は「まだ止まっていません」でも現れるので、時刻が入るまで待つ。
+    await expect
+      .poll(async () => await settled.getAttribute("data-seconds"), { timeout: 40_000 })
+      .not.toBeNull();
     return Number(await settled.getAttribute("data-seconds"));
   };
 
@@ -6472,6 +6482,42 @@ test("一瞬で終わる現象でも、つまみの効きが数値で読める(�
   // いないと、一度強く押しただけで以後ずっと深い値を指したままになる
   // (つまみを動かすと実験は読み込み直される)。
   expect(gentle, `強く押した後にやさしくしたら ${gentle} m`).toBeGreaterThan(-0.01);
+
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑩の観察)**: 3 段の積み木(すぐ止まる)では「ほぼ止まった時刻」
+// の行が出るのに、8 段(崩れ続けて止まらない)に上げると**行ごと消える**ので、
+// 崩れたのか数値が壊れたのか分からなかった。いちど出た行を黙って消さない。
+// あわせて、段数の上限 8 では「高く積むほど崩れやすい」を試しきれなかった。
+test("止まらない場面でも、「ほぼ止まった時刻」の行が消えない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "積み木");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("積み木");
+
+  const floors = page.locator('.knob[data-knob-id="floors"] input[type="range"]');
+  const settled = page.locator("#readout-settled");
+  // 高い塔は崩れ続ける。**行は残り、止まっていないと言う**——ここが本題。
+  // (止まったときに時刻が出ることは「動きが止まったら、その時刻が数値に
+  // 出る」が見ている。低い塔も必ず静止するとは限らない——3 段でも接触が
+  // 微妙に震え続けることがあり、実測で 30 秒待っても止まらない回があった
+  // ので、こちらの前提には使わない。)
+  await floors.fill("16");
+  await expect
+    .poll(async () => await settled.textContent(), { timeout: 30_000 })
+    .toContain("まだ止まっていません");
+  await expect(page.locator("#readout-settled-key")).toBeVisible();
+  expect(await settled.getAttribute("data-seconds"), "止まっていないのに時刻がある").toBeNull();
+
+  // 16 段まで積める(上限 8 では崩れ方の違いを試しきれなかった)。
+  const bodies = await page.evaluate(() =>
+    Number((window as unknown as Record<string, any>).__world.read_component("body_count", "")),
+  );
+  expect(bodies, `積んだ数 ${bodies}(床を含む)`).toBeGreaterThanOrEqual(17);
 
   expect(errors).toEqual([]);
 });
