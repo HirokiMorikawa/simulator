@@ -6437,3 +6437,41 @@ test("つまみと数値が、同じ量を同じ目盛りで言う(飲み物の�
   expect(panel, panel).toContain("℃");
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役⑩の実測)**: 「空気をばねにする」で「押し込む速さ」を 0.1 m/s に
+// しても、画面の「ピストンの速さ」は 0.815 m/s ——つまみと 8 倍以上ずれる。
+// どちらも「速さ(m/s)」なので、効いていないのか読み違えたのか分からない。
+// 実際には押し込みから押し返しまでが 0.1 秒ほどで終わり、そのあと数値に
+// 出ているのは**外へ出ていく速さ**だった。つまみが実際に決めているのは
+// 「どこまで押し込めたか」なので、それを出す。
+test("一瞬で終わる現象でも、つまみの効きが数値で読める(ピストン)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "空気をばね");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("空気をばね");
+  await page.waitForTimeout(1200);
+
+  const deepest = async (speed: string) => {
+    await page.locator('.knob[data-knob-id="push"] input[type="range"]').fill(speed);
+    await page.waitForTimeout(2500);
+    const panel = await page.locator('.card[data-card="numbers"]').innerText();
+    const match = panel.match(/いちばん深く押し込めたところ\s*(-?[\d.]+) m/);
+    expect(match, `「いちばん深く押し込めたところ」が読めない: ${panel}`).not.toBeNull();
+    return Number.parseFloat(match![1]);
+  };
+
+  // 強く押すほど深い(負の向きへ大きい)。実測: 0.1 m/s で -0.002 m、
+  // 1.5 m/s で -0.086 m。
+  const hard = await deepest("1.5");
+  const gentle = await deepest("0.1");
+  expect(hard, `強く ${hard} m / やさしく ${gentle} m`).toBeLessThan(gentle - 0.02);
+  // **深いほうの値が居座らない**。つまみを戻したら測り直す——ここが効いて
+  // いないと、一度強く押しただけで以後ずっと深い値を指したままになる
+  // (つまみを動かすと実験は読み込み直される)。
+  expect(gentle, `強く押した後にやさしくしたら ${gentle} m`).toBeGreaterThan(-0.01);
+
+  expect(errors).toEqual([]);
+});

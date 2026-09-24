@@ -1705,6 +1705,8 @@ export function setUpWorkspace(
     // 場面へは移らない——確認が要る呼び出し元(`start`)はそちらで済ませて
     // いる。
     const wasPaused = options?.keepPauseIntent === true && !api.isPlaying();
+    // 端の値を出す読み値は、読み込み直したら測り直す(`Readout.extreme`)。
+    readoutExtremes.clear();
     const json = sceneJsonFor(current);
     if (!json) return;
     api.loadSceneJson(json);
@@ -1844,6 +1846,11 @@ export function setUpWorkspace(
   let readoutNodes: { readout: NonNullable<Experiment["readouts"]>[number]; node: HTMLElement }[] = [];
   /** その欄がこれまでに見せた最大の大きさ(「ほぼ 0」の判断に使う)。 */
   const readoutSeenMax = new WeakMap<HTMLElement, number>();
+  /**
+   * `Readout.extreme` を出すための、これまでの端の値(読み値ごと)。
+   * 実験を読み込み直したら測り直すので、`reload()` で空にする。
+   */
+  const readoutExtremes = new Map<string, number>();
   let focusNodes: Record<string, HTMLElement> = {};
   /** 「選んだもの」の置き場所の入力欄(打っている最中は書き換えない)。 */
   let focusPositionInputs: HTMLInputElement[] = [];
@@ -3594,7 +3601,25 @@ export function setUpWorkspace(
             continue;
           }
           const values = sources.map((i) => api.probeValue(i));
-          const value = readout.derive ? readout.derive(values) : values[0];
+          const current = readout.derive ? readout.derive(values) : values[0];
+          // **端の値を出す読み値**(`Readout.extreme` のdoc参照)。一瞬で
+          // 過ぎる現象では、いまの値からはつまみの効きが読めないので、
+          // どこまで届いたかを覚えておいて出す。
+          let value = current;
+          if (readout.extreme && Number.isFinite(current)) {
+            // 同じプローブを「いまの値」と「端の値」の両方で出す実験が
+            // あるので、向きも鍵に含める(片方の更新がもう片方を上書きしない)。
+            const key = `${readout.probe}|${readout.extreme}`;
+            const seen = readoutExtremes.get(key);
+            const next =
+              seen === undefined
+                ? current
+                : readout.extreme === "min"
+                  ? Math.min(seen, current)
+                  : Math.max(seen, current);
+            readoutExtremes.set(key, next);
+            value = next;
+          }
           // **その量にとって「ほぼ 0」なら、0 と書く**。桁の離れた量を指数で
           // 書くようにしたら、こんどは止まりかけた箱の速さが「8.67e-19 m/s」と
           // 出るようになった——普通の人には壊れて見える(利用者役②の観察)。
