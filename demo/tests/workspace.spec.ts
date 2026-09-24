@@ -5084,11 +5084,12 @@ test("回路の実験では、つないであるものが「みる」から読�
 });
 
 // **課題(利用者役「みる」の観察)**: 「ふりこ」は「往復します」と書いてあるのに
-// 揺れて見えない——出荷しているシーンの初期振れ角は 0.05 rad(2.9°、ひも 1m に
-// 対して左右 5cm)で、実測でも x は ±0.05 m しか動かない。小さいのには理由が
-// ある(Rust 側の受け入れテストが、この小振幅で「周期 = 2π√(長さ/重力)」を
-// 1% 以内で確かめている)ので、**シーンJSONは変えず**、理由を書いたうえで
-// 「振れはば」のつまみを渡す。
+// 揺れて見えなかった。いまは既定の振れはば自体を目で見える 21 度にしてあり
+// (上の「何も触らなくても目で見て往復する」が押さえている)、ここでは
+// **つまみで大きくすればそのぶん大きく振れる**ことと、ぴったりを確かめたい人へ
+// 「小さくするほど関係がぴったりになる」と案内していることを見る。
+// **シーンJSONは変えない**——Rust 側の受け入れテストが、このファイルの小振幅で
+// 「周期 = 2π√(長さ/重力)」を 1% 以内で確かめている。
 test("ふりこは、振れはばを大きくすれば目で見て往復する", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
@@ -5097,8 +5098,8 @@ test("ふりこは、振れはばを大きくすれば目で見て往復する",
   await page.waitForTimeout(1500);
   await setGrain(page, 1);
 
-  // 小さいことと、その理由が読める。
-  await expect(page.locator("#context")).toContainText("わざと小さく");
+  // ぴったり確かめたい人への道が読める。
+  await expect(page.locator("#context")).toContainText("小さくするほど");
 
   const bobX = async () =>
     page.evaluate(() => {
@@ -5291,8 +5292,8 @@ test("ふりこの説明とつまみが、同じ単位で同じものを指す",
   const watch = await page.locator('.card[data-card="watch"]').innerText();
   const value = await page.locator('.knob[data-knob-id="swing"] .knob-value').innerText();
   // 説明にもつまみにも「度」と「cm」の両方が出ていて、突き合わせられる。
-  expect(watch).toContain("3 度");
-  expect(watch).toContain("5cm");
+  expect(watch).toContain("21 度");
+  expect(watch).toContain("36cm");
   expect(value).toContain("度");
   expect(value).toContain("cm");
 
@@ -5958,5 +5959,113 @@ test("長い「ここを見る」が、「いまの数値」を画面の外へ�
     `「いまの数値」の上端 ${where.numbersTop}px / 窓 ${where.scrollTop}→${where.scrollBottom} / 「ここを見る」の高さ ${where.watchHeight}px`,
   ).toBeLessThan(where.scrollBottom);
   await expect(page.locator('.card[data-card="numbers"]')).toBeInViewport();
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の観察 + 進行管理役の再現)**: 「斜めに投げる」は 45° に
+// 投げ上げた球の**放物線**を見せる実験なのに、画面では球が上がって下りるだけに
+// 見えていた。追いかけるカメラが球を画面のまん中に置き続けるからで、実測では
+// 球が世界で 9.8m → 59.6m と 50m 進むあいだ、画面の横位置は 681〜740px の
+// 40px の帯から出ない。カメラは正しい——足りないのは**どこを通ってきたか**の
+// ほうなので、通った跡を残す。
+test("投げた物は、通った跡が画面に残る(カメラが追いかけても形が読める)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+  await page.waitForTimeout(1500);
+
+  const spread = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const camera = w.__camera;
+    const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    const mul = (m: number[], v: number[]) => [
+      m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+      m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+      m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+      m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+    ];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let points = 0;
+    w.__scene.traverseVisible((o: any) => {
+      if (!o.isLine || !o.geometry?.drawRange) return;
+      const n = o.geometry.drawRange.count;
+      if (!n || n === Infinity) return;
+      const arr = o.geometry.attributes.position.array as Float32Array;
+      for (let i = 0; i < n; i += 1) {
+        const eye = mul(camera.matrixWorldInverse.elements, [
+          arr[i * 3],
+          arr[i * 3 + 1],
+          arr[i * 3 + 2],
+          1,
+        ]);
+        if (eye[2] > -1e-4) continue;
+        const clip = mul(camera.projectionMatrix.elements, eye);
+        const x = rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        points += 1;
+      }
+    });
+    return { points, width: points ? Math.round(maxX - minX) : 0 };
+  });
+  expect(spread.points, "跡の点の数").toBeGreaterThan(20);
+  expect(spread.width, `跡の画面上の広がり ${spread.width}px`).toBeGreaterThan(300);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑨の実測)**: 「ふりこ」を開いても、おもりはほぼ真下で
+// 止まって見えた——画面上の往復は 17px(おもりの直径 57px の 1/3 未満、
+// 舞台の幅の 1.7%)。既定の振れはばが 3 度だったため。「ふりこ」を選んだ人が
+// まず見たいのは往復そのものなので、既定を目で見て分かる大きさにする
+// (21 度。1 往復の時間が「ひもの長さだけで決まる」関係は 0.8% のずれで
+// 成り立ったまま——`catalog.ts` の該当つまみのdoc参照)。
+test("ふりこは、何も触らなくても目で見て往復する", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
+  await page.waitForTimeout(400);
+
+  const xs: number[] = [];
+  for (let i = 0; i < 14; i += 1) {
+    xs.push(
+      await page.evaluate(() => {
+        const w = window as unknown as Record<string, any>;
+        const world = w.__world;
+        const camera = w.__camera;
+        const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+        const rect = canvas.getBoundingClientRect();
+        const count = Number(world.read_component("body_count", ""));
+        for (let i = 0; i < count; i += 1) {
+          if (world.read_component("body_label_at", String(i)) !== "bob") continue;
+          const p = world.body_position_at_f32(i);
+          const mul = (m: number[], v: number[]) => [
+            m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+            m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+            m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+            m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+          ];
+          const clip = mul(
+            camera.projectionMatrix.elements,
+            mul(camera.matrixWorldInverse.elements, [p[0], p[1], p[2], 1]),
+          );
+          return rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width;
+        }
+        return 0;
+      }),
+    );
+    await page.waitForTimeout(220);
+  }
+  const swing = Math.round(Math.max(...xs) - Math.min(...xs));
+  expect(swing, `画面上の往復の幅 ${swing}px`).toBeGreaterThan(60);
   expect(errors).toEqual([]);
 });

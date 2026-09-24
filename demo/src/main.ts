@@ -6286,6 +6286,17 @@ async function setUpSceneView(
   // index 1に「箱」は存在しない)になり得るため、「index 1は常に箱」という
   // 決め打ちを解く必要があった。
   const bodyMeshes = new Map<number, THREE.Mesh>();
+  /** 通った跡(`extendTrail` のdoc参照)。場面を入れ替える処理より先に
+   *  用意しておく——後ろで作ると、読み込み時の片付けが宣言前に走る。 */
+  type Trail = {
+    line: THREE.Line;
+    positions: Float32Array;
+    count: number;
+    last: THREE.Vector3;
+  };
+  const trails = new Map<number, Trail>();
+  const trailGroup = new THREE.Group();
+  scene.add(trailGroup);
   bodyMeshes.set(BODY_INDEX_GROUND, ground);
   bodyMeshes.set(BODY_INDEX_BOX, box);
 
@@ -10045,6 +10056,8 @@ async function setUpSceneView(
       (mesh.material as THREE.Material).dispose();
     }
     bodyMeshes.clear();
+    // 場面を入れ替えたら、前の場面の跡は残さない(`clearTrails` のdoc参照)。
+    clearTrails();
     for (const line of constraintLines.values()) {
       scene.remove(line);
     }
@@ -11785,6 +11798,74 @@ async function setUpSceneView(
   const inspectorRotation = new THREE.Euler();
   const inspectorVelocity = new THREE.Vector3();
 
+  // ---------------------------------------------------------------------------
+  // **通った跡(軌跡)**
+  //
+  // 「斜めに投げる」は秒速 20m で 45° に投げ上げた球の**放物線**を見せる実験
+  // なのに、画面では球が上がって下りるだけに見えていた。追いかけるカメラが
+  // 球を画面のまん中に置き続けるからで、実測では球が世界で 9.8m → 59.6m と
+  // 50m 進むあいだ、画面の横位置は 681〜740px の 40px の帯から出ない
+  // (利用者役⑨の観察と、進行管理役の再現)。カメラは正しい——対象を見失わ
+  // ないための仕組みだ。足りないのは**どこを通ってきたか**のほうで、それは
+  // 跡を残せば、カメラがどう動いても形として残る。
+  //
+  // 物理にも記録にも触れない、描画だけの線。点は「場面の大きさに対して十分
+  // 動いたとき」だけ足すので、止まっている物は跡を残さない(積み木のように
+  // 動かない場面では線が一本も出ない)。
+  const TRAIL_MAX_POINTS = 240;
+  /** 跡を描くボディ数の上限。50 個ばらまく場面まで描くと線で埋まる。 */
+  const TRAIL_MAX_BODIES = 6;
+  function clearTrails(): void {
+    for (const trail of trails.values()) {
+      trailGroup.remove(trail.line);
+      trail.line.geometry.dispose();
+      (trail.line.material as THREE.Material).dispose();
+    }
+    trails.clear();
+  }
+
+  /** 跡に 1 点足す(十分動いたときだけ)。 */
+  function extendTrail(bodyIndex: number, at: THREE.Vector3, step: number): void {
+    let trail = trails.get(bodyIndex);
+    if (!trail) {
+      if (trails.size >= TRAIL_MAX_BODIES) return;
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(TRAIL_MAX_POINTS * 3);
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geometry.setDrawRange(0, 0);
+      const line = new THREE.Line(
+        geometry,
+        new THREE.LineBasicMaterial({
+          color: 0xffd08a,
+          transparent: true,
+          opacity: 0.55,
+        }),
+      );
+      // 跡は「読むための補助線」なので、物より前に出て邪魔をしない。
+      line.renderOrder = -1;
+      trailGroup.add(line);
+      trail = { line, positions, count: 0, last: at.clone() };
+      trails.set(bodyIndex, trail);
+      trail.positions.set([at.x, at.y, at.z], 0);
+      trail.count = 1;
+      geometry.setDrawRange(0, 1);
+      return;
+    }
+    if (trail.count > 0 && trail.last.distanceTo(at) < step) return;
+    if (trail.count >= TRAIL_MAX_POINTS) {
+      // いちばん古い点を捨てて詰める(線の長さを一定に保つ)。
+      trail.positions.copyWithin(0, 3, TRAIL_MAX_POINTS * 3);
+      trail.count = TRAIL_MAX_POINTS - 1;
+    }
+    trail.positions.set([at.x, at.y, at.z], trail.count * 3);
+    trail.count += 1;
+    trail.last.copy(at);
+    const attribute = trail.line.geometry.attributes.position as THREE.BufferAttribute;
+    attribute.needsUpdate = true;
+    trail.line.geometry.setDrawRange(0, trail.count);
+    trail.line.geometry.computeBoundingSphere();
+  }
+
   function render() {
     updatePredictionResults();
     // QA不具合5: 再生中は⏭(Nstep送り)を押しても無反応なのに、ボタンは
@@ -11803,6 +11884,9 @@ async function setUpSceneView(
     // `normal`から計算した向き(`sceneImportRef`のPlane分岐参照)が単位回転で
     // 上書きされてしまう——統合の際に発見し、床メッシュの見た目が壊れる前に
     // 気付いて対処した)。Planeは静的なので同期しなくても正しい。
+    // 点の間隔は「いま見ている距離」の 1/220。カメラが引けば粗く、寄れば
+    // 細かくなるので、どの寸法の場面でも同じ見た目の線になる。
+    const trailStep = camera.position.distanceTo(orbit.target) / 220;
     for (const [bodyIndex, mesh] of bodyMeshes) {
       if (world.read_component("body_shape_kind_at", String(bodyIndex)) === "plane") continue;
       const sp = world.body_position_at_f32(bodyIndex);
@@ -11812,6 +11896,12 @@ async function setUpSceneView(
       const xyz = currentScaleXyz.get(bodyIndex);
       if (xyz) mesh.scale.set(xyz[0], xyz[1], xyz[2]);
       else mesh.scale.setScalar(currentScale.get(bodyIndex) ?? 1.0);
+      // 通った跡を伸ばす(`extendTrail` のdoc参照)。動かせない物(床・壁)は
+      // 通らないので描かない。点の間隔は、いま見ている広がりに対する比で
+      // 決める——1e-7m の分子から 1e11m の公転まで同じ線の密度で描くため。
+      if (world.read_component("body_is_static_at", String(bodyIndex)) !== "true") {
+        extendTrail(bodyIndex, mesh.position, trailStep);
+      }
     }
 
     for (const [bodyIndex, line] of constraintLines) {
