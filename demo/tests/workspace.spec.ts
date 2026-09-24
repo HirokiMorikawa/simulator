@@ -6199,6 +6199,121 @@ test("止まる・止まらないを、問える場面でだけ問う", async ({
   expect(errors).toEqual([]);
 });
 
+// **課題(利用者役⑪の実測)**: どの実験で何秒目に保存しても、書き出した
+// ファイルの名前は必ず `probes.csv`。中にも「どの実験を、どの高さ・どの
+// 重力で回したか」は入っていない。3〜4 個ぶん落とすと、どれがどれだか
+// 分からなくなる。中身(列)は機械で読むためのものなので触らず、名前で
+// 見分けられるようにする。
+test("書き出したファイルの名前が、どの実験のどの設定か言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    w.__lastDownload = null;
+    const original = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      if (this.download) w.__lastDownload = this.download;
+      return original.apply(this, arguments as never);
+    };
+  });
+
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを落とす");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ボールを落とす");
+  await expect(page.locator("#btn-probe-csv")).toBeEnabled({ timeout: 20_000 });
+  await page.click("#btn-probe-csv");
+
+  const name = await page.evaluate(
+    () => (window as unknown as Record<string, any>).__lastDownload as string,
+  );
+  expect(name, `書き出した名前 ${name}`).toContain("ボールを落とす");
+  expect(name, "効いているつまみも名前に入る").toContain("落とす高さ");
+  expect(name).toMatch(/\.csv$/);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測)**: グラフの横軸は常に 0 から現在までで、範囲を
+// 選ぶ手段が無かった。ふりこを 1.04 分回すと同じ幅に約 31 往復が詰まり、
+// 青と橙の縞模様になって周期が読めない(10 秒の時点では 2.0236 秒/往復と
+// 読めていた)。戻す方法も無かった。
+test("グラフの見る範囲を選べる(記録そのものは減らない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ふりこ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
+
+  const spanSeconds = async () => {
+    const text = await page.locator("#probe-time-range").innerText();
+    const hit = text.match(/t = ([\d.]+) 秒 〜 ([\d.]+) 秒/);
+    return hit ? Number.parseFloat(hit[2]) - Number.parseFloat(hit[1]) : 0;
+  };
+  // 20 秒ぶんまで溜まるのを待つ(「直近 10 秒」との差がはっきり出る長さ)。
+  await expect.poll(spanSeconds, { timeout: 60_000 }).toBeGreaterThan(20);
+
+  await page.selectOption("#probe-window", "10");
+  await expect.poll(spanSeconds, { timeout: 10_000 }).toBeLessThan(12);
+  expect(await spanSeconds(), "選んだ範囲ぶんは描かれている").toBeGreaterThan(8);
+
+  // 書き出す表は切らない——記録そのものは減っていないこと。
+  await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    w.__lastCsvRows = null;
+    const original = Blob;
+    (window as unknown as { Blob: unknown }).Blob = function (
+      parts: BlobPart[],
+      options?: BlobPropertyBag,
+    ) {
+      if (typeof parts?.[0] === "string") w.__lastCsvRows = parts[0].split("\n").length;
+      return new original(parts, options);
+    } as unknown as typeof Blob;
+  });
+  await page.click("#btn-probe-csv");
+  const rows = await page.evaluate(
+    () => (window as unknown as Record<string, any>).__lastCsvRows as number,
+  );
+  // 10 秒ぶんは 1/120 秒刻みで 1200 行ほど。それより明らかに多ければ、
+  // 表は「見る範囲」で切られていない。
+  expect(rows, `書き出した行数 ${rows}`).toBeGreaterThan(2000);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑪の実測、進行管理役の再現)**: 同じ瞬間の同じ量が、画面の
+// 2 か所で食い違っていた——「選んだもの」札の『置き場所 x』と Inspector の
+// 『位置 x』。秒速 9.6m で飛ぶ球で 44.571 m と 45.055 m(差 0.48m)。
+// どちらを書き写せばいいのか決められない。
+test("同じ量は、画面のどこで読んでも同じ数字", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "斜めに投");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
+  await page.locator("#hierarchy-tree").getByText("shell", { exact: false }).first().click();
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+
+  for (let i = 0; i < 5; i += 1) {
+    await page.waitForTimeout(400);
+    const both = await page.evaluate(() => ({
+      card: (document.getElementById("focus-pos-x") as HTMLInputElement | null)?.value ?? null,
+      inspector:
+        (document.getElementById("inspector-position-x") as HTMLInputElement | null)?.value ??
+        null,
+    }));
+    if (both.card === null || both.inspector === null) continue;
+    expect(
+      Number.parseFloat(both.inspector),
+      `札 ${both.card} と Inspector ${both.inspector}`,
+    ).toBeCloseTo(Number.parseFloat(both.card), 3);
+  }
+  expect(errors).toEqual([]);
+});
+
 // **課題#32(進行管理役の実測)**: 「50個の球をばらまく」は 5.3秒で全部の球が
 // y=0.20 に落ち着くのに、カメラは距離 25.19m・注視点 y=6.01 のまま動かず、
 // 球の塊は舞台 1132×715px のうち 134×67px ——面積で 1.1% しか使っていな

@@ -120,6 +120,11 @@ export type WorkspaceApi = {
    * パネルは読める形、グラフだけ生の指数(`9.3e-67`)という食い違いが
    * 起きる(実測: 「熱が棒を伝わる」で木を選ぶと再現した)。
    */
+  /**
+   * **書き出すファイルの名前**(拡張子なし)。実験の名前と、いま効いている
+   * つまみを並べたもの(main 側 `exportName` のdoc参照)。
+   */
+  setExportName: (name: string | null) => void;
   setProbeLabels: (
     labels: Record<number, string> | null,
     units?: Record<number, string> | null,
@@ -1535,6 +1540,37 @@ export function setUpWorkspace(
     return digits;
   }
 
+  /**
+   * **書き出すファイルの名前**。実験の名前と、いま効いているつまみを並べる
+   * (main 側 `exportName` のdoc参照)。つまみの値は画面に出ている書き方
+   * (`display`・`unit`・選択肢の札)をそのまま使う——ファイル名と画面で
+   * 書き方が違えば、見分けるための手がかりにならない。
+   */
+  function exportNameFor(experiment: Experiment): string {
+    const parts = [experiment.title];
+    for (const knob of experiment.knobs ?? []) {
+      const value = knobValues[knob.id] ?? knob.value;
+      if (value === undefined) continue;
+      if (knob.kind === "choice") {
+        const option = (knob.options ?? []).find(
+          (o) => String(o.value) === String(value),
+        );
+        // 選択肢の札は絵文字と丸かっこ付き(「🌍 地球 (9.81)」)。ファイル名
+        // では読みにくいので、名前の部分だけを使う(「地球」)。値そのものは
+        // 画面でも札に書いてあるので、ここで落としても手がかりは減らない。
+        const shown = option
+          ? option.label.replace(/^[^\p{L}\p{N}]+/u, "").replace(/\s*\(.*\)\s*$/u, "")
+          : String(value);
+        parts.push(`${knob.label}${shown}`);
+      } else if (knob.display) {
+        parts.push(`${knob.label}${knob.display(Number(value))}`);
+      } else {
+        parts.push(`${knob.label}${value}${knob.unit ?? ""}`);
+      }
+    }
+    return parts.join("_");
+  }
+
   /** グラフに描く前にかける変換(`Readout.graph` のdoc参照)。 */
   function probeConvertFor(
     experiment: Experiment,
@@ -1752,6 +1788,7 @@ export function setUpWorkspace(
       probeConvertFor(current),
       probeDigitsFor(current),
     );
+    api.setExportName(exportNameFor(current));
     api.setPace(current.pace * speedMultiplier);
     // 作り直したら「止まった時刻」も忘れる(前回の結果が残っていると、
     // 変えた条件の結果と取り違える)。
@@ -2276,6 +2313,8 @@ export function setUpWorkspace(
     // `lastSelection` の不変条件(このファイル冒頭の doc 参照)。
     lastSelection = -1;
     api.setProbeLabels(null, null);
+    // 自分で組み立てた場面には、名乗るための名前がまだ無い(保存すれば付く)。
+    api.setExportName(ownSceneName || null);
     api.setPace(null);
     // 自分の場面は組み立てるためのものなので、カメラは追いかけない。
     api.followCamera(false);
@@ -3481,6 +3520,7 @@ export function setUpWorkspace(
         api.selectBody(-1);
         lastSelection = -1;
         api.setProbeLabels(null, null);
+        api.setExportName(ownSceneName || null);
         api.setPace(null);
         // 実験を読み込むときと同じ規則(`reload`)。浅い粒度は「動いている
         // ところ」を見に来ているので走らせ、深い粒度は**置いてから動かす**

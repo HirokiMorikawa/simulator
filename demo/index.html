@@ -502,6 +502,20 @@
           <label title="桁の違う量を同じグラフで見比べられるようにする(各系列を |値| の log10 で正規化する対数軸)">
             <input type="checkbox" id="toggle-probe-log" /> 小さい変化も見る
           </label>
+          <!-- **見る範囲**。グラフは常に「最初から今まで」で、長く回すほど
+               潰れた。実測(利用者役⑪): ふりこを 1.04 分回すと同じ幅に約 31
+               往復が詰まり、青と橙の縞模様になって周期が読めなくなる
+               (10 秒の時点では山を数えて 2.0236 秒/往復と読めていた)。
+               戻す方法も、見たい区間だけ見る方法も無かった。 -->
+          <label title="グラフに描く時間の範囲を選ぶ(記録そのものは消えません)">
+            見る範囲
+            <select id="probe-window">
+              <option value="0">ぜんぶ</option>
+              <option value="30">直近 30 秒</option>
+              <option value="10">直近 10 秒</option>
+              <option value="3">直近 3 秒</option>
+            </select>
+          </label>
           <button id="btn-probe-csv" title="いま描かれている全系列の履歴を、時刻つきの表(CSV)にして保存する">
             ⬇ 数値を保存する
           </button>

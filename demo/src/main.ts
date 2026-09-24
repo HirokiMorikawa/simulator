@@ -4945,6 +4945,20 @@ function csvTimeDigits(dt: number, factor: number): number {
 /// 系列ごとに履歴長が違い得るので**最新のサンプルで右端を揃え**、足りない
 /// 古い側を空欄で埋める(最後のサンプルはどの系列でも「いま」なので、
 /// 右詰めだけが時刻と辻褄が合う)。
+/**
+ * **書き出すファイルの名前**(`WorkspaceApi.setExportName`)。
+ *
+ * どの実験を、どの設定で回して落としたファイルでも名前は `probes.csv` で、
+ * 中にも設定が書いていなかった。3〜4 個ぶん落とすと、どれがどれだか
+ * 分からなくなる(実測・利用者役⑪:「重力=月で落とした CSV と地球の CSV は、
+ * 中身を見ても設定の違いが書かれていない」)。
+ *
+ * 中身(列)は機械で読むためのものなので触らず、**名前で見分けられる**ように
+ * する。名前は画面に出ている言葉そのまま——「斜めに投げる_投げる角度45°」の
+ * ように、実験の名前と、いま効いているつまみを並べる。
+ */
+let exportName: string | null = null;
+
 function probeSeriesToCsv(
   series: ProbeSeries[],
   dt: number,
@@ -5029,6 +5043,7 @@ function setUpProbeGraph(): (
   const csvButton = document.getElementById(
     "btn-probe-csv",
   ) as HTMLButtonElement;
+  const windowSelect = document.getElementById("probe-window") as HTMLSelectElement | null;
   const timeRangeLabel = document.getElementById("probe-time-range")!;
   const emptyState = document.getElementById("probe-empty");
 
@@ -5056,6 +5071,11 @@ function setUpProbeGraph(): (
   canvas.addEventListener("mouseleave", () => {
     hoverX = null;
   });
+  // 選び直したら、次の描画を待たずにその場で描き直す(止めている間に
+  // 選んだときに何も起きないと、効いていないと読まれる)。
+  windowSelect?.addEventListener("change", () => {
+    if (latest.length > 0) redraw(latest, latestDt, latestTime);
+  });
   csvButton.addEventListener("click", () => {
     if (latest.length === 0) return;
     // 押しても何も起きないボタンは「壊れている」と読まれるので、下の
@@ -5066,15 +5086,31 @@ function setUpProbeGraph(): (
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "probes.csv";
+    // ファイル名に使えない文字だけ外す(日本語はそのまま——画面の言葉と
+    // 同じであることが、見分けるための唯一の手がかりなので)。
+    a.download = `${(exportName ?? "probes").replace(/[\\/:*?"<>|]/g, "_").slice(0, 120)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   });
 
-  return (series: ProbeSeries[], dt: number, currentTime: number) => {
-    latest = series;
+  const redraw = (allSeries: ProbeSeries[], dt: number, currentTime: number) => {
+    latest = allSeries;
     latestDt = dt;
     latestTime = currentTime;
+    // **見る範囲**(index.html の `probe-window` のコメント参照)。記録は
+    // そのまま持ったまま、描く範囲だけを切る——書き出す表(CSV)は `latest` を
+    // 使うので、ここで切っても記録は減らない。
+    const windowSeconds = Number(windowSelect?.value ?? "0") || 0;
+    const keep =
+      windowSeconds > 0 && dt > 0 ? Math.max(2, Math.ceil(windowSeconds / dt)) : 0;
+    const series =
+      keep > 0
+        ? allSeries.map((s) =>
+            s.history.length > keep
+              ? { ...s, history: s.history.slice(s.history.length - keep) }
+              : s,
+          )
+        : allSeries;
     // **空状態**(増分「UI 品質の底上げ」)。描ける系列(サンプル 2 点以上)が
     // 1 本も無いあいだは、黒い矩形ではなく「何をすれば線が出るか」を出す。
     const drawable = series.filter((s) => s.history.length >= 2);
@@ -5591,6 +5627,7 @@ function setUpProbeGraph(): (
       }
     }
   };
+  return redraw;
 }
 
 async function setUpSceneView(
@@ -12114,6 +12151,27 @@ async function setUpSceneView(
     }
   }
 
+  /**
+   * **いちばん最後に画面へ描かれた姿**(ボディ番号 → 位置と向き)。
+   *
+   * 同じ瞬間の同じ量が、画面の 2 か所で食い違っていた——「選んだもの」札の
+   * 『置き場所』と、Inspector の『位置』。実測(利用者役⑪と進行管理役の
+   * 再現、秒速 9.6m で飛ぶ球): 44.571 m と 45.055 m(差 0.48m = 球 2.4 個
+   * ぶん)。どちらを書き写せばいいのか決められない。
+   *
+   * 原因は**読む時刻が違う**こと。workspace 側の毎フレーム処理は `render()`
+   * より先に走るので、札は歩を進める前、Inspector は進めた後を見ていた。
+   * どちらも「その瞬間としては正しい」ので、片方を直しても揃わない。
+   *
+   * 揃える唯一の方法は**同じ 1 枚を見せる**こと。この表はフレームの最後
+   * (描き終わったあと)に更新するので、次のフレームでは札も Inspector も
+   * 同じ「最後に描かれた姿」を読む。1 フレーム(16ms)前の値だが、両方とも
+   * 同じ 1 フレーム前なので、画面の中で食い違わない。
+   */
+  const lastDrawnTransforms = new Map<
+    number,
+    { position: [number, number, number]; rotation: [number, number, number, number] }
+  >();
   const inspectorPosition = new THREE.Vector3();
   const inspectorRotationQuat = new THREE.Quaternion();
   const inspectorRotation = new THREE.Euler();
@@ -12469,9 +12527,23 @@ async function setUpSceneView(
     }
     inspectorRotation.setFromQuaternion(inspectorRotationQuat);
     if (selectedBodyValid) {
+      // **欄に書く数字は「最後に描かれた姿」から**(`lastDrawnTransforms` の
+      // doc参照)。ギズモの置き場所は `inspectorPosition`(いまの値)のままで
+      // よい——あれは物にぴったり重なっていることだけが大事で、数字として
+      // 読まれるものではない。
+      const drawnForFields = lastDrawnTransforms.get(selectedBodyIndex);
+      const fieldPosition = drawnForFields
+        ? new THREE.Vector3(...drawnForFields.position)
+        : inspectorPosition;
+      const fieldRotation = drawnForFields
+        ? new THREE.Euler().setFromQuaternion(
+            new THREE.Quaternion(...drawnForFields.rotation),
+            "XYZ",
+          )
+        : inspectorRotation;
       updateInspectorTransformFields(
-        inspectorPosition,
-        inspectorRotation,
+        fieldPosition,
+        fieldRotation,
         inspectorVelocity,
       );
       updateInspectorRigidBodyFields(world, selectedBodyIndex);
@@ -12746,6 +12818,15 @@ async function setUpSceneView(
     // enableDamping を使うので毎フレーム update が要る。
     orbit.update();
     renderer.render(scene, camera);
+    // **描き終わってから覚える**(`lastDrawnTransforms` のdoc参照)。ここで
+    // 覚えた姿を、次のフレームの札と Inspector が**どちらも**読む。
+    lastDrawnTransforms.clear();
+    for (const [bodyIndex, mesh] of bodyMeshes) {
+      lastDrawnTransforms.set(bodyIndex, {
+        position: [mesh.position.x, mesh.position.y, mesh.position.z],
+        rotation: [mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w],
+      });
+    }
   }
   hashDisplay.addEventListener("click", () => {
     // **コピーできたことを伝える**(増分「UI 品質の底上げ」)。設計 §2 は
@@ -12964,6 +13045,9 @@ async function setUpSceneView(
     },
     isPlaying: () => mode === "play" && playing,
     isEditing: () => mode === "edit",
+    setExportName: (name) => {
+      exportName = name;
+    },
     setProbeLabels: (labels, units, convert, digits) => {
       guidedProbeLabels = labels;
       guidedProbeUnits = units ?? null;
@@ -13190,9 +13274,22 @@ async function setUpSceneView(
       if (world.read_component("body_is_removed_at", String(index)) === "true") {
         return null;
       }
-      const position = world.body_position_at_f32(index);
+      // **画面に描かれている姿をそのまま返す**。
+      //
+      // ここは世界の**いまの**値を読んでいた。ところがこの関数を呼ぶ
+      // workspace 側の毎フレーム処理は、`render()`(=歩を進めてメッシュへ
+      // 同期する処理)より**先に**走る。つまり「選んだもの」札の『置き場所』は
+      // 歩を進める前、3D と Inspector の『位置』は進めた後の値になり、同じ
+      // 瞬間の同じ量が画面の 2 か所で食い違っていた——実測(利用者役⑪と
+      // 進行管理役の再現、秒速 9.6m で飛ぶ球): 札 44.571 m / 世界 45.055 m
+      // (差 0.48m = 球 2.4 個ぶん)。どちらを書き写せばいいのか決められない。
+      //
+      // メッシュの位置は「いま描かれている姿」そのもので、3D も Inspector も
+      // そこを見ている。同じところを見れば、食い違いようがない。
+      const drawn = lastDrawnTransforms.get(index);
+      const position = drawn ? drawn.position : world.body_position_at_f32(index);
       const velocity = world.body_velocity_at_f32(index);
-      const r = world.body_rotation_at_f32(index);
+      const r = drawn ? drawn.rotation : world.body_rotation_at_f32(index);
       const euler = new THREE.Euler().setFromQuaternion(
         new THREE.Quaternion(r[0], r[1], r[2], r[3]),
         "XYZ",
