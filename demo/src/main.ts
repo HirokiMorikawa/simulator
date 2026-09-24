@@ -6999,6 +6999,8 @@ async function setUpSceneView(
   // オーダーで、カメラは数メートルの世界にいる。最も遠い天体が画面に収まるよう
   // **毎フレーム正規化して描く**(絶対距離はProbe Graphsが出す)。
   const ASTRO_VIEW_RADIUS = 6.0; // 最遠天体をこの半径に収める。
+  /** 天体の跡に使う番号の帯(剛体の番号とぶつからないよう十分離す)。 */
+  const ASTRO_TRAIL_INDEX_BASE = 1_000_000;
   const astroMeshes: THREE.Mesh[] = [];
   const astroGroup = new THREE.Group();
   astroGroup.visible = false;
@@ -7048,6 +7050,13 @@ async function setUpSceneView(
       // 質量が桁違いなので、太陽が画面を埋めないよう上限を掛ける。
       const ratio = maxMass > 0 ? (masses[i] ?? 0) / maxMass : 0;
       mesh.scale.setScalar(0.12 + 0.5 * Math.cbrt(Math.max(ratio, 0)));
+      // **通った跡を、天体にも残す**。「惑星が太陽を回る」を開いても、画面に
+      // 出ているのは黒地に 2 つの点だけで、**軌道はどこにも描かれていない**
+      // ——タイトルが約束している「回る」が絵になっていなかった(利用者役⑨の
+      // 実測: 惑星 10×10px、舞台の 99.7% が背景色)。跡を残せば、回っている
+      // ことが形として見える。剛体と同じ仕組みを使う(`extendTrail` のdoc)。
+      // 天体は `bodyMeshes` に居ないので、番号がぶつからないよう別の帯へ置く。
+      extendTrail(ASTRO_TRAIL_INDEX_BASE + i, mesh.position, trailStepForCamera());
     }
     astroGroup.visible = true;
   }
@@ -11824,6 +11833,14 @@ async function setUpSceneView(
     trails.clear();
   }
 
+  /**
+   * 点の間隔 [m]。「いま見ている距離」の 1/220 ——カメラが引けば粗く、寄れば
+   * 細かくなるので、1e-7m の分子から 1e11m の公転まで同じ見た目の線になる。
+   */
+  function trailStepForCamera(): number {
+    return camera.position.distanceTo(orbit.target) / 220;
+  }
+
   /** 跡に 1 点足す(十分動いたときだけ)。 */
   function extendTrail(bodyIndex: number, at: THREE.Vector3, step: number): void {
     let trail = trails.get(bodyIndex);
@@ -11884,9 +11901,7 @@ async function setUpSceneView(
     // `normal`から計算した向き(`sceneImportRef`のPlane分岐参照)が単位回転で
     // 上書きされてしまう——統合の際に発見し、床メッシュの見た目が壊れる前に
     // 気付いて対処した)。Planeは静的なので同期しなくても正しい。
-    // 点の間隔は「いま見ている距離」の 1/220。カメラが引けば粗く、寄れば
-    // 細かくなるので、どの寸法の場面でも同じ見た目の線になる。
-    const trailStep = camera.position.distanceTo(orbit.target) / 220;
+    const trailStep = trailStepForCamera();
     for (const [bodyIndex, mesh] of bodyMeshes) {
       if (world.read_component("body_shape_kind_at", String(bodyIndex)) === "plane") continue;
       const sp = world.body_position_at_f32(bodyIndex);

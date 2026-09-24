@@ -6160,3 +6160,70 @@ test("計算が重い実験では、どれだけ待つことになるのかが�
 
   expect(errors).toEqual([]);
 });
+
+// **課題(利用者役⑨の実測)**: 「惑星が太陽を回る」を開いても、画面に出て
+// いるのは黒地に 2 つの点だけ(惑星 10×10px、舞台の 99.7% が背景色)で、
+// **軌道はどこにも描かれていなかった**——タイトルが約束している「回る」が
+// 絵になっていない。通った跡は剛体にだけ付けていたが、天体は別の仕組みで
+// 描かれているので素通りしていた。同じ跡を天体にも残す。
+test("天体の実験では、回った跡が軌道として描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星が太");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("惑星");
+  await page.waitForTimeout(3500);
+
+  const arc = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const camera = w.__camera;
+    const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
+    const rect = canvas.getBoundingClientRect();
+    const mul = (m: number[], v: number[]) => [
+      m[0] * v[0] + m[4] * v[1] + m[8] * v[2] + m[12] * v[3],
+      m[1] * v[0] + m[5] * v[1] + m[9] * v[2] + m[13] * v[3],
+      m[2] * v[0] + m[6] * v[1] + m[10] * v[2] + m[14] * v[3],
+      m[3] * v[0] + m[7] * v[1] + m[11] * v[2] + m[15] * v[3],
+    ];
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let points = 0;
+    w.__scene.traverseVisible((o: any) => {
+      if (!o.isLine || !o.geometry?.drawRange) return;
+      const n = o.geometry.drawRange.count;
+      if (!n || n === Infinity) return;
+      const arr = o.geometry.attributes.position.array as Float32Array;
+      for (let i = 0; i < n; i += 1) {
+        const eye = mul(camera.matrixWorldInverse.elements, [
+          arr[i * 3],
+          arr[i * 3 + 1],
+          arr[i * 3 + 2],
+          1,
+        ]);
+        if (eye[2] > -1e-4) continue;
+        const clip = mul(camera.projectionMatrix.elements, eye);
+        const x = rect.left + ((clip[0] / clip[3] + 1) / 2) * rect.width;
+        const y = rect.top + ((1 - clip[1] / clip[3]) / 2) * rect.height;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+        points += 1;
+      }
+    });
+    return {
+      points,
+      width: points ? Math.round(maxX - minX) : 0,
+      height: points ? Math.round(maxY - minY) : 0,
+    };
+  });
+  expect(arc.points, "軌道の点の数").toBeGreaterThan(20);
+  // まっすぐな線ではなく、**曲がって**いる(縦にも横にも広がっている)。
+  expect(arc.width, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(150);
+  expect(arc.height, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(60);
+  expect(errors).toEqual([]);
+});
