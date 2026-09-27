@@ -12177,26 +12177,26 @@ async function setUpSceneView(
   }
 
   /**
-   * **いちばん最後に画面へ描かれた姿**(ボディ番号 → 位置と向き)。
+   * **同じ量が、画面の 2 か所で食い違う件(利用者役⑪の課題4)の顛末**。
    *
-   * 同じ瞬間の同じ量が、画面の 2 か所で食い違っていた——「選んだもの」札の
-   * 『置き場所』と、Inspector の『位置』。実測(利用者役⑪と進行管理役の
-   * 再現、秒速 9.6m で飛ぶ球): 44.571 m と 45.055 m(差 0.48m = 球 2.4 個
-   * ぶん)。どちらを書き写せばいいのか決められない。
+   * 「選んだもの」札の『置き場所 x』と Inspector の『位置 x』が、秒速 9.6m で
+   * 飛ぶ球で 44.571 m と 45.055 m(差 0.48m)を同時に出していた。読む時刻が
+   * 違うせい——workspace 側の毎フレーム処理は `render()` より先に走るので、
+   * 札は歩を進める前、Inspector は進めた後を見ている。どちらもその瞬間
+   * としては正しい。
    *
-   * 原因は**読む時刻が違う**こと。workspace 側の毎フレーム処理は `render()`
-   * より先に走るので、札は歩を進める前、Inspector は進めた後を見ていた。
-   * どちらも「その瞬間としては正しい」ので、片方を直しても揃わない。
+   * **「最後に描かれた姿」を覚えて両方に読ませる**という直し方を一度入れ、
+   * 画面上は 59.774 / 59.774 とぴたり揃った。ところがこれは**編集を壊した**
+   * ——止めて欄に位置を打つと、打った直後の 1 フレームだけ欄が「打つ前の
+   * 値」に戻り、次の軸を打った拍子にその古い値が確定してしまう。macOS の
+   * CI で、UI だけで組み立てた D24 の車の `state_hash` が基準と食い違って
+   * 表に出た(期待 85616927e05b8f21 / 実際 2cf750eb128bd591)。
    *
-   * 揃える唯一の方法は**同じ 1 枚を見せる**こと。この表はフレームの最後
-   * (描き終わったあと)に更新するので、次のフレームでは札も Inspector も
-   * 同じ「最後に描かれた姿」を読む。1 フレーム(16ms)前の値だが、両方とも
-   * 同じ 1 フレーム前なので、画面の中で食い違わない。
+   * **打った値が黙って戻るほうが、はるかに重い**。欄はいまの値をそのまま
+   * 出す(元の作りへ戻した)。動いている物の数字を 2 か所で見比べると
+   * 1 コマぶんずれることがあるが、書き写すときは止めてから読むので、
+   * そこでは必ず一致する(回帰テストはその止めた状態を見る)。
    */
-  const lastDrawnTransforms = new Map<
-    number,
-    { position: [number, number, number]; rotation: [number, number, number, number] }
-  >();
   const inspectorPosition = new THREE.Vector3();
   const inspectorRotationQuat = new THREE.Quaternion();
   const inspectorRotation = new THREE.Euler();
@@ -12552,23 +12552,9 @@ async function setUpSceneView(
     }
     inspectorRotation.setFromQuaternion(inspectorRotationQuat);
     if (selectedBodyValid) {
-      // **欄に書く数字は「最後に描かれた姿」から**(`lastDrawnTransforms` の
-      // doc参照)。ギズモの置き場所は `inspectorPosition`(いまの値)のままで
-      // よい——あれは物にぴったり重なっていることだけが大事で、数字として
-      // 読まれるものではない。
-      const drawnForFields = lastDrawnTransforms.get(selectedBodyIndex);
-      const fieldPosition = drawnForFields
-        ? new THREE.Vector3(...drawnForFields.position)
-        : inspectorPosition;
-      const fieldRotation = drawnForFields
-        ? new THREE.Euler().setFromQuaternion(
-            new THREE.Quaternion(...drawnForFields.rotation),
-            "XYZ",
-          )
-        : inspectorRotation;
       updateInspectorTransformFields(
-        fieldPosition,
-        fieldRotation,
+        inspectorPosition,
+        inspectorRotation,
         inspectorVelocity,
       );
       updateInspectorRigidBodyFields(world, selectedBodyIndex);
@@ -12843,15 +12829,6 @@ async function setUpSceneView(
     // enableDamping を使うので毎フレーム update が要る。
     orbit.update();
     renderer.render(scene, camera);
-    // **描き終わってから覚える**(`lastDrawnTransforms` のdoc参照)。ここで
-    // 覚えた姿を、次のフレームの札と Inspector が**どちらも**読む。
-    lastDrawnTransforms.clear();
-    for (const [bodyIndex, mesh] of bodyMeshes) {
-      lastDrawnTransforms.set(bodyIndex, {
-        position: [mesh.position.x, mesh.position.y, mesh.position.z],
-        rotation: [mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w],
-      });
-    }
   }
   hashDisplay.addEventListener("click", () => {
     // **コピーできたことを伝える**(増分「UI 品質の底上げ」)。設計 §2 は
@@ -13311,10 +13288,9 @@ async function setUpSceneView(
       //
       // メッシュの位置は「いま描かれている姿」そのもので、3D も Inspector も
       // そこを見ている。同じところを見れば、食い違いようがない。
-      const drawn = lastDrawnTransforms.get(index);
-      const position = drawn ? drawn.position : world.body_position_at_f32(index);
+      const position = world.body_position_at_f32(index);
       const velocity = world.body_velocity_at_f32(index);
-      const r = drawn ? drawn.rotation : world.body_rotation_at_f32(index);
+      const r = world.body_rotation_at_f32(index);
       const euler = new THREE.Euler().setFromQuaternion(
         new THREE.Quaternion(r[0], r[1], r[2], r[3]),
         "XYZ",

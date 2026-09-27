@@ -6286,7 +6286,14 @@ test("グラフの見る範囲を選べる(記録そのものは減らない)", 
 // 2 か所で食い違っていた——「選んだもの」札の『置き場所 x』と Inspector の
 // 『位置 x』。秒速 9.6m で飛ぶ球で 44.571 m と 45.055 m(差 0.48m)。
 // どちらを書き写せばいいのか決められない。
-test("同じ量は、画面のどこで読んでも同じ数字", async ({ page }) => {
+//
+// **見るのは「止めてから」**。動いている物の数字を 2 か所で見比べると、
+// 読む時刻の違いで 1 コマぶんずれ得る——それを消そうとして「最後に描かれた
+// 姿」を両方に読ませたら、今度は**打った位置が 1 フレームだけ古い値に戻る**
+// 副作用が出て、UI だけで組み立てた車の state_hash が macOS の CI で食い
+// 違った(`main.ts` の該当doc参照)。数字を書き写すのは止めてからなので、
+// 止めた状態で一致することを見る。
+test("止めれば、同じ量は画面のどこで読んでも同じ数字", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 3);
@@ -6296,6 +6303,13 @@ test("同じ量は、画面のどこで読んでも同じ数字", async ({ page 
   await expect(page.locator("#crumb-experiment")).toContainText("斜めに投げる");
   await page.locator("#hierarchy-tree").getByText("shell", { exact: false }).first().click();
   await expect(page.locator("#focus-pos-x")).toBeVisible();
+  // 「つくる」の粒度は**止まった状態から始まる**(置いてから動かすため)。
+  // 飛ばしてから止めて読む——数字を書き写すときの手順そのもの。
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+  await page.click("#btn-run"); // うごかす
+  await page.waitForTimeout(2000);
+  await page.click("#btn-run"); // とめる
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
 
   for (let i = 0; i < 5; i += 1) {
     await page.waitForTimeout(400);
