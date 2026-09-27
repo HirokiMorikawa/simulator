@@ -1779,13 +1779,18 @@ test("「手回し発電機」の軸は、取っ手が回って見える(課題C
     });
   };
 
-  const x1 = await handleWorldX();
-  expect(x1).not.toBeNull();
-  await page.waitForTimeout(800);
-  const x2 = await handleWorldX();
-  expect(x2).not.toBeNull();
   // 回っていれば、取っ手の世界座標は時間とともに変わる(円を描く)。
-  expect(Math.abs((x1 as number) - (x2 as number))).toBeGreaterThan(0.01);
+  // **2 点だけを比べない**: 横の位置は R·cos θ なので、2 回の角度がちょうど
+  // 左右対称(θ₂ ≈ −θ₁)に来ると、回っていても同じ値になる(全体実行で
+  // 0.007 m 差の偶然を踏んだ)。何度か読み、その振れ幅で確かめる。
+  const xs: number[] = [];
+  for (let i = 0; i < 6; i += 1) {
+    const x = await handleWorldX();
+    expect(x).not.toBeNull();
+    xs.push(x as number);
+    await page.waitForTimeout(170);
+  }
+  expect(Math.max(...xs) - Math.min(...xs), xs.join(", ")).toBeGreaterThan(0.01);
   expect(errors).toEqual([]);
 });
 
@@ -6974,17 +6979,9 @@ test("計算が重い実験では、どれだけ待つことになるのかが�
 // **軌道はどこにも描かれていなかった**——タイトルが約束している「回る」が
 // 絵になっていない。通った跡は剛体にだけ付けていたが、天体は別の仕組みで
 // 描かれているので素通りしていた。同じ跡を天体にも残す。
-test("天体の実験では、回った跡が軌道として描かれる", async ({ page }) => {
-  const errors = collectPageErrors(page);
-  await boot(page);
-  await setGrain(page, 0);
-  await page.keyboard.press("Control+k");
-  await page.fill("#palette-input", "惑星が太");
-  await page.keyboard.press("Enter");
-  await expect(page.locator("#crumb-experiment")).toContainText("惑星");
-  await page.waitForTimeout(3500);
-
-  const arc = await page.evaluate(() => {
+/** 舞台の中に見えている線(跡・軌道)の点が、画面で占める広がり(px)。 */
+async function visibleLineSpread(page: Page) {
+  return page.evaluate(() => {
     const w = window as unknown as Record<string, any>;
     const camera = w.__camera;
     const canvas = document.querySelector<HTMLCanvasElement>("#scene-view canvas")!;
@@ -7033,10 +7030,107 @@ test("天体の実験では、回った跡が軌道として描かれる", async
       height: points ? Math.round(maxY - minY) : 0,
     };
   });
+}
+
+test("天体の実験では、回った跡が軌道として描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星が太");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("惑星");
+  await page.waitForTimeout(3500);
+
+  const arc = await visibleLineSpread(page);
   expect(arc.points, "舞台の中に見えている軌道の点の数").toBeGreaterThan(20);
   // まっすぐな線ではなく、**曲がって**いる(縦にも横にも広がっている)。
   expect(arc.width, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(150);
   expect(arc.height, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(60);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑬の観察)**: 同じ「惑星が太陽を回る」でも、**前に何を
+// 見ていたか**で、円に見えたり縦の線に見えたりした。追いかけるカメラが
+// 水平の向きを前の場面から引き継いでいたので、前の場面のカメラが x の向きを
+// 向いていると、x–y 平面の公転を真横から見ていた(実測 6×200px の線)。
+// 説明は「きれいな円を描いて戻ってきます」。どこから来ても円に見える。
+test("前に何を見ていても、公転は円として見える(真横から見ない)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ブラウン");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ブラウン");
+  await page.waitForTimeout(3000);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星が太");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("惑星");
+  await page.waitForTimeout(8000);
+
+  const arc = await visibleLineSpread(page);
+  expect(arc.points, "舞台の中に見えている軌道の点の数").toBeGreaterThan(20);
+  // 円は縦にも横にも同じくらい広がる。真横から見た線は幅が高さの 1 割も無い。
+  const ratio = Math.min(arc.width, arc.height) / Math.max(arc.width, arc.height);
+  expect(ratio, `軌道の広がり ${arc.width}×${arc.height}px`).toBeGreaterThan(0.5);
+  expect(errors).toEqual([]);
+});
+
+/** 右の「いまの数値」から、名前の次の行の数を読む(読めなければ NaN)。 */
+async function readoutValue(page: Page, label: string): Promise<number> {
+  const text = await page.locator("#context").innerText();
+  const match = text.match(new RegExp(`${label}\\n\\s*(-?[\\d.,]+)`));
+  return match ? Number(match[1].replace(/,/g, "")) : Number.NaN;
+}
+
+// **課題(利用者役⑬の観察)**: 「スイングバイで加速する」の隣で、探査機の速さが
+// 26.10 → 24.83 km/s と**下がっていった**。場面が近点(いちばん近づいた点)から
+// 始まり、惑星の進む向きへ飛び出す後半しか無かったため。しかも説明が指す
+// 「グラフの『探査機の速さ』」はグラフに無く、成分の線が 8 本並んでいた。
+test("スイングバイでは、探査機の速さがグラフで上がる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "スイングバイ");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("スイングバイ");
+  await expect.poll(() => readoutValue(page, "探査機の速さ")).toBeGreaterThan(0);
+  const before = await readoutValue(page, "探査機の速さ");
+  // 近づく前(実測 7.95 km/s)から、惑星の後ろを回り込んだ後(12 km/s 前後)へ。
+  await expect
+    .poll(() => readoutValue(page, "探査機の速さ"), { timeout: 20_000 })
+    .toBeGreaterThan(before + 3);
+
+  const legend = await page.evaluate(
+    () => (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend ?? [],
+  );
+  expect(legend[0], legend.join(" / ")).toMatch(/^探査機の速さ/);
+  expect(legend.join(" / ")).not.toMatch(/横の|縦の/);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑬の観察)**: 「磁石が銅管をゆっくり落ちる」の磁石は、3 秒で
+// 秒速 39 m に向かって速くなり続けていた(回路の抵抗が 1 Ω で、ブレーキが実物の
+// 百分の一しか効いていなかった)。しかも 4 倍のスローで流していた。実物と同じ
+// 速さで、落とした直後から一定のゆっくりした速さで落ちる。
+test("銅管の中の磁石は、実時間で、ゆっくり一定の速さで落ちる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "磁石が銅管");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("銅管");
+  await expect.poll(() => readoutValue(page, "経過した時間")).toBeGreaterThan(0.5);
+  const first = await readoutValue(page, "落ちる速さ");
+  await page.waitForTimeout(1500);
+  const second = await readoutValue(page, "落ちる速さ");
+  expect(first, `落ちる速さ ${first} m/s`).toBeGreaterThan(0.1);
+  expect(first, `落ちる速さ ${first} m/s`).toBeLessThan(1);
+  expect(Math.abs(second - first), `${first} → ${second} m/s`).toBeLessThan(0.01);
   expect(errors).toEqual([]);
 });
 

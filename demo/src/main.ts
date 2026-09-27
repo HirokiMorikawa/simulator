@@ -15,6 +15,7 @@ import {
   readoutNumber,
   setUpWorkspace,
   type ConfirmDiscardRef,
+  type DerivedProbeSeries,
   type WorkspaceApi,
   type WorkspaceApiRef,
 } from "./workspace";
@@ -4651,6 +4652,14 @@ type ProbeSeries = {
    * 無い系列向け)。
    */
   digits?: number;
+  /**
+   * **線には描かず、書き出す表(CSV)にだけ入れる**。天体の場面では、
+   * 探査機の速さを横・縦の成分に分けて記録している。成分の線を 8 本並べると、
+   * 説明が「グラフの『探査機の速さ』が階段状に上がります」と言っている当の
+   * 線がどこにも無かった(利用者役⑬の観察)。成分から作った量(速さ・距離)を
+   * 線にし、材料になった成分は表にだけ残す。
+   */
+  csvOnly?: boolean;
 };
 
 /// 符号を保つ対数変換(symlog)。`type ProbeSeries`のdoc参照。
@@ -4660,7 +4669,15 @@ type ProbeSeries = {
  */
 function formatTickValue(value: number): string {
   const magnitude = Math.abs(value);
-  if (magnitude >= 1000) return value.toPrecision(4);
+  // 千以上は位取りのカンマで書く。`toPrecision(4)` は 1 万を超えると
+  // `4.932e+4 km` のような指数になり、中を知らない人には読めなかった
+  // (利用者役⑬の観察)。1 億を超える桁だけは、有効数字 4 桁に丸める。
+  if (magnitude >= 1e8) return value.toPrecision(4);
+  if (magnitude >= 1000) {
+    return Math.round(value)
+      .toString()
+      .replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  }
   if (magnitude >= 100) return value.toFixed(0);
   if (magnitude >= 1) return value.toFixed(2);
   if (magnitude >= 0.001) return value.toFixed(3);
@@ -5103,14 +5120,15 @@ function setUpProbeGraph(): (
     const windowSeconds = Number(windowSelect?.value ?? "0") || 0;
     const keep =
       windowSeconds > 0 && dt > 0 ? Math.max(2, Math.ceil(windowSeconds / dt)) : 0;
-    const series =
+    const series = (
       keep > 0
         ? allSeries.map((s) =>
             s.history.length > keep
               ? { ...s, history: s.history.slice(s.history.length - keep) }
               : s,
           )
-        : allSeries;
+        : allSeries
+    ).filter((s) => !s.csvOnly);
     // **空状態**(増分「UI 品質の底上げ」)。描ける系列(サンプル 2 点以上)が
     // 1 本も無いあいだは、黒い矩形ではなく「何をすれば線が出るか」を出す。
     const drawable = series.filter((s) => s.history.length >= 2);
@@ -8121,6 +8139,43 @@ async function setUpSceneView(
   /** 形と呼べるだけの点数。数点では丸め誤差が膨らみに見える。 */
   const CURVED_PATH_MIN_POINTS = 8;
   /**
+   * **動きが描く平面の向き**(法線、単位ベクトル。まだ分からなければ null)。
+   *
+   * 追いかけるカメラは、仰角を帯で押さえる一方、水平の向きは**前の場面の
+   * カメラの向きを引き継いでいた**。惑星の公転は x–y 平面の円なので、前の
+   * 場面のカメラが x の向きを向いていると、円を**真横から**見ることになり、
+   * 「きれいな円を描いて戻ってきます」の隣で、画面には縦の線(幅 67px ×
+   * 高さ 459px)しか映らなかった(利用者役⑬の観察。同じ場面でも、前に何を
+   * 見ていたかで円になったり線になったりした)。
+   *
+   * 曲がった道すじが見えたら、その道すじが載っている平面を求め、カメラを
+   * その平面に向ける。まっすぐな道すじ(平面が決まらない)では何もしない。
+   * 場面を読み込み直すと測り直す。
+   */
+  let motionPlaneNormal: THREE.Vector3 | null = null;
+  function detectMotionPlane(): void {
+    if (motionPlaneNormal) return;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    for (const trail of trails.values()) {
+      if (trail.count < CURVED_PATH_MIN_POINTS) continue;
+      const last = trail.count - 1;
+      const mid = Math.floor(last / 2);
+      a.fromArray(trail.positions, 0);
+      b.fromArray(trail.positions, mid * 3);
+      c.fromArray(trail.positions, last * 3);
+      const ab = b.clone().sub(a);
+      const ac = c.clone().sub(a);
+      const normal = ab.clone().cross(ac);
+      // 3 点がほぼ一直線(=まっすぐ進んでいる)なら、平面は決まらない。
+      if (normal.length() < 0.05 * ab.length() * ac.length()) continue;
+      motionPlaneNormal = normal.normalize();
+      return;
+    }
+  }
+
+  /**
    * いま残っている跡のうち「曲がっているもの」を `guidedCurvedPathBox` に
    * 足す。跡は描画のためだけの線なので、ここでも読むだけで書き換えない。
    */
@@ -8376,6 +8431,26 @@ async function setUpSceneView(
     }
     const distance = guidedFollowDirection.length();
     guidedFollowDirection.normalize();
+    // **動きの平面に向く**(`motionPlaneNormal` のdoc参照)。平面が立っている
+    // (法線が水平に近い)ときだけ、水平の向きを法線へ寄せる——寝ている平面
+    // (法線がほぼ真上)は、下の仰角の帯のまま見下ろせば形が読める。符号は
+    // いまの向きに近いほうを選び、少しずつ回す(一気に跳ばない)。
+    detectMotionPlane();
+    if (motionPlaneNormal && Math.abs(motionPlaneNormal.y) < 0.7) {
+      const facing = new THREE.Vector3(motionPlaneNormal.x, 0, motionPlaneNormal.z).normalize();
+      if (facing.dot(guidedFollowDirection) < 0) facing.negate();
+      const horizontal = new THREE.Vector3(guidedFollowDirection.x, 0, guidedFollowDirection.z);
+      const length = horizontal.length();
+      if (length > 1e-6) {
+        horizontal.divideScalar(length).lerp(facing, guidedCameraSnap ? 1 : 0.08).normalize();
+        guidedFollowDirection.set(
+          horizontal.x * length,
+          guidedFollowDirection.y,
+          horizontal.z * length,
+        );
+        guidedFollowDirection.normalize();
+      }
+    }
     // 仰角は**帯**で押さえる。下限は床の下に潜らないため。上限が無かったので、
     // 場面によっては 45° ほぼ真上から見下ろす画になり、地平線が画角の外へ
     // 出て**空が一切映らない**——落ちているのか止まっているのかが画面から
@@ -12752,8 +12827,35 @@ async function setUpSceneView(
       // する、`setUpProbeGraph`のdoc参照)。
       const probeCount = readNumber(world, "imported_probe_count");
       const series: ProbeSeries[] = [];
+      // 成分から作る量を先に(=いちばん目立つ色で)描き、材料の成分は表にだけ
+      // 残す(`ProbeSeries.csvOnly` のdoc参照)。成分は生の値(変換前)から作る。
+      const derivedFrom = new Set<number>();
+      const derivedSeries: ProbeSeries[] = [];
+      for (const spec of guidedDerivedSeries ?? []) {
+        if (spec.probes.some((index) => index >= probeCount)) continue;
+        const inputs = spec.probes.map((index) =>
+          Float64Array.from(world.imported_probe_history_f64(index)),
+        );
+        const length = Math.min(...inputs.map((input) => input.length));
+        const history = new Float64Array(length);
+        const values = new Array<number>(inputs.length);
+        for (let k = 0; k < length; k += 1) {
+          for (let j = 0; j < inputs.length; j += 1) values[j] = inputs[j][k];
+          const value = spec.derive(values);
+          history[k] = spec.convert ? spec.convert(value) : value;
+        }
+        for (const index of spec.probes) derivedFrom.add(index);
+        derivedSeries.push({
+          label: spec.label,
+          unit: spec.unit,
+          color: PROBE_GRAPH_COLORS[derivedSeries.length % PROBE_GRAPH_COLORS.length],
+          history,
+        });
+      }
+      series.push(...derivedSeries);
       for (let i = 0; i < probeCount; i++) {
         series.push({
+          csvOnly: derivedFrom.has(i),
           // かんたんモードでは、グラフの凡例も人間の言葉にする
           // (`NodeTemp[0]` ではなく「コーヒーの温度」)。指定が無いプローブは
           // 従来どおり Rust 側の生ラベルを出す。
@@ -12772,7 +12874,7 @@ async function setUpSceneView(
           // `undefined` のままにし、凡例は従来どおり `formatTickValue` で
           // 整形する。
           digits: guidedProbeDigits?.[i],
-          color: PROBE_GRAPH_COLORS[i % PROBE_GRAPH_COLORS.length],
+          color: PROBE_GRAPH_COLORS[(i + derivedSeries.length) % PROBE_GRAPH_COLORS.length],
           // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
           // 返す(B16、`HotPathViewBuffers`のdoc参照)——このループが呼ぶたび
           // 同じ1本の永続バッファを使い回すため、`series`へ積んだ後の要素を
@@ -13052,6 +13154,8 @@ async function setUpSceneView(
    * (`9.3e-67`)という食い違いが起きる(`setProbeLabels` のdoc参照)。
    */
   let guidedProbeDigits: Record<number, number> | null = null;
+  /** 成分から作る量(速さ・距離)の線(`ProbeSeries.csvOnly` のdoc参照)。 */
+  let guidedDerivedSeries: DerivedProbeSeries[] | null = null;
   let lastTimeMs = performance.now();
 
   function frame(nowMs: number) {
@@ -13171,6 +13275,7 @@ async function setUpSceneView(
       guidedSceneStartPending = true;
       guidedCurvedPathBox = null;
       guidedStillBox = null;
+      motionPlaneNormal = null;
       resetSettleWatch();
       // **前の場面の「単独追跡」を持ち越さない**。`followedBodyIndices`は
       // ボディ番号でしかないので、差し替わった新しい場面でたまたま同じ番号の
@@ -13236,11 +13341,12 @@ async function setUpSceneView(
     setExportName: (name) => {
       exportName = name;
     },
-    setProbeLabels: (labels, units, convert, digits) => {
+    setProbeLabels: (labels, units, convert, digits, derived) => {
       guidedProbeLabels = labels;
       guidedProbeUnits = units ?? null;
       guidedProbeConvert = convert ?? null;
       guidedProbeDigits = digits ?? null;
+      guidedDerivedSeries = derived?.length ? derived : null;
     },
     setPace: (stepsPerSecond) => {
       guidedPace = stepsPerSecond;

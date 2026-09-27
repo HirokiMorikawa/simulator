@@ -36,6 +36,18 @@ import {
   type SceneJson,
 } from "./catalog";
 
+/**
+ * **成分から作る量の線**(速さ・距離)。天体の場面は x/y の成分でしか記録して
+ * いないので、「いまの数値」と同じ作り方(`Readout.derive`)でグラフにも描く。
+ */
+export type DerivedProbeSeries = {
+  label: string;
+  unit?: string;
+  probes: number[];
+  derive: (values: number[]) => number;
+  convert?: (value: number) => number;
+};
+
 /** ワークスペースが物理側へ求めることの全部。 */
 export type WorkspaceApi = {
   loadSceneJson: (json: string) => void;
@@ -130,6 +142,7 @@ export type WorkspaceApi = {
     units?: Record<number, string> | null,
     convert?: Record<number, (value: number) => number> | null,
     digits?: Record<number, number> | null,
+    derived?: DerivedProbeSeries[] | null,
   ) => void;
   /**
    * **いまの場面をそのまま文書にする**(利用者役④の観察: 自分で組み立てた
@@ -1652,6 +1665,22 @@ export function setUpWorkspace(
     return parts.join("_");
   }
 
+  /** 成分から作る量の線(`DerivedProbeSeries` のdoc参照)。 */
+  function derivedSeriesFor(experiment: Experiment): DerivedProbeSeries[] {
+    const result: DerivedProbeSeries[] = [];
+    for (const readout of experiment.readouts ?? []) {
+      if (!readout.derive || !readout.probes) continue;
+      result.push({
+        label: readout.label,
+        unit: readout.graph?.unit ?? readout.unit,
+        probes: readout.probes,
+        derive: readout.derive,
+        convert: readout.graph?.convert,
+      });
+    }
+    return result;
+  }
+
   /** グラフに描く前にかける変換(`Readout.graph` のdoc参照)。 */
   function probeConvertFor(
     experiment: Experiment,
@@ -1869,6 +1898,7 @@ export function setUpWorkspace(
       probeUnitsFor(current),
       probeConvertFor(current),
       probeDigitsFor(current),
+      derivedSeriesFor(current),
     );
     api.setExportName(exportNameFor(current));
     api.setPace(current.pace * speedMultiplier);

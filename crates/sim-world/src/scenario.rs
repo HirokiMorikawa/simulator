@@ -4946,12 +4946,17 @@ mod tests {
     /// `Scenario::circuit`+`CouplingJson::InductionCoupling`スキーマ拡張)を
     /// シーンJSON経由で再現し、終端速度が解析解$v_{term}=mgR/(B\ell)^2$と
     /// rel<0.02一致することを確認する。
+    ///
+    /// 抵抗は銅らしく小さく `R = 0.0064 Ω` にしてある。以前は `1 Ω` で、終端速度が
+    /// 39 m/s・そこへ近づく時定数が 4 秒——「ゆっくり落ちる」はずの磁石が、画面では
+    /// 自由落下と見分けがつかない速さで落ち続けていた(利用者役⑬の観察。実物の
+    /// 銅管では磁石は毎秒数十 cm で落ちる)。いまは終端速度 0.25 m/s、時定数 0.026 秒。
     #[test]
     fn run_headless_scenario_copper_tube_drop_reaches_analytic_terminal_velocity() {
         let mass: f64 = 0.01;
         let length: f64 = 0.1;
         let b: f64 = 0.5;
-        let r: f64 = 1.0;
+        let r: f64 = 0.0064;
         let gravity: f64 = 9.80665;
         let dt: f64 = 0.001;
         let tau = mass * r / (b * length).powi(2);
@@ -6104,60 +6109,81 @@ mod tests {
     /// **増分G1** D36(スイングバイ): 双曲線フライバイを`scenes/d36-swingby.json`
     /// 経由で解析解と突き合わせる。
     ///
-    /// シーンは**近点から**始める配置にしてある——探査機の位置は惑星から+x方向に
-    /// `r_p = 5e6 m`、相対速度は+y方向(位置ベクトルと直交)なので、この点が
-    /// 定義上そのまま近点になる。相対速度の大きさ `v_p = 7189.993045893716 m/s` は
-    /// 無限遠速度がちょうど `v_inf = 5000 m/s` になるよう逆算して焼き込んだ値
-    /// (`v_p = sqrt(v_inf^2 + 2GM/r_p)`)。ここから離心率と漸近真近点角が閉形式で出る:
+    /// シーンは**遠くから近づいてくる途中**(惑星から近点距離の約8倍)から始める。
+    /// 以前は近点から始めていたが、その配置では探査機が惑星の進む向きへ飛び出す
+    /// 後半しか映らず、画面では「スイングバイで加速する」の隣で速さが**下がって**
+    /// いった(利用者役⑬の観察)。いまは惑星の**後ろ側**を回り込み、出ていく向きが
+    /// 惑星の進む向きにそろう配置にしてある——重力アシストで速くなる典型の通り方。
     ///
-    /// - `e = r_p * v_p^2 / GM - 1 = 2.8729397662571174`
-    /// - `nu_inf = arccos(-1/e) = 110.36965034969745°`(近点方向=+x から測った角度)
+    /// 初期状態(JSON から読む)の相対位置・相対速度だけから、2体問題の閉形式で
+    /// 双曲線の形が決まる:
     ///
-    /// 近点で相対速度は+y(=+xから90°)を向いており、無限遠では漸近線に平行=
-    /// `nu_inf` を向く。つまり**近点から無限遠までの偏向は `nu_inf - 90° = 20.37°`**
-    /// (全偏向 `2*arcsin(1/e) = 40.74°` の半分)。
+    /// - エネルギー `ε = v²/2 - GM/r` → 無限遠速度 `v_inf = sqrt(2ε)`
+    /// - 離心率ベクトル `e = ((v² - GM/r) r - (r·v) v) / GM`
+    /// - 出ていく漸近線の向き = 近点方向 `ê` を運動の向きに `nu_inf = arccos(-1/|e|)` 回した向き
     ///
-    /// 実測(1e5秒 = 20,000ステップ後、r = 5.10e8 m ≒ 近点の102倍):
-    /// 速度方向 110.36749°(解析解との相対誤差 **2.0e-5**)、
-    /// 相対速さ 5026.0909 m/s に対し同じrでのvis-viva `sqrt(v_inf^2 + 2GM/r)` は
-    /// 5026.0809 m/s(相対誤差 **2.0e-6**)。
+    /// これと、十分遠くまで飛ばした後の実測とを比べる。
     #[test]
     fn run_headless_scenario_swingby_deflection_matches_hyperbolic_analytic_solution() {
         let gm = sim_astro::GRAVITATIONAL_CONSTANT * 1.0e24; // JSON側の惑星質量。
-        let r_p: f64 = 5.0e6; // JSON側の初期相対距離(=近点距離)。
-        let v_inf: f64 = 5000.0; // JSON側の初期相対速度はこれを与えるよう逆算済み。
-        let v_p = (v_inf * v_inf + 2.0 * gm / r_p).sqrt();
-        let eccentricity = r_p * v_p * v_p / gm - 1.0;
-        let nu_inf = (-1.0 / eccentricity).acos().to_degrees();
-
         let json = include_str!("../../../scenes/d36-swingby.json");
-        let steps = 20_000u32; // dt=5s → 1e5秒。近点から近点距離の約100倍まで飛ばす。
+        let scene: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+        let body = |i: usize, key: &str, axis: usize| {
+            scene["astro"]["bodies"][i][key][axis]
+                .as_f64()
+                .expect("数値")
+        };
+        let planet_speed = body(0, "velocity", 1); // 惑星は+y方向へ等速。
+        assert_eq!(body(0, "velocity", 0), 0.0);
+        let (rx0, ry0) = (
+            body(1, "position", 0) - body(0, "position", 0),
+            body(1, "position", 1) - body(0, "position", 1),
+        );
+        let (vx0, vy0) = (
+            body(1, "velocity", 0),
+            body(1, "velocity", 1) - planet_speed,
+        );
+        let r0 = rx0.hypot(ry0);
+        let v0_sq = vx0 * vx0 + vy0 * vy0;
+        let v_inf = (v0_sq - 2.0 * gm / r0).sqrt();
+        let r_dot_v = rx0 * vx0 + ry0 * vy0;
+        let ex = ((v0_sq - gm / r0) * rx0 - r_dot_v * vx0) / gm;
+        let ey = ((v0_sq - gm / r0) * ry0 - r_dot_v * vy0) / gm;
+        let eccentricity = ex.hypot(ey);
+        assert!(eccentricity > 1.0, "双曲線であるべき: e={eccentricity}");
+        let h = rx0 * vy0 - ry0 * vx0; // 正なら反時計回り。
+        let r_p = h * h / (gm * (1.0 + eccentricity));
+        let nu_inf = (-1.0 / eccentricity).acos();
+        let out_angle = ey.atan2(ex) + h.signum() * nu_inf;
+        // 始点は近づいてくる途中(r·v < 0)で、近点から十分離れている。
+        assert!(r_dot_v < 0.0 && r0 > 5.0 * r_p, "r0/r_p={}", r0 / r_p);
+
+        let steps = 40_000u32; // dt=5s → 2e5秒。近点を過ぎて、近点距離の100倍以上まで飛ばす。
         let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let last = |i: usize| *result.probe_histories[i].last().expect("履歴が空でない");
-        // プローブ0..3が探査機、4..7が惑星(惑星自身も+y方向へ 20 km/s で動いている
-        // ため、双曲線軌道の量は**相対**座標で見る必要がある)。
+        // プローブ0..3が探査機、4..7が惑星(惑星自身も動いているので、双曲線軌道の
+        // 量は**相対**座標で見る)。
         let (rx, ry) = (last(0) - last(4), last(1) - last(5));
         let (vx, vy) = (last(2) - last(6), last(3) - last(7));
         let r = rx.hypot(ry);
         let v = vx.hypot(vy);
-
         assert!(
-            r > 50.0 * r_p,
-            "漸近的な向きを見るには十分遠方まで飛ばす必要がある: r/r_p={}",
+            r > 100.0 * r_p && rx * vx + ry * vy > 0.0,
+            "近点を過ぎて十分遠方まで飛んでいるべき: r/r_p={}",
             r / r_p
         );
 
-        // ①偏向: 相対速度の向きが漸近真近点角と一致する。
-        let angle = vy.atan2(vx).to_degrees();
-        let angle_rel_err = (angle - nu_inf).abs() / nu_inf;
+        // ①偏向: 相対速度の向きが、出ていく漸近線の向きと一致する(実測の差 2.9e-5 rad)。
+        let angle = vy.atan2(vx);
+        let diff = (angle - out_angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
         assert!(
-            angle_rel_err < 1.0e-4,
+            diff.abs() < 2.0e-4,
             "双曲線フライバイの漸近方向が解析解と一致すべき: \
-             angle={angle} nu_inf={nu_inf} rel_err={angle_rel_err:e}"
+             angle={angle} out_angle={out_angle} diff={diff:e} rad"
         );
 
-        // ②エネルギー保存: 到達した距離でのvis-viva速度と一致する
-        // (無限遠ではないので `v_inf` そのものではなく `sqrt(v_inf^2 + 2GM/r)` と比べる)。
+        // ②エネルギー保存: 到達した距離でのvis-viva速度と一致する。
         let vis_viva = (v_inf * v_inf + 2.0 * gm / r).sqrt();
         let speed_rel_err = (v - vis_viva).abs() / vis_viva;
         assert!(
@@ -6165,26 +6191,26 @@ mod tests {
             "相対速さがvis-vivaと一致すべき: v={v} vis_viva={vis_viva} rel_err={speed_rel_err:e}"
         );
 
-        // ③スイングバイであること: 惑星に対する速さは(散逸が無いので)保存される
-        // 一方、**慣性系での速さは変化する**——これが重力アシストの定義そのもの。
-        // この配置では探査機は惑星の進行方向へ向かって近点を通るため**減速**する。
-        // 解析的な漸近値は `|v_inf*(cos nu_inf, sin nu_inf) + (0, 20000)|`。
-        let planet_speed: f64 = 20_000.0; // JSON側の惑星速度(+y)。
-        let asymptotic_inertial = (v_inf * nu_inf.to_radians().cos())
-            .hypot(v_inf * nu_inf.to_radians().sin() + planet_speed);
-        let initial_inertial = v_p + planet_speed; // 近点では両者とも+y向き。
+        // ③スイングバイであること: 惑星に対する速さは保存される一方、**慣性系での
+        // 速さは増える**——惑星の後ろを回り込んだので、出ていく向きが惑星の進む
+        // 向きにそろう(実測 7.95 → 11.87 km/s)。解析的な漸近値は
+        // `|v_inf*(cos, sin)(out_angle) + (0, V)|`(有限距離なので 0.1% ほどずれる)。
+        let asymptotic_inertial =
+            (v_inf * out_angle.cos()).hypot(v_inf * out_angle.sin() + planet_speed);
+        let initial_inertial = body(1, "velocity", 0).hypot(body(1, "velocity", 1));
         let final_inertial = last(2).hypot(last(3));
         assert!(
-            final_inertial < initial_inertial - 2_000.0,
-            "スイングバイで慣性系の速さが変化しているべき: \
+            final_inertial > initial_inertial + 3_000.0,
+            "スイングバイで慣性系の速さが増えるべき: \
              initial={initial_inertial} final={final_inertial}"
         );
-        // 有限距離(r は近点の約100倍)なので漸近値からは0.1%ほどずれる。
         assert!(
             (final_inertial - asymptotic_inertial).abs() / asymptotic_inertial < 3.0e-3,
             "慣性系の速さが解析的な漸近値に近づくべき: \
              final={final_inertial} asymptotic={asymptotic_inertial}"
         );
+        // 探査機は惑星に比べて無視できるほど軽いので、惑星の速さは変わらない。
+        assert!((last(7) - planet_speed).abs() < 1.0e-6 && last(6).abs() < 1.0e-6);
     }
 
     /// D2(弾道): 45°射出の真空放物運動を`body_pos_y`/`body_speed`の2プローブのみで検証する。
