@@ -2947,6 +2947,15 @@ export function setUpWorkspace(
             place.appendChild(fields);
             const placeSection = section("build");
             placeSection.appendChild(place);
+            // **組み立てる人には、置き場所と向きがいちばん上**(数値のすぐ下)。
+            // 作った順に並べていたので、1280×720 の「つくる」では、材質(98px)と
+            // 見かたの操作(64px)の下、向きの欄が柱 371px のうち 351px ——
+            // 下端すれすれにいた。文字の幅が広い Windows では 370px / 364px と
+            // 柱の外に出た(CI の実測)。組み立てでいちばん触る欄なので、端の
+            // px を詰めるのではなく、並びそのものを前に出す。この段は
+            // 「つくる」でしか出ない(`section` のdoc参照)ので、ほかの粒度の
+            // 並びは変わらない。
+            list.after(placeSection);
             focusPositionInputs = inputs;
 
             // **向きも数値で決められるようにする**(`setBodyRotation` の doc)。
