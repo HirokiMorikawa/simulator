@@ -1820,7 +1820,7 @@ function renderInspectorFor(world: WasmWorld, index: number): void {
   body.innerHTML = `
     <div class="inspector-component">
       <h3>${label}${staticBadge}</h3>
-      <div class="inspector-field"><span>かたち (Shape)</span><span>${annotateInspectorShape(world.read_component("body_shape_label_at", String(index)))}</span></div>
+      <div class="inspector-field"><span>かたち (Shape)</span><span id="inspector-shape-label">${annotateInspectorShape(world.read_component("body_shape_label_at", String(index)))}</span></div>
       <div class="inspector-field">
         <span>大きさ(倍率) x,y,z</span>
         <span class="inspector-scale-fields">
@@ -6252,7 +6252,7 @@ async function setUpSceneView(
       // 戻り、物はそのまま**になっていた(利用者役の実測: 欄が `-0.395` に
       // 化けたのに、置いた物は動いたまま)。画面には「戻った」ように見えるので、
       // そこから先の操作がぜんぶずれる。この2つだけは、欄の中にいても
-      // アプリの「動かしたのを戻す」へ送る。
+      // アプリの「↶ 戻す」へ送る。
       // 他の Ctrl 組み合わせ(Ctrl+A の全選択など)は欄の中では横取りしない
       // ——文字の全選択が効かなくなるほうが困る。
       const key = event.key.toLowerCase();
@@ -8921,6 +8921,9 @@ async function setUpSceneView(
       bodies.find((b) => typeof b.name === "string" && b.name === label) ??
       bodies[bodyIndex];
     if (!target) return false;
+    // 変える前の場面を取り消しに積む(`EditUndoEntry` の `kind: "scene"` の
+    // doc参照)。材質の変更は組み直しを伴うので、値を 1 つ覚えるだけでは戻せない。
+    pushSceneUndo();
     patch(target);
     relabelSceneBodies(doc as Record<string, unknown>);
     // 観測点は元の一覧へ戻す(`sceneOwnProbes` のdoc参照)。
@@ -8930,6 +8933,7 @@ async function setUpSceneView(
     // 選択も読み込み直後の床へ戻ってしまう(材質を変えただけで場面の名前が
     // 消え、右の「選んだもの」が ground に化けた——利用者役④の観察)。
     workspaceIsLoading = true;
+    rebuildingSameScene = true;
     try {
       sceneGalleryRef.current?.(JSON.stringify(doc));
     } catch (err) {
@@ -8937,6 +8941,7 @@ async function setUpSceneView(
       return false;
     } finally {
       workspaceIsLoading = false;
+      rebuildingSameScene = false;
     }
     // 組み直しでボディは作り直されるが、並びは同じなので選び直せる。
     if (bodyIndex < readNumber(world, "body_count")) selectBody(bodyIndex);
@@ -8947,6 +8952,31 @@ async function setUpSceneView(
       showToast("場面を組み直しました(回転する座標系は外れます)");
     }
     return true;
+  }
+
+  /**
+   * **「動き方」を変える、ただ一つの経路**。
+   *
+   * 走っている間は Command(`push_set_body_type`)で次の step に効かせ、
+   * 記録にも残す(リプレイで同じ瞬間に同じことが起きるように)。**止めている
+   * 間は、その場で効かせる**(`set_body_type_at`)。Command は次の step の
+   * 先頭でしか効かないので、止めたまま「動かない(Static)」を選んで材質を
+   * 変えると、場面の組み直し(`patchSceneBody`)で積まれた Command ごと
+   * 捨てられ、坂が Dynamic に戻って倒れた——札は Static のまま、書き出した
+   * ファイルでも type が無かった(利用者役⑫の観察)。
+   */
+  function setBodyTypeNowOrQueued(bodyIndex: number, kind: string): void {
+    if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
+    if (!(mode === "play" && playing)) {
+      // 変える前の場面を取り消しに積む(「動かない」→「動く」は質量を密度から
+      // 計算し直すので、値 1 つでは元に戻せない)。
+      if (world.read_component("body_type_at", String(bodyIndex)) !== kind) pushSceneUndo();
+      applyComponent(world, "set_body_type_at", { index: bodyIndex, kind });
+      markUnsaved();
+      return;
+    }
+    applyComponent(world, "push_set_body_type", { body_index: bodyIndex, kind });
+    pushCommandLog(world, { kind: "SetBodyType", bodyIndex, bodyType: kind });
   }
 
   inspectorEditRef.current = {
@@ -8975,12 +9005,18 @@ async function setUpSceneView(
       });
     },
     setBodyType(bodyIndex, kind) {
-      if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
-      applyComponent(world, "push_set_body_type", { body_index: bodyIndex, kind });
-      pushCommandLog(world, { kind: "SetBodyType", bodyIndex, bodyType: kind });
+      setBodyTypeNowOrQueued(bodyIndex, kind);
     },
     setCollisionFilter(bodyIndex, group, mask) {
       if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
+      // 止めている間はその場で効かせる(`set_collision_filter_at_impl` のdoc
+      // 参照——Command のまま積むと、材質の変更などで場面を組み直したときに
+      // 捨てられる)。
+      if (!(mode === "play" && playing)) {
+        applyComponent(world, "set_collision_filter_at", { index: bodyIndex, group, mask });
+        markUnsaved();
+        return;
+      }
       applyComponent(world, "push_set_collision_filter", { body_index: bodyIndex, group, mask });
       pushCommandLog(world, {
         kind: "SetCollisionFilter",
@@ -8991,6 +9027,8 @@ async function setUpSceneView(
     },
     setScaleXyz(bodyIndex, sx, sy, sz) {
       if (bodyIndex <= 0 || bodyIndex >= readNumber(world, "body_count")) return false;
+      // 軸ごとの大きさは形状そのものを作り直すので、場面ごと覚える。
+      const pushedUndo = pushSceneUndo();
       const { applied } = applyComponent(world, "set_body_scale_xyz_at", {
         index: bodyIndex,
         sx,
@@ -9001,6 +9039,20 @@ async function setUpSceneView(
         // Three.js 側のメッシュは基準ジオメトリ×スケールで表示しているので、
         // 同じ倍率を掛ける(`currentScale` は等方スケール用なので触らない)。
         currentScaleXyz.set(bodyIndex, [sx, sy, sz]);
+        // 「かたち」の行だけを書き直す。大きさ x=3 にした直後も「半辺 x=0.4000」
+        // のままだった(利用者役⑫の実測)。Inspector ごと組み直すと、次の軸を
+        // 打とうとしている欄から焦点が外れるので、その 1 行だけ。
+        const shapeLabel = document.getElementById("inspector-shape-label");
+        if (shapeLabel && bodyIndex === selectedBodyIndex) {
+          shapeLabel.textContent = annotateInspectorShape(
+            world.read_component("body_shape_label_at", String(bodyIndex)),
+          );
+        }
+      } else if (pushedUndo) {
+        // 効かなかった(この形状には軸ごとの大きさが無い)なら、いま積んだ
+        // 取り消しも捨てる——押しても何も変わらない「戻す」を 1 段増やさない。
+        editUndoStack.pop();
+        syncUndoButtons();
       }
       return applied ?? false;
     },
@@ -9296,17 +9348,35 @@ async function setUpSceneView(
   // たびに直前の値をUndoスタックへ1件積み、新規ドラッグはRedoスタックを破棄する
   // (標準的なUndo/Redoの意味論)。
   const EDIT_UNDO_STACK_CAPACITY = 20;
+  /**
+   * **場面ごと覚える取り消し(`kind: "scene"`)**。
+   *
+   * 位置・向き・一様な大きさは値を 1 つ覚えれば戻せるが、材質・動き方・
+   * 軸ごとの大きさ・物を置く/消す は、どれも**場面の組み直し**を伴うか、
+   * ボディの並びが変わる。これらは取り消しの対象にすら入っていなかった
+   * ——しかも材質を変えると組み直しが取り消しの記録を**黙って空に**し、
+   * 「↶ 戻す」は押せる見た目のまま何も戻さなかった(利用者役⑫の実測:
+   * Ctrl+Z を 7 回押して変化なし)。
+   *
+   * 変える直前の場面を丸ごと(書き出した文書として)覚え、戻すときはそれで
+   * 組み直す。値を覚える取り消しと**同じ積み荷に同じ順番で**積むので、
+   * 「位置 → 材質 → 位置」のように混ぜても、押した順に 1 つずつ戻る。
+   */
   type EditUndoEntry =
     | { bodyIndex: number; kind: "position"; position: THREE.Vector3 }
     | { bodyIndex: number; kind: "rotation"; rotation: THREE.Quaternion }
-    | { bodyIndex: number; kind: "scale"; scale: number };
+    | { bodyIndex: number; kind: "scale"; scale: number }
+    | { bodyIndex: number; kind: "scene"; json: string };
   const editUndoStack: EditUndoEntry[] = [];
   const editRedoStack: EditUndoEntry[] = [];
 
   function captureCurrentEntry(
     bodyIndex: number,
-    kind: "position" | "rotation" | "scale",
+    kind: EditUndoEntry["kind"],
   ): EditUndoEntry {
+    if (kind === "scene") {
+      return { bodyIndex, kind: "scene", json: currentSceneDocument() };
+    }
     if (kind === "position") {
       const p = world.body_position_at_f32(bodyIndex);
       return {
@@ -9344,6 +9414,76 @@ async function setUpSceneView(
     editRedoStack.length = 0;
     undoButton.disabled = mode !== "edit";
     redoButton.disabled = true;
+  }
+
+  /** 取り消し/やり直しボタンの押せる/押せないを、積み荷の中身に合わせる。 */
+  function syncUndoButtons(): void {
+    undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
+    redoButton.disabled = mode !== "edit" || editRedoStack.length === 0;
+  }
+
+  /**
+   * いまの場面を、組み直しに使える文書として書き出す(`kind: "scene"` の
+   * 取り消しが覚える中身)。観測点は元の一覧へ戻しておく——読み込みが毎回
+   * 編集用の観測点を足すので、そのまま覚えると戻すたびに増えていく
+   * (`sceneOwnProbes` のdoc参照)。
+   */
+  function currentSceneDocument(): string {
+    const doc = JSON.parse(world.read_component("export_scene_json", "")) as Record<
+      string,
+      unknown
+    >;
+    relabelSceneBodies(doc);
+    doc.probes = sceneOwnProbes;
+    return JSON.stringify(doc);
+  }
+
+  /**
+   * **変える直前の場面を、取り消しに積む**(`kind: "scene"` のdoc参照)。
+   * 止めている間(Edit)だけ——走っている間の変更は Command として記録され、
+   * 取り消しの対象ではない(値を覚える取り消しと同じ規則)。
+   */
+  function pushSceneUndo(): boolean {
+    if (mode !== "edit" || restoringSceneSnapshot) return false;
+    pushEditUndoEntry({
+      bodyIndex: selectedBodyIndex,
+      kind: "scene",
+      json: currentSceneDocument(),
+    });
+    return true;
+  }
+
+  /**
+   * 覚えておいた場面で組み直す。これは**同じ場面の編集**であって差し替えでは
+   * ない——名前・選択・取り消しの記録は持ち越す(`patchSceneBody` と同じ扱い)。
+   */
+  let restoringSceneSnapshot = false;
+  /**
+   * **同じ場面を組み直している最中**(材質の変更・取り消しで戻す)。このあいだの
+   * 読み込みでは取り消しの記録を捨てない(`sceneGalleryRef` の該当doc参照)。
+   * 別の場面への差し替え(`loadSceneJson`)とは区別する——あちらは旧ボディの
+   * 番号を指す記録を捨てる必要がある。
+   */
+  let rebuildingSameScene = false;
+  function restoreSceneSnapshot(json: string, select: number): void {
+    const undo = editUndoStack.slice();
+    const redo = editRedoStack.slice();
+    restoringSceneSnapshot = true;
+    rebuildingSameScene = true;
+    workspaceIsLoading = true;
+    try {
+      sceneGalleryRef.current?.(json);
+    } finally {
+      workspaceIsLoading = false;
+      rebuildingSameScene = false;
+      restoringSceneSnapshot = false;
+    }
+    editUndoStack.splice(0, editUndoStack.length, ...undo);
+    editRedoStack.splice(0, editRedoStack.length, ...redo);
+    const count = readNumber(world, "body_count");
+    if (select >= 0 && select < count) selectBody(select);
+    markUnsaved();
+    syncUndoButtons();
   }
 
   /**
@@ -9804,6 +9944,10 @@ async function setUpSceneView(
   setMode("edit");
 
   function applyEditEntry(entry: EditUndoEntry) {
+    if (entry.kind === "scene") {
+      restoreSceneSnapshot(entry.json, entry.bodyIndex);
+      return;
+    }
     if (entry.kind === "position") {
       applyComponent(world, "set_body_position_at", {
         index: entry.bodyIndex,
@@ -9836,8 +9980,7 @@ async function setUpSceneView(
     editRedoStack.push(captureCurrentEntry(entry.bodyIndex, entry.kind));
     if (editRedoStack.length > EDIT_UNDO_STACK_CAPACITY) editRedoStack.shift();
     applyEditEntry(entry);
-    undoButton.disabled = editUndoStack.length === 0;
-    redoButton.disabled = editRedoStack.length === 0;
+    syncUndoButtons();
     render();
   });
 
@@ -9848,8 +9991,7 @@ async function setUpSceneView(
     editUndoStack.push(captureCurrentEntry(entry.bodyIndex, entry.kind));
     if (editUndoStack.length > EDIT_UNDO_STACK_CAPACITY) editUndoStack.shift();
     applyEditEntry(entry);
-    redoButton.disabled = editRedoStack.length === 0;
-    undoButton.disabled = editUndoStack.length === 0;
+    syncUndoButtons();
     render();
   });
 
@@ -9906,11 +10048,21 @@ async function setUpSceneView(
    * の観察)。場面の広がりに合わせて、その少し上から落とす。何も無い場面では
    * これまでどおり 12 m ——自由落下の手応えは、そこが気持ちいいから。
    */
+  /**
+   * **何も無い場面では、床のすぐ上に出す**。
+   *
+   * 大きさを測れる物が 1 つも無いと、落下を見せる実験向けの既定の高さ
+   * (`SPAWN_HEIGHT` = 12 m)へ落ちていた。からっぽの場面で「＋ 箱」を押すと
+   * 1 個目は 12 m の空中に現れ、その高さを基準に次の物の高さが決まるので、
+   * 2 個目 1.2 m・3 個目 8.9 m とばらばらになった(利用者役⑫の実測)。組み
+   * 立てる人にとって、床から遠い空中は「狙った場所」から最も遠い。
+   */
+  const EMPTY_SCENE_SPAWN_HEIGHT = 1.0;
   function spawnHeight(): number {
     const box = contentBoundingBox();
-    if (!box) return SPAWN_HEIGHT;
+    if (!box) return EMPTY_SCENE_SPAWN_HEIGHT;
     const radius = box.getSize(new THREE.Vector3()).length() * 0.5;
-    if (!(radius > 0)) return SPAWN_HEIGHT;
+    if (!(radius > 0)) return EMPTY_SCENE_SPAWN_HEIGHT;
     return Math.min(SPAWN_HEIGHT, Math.max(radius * 1.5, radius + 0.5));
   }
 
@@ -9920,8 +10072,25 @@ async function setUpSceneView(
     // ばらけ方も場面の寸法に合わせる(高さだけ縮めても、横に 1.5 m 離れて
     // いては小さな場面から外れてしまう)。
     const scale = Math.max(spawnHeight() / SPAWN_HEIGHT, 0.05);
-    const radius = (1.5 + n * 0.3) * scale;
-    return { x: Math.cos(angle) * radius, z: Math.sin(angle) * radius };
+    // **足す物どうしが重ならない間隔は、場面ではなく物の大きさで決まる**。
+    // 置く物は場面に関係なく同じ大きさ(箱なら 0.8 m 角)なのに、間隔だけを
+    // 場面の高さで縮めていたので、低い所に置くと 0.2 m おきに重なって現れた
+    // ——重なったまま走らせると弾け飛ぶ(進行管理役の実測: 床だけの場面で
+    // 3 個足すと (0.13,1.00,0) / (-0.01,1.19,0.12) / (0.08,1.32,-0.17))。
+    // 黄金角で回しながら半径を √n で広げる並べ方(ひまわりの種の並び)は、
+    // 何個足しても隣どうしの間隔がほぼ一定になる。
+    const SPAWN_SPACING = 2.4 * SPAWN_BOX_HALF_EXTENT;
+    const radius = Math.max((1.5 + n * 0.3) * scale, SPAWN_SPACING * Math.sqrt(n + 1));
+    // **いまある物のそばに出す**。輪の中心を世界の原点に決め打ちしていたので、
+    // 原点から離れた所で組み立てていると、足した物は毎回その人の作業場所から
+    // 遠い同じ場所に現れた。動く物があればその真ん中、無ければいま見ている
+    // ところ(注視点)を中心にする。
+    const box = contentBoundingBox();
+    const center = box ? box.getCenter(new THREE.Vector3()) : orbit.target.clone();
+    return {
+      x: center.x + Math.cos(angle) * radius,
+      z: center.z + Math.sin(angle) * radius,
+    };
   }
 
   /**
@@ -10402,7 +10571,15 @@ async function setUpSceneView(
     currentMotorTarget.clear();
     currentScale.clear();
     currentScaleXyz.clear();
-    editUndoStack.length = 0;
+    // 取り消しの記録は、**同じ場面の組み直し**(材質の変更・取り消しで戻す)
+    // では持ち越す——ここで空にすると、材質を変えた途端に「↶ 戻す」が押せる
+    // 見た目のまま何も戻さなくなった(利用者役⑫)。別の場面へ差し替えるとき
+    // だけ捨てる(旧ボディの番号を指しているため)。
+    if (!rebuildingSameScene) {
+      editUndoStack.length = 0;
+      editRedoStack.length = 0;
+      syncUndoButtons();
+    }
     commandLog.length = 0;
     fluidPositionAttribute = null;
     fluidPoints.visible = false;
@@ -10907,6 +11084,9 @@ async function setUpSceneView(
       return { kind, shape, material };
     },
     spawn: (prefab) => {
+      // 物を足すとボディの並びが変わるので、場面ごと覚える(「置いた」も
+      // 取り消せるように——利用者役⑫の実測では取り消せなかった)。
+      pushSceneUndo();
       const { x, z } = nextSpawnPosition();
       const bodyIndex = applyComponent(world, "spawn_shape_json", {
         shape_json: JSON.stringify(prefab.shape),
@@ -10980,6 +11160,8 @@ async function setUpSceneView(
     y: number,
     z: number,
   ): number {
+    // 置く前の場面を取り消しに積む(置いたことも取り消せるように)。
+    pushSceneUndo();
     const material = spawnMaterialSelect.value;
     // 「ちゃんと見えているか」の判定に使う代表的な大きさ(`isWellVisible`)。
     const spawnRadius = {
@@ -11129,6 +11311,7 @@ async function setUpSceneView(
       // フロント側は対応するメッシュを作るだけ——**形状の種類は Rust から
       // 読み直す**(元メッシュを `clone()` すると、Scale Gizmo で寸法を
       // 変えたボディで見た目と物理がずれる)。
+      pushSceneUndo();
       const newIndex = applyComponent(world, "duplicate_body_at", {
         index,
         offset: DUPLICATE_OFFSET_M,
@@ -11145,6 +11328,7 @@ async function setUpSceneView(
       addSpawnedMesh(newIndex, meshFromShapeJson(shapeJson).mesh);
     },
     remove(index) {
+      pushSceneUndo();
       applyComponent(world, "remove_body_at", { index });
       // メッシュ・ピック対象・オーバーレイから外す(残すと y=-1e9 の
       // 退避先へ飛んだメッシュが毎フレーム同期され続ける)。
@@ -11709,6 +11893,7 @@ async function setUpSceneView(
     .addEventListener("click", () => {
       const { x, z } = nextSpawnPosition();
       const material = spawnMaterialSelect.value;
+      pushSceneUndo();
       const bodyIndex = applyComponent(world, "spawn_pendulum", {
         pivot_x: x,
         pivot_y: PENDULUM_PIVOT_HEIGHT,
@@ -11736,6 +11921,7 @@ async function setUpSceneView(
   document.getElementById("btn-spawn-motor")!.addEventListener("click", () => {
     const { x, z } = nextSpawnPosition();
     const material = spawnMaterialSelect.value;
+    pushSceneUndo();
     const bodyIndex = applyComponent(world, "spawn_motor_arm", {
       pivot_x: x,
       pivot_y: PENDULUM_PIVOT_HEIGHT,
@@ -13170,10 +13356,9 @@ async function setUpSceneView(
       }),
     setBodyMotion: (index, kind) => {
       if (index < 0 || index >= readNumber(world, "body_count")) return false;
-      // Inspector の「動き方」と**同じ経路**(`push_set_body_type`)を通す
-      // ——別系統を作らない(`WorkspaceApi.setBodyMotion` の doc 参照)。
-      applyComponent(world, "push_set_body_type", { body_index: index, kind });
-      pushCommandLog(world, { kind: "SetBodyType", bodyIndex: index, bodyType: kind });
+      // Inspector の「動き方」と**同じ経路**を通す——別系統を作らない
+      // (`WorkspaceApi.setBodyMotion` の doc 参照)。
+      setBodyTypeNowOrQueued(index, kind);
       markUnsaved();
       return true;
     },
@@ -13276,18 +13461,9 @@ async function setUpSceneView(
       if (world.read_component("body_is_removed_at", String(index)) === "true") {
         return null;
       }
-      // **画面に描かれている姿をそのまま返す**。
-      //
-      // ここは世界の**いまの**値を読んでいた。ところがこの関数を呼ぶ
-      // workspace 側の毎フレーム処理は、`render()`(=歩を進めてメッシュへ
-      // 同期する処理)より**先に**走る。つまり「選んだもの」札の『置き場所』は
-      // 歩を進める前、3D と Inspector の『位置』は進めた後の値になり、同じ
-      // 瞬間の同じ量が画面の 2 か所で食い違っていた——実測(利用者役⑪と
-      // 進行管理役の再現、秒速 9.6m で飛ぶ球): 札 44.571 m / 世界 45.055 m
-      // (差 0.48m = 球 2.4 個ぶん)。どちらを書き写せばいいのか決められない。
-      //
-      // メッシュの位置は「いま描かれている姿」そのもので、3D も Inspector も
-      // そこを見ている。同じところを見れば、食い違いようがない。
+      // 世界の**いまの**値を返す(「最後に描かれた姿」を返す案は、打った位置が
+      // 1 フレーム古い値へ戻る不具合を生んだので戻した——`inspectorPosition`
+      // の手前のdoc参照)。
       const position = world.body_position_at_f32(index);
       const velocity = world.body_velocity_at_f32(index);
       const r = world.body_rotation_at_f32(index);

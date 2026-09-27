@@ -177,11 +177,15 @@
           </button>
         </div>
         <div class="toolbar-group">
-          <button id="btn-undo" title="Editモードで動かす/回す/拡縮した直前の1件だけを戻す(それ以外の変更は戻せません)">
-            ↶ 動かしたのを戻す
+          <!-- 止めている間の変更(置く・消す・動かす・回す・大きさ・材質・
+               動き方)を、押した順に 1 つずつ戻す。以前は位置・向き・一様な
+               大きさしか戻せなかったので「動かしたのを戻す」と名乗っていた
+               が、材質や「動かない」も戻せるようになったので名前も広げた。 -->
+          <button id="btn-undo" title="止めている間にした変更(置く・消す・動かす・回す・大きさ・材質・動き方)を、新しいものから1つずつ戻す(Ctrl+Z)">
+            ↶ 戻す
           </button>
-          <button id="btn-redo" title="「動かしたのを戻す」を取り消してやり直す">
-            ↷ 戻したのをやり直す
+          <button id="btn-redo" title="「戻す」で戻したものを、もう一度やり直す(Ctrl+Y / Ctrl+Shift+Z)">
+            ↷ やり直す
           </button>
         </div>
         <div class="toolbar-group">

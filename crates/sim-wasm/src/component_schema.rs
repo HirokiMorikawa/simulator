@@ -619,6 +619,13 @@ pub fn apply_schema() -> Vec<ComponentKindSchema> {
             vec![u("body_index"), f("mass", "kg").positive()],
         ),
         kind("push_set_body_type", vec![u("body_index"), s("kind")]),
+        // 動き方・衝突フィルタの直接設定(止めている間)。Command のまま
+        // 積むと、場面の組み直しで捨てられる(`set_body_type_at_impl`のdoc参照)。
+        kind("set_body_type_at", vec![u("index"), s("kind")]),
+        kind(
+            "set_collision_filter_at",
+            vec![u("index"), u("group"), u("mask")],
+        ),
         // `group`/`mask`は衝突フィルタのビットマスク(u32)。
         kind(
             "push_set_collision_filter",

@@ -3301,6 +3301,14 @@ impl WasmWorld {
                 self.push_set_body_type_impl(u("body_index"), s("kind"))?;
                 Ok("{}".to_string())
             }
+            "set_body_type_at" => {
+                self.set_body_type_at_impl(u("index"), s("kind"))?;
+                Ok("{}".to_string())
+            }
+            "set_collision_filter_at" => {
+                self.set_collision_filter_at_impl(u("index"), u("group") as u32, u("mask") as u32)?;
+                Ok("{}".to_string())
+            }
             "push_set_collision_filter" => {
                 self.push_set_collision_filter_impl(
                     u("body_index"),
@@ -5386,6 +5394,56 @@ impl WasmWorld {
         Ok(())
     }
 
+    /// **止めている間の「動き方」は、その場で効かせる**(`set_body_mass_at_impl`
+    /// と同じ位置付け——Play に入る前の初期条件づくり)。
+    ///
+    /// `push_set_body_type` は Command なので**次の step の先頭**でしか効かない。
+    /// 止めている間に「動かない(Static)」を選ぶと、Command は積まれたまま
+    /// 世界は Dynamic のまま——そこで材質を変えると、場面を書き出して組み
+    /// 直す(`patchSceneBody`)ので、**積まれた Command ごと捨てられて**
+    /// Dynamic に戻る。画面の札は Static のまま、走らせると坂が倒れて床に
+    /// 落ちた(利用者役⑫の観察、書き出したファイルでも type 無し)。
+    ///
+    /// 適用する処理は `Command::SetBodyType` の腕と**同一**
+    /// (`RigidBodySet::set_body_type`)。質量の確保も `push_set_body_type_impl`
+    /// と同じ規則。
+    fn set_body_type_at_impl(&mut self, index: usize, kind: String) -> Result<(), WasmError> {
+        let body = self.try_body_id_at(index)?;
+        let body_type = match kind.as_str() {
+            "Dynamic" => BodyType::Dynamic,
+            "Static" => BodyType::Static,
+            "Kinematic" => BodyType::Kinematic,
+            other => return Err(WasmError::UnknownBodyType(other.to_string())),
+        };
+        let idx = body.index as usize;
+        let mut mass = self.inner.mechanics().bodies.mass(idx);
+        if mass <= 0.0 {
+            let bodies = &self.inner.mechanics().bodies;
+            let material = self.inner.materials().get(bodies.material[idx]);
+            mass = bodies.shape_of(idx).volume().unwrap_or(0.0) * material.density;
+        }
+        let bodies = &mut self.inner.mechanics_mut().bodies;
+        bodies.set_body_type(idx, body_type, mass);
+        bodies.asleep[idx] = false;
+        Ok(())
+    }
+
+    /// 衝突フィルタも、止めている間はその場で効かせる(`set_body_type_at_impl`
+    /// と同じ理由——Command のまま積むと、組み直しで捨てられる)。
+    fn set_collision_filter_at_impl(
+        &mut self,
+        index: usize,
+        group: u32,
+        mask: u32,
+    ) -> Result<(), WasmError> {
+        let body = self.try_body_id_at(index)?;
+        let idx = body.index as usize;
+        let bodies = &mut self.inner.mechanics_mut().bodies;
+        bodies.set_collision_filter(idx, group, mask);
+        bodies.asleep[idx] = false;
+        Ok(())
+    }
+
     fn push_set_collision_filter_impl(
         &mut self,
         body_index: usize,
@@ -6191,6 +6249,48 @@ mod tests {
                 )
                 .is_err(),
             "set_body_mass_at must reject a non-positive mass"
+        );
+
+        // 動き方と衝突フィルタの直接設定も**stepを挟まずに**効く
+        // (`set_body_type_at_impl`のdoc参照——Command のまま積むと、場面の
+        // 組み直しで捨てられて Dynamic に戻っていた)。
+        world
+            .apply_component_impl(
+                "set_body_type_at",
+                &format!(r#"{{"index":{body},"kind":"Static"}}"#),
+            )
+            .expect("set_body_type_at via apply_component must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_type_at", &body.to_string())
+                .unwrap(),
+            "Static",
+            "set_body_type_at must apply immediately (no step)"
+        );
+        world
+            .apply_component_impl(
+                "set_body_type_at",
+                &format!(r#"{{"index":{body},"kind":"Dynamic"}}"#),
+            )
+            .expect("set_body_type_at back to Dynamic must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_type_at", &body.to_string())
+                .unwrap(),
+            "Dynamic"
+        );
+        world
+            .apply_component_impl(
+                "set_collision_filter_at",
+                &format!(r#"{{"index":{body},"group":8,"mask":16}}"#),
+            )
+            .expect("set_collision_filter_at via apply_component must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_collision_group_at", &body.to_string())
+                .unwrap(),
+            "8",
+            "set_collision_filter_at must apply immediately (no step)"
         );
 
         let result = world
@@ -7714,7 +7814,7 @@ mod tests {
         // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
         // 足したらこの数と`component_schema`の表の両方を更新すること**——
         // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
-        const APPLY_KIND_COUNT: usize = 78;
+        const APPLY_KIND_COUNT: usize = 80;
         assert_eq!(
             entries.len(),
             APPLY_KIND_COUNT,

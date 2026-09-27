@@ -844,12 +844,18 @@ test("置いた物は、置いた瞬間に画面で見える大きさで映る",
   await page.waitForTimeout(500);
 
   // 置いた物のところまで画角が寄る(以前は原点を見たままで、数ピクセルの
-  // 点にしか見えなかった)。
-  const near = await page.evaluate(() => {
-    const hud = document.getElementById("hud");
-    return hud?.textContent ?? "";
+  // 点にしか見えなかった)。HUD が**置いた物の高さ**を出していることで見る
+  // ——高さの決め打ち(以前は 12 m)ではなく、実際に置かれた高さと比べる
+  // (からっぽの場面では床のすぐ上に置くようにした、利用者役⑫)。
+  const { hud, placedY } = await page.evaluate(() => {
+    const w = (window as unknown as Record<string, any>).__world;
+    const i = Number(w.read_component("body_count", "")) - 1;
+    return {
+      hud: document.getElementById("hud")?.textContent ?? "",
+      placedY: w.body_position_at_f32(i)[1] as number,
+    };
   });
-  expect(near).toContain("12.0000 m");
+  expect(hud).toContain(`${placedY.toFixed(4)} m`);
   // 走らせなくても、そこに在ることが分かる。
   await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
   expect(errors).toEqual([]);
@@ -2968,17 +2974,23 @@ test("動き方の選択肢とバッジ、「＋追加」メニューが人の�
 });
 
 // 課題C: 「Undo」は位置/向き/大きさしか戻せないのに「Undo」とだけ書かれ、
-// 何でも戻せると期待させていた。また、消す手段がDeleteキーだけで画面に
-// 書かれていなかった(利用者役は自動テストで偶然見つけた)。
-test("「Undo」は、できること(動かしたのを戻す)に合わせた名前になっている", async ({ page }) => {
+// 何でも戻せると期待させていた。当時は名前を「動かしたのを戻す」へ狭めた。
+// その後、材質・動き方・置く/消す まで戻せるようにしたので(利用者役⑫)、
+// 名前もできることに合わせて広げた——**名前とできることが一致している**
+// ことを見る。戻せる範囲は、ボタンの説明(title)が言う。
+test("「戻す」は、できることに合わせた名前と説明になっている", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
   await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
 
-  await expect(page.locator("#btn-undo")).toContainText("動かしたのを戻す");
-  await expect(page.locator("#btn-redo")).toContainText("戻したのをやり直す");
+  await expect(page.locator("#btn-undo")).toContainText("戻す");
+  await expect(page.locator("#btn-redo")).toContainText("やり直す");
+  const title = (await page.locator("#btn-undo").getAttribute("title")) ?? "";
+  for (const word of ["置く", "消す", "材質", "動き方"]) {
+    expect(title, `戻せるものとして「${word}」を挙げている`).toContain(word);
+  }
   expect(errors).toEqual([]);
 });
 
@@ -4246,7 +4258,7 @@ test("物を選んだままでも、「この場面を保存する」がスク�
 // おり、**数値で打ち替えた置き場所・向きは戻せなかった**(実測: 箱を置いて
 // x を 1.500 → 10.000 に打ち替えたあと、`#btn-undo` は disabled のまま)。
 // 座標を打ち込んで組み立てる人には、戻す手段が一つも無かった。
-test("数値で打ち替えた置き場所も、「動かしたのを戻す」で戻せる", async ({ page }) => {
+test("数値で打ち替えた置き場所も、「戻す」で戻せる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 3);
@@ -5788,10 +5800,14 @@ test("移動の矢印は、狙いが数ピクセル外れても掴める", async
     await page.mouse.up();
     await page.waitForTimeout(150);
     const after = await axisPointOnScreen(page, box, "x", 0);
+    // 見ているのは**掴めたかどうか**——掴み損ねるとドラッグは視点回しに化け、
+    // 物は 1 mm も動かない。何 m 動くかはカメラの距離で変わる(置く高さを床の
+    // すぐ上にしてからは寄りが深くなり、同じ 50px が 0.2 m ぶん——目盛り
+    // 0.1 m に吸い付いてちょうど 0.2)ので、はっきり動いたことだけを見る。
     expect(
       Math.abs(after.pos[0] - before.pos[0]),
       `${off}px 外して掴んだとき x ${before.pos[0].toFixed(2)} → ${after.pos[0].toFixed(2)}`,
-    ).toBeGreaterThan(0.2);
+    ).toBeGreaterThan(0.05);
   }
 });
 
@@ -6406,6 +6422,281 @@ test("壁のある実験では、壁が「立っている板」として画面�
   expect(wall.width, `壁の板の大きさ ${wall.width} m`).toBeLessThan(5);
   expect(wall.width, "小さすぎて板に見えなくならない").toBeGreaterThan(0.2);
   expect(wall.cornersOnScreen, "板の角が画面に入っている(=縁が見える)").toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑫の観察、進行管理役の再現)**: 止めたまま「動かない
+// (Static)」を選んでから材質を変えると、札は Static のまま、中身は Dynamic に
+// 戻って、走らせると坂が倒れて床に落ちた(書き出したファイルでも type 無し)。
+// 「動き方」は次の step で効く Command として積まれていただけで、材質の変更が
+// 場面を組み直したときに、積まれた Command ごと捨てられていた。
+test("止めたまま「動かない」にしてから材質を変えても、動かないまま", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+  const stage = await page.locator("#scene-view-canvas-host").boundingBox();
+  await page.mouse.click(stage!.x + stage!.width / 2, stage!.y + stage!.height / 2, {
+    button: "right",
+  });
+  await page.getByText("ここに箱を配置").click();
+  await expect(page.locator("#focus-pos-y")).toBeVisible();
+  await page.fill("#focus-pos-y", "2");
+  await page.press("#focus-pos-y", "Enter");
+
+  const index = await page.evaluate(
+    () =>
+      Number((window as unknown as Record<string, any>).__world.read_component("body_count", "")) -
+      1,
+  );
+  const typeOf = () =>
+    page.evaluate(
+      (i) =>
+        (window as unknown as Record<string, any>).__world.read_component(
+          "body_type_at",
+          String(i),
+        ) as string,
+      index,
+    );
+
+  await page.selectOption("#focus-motion", { label: "動かない(Static)" });
+  await expect.poll(typeOf).toBe("Static");
+  await page.selectOption("#focus-material", { label: "木材(松)" });
+  await expect.poll(typeOf, { message: "材質を変えたあとも Static のまま" }).toBe("Static");
+  await expect(page.locator("#focus-motion")).toHaveValue("Static");
+
+  await page.click("#btn-run");
+  await page.waitForTimeout(1500);
+  const y = await page.evaluate(
+    (i) => (window as unknown as Record<string, any>).__world.body_position_at_f32(i)[1] as number,
+    index,
+  );
+  expect(y, `走らせたあとの高さ ${y.toFixed(3)} m(置いた高さ 2 m から落ちない)`).toBeCloseTo(2, 2);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑫の実測)**: 材質を変えると Ctrl+Z が何も戻さなくなった
+// (7 回押して変化なし、「↶ 戻す」は押せる見た目のまま)。材質の変更は場面を
+// 組み直すので、そのたびに取り消しの記録が黙って空になっていた。大きさ・
+// 「動かない」・物を置く/消す も、そもそも取り消しの対象に入っていなかった。
+test("材質・動き方・置いたことまで、押した順に 1 つずつ戻せる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+  const stage = await page.locator("#scene-view-canvas-host").boundingBox();
+  await page.mouse.click(stage!.x + stage!.width / 2, stage!.y + stage!.height / 2, {
+    button: "right",
+  });
+  await page.getByText("ここに箱を配置").click();
+  await expect(page.locator("#focus-pos-x")).toBeVisible();
+
+  const state = () =>
+    page.evaluate(() => {
+      const w = (window as unknown as Record<string, any>).__world;
+      const count = Number(w.read_component("body_count", ""));
+      const i = count - 1;
+      return {
+        count,
+        x: Number(w.body_position_at_f32(i)[0].toFixed(3)),
+        material: w.read_component("body_material_label_at", String(i)) as string,
+        type: w.read_component("body_type_at", String(i)) as string,
+      };
+    });
+  const placed = await state();
+  expect(placed.count).toBe(2);
+
+  await page.fill("#focus-pos-x", "3");
+  await page.press("#focus-pos-x", "Enter");
+  await expect.poll(async () => (await state()).x).toBe(3);
+  await page.selectOption("#focus-material", { label: "ゴム(天然)" });
+  await expect.poll(async () => (await state()).material).toBe("ゴム(天然)");
+  await page.selectOption("#focus-motion", { label: "動かない(Static)" });
+  await expect.poll(async () => (await state()).type).toBe("Static");
+
+  // 欄の外へ焦点を移してから戻す(欄の中の Ctrl+Z も横取りするが、ここでは
+  // 素直な押し方で確かめる)。
+  await page.locator("#hierarchy-tree").click();
+  await page.keyboard.press("Control+z");
+  await expect.poll(async () => (await state()).type, { message: "1 回目: 動き方が戻る" }).toBe(
+    "Dynamic",
+  );
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => (await state()).material, { message: "2 回目: 材質が戻る" })
+    .toBe(placed.material);
+  expect((await state()).x, "材質を戻しても、そのあとに打った位置はまだ残っている").toBe(3);
+  await page.keyboard.press("Control+z");
+  await expect.poll(async () => (await state()).x, { message: "3 回目: 位置が戻る" }).toBe(
+    placed.x,
+  );
+  await page.keyboard.press("Control+z");
+  await expect
+    .poll(async () => (await state()).count, { message: "4 回目: 置いたこと自体が戻る" })
+    .toBe(1);
+  await expect(page.locator("#btn-undo"), "もう戻すものが無ければ押せない").toBeDisabled();
+
+  await page.keyboard.press("Control+Shift+z");
+  await expect.poll(async () => (await state()).count, { message: "やり直すと、また置かれる" }).toBe(
+    2,
+  );
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑫の実測)**: 自分の場面では「↺ はじめから」がずっと押せず、
+// 時間を戻す帯も 1 秒刻みで 0 秒へは戻れない。いちど試しに走らせると、自分で
+// 組んだ配置へは二度と戻れなかった。保存しても走ったあとの途中の状態が残り、
+// 開き直すと途中(t=1.750 秒)から始まった。
+test("自分の場面も、走らせたあとで組み立てた最初の状態へ戻せる(保存も最初の状態)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+  await expect(page.locator("#btn-restart"), "まだ走らせていなければ、戻る先が無い").toBeDisabled();
+
+  const stage = await page.locator("#scene-view-canvas-host").boundingBox();
+  await page.mouse.click(stage!.x + stage!.width / 2, stage!.y + stage!.height / 2, {
+    button: "right",
+  });
+  await page.getByText("ここに球を配置").click();
+  await expect(page.locator("#focus-pos-y")).toBeVisible();
+  await page.fill("#focus-pos-y", "5");
+  await page.press("#focus-pos-y", "Enter");
+
+  const ballY = () =>
+    page.evaluate(() => {
+      const w = (window as unknown as Record<string, any>).__world;
+      const i = Number(w.read_component("body_count", "")) - 1;
+      return Number(w.body_position_at_f32(i)[1].toFixed(3));
+    });
+  await expect.poll(ballY).toBeCloseTo(5, 2);
+  const assembled = await ballY();
+
+  await page.click("#btn-run"); // うごかす
+  await expect.poll(ballY, { timeout: 10_000 }).toBeLessThan(assembled - 1);
+  await page.click("#btn-run"); // とめる
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+
+  // 保存は、走ったあとでも組み立てた最初の状態を取っておく。
+  await page.fill("#input-scene-name", "はじめから試験");
+  await page.click("#btn-save-scene");
+  const savedY = await page.evaluate(() => {
+    const raw = localStorage.getItem("simulator.scenes.saved") ?? "[]";
+    const entry = (JSON.parse(raw) as { name: string; json: string }[]).find(
+      (e) => e.name === "はじめから試験",
+    );
+    if (!entry) return Number.NaN;
+    const doc = JSON.parse(entry.json) as { bodies: { position?: number[] }[] };
+    return doc.bodies[doc.bodies.length - 1].position?.[1] ?? Number.NaN;
+  });
+  expect(savedY, "保存したのは組み立てた最初の高さ(走ったあとの途中ではない)").toBeCloseTo(
+    assembled,
+    2,
+  );
+
+  await expect(page.locator("#btn-restart")).toBeEnabled();
+  await page.click("#btn-restart");
+  await expect.poll(ballY, { message: "組み立てた高さへ戻る" }).toBeCloseTo(assembled, 2);
+  expect(await elapsedSeconds(page), "時計も 0 へ戻る").toBe(0);
+  await expect(page.locator("#btn-run"), "戻したあとは止まっている(組み立てを続けられる)").toHaveAttribute(
+    "data-playing",
+    "false",
+  );
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑫の実測)**: 入口は ⌘K ひとつと言いながら、からっぽの場面を
+// 作る道は左上の小さな「🆕 新規シーン」にしか無く、「新しい」「新規」「new」
+// 「シーン」「からっぽ」のどれで探しても「見つかりません」だった。
+// ただし、実験を探している人の Enter を横取りしないこと(「空気」を探して
+// Enter を押したら場面が空になった、とならないように)。
+test("⌘K から「新しい場面を作る」へ行ける(実験を探す Enter は横取りしない)", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+
+  for (const word of ["新しい", "新規", "new", "からっぽ"]) {
+    await page.keyboard.press("Control+k");
+    await page.fill("#palette-input", word);
+    await expect(
+      page.locator('.palette-row[data-action="new-scene"]'),
+      `「${word}」で出てくる`,
+    ).toHaveCount(1);
+    await page.keyboard.press("Escape");
+  }
+
+  // 実験の名前で探したときは、実験が先頭(Enter で実験が開く)。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "空気");
+  await expect(page.locator(".palette-row").first()).not.toHaveAttribute(
+    "data-action",
+    "new-scene",
+  );
+  await page.keyboard.press("Escape");
+
+  // 選べば、からっぽの場面(床だけ)になる。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "新しい");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#palette")).toBeHidden();
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑫の実測、進行管理役の再現)**: からっぽの場面で「＋ 箱」を
+// 押すと、1 個目は 12 m の空中に現れ(落下を見せる実験向けの既定の高さ)、
+// 高さも置き場所もばらばらだった。低い所に出すようにしたら、今度は間隔が
+// 場面の高さで縮められて 0.2 m おきに重なって出た。舞台も、まだ記録が無い
+// グラフの段が自分の高さを元に太り続けて、159px まで押し潰されていた。
+test("からっぽの場面では、舞台が作業台として広く、足した物は床の近くに重ならず並ぶ", async ({
+  page,
+}) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  const stageHeight = async () =>
+    (await page.locator("#scene-view-canvas-host").boundingBox())!.height;
+  const catalogStage = await stageHeight();
+
+  await page.click("#btn-new-scene");
+  await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(1);
+  await page.waitForTimeout(300);
+  expect(
+    await stageHeight(),
+    `からっぽの場面の舞台(用意された実験では ${Math.round(catalogStage)}px)`,
+  ).toBeGreaterThanOrEqual(catalogStage - 2);
+
+  for (let i = 0; i < 3; i += 1) {
+    await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+    await page.waitForTimeout(300);
+  }
+  const placed = await page.evaluate(() => {
+    const w = (window as unknown as Record<string, any>).__world;
+    const count = Number(w.read_component("body_count", ""));
+    const out: number[][] = [];
+    for (let i = 1; i < count; i += 1) out.push(Array.from(w.body_position_at_f32(i) as Float32Array));
+    return out;
+  });
+  expect(placed).toHaveLength(3);
+  expect(placed[0][1], `1 個目の高さ ${placed[0][1].toFixed(2)} m`).toBeLessThan(3);
+  for (let a = 0; a < placed.length; a += 1) {
+    for (let b = a + 1; b < placed.length; b += 1) {
+      const d = Math.hypot(
+        placed[a][0] - placed[b][0],
+        placed[a][1] - placed[b][1],
+        placed[a][2] - placed[b][2],
+      );
+      // 箱は 0.8 m 角。中心どうしがそれより近いと重なっている。
+      expect(d, `${a + 1} 個目と ${b + 1} 個目の間隔 ${d.toFixed(2)} m`).toBeGreaterThan(0.8);
+    }
+  }
   expect(errors).toEqual([]);
 });
 

@@ -208,9 +208,10 @@ export type WorkspaceApi = {
    * 選んだ物を場面から消す。Hierarchy右クリックの「削除」・Deleteキーと
    * 同じ経路(`false`が返るのは、床(index 0)を指定したか、既に無い場合)。
    *
-   * 押し間違いで戻せなくなる操作(この後の「動かしたのを戻す(Undo)」は
-   * 位置/向き/大きさしか戻せず、削除は対象外)なので、**呼ぶ前に確認を
-   * 挟むのは呼び出し側の責任**——この関数自体は無条件に消す。
+   * 止めている間なら「↶ 戻す」で戻せる(消す前の場面を丸ごと覚える、
+   * main 側 `EditUndoEntry` の `kind: "scene"`)。走っている間は戻せないので、
+   * 押し間違い防ぎの確認は呼び出し側(この物の札)で挟む——この関数自体は
+   * 無条件に消す。
    */
   removeBody: (index: number) => boolean;
   /** 選べる材質の名前(スポーンパレットと同じ並び)。 */
@@ -808,6 +809,17 @@ export function setUpWorkspace(
    */
   let ownSceneName = "";
   /**
+   * **組み立てた最初の状態**(自分の場面で、止めた状態から ▶ を押した瞬間の
+   * 場面の文書)。まだ一度も走らせていなければ null。
+   *
+   * 自分の場面では「↺ はじめから」がずっと押せず、時間を戻す帯も 1 秒刻みで
+   * 0 秒へは戻れない。いちど試しに走らせると、自分で組んだ配置へは二度と
+   * 戻れなかった——保存しても走ったあとの途中の状態が残り、開き直すと
+   * 途中(t=1.750 秒、球は坂を転がり落ちた後)から始まった(利用者役⑫の実測)。
+   * 組み立てたところを覚えておき、「はじめから」と保存はそこへ戻る。
+   */
+  let ownSceneStart: string | null = null;
+  /**
    * 保存の名前欄に**打ちかけている文字**。カードは選択が変わるたびに組み直す
    * ので、これを持っていないと打っている途中で欄が空に戻る(CI で実際に、
    * 名前を打った直後の保存が自動命名になった)。
@@ -997,7 +1009,12 @@ export function setUpWorkspace(
     // 「場」のパネルは**舞台の中**に描かれる(二重スリットの絵は 984×431px)
     // ので、そちらは舞台を渡したまま。絵の行き先が下のグラフしか無いときだけ、
     // 舞台を案内が入るだけの高さに畳んで、残りをグラフへ渡す。
-    const stageShowsNothing = lastStageEmpty === true && current?.view !== "field";
+    // **自分で組み立てている場面は除く**。そこでは舞台が作業台そのもので、
+    // 何も置いていない=これから置く場所。畳むと、からっぽの場面の舞台が
+    // 案内の高さまで潰れて、置いた物を見る場所が無くなる(利用者役⑫の実測:
+    // 新規シーンの舞台 828×160px)。
+    const stageShowsNothing =
+      current !== null && lastStageEmpty === true && current.view !== "field";
     // グラフの段の最低限は、**見出しと操作の行を実際に測ってから決める**。
     //
     // ここは 150px の決め打ちだった。手元(Linux)では見出し 15px + 操作の行
@@ -1009,8 +1026,15 @@ export function setUpWorkspace(
     // (この 90px は、手元で読めている 88px を丸めた値。)
     const graphChrome = (() => {
       const panel = document.getElementById("probe-graphs");
-      const canvas = document.getElementById("probe-canvas");
+      const canvas = document.getElementById("probe-canvas") as HTMLCanvasElement | null;
       if (!panel || !canvas) return 62;
+      // **まだ線が無いとき(キャンバスが隠れているとき)は測らない**。その間の
+      // 「段の高さ − キャンバスの高さ」は**段そのものの高さ**になり、それに
+      // 描く場所 90px を足した値が次の段の高さになる——自分の高さを元に自分を
+      // 太らせ続け、新規シーン(記録がまだ無い)ではグラフの段が 271px まで
+      // 育って舞台を最低限の 159px へ押し潰していた(利用者役⑫の実測: 舞台
+      // 828×160px、進行管理役の再現: 段 271px)。
+      if (canvas.hidden || canvas.clientHeight === 0) return 62;
       const chrome = panel.getBoundingClientRect().height - canvas.clientHeight;
       return Number.isFinite(chrome) && chrome > 0 ? chrome : 62;
     })();
@@ -1361,6 +1385,14 @@ export function setUpWorkspace(
     const query = paletteInput.value.trim().toLowerCase();
     const result: PaletteEntry[] = [];
 
+    // 「作る」ための入口。「じぶんで作る」「じぶんの場面」で絞ったときは先頭に
+    // (そこを開いた人は作りに来ている)。言葉で探したときは**最後に**置く
+    // ——Enter は先頭の行を開くので、実験を探している人の Enter を横取りして
+    // 場面を空にしてしまわないように(ほかに当たりが無ければ、先頭になる)。
+    const newSceneFirst =
+      !query && (filterCategory === "sandbox" || filterCategory === OWN_SCENES_FILTER);
+    if (newSceneFirst) result.push({ kind: "new-scene" });
+
     // 自分の場面が先。数は少なく、探しているのはたいていこちらだから。
     if (!filterCategory || filterCategory === OWN_SCENES_FILTER) {
       for (const scene of readSavedScenes()) {
@@ -1383,13 +1415,47 @@ export function setUpWorkspace(
         if (haystack.includes(query)) result.push({ kind: "experiment", experiment });
       }
     }
+    if (!newSceneFirst && newSceneMatches(query)) result.push({ kind: "new-scene" });
     return result;
   }
 
-  /** パレットの1行が指すもの。用意された実験か、自分で保存した場面か。 */
+  /** パレットの1行が指すもの。用意された実験か、自分で保存した場面か、
+   *  「からっぽの場面を作る」という操作そのものか。 */
   type PaletteEntry =
     | { kind: "experiment"; experiment: Experiment }
-    | { kind: "saved"; scene: SavedScene };
+    | { kind: "saved"; scene: SavedScene }
+    | { kind: "new-scene" };
+
+  /**
+   * **「新しい場面を作る」も ⌘K から行けるようにする**。
+   *
+   * 入口はひとつ(⌘K)と言いながら、からっぽの場面を作る道は左上の小さな
+   * 「🆕 新規シーン」ボタンにしか無かった。「新しい」「新規」「new」「シーン」
+   * 「からっぽ」のどれで探しても「見つかりません」と出た(利用者役⑫の実測)。
+   * 作りたい人が最初に打つ言葉で出てくるよう、操作そのものを 1 行として載せる。
+   */
+  const NEW_SCENE_WORDS = [
+    "新しい",
+    "あたらしい",
+    "新規",
+    "しんき",
+    "new",
+    "からっぽ",
+    "場面",
+    "シーン",
+    "つくる",
+    "作る",
+    "組み立て",
+  ];
+  /**
+   * 打った言葉が「作る」入口を指しているか。**打った言葉が入口の言葉の
+   * 書き出し**のときだけ——逆向き(打った言葉の中に入口の言葉がある)まで
+   * 拾うと、「空気抵抗」を探す人に「空」が当たる類いの取り違えが起きる。
+   */
+  function newSceneMatches(query: string): boolean {
+    if (!query) return false;
+    return NEW_SCENE_WORDS.some((word) => word.startsWith(query));
+  }
 
   /** 絞り込みの「じぶんの場面」。分野 id と衝突しない値にしてある。 */
   const OWN_SCENES_FILTER = "__own__";
@@ -1403,7 +1469,13 @@ export function setUpWorkspace(
 
   function openEntry(entry: PaletteEntry): void {
     if (entry.kind === "experiment") start(entry.experiment);
-    else openSavedScene(entry.scene);
+    else if (entry.kind === "saved") openSavedScene(entry.scene);
+    else {
+      // 画面左上の「🆕 新規シーン」と**同じ経路**を押す(保存していない作り
+      // かけがあるときの確認も、そちらが面倒を見る)。
+      closePalette();
+      document.getElementById("btn-new-scene")?.click();
+    }
   }
 
   function categoryOf(experiment: Experiment): Category | undefined {
@@ -1426,7 +1498,16 @@ export function setUpWorkspace(
       row.type = "button";
       row.className = "palette-row";
       row.dataset.active = String(index === paletteIndex);
-      if (entry.kind === "saved") {
+      if (entry.kind === "new-scene") {
+        row.dataset.action = "new-scene";
+        row.innerHTML =
+          `<span class="palette-row-icon">🆕</span>` +
+          `<span class="palette-row-main">` +
+          `<span class="palette-row-title">新しい場面を作る</span>` +
+          `<span class="palette-row-blurb">床だけのからっぽの場面から、自分で物を置いて組み立てます。</span>` +
+          `</span>` +
+          `<span class="palette-row-tag">✋ じぶんで作る</span>`;
+      } else if (entry.kind === "saved") {
         row.dataset.savedScene = entry.scene.name;
         const when = entry.scene.savedAt
           ? new Date(entry.scene.savedAt).toLocaleString("ja-JP")
@@ -1674,6 +1755,7 @@ export function setUpWorkspace(
     // 何も書き換える前にここで先に聞き、やめるならここで全部やめる。
     if (!confirmDiscardIfNeeded()) return;
     current = experiment;
+    ownSceneStart = null; // 自分の場面の「はじめ」は、別の実験へ移ったら捨てる。
     knobValues = defaultKnobValues(experiment);
     cardOverrides.clear();
     try {
@@ -1856,12 +1938,57 @@ export function setUpWorkspace(
       // (2) 一時停止(`pause()`)は`mode`を"play"のまま変えないので、
       //     一時停止中に自分でカメラを動かした操作を、再開のたびに奪わない
       //     ——`isEditing()`は再開時には偽になる。
-      if (!current && api.isEditing()) api.followCamera(true);
+      if (!current && api.isEditing()) {
+        api.followCamera(true);
+        // 止めた状態(組み立て中)から走らせる瞬間を、自分の場面の「はじめ」と
+        // して覚える(`ownSceneStart` のdoc参照)。
+        ownSceneStart = api.exportSceneJson();
+      }
       api.play();
     }
     syncRun();
   });
-  restartButton.addEventListener("click", () => reload());
+  restartButton.addEventListener("click", () => {
+    if (current) reload();
+    else restartOwnScene();
+  });
+
+  /**
+   * **自分の場面を、組み立てた最初の状態へ戻す**(`ownSceneStart` のdoc参照)。
+   * 開き直すのと同じ経路で読み、止めた状態から始める——また組み立てを
+   * 続けられるように。
+   */
+  function restartOwnScene(): void {
+    const api = apiRef.current;
+    if (!api || !ownSceneStart) return;
+    api.loadSceneJson(ownSceneStart);
+    api.setDecor([]);
+    api.selectBody(-1);
+    lastSelection = -1;
+    api.setProbeLabels(null, null);
+    api.setExportName(ownSceneName || null);
+    api.setPace(null);
+    api.followCamera(false);
+    api.stopForEditing();
+    renderCrumbs();
+    renderContext();
+    syncRun();
+  }
+
+  /**
+   * 保存・書き出しに使う文書。自分の場面を走らせたあとなら、**組み立てた最初の
+   * 状態**を渡す(途中の状態を残しても、開き直すと途中から始まるだけで、組んだ
+   * 配置が失われる——`ownSceneStart` のdoc参照)。まだ走らせていなければ、いま
+   * の場面そのもの。
+   */
+  function sceneJsonToKeep(): { json: string | null; fromStart: boolean } {
+    const api = apiRef.current;
+    if (!api) return { json: null, fromStart: false };
+    if (!current && ownSceneStart && !api.isEditing()) {
+      return { json: ownSceneStart, fromStart: true };
+    }
+    return { json: api.exportSceneJson(), fromStart: false };
+  }
 
   for (const button of speedGroup.querySelectorAll("button")) {
     button.addEventListener("click", () => {
@@ -1879,9 +2006,14 @@ export function setUpWorkspace(
       ? `<span aria-hidden="true">⏸</span> とめる`
       : `<span aria-hidden="true">▶</span> うごかす`;
     playButton.setAttribute("aria-label", playing ? "とめる" : "うごかす");
-    // 自分の場面には「やり直し」の元が無い(つまみで組み直す実験と違い、
-    // 手で置いたものは巻き戻す先が保存した場面しかない)。
-    restartButton.disabled = !current;
+    // 自分の場面は、いちど走らせれば「組み立てた最初の状態」へ戻れる
+    // (`ownSceneStart` のdoc参照)。まだ走らせていなければ、戻る先が無い。
+    restartButton.disabled = !current && !ownSceneStart;
+    restartButton.title = current
+      ? "この実験を最初の状態から作り直します(自分で足した物は消え、札で変えた置き場所・向き・材質も戻ります。つまみの設定はそのままです)"
+      : ownSceneStart
+        ? "組み立てた最初の状態(最後に止めた状態から ▶ うごかす を押す直前)へ戻して、止めます"
+        : "まだ一度も動かしていないので、戻る先がありません(▶ うごかす を押すと、その直前の状態がはじめになります)";
     for (const button of speedGroup.querySelectorAll("button")) {
       button.classList.toggle(
         "active",
@@ -2124,11 +2256,11 @@ export function setUpWorkspace(
         save.className = "primary";
         save.textContent = "💾 保存する";
         save.title =
-          "名前を付けて保存すると、次に開いたときそのまま続きから始められます。";
+          "名前を付けて保存します。動かしたあとでも、組み立てた最初の状態(▶ を押す前)で取っておくので、開き直すとそこから始まります。";
         save.addEventListener("click", () => {
           const api = apiRef.current;
           if (!api) return;
-          const json = api.exportSceneJson();
+          const { json, fromStart } = sceneJsonToKeep();
           if (!json) return;
           const name =
             (sceneNameDraft || nameInput.value).trim() ||
@@ -2148,7 +2280,9 @@ export function setUpWorkspace(
           }
           ownSceneName = name;
           sceneNameDraft = name;
-          sceneSaveNote = `「${name}」を取っておきました。⌘K で名前を打つと、いつでも開けます。`;
+          sceneSaveNote = fromStart
+            ? `「${name}」を、組み立てた最初の状態(▶ を押す前)で取っておきました。⌘K で名前を打つと、いつでも開けます。`
+            : `「${name}」を取っておきました。⌘K で名前を打つと、いつでも開けます。`;
           // **課題B**: 保存できたので、「新規シーン」等で捨てる前の確認は
           // もう要らない(`hasUnsavedWork`のdoc参照)。
           api.markSceneSaved();
@@ -2250,7 +2384,8 @@ export function setUpWorkspace(
         download.id = "btn-scene-download";
         download.textContent = "⬇ ファイルに書き出す";
         download.addEventListener("click", () => {
-          const json = apiRef.current?.exportSceneJson();
+          // 保存と同じく、走らせたあとなら組み立てた最初の状態を書き出す。
+          const { json } = sceneJsonToKeep();
           if (!json) return;
           const blob = new Blob([namedSceneJson(json, chosenSceneName())], {
             type: "application/json",
@@ -2302,6 +2437,7 @@ export function setUpWorkspace(
     if (!confirmDiscardIfNeeded()) return;
     current = null;
     ownSceneName = entry.name;
+    ownSceneStart = null;
     try {
       localStorage.setItem(LAST_OWN_SCENE_KEY, entry.name);
     } catch {
@@ -3084,7 +3220,7 @@ export function setUpWorkspace(
               remove.id = "btn-remove-body";
               remove.className = "btn-danger";
               remove.textContent = "🗑 これを消す";
-              remove.title = "この物を場面から消します(元に戻せません——「動かしたのを戻す」の対象外です)";
+              remove.title = "この物を場面から消します(止めている間なら「↶ 戻す」で戻せます)";
               let armed = false;
               let armedTimer: ReturnType<typeof setTimeout> | null = null;
               const disarm = () => {
@@ -3481,6 +3617,7 @@ export function setUpWorkspace(
       api.onSceneReplaced(() => {
         current = null;
         ownSceneName = "";
+        ownSceneStart = null;
         cardOverrides.clear();
         // **読み込み直後は何も選ばれていない状態から始める**(`reload`と
         // 同じ規則、そちらのdoc参照)。エディタ側(`sceneGalleryRef.current`)は
