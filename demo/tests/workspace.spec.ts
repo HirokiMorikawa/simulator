@@ -23,8 +23,18 @@ test.use({ storageState: { cookies: [], origins: [] } });
  */
 function parseShownNumber(text: string): number {
   const SUPERSCRIPT = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+  // 桁の離れた値は日本語の数の言葉で書かれる(`readoutNumber` の
+  // `japaneseMagnitude` のdoc参照):「約 1140 万分の 1」「1.50 億」。
+  const UNITS: Record<string, number> = { "": 1, 万: 1e4, 億: 1e8, 兆: 1e12, 京: 1e16 };
+  const fraction = text.match(/約 (-?)([\d.,]+) ?(万|億|兆|京)?分の 1/);
+  if (fraction) {
+    const denominator = Number(fraction[2].replace(/,/g, "")) * UNITS[fraction[3] ?? ""];
+    return (fraction[1] ? -1 : 1) / denominator;
+  }
+  const large = text.match(/(-?[\d.,]+) (万|億|兆|京)/);
+  if (large) return Number(large[1].replace(/,/g, "")) * UNITS[large[2]];
   const match = text.match(/(-?[\d.]+)×10(⁻?)([⁰¹²³⁴⁵⁶⁷⁸⁹]+)/);
-  if (!match) return Number.parseFloat(text);
+  if (!match) return Number.parseFloat(text.replace(/,/g, ""));
   const exponent = [...match[3]].map((c) => SUPERSCRIPT.indexOf(c)).join("");
   return Number.parseFloat(match[1]) * 10 ** (Number(exponent) * (match[2] ? -1 : 1));
 }
@@ -486,6 +496,8 @@ test("グラフの単位が、表の数値と同じ量になっている", async
 test("つまみが無い実験は、無いと言う", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
+  // つまみは「さわる」の道具(初めて開いた人は「みる」から始まる、利用者役⑬)。
+  await setGrain(page, 1);
 
   // 場の中身そのものが記録された状態から始まる実験には、変えるつまみが無い。
   await page.keyboard.press("Control+k");
@@ -504,6 +516,8 @@ test("つまみが無い実験は、無いと言う", async ({ page }) => {
 test("棒の材質を変えると、熱の伝わり方が実際に変わる", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
+  // つまみは「さわる」の道具(初めて開いた人は「みる」から始まる、利用者役⑬)。
+  await setGrain(page, 1);
   await page.keyboard.press("Control+k");
   await page.click('.palette-row[data-experiment-id="d16-conduction-race"]');
 
@@ -975,6 +989,8 @@ test("つまみを途中の位置へ動かすと、その時刻の値が読め�
 test("つまみは、壊れた結果しか出ない値を渡さない", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
+  // つまみは「さわる」の道具(初めて開いた人は「みる」から始まる、利用者役⑬)。
+  await setGrain(page, 1);
   await page.keyboard.press("Control+k");
   await page.click('.palette-row[data-experiment-id="d24-car"]');
 
@@ -1052,6 +1068,8 @@ test("無くなった物の値を、壊れた数字で出さない", async ({ pa
 test("時間の帯には、何をするものか書いてある", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
+  // 時間の帯は「さわる」から出る(初めて開いた人は「みる」から、利用者役⑬)。
+  await setGrain(page, 1);
   // 浅い粒度では時刻も step も隠していたので、ただの飾りの線に見えていた。
   await expect(page.locator("#timeline-hint")).toBeVisible();
   await expect(page.locator("#timeline-time")).toBeVisible();
@@ -2455,7 +2473,7 @@ test("グラフの凡例の数値が、右の「いまの数値」と同じ書�
   // `humanExponent` のdoc参照。
   await expect
     .poll(async () => (await near.textContent()) ?? "", { timeout: 60_000 })
-    .toMatch(/×10⁻?[⁰¹²³⁴⁵⁶⁷⁸⁹]/);
+    .toMatch(/分の 1|×10⁻?[⁰¹²³⁴⁵⁶⁷⁸⁹]/);
   await page.click("#btn-run");
   await page.waitForTimeout(200);
 
@@ -2514,15 +2532,15 @@ test("グラフの凡例の数値が、右の「いまの数値」と同じ書�
 
   const nearLine = legendLines.find((l) => l.includes("0.25 m"));
   expect(nearLine).toBeDefined();
-  expect(nearLine).toContain(`max=${expectedMaxText} ℃`);
-  expect(nearLine).toContain(`min=${expectedMinText} ℃`);
+  expect(nearLine).toContain(`最大 ${expectedMaxText} ℃`);
+  expect(nearLine).toContain(`最小 ${expectedMinText} ℃`);
 
   // 退行時の実測を再現しないことも確かめる: 凡例の `max=` が生の指数
   // (`toExponential`のデフォルト書式や、桁数を無視した `formatTickValue`)
   // に戻っていないこと。`readoutNumber`が返す指数は必ず小数点以下2桁
   // (`toExponential(2)`)なので、それ以外の指数書式(桁数違い)は退行の
   // 兆候になる。
-  const maxMatch = nearLine?.match(/max=(-?\d(?:\.\d+)?e[+-]?\d+)/);
+  const maxMatch = nearLine?.match(/最大 (-?\d(?:\.\d+)?e[+-]?\d+)/);
   if (maxMatch) {
     expect(maxMatch[1]).toMatch(/^-?\d\.\d{2}e[+-]?\d+$/);
   }
@@ -4307,7 +4325,7 @@ test("自分で置いた物は、色も重さも違う材質から選べる", as
   // 4種類しか無かった頃には決して満たせない条件。個々の名前ではなく
   // 「流体以外はひととおり選べる」ことを見る。
   expect(options.length).toBeGreaterThan(8);
-  for (const name of ["ガラス", "銅", "発泡スチロール", "氷(0°C)"]) {
+  for (const name of ["ガラス", "銅", "発泡スチロール", "氷(0℃)"]) {
     expect(options, `${name} が選べる`).toContain(name);
   }
   // 流体は固体の塊として置けないので、ここには出さない。
@@ -4549,7 +4567,7 @@ test("「ボールを落とす」は、説明が言い切る速さを自分で�
           () => (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend ?? [],
         );
         const line = legend.find((l) => l.includes("速さ")) ?? "";
-        const m = line.match(/max=([\d.]+)/);
+        const m = line.match(/最大 ([\d.]+)/);
         return m ? Number.parseFloat(m[1]) : 0;
       },
       { timeout: 20_000 },
@@ -5010,8 +5028,9 @@ test("「選んだもの」札の中身も、粒度に沿って増えていく",
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 0);
-  await page.locator('.card[data-card="add-body"] .card-header').first().click();
-  await page.click("#btn-add-body-card");
+  // 「物を足す」札は「みる」には出ない(道具は隠す段、利用者役⑬)。ここで
+  // 確かめたいのは「選んだもの」札の中身なので、同じボタンを直接鳴らす。
+  await page.evaluate(() => document.getElementById("btn-add-body-card")!.click());
   await expect(page.locator('.card[data-card="focus"]')).toBeVisible();
 
   const shown = async () => {
@@ -5075,7 +5094,8 @@ test("「グラフを出す」が帯を動かしたことを、画面で言う",
   await page.keyboard.press("Control+k");
   await page.click('.palette-row[data-experiment-id="d1-free-fall"]');
   await page.waitForTimeout(1200);
-  await setGrain(page, 0);
+  // 「見え方」札は「さわる」から出る(「みる」には道具を出さない、利用者役⑬)。
+  await setGrain(page, 1);
   await page.locator('.card[data-card="view"] .card-header').first().click();
 
   const toggle = page.locator("#btn-toggle-analysis");
@@ -5150,8 +5170,8 @@ test("ふりこは、振れはばを大きくすれば目で見て往復する",
   await page.waitForTimeout(1500);
   await setGrain(page, 1);
 
-  // ぴったり確かめたい人への道が読める。
-  await expect(page.locator("#context")).toContainText("小さくするほど");
+  // ぴったり確かめたい人への道が読める(つまみを動かす案内なので「さわる」から)。
+  await expect(page.locator("#context")).toContainText("「振れはば」を小さくして");
 
   const bobX = async () =>
     page.evaluate(() => {
@@ -5205,7 +5225,9 @@ test("場のパネルの見出しが、何を見ているかを言葉で言う",
   await expect(title).toBeVisible();
   const text = (await title.textContent()) ?? "";
   expect(text, "何が明るいのかが言葉で書いてある").toContain("見つかりやすさ");
-  expect(text, "ます目の数が何のことか分かる").toContain("ます目");
+  // 記号(|ψ|²)や計算のます目の数(「256×128 のます目で計算」)は、括弧で添えても
+  // 読めない言葉として挙げられた(利用者役⑬)。見出しは現象の言葉だけ。
+  expect(text, `見出し: ${text}`).not.toMatch(/ψ|ます目|×/);
   expect(text.trim().startsWith("量子"), `見出し: ${text}`).toBe(false);
 
   expect(errors).toEqual([]);
@@ -5459,9 +5481,9 @@ test("回路の電流が、どこを流れる電流なのか名前で分かる",
   for await (const c of stream) chunks.push(c as Buffer);
   const header = Buffer.concat(chunks).toString("utf8").split("\n")[0];
   const currentColumn = header.split(",").find((c) => c.includes("電流")) ?? "";
-  expect(currentColumn, `見出し: ${header}`).toContain("電池・電源");
+  expect(currentColumn, `見出し: ${header}`).toContain("電池");
   // 「つないであるもの」札にも同じ呼び名が並んでいて、番号から現物へたどれる。
-  await expect(page.locator('.card[data-card="circuit"]')).toContainText("電池・電源");
+  await expect(page.locator('.card[data-card="circuit"]')).toContainText("電池");
 
   expect(errors).toEqual([]);
 });
@@ -6935,11 +6957,11 @@ test("「みる」に出る数字は、読める単位と桁で書いてある",
   await expect(page.locator("#crumb-experiment")).toContainText("気体");
   await page.waitForTimeout(2500);
   const gas = await page.locator('.card[data-card="numbers"]').innerText();
-  // K と Pa は残したまま、隣に馴染みのある目盛りを添える。
-  expect(gas, gas).toContain("K");
+  // 温度は ℃ で書く(K は中学校で使わない目盛り、利用者役⑬)。圧力は
+  // 馴染みのある言い方で(Pa はグラフと書き出す表の単位として残る)。
   expect(gas, gas).toContain("℃");
-  expect(gas, gas).toContain("Pa");
-  expect(gas, gas).toContain("ふだんの空気の");
+  expect(gas, gas).not.toMatch(/\d K/);
+  expect(gas, gas).toMatch(/ふだんの空気の [\d.]+%/);
 
   expect(errors).toEqual([]);
 });
@@ -6971,6 +6993,8 @@ test("計算が重い実験では、どれだけ待つことになるのかが�
   await page.waitForTimeout(3000);
   const gas = await page.locator("#run-actual-rate").innerText();
   expect(gas, gas).toContain("1 秒待って");
+  // 百分の一より遅いときの倍率は「×0.00」になり、何も言っていない(利用者役⑬)。
+  expect(gas, gas).not.toContain("×0.00");
   expect(gas, `秒で言うと意味を成さない桁になる: ${gas}`).not.toMatch(/ぶんに \d{4,} 秒/);
 
   expect(errors).toEqual([]);
@@ -7083,17 +7107,8 @@ test("前に何を見ていても、公転は円として見える(真横から�
 /** 右の「いまの数値」から、名前の次の行の数を読む(読めなければ NaN)。 */
 async function readoutValue(page: Page, label: string): Promise<number> {
   const text = await page.locator("#context").innerText();
-  // 桁の離れた値は `1.09×10⁻⁴` と書かれる。指数を読み落とすと 1.09 と読んでしまう。
-  const match = text.match(new RegExp(`${label}\\n\\s*(-?[\\d.,]+)(?:×10([⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+))?`));
-  if (!match) return Number.NaN;
-  const mantissa = Number(match[1].replace(/,/g, ""));
-  if (!match[2]) return mantissa;
-  const digits = "⁰¹²³⁴⁵⁶⁷⁸⁹";
-  const exponent = [...match[2]].reduce(
-    (acc, ch) => (ch === "⁻" ? acc : acc * 10 + digits.indexOf(ch)),
-    0,
-  );
-  return mantissa * 10 ** (match[2].startsWith("⁻") ? -exponent : exponent);
+  const match = text.match(new RegExp(`${label}\\n\\s*([^\\n]+)`));
+  return match ? parseShownNumber(match[1]) : Number.NaN;
 }
 
 // **課題(利用者役⑬の観察)**: 「スイングバイで加速する」の隣で、探査機の速さが
@@ -7266,6 +7281,94 @@ test("ブラウン運動は、先頭の粒子のずれが「みる」のまま�
   expect(errors).toEqual([]);
 });
 
+// **課題(利用者役⑬「みる」)**: 初めて開くと「さわる」から始まり、「みる」の
+// まま見ても「物を足す」「見え方」「この場面を保存する」の札やグラフの操作、
+// 「つまみを動かして…」という文が出ていた——「道具は隠す」と書いてある段で。
+// 英語の「Playing」、Linux でも「⌘K」も並んでいた。
+test("初めて開くと「みる」から始まり、道具も操作のすすめも出ない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await expect(page.locator("#app")).toHaveAttribute("data-grain", "watch");
+  await expect(page.locator("#play-mode-badge")).not.toHaveText(/Playing|Paused|Edit/);
+  const search = (await page.locator("#crumb-root, .crumb-root").first().textContent()) ?? "";
+  if (!/Mac/.test(await page.evaluate(() => navigator.platform))) {
+    expect(search, search).toContain("Ctrl+K");
+  }
+  // 深い段の札は、見出しごと出ない。すぐ次の段(さわる)の札は畳んだ見出しで見える。
+  for (const id of ["add-body", "view", "my-scenes", "my-scenes-library"]) {
+    await expect(page.locator(`.card[data-card="${id}"]`)).toBeHidden();
+  }
+  await expect(page.locator('.card[data-card="knobs"] .card-header')).toBeVisible();
+
+  // つまみを動かすようすすめる文は「みる」では出ず、「さわる」で出る。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "好きな物を落とす");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("好きな物");
+  const touchLine = page.locator('.card-watch li[data-at="touch"]').first();
+  await expect(touchLine).toBeHidden();
+  await setGrain(page, 1);
+  await expect(touchLine).toBeVisible();
+  await setGrain(page, 0);
+
+  // グラフが出ている実験でも、グラフの操作(小さい変化・見る範囲・保存)は出ない。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星が太");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#probe-canvas")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#btn-probe-csv")).toBeHidden();
+  await expect(page.locator("#toggle-probe-log")).toBeHidden();
+  await page.waitForTimeout(1500);
+  const legend = await page.evaluate(
+    () => (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend ?? [],
+  );
+  expect(legend.join(" / ")).not.toMatch(/max=|min=/);
+  // 円軌道のグラフは「横・縦の位置」の波(説明の「波 1 つが 1 年」)。
+  expect(legend.join(" / ")).toContain("横の位置");
+
+  // 磁石と銅管では、渦電流を解くための回路は「みる」に出さない。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "磁石が銅管");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("銅管");
+  await page.waitForTimeout(800);
+  await expect(page.locator('.card[data-card="circuit"]')).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑬「みる」)**: 桁の離れた数が「8.77×10⁻⁸」「2.53×10⁻⁷ ℃」と
+// 10 のべき乗で出ていた。中学生にも読める、ふだんの数の言葉で書く。
+test("桁の離れた数は、ふだんの数の言葉で書く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  const shown = await page.evaluate(() => {
+    const f = (window as unknown as {
+      __readoutNumberForTest: (v: number, d: number) => string;
+    }).__readoutNumberForTest;
+    return [f(8.77e-8, 3), f(2.53e-7, 2), f(1.5e8, 2), f(0.25, 3)];
+  });
+  expect(shown[0]).toBe("約 1140 万分の 1");
+  expect(shown[1]).toBe("約 395 万分の 1");
+  expect(shown[2]).toBe("1.50 億");
+  expect(shown[3]).toBe("0.250");
+  for (const text of shown) expect(text).not.toMatch(/×10|e[+-]\d/);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑬「みる」)**: 「ボールを落とす」で空からボールまで細い縦線が
+// 出たままで、何の線か説明が無かった(説明していたのは「斜めに投げる」だけ)。
+test("舞台に通った跡の線が出ていれば、その意味を言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを落");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ボール");
+  await expect(page.locator(".card-watch-trail")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".card-watch-trail")).toContainText("通った跡");
+  expect(errors).toEqual([]);
+});
+
 // **課題(利用者役⑨の観察)**: 「煙が流れる(3D)」の説明は「球のまわりを煙が
 // 流れていきます」「球の裏側で巻き込まれ」と書いていたのに、**この場面に球は
 // 無い**(場面ファイルの `bodies` は空、格子流体の境界も流入だけ)。利用者役は
@@ -7395,18 +7498,18 @@ test("電池のつまみが、回路のどの数値にも効く", async ({ page 
 
   // コンデンサは、選んだ電池で充電された状態から始まる——1.5 V の乾電池から
   // 8.852 V が出る、ということが起きない。
-  const peak = (line: string) => Number.parseFloat(line.match(/max=([\d.]+)/)?.[1] ?? "0");
+  const peak = (line: string) => Number.parseFloat(line.match(/最大 ([\d.]+)/)?.[1] ?? "0");
   expect(peak(low.capacitorPeak), low.capacitorPeak).toBeLessThan(2);
   expect(peak(high.capacitorPeak), high.capacitorPeak).toBeGreaterThan(9);
 
   // つまみの説明が約束している電流と温度が、画面にあって、ちゃんと動く。
-  for (const label of ["電池・電源0 から流れる電流", "抵抗の温度"]) {
+  for (const label of ["電池から流れる電流", "抵抗の温度"]) {
     expect(low.panel, `${label} が「いまの数値」に無い`).toContain(label);
   }
   const current = (panel: string) =>
-    Number.parseFloat(panel.match(/電池・電源0 から流れる電流\s*([\d.]+) mA/)?.[1] ?? "0");
+    Number.parseFloat(panel.match(/電池から流れる電流\s*([\d.]+) mA/)?.[1] ?? "0");
   const celsius = (panel: string) =>
-    Number.parseFloat(panel.match(/抵抗の温度\s*[\d.]+ K\(([-\d.]+) ℃\)/)?.[1] ?? "0");
+    Number.parseFloat(panel.match(/抵抗の温度\s*([-\d.]+) ℃/)?.[1] ?? "0");
   expect(current(high.panel), `電流 ${current(low.panel)} → ${current(high.panel)} mA`).toBeGreaterThan(
     current(low.panel) * 2,
   );
@@ -7456,9 +7559,9 @@ test("つまみと数値が、同じ量を同じ目盛りで言う(飲み物の�
 
   const knob = await page.locator('.knob[data-knob-id="drink"] .knob-value').innerText();
   const panel = await page.locator('.card[data-card="numbers"]').innerText();
-  // つまみは K のまま(場面が使う目盛り)、℃ を添えて突き合わせられる。
-  expect(knob, knob).toContain("K");
+  // つまみも数値も ℃ で言う(K は中学校で使わない目盛り、利用者役⑬)。
   expect(knob, knob).toContain("℃");
+  expect(knob, knob).not.toMatch(/\d K/);
   expect(panel, panel).toContain("℃");
   expect(errors).toEqual([]);
 });

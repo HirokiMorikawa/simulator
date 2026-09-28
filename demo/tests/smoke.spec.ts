@@ -935,7 +935,8 @@ test("B9: エディタから量子ドメイン(1D/2D)をプリセットで新規
   await page.click("#btn-settings"); // ポップオーバーを閉じる。
   await expect(fieldPanel).toBeVisible();
   await expect(fieldTitle).toContainText("見つかりやすさ");
-  await expect(fieldTitle).toContainText("128 点のます目");
+  // 計算のます目の数は見出しに出さない(読めない言葉として挙げられた、利用者役⑬)。
+  await expect(fieldTitle).not.toContainText("ます目");
 
   // --- 2D: 二重スリット(D27と同じ構成、`quantum2dDoubleSlitPotential`のdoc参照)。
   // 場のパネルは2Dを優先して描く(`updateFieldPanel`のdoc「優先順位を固定する」)ので、
@@ -957,7 +958,7 @@ test("B9: エディタから量子ドメイン(1D/2D)をプリセットで新規
   await page.click("#btn-add-quantum-2d");
   await page.click("#btn-settings"); // ポップオーバーを閉じる。
   await expect(fieldTitle).toContainText("見つかりやすさ");
-  await expect(fieldTitle).toContainText("64×64");
+  await expect(fieldTitle).not.toContainText("64×64");
 
   expect(errors).toEqual([]);
 });

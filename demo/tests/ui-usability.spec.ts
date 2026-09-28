@@ -187,7 +187,8 @@ test("起動中は読み込みオーバーレイが出て、World ができた�
 
   const overlay = page.locator("#boot-overlay");
   await expect(overlay).toBeVisible();
-  await expect(overlay).toContainText("読み込んでいます");
+  // 「物理エンジン(WebAssembly)」は中を知らない人に読めない言葉だった(利用者役⑬)。
+  await expect(overlay).toContainText("準備をしています");
 
   await waitForWorld(page);
   await expect(overlay).toBeHidden();

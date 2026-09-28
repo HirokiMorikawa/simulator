@@ -197,6 +197,8 @@ export type WorkspaceApi = {
   settlePending: () => boolean;
   /** 舞台に描くものが無いか(案内を出しているのと同じ判断)。 */
   stageIsEmpty: () => boolean;
+  /** 舞台に「通った跡」の線が描かれているか(「ここを見る」で線の意味を言うため)。 */
+  showsTrails: () => boolean;
   /**
    * 選んだ物の**材質を差し替える**。物理側は場面を組み直して反映するので、
    * 走行中はできない(`false` を返す)。
@@ -473,6 +475,20 @@ const RETIRED_BODY_Y = -1e9;
 /** 退避先とみなす幅 [m]。 */
 const RETIRED_BODY_TOLERANCE = 1;
 
+/**
+ * 畳んだ見出しとして見せる札の深さ(いまの粒度からどこまで先か)。
+ * これより深い札は見出しごと出さない(`syncCards` のdoc参照)。
+ */
+const CARD_REACH = 1;
+
+/**
+ * 「実験をさがす」の近道キーの書き方。Mac 以外で「⌘K」と出ていて、押す
+ * キーが手元に無かった(利用者役⑬)。動作はどちらでも同じ(⌘K / Ctrl+K)。
+ */
+const SEARCH_KEY = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+  ? "⌘K"
+  : "Ctrl+K";
+
 const REVEAL = {
   analysis: 1.2, // グラフ
   outline: 1.6, // シーンの一覧
@@ -514,9 +530,56 @@ export function readoutNumber(value: number, digits: number): string {
   if (!Number.isFinite(value)) return "—";
   const abs = Math.abs(value);
   if (abs !== 0 && (abs < 0.5 * 10 ** -digits || abs >= 1e7)) {
-    return humanExponent(value.toExponential(2));
+    return japaneseMagnitude(value) ?? humanExponent(value.toExponential(2));
   }
   return value.toFixed(digits);
+}
+
+/**
+ * **材質の名前を画面に書く形にする**。物理側の材質表の名前(「氷(0°C)」)は
+ * 識別子でもあるので変えられないが、画面のほかの温度はすべて「℃」で書いて
+ * いて、ここだけ「°C」が混ざっていた(利用者役⑬)。表示だけそろえる。
+ */
+export function materialLabel(name: string): string {
+  return name.replace(/°C/g, "℃");
+}
+
+/** 日本語の大きな数の位。 */
+const JAPANESE_UNITS: [number, string][] = [
+  [1e16, "京"],
+  [1e12, "兆"],
+  [1e8, "億"],
+  [1e4, "万"],
+];
+
+/** `abs`(正)を「395 万」「1.50 億」の数と位に分ける。位が足りなければ null。 */
+function japaneseLarge(abs: number): { number: string; unit: string } | null {
+  for (const [size, unit] of JAPANESE_UNITS) {
+    if (abs < size) continue;
+    const n = abs / size;
+    if (n >= 1e4) return null;
+    return { number: n >= 1000 ? String(Math.round(n)) : n.toPrecision(3), unit };
+  }
+  return { number: abs >= 1000 ? String(Math.round(abs)) : abs.toPrecision(3), unit: "" };
+}
+
+/**
+ * **桁の離れた値を、日本語の数の言葉で書く**。`8.77×10⁻⁸` は教科書の書き方
+ * ではあるが、中学生には「大きいのか小さいのか」すら読めなかった(利用者役⑬:
+ * 「通り抜けた割合 8.77×10⁻⁸」「2.53×10⁻⁷ ℃」)。小さい値は「約 1140 万分の 1」、
+ * 大きい値は「1.50 億」と書く——ふだん使う言い方で、桁の感覚がそのまま伝わる。
+ * 位(京)を超えるほど離れた値だけ、`humanExponent` に任せる(null を返す)。
+ * **値は変えない**(小さい値は 1/値 を丸めて言い直すだけ)。
+ */
+function japaneseMagnitude(value: number): string | null {
+  const abs = Math.abs(value);
+  const sign = value < 0 ? "-" : "";
+  if (abs >= 1) {
+    const large = japaneseLarge(abs);
+    return large ? `${sign}${large.number} ${large.unit}` : null;
+  }
+  const inverse = japaneseLarge(1 / abs);
+  return inverse ? `約 ${sign}${inverse.number}${inverse.unit ? ` ${inverse.unit}` : " "}分の 1` : null;
 }
 
 /**
@@ -702,13 +765,14 @@ function el<T extends HTMLElement>(id: string): T {
 function readStoredDetail(): number {
   try {
     const raw = localStorage.getItem(DETAIL_KEY);
-    // 初見は「さわる」から。現象が動いているのが見え、かつ**自分で変えられる**
-    // ことがつまみとして目に入る位置。ここから浅くも深くも回せる。
-    if (raw === null) return 1;
+    // 初見は「みる」から。以前は「さわる」から始めていたが、「みる」の人は
+    // 開くたびに 1 手戻す必要があった(利用者役⑬)。グラデーションは浅い端から
+    // 始まり、深くしたい人が帯を右へ動かす——「さわる」の札はすぐ隣に見えている。
+    if (raw === null) return 0;
     const value = Number.parseFloat(raw);
-    return Number.isFinite(value) ? Math.min(3, Math.max(0, value)) : 1;
+    return Number.isFinite(value) ? Math.min(3, Math.max(0, value)) : 0;
   } catch {
-    return 1;
+    return 0;
   }
 }
 
@@ -1269,8 +1333,8 @@ export function setUpWorkspace(
     root.type = "button";
     root.className = "crumb crumb-root";
     root.id = "btn-open-palette";
-    root.innerHTML = `<span aria-hidden="true">◎</span> 実験をさがす<kbd>⌘K</kbd>`;
-    root.title = "46 の実験から選ぶ(⌘K / Ctrl+K)";
+    root.innerHTML = `<span aria-hidden="true">◎</span> 実験をさがす<kbd>${SEARCH_KEY}</kbd>`;
+    root.title = `46 の実験から選ぶ(${SEARCH_KEY})`;
     root.addEventListener("click", () => openPalette());
     crumbs.appendChild(root);
 
@@ -1677,7 +1741,7 @@ export function setUpWorkspace(
   function derivedSeriesFor(experiment: Experiment): DerivedProbeSeries[] {
     const result: DerivedProbeSeries[] = [];
     for (const readout of experiment.readouts ?? []) {
-      if (!readout.derive || !readout.probes) continue;
+      if (!readout.derive || !readout.probes || readout.plot === false) continue;
       result.push({
         label: readout.label,
         unit: readout.graph?.unit ?? readout.unit,
@@ -2320,8 +2384,8 @@ export function setUpWorkspace(
           ownSceneName = name;
           sceneNameDraft = name;
           sceneSaveNote = fromStart
-            ? `「${name}」を、組み立てた最初の状態(▶ を押す前)で取っておきました。⌘K で名前を打つと、いつでも開けます。`
-            : `「${name}」を取っておきました。⌘K で名前を打つと、いつでも開けます。`;
+            ? `「${name}」を、組み立てた最初の状態(▶ を押す前)で取っておきました。${SEARCH_KEY} で名前を打つと、いつでも開けます。`
+            : `「${name}」を取っておきました。${SEARCH_KEY} で名前を打つと、いつでも開けます。`;
           // **課題B**: 保存できたので、「新規シーン」等で捨てる前の確認は
           // もう要らない(`hasUnsavedWork`のdoc参照)。
           api.markSceneSaved();
@@ -2617,6 +2681,22 @@ export function setUpWorkspace(
           item.textContent = line;
           list.appendChild(item);
         }
+        // つまみや帯を動かすようすすめる文は「さわる」から(`Experiment.watchTouch`)。
+        for (const line of experiment.watchTouch ?? []) {
+          const item = document.createElement("li");
+          item.textContent = line;
+          item.dataset.at = "touch";
+          list.appendChild(item);
+        }
+        // **舞台の細い線の意味を言う**。動いた物の通った跡を線で残しているが、
+        // 説明していたのは「斜めに投げる」だけで、「ボールを落とす」では
+        // 空からボールまで伸びた線が何なのか分からなかった(利用者役⑬)。
+        // 線が実際に出ているときだけ見せる(`tick` で切り替える)。
+        const trailNote = document.createElement("li");
+        trailNote.className = "card-watch-trail";
+        trailNote.textContent = "細い線は、動いた物が通った跡です。";
+        trailNote.hidden = true;
+        list.appendChild(trailNote);
         body.appendChild(list);
       },
     });
@@ -2670,7 +2750,9 @@ export function setUpWorkspace(
       specs.push({
         id: "circuit",
         title: "つないであるもの",
-        reveal: 0, // 舞台に映らないものの代わりなので、いちばん浅い段から出す。
+        // 舞台に映らないものの代わりなので、いちばん浅い段から出す。ただし回路が
+        // 計算の仕掛けにすぎない実験は深い段から(`Experiment.circuitReveal`)。
+        reveal: experiment.circuitReveal ?? 0,
         summary: `${circuit.length}個`,
         build: (body) => {
           const note = document.createElement("p");
@@ -2887,7 +2969,7 @@ export function setUpWorkspace(
               for (const name of names) {
                 const option = document.createElement("option");
                 option.value = name;
-                option.textContent = name;
+                option.textContent = materialLabel(name);
                 option.selected = name === readout.material;
                 select.appendChild(option);
               }
@@ -3430,6 +3512,11 @@ export function setUpWorkspace(
       const reveal = Number(card.dataset.reveal ?? "0");
       const override = cardOverrides.get(id);
       const open = override ?? detail >= reveal;
+      // **いまの粒度より 1 段以上深い札は、見出しごと出さない**。畳んでいても
+      // 見出しは並ぶので、「みる」(道具は隠す段)に「物を足す」「取っておいた
+      // 場面」「この場面を保存する」が並んでいた(利用者役⑬)。すぐ次の段の
+      // 札だけは畳んだ見出しで見せ、「右へ動かすと何が増えるか」の手掛かりは残す。
+      card.hidden = override === undefined && reveal - detail > CARD_REACH;
       card.dataset.expanded = String(open);
       card.dataset.auto = String(override === undefined);
       card
@@ -3627,7 +3714,11 @@ export function setUpWorkspace(
         !Number.isFinite(secondsPerSimSecond) || secondsPerSimSecond > 120
           ? `1 秒待って ${formatDuration(r, api.stepSeconds())}ぶん進む`
           : `画面の 1 秒ぶんに ${secondsPerSimSecond < 10 ? secondsPerSimSecond.toFixed(1) : Math.round(secondsPerSimSecond)} 秒`;
-      actualRate.textContent = `実際は ×${r.toFixed(2)}(${cost})`;
+      // 百分の一より遅いと倍率は「×0.00」になり、何も言っていないのと同じ
+      // (利用者役⑬:「実際は ×0.00(1 秒待って 122.87 ピコ秒ぶん進む)」)。
+      // そのときは倍率を書かず、待ち方だけを書く。
+      actualRate.textContent =
+        r < 0.01 ? `実際は ${cost}` : `実際は ×${r.toFixed(2)}(${cost})`;
       actualRate.classList.add("slow");
     } else if (r > 1.1) {
       // **桁が飛ぶ場面では、何の比なのかを書く**(利用者役「さわる」の報告、
@@ -3811,6 +3902,11 @@ export function setUpWorkspace(
       // のdoc参照)。ここは読むだけ——画面の更新に合わせて覗いていたときは、
       // 1 コマで 1 秒ぶん進む場面で秒に 1 回しか見ておらず、同じ設定で
       // 2.71 / 2.74 / 4.01 秒と答えが変わっていた(実測)。
+      const trailNote = document.querySelector<HTMLElement>(".card-watch-trail");
+      if (trailNote) {
+        const trailsShown = api.showsTrails();
+        if (trailNote.hidden === trailsShown) trailNote.hidden = !trailsShown;
+      }
       settledAt = api.settledTime();
       everMoved = api.settledEverMoved();
       const settledKey = document.getElementById("readout-settled-key");

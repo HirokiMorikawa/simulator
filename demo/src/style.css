@@ -2121,6 +2121,9 @@ kbd {
   color: var(--text-subtle);
   text-align: center;
   min-height: 14px;
+  /* 1 文字だけ次の行へ落ちていた(「…(現象は変わりませ / ん)」、利用者役⑬)。
+     折り返すなら、2 行の長さをそろえる。 */
+  text-wrap: balance;
 }
 
 /* **「選んだもの」札の中身にも、同じグラデーションを掛ける**
@@ -2139,6 +2142,13 @@ kbd {
 #app[data-grain="touch"] .focus-section[data-at="study"],
 #app[data-grain="touch"] .focus-section[data-at="build"],
 #app[data-grain="study"] .focus-section[data-at="build"] {
+  display: none;
+}
+/* 「みる」では、つまみや帯を動かすようすすめる文(`watchTouch`)と、グラフの
+   操作(小さい変化も見る・見る範囲・数値を保存する)を出さない。グラフそのものは
+   現象なので出す(利用者役⑬:「道具は隠す」と書いてあるのに出ていた)。 */
+#app[data-grain="watch"] .card-watch li[data-at="touch"],
+#app[data-grain="watch"] .probe-controls {
   display: none;
 }
 .focus-section {
@@ -2344,7 +2354,9 @@ kbd {
    * 時刻(0.05 m/s 以下)」のような長い名前が値の列を押し潰し、「6.72 秒」が
    * 「6.7 / 2 / 秒」と三行に割れていた(利用者役①の観察)。数字は一目で
    * 読めることがすべてなので、幅は値の側に譲り、名前の方を折り返す。 */
-  grid-template-columns: minmax(0, 1fr) max-content;
+  /* 名前の列にも最低の幅を残す。値が長いと名前が押し潰され、「経過した時間」が
+     「経過 / した / 時間」と三行に割れていた(利用者役⑬、1280 幅の気体の場面)。 */
+  grid-template-columns: minmax(5.5em, 1fr) max-content;
   gap: var(--space-2) var(--space-4);
   margin: 0;
   font-size: var(--text-md);

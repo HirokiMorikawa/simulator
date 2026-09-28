@@ -11,6 +11,7 @@ import {
   annotateInspectorShape,
   formatDuration,
   friendlyBodyLabel,
+  materialLabel,
   pickDurationUnit,
   readoutNumber,
   setUpWorkspace,
@@ -2721,7 +2722,7 @@ function renderRigidBodyComponent(world: WasmWorld, index: number): string {
     return names
       .map(
         (name) =>
-          `<option value="${name}"${name === selected ? " selected" : ""}>${name}</option>`,
+          `<option value="${name}"${name === selected ? " selected" : ""}>${materialLabel(name)}</option>`,
       )
       .join("");
   };
@@ -3977,7 +3978,7 @@ function setUpProjectDrawer(
         if (c.kind === "resistor") {
           item.textContent = `抵抗 つなぎ目${c.a}—${c.b}: 流れにくさ ${c.resistance} Ω`;
         } else if (c.kind === "voltage_source") {
-          item.textContent = `電池・電源 つなぎ目${c.a}(＋)—${c.b}(−): ${c.voltage} V`;
+          item.textContent = `電池 つなぎ目${c.a}(＋)—${c.b}(−): ${c.voltage} V`;
         } else if (c.kind === "switch") {
           const switchCheckboxItem = document.createElement("input");
           switchCheckboxItem.type = "checkbox";
@@ -4669,10 +4670,15 @@ type ProbeSeries = {
  */
 function formatTickValue(value: number): string {
   const magnitude = Math.abs(value);
+  // 0 は「0」。以前は下の指数の枝に落ちて「0.0e+0 Pa」と出ていた(利用者役⑬)。
+  if (magnitude === 0) return "0";
+  // 小さすぎる値は、パネルと同じ日本語の数の言葉で(`readoutNumber`)。
+  if (magnitude < 0.001) return readoutNumber(value, 3);
   // 千以上は位取りのカンマで書く。`toPrecision(4)` は 1 万を超えると
   // `4.932e+4 km` のような指数になり、中を知らない人には読めなかった
-  // (利用者役⑬の観察)。1 億を超える桁だけは、有効数字 4 桁に丸める。
-  if (magnitude >= 1e8) return value.toPrecision(4);
+  // (利用者役⑬の観察)。1 億を超える桁は「1.50 億」のように位の言葉で書く
+  // (`readoutNumber`、パネルと同じ書き方)。
+  if (magnitude >= 1e8) return readoutNumber(value, 2);
   if (magnitude >= 1000) {
     return Math.round(value)
       .toString()
@@ -5425,7 +5431,14 @@ function setUpProbeGraph(): (
           ctx.lineTo(w, Math.round(zeroY) + 0.5);
           ctx.stroke();
           ctx.setLineDash([]);
-          outlined("0", w - 6, Math.min(bottom - 1, zeroY - 2), "#8b929c", "right");
+          // 「0」の文字は、上端・下端の目盛り(同じ右寄せ)と重ならないときだけ
+          // 書く。段が低いと「1.50 億 km」と「0」が重なって読めなかった
+          // (利用者役⑬、1280×720)。点線は残るので、0 の位置は分かる。
+          const zeroBaseline = Math.min(bottom - 1, zeroY - 2);
+          const TEXT_HEIGHT = 10;
+          if (zeroBaseline - TEXT_HEIGHT > top + 13 && zeroBaseline < bottom - 3 - TEXT_HEIGHT - 2) {
+            outlined("0", w - 6, zeroBaseline, "#8b929c", "right");
+          }
         }
         // 名前は自分の段の左上に置く。重ねて描かないので、上の線を隠さない。
         outlined(
@@ -5552,9 +5565,13 @@ function setUpProbeGraph(): (
       // `149597047014.36` のような読めない数字が並ぶ(利用者役②の観察)。
       // 目盛りと同じ整形にそろえる(`legendNumber` のdoc参照——右の
       // 「いまの数値」パネルと桁数が分かっている系列は、そこと同じ書式)。
+      // **英語の `max=` / `min=` を使わない**(利用者役⑬)。ずっと同じ値だった
+      // 線は、同じ数を 2 回並べずに「ずっと ◯」と言う。
       const legendText =
-        `${s.label}: max=${legendNumber(s, max)}${unitSuffix} ` +
-        `min=${legendNumber(s, min)}${unitSuffix}${suffix}`;
+        flatY !== null
+          ? `${s.label}: ずっと ${legendNumber(s, max)}${unitSuffix}${useLog ? " [log]" : ""}`
+          : `${s.label}: 最大 ${legendNumber(s, max)}${unitSuffix}・` +
+            `最小 ${legendNumber(s, min)}${unitSuffix}${suffix}`;
       if (drawHere) {
         outlined(legendText, 4, legendY, s.color);
         legendY += 13;
@@ -7528,12 +7545,10 @@ async function setUpSceneView(
       // **場のパネルの見出しは、画面に出る文字**。`|ψ|²` も `Ez` も
       // `V(x)` も、この実験で初めて量子や電磁波に触れる人には読めない
       // (利用者役の観察:「Ψ² のような数式記号や (256×128) の意味が全く
-      // 分からなかった」)。何が明るいのかを言葉で書き、元の記号は括弧で
-      // 添える——知っている人が見失わないように。ます目の数も「何のことか」
-      // を付ける。
-      fieldTitle.textContent =
-        `電子の見つかりやすさ(明るいほど見つかりやすい・|ψ|²)` +
-        ` — ${quantum2dSize[0]}×${quantum2dSize[1]} のます目で計算`;
+      // 分からなかった」)。何が明るいのかを言葉で書く。記号(|ψ|²・V(x))と
+      // ます目の数(「256×128 のます目で計算」)も括弧で添えていたが、それも
+      // 読めない言葉として挙げられた(利用者役⑬)ので、見出しは現象の言葉だけにする。
+      fieldTitle.textContent = "電子の見つかりやすさ(明るいほど見つかりやすい)";
       // ポテンシャル壁を暗く重ねたいが、まずは密度をそのまま出す
       // (壁は密度が 0 のまま残るので位置は読み取れる)。
       drawScalarField(
@@ -7552,18 +7567,14 @@ async function setUpSceneView(
     // コピーへ読み切っておく。
     const density = Float32Array.from(currentWorld.quantum_1d_density_f32());
     if (density.length > 0) {
-      fieldTitle.textContent =
-        `電子の見つかりやすさ(|ψ|²)と、越えられない坂の高さ(V(x))` +
-        ` — ${density.length} 点のます目で計算`;
+      fieldTitle.textContent = "電子の見つかりやすさと、越えられない坂の高さ";
       drawQuantum1d(density, currentWorld.quantum_1d_potential_f32());
       fieldPanel.hidden = false;
       return;
     }
     const fdtdSize = currentWorld.fdtd_size();
     if (fdtdSize.length === 2) {
-      fieldTitle.textContent =
-        `電波の強さ(Ez・赤と青は向きの違い)` +
-        ` — ${fdtdSize[0]}×${fdtdSize[1]} のます目で計算`;
+      fieldTitle.textContent = "電波の強さ(赤と青は向きの違い)";
       drawScalarField(
         currentWorld.fdtd_ez_f32(),
         fdtdSize[0],
@@ -10080,7 +10091,7 @@ async function setUpSceneView(
   for (const material of SPAWN_MATERIALS) {
     const option = document.createElement("option");
     option.value = material;
-    option.textContent = material;
+    option.textContent = materialLabel(material);
     spawnMaterialSelect.appendChild(option);
   }
 
@@ -11955,7 +11966,7 @@ async function setUpSceneView(
         });
         const option = document.createElement("option");
         option.value = name;
-        option.textContent = name;
+        option.textContent = materialLabel(name);
         spawnMaterialSelect.appendChild(option);
         spawnMaterialSelect.value = name;
       } catch (err) {
@@ -13073,7 +13084,8 @@ async function setUpSceneView(
     // 分ける(`style.css` の `.badge[data-mode]`)。
     const badgeMode = mode === "edit" ? "edit" : playing ? "playing" : "paused";
     playModeBadge.textContent =
-      badgeMode === "edit" ? "Edit" : badgeMode === "playing" ? "Playing" : "Paused";
+      // 英語の「Playing」がそのまま出ていた(利用者役⑬)。画面の言葉にそろえる。
+      badgeMode === "edit" ? "組み立て中" : badgeMode === "playing" ? "うごいています" : "とめています";
     playModeBadge.dataset.mode = badgeMode;
 
     if (!scrubbing) {
@@ -13443,6 +13455,7 @@ async function setUpSceneView(
     settledEverMoved: () => settledEverMoved,
     settlePending: () => settledAtTime === null && settledStillSince !== null,
     stageIsEmpty: () => sceneViewElement.dataset.stageEmpty === "true",
+    showsTrails: () => [...trails.values()].some((trail) => trail.count >= 2),
     materialNames: () => [...SPAWN_MATERIALS],
     // **課題B**: 材質ボタンの隣に添える摩擦係数。でっち上げず、Rust側の材質DB
     // (`material_properties_f64`、`materialsRef.current`と同じソース、
