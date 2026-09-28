@@ -73,6 +73,9 @@
     },
     {
       "body_speed": "ice_cube"
+    },
+    {
+      "body_mass": "ice_cube"
     }
   ]
 }

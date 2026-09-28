@@ -195,6 +195,8 @@ export type WorkspaceApi = {
    * 言っていた(利用者役⑬の観察)。
    */
   settlePending: () => boolean;
+  /** いまいちばん速く動いている点の速さ [m/s](回る物は表面の速さ)。 */
+  maxPointSpeed: () => number;
   /** 舞台に描くものが無いか(案内を出しているのと同じ判断)。 */
   stageIsEmpty: () => boolean;
   /** 舞台に「通った跡」の線が描かれているか(「ここを見る」で線の意味を言うため)。 */
@@ -1294,19 +1296,25 @@ export function setUpWorkspace(
   });
 
   document.addEventListener("keydown", (event) => {
-    const target = event.target as HTMLElement | null;
-    const typing =
-      target &&
-      (target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable);
-    if (typing && target?.id !== "palette-input") return;
-
+    // **「実験をさがす」は、どこにいても効く**。入力欄にいるあいだは近道を
+    // 全部見送っていたので、つまみ(横に動かす欄)を動かした直後——焦点が
+    // つまみに残っている——に Ctrl+K を押しても何も起きなかった(利用者役⑭)。
+    // Ctrl+K は文字を打つ操作とぶつからないので、先に見る。
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       openPalette();
       return;
     }
+    const target = event.target as HTMLElement | null;
+    // 文字を打つ欄だけを「入力中」とみなす(つまみ・チェックは打たない)。
+    const textLike =
+      target instanceof HTMLInputElement &&
+      !["range", "checkbox", "radio", "button", "submit", "reset", "color", "file"].includes(
+        target.type,
+      );
+    const typing =
+      target && (textLike || target.tagName === "TEXTAREA" || target.isContentEditable);
+    if (typing && target?.id !== "palette-input") return;
     if (!palette.hidden) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -1860,6 +1868,11 @@ export function setUpWorkspace(
     ownSceneStart = null; // 自分の場面の「はじめ」は、別の実験へ移ったら捨てる。
     knobValues = defaultKnobValues(experiment);
     cardOverrides.clear();
+    // **右の柱は、いちばん上から読み始める**。前の実験で下までスクロール
+    // していると、次の実験の「ここを見る」の上が隠れたまま始まった
+    // (利用者役⑭: 切り替え後も 166px 下のまま、見出しが画面の外)。
+    const contextScroll = document.getElementById("context-scroll");
+    if (contextScroll) contextScroll.scrollTop = 0;
     try {
       localStorage.setItem(LAST_EXPERIMENT_KEY, experiment.id);
     } catch {
@@ -2784,10 +2797,10 @@ export function setUpWorkspace(
         build: (body) => {
           const note = document.createElement("p");
           note.className = "card-note";
+          // 理由を中の仕組みの言葉(「場の中身そのものが記録された状態から
+          // 始まる」)で書いていて、意味が分からなかった(利用者役⑭)。
           note.textContent =
-            "この実験に変えられるつまみはありません——場の中身そのものが" +
-            "記録された状態から始まるので、途中の条件を差し替えられないためです。" +
-            "見どころは「ここを見る」に書いてあります。";
+            "この実験は、条件を変えずに見るだけの実験です。見どころは「ここを見る」に書いてあります。";
           body.appendChild(note);
         },
       });
@@ -2824,6 +2837,17 @@ export function setUpWorkspace(
       });
     }
 
+    // **「変えてみる」は「ここを見る」のすぐ下**。「いまの数値」や
+    // 「つないであるもの」の後ろに置いていたので、1280×720 では 16 実験中
+    // 9 つでつまみが最初の画面の下に隠れ、「電気の工作台」は 1440×900 でも
+    // 見えなかった(利用者役⑭「さわる」)。条件を変える → 結果を読む、の
+    // 順に並べる(「みる」では畳んだ見出し 1 行なので、数値は押し下げない)。
+    const knobsAt = specs.findIndex((spec) => spec.id === "knobs");
+    const watchAt = specs.findIndex((spec) => spec.id === "watch");
+    if (knobsAt > watchAt + 1 && watchAt >= 0) {
+      const [knobsSpec] = specs.splice(knobsAt, 1);
+      specs.splice(watchAt + 1, 0, knobsSpec);
+    }
     for (const spec of specs) contextBody.appendChild(buildCard(spec));
     // 用意された実験の上でも、「これを消す」と同じ足場で「足す」ができる
     // ようにする(`addBodyCard`のdoc参照)。
@@ -3925,9 +3949,10 @@ export function setUpWorkspace(
         // 電気の工作台)にまで m/s の行が出て、永久に「まだ止まっていません」と
         // 言い続けるようになっていた(実測・利用者役⑪)。動ける物が無いなら、
         // 止まる・止まらないという問い自体が無い。
+        const askable = current?.askSettled !== false;
         const movable = api.movableBodyCount() > 0;
         const readyToTell =
-          settledAt !== null || (movable && seconds > SETTLED_TELL_AFTER_SECONDS);
+          askable && (settledAt !== null || (movable && seconds > SETTLED_TELL_AFTER_SECONDS));
         settledKey.hidden = !readyToTell;
         settledNode.hidden = !readyToTell;
         if (settledAt !== null) {
@@ -3938,8 +3963,14 @@ export function setUpWorkspace(
           // 25°の坂では箱が 0.00 m/s のまま張り付いているのに「まだ止まって
           // いません」と出ていて、すぐ上の速さと矛盾して読めた(実測・
           // 利用者役⑪)。動き出していないなら、そう言う。
+          // **ゆっくりでも動き続けている物を「動いていない」と言わない**。
+          // 「動いた」と数えるのは 0.2 m/s を超えてからなので、強い磁石で
+          // 0.016 m/s で落ち続ける磁石や、2 rad/s で回るクランクに「はじめから
+          // 動いていません」と出ていた(利用者役⑭)。
           settledNode.textContent = !everMoved
-            ? "はじめから動いていません"
+            ? api.maxPointSpeed() > 1e-3
+              ? "ゆっくり動き続けています"
+              : "はじめから動いていません"
             : api.settlePending()
               ? "止まりかけています…"
               : "まだ止まっていません";
@@ -4033,6 +4064,18 @@ export function setUpWorkspace(
               const at = i - lag;
               if (at >= 0 && at < source.length && Number.isFinite(source[at])) {
                 peak = Number.isNaN(peak) ? source[at] : Math.max(peak, source[at]);
+                // **頂点を過ぎたら、その時点で決まる**。跳ね返りの頂点は着地と
+                // 着地のあいだに 1 つだけなので、下り始めた時点で最大値はもう
+                // 変わらない。2 回目の着地まで待っていたので、目で頂点を見てから
+                // 2.6 秒も「まだです」だった(利用者役⑭: 50 m から落として
+                // 5.75 秒で頂点、数字が出たのは 8.35 秒)。
+                // 着地の直後はまだ少し沈むことがあるので、いちど床から
+                // 離れて(`rose`)から下り始めたときだけ頂点とみなす。
+                const drop = peak - source[at];
+                if (rose && drop > Math.max(Math.abs(peak) * 0.01, 1e-3)) {
+                  phase = "done";
+                  break;
+                }
               }
               if (t > gate * 1.2) rose = true;
               else if (rose && t <= gate) {
@@ -4042,7 +4085,7 @@ export function setUpWorkspace(
             }
             // **上りきるまでは数字を出さない**。登っている途中の値を出すと、
             // 読むたびに増えていく数字になる(実測: 1.29 m → 1.30 m)。
-            // 「1 回目に跳ね返った高さ」は、下りてくるまで決まらない。
+            // 「1 回目に跳ね返った高さ」は、下り始めたところで決まる。
             if (phase !== "done" || Number.isNaN(peak)) {
               node.textContent = "まだです";
               continue;
@@ -4074,7 +4117,11 @@ export function setUpWorkspace(
               ? "もう在りません"
               : readout.format
                 ? readout.format(shown)
-                : `${readoutNumber(shown, readout.digits ?? 2)}${readout.unit ? ` ${readout.unit}` : ""}`;
+                : readout.tiny !== "fraction" &&
+                    shown !== 0 &&
+                    Math.abs(shown) < 0.5 * 10 ** -(readout.digits ?? 2)
+                  ? `ほぼ 0${readout.unit ? ` ${readout.unit}` : ""}`
+                  : `${readoutNumber(shown, readout.digits ?? 2)}${readout.unit ? ` ${readout.unit}` : ""}`;
         }
       }
 

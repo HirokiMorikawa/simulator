@@ -64,6 +64,14 @@ export type Readout = {
   /** 単位変換込みの整形(例: ケルビン → ℃)。 */
   format?: (value: number) => string;
   /**
+   * **書いた桁に現れないほど小さい値の書き方**。既定は「ほぼ 0」——止まった
+   * 箱の速さ 5×10⁻⁷ m/s を「約 199 万分の 1 m/s」と書いても、言いたいのは
+   * 0 だということが伝わらなかった(利用者役⑭)。小ささそのものが見どころの
+   * 量(トンネル効果で通り抜けた割合)だけ `"fraction"` にして
+   * 「約 1140 万分の 1」と書く。
+   */
+  tiny?: "fraction";
+  /**
    * **グラフに描くときの単位**。表の数字が ℃ なのにグラフだけ生のケルビン
    * (300 台の無単位の数)で、同じ量だと気付けなかった(利用者役②の観察)。
    * `format` を持つ読み値は、ここで同じ変換をグラフ側にも渡す。
@@ -249,6 +257,13 @@ export type Experiment = {
    * なぜ電池?」としか読めない(利用者役⑬)。そういう実験は「しらべる」(2)から。
    */
   circuitReveal?: number;
+  /**
+   * **「ほぼ止まった時刻」を問わない**(`false`)。この問いは固い物が止まるか
+   * どうかを見るもので、主役が流れ・水の場面では、柱や氷が止まっていても
+   * 流れは動いている——「はじめから動いていません」と出て、画面と食い違った
+   * (利用者役⑭: 乱れが消えていく・氷が水に変わる)。
+   */
+  askSettled?: false;
   /** どこを見れば現象が見えるか。 */
   view: "3d" | "graph" | "field";
   /** 1 秒あたりに進める step 数(モジュール冒頭の doc 参照)。 */
@@ -691,12 +706,18 @@ export const GUIDED_CATEGORIES: Category[] = [
         blurb: "積み上げた箱が崩れずに立っていられるかを見ます。",
         watch: [
           "ぶつかり合いが落ち着けば、数秒でぴたりと止まります。",
-          "「いちばん上の箱の速さ」が 0 に落ち着けば成功です。",
+          // 「いちばん上の箱の速さが 0 に落ち着けば成功」と書いていたが、崩れた
+          // 塔の箱も床の上で止まれば 0 になり、16 段がばらばらに崩れたのに
+          // 「成功」と読めた(利用者役⑭)。立っているかどうかは高さで分かる。
+          "まっすぐ積んだ塔は、何段でも立ったままです。いちばん上の箱の高さが「段数 − 0.5 m」のままなら、崩れずに立っています。",
           "段数を増やすほど、静まるまでに時間がかかります。",
         ],
         view: "3d",
-        pace: 120,
+        // 1 step を 1/480 秒にしている(下の `apply` のdoc参照)ので、実時間で
+        // 見えるよう 1 秒に 480 step 進める。
+        pace: 480,
         readouts: [
+          { probe: 3, label: "いちばん上の箱の高さ", unit: "m", digits: 2 },
           { probe: 2, label: "いちばん上の箱の速さ", unit: "m/s", digits: 3 },
         ],
         series: { 0: "1 段目の速さ", 1: "2 段目の速さ" },
@@ -713,25 +734,33 @@ export const GUIDED_CATEGORIES: Category[] = [
             step: 1,
             unit: "段",
             value: 3,
-            hint: "高く積むほど崩れやすくなります。",
+            hint: "高く積んでも、まっすぐなら立ったままです。静まるまでの時間が長くなります。",
             apply: (scene, value) => {
               const floors = Math.max(2, Math.trunc(Number(value)));
               const ground = scene.bodies?.[0];
               const boxes = [];
+              // **隙間なく積み、細かい刻みで解く**。1 cm ずつ隙間を空けて置き、
+              // 1/120 秒刻みで解いていたので、全部の箱が同時に 1 cm 落ちる衝突を
+              // 解ききれず、何も当てていない塔が 8 段で崩れていた(実測: 8 段で
+              // 0.95 m、16 段で 5.9 m 横へずれる)。隙間なし・1/480 秒刻みなら
+              // 16 段でも 0.012 m しかずれない。まっすぐ積んだ塔は物理として
+              // 立っているものなので、それが立つように解く。
               for (let i = 0; i < floors; i += 1) {
                 boxes.push({
                   shape: { box: { half: [0.5, 0.5, 0.5] } },
                   material: "鋼(炭素鋼)",
-                  position: [0, 0.5 + i * 1.01, 0],
+                  position: [0, 0.5 + i * 1.0, 0],
                   name: `box${i + 1}`,
                 });
               }
               scene.bodies = ground ? [ground, ...boxes] : boxes;
-              // プローブは「1 段目・2 段目・いちばん上」を見る。
+              scene.world = { ...(scene.world ?? {}), dt: 1 / 480 };
+              // プローブは「1 段目・2 段目・いちばん上」の速さと、いちばん上の高さ。
               scene.probes = [
                 { body_speed: "box1" },
                 { body_speed: "box2" },
                 { body_speed: `box${floors}` },
+                { body_pos_y: `box${floors}` },
               ];
             },
           },
@@ -896,7 +925,7 @@ export const GUIDED_CATEGORIES: Category[] = [
             kind: "choice",
             options: [
               { label: "🌍 地球", value: 9.80665 },
-              { label: "🌕 月", value: 1.62 },
+              { label: "🌙 月", value: 1.62 },
               { label: "🪐 木星", value: 24.79 },
               { label: "🚀 無重力", value: 0 },
             ],
@@ -932,7 +961,7 @@ export const GUIDED_CATEGORIES: Category[] = [
             kind: "choice",
             options: [
               { label: "🌍 地球", value: 9.80665 },
-              { label: "🌕 月", value: 1.62 },
+              { label: "🌙 月", value: 1.62 },
               { label: "🪐 木星", value: 24.79 },
               { label: "🚀 無重力", value: 0 },
             ],
@@ -954,6 +983,12 @@ export const GUIDED_CATEGORIES: Category[] = [
         watch: [
           "垂れた形は「懸垂線(カテナリー)」——放物線とよく似た別の曲線です。",
           "ゆらゆら揺れたあと、静かな形に落ち着きます。",
+          // 重力のつまみが効いていなかった(ロープは自分の重力を持っていて、
+          // 世界の重力だけ変えても変わらなかった——利用者役⑭)。直したうえで、
+          // 落ち着いた形そのものは重力の強さによらない(伸びないロープの
+          // 懸垂線は重さの比だけで決まる)ことを先に言う。違いが出るのは
+          // 落ち着くまでの速さと、無重力で垂れないこと。
+          "落ち着いた形は、重力が強くても弱くても同じです。変わるのは落ち着くまでの速さで、無重力なら垂れません。",
         ],
         view: "3d",
         pace: 120,
@@ -964,14 +999,18 @@ export const GUIDED_CATEGORIES: Category[] = [
             kind: "choice",
             options: [
               { label: "🌍 地球", value: 9.80665 },
-              { label: "🌕 月", value: 1.62 },
+              { label: "🌙 月", value: 1.62 },
               { label: "🪐 木星", value: 24.79 },
               { label: "🚀 無重力", value: 0 },
             ],
             value: 9.80665,
-            hint: "重力が弱いほど、ゆっくり落ちます。",
+            hint: "重力が弱いほど、ゆっくり垂れていきます。無重力なら垂れません。",
             apply: (scene, value) => {
               scene.world = { ...(scene.world ?? {}), gravity: Number(value) };
+              // ロープ(やわらかい物)は自分の重力を状態として持っているので、
+              // そちらも合わせる(水を注ぐの SPH と同じ)。
+              const soft = scene.soft_body as { raw_state?: Record<string, unknown> } | undefined;
+              if (soft?.raw_state) soft.raw_state.gravity = [0, -Number(value), 0];
             },
           },
         ],
@@ -1010,7 +1049,7 @@ export const GUIDED_CATEGORIES: Category[] = [
             kind: "choice",
             options: [
               { label: "🌍 地球", value: 9.80665 },
-              { label: "🌕 月", value: 1.62 },
+              { label: "🌙 月", value: 1.62 },
               { label: "🪐 木星", value: 24.79 },
             ],
             value: 9.80665,
@@ -1093,12 +1132,29 @@ export const GUIDED_CATEGORIES: Category[] = [
           // だけだった(実測)。**できないことを、できるように書かない**。
           "はじめに与えた流れが柱にぶつかって乱れ、その乱れがだんだん消えていきます。",
           "グラフの「上下の揺れの強さ」が下がっていく速さを見てください。",
-          "ねばりが小さいほど、乱れは長く残ります。",
+          // 「ねばりが小さいほど長く残る」とだけ書いていたが、はじめの 15 秒は
+          // とろとろの揺れがいちばん大きく、利用者役⑭は「説明と逆」と読んだ。
+          // 実測(35 秒): とろとろ 0.026 → 0.0011 と減り続けていちばん静かになる。
+          // さらさら・ふつうはすぐ 0.003〜0.006 まで下がるが、そこから消えず、
+          // 26〜31 秒でまた 0.1 ほどに戻る。見えるとおりに書く。
+          "ねばりが大きい(とろとろ)と、はじめの揺れは大きいものの、止まらずに減り続け、30 秒ほどでいちばん静かになります。",
+          "ねばりが小さい(さらさら)と、揺れはすぐ小さくなりますが、そこから消えずに残り、ときどき大きく戻ってきます。",
           "旗がはためくのも、電線が唸るのも、流れと物のこういうやり取りです。",
         ],
-        watchTouch: ["ねばりはつまみで変えられます。小さくすると乱れが長く残るのを比べてみてください。"],
+        watchTouch: ["ねばりはつまみで変えられます。30 秒ほど眺めて、揺れが静まっていくかどうかを比べてみてください。"],
+        askSettled: false,
         view: "graph",
         pace: 120,
+        // **柱は動かない**。場面ファイルの柱は自由に動ける箱で、重力を切って
+        // あるため、ねばりの強い流れ(とろとろ)では流れに引きずられて 10 秒で
+        // 15 cm 流され、その動く箱が水をかき混ぜ続けた。結果、説明の「ねばる
+        // ほど早く消える」と逆に、とろとろがいちばん長く揺れた(利用者役⑭の
+        // 実測: 12 秒で 0.0118、さらさら 0.0059)。柱は地面に立っているものと
+        // して固定する。
+        prepare: (scene) => {
+          const pillar = body(scene, "obstacle");
+          if (pillar) pillar.mass_override = 1000;
+        },
         knobs: [
           {
             id: "viscosity",
@@ -1110,7 +1166,7 @@ export const GUIDED_CATEGORIES: Category[] = [
               { label: "とろとろ(油)", value: 1e-2 },
             ],
             value: 1e-4,
-            hint: "ねばるほど渦は早く消えます。さらさらなら長く回り続けます。",
+            hint: "とろとろは揺れが減り続けて静まり、さらさらは小さな揺れがいつまでも残ります(30 秒ほど見比べてください)。",
             apply: (scene, value) => {
               const fluid = scene.grid_fluid as
                 | { raw_state?: Record<string, unknown> }
@@ -1192,6 +1248,8 @@ export const GUIDED_CATEGORIES: Category[] = [
             max: 340,
             step: 5,
             unit: "K",
+            // 画面では ℃ で見せる(K は中学校で使わない目盛り、利用者役⑭)。値そのもの(K)は変えない。
+            display: (value) => `${(Number(value) - 273.15).toFixed(0)} ℃`,
             value: 300,
             hint: "下が熱いほど強い上昇流ができます(まわりは 293 K)。",
             apply: (scene, value) => {
@@ -1450,7 +1508,11 @@ export const GUIDED_CATEGORIES: Category[] = [
         title: "氷が融ける",
         blurb: "飲み物に浮かべた氷が融けて小さくなります。",
         watch: [
-          "融けて軽くなるにつれ、氷が浮き上がってきます。",
+          // **融けても 9 割が沈んだまま、小さくなる**。もとは質量だけが減って
+          // 形が変わらず、「浮き上がってきます」と書いていた——半分融けると
+          // 体の 8 割が水の上に出る、本物の氷ではありえない姿だった(利用者役⑭。
+          // 形も縮むように直した、`sim_coupling::PhaseChangeMorph`)。
+          "融けるにつれ、氷が小さくなっていきます。どれだけ小さくなっても、9 割が水に沈んだまま浮いています(氷は水より 1 割軽いので)。",
           // **約束した現象が、数字に現れるようにした**(進行管理役の実測)。
           // もとは飲み物の熱容量が 200000 J/K ——水にすると 48 kg で、0.9 kg の
           // 氷を一杯のドリンクではなく風呂に浮かべているのと同じだった。
@@ -1459,13 +1521,14 @@ export const GUIDED_CATEGORIES: Category[] = [
           // 実際に読める数字で書く(`scenes/d18-ice-in-drink.json`)。
           "氷を融かすのに熱を使うので、飲み物は冷えていきます"
             + "(76.9 ℃ → 40 秒で 64.5 ℃ → 融け切って 56.2 ℃)。",
-          "1 分ちょっとで融け切り、「氷の高さ」が「もう在りません」に変わります。",
-          // 氷が上下に揺れ続けるのを「壊れている」と読まれた(利用者役③の
-          // 観察。実測でも 45 秒たっても振幅が減らない)。この計算に入って
-          // いるのは浮力だけで、**水の抵抗が入っていない**——だから揺れは
-          // 減らない。無いものを在るように書かない。
-          "上下の揺れが止まらないのは、この計算に水の抵抗を入れていないからです(浮力だけを解いています)。本物の水なら数秒で収まります。",
+          // 「上下の揺れが止まらないのは水の抵抗を入れていないから」と書いて
+          // いたが、水の抵抗は入った(⑬、`sim_fluid::drag_force_submerged_box`)
+          // ので、揺れはもう起きない。無いものを在るように書かない。
+          "1 分ちょっとで融け切り、「残っている氷」が 0 % になります。",
         ],
+        // 融けていく氷は「止まる」物ではない(ゆっくり動き続ける)ので、
+        // 「ほぼ止まった時刻」の問いを出さない(利用者役⑭)。
+        askSettled: false,
         view: "graph",
         pace: 240,
         knobs: [
@@ -1485,7 +1548,7 @@ export const GUIDED_CATEGORIES: Category[] = [
             // つまみの値そのもの(シーンに渡る K)は変えず、見せ方だけ ℃ にする(利用者役⑬)。
             display: (value) => `${(Number(value) - 273.15).toFixed(0)} ℃`,
             value: 350,
-            hint: "温かいほど速く融けます(273 K = 0 ℃ より下では融けません)。",
+            hint: "温かいほど速く融けます(0 ℃ より下では融けません)。",
             apply: (scene, value) => {
               const thermal = scene.thermal as
                 | { ambient_temperature?: number; nodes?: { temperature?: number }[] }
@@ -1497,7 +1560,15 @@ export const GUIDED_CATEGORIES: Category[] = [
           },
         ],
         readouts: [
-          { probe: 0, label: "氷の高さ", unit: "m", digits: 3 },
+          // **融け具合そのものを読む**。読めたのは「氷の高さ」(水面を 0 と
+          // した重心の高さ、はじめ -0.040 m)だけで、負の高さが何なのか、
+          // 融けたのかどうかが分からなかった(利用者役⑭)。はじめの 0.9 kg に
+          // 対する割合で言う。
+          {
+            probe: 3,
+            label: "残っている氷",
+            format: (kg) => `${Math.max(0, Math.round((kg / 0.9) * 100))} %`,
+          },
           { probe: 1, label: "飲み物の温度", format: celsius(), graph: CELSIUS_GRAPH },
         ],
       },
@@ -1579,10 +1650,13 @@ export const GUIDED_CATEGORIES: Category[] = [
         // だけを案内に書く。
         blurb: "氷が周りから熱を奪って融け、跡形もなく消えます。",
         watch: [
-          "氷は最後まで同じ大きさのまま、その場でじっとしています(融けても縮んでは見えません)。",
-          "融け切ると跡形もなく消え、「氷の高さ」が「もう在りません」に変わります。",
+          // 形も縮むように直した(利用者役⑭、`sim_coupling::PhaseChangeMorph`)ので、
+          // 「同じ大きさのまま(縮んでは見えません)」はもう言わない。
+          "融けたぶんだけ、氷が小さくなっていきます(「残っている氷」が減っていきます)。",
+          "融け切ると跡形もなく消え、「残っている氷」が 0 % になります。",
           "そのぶん熱を奪われて、「まわりの温度」がゆっくり下がっていきます。",
         ],
+        askSettled: false,
         view: "3d",
         // 現実の速さを目標にする。重い計算で届かない分は、1 コマの計算時間の上限
         // (main.ts `STEP_TIME_BUDGET_MS`)が画面のなめらかさを守り、届いた速さは
@@ -1598,7 +1672,11 @@ export const GUIDED_CATEGORIES: Category[] = [
             max: 360,
             step: 5,
             unit: "K",
-            value: 350,
+            // 画面では ℃ で見せる(K は中学校で使わない目盛り、利用者役⑭)。値そのもの(K)は変えない。
+            display: (value) => `${(Number(value) - 273.15).toFixed(0)} ℃`,
+            // 350 K では 20 秒見ても見た目が変わらなかった(利用者役⑭)。
+            // 開いて 20 秒のうちに融けていくのが見える温度から始める。
+            value: 360,
             hint: "温かいほど速く融けます。",
             apply: (scene, value) => {
               const thermal = scene.thermal as
@@ -1611,7 +1689,12 @@ export const GUIDED_CATEGORIES: Category[] = [
           },
         ],
         readouts: [
-          { probe: 0, label: "氷の高さ", unit: "m", digits: 3 },
+          // 「氷の高さ」では融け具合が読めなかった(「氷が融ける」と同じ、利用者役⑭)。
+          {
+            probe: 2,
+            label: "残っている氷",
+            format: (kg) => `${Math.max(0, Math.round((kg / 0.9) * 100))} %`,
+          },
           { probe: 1, label: "まわりの温度", format: celsius(), graph: CELSIUS_GRAPH },
         ],
       },
@@ -2006,14 +2089,18 @@ export const GUIDED_CATEGORIES: Category[] = [
         knobs: [
           {
             id: "speed",
-            label: "投入する速さ",
+            // **「1 倍」は円軌道の速さ**(「惑星が太陽を回る」と同じ意味)。以前は
+            // 場面ファイルの速さ(= 円軌道の 0.9 倍)を 1 倍と呼んでいたので、
+            // 同じ「1 倍」なのに片方は円、片方はつぶれた楕円になり、1.1 倍で
+            // やっと円に近づいた(利用者役⑭)。
+            label: "投入する速さ(円軌道の速さ = 1)",
             kind: "range",
             min: 0.6,
             max: 1.3,
             step: 0.05,
             unit: "倍",
-            value: 1,
-            hint: "遅いほどつぶれた楕円に、速いほど外へ膨らみます。",
+            value: 0.9,
+            hint: "1 倍がちょうど円軌道。遅いほどつぶれた楕円に、速いほど外へ膨らみます。",
             apply: (scene, value) => {
               const astro = scene.astro as
                 | { bodies?: { velocity?: number[] }[] }
@@ -2023,7 +2110,8 @@ export const GUIDED_CATEGORIES: Category[] = [
               // 元の速さを基準に掛ける(つまみを 1 に戻せば元の軌道へ戻る)。
               const base = BASE_VELOCITY.get(moving) ?? [...moving.velocity];
               BASE_VELOCITY.set(moving, base);
-              moving.velocity = base.map((v) => v * Number(value));
+              // 場面ファイルの速さは円軌道の 0.9 倍(`blurb` の「1 割遅い」)。
+              moving.velocity = base.map((v) => (v / 0.9) * Number(value));
             },
           },
         ],
@@ -2203,24 +2291,30 @@ export const GUIDED_CATEGORIES: Category[] = [
           // 距離を「億 km」で書いていたので、実際は 0.5 前後で動いている値が
           // 「0.000 億 km」に潰れ、しらべる人には何も読めなかった(利用者役③の
           // 観察)。この場面は縮尺を落とした模型なので、そう書いて素の値を出す。
-          "この場面は縮尺を落とした模型です(光の速さも 100)。距離や速さは、その世界での値としてお読みください。",
+          "この場面は縮尺を落とした模型です(光の速さも 20 と、とても遅くしてあります)。距離や速さは、その世界での値としてお読みください。",
+          // 以前は光の速さ 100(つまみの下限でも 40)で、1 周あたり 0.14°(0.9°)
+          // しか回らず、1 周に 8 秒かかっていた——15 秒見ても楕円 1 つにしか
+          // 見えなかった(利用者役⑭)。光の速さを下げ、速く回して、20 秒で
+          // 向きが回っていくのが通った跡の線で見えるようにする。
+          "通った跡の線が、少しずつ向きを変えた楕円を重ねて、花びらのような形になっていきます。",
         ],
         view: "graph",
         // 現実の速さを目標にする。重い計算で届かない分は、1 コマの計算時間の上限
         // (main.ts `STEP_TIME_BUDGET_MS`)が画面のなめらかさを守り、届いた速さは
         // 「実際は ×◯」が言う。以前は低く据えていて、20 秒眺めても現象が進まなかった
         // (利用者役⑬)。
-        pace: 960,
+        // 2 体だけの軽い計算なので、1 周 2 秒ほどで回す。
+        pace: 4000,
         knobs: [
           {
             id: "light",
             label: "光の速さ",
             kind: "range",
-            min: 40,
-            max: 200,
-            step: 10,
+            min: 10,
+            max: 60,
+            step: 5,
             unit: "(この世界での値)",
-            value: 100,
+            value: 20,
             hint: "光が遅い世界ほど相対論の効きが強く、軌道の向きが速く回ります。",
             apply: (scene, value) => {
               const astro = scene.astro as
@@ -2282,6 +2376,10 @@ export const GUIDED_CATEGORIES: Category[] = [
           "波が壁に当たると、跳ね返る波と通り抜ける波に分かれます。",
           "「通り抜けた割合」が 0 より大きくなります(トンネル効果)。",
           "全体の量は常にちょうど 1 のまま——確率は消えません。",
+          // 通り抜けた割合が 0.29 から 0.19 へ下がり、理由が書いていなかった
+          // (利用者役⑭)。通り抜けた波が向こうの端で跳ね返り、また壁を
+          // 通って戻ってくるため。
+          "しばらくすると割合は少し下がります——通り抜けた波が向こうの端で跳ね返り、一部がまた壁を通って戻ってくるからです。",
         ],
         view: "field",
         // 現実の速さを目標にする。重い計算で届かない分は、1 コマの計算時間の上限
@@ -2290,7 +2388,7 @@ export const GUIDED_CATEGORIES: Category[] = [
         // (利用者役⑬)。
         pace: 600,
         readouts: [
-          { probe: 3, label: "通り抜けた割合", digits: 4 },
+          { probe: 3, label: "通り抜けた割合", digits: 4, tiny: "fraction" },
           { probe: 0, label: "全体の量(常に 1)", digits: 6 },
         ],
       },
@@ -2382,14 +2480,46 @@ export const GUIDED_CATEGORIES: Category[] = [
         title: "磁石が生まれる",
         blurb: "小さな磁石の向きが、ある温度で一斉に揃います。",
         watch: [
-          "「磁化」が 0 付近から離れて、大きな値へ落ち着きます。",
-          "温度がある一点(キュリー温度)を下回ると起きる相転移です。",
+          "小さな磁石の「揃い具合」が 0 付近から上がり、1 に近い値へ落ち着きます。",
+          // 以前は符号つきの磁化を出していたので、+0.91 → -0.92 → +0.92 …と
+          // 行ったり来たりして「落ち着く」に見えなかった(利用者役⑭)。揃った
+          // 塊ごとまとめて向きを入れ替える計算なので、全体の向きは入れ替わるが、
+          // どちら向きでも同じ「揃った状態」。揃い具合(向きを問わない大きさ)を出す。
+          "全体が上向きに揃うか下向きに揃うかは、そのときどきで入れ替わります——どちら向きでも同じ「揃った状態」です。",
+          "温度がある一点(キュリー温度、この計算の目盛りで 2.27)を下回ると起きる相転移です。上回ると揃いません。",
           "鉄が磁石になれる理由そのものです。",
         ],
         view: "graph",
-        pace: 60,
+        // 揃っていく様子が見えるよう、ゆっくり進める。以前(60)は開いて最初に
+        // 読めた値がもう 0.89 で、「0 付近から上がる」ところが見えなかった。
+        pace: 6,
+        knobs: [
+          {
+            id: "temperature",
+            label: "温度",
+            kind: "choice",
+            options: [
+              { label: "❄️ 低い (1.5)", value: 1.5 },
+              { label: "🙂 ふつう (2.0)", value: 2.0 },
+              { label: "🌡️ キュリー温度 (2.27)", value: 2.27 },
+              { label: "🔥 高い (3.0)", value: 3.0 },
+            ],
+            value: 2.0,
+            hint: "キュリー温度より低いと揃い、高いと揃いません。ちょうどその温度では、揃いかけては崩れます。",
+            apply: (scene, value) => {
+              const ising = scene.ising as { raw_state?: Record<string, unknown> } | undefined;
+              if (ising?.raw_state) ising.raw_state.temperature = Number(value);
+            },
+          },
+        ],
         readouts: [
-          { probe: 0, label: "磁化(揃い具合)", digits: 4 },
+          {
+            probe: 0,
+            probes: [0],
+            derive: ([m]) => Math.abs(m),
+            label: "揃い具合(0 〜 1)",
+            digits: 3,
+          },
           { probe: 1, label: "1 個あたりのエネルギー", digits: 4 },
         ],
       },
@@ -2421,10 +2551,13 @@ export const GUIDED_CATEGORIES: Category[] = [
             id: "temperature",
             label: "水の温度",
             kind: "range",
-            min: 250,
+            // 250 K(−23 ℃)の「水」は凍っている温度なので、2 ℃ から。
+            min: 275,
             max: 360,
             step: 10,
             unit: "K",
+            // 画面では ℃ で見せる(K は中学校で使わない目盛り、利用者役⑭)。値そのもの(K)は変えない。
+            display: (value) => `${(Number(value) - 273.15).toFixed(0)} ℃`,
             // 250 から 10 きざみの目盛りに乗る値にする(上と同じ理由)。
             value: 290,
             hint: "温度が高いほど分子の蹴り方が強くなり、粒はよく動きます。",
@@ -2503,6 +2636,10 @@ export const GUIDED_CATEGORIES: Category[] = [
         readouts: [
           { probe: 0, label: "進んだ距離", unit: "m", digits: 2 },
           { probe: 2, label: "車の速さ", unit: "m/s", digits: 2 },
+          // サスペンションのつまみが効くのは車体の沈み方で、距離と速さはほとんど
+          // 変わらない(利用者役⑭の実測: 1.5 Hz と 6 Hz で 7 秒後 6.60 m と 6.65 m)。
+          // つまみの効きが読める量を出す。
+          { probe: 1, label: "車体がいちばん沈んだ高さ", extreme: "min", unit: "m", digits: 3 },
         ],
       },
     ],
@@ -2522,7 +2659,9 @@ export const GUIDED_CATEGORIES: Category[] = [
           "材質を変えると、跳ね方も転がり方も変わります。",
           "重力を月にすると、ゆっくり落ちて高く跳ねます。",
         ],
-        watchTouch: ["つまみを動かして「はじめから」を押すと、すぐ試せます。"],
+        // つまみを動かすと自動でやり直すので、「はじめから」を押す必要は無い
+        // (「押すと」と書いていて、押す必要があるのか迷わせた、利用者役⑭)。
+        watchTouch: ["つまみを動かすと、その設定ですぐ最初からやり直します。"],
         view: "3d",
         pace: 240,
         readouts: [{ probe: 0, label: "高さ", unit: "m", digits: 3 }],
@@ -2663,7 +2802,10 @@ export const GUIDED_CATEGORIES: Category[] = [
             bodies.push({
               shape: { box: { half: [0.4, 0.4, 0.4] } },
               material,
-              position: [0, 0.4 + i * 0.81, 0],
+              // 隙間なく積む(「積み木を積む」の `apply` のdoc参照)。1 cm の
+              // 隙間を空けていたので、球の速さ 0 でも 10 段が勝手に崩れた
+              // (利用者役⑭)。この刻み(1/240 秒)と箱なら 10 段まで立つ。
+              position: [0, 0.4 + i * 0.8, 0],
               name: `box${i + 1}`,
             });
           }

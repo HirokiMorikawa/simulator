@@ -184,6 +184,48 @@ impl Shape {
         }
     }
 
+    /// ローカル原点を中心に、形を**相似のまま** `factor` 倍にした形状
+    /// (融けて小さくなる氷のように、形はそのまま大きさだけが変わる物に使う)。
+    /// 無限平面は大きさを持たないので変えない。
+    pub fn scaled(&self, factor: f64) -> Shape {
+        match self {
+            Shape::Sphere { radius } => Shape::Sphere {
+                radius: radius * factor,
+            },
+            Shape::Box { half_extents } => Shape::Box {
+                half_extents: half_extents.scale(factor),
+            },
+            Shape::Capsule {
+                radius,
+                half_height,
+            } => Shape::Capsule {
+                radius: radius * factor,
+                half_height: half_height * factor,
+            },
+            Shape::Plane { normal, d } => Shape::Plane {
+                normal: *normal,
+                d: *d,
+            },
+            Shape::Compound { children } => Shape::Compound {
+                children: children
+                    .iter()
+                    .map(|(transform, child)| {
+                        (
+                            sim_math::Transform {
+                                position: transform.position.scale(factor),
+                                rotation: transform.rotation,
+                            },
+                            child.scaled(factor),
+                        )
+                    })
+                    .collect(),
+            },
+            Shape::ConvexMesh { vertices } => Shape::ConvexMesh {
+                vertices: vertices.iter().map(|v| v.scale(factor)).collect(),
+            },
+        }
+    }
+
     /// 体積(質量 = 密度 × 体積の算出に使う)。`Plane`は無限平面(static専用)、
     /// 空の`ConvexMesh`は実体が無いため `None`。
     ///

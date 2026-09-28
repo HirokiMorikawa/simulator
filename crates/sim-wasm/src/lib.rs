@@ -945,6 +945,26 @@ impl WasmWorld {
         )
     }
 
+    /// いまの形が、置いたときの形(`base_shape`)の何倍の大きさか(体積比の立方根)。
+    /// 融けて小さくなる氷(`PhaseChangeMorph`)は計算の中で形が縮むので、
+    /// 画面の側はこれを見て描く大きさを合わせる——読まないと、計算では 4 割に
+    /// 縮んだ氷が画面では元の大きさのまま浮いて見える(利用者役⑭)。
+    /// 大きさを持たない形(平面)や読めない形は 1。
+    fn body_size_ratio_at_impl(&self, index: usize) -> Result<f64, WasmError> {
+        let id = self.try_body_id_at(index)?;
+        let base = self.try_body_meta_at(index)?.base_shape.volume();
+        let now = self
+            .inner
+            .mechanics()
+            .bodies
+            .shape_of(id.index as usize)
+            .volume();
+        Ok(match (base, now) {
+            (Some(base), Some(now)) if base > 0.0 && now > 0.0 => (now / base).cbrt(),
+            _ => 1.0,
+        })
+    }
+
     /// `index`番目のボディの、入れ子構造も含めた完全な形状記述をシーンJSON
     /// 形式(`ShapeJson`を`serde_json`でシリアライズした文字列)で返す。
     /// **6形状すべてを無損失に表現できる唯一の読み出し口**であり、フロント側は
@@ -1466,11 +1486,19 @@ impl WasmWorld {
     /// `probe_index`は`scenario.probes`配列内でのインデックス(`prediction_prompts
     /// [].probe_index`と同じ添字系)。範囲外、または該当プローブの履歴がまだ
     /// 1件も無い(1stepも進んでいない)場合は0.0を返す。
+    /// プローブの最新の値。**まだ 1 度も記録していなければ、いまの状態から読む**。
+    /// 止めたままつまみを動かすと場面は t=0 で組み直され、step を進めるまで
+    /// 記録が空のまま——以前はそこで 0 を返していたので、「ボールの高さ」が
+    /// 高いところにボールが見えているのに -0.30 m(0 から球の半径を引いた値)と
+    /// 出た(利用者役⑭)。
     fn imported_probe_value_at_impl(&self, probe_index: usize) -> f64 {
-        self.imported_probe_handles
-            .get(probe_index)
-            .and_then(|&handle| self.inner.probe(handle))
+        let Some(&handle) = self.imported_probe_handles.get(probe_index) else {
+            return 0.0;
+        };
+        self.inner
+            .probe(handle)
             .and_then(|probe| probe.history().last().copied())
+            .or_else(|| self.inner.probe_current_value(handle))
             .unwrap_or(0.0)
     }
 
@@ -2230,6 +2258,7 @@ impl WasmWorld {
             ProbeTarget::BodyPosY(id) => format!("BodyPosY({})", body_label(id)),
             ProbeTarget::BodyPosX(id) => format!("BodyPosX({})", body_label(id)),
             ProbeTarget::BodySpeed(id) => format!("BodySpeed({})", body_label(id)),
+            ProbeTarget::BodyMass(id) => format!("BodyMass({})", body_label(id)),
             ProbeTarget::NodeTemp(idx) => format!("NodeTemp[{idx}]"),
             ProbeTarget::AstroPosX(idx) => format!("AstroPosX[{idx}]"),
             ProbeTarget::AstroPosY(idx) => format!("AstroPosY[{idx}]"),
@@ -3633,6 +3662,10 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 self.body_shape_json_at_impl(index)
             }
+            "body_size_ratio_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_size_ratio_at_impl(index)?.to_string())
+            }
             "body_material_label_at" => {
                 let index: usize = arg.parse().unwrap_or(0);
                 self.body_material_label_at_impl(index)
@@ -3753,6 +3786,7 @@ impl WasmWorld {
                 "body_collision_group_at", "body_collision_mask_at",
                 "body_count", "body_label_at", "body_is_static_at",
                 "body_shape_label_at", "body_shape_kind_at", "body_shape_json_at",
+                "body_size_ratio_at",
                 "body_material_label_at", "body_is_removed_at",
                 "material_properties_f64",
                 "circuit_element_count", "circuit_element_label_at",
@@ -5884,6 +5918,43 @@ mod tests {
                 ),
             }
         };
+    }
+
+    /// 記録がまだ無いプローブは、いまの状態の値を返す(0 ではなく)。
+    #[test]
+    fn imported_probe_value_reads_the_current_state_before_any_step() {
+        let world =
+            WasmWorld::from_scene_json_impl(include_str!("../../../scenes/d1-free-fall.json"))
+                .expect("D1 must load");
+        let value = world.imported_probe_value_at_impl(0);
+        assert!(value > 1.0, "落とす前の高さは床より上のはず: {value}");
+    }
+
+    /// 融けて縮んだ氷の大きさが、画面の側から読めること
+    /// (`body_size_ratio_at_impl` のdoc参照)。
+    #[test]
+    fn body_size_ratio_reports_a_melting_ice_cube_shrinking() {
+        let mut world =
+            WasmWorld::from_scene_json_impl(include_str!("../../../scenes/d18-ice-in-drink.json"))
+                .expect("D18 must load");
+        let ratios = |world: &WasmWorld| -> Vec<f64> {
+            let count = world.body_count_impl();
+            (0..count)
+                .map(|i| {
+                    world
+                        .read_component_impl("body_size_ratio_at", &i.to_string())
+                        .unwrap()
+                        .parse::<f64>()
+                        .unwrap()
+                })
+                .collect()
+        };
+        assert!(ratios(&world).iter().all(|r| (r - 1.0).abs() < 1e-12));
+        for _ in 0..3000 {
+            world.step();
+        }
+        let smallest = ratios(&world).into_iter().fold(f64::INFINITY, f64::min);
+        assert!(smallest < 0.95, "融けた氷は小さく読めるはず: {smallest}");
     }
 
     /// 回っているだけの物(重心は動かない)も「動いている」と読めること

@@ -7231,6 +7231,10 @@ async function setUpSceneView(
   /** 天体の跡に使う番号の帯(剛体の番号とぶつからないよう十分離す)。 */
   const ASTRO_TRAIL_INDEX_BASE = 1_000_000;
   const astroMeshes: THREE.Mesh[] = [];
+  /** これまでで最も遠かった天体の距離(場面を読み込むと 0 に戻す)。 */
+  let astroMaxR = 0;
+  /** いま跡に使っている縮尺(場面を読み込むと null に戻す)。 */
+  let astroScaleApplied: number | null = null;
   const astroGroup = new THREE.Group();
   astroGroup.visible = false;
   scene.add(astroGroup);
@@ -7253,7 +7257,24 @@ async function setUpSceneView(
       const r = Math.hypot(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
       if (r > maxR) maxR = r;
     }
-    const scale = maxR > 0 ? ASTRO_VIEW_RADIUS / maxR : 1;
+    // **縮尺はこれまでで最も遠かった距離で決め、縮めるときは跡も一緒に縮める**。
+    // 以前はコマごとに「いまの最遠の天体」を半径 6 に合わせていたので、楕円
+    // 軌道の惑星はいつも半径 6 に描かれ、跡は円になった——離心率 0.5 の
+    // 楕円も「つぶれた楕円」の説明の隣で円に見えていた(利用者役⑭の
+    // 「アインシュタインの補正」を確かめる途中で発見)。縮尺が変わったときは、
+    // 残してある跡の点を同じ比で縮め、形を保つ。
+    astroMaxR = Math.max(astroMaxR, maxR);
+    const scale = astroMaxR > 0 ? ASTRO_VIEW_RADIUS / astroMaxR : 1;
+    if (astroScaleApplied !== null && scale !== astroScaleApplied) {
+      const ratio = scale / astroScaleApplied;
+      for (const [index, trail] of trails) {
+        if (index < ASTRO_TRAIL_INDEX_BASE) continue;
+        for (let k = 0; k < trail.count * 3; k += 1) trail.positions[k] *= ratio;
+        trail.last.multiplyScalar(ratio);
+        (trail.line.geometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+      }
+    }
+    astroScaleApplied = scale;
     const maxMass = masses.length ? Math.max(...masses) : 1;
     while (astroMeshes.length < count) {
       const mesh = new THREE.Mesh(
@@ -7664,6 +7685,18 @@ async function setUpSceneView(
   /// 「観察対象」の定義を使うため。
   ///
   /// 「観察対象」のバウンディングボックス。静的な床・壁は含めない(QA不具合2)。
+  /**
+   * 計算の中で縮んでいる物(融ける氷)の、置いたときに対する大きさの比
+   * (`render` が毎フレーム書く。1 より小さいときだけ入る)。
+   *
+   * 画角は動く物の大きさで決めているので、縮む氷に合わせてカメラも同じ割合で
+   * 寄っていき、**画面の上では氷がずっと同じ大きさに見えた**——「小さく
+   * なっていきます」と書いてあるのに、縮んでいるのが見えない(利用者役⑭の
+   * 実測: 融け切る直前まで、カメラとの距離が氷の大きさに比例して 0.31 → 0.10 m)。
+   * 画角は置いたときの大きさで決め、縮んでいくのを同じ画角の中で見せる。
+   */
+  const simShrinkRatio = new Map<number, number>();
+
   function contentBoundingBox(): THREE.Box3 | null {
     const box = new THREE.Box3();
     let hasContent = false;
@@ -7681,6 +7714,19 @@ async function setUpSceneView(
     // 「シーンの一部」ではあっても「観察対象」ではないため。
     for (const [bodyIndex, mesh] of bodyMeshes) {
       if ((world.read_component("body_is_static_at", String(bodyIndex)) === "true")) continue;
+      // **計算の中で縮んでいく物は、置いたときの大きさで画角を決める**
+      // (`simShrinkRatio` のdoc)。
+      const shrink = simShrinkRatio.get(bodyIndex);
+      if (shrink !== undefined && mesh.visible) {
+        const shrunkBox = new THREE.Box3().setFromObject(mesh);
+        if (!shrunkBox.isEmpty()) {
+          const center = shrunkBox.getCenter(new THREE.Vector3());
+          const size = shrunkBox.getSize(new THREE.Vector3()).divideScalar(shrink);
+          box.union(new THREE.Box3().setFromCenterAndSize(center, size));
+          hasContent = true;
+        }
+        continue;
+      }
       expand(mesh);
     }
     expand(softBodyPoints);
@@ -10684,6 +10730,7 @@ async function setUpSceneView(
     motorArmBodies.clear();
     currentMotorTarget.clear();
     currentScale.clear();
+    simShrinkRatio.clear();
     currentScaleXyz.clear();
     // 取り消しの記録は、**同じ場面の組み直し**(材質の変更・取り消しで戻す)
     // では持ち越す——ここで空にすると、材質を変えた途端に「↶ 戻す」が押せる
@@ -12707,7 +12754,19 @@ async function setUpSceneView(
       mesh.quaternion.set(sr[0], sr[1], sr[2], sr[3]);
       const xyz = currentScaleXyz.get(bodyIndex);
       if (xyz) mesh.scale.set(xyz[0], xyz[1], xyz[2]);
-      else mesh.scale.setScalar(currentScale.get(bodyIndex) ?? 1.0);
+      // 大きさを変えていない物も、計算の中で形が変わることがある(融けて
+      // 縮む氷)。そのときは計算が言う大きさで描く(sim-wasm
+      // `body_size_ratio_at` のdoc)。
+      else {
+        const userScale = currentScale.get(bodyIndex);
+        const simRatio =
+          userScale === undefined
+            ? Number(world.read_component("body_size_ratio_at", String(bodyIndex)))
+            : 1;
+        if (simRatio > 0 && simRatio < 1) simShrinkRatio.set(bodyIndex, simRatio);
+        else simShrinkRatio.delete(bodyIndex);
+        mesh.scale.setScalar(userScale ?? simRatio);
+      }
       // 通った跡を伸ばす(`extendTrail` のdoc参照)。動かせない物(床・壁)は
       // 通らないので描かない。点の間隔は、いま見ている広がりに対する比で
       // 決める——1e-7m の分子から 1e11m の公転まで同じ線の密度で描くため。
@@ -13357,6 +13416,8 @@ async function setUpSceneView(
       guidedCurvedPathBox = null;
       guidedStillBox = null;
       motionPlaneNormal = null;
+      astroMaxR = 0;
+      astroScaleApplied = null;
       resetSettleWatch();
       // **前の場面の「単独追跡」を持ち越さない**。`followedBodyIndices`は
       // ボディ番号でしかないので、差し替わった新しい場面でたまたま同じ番号の
@@ -13518,7 +13579,15 @@ async function setUpSceneView(
     maxSpeed: () => readNumber(world, "max_body_speed"),
     settledTime: () => settledAtTime,
     settledEverMoved: () => settledEverMoved,
-    settlePending: () => settledAtTime === null && settledStillSince !== null,
+    // 猶予の半分(0.25 秒)より長く静かなときだけ「止まりかけ」と言う。弾み
+    // 続けるピストンは、上と下で向きを変えるたびに一瞬だけ静かになり、
+    // そのたびに「止まりかけています…」と出ていた(利用者役⑭)。
+    settlePending: () =>
+      settledAtTime === null &&
+      settledStillSince !== null &&
+      readNumber(world, "time") - settledStillSince >= SETTLED_GRACE / 2,
+    // いまいちばん速く動いている点の速さ(回る物は表面の速さ)。
+    maxPointSpeed: () => readNumber(world, "max_body_point_speed"),
     stageIsEmpty: () => sceneViewElement.dataset.stageEmpty === "true",
     showsTrails: () => [...trails.values()].some((trail) => trail.count >= 2),
     materialNames: () => [...SPAWN_MATERIALS],

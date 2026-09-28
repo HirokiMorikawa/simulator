@@ -827,6 +827,8 @@ pub enum ProbeJson {
     /// D11(振り子)の振れ角再構成のため追加)。
     BodyPosX(String),
     BodySpeed(String),
+    /// 物の質量(`ProbeTarget::BodyMass` のdoc参照)。
+    BodyMass(String),
     NodeTemp(usize),
     /// `astro.bodies`配列のインデックス(0起点、名前解決を経ない——`NodeTemp`と
     /// 同じ理由、D34太陽系儀の軌道半径再構成に使う)。
@@ -3551,13 +3553,15 @@ impl World {
             let target = match probe {
                 ProbeJson::BodyPosY(name)
                 | ProbeJson::BodyPosX(name)
-                | ProbeJson::BodySpeed(name) => {
+                | ProbeJson::BodySpeed(name)
+                | ProbeJson::BodyMass(name) => {
                     let id = body_ids_by_name
                         .get(name)
                         .ok_or_else(|| SceneError::UnknownBodyName(name.to_string()))?;
                     match probe {
                         ProbeJson::BodyPosY(_) => ProbeTarget::BodyPosY(*id),
                         ProbeJson::BodyPosX(_) => ProbeTarget::BodyPosX(*id),
+                        ProbeJson::BodyMass(_) => ProbeTarget::BodyMass(*id),
                         _ => ProbeTarget::BodySpeed(*id),
                     }
                 }
@@ -5924,35 +5928,52 @@ mod tests {
     }
 
     /// **増分H3** D18(氷と飲み物): 浮いた氷が`couplings[].phase_change_morph`で
-    /// 融解して質量を失い、**喫水が浅くなって浮き上がる**(アルキメデスとの統合)。
+    /// 融解して質量を失い、**相似に小さくなりながら浮き続ける**(アルキメデスとの統合)。
     ///
-    /// 実測(6000step = 50秒): 質量 0.900 → 0.2540 kg(72%融解)、
-    /// 重心 y = -0.0402 → +0.0281(浮き上がり)、飲み物 350.0 → 335.01 K。
-    /// 「水位不変」は自由表面を追跡しない本実装の対象外(既存の記載どおり)。
+    /// **形も縮むようにした**(利用者役⑭)。もとは質量だけが減って形が据え置き
+    /// だったので、密度が下がり続けた氷が浮き上がり、重心が水面の 4 cm 下から
+    /// 4 cm 上へ——体の 8 割以上が水の上に出ていた。本物の氷は融けても
+    /// 密度(0.9 g/cm³)は変わらないので、**沈んでいる割合(9 割)は最後まで同じ**
+    /// で、ただ小さくなる。ここではその 2 つ——辺が質量の立方根に比例して縮むこと、
+    /// 沈んでいる割合が保たれること——を確かめる。
     ///
     /// **飲み物の熱容量と熱伝導を、飲み物らしい大きさに直した**
     /// (`scenes/d18-ice-in-drink.json`、進行管理役の実測)。もとは
     /// 熱容量 200000 J/K ——水にすると **48 kg**、つまり 0.9 kg の氷を
     /// 一杯のドリンクではなく風呂に浮かべているのと同じで、融かしても
-    /// 温度が 1 K も動かなかった。画面では 42 秒待っても「飲み物 76 ℃」の
-    /// まま、氷も 17% しか縮まない——説明文が約束している「融けている間に
-    /// 熱を奪われる」が、数字のどこにも現れない。15000 J/K(= 水 3.6 kg、
-    /// 10cm の氷塊に見合う大きさ)と 65 W/K に直すと、実測で 40 秒に
-    /// 59% 融解・76.9 → 64.5 ℃、1.2 分で融け切って 56.2 ℃ に落ち着く。
+    /// 温度が 1 K も動かなかった。15000 J/K(= 水 3.6 kg、10cm の氷塊に
+    /// 見合う大きさ)と 65 W/K に直してある。
     #[test]
-    fn run_headless_scenario_melting_ice_rises_as_it_loses_mass() {
+    fn run_headless_scenario_melting_ice_shrinks_and_keeps_floating_at_the_same_depth_ratio() {
         let json = include_str!("../../../scenes/d18-ice-in-drink.json");
         let scenario = Scenario::from_json(json).expect("valid scenario JSON");
         let mut world = World::from_scenario(&scenario).expect("valid world");
-        let y0 = world.mechanics().bodies.position[0].y;
-        let m0 = world.mechanics().bodies.mass(0);
+        let half_y = |world: &World| match world.mechanics().bodies.shape_of(0) {
+            sim_mechanics::Shape::Box { half_extents } => half_extents.y,
+            other => panic!("氷は箱のはず: {other:?}"),
+        };
+        // 沈んでいる割合 = (水面より下の高さ) / (全体の高さ)。水面は y = 0。
+        let submerged = |world: &World| {
+            let h = half_y(world);
+            let y = world.mechanics().bodies.position[0].y;
+            ((h - y) / (2.0 * h)).clamp(0.0, 1.0)
+        };
+        for _ in 0..600 {
+            world.step(); // 置いた直後の揺れを落とす
+        }
+        let (h0, m0, sub0) = (
+            half_y(&world),
+            world.mechanics().bodies.mass(0),
+            submerged(&world),
+        );
         let drink0 = world.thermal().expect("熱ドメイン").nodes[0].temperature;
-        for _ in 0..6000 {
+        for _ in 0..5400 {
             world.step();
         }
-        let (y1, m1) = (
-            world.mechanics().bodies.position[0].y,
+        let (h1, m1, sub1) = (
+            half_y(&world),
             world.mechanics().bodies.mass(0),
+            submerged(&world),
         );
         let drink1 = world.thermal().expect("熱ドメイン").nodes[0].temperature;
 
@@ -5960,9 +5981,18 @@ mod tests {
             m1 < 0.5 * m0 && m1 > 0.0,
             "融解して質量が部分的に減るべき(T7の融解プラトー): {m0} -> {m1}"
         );
+        let expected_h = h0 * (m1 / m0).cbrt();
         assert!(
-            y1 > y0 + 0.03,
-            "質量が減ったぶん喫水が浅くなって浮き上がるべき: {y0} -> {y1}"
+            (h1 - expected_h).abs() < 0.01 * h0,
+            "辺は質量の立方根に比例して縮むべき: {h0} -> {h1}(期待 {expected_h})"
+        );
+        assert!(
+            (sub0 - 0.9).abs() < 0.03,
+            "はじめは 9 割が沈んでいるべき(0.9 g/cm³ の氷): {sub0}"
+        );
+        assert!(
+            (sub1 - sub0).abs() < 0.03,
+            "小さくなっても沈んでいる割合は変わらないべき: {sub0} -> {sub1}"
         );
         assert!(
             drink1 < drink0,

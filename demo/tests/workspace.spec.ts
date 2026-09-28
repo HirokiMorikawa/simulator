@@ -26,6 +26,8 @@ function parseShownNumber(text: string): number {
   // 桁の離れた値は日本語の数の言葉で書かれる(`readoutNumber` の
   // `japaneseMagnitude` のdoc参照):「約 1140 万分の 1」「1.50 億」。
   const UNITS: Record<string, number> = { "": 1, 万: 1e4, 億: 1e8, 兆: 1e12, 京: 1e16 };
+  // 書いた桁に現れないほど小さい値は「ほぼ 0」と書かれる(`Readout.tiny` のdoc参照)。
+  if (text.includes("ほぼ 0")) return 0;
   const fraction = text.match(/約 (-?)([\d.,]+) ?(万|億|兆|京)?分の 1/);
   if (fraction) {
     const denominator = Number(fraction[2].replace(/,/g, "")) * UNITS[fraction[3] ?? ""];
@@ -1055,13 +1057,16 @@ test("無くなった物の値を、壊れた数字で出さない", async ({ pa
     r.dispatchEvent(new Event("change", { bubbles: true }));
   });
   await page.click('button:has-text("はやい")');
+  // いまは融け具合を「残っている氷」の割合で読む(利用者役⑭)。融け切ったら
+  // 0 % になり、退避先の座標が数字として出てくることはない。
   await expect
     .poll(
       async () =>
         (await page.locator("#context .readouts").textContent()) ?? "",
       { timeout: 40_000 },
     )
-    .toContain("もう在りません");
+    .toMatch(/残っている氷\s*0 %/);
+  expect(await page.locator("#context .readouts").textContent()).not.toMatch(/000,000/);
   expect(errors).toEqual([]);
 });
 
@@ -2473,7 +2478,7 @@ test("グラフの凡例の数値が、右の「いまの数値」と同じ書�
   // `humanExponent` のdoc参照。
   await expect
     .poll(async () => (await near.textContent()) ?? "", { timeout: 60_000 })
-    .toMatch(/分の 1|×10⁻?[⁰¹²³⁴⁵⁶⁷⁸⁹]/);
+    .toMatch(/ほぼ 0|分の 1|×10⁻?[⁰¹²³⁴⁵⁶⁷⁸⁹]/);
   await page.click("#btn-run");
   await page.waitForTimeout(200);
 
@@ -7481,6 +7486,235 @@ test("二重スリットでは、隙間のある壁が絵に描かれる", async
   expect(errors).toEqual([]);
 });
 
+// **課題(利用者役⑭「さわる」)**: 操作の不具合 4 つ。
+// ① 止めたままつまみを動かすと「ボールの高さ -0.30 m」(記録が空のとき 0 を
+//    返していた)。② つまみを動かした直後は Ctrl+K が効かない。③ 前の実験で
+//    下までスクロールした右の柱が、次の実験でもずれたまま。④ 1280×720 では
+//    「変えてみる」のつまみが最初の画面の下に隠れる。
+test("止めてつまみを動かしても数値が正しく、Ctrl+K も効き、つまみが見える", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを落");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ボール");
+  await page.waitForTimeout(500);
+
+  // ④ つまみが最初の画面に入っている。
+  const knob = page.locator('#context .knob input[type="range"]').first();
+  const box = await knob.boundingBox();
+  expect(box, "つまみがある").not.toBeNull();
+  expect(box!.y + box!.height, `つまみの下端 ${box!.y + box!.height}px`).toBeLessThan(720);
+
+  // ① 止めてからつまみを動かす。
+  await page.click("#btn-run");
+  await expect(page.locator("#btn-run")).toHaveAttribute("data-playing", "false");
+  await knob.evaluate((el: HTMLInputElement) => {
+    el.value = "40";
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect.poll(() => readoutValue(page, "ボールの高さ[^\\n]*")).toBeGreaterThan(30);
+
+  // ② つまみに焦点があるまま Ctrl+K。
+  await knob.focus();
+  await page.keyboard.press("Control+k");
+  await expect(page.locator("#palette-input")).toBeVisible();
+
+  // ③ 下までスクロールしてから別の実験へ。
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    document.getElementById("context-scroll")!.scrollTop = 10_000;
+  });
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "コーヒーが冷め");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("コーヒー");
+  expect(await page.evaluate(() => document.getElementById("context-scroll")!.scrollTop)).toBe(0);
+  expect(errors).toEqual([]);
+});
+
+// 「1 回目に跳ね返った高さ」は 2 回目の着地まで「まだです」だった(50 m から
+// 落とすと頂点は 5.75 秒、数字が出たのは 8.35 秒)。頂点を過ぎたら出す。
+test("跳ね返った高さは、頂点を過ぎたところで出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを跳ね");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("跳ね");
+  const shown = page.locator('#context dd').filter({ hasText: /m$|まだです/ });
+  await expect
+    .poll(async () => (await page.locator("#context").innerText()).match(/1 回目に跳ね返った高さ\n([^\n]+)/)?.[1] ?? "", {
+      timeout: 20_000,
+    })
+    .toMatch(/\d+\.\d+ m/);
+  // 出たときには、まだ 2 回目の着地の前(ボールは宙にいる)。
+  const height = await readoutValue(page, "ボールの高さ[^\\n]*");
+  expect(height, `数字が出たときのボールの高さ ${height} m`).toBeGreaterThan(0.05);
+  void shown;
+  expect(errors).toEqual([]);
+});
+
+/** 「さわる」で実験を開き、横に動かすつまみを値に合わせる。 */
+async function openTouching(page: Page, query: string) {
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", query);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(800);
+}
+async function setRange(page: Page, id: string, value: string) {
+  await page.locator(`.knob[data-knob-id="${id}"] input[type="range"]`).evaluate(
+    (el: HTMLInputElement, v: string) => {
+      el.value = v;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    },
+    value,
+  );
+}
+/** 剛体(球 `wrecker` は除く)の、原点からの横のずれのいちばん大きいもの。 */
+async function maxSideways(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const w = (window as unknown as Record<string, any>).__world;
+    const n = Number(w.read_component("body_count", ""));
+    let max = 0;
+    for (let i = 1; i < n; i += 1) {
+      if (w.read_component("body_label_at", String(i)) === "wrecker") continue;
+      const p = w.body_position_at_f32(i);
+      max = Math.max(max, Math.abs(p[0]), Math.abs(p[2]));
+    }
+    return max;
+  });
+}
+
+// **課題(利用者役⑭「さわる」)**: つまみの結果が説明と食い違っていた。
+// 積んで、崩す: 球の速さ 0 でも 10 段が崩れた(1 cm の隙間を空けて積んでいた)。
+// 積み木を積む: 16 段が崩れても「いちばん上の箱の速さ 0 = 成功」と読めた。
+test("まっすぐ積んだ塔は、当てなければ立ったまま(高さで確かめられる)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await openTouching(page, "積んで、崩す");
+  await setRange(page, "speed", "0");
+  await setRange(page, "floors", "10");
+  await page.waitForTimeout(4000);
+  expect(await maxSideways(page), "10 段・球の速さ 0").toBeLessThan(0.1);
+
+  await openTouching(page, "積み木を積");
+  await setRange(page, "floors", "16");
+  await page.waitForTimeout(5000);
+  expect(await maxSideways(page), "16 段").toBeLessThan(0.1);
+  // 立っているかどうかは、いちばん上の箱の高さ(16 段なら 15.5 m 前後)で読める。
+  await expect.poll(() => readoutValue(page, "いちばん上の箱の高さ")).toBeGreaterThan(15);
+  expect(errors).toEqual([]);
+});
+
+// ロープが垂れる: 重力を無重力にしても形が変わらなかった(ロープが自分の重力を
+// 持っていて、つまみが世界の重力しか変えていなかった)。
+test("ロープの重力つまみが効き、無重力なら垂れない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await openTouching(page, "ロープ");
+  await page.locator(".knob-choice-btn", { hasText: "無重力" }).click();
+  await page.waitForTimeout(2500);
+  expect(Math.abs(await readoutValue(page, "まん中の高さ"))).toBeLessThan(0.01);
+  await page.locator(".knob-choice-btn", { hasText: "地球" }).click();
+  await page.waitForTimeout(2500);
+  expect(await readoutValue(page, "まん中の高さ")).toBeLessThan(-0.2);
+  expect(errors).toEqual([]);
+});
+
+// 磁石が生まれる: 符号つきの磁化が +0.9 ↔ −0.9 と行ったり来たりして「落ち着く」に
+// 見えなかった。つまみも無かった。揃い具合(大きさ)を出し、温度を変えられる。
+test("磁石が生まれるは、揃い具合が温度で変わる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await openTouching(page, "磁石が生まれ");
+  await page.locator(".knob-choice-btn", { hasText: "低い" }).click();
+  await expect
+    .poll(() => readoutValue(page, "揃い具合\\(0 〜 1\\)"), { timeout: 15_000 })
+    .toBeGreaterThan(0.9);
+  await page.locator(".knob-choice-btn", { hasText: "高い" }).click();
+  await page.waitForTimeout(5000);
+  const hot = await readoutValue(page, "揃い具合\\(0 〜 1\\)");
+  expect(hot).toBeGreaterThanOrEqual(0);
+  expect(hot).toBeLessThan(0.2);
+  expect(errors).toEqual([]);
+});
+
+// 乱れが消えていく: 柱が自由に動ける箱で、ねばりの強い流れに 10 秒で 15 cm
+// 流されていた。柱は立ったまま。
+test("乱れが消えていくの柱は、流れに流されない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await openTouching(page, "乱れが消え");
+  await page.locator(".knob-choice-btn", { hasText: "とろとろ" }).click();
+  await page.waitForTimeout(6000);
+  const x = await page.evaluate(() => {
+    const w = (window as unknown as Record<string, any>).__world;
+    return w.body_position_at_f32(0)[0];
+  });
+  expect(Math.abs(x - 0.4), `柱の位置 ${x}`).toBeLessThan(0.01);
+  expect(errors).toEqual([]);
+});
+
+// 車を走らせる: サスペンションのつまみの効きが、距離や速さからは読めなかった。
+test("サスペンションの硬さで、車体の沈み方が数値で変わる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await openTouching(page, "車を走らせ");
+  await setRange(page, "suspension", "1.5");
+  await page.waitForTimeout(4000);
+  const soft = await readoutValue(page, "車体がいちばん沈んだ高さ");
+  await setRange(page, "suspension", "6");
+  await page.waitForTimeout(4000);
+  const hard = await readoutValue(page, "車体がいちばん沈んだ高さ");
+  expect(hard - soft, `柔らかい ${soft} m / 硬い ${hard} m`).toBeGreaterThan(0.1);
+  expect(errors).toEqual([]);
+});
+
+// 天体の絵は、コマごとに「いまいちばん遠い天体」を半径 6 に合わせていたので、
+// 楕円軌道の跡が円に描かれていた(アインシュタインの補正・軌道に乗せる)。
+test("楕円軌道は、楕円として描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await openTouching(page, "アインシュタイン");
+  await page.waitForTimeout(6000);
+  const ratio = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const points: number[][] = [];
+    w.__scene.traverseVisible((o: any) => {
+      if (!o.isLine || !o.geometry?.drawRange) return;
+      const n = o.geometry.drawRange.count;
+      if (!n || n === Infinity) return;
+      const arr = o.geometry.attributes.position.array as Float32Array;
+      for (let i = 0; i < n; i += 1) points.push([arr[i * 3], arr[i * 3 + 1], arr[i * 3 + 2]]);
+    });
+    // 中心の星(いちばん大きい球)からの距離の、最大と最小の比。
+    let star: number[] = [0, 0, 0];
+    let biggest = 0;
+    w.__scene.traverseVisible((o: any) => {
+      if (o.isMesh && o.geometry?.type === "SphereGeometry" && o.scale.x > biggest) {
+        biggest = o.scale.x;
+        star = [o.position.x, o.position.y, o.position.z];
+      }
+    });
+    const d = points.map((p) => Math.hypot(p[0] - star[0], p[1] - star[1], p[2] - star[2]));
+    return Math.max(...d) / Math.max(1e-9, Math.min(...d));
+  });
+  // 離心率 0.5 の楕円なら、いちばん遠い点といちばん近い点の比は 3。
+  expect(ratio, `遠い/近い = ${ratio}`).toBeGreaterThan(2);
+  expect(errors).toEqual([]);
+});
+
 // **課題(利用者役⑨の観察)**: 「煙が流れる(3D)」の説明は「球のまわりを煙が
 // 流れていきます」「球の裏側で巻き込まれ」と書いていたのに、**この場面に球は
 // 無い**(場面ファイルの `bodies` は空、格子流体の境界も流入だけ)。利用者役は
@@ -7749,5 +7983,69 @@ test("止まらない場面でも、「ほぼ止まった時刻」の行が消�
   );
   expect(bodies, `積んだ数 ${bodies}(床を含む)`).toBeGreaterThanOrEqual(17);
 
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑭の観察)**: 強い磁石でゆっくり(0.016 m/s)落ち続ける磁石に、
+// 「ほぼ止まった時刻 はじめから動いていません」と出ていた。「動いた」と数えるのは
+// 0.2 m/s を超えてからなので、ゆっくり動き続ける物は一度も「動いた」ことにならない。
+test("ゆっくり落ち続ける磁石を「はじめから動いていません」と言わない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await openTouching(page, "磁石が銅管");
+  await page.locator('.knob[data-knob-id="magnet"] .knob-choice-btn', { hasText: "とても強い" }).click();
+  await expect(page.locator("#readout-settled")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#readout-settled")).toHaveText("ゆっくり動き続けています");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑭の観察)**: 温度のつまみが「350 K」のように K で出ていて、
+// 中学校で使わない目盛りだった(隣の数値は ℃)。つまみも ℃ で見せる。
+test("温度のつまみは ℃ で出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  for (const query of ["コーヒーが冷める", "氷が融ける", "氷が水に変わる", "ブラウン運動"]) {
+    await openTouching(page, query);
+    const knobs = (await page.locator(".knob").allTextContents()).join(" / ");
+    expect(knobs, query).toContain("℃");
+    expect(knobs, query).not.toMatch(/\d\s*K\b/);
+  }
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑭の実測)**: 融ける氷は質量だけが減って形が変わらず、
+// 半分融けると体の 8 割が水の上に浮き上がっていた(本物の氷は 9 割沈んだまま
+// 小さくなる)。形も縮むように直したうえで、カメラが氷の大きさに合わせて寄って
+// いくと画面では同じ大きさに見えてしまうので、画角は置いたときの大きさで保つ。
+test("融ける氷は、沈んだまま画面の上でも小さくなっていく", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await openTouching(page, "氷が融ける");
+  const look = () =>
+    page.evaluate(() => {
+      const w = (window as unknown as Record<string, any>).__world;
+      const mesh = (window as unknown as Record<string, any>).__bodyMeshFor(0);
+      const camera = (window as unknown as Record<string, any>).__camera;
+      return {
+        scale: mesh.scale.x as number,
+        distance: camera.position.distanceTo(mesh.position) as number,
+        y: w.body_position_at_f32(0)[1] as number,
+      };
+    });
+  await expect.poll(() => readoutValue(page, "残っている氷"), { timeout: 10_000 }).toBeGreaterThan(90);
+  const before = await look();
+  await page.click('button:has-text("はやい")');
+  await expect
+    .poll(() => readoutValue(page, "残っている氷"), { timeout: 60_000 })
+    .toBeLessThan(40);
+  const after = await look();
+  // 3 割以上小さく描かれ、カメラは寄っていかない。
+  expect(after.scale).toBeLessThan(before.scale * 0.8);
+  expect(after.distance).toBeGreaterThan(before.distance * 0.9);
+  // 沈んだまま(重心は水面 y=0 より下)。
+  expect(after.y).toBeLessThan(0);
   expect(errors).toEqual([]);
 });
