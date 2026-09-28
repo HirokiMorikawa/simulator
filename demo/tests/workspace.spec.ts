@@ -1004,9 +1004,11 @@ test("つまみの端でも、数値が発散しない", async ({ page }) => {
 
   // 2.0 m/s まで押せたときは気体がほぼ 0 まで潰れて圧力が発散し、位置が
   // -5.4e7 m、速さが 2.1e7 m/s という壊れた数字になった(利用者役②)。
-  const knob = page.locator("#knob-push");
-  await expect(knob).toHaveAttribute("max", "1.5");
-  await knob.fill("1.5");
+  // 縦置きの気体ばねに作り直した(利用者役⑬)いまは、つまみはピストンの重さ。
+  // いちばん重くしても、弾み続けて発散しない。
+  const knob = page.locator("#knob-mass");
+  await expect(knob).toHaveAttribute("max", "2");
+  await knob.fill("2");
   await knob.dispatchEvent("change");
   await page.waitForTimeout(6000);
   const values = await page.locator("#context .readouts dd").allTextContents();
@@ -7081,8 +7083,17 @@ test("前に何を見ていても、公転は円として見える(真横から�
 /** 右の「いまの数値」から、名前の次の行の数を読む(読めなければ NaN)。 */
 async function readoutValue(page: Page, label: string): Promise<number> {
   const text = await page.locator("#context").innerText();
-  const match = text.match(new RegExp(`${label}\\n\\s*(-?[\\d.,]+)`));
-  return match ? Number(match[1].replace(/,/g, "")) : Number.NaN;
+  // 桁の離れた値は `1.09×10⁻⁴` と書かれる。指数を読み落とすと 1.09 と読んでしまう。
+  const match = text.match(new RegExp(`${label}\\n\\s*(-?[\\d.,]+)(?:×10([⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+))?`));
+  if (!match) return Number.NaN;
+  const mantissa = Number(match[1].replace(/,/g, ""));
+  if (!match[2]) return mantissa;
+  const digits = "⁰¹²³⁴⁵⁶⁷⁸⁹";
+  const exponent = [...match[2]].reduce(
+    (acc, ch) => (ch === "⁻" ? acc : acc * 10 + digits.indexOf(ch)),
+    0,
+  );
+  return mantissa * 10 ** (match[2].startsWith("⁻") ? -exponent : exponent);
 }
 
 // **課題(利用者役⑬の観察)**: 「スイングバイで加速する」の隣で、探査機の速さが
@@ -7131,6 +7142,127 @@ test("銅管の中の磁石は、実時間で、ゆっくり一定の速さで�
   expect(first, `落ちる速さ ${first} m/s`).toBeGreaterThan(0.1);
   expect(first, `落ちる速さ ${first} m/s`).toBeLessThan(1);
   expect(Math.abs(second - first), `${first} → ${second} m/s`).toBeLessThan(0.01);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑬の観察)**: 「ほぼ止まった時刻」が 0.67 → 1.23 → 1.84 秒 →
+// 「まだ止まっていません」と書き換わり続けた(静電気の風船)。壁に貼りついて
+// 眠った風船に鏡像力を積み続けていたので、0.6 秒ごとに壁から跳ね返っていた。
+// 一度止まったら、その答えのまま変わらない。
+test("壁に貼りついた風船の「ほぼ止まった時刻」は、一度出たら変わらない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "風船");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("風船");
+  const settled = page.locator("#readout-settled");
+  await expect(settled).toHaveAttribute("data-seconds", /\d/, { timeout: 10_000 });
+  const first = await settled.getAttribute("data-seconds");
+  const seen = new Set<string>();
+  for (let i = 0; i < 12; i += 1) {
+    await page.waitForTimeout(500);
+    seen.add((await settled.getAttribute("data-seconds")) ?? "(消えた)");
+  }
+  expect([...seen], `最初は ${first}`).toEqual([first]);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑬の観察)**: 手回し発電機のクランクが画面で回っているのに、
+// 「ほぼ止まった時刻」は「はじめから動いていません」。重心の速さだけを見て
+// いたので、その場で回る物は止まっていると読めていた。電流も、電圧が正なのに
+// `-0.05 A` と負で出て、逆に流れているのかと読まれた。
+test("回っている発電機を「動いていない」と言わず、電流は正の大きさで出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d20-generator"]');
+  await expect(page.locator("#readout-settled")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#readout-settled")).toHaveText("まだ止まっていません");
+  await expect.poll(() => readoutValue(page, "流れた電流")).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+/** 右の「いまの数値」を、間隔を空けて何度か読む。 */
+async function sampleReadout(page: Page, label: string, count: number, everyMs: number) {
+  const values: number[] = [];
+  for (let i = 0; i < count; i += 1) {
+    values.push(await readoutValue(page, label));
+    await page.waitForTimeout(everyMs);
+  }
+  return values;
+}
+
+// **課題(利用者役⑬の観察)**: 20 秒眺めても何も起きない実験があった。
+// 「浮くか沈むか」は最初から釣り合いの深さに置いてあって沈み終わっていた。
+// 水面から始めて、沈んで浮き上がるところが見える。
+test("浮くか沈むかは、水面から沈んで浮き上がるところが見える", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "浮くか");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("浮くか");
+  const heights = await sampleReadout(page, "箱の中心の高さ\\(水面が 0\\)", 10, 300);
+  const spread = Math.max(...heights) - Math.min(...heights);
+  expect(spread, heights.join(", ")).toBeGreaterThan(0.2);
+  expect(errors).toEqual([]);
+});
+
+// 「空気をばねにする」は一度押し返されたら離れていくだけだった。縦に置いた
+// ピストンが、自分の重さで空気を押しては押し返され、弾み続ける。
+test("空気のばねは、ピストンが弾み続ける", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d17-piston"]');
+  await page.waitForTimeout(3000);
+  // 0.5 秒ごとに弾むので、0.13 秒おきに 3 秒読めば、上と下の両方に何度も当たる。
+  const late = await sampleReadout(page, "ピストンの高さ", 24, 130);
+  const spread = Math.max(...late) - Math.min(...late);
+  expect(spread, late.join(", ")).toBeGreaterThan(0.015);
+  expect(errors).toEqual([]);
+});
+
+// 「静電気で風船がくっつく」は 0.7 秒で壁に着いて終わっていた。離れたところ
+// からゆっくり動き出し、近づくほど速くなって貼りつくまでが見える。
+test("風船は、離れたところから動き出して壁に貼りつく", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "風船");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("風船");
+  await expect.poll(() => readoutValue(page, "経過した時間")).toBeGreaterThan(1);
+  expect(await readoutValue(page, "壁からの距離")).toBeGreaterThan(0.3);
+  await expect
+    .poll(() => readoutValue(page, "壁からの距離"), { timeout: 15_000 })
+    .toBeLessThan(0.03);
+  expect(errors).toEqual([]);
+});
+
+// 「ブラウン運動」は 3D を見てもらっていたが、1 秒に動くのは 1 nm 足らずで、
+// 20 秒眺めても画素が 1 つも変わらなかった。先頭の粒子のずれを nm で描く。
+test("ブラウン運動は、先頭の粒子のずれが「みる」のままグラフに出る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 0);
+  await page.keyboard.press("Control+k");
+  await page.click('.palette-row[data-experiment-id="d25-brownian"]');
+  await expect(page.locator("#probe-canvas")).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(3000);
+  const legend = await page.evaluate(
+    () => (window as unknown as { __probeGraphLegend?: string[] }).__probeGraphLegend ?? [],
+  );
+  expect(legend.join(" / ")).toContain("先頭の粒子の横のずれ");
+  expect(legend.join(" / ")).toContain("nm");
+  const shifts = await sampleReadout(page, "先頭の粒子の横のずれ", 6, 400);
+  expect(new Set(shifts).size, shifts.join(", ")).toBeGreaterThan(3);
   expect(errors).toEqual([]);
 });
 
@@ -7347,24 +7479,24 @@ test("一瞬で終わる現象でも、つまみの効きが数値で読める(�
   await expect(page.locator("#crumb-experiment")).toContainText("空気をばね");
   await page.waitForTimeout(1200);
 
-  const deepest = async (speed: string) => {
-    await page.locator('.knob[data-knob-id="push"] input[type="range"]').fill(speed);
+  // 縦置きの気体ばねに作り直した(利用者役⑬)ので、つまみはピストンの重さ。
+  const deepest = async (mass: string) => {
+    await page.locator('.knob[data-knob-id="mass"] input[type="range"]').fill(mass);
     await page.waitForTimeout(2500);
     const panel = await page.locator('.card[data-card="numbers"]').innerText();
-    const match = panel.match(/いちばん深く押し込めたところ\s*(-?[\d.]+) m/);
-    expect(match, `「いちばん深く押し込めたところ」が読めない: ${panel}`).not.toBeNull();
+    const match = panel.match(/いちばん深く沈んだところ\s*(-?[\d.]+) m/);
+    expect(match, `「いちばん深く沈んだところ」が読めない: ${panel}`).not.toBeNull();
     return Number.parseFloat(match![1]);
   };
 
-  // 強く押すほど深い(負の向きへ大きい)。実測: 0.1 m/s で -0.002 m、
-  // 1.5 m/s で -0.086 m。
-  const hard = await deepest("1.5");
-  const gentle = await deepest("0.1");
-  expect(hard, `強く ${hard} m / やさしく ${gentle} m`).toBeLessThan(gentle - 0.02);
+  // 重いほど深い(負の向きへ大きい)。実測: 1 kg で -0.033 m、2 kg で -0.078 m。
+  const heavy = await deepest("2");
+  const light = await deepest("1");
+  expect(heavy, `重い ${heavy} m / 軽い ${light} m`).toBeLessThan(light - 0.02);
   // **深いほうの値が居座らない**。つまみを戻したら測り直す——ここが効いて
-  // いないと、一度強く押しただけで以後ずっと深い値を指したままになる
+  // いないと、一度重くしただけで以後ずっと深い値を指したままになる
   // (つまみを動かすと実験は読み込み直される)。
-  expect(gentle, `強く押した後にやさしくしたら ${gentle} m`).toBeGreaterThan(-0.01);
+  expect(light, `重くした後に軽くしたら ${light} m`).toBeGreaterThan(-0.05);
 
   expect(errors).toEqual([]);
 });

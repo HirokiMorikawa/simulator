@@ -12419,7 +12419,10 @@ async function setUpSceneView(
     settledAtTime = null;
   }
   function noteSettleAfterStep(): void {
-    const fastest = readNumber(world, "max_body_speed");
+    // 重心の速さだけでなく、**回っている物の表面の速さ**も数える
+    // (sim-wasm `max_body_point_speed` のdoc参照)。重心だけだと、画面で
+    // 回り続けている発電機のクランクに「はじめから動いていません」と出た。
+    const fastest = readNumber(world, "max_body_point_speed");
     const now = readNumber(world, "time");
     if (fastest > SETTLED_TRIGGER_SPEED) {
       settledEverMoved = true;
@@ -12848,6 +12851,7 @@ async function setUpSceneView(
         derivedSeries.push({
           label: spec.label,
           unit: spec.unit,
+          digits: spec.digits,
           color: PROBE_GRAPH_COLORS[derivedSeries.length % PROBE_GRAPH_COLORS.length],
           history,
         });
@@ -13437,6 +13441,7 @@ async function setUpSceneView(
     maxSpeed: () => readNumber(world, "max_body_speed"),
     settledTime: () => settledAtTime,
     settledEverMoved: () => settledEverMoved,
+    settlePending: () => settledAtTime === null && settledStillSince !== null,
     stageIsEmpty: () => sceneViewElement.dataset.stageEmpty === "true",
     materialNames: () => [...SPAWN_MATERIALS],
     // **課題B**: 材質ボタンの隣に添える摩擦係数。でっち上げず、Rust側の材質DB

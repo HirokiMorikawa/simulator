@@ -1850,6 +1850,25 @@ impl WasmWorld {
             .fold(0.0_f64, f64::max)
     }
 
+    /// **物のどこかの点が動いているいちばんの速さ**(重心の速さ + 回る速さ ×
+    /// 中心からいちばん遠い点までの距離)。
+    ///
+    /// `max_body_speed` は重心の速さしか見ないので、その場で回り続ける物
+    /// (手回し発電機のクランク)は 0 m/s と読める。「ほぼ止まった時刻」の
+    /// 判定がこれを使っていたため、クランクが画面で回っている隣に
+    /// 「はじめから動いていません」と出ていた(利用者役⑬の観察)。回っている
+    /// 物も「動いている」と数える。上から押さえる見積もり(`|v| + |ω|R`)で、
+    /// 止まっている物には 0 を返す。
+    fn max_body_point_speed_impl(&self) -> f64 {
+        let bodies = &self.inner.mechanics().bodies;
+        (0..bodies.position.len())
+            .map(|i| {
+                bodies.linear_velocity[i].length()
+                    + bodies.angular_velocity[i].length() * shape_reach(bodies.shape_of(i))
+            })
+            .fold(0.0_f64, f64::max)
+    }
+
     /// 登録済み結合の件数。
     fn coupling_count_impl(&self) -> usize {
         self.inner.coupling_count()
@@ -3645,6 +3664,7 @@ impl WasmWorld {
             "state_hash" => Ok(self.state_hash_impl()),
             "energy_residual" => Ok(self.energy_residual_impl().to_string()),
             "max_body_speed" => Ok(self.max_body_speed_impl().to_string()),
+            "max_body_point_speed" => Ok(self.max_body_point_speed_impl().to_string()),
             "active_approximations_text" => Ok(self.active_approximations_text_impl()),
             "imported_probe_count" => Ok(self.imported_probe_count_impl().to_string()),
             "imported_probe_label_at" => {
@@ -3739,7 +3759,7 @@ impl WasmWorld {
                 "circuit_divider_voltage", "circuit_editor_motor_current",
                 "circuit_node_voltage", "heater_node_temperature",
                 "time", "step_count", "state_hash", "energy_residual",
-                "max_body_speed", "active_approximations_text",
+                "max_body_speed", "max_body_point_speed", "active_approximations_text",
                 "last_import_skipped_sections",
                 "imported_probe_count", "imported_probe_label_at",
                 "imported_probe_value_at", "probe_history_bytes_estimate",
@@ -5804,6 +5824,27 @@ fn sketch_extrude_shape_json_impl(request_json: &str) -> Result<String, WasmErro
 /// 戻り値の中身は検証しない——ただしindex検証を担う`*_impl`
 /// (`body_position_at_impl`等)は素のRust配列を返すため、成功値もエラーも
 /// ここで検証できる。
+/// 物の中心から、いちばん遠い点までの距離(`max_body_point_speed_impl` 用)。
+/// 無限平面は回っても点が動いて見えないので 0 とする。
+fn shape_reach(shape: &Shape) -> f64 {
+    match shape {
+        Shape::Sphere { radius } => *radius,
+        Shape::Box { half_extents } => half_extents.length(),
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => radius + half_height,
+        Shape::Plane { .. } => 0.0,
+        Shape::Compound { children } => children
+            .iter()
+            .map(|(xf, child)| xf.position.length() + shape_reach(child))
+            .fold(0.0_f64, f64::max),
+        Shape::ConvexMesh { vertices } => {
+            vertices.iter().map(|v| v.length()).fold(0.0_f64, f64::max)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5843,6 +5884,28 @@ mod tests {
                 ),
             }
         };
+    }
+
+    /// 回っているだけの物(重心は動かない)も「動いている」と読めること
+    /// (`max_body_point_speed_impl` のdoc参照)。手回し発電機のクランクは
+    /// 半径 0.05 m の球が 10 rad/s で回るので、表面の点は 0.5 m/s で動く。
+    #[test]
+    fn max_body_point_speed_counts_a_spinning_crank_as_moving() {
+        let mut world = WasmWorld::from_scene_json_impl(include_str!(
+            "../../../scenes/d20-hand-crank-generator.json"
+        ))
+        .expect("D20 must load");
+        world.step();
+        let read = |key: &str| -> f64 {
+            world
+                .read_component_impl(key, "")
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+        };
+        assert!(read("max_body_speed") < 1e-9, "重心は動かない");
+        let point = read("max_body_point_speed");
+        assert!((point - 0.5).abs() < 1e-6, "表面の点は 0.5 m/s: {point}");
     }
 
     /// 検証パネル(**残タスク完遂の縦串④増分**)——`run_headless_scenario_json`が

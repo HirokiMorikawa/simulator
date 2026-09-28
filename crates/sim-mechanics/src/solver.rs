@@ -578,9 +578,10 @@ impl MechanicsSolver {
                 if let (Some(water), Shape::Box { half_extents }, Some((up, g))) =
                     (water, self.bodies.shape_of(i), up_and_g)
                 {
+                    let half_extents = *half_extents;
                     let (v_sub, _c_buoy) = sim_fluid::submerged_box_below_plane(
                         self.bodies.position[i],
-                        *half_extents,
+                        half_extents,
                         up,
                         water.water_level,
                     );
@@ -594,6 +595,16 @@ impl MechanicsSolver {
                     if v_sub > 0.0 {
                         self.bodies.force_accum[i] = self.bodies.force_accum[i]
                             + sim_fluid::buoyancy_force(v_sub, water.density, g, up);
+                        // 水の抵抗(`sim_fluid::drag_force_submerged_box`のdoc)。
+                        // 浮力だけでは浮き沈みがいつまでも減らなかった。
+                        let box_volume = 8.0 * half_extents.x * half_extents.y * half_extents.z;
+                        self.bodies.force_accum[i] = self.bodies.force_accum[i]
+                            + sim_fluid::drag_force_submerged_box(
+                                half_extents,
+                                v_sub / box_volume,
+                                water.density,
+                                self.bodies.linear_velocity[i],
+                            );
                     }
                 }
             }

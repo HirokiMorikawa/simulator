@@ -46,6 +46,8 @@ export type DerivedProbeSeries = {
   probes: number[];
   derive: (values: number[]) => number;
   convert?: (value: number) => number;
+  /** 右の「いまの数値」と同じ桁数(`Readout.digits`、`format` を持つ読み値には無い)。 */
+  digits?: number;
 };
 
 /** ワークスペースが物理側へ求めることの全部。 */
@@ -187,6 +189,12 @@ export type WorkspaceApi = {
   /** いちどでも動いたか(`settledTime` と対。止まる・止まらないの問いが
    *  そもそも成り立つ場面かを見分ける)。 */
   settledEverMoved: () => boolean;
+  /**
+   * **いま静かになったところで、止まったと言い切る前の猶予の最中か**。
+   * この間は速さが 0.00 m/s と出ているのに「まだ止まっていません」と
+   * 言っていた(利用者役⑬の観察)。
+   */
+  settlePending: () => boolean;
   /** 舞台に描くものが無いか(案内を出しているのと同じ判断)。 */
   stageIsEmpty: () => boolean;
   /**
@@ -1676,6 +1684,7 @@ export function setUpWorkspace(
         probes: readout.probes,
         derive: readout.derive,
         convert: readout.graph?.convert,
+        digits: readout.format ? undefined : (readout.digits ?? 2),
       });
     }
     return result;
@@ -3833,9 +3842,11 @@ export function setUpWorkspace(
           // 25°の坂では箱が 0.00 m/s のまま張り付いているのに「まだ止まって
           // いません」と出ていて、すぐ上の速さと矛盾して読めた(実測・
           // 利用者役⑪)。動き出していないなら、そう言う。
-          settledNode.textContent = everMoved
-            ? "まだ止まっていません"
-            : "はじめから動いていません";
+          settledNode.textContent = !everMoved
+            ? "はじめから動いていません"
+            : api.settlePending()
+              ? "止まりかけています…"
+              : "まだ止まっていません";
           delete settledNode.dataset.seconds;
         }
       }

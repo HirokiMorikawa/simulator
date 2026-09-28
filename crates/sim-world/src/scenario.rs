@@ -4803,6 +4803,23 @@ mod tests {
                  pulled to the wall by the image charge force and *stay* against it \
                  (0 <= x <= 0.03, sphere radius 0.02): final_x={final_x}"
             );
+
+            // **貼りついたら、そのまま静かに止まっている**。眠った風船にも鏡像力を
+            // 積み続けていたため、0.6 秒ごとに壁へ 5 mm めり込んで 0.5 m/s で
+            // 跳ね返っていた(`sim_coupling::ImageChargeForce::apply_pre`のdoc参照)。
+            // 最終位置だけを見ていた上の判定では、この揺れは見えなかった。
+            let with_speed = json.replace(
+                r#"[ { "body_pos_x": "balloon" } ]"#,
+                r#"[ { "body_pos_x": "balloon" }, { "body_speed": "balloon" } ]"#,
+            );
+            let result = run_headless_scenario(&with_speed, 6000).expect("valid scenario JSON");
+            let speeds = &result.probe_histories[1];
+            // 0.2 m から約 0.7 秒(84 step)で壁に着く。着いて 1 秒後から先を見る。
+            let late_max = speeds[200..].iter().cloned().fold(0.0_f64, f64::max);
+            assert!(
+                late_max < 0.01,
+                "貼りついた風船は止まったままのはず: 200 step 以降の最大の速さ={late_max}"
+            );
         }
 
         // 逆二乗則: 初期距離を2倍にすると初期加速度(=1step目の速度変化/dt)は1/4になる。
@@ -5791,6 +5808,75 @@ mod tests {
         assert!(
             returned_speed > 0.9 * v0 && returned_speed < 1.05 * v0,
             "気体ばねは圧縮エネルギーをほぼ返すべき: v0={v0} returned={returned_speed}"
+        );
+    }
+
+    /// **気体ばねは、何度弾んでも振れ幅が育たない**(利用者役⑬の「空気をばねにする」を
+    /// 縦置きに作り直したときの形)。ピストンを縦に立て、自分の重さで気体を押させる。
+    /// 1 step ごとの断熱変化を1次近似で積んでいた頃は、往復のたびに少しずつ
+    /// エネルギーが増え、2 kg では 15 秒ほどで位置が −2.4e8 m まで発散した
+    /// (`sim_thermal::GasCompartment::apply_step_volume_change`のdoc参照)。
+    #[test]
+    fn a_vertical_gas_spring_keeps_bouncing_with_the_same_amplitude() {
+        for mass in ["1.0", "2.0"] {
+            let json = include_str!("../../../scenes/d17-piston.json")
+                .replace(r#""gravity": 0.0"#, r#""gravity": 9.80665"#)
+                .replace(r#""n_moles": 1.0e-4"#, r#""n_moles": 3.0e-4"#)
+                .replace(r#""axis": [1, 0, 0]"#, r#""axis": [0, 1, 0]"#)
+                .replace(
+                    r#""linear_velocity": [-0.5, 0, 0]"#,
+                    r#""linear_velocity": [0, 0, 0]"#,
+                )
+                .replace(
+                    r#""mass_override": 1.0"#,
+                    &format!(r#""mass_override": {mass}"#),
+                )
+                .replace(
+                    r#"{ "body_pos_x": "piston" }"#,
+                    r#"{ "body_pos_y": "piston" }"#,
+                );
+            // 20 秒。はじめの 5 秒と、おわりの 5 秒で振れ幅を比べる。
+            let result = run_headless_scenario(&json, 2400).expect("valid scenario JSON");
+            let y = &result.probe_histories[0];
+            let span = |r: std::ops::Range<usize>| {
+                let lo = y[r.clone()].iter().cloned().fold(f64::MAX, f64::min);
+                let hi = y[r].iter().cloned().fold(f64::MIN, f64::max);
+                (lo, hi)
+            };
+            let (lo0, hi0) = span(0..600);
+            let (lo1, hi1) = span(1800..2400);
+            assert!(
+                hi0 - lo0 > 0.02,
+                "m={mass}: 実際に弾んでいるべき: {lo0}..{hi0}"
+            );
+            assert!(
+                (lo1 - lo0).abs() < 1.0e-3 && (hi1 - hi0).abs() < 1.0e-3,
+                "m={mass}: 振れ幅は育ちも縮みもしないはず: 最初 {lo0}..{hi0} 最後 {lo1}..{hi1}"
+            );
+        }
+    }
+
+    /// **水に落とした箱は、浮き沈みしながら釣り合いの深さへ落ち着く**
+    /// (`sim_fluid::drag_force_submerged_box`のdoc参照)。浮力だけだった頃は、
+    /// 水面から落とすと ±0.6 m の上下を 20 秒たっても同じ幅で続けていた。
+    #[test]
+    fn a_box_dropped_onto_water_bobs_and_settles_toward_the_floating_depth() {
+        let json = include_str!("../../../scenes/d6-floating-box-f4.json")
+            .replace("-0.09999999999999998", "0.5");
+        let result = run_headless_scenario(&json, 2400).expect("valid scenario JSON");
+        let y = &result.probe_histories[0];
+        // 釣り合いは中心が水面の 0.1 m 下(密度 599 / 998.2 ≒ 6 割沈む)。
+        let equilibrium = 0.5 - 598.92 / 998.2;
+        let swing = |r: std::ops::Range<usize>| {
+            y[r].iter()
+                .map(|v| (v - equilibrium).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        let (first, last) = (swing(0..600), swing(1800..2400));
+        assert!(first > 0.4, "はじめは大きく浮き沈みする: {first}");
+        assert!(
+            last < 0.5 * first,
+            "水の抵抗で落ち着いていくはず: 最初の振れ {first} 最後の振れ {last}"
         );
     }
 

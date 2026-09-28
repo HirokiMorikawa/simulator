@@ -366,9 +366,66 @@ pub fn buoyancy_force(volume_submerged: f64, fluid_density: f64, gravity: f64, u
     up.scale(fluid_density * gravity * volume_submerged)
 }
 
+/// 角ばった箱(立方体)の抗力係数。高レイノルズ数域でほぼ一定の値として
+/// よく使われる 1.05 を採る。
+pub const DRAG_COEFFICIENT_BOX: f64 = 1.05;
+
+/// **水の中で動く箱が受ける抵抗**(高レイノルズ数の二乗抵抗
+/// $\mathbf F = -\tfrac12\rho C_d A |\mathbf v| \mathbf v$)。
+///
+/// 浮力だけを積んでいた頃は、水に落とした箱が浮き沈みを**いつまでも**
+/// 繰り返していた(実測: 高さ 0.8 m から落とすと 20 秒たっても ±1 m の
+/// 振幅のまま。利用者役⑬の「浮くか沈むか」で、何も起きないか、ずっと
+/// 揺れているかのどちらかになった)。実物の木箱は数回浮き沈みして落ち着く。
+///
+/// `A` は速度の向きから見た箱の影の面積(直立した直方体として、各面の
+/// 面積 × その面の法線と速度の向きの余弦の絶対値の和)。水に浸かっている
+/// 割合 `submerged_fraction`(0〜1)だけ効く——水の外にある部分は水を
+/// 押しのけない。止まっている箱には 0 を返すので、釣り合いの深さ
+/// (アルキメデス)は変わらない。
+pub fn drag_force_submerged_box(
+    half_extents: Vec3,
+    submerged_fraction: f64,
+    fluid_density: f64,
+    velocity: Vec3,
+) -> Vec3 {
+    let speed = velocity.length();
+    if speed < 1e-12 || submerged_fraction <= 0.0 {
+        return Vec3::ZERO;
+    }
+    let dir = velocity.scale(1.0 / speed);
+    let (hx, hy, hz) = (half_extents.x, half_extents.y, half_extents.z);
+    let area = 4.0 * (hy * hz * dir.x.abs() + hx * hz * dir.y.abs() + hx * hy * dir.z.abs());
+    let magnitude =
+        0.5 * fluid_density * DRAG_COEFFICIENT_BOX * area * submerged_fraction.min(1.0) * speed;
+    velocity.scale(-magnitude)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 水中の箱の抵抗: 速度と逆向きで、大きさは $\tfrac12\rho C_d A v^2$、
+    /// 浸かっている割合に比例し、止まっていれば 0。
+    #[test]
+    fn drag_on_a_submerged_box_opposes_motion_and_scales_with_the_wetted_part() {
+        let half = Vec3::new(0.5, 0.5, 0.5); // 一辺 1 m、正面の面積 1 m^2
+        let v = Vec3::new(0.0, -2.0, 0.0);
+        let full = drag_force_submerged_box(half, 1.0, 1000.0, v);
+        let expected = 0.5 * 1000.0 * DRAG_COEFFICIENT_BOX * 1.0 * 4.0;
+        assert!(
+            (full.y - expected).abs() < 1e-9,
+            "full={full:?} expected={expected}"
+        );
+        assert!(full.x.abs() < 1e-12 && full.z.abs() < 1e-12);
+        let half_wet = drag_force_submerged_box(half, 0.5, 1000.0, v);
+        assert!((half_wet.y - expected / 2.0).abs() < 1e-9);
+        assert_eq!(
+            drag_force_submerged_box(half, 1.0, 1000.0, Vec3::ZERO),
+            Vec3::ZERO
+        );
+        assert_eq!(drag_force_submerged_box(half, 0.0, 1000.0, v), Vec3::ZERO);
+    }
 
     /// 既定の重力(ワールド`-y`向き)に対応する上方向。
     const UP_Y: Vec3 = Vec3 {

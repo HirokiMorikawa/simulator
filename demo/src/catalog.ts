@@ -442,6 +442,8 @@ const CELSIUS_GRAPH = { unit: "℃", convert: (v: number) => v - KELVIN };
 const OKU_KM_GRAPH = { unit: "億 km", convert: (v: number) => v / 1e11 };
 const KM_PER_SECOND_GRAPH = { unit: "km/s", convert: (v: number) => v / 1000 };
 const KM_GRAPH = { unit: "km", convert: (v: number) => v / 1000 };
+/** ナノメートル(ブラウン運動のずれ)。 */
+const NM_GRAPH = { unit: "nm", convert: (v: number) => v * 1e9 };
 
 // ---------------------------------------------------------------------------
 // カタログ本体。
@@ -1007,10 +1009,19 @@ export const GUIDED_CATEGORIES: Category[] = [
           // 自分で計算して突き合わせられる。
           "箱は一辺 1 m の立方体、数値は箱の中心の高さです(水面が 0)。",
           "密度 600 kg/m³ なら 6 割(0.6 m)が沈み、中心は水面の 0.1 m 下で釣り合います。",
+          "箱は水面にそっと置いたところから始まります。ぐっと沈んで浮き上がり、何度か上下しながら、水の抵抗で釣り合いの深さへ落ち着いていきます。",
           "1000 を超えると沈み、超えなければ浮きます。",
         ],
         view: "graph",
         pace: 120,
+        // **釣り合った位置から始めない**。以前は箱を最初から釣り合いの深さに
+        // 置いていたので、開いた瞬間にもう沈み終わっていて、20 秒眺めても
+        // 何も起きなかった(利用者役⑬の観察)。箱の底を水面に触れさせた
+        // ところから始める(沈む・浮き上がる・落ち着く、が全部見える)。
+        prepare: (scene) => {
+          const box = body(scene, "box");
+          if (box) box.position = [0, 0.5, 0];
+        },
         readouts: [
           { probe: 0, label: "箱の中心の高さ(水面が 0)", unit: "m", digits: 3 },
         ],
@@ -1031,10 +1042,6 @@ export const GUIDED_CATEGORIES: Category[] = [
             apply: (scene, value) => {
               const material = scene.materials?.[0];
               if (material) material.density = Number(value);
-              // 初期位置は「だいたい釣り合う位置」に置く(沈む場合も自然に沈む)。
-              const box = body(scene, "box");
-              const draft = Math.min(Number(value) / 998.2, 1);
-              if (box) box.position = [0, 0.5 - draft, 0];
             },
           },
         ],
@@ -1469,47 +1476,53 @@ export const GUIDED_CATEGORIES: Category[] = [
           // だけの画面が何なのか分からなかった(利用者役②の観察)。手回し
           // 発電機と同じように、先に言う。
           "3D に映るのはピストンそのもの(球)だけです——シリンダーや気体は描いていません。",
-          "押し込むと押し返されます——気体はばねとして働きます。",
-          // 「行ったり来たりを繰り返します」と書いてあったが、反対側に押し返す
-          // ものが無いので、一度押し返されたあとはそのまま離れていく。画面と
-          // 食い違っていた(利用者役②の観察)。
-          "押し込んで押し返されるまでは 0.1 秒ほどで終わります——そのあと数値に出ているのは、外へ出ていく速さです。",
-          "つまみの効きは「いちばん深く押し込めたところ」で比べてください(強く押すほど深くなります)。",
-          "押し返されたあとは、止めるものが無いのでそのまま離れていきます。",
+          // 以前は横向きのピストンを一度押し込むだけで、0.1 秒で押し返された
+          // あとは離れていくだけ——20 秒眺めても何も起きなかった(利用者役⑬の
+          // 観察)。縦に置いて自分の重さで空気を押させると、押し縮めては
+          // 押し返される往復がずっと続く。これが「空気のばね」そのもの。
+          "ピストンは自分の重さで下の空気を押し縮め、縮んだ空気に押し返されて跳ね上がります。これを何度でも繰り返します——空気がばねとして働いています。",
+          "摩擦も熱の逃げも入れていないので、弾みは弱まりません。",
+          "重いピストンほど深く沈み、そのぶん空気が固くなって速く弾みます(1 kg で 0.5 秒ごと、2 kg で 0.4 秒ごと)。",
         ],
         view: "3d",
         pace: 120,
+        // 場面ファイルは横向きに押し込む形のまま(物理側の検証が使っている)。
+        // ここで縦に立て、重さで押させる形に組み直す。気体は 3 倍にして、
+        // 重さに対して潰れすぎない量にしてある(1 kg で 3.3 cm 沈む)。
+        prepare: (scene) => {
+          const s = scene as Record<string, any>;
+          s.world.gravity = 9.80665;
+          s.gas.n_moles = 3.0e-4;
+          const piston = body(scene, "piston");
+          if (piston) piston.linear_velocity = [0, 0, 0];
+          for (const joint of s.joints ?? []) if (joint.slider) joint.slider.axis = [0, 1, 0];
+          for (const coupling of s.couplings ?? []) {
+            if (coupling.piston_gas) coupling.piston_gas.axis = [0, 1, 0];
+          }
+          s.probes = [{ body_pos_y: "piston" }, { body_speed: "piston" }];
+        },
         knobs: [
           {
-            id: "push",
-            label: "押し込む速さ",
+            id: "mass",
+            label: "ピストンの重さ",
             kind: "range",
-            min: 0.1,
-            // 上限は 1.5。1.7 m/s では気体の体積がほぼ 0 まで潰れて圧力が
-            // 発散し、ピストンの位置が -5.4e7 m、速さが 2.1e7 m/s という
-            // 壊れた数字になった(利用者役②の観察)。**壊れた結果しか出ない
-            // 値は渡さない**——見どころは「押すと押し返される」ところなので、
-            // その手前までを渡す(実測で 1.6 まで安定、余裕を見て 1.5)。
-            max: 1.5,
-            step: 0.1,
-            unit: "m/s",
-            value: 0.5,
-            hint: "強く押すほど深く縮み、押し返しも大きくなります。",
+            // 1 kg を下回ると、始めの空気の押す力のほうが勝って押し上げられる
+            // だけになる(0.75 kg でほぼ釣り合って動かない)。
+            min: 1,
+            max: 2,
+            step: 0.25,
+            unit: "kg",
+            value: 1,
+            hint: "重いほど深く沈み、速く弾みます。",
             apply: (scene, value) => {
-              const piston = scene.bodies?.find((b) => b.name === "piston");
-              if (piston) piston.linear_velocity = [-Number(value), 0, 0];
+              const piston = body(scene, "piston");
+              if (piston) piston.mass_override = Number(value);
             },
           },
         ],
-        // **つまみが動かしているものを出す**。「押し込む速さ」を変えても、
-        // 人が数値を読む頃には押し返された後で、「ピストンの速さ」は外へ
-        // 出ていく速さ(つまみ 0.1 に対して 0.815)しか残っていなかった
-        // ——つまみと 8 倍ずれて見えるので、効いていないのか読み違えたのかが
-        // 分からない(利用者役⑩の観察)。つまみが実際に決めているのは
-        // **どこまで押し込めたか**なので、それを出す。
         readouts: [
-          { probe: 0, label: "いちばん深く押し込めたところ", extreme: "min", unit: "m", digits: 3 },
-          { probe: 0, label: "ピストンの位置", unit: "m", digits: 3 },
+          { probe: 0, label: "いちばん深く沈んだところ", extreme: "min", unit: "m", digits: 3 },
+          { probe: 0, label: "ピストンの高さ", unit: "m", digits: 3 },
           { probe: 1, label: "ピストンの速さ", unit: "m/s", digits: 3 },
         ],
       },
@@ -1729,7 +1742,17 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         readouts: [
           { probe: 0, label: "発電した電圧", unit: "V", digits: 3 },
-          { probe: 1, label: "流れた電流", unit: "A", digits: 4 },
+          {
+            // 電源の端子の向きで測るので、発電しているあいだは負の値になる
+            // (`-0.05 A`)。電圧は正なのに電流だけ負で、逆向きに流れているのか
+            // と読まれた(利用者役⑬の観察)。抵抗を流れる電流の大きさを出す。
+            probe: 1,
+            probes: [1],
+            derive: ([current]) => Math.abs(current),
+            label: "流れた電流",
+            unit: "A",
+            digits: 4,
+          },
           { probe: 2, label: "抵抗の温度", format: celsius(2), graph: CELSIUS_GRAPH },
         ],
       },
@@ -1828,6 +1851,15 @@ export const GUIDED_CATEGORIES: Category[] = [
         ],
         view: "graph",
         pace: 120,
+        // **壁から 60 cm 離して始める**。場面ファイルの 20 cm では 0.7 秒で壁に
+        // 着いてしまい、開いて目を向けた頃にはもう終わっていた(利用者役⑬の
+        // 観察)。引力は距離の 2 乗に反比例するので、離れたところでは
+        // ゆっくり動き出し、近づくほど急に速くなる——説明の「加速しながら
+        // 吸い寄せられます」がそのまま見える(実測 3.4 秒で壁に着く)。
+        prepare: (scene) => {
+          const balloon = body(scene, "balloon");
+          if (balloon) balloon.position = [0.6, 0, 0];
+        },
         knobs: [
           {
             id: "charge",
@@ -2313,12 +2345,16 @@ export const GUIDED_CATEGORIES: Category[] = [
           // 「下のグラフを見てください」と書いてあったが、浅い濃さではグラフを
           // 畳んでいるので、その下には何も無かった(利用者役①の観察)。まず
           // 右の数値を指し、グラフの出し方を添える。
-          "300 個は一直線に並べてあります。震えはとても小さいので、右の「先頭の粒子の速さ」で見てください(温度を上げると大きくなります)。",
+          // 以前は 3D を見てもらっていたが、1 秒に動く距離は 1 nm 足らず
+          // (粒の大きさの 1000 分の 1)で、20 秒眺めても画面の画素が 1 つも
+          // 変わらなかった(利用者役⑬の実測)。記録している先頭の粒子の
+          // 位置を、ナノメートルのずれとしてグラフに描く。
+          "300 個は一直線に並べてあります。1 個が震える幅はナノメートル(髪の毛の 10 万分の 1)ほどで 3D では見えないので、下のグラフで先頭の粒子の「ずれ」を見てください。線がでたらめに上下します。",
           "どの粒子もでたらめに動きますが、平均の広がり方には法則があります。",
           "アインシュタインがこの法則から分子の存在を示しました。",
           "粒は実際には 1 µm(髪の毛の 50 分の 1)。見えるように、画面では実物より大きく描いています。",
         ],
-        view: "3d",
+        view: "graph",
         pace: 120,
         knobs: [
           {
@@ -2345,6 +2381,18 @@ export const GUIDED_CATEGORIES: Category[] = [
           // 温度を変えた違いが数値からは読めなかった(利用者役②の観察)。
           // この場面には「広がりの大きさ」の観測点は無い(粒は 300 個の剛体で、
           // 平均二乗変位を測るドメインを持たない)ので、速さで見てもらう。
+          {
+            probe: 0,
+            label: "先頭の粒子の横のずれ",
+            format: (v) => `${(v * 1e9).toFixed(3)} nm`,
+            graph: NM_GRAPH,
+          },
+          {
+            probe: 1,
+            label: "先頭の粒子の縦のずれ",
+            format: (v) => `${(v * 1e9).toFixed(3)} nm`,
+            graph: NM_GRAPH,
+          },
           { probe: 2, label: "先頭の粒子の速さ", unit: "m/s", digits: 5 },
         ],
       },
