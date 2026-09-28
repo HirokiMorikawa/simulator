@@ -84,6 +84,15 @@ const DT = 1.0 / 120.0;
 const INITIAL_HEIGHT = 10.0;
 const BOX_HALF_EXTENT = 0.5;
 const MAX_STEPS_PER_FRAME = 240;
+/**
+ * **1 コマで計算に使ってよい時間 [ms]**。step の数だけで上限を切っていたので、
+ * 1 step が重い場面(水を注ぐ: 1 step 約 3 ms)で進める速さを上げると、
+ * 1 コマが 100 ms 近くかかって画面がかくかくになる。そのため重い場面は
+ * 速さそのものを低く据えるしかなく、「ふつう」で 20 秒見ても 1 秒ぶんしか
+ * 進まなかった(利用者役⑬)。時間で切れば、速い機械は速く、遅い機械は
+ * なめらかさを保ったままその機械なりに進む(届かない分は「実際は ×◯」が言う)。
+ */
+const STEP_TIME_BUDGET_MS = 16;
 const BODY_INDEX_GROUND = 0;
 const BODY_INDEX_BOX = 1;
 
@@ -7269,7 +7278,11 @@ async function setUpSceneView(
       // 半径は質量の立方根に比例させる(密度一定の球と同じ関係)。
       // 質量が桁違いなので、太陽が画面を埋めないよう上限を掛ける。
       const ratio = maxMass > 0 ? (masses[i] ?? 0) / maxMass : 0;
-      mesh.scale.setScalar(0.12 + 0.5 * Math.cbrt(Math.max(ratio, 0)));
+      // **いちばん軽い天体も、見失わない大きさに**。下限 0.12 では、地球の
+      // 重さの惑星は太陽の隣で 8px、探査機は 12px の点にしかならず、主役が
+      // 動いているのか目で追えなかった(利用者役⑬)。下限を 0.35 に上げ、
+      // 太陽はそのぶん伸びを抑えて(0.7)、重い方が大きいという並びは保つ。
+      mesh.scale.setScalar(0.35 + 0.35 * Math.cbrt(Math.max(ratio, 0)));
       // **通った跡を、天体にも残す**。「惑星が太陽を回る」を開いても、画面に
       // 出ているのは黒地に 2 つの点だけで、**軌道はどこにも描かれていない**
       // ——タイトルが約束している「回る」が絵になっていなかった(利用者役⑨の
@@ -7296,7 +7309,8 @@ async function setUpSceneView(
     scene.add(points);
     return { geometry, vertices, attribute, points };
   }
-  const gasCloud = makeParticleCloud(0x88ddff, 0.05);
+  // 0.05 では分子が 1〜3px の点で、数えるどころか見えなかった(利用者役⑬)。
+  const gasCloud = makeParticleCloud(0x88ddff, 0.14);
   const brownianCloud = makeParticleCloud(0xff88cc, 0.06);
 
   function updateParticleCloud(
@@ -7397,6 +7411,7 @@ async function setUpSceneView(
     ny: number,
     color: (t: number) => [number, number, number],
     normalize: "signed" | "positive",
+    options: { walls?: Float32Array; gamma?: number } = {},
   ) {
     if (!fieldContext || nx === 0 || ny === 0) return;
     fieldCanvas.width = nx;
@@ -7405,11 +7420,17 @@ async function setUpSceneView(
     let scale = 0;
     for (let i = 0; i < values.length; i += 1) scale = Math.max(scale, Math.abs(values[i]));
     if (scale === 0) scale = 1;
+    let wallMax = 0;
+    if (options.walls) for (const w of options.walls) wallMax = Math.max(wallMax, w);
+    const wallThreshold = wallMax > 0 ? wallMax * 0.5 : Infinity;
     for (let j = 0; j < ny; j += 1) {
       for (let i = 0; i < nx; i += 1) {
         const v = values[j * nx + i];
-        const t = normalize === "signed" ? v / scale : Math.abs(v) / scale;
-        const [r, g, b] = color(t);
+        let t = normalize === "signed" ? v / scale : Math.abs(v) / scale;
+        if (options.gamma !== undefined && normalize === "positive") t = t ** options.gamma;
+        // 壁(ポテンシャルが立っている所)は灰色で塗る——そこに何があるのかを見せる。
+        const wall = options.walls !== undefined && options.walls[j * nx + i] > wallThreshold;
+        const [r, g, b] = wall ? [139, 146, 156] : color(t);
         // canvas の y は下向き。物理の格子は上向きなので反転して描く。
         const px = ((ny - 1 - j) * nx + i) * 4;
         image.data[px] = r;
@@ -7549,15 +7570,18 @@ async function setUpSceneView(
       // ます目の数(「256×128 のます目で計算」)も括弧で添えていたが、それも
       // 読めない言葉として挙げられた(利用者役⑬)ので、見出しは現象の言葉だけにする。
       fieldTitle.textContent = "電子の見つかりやすさ(明るいほど見つかりやすい)";
-      // ポテンシャル壁を暗く重ねたいが、まずは密度をそのまま出す
-      // (壁は密度が 0 のまま残るので位置は読み取れる)。
-      drawScalarField(
-        currentWorld.quantum_2d_density_f32(),
-        quantum2dSize[0],
-        quantum2dSize[1],
-        sequentialColor,
-        "positive",
-      );
+      // **隙間のある壁を描く**。「2 つの隙間を抜けて」と言いながら壁が
+      // どこにも無く、何を抜けたのか分からなかった(利用者役⑬)。ポテンシャルが
+      // 立っている所を灰色で塗る。明るさは平方根でつけ、壁の向こうの弱い
+      // しま模様も見えるようにする(明るいほど見つかりやすい、は変わらない)。
+      // `quantum_2d_density_f32` のビューは次の Wasm 呼び出しで無効になるので、
+      // 先に写し取る。
+      const density2d = Float32Array.from(currentWorld.quantum_2d_density_f32());
+      const potential2d = Float32Array.from(currentWorld.quantum_2d_potential_f32());
+      drawScalarField(density2d, quantum2dSize[0], quantum2dSize[1], sequentialColor, "positive", {
+        walls: potential2d,
+        gamma: 0.5,
+      });
       fieldPanel.hidden = false;
       return;
     }
@@ -8402,7 +8426,11 @@ async function setUpSceneView(
     // の端の小さな点になっていて、まともに見えない」)。16 なら画面の高さの
     // 6〜7% ——まわりが見えることは保ちつつ、何が走っているのか分かる大きさ。
     // 全体が入る場面では `fit` の方が小さいので、この上限は効かない。
-    const APPARENT_MIN = 16;
+    // 16 でも、20 m 落とすボールは落ちている間ずっと 44px(画面の 6%)で、
+    // 大きく映るのは止まって寄ってからだった——「みる:現象だけを大きく」なのに
+    // (利用者役⑬)。9 で落ちている最中から 80px ほど。床と通った跡の線は
+    // 画面に残るので、落ちていることは読める。
+    const APPARENT_MIN = 9;
     // **見どころが「物」ではなく「道すじ」の場面では、道すじの大きさで
     // 上限を決める**(`guidedCurvedPathBox` の doc 参照)。曲がって進んだ跡が
     // 残っていれば、その広がりを見どころの大きさに足す——「斜めに投げる」は
@@ -13132,7 +13160,37 @@ async function setUpSceneView(
     if (guidedFollowCamera) updateGuidedFollowCamera();
     // enableDamping を使うので毎フレーム update が要る。
     orbit.update();
+    shiftViewAwayFromFieldPanel();
     renderer.render(scene, camera);
+  }
+  /**
+   * **場のパネルが舞台の右下に浮いているときは、絵をその左へ寄せる**。
+   * 気体の箱のように 3D にも中身がある場面では、カメラが中身を舞台の
+   * まん中に置く一方で、速さの分布のパネルが右下を覆い、箱の角が隠れていた
+   * (利用者役⑬)。パネルの幅の半分だけ描く範囲をずらし、中身が空いている
+   * 側のまん中に来るようにする。舞台に形のある物が無い場面(パネルが主役)
+   * ではずらさない。カメラの投影そのものをずらすので、クリックで物を選ぶ
+   * 計算も同じずれを使い、食い違わない。
+   */
+  let viewShiftApplied = 0;
+  function shiftViewAwayFromFieldPanel(): void {
+    const width = renderer.domElement.clientWidth;
+    const height = renderer.domElement.clientHeight;
+    const overStage =
+      !fieldPanel.hidden && sceneViewElement.dataset.stageEmpty !== "true" && width > 0;
+    const shift = overStage ? Math.round(fieldPanel.offsetWidth / 2) : 0;
+    if (
+      shift === viewShiftApplied &&
+      (shift === 0 || (camera.view?.fullWidth === width && camera.view?.fullHeight === height))
+    ) {
+      return;
+    }
+    viewShiftApplied = shift;
+    if (shift === 0) {
+      camera.clearViewOffset();
+    } else {
+      camera.setViewOffset(width, height, shift, 0, width, height);
+    }
   }
   hashDisplay.addEventListener("click", () => {
     // **コピーできたことを伝える**(増分「UI 品質の底上げ」)。設計 §2 は
@@ -13197,7 +13255,14 @@ async function setUpSceneView(
         budget = Math.floor(accumulator / dt);
       }
       let steps = 0;
+      const stepStart = performance.now();
+      let outOfTime = false;
       while (steps < budget && steps < MAX_STEPS_PER_FRAME) {
+        // 最低 1 step は進める(どんなに重くても止まって見えないように)。
+        if (steps > 0 && performance.now() - stepStart > STEP_TIME_BUDGET_MS) {
+          outOfTime = true;
+          break;
+        }
         if (heaterToggle.checked) applyComponent(world, "push_heat_source", { watts: HEATER_WATTS });
         applyThrustForStep();
         world.step();
@@ -13211,7 +13276,7 @@ async function setUpSceneView(
       // (届かないまま `accumulator` を溜め続けると、負荷が下がった瞬間に
       //  一気に進む「時間の借金」になるので、上限に当たったフレームでは
       //  余りを捨てる。)
-      const capped = steps >= MAX_STEPS_PER_FRAME;
+      const capped = steps >= MAX_STEPS_PER_FRAME || outOfTime;
       if (capped) {
         accumulator = 0;
         stepAccumulator = 0;

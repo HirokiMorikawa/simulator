@@ -7369,6 +7369,118 @@ test("舞台に通った跡の線が出ていれば、その意味を言う", as
   expect(errors).toEqual([]);
 });
 
+// **課題(利用者役⑬「みる」: 見どころが小さい)**: 20 m 落とすボールは落ちている
+// 間ずっと 44px(画面の 6%)で、大きく映るのは止まって寄ってからだった。
+test("落ちている最中のボールが、画面の 1 割ほどの大きさで映る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを落");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("ボール");
+  await page.waitForTimeout(900);
+  const share = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const cam = w.__camera;
+    const world = w.__world;
+    const n = Number(world.read_component("body_count", ""));
+    for (let i = 0; i < n; i += 1) {
+      if (world.read_component("body_is_static_at", String(i)) === "true") continue;
+      const mesh = w.__bodyMeshFor(i);
+      mesh.geometry.computeBoundingSphere();
+      const radius = mesh.geometry.boundingSphere.radius * mesh.scale.x;
+      const p = world.body_position_at_f32(i);
+      const d = Math.hypot(cam.position.x - p[0], cam.position.y - p[1], cam.position.z - p[2]);
+      const speed = Number(world.read_component("max_body_speed", ""));
+      return { share: (2 * radius) / (2 * d * Math.tan((cam.fov * Math.PI) / 360)), speed };
+    }
+    return { share: 0, speed: 0 };
+  });
+  expect(share.speed, "まだ落ちている最中に測る").toBeGreaterThan(1);
+  expect(share.share, `画面の高さに対するボールの直径 ${share.share}`).toBeGreaterThan(0.1);
+  expect(errors).toEqual([]);
+});
+
+// 惑星は太陽の隣で 8px の点で、回っているのか目で追えなかった。気体の分子は
+// 1〜3px の点だった。どちらも絵の大きさだけを上げる(物理は変えない)。
+test("惑星と気体の分子が、点ではなく見える大きさで描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "惑星が太");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("惑星");
+  await page.waitForTimeout(1500);
+  const smallest = await page.evaluate(() => {
+    let min = Infinity;
+    (window as unknown as Record<string, any>).__scene.traverseVisible((o: any) => {
+      if (o.isMesh && o.geometry?.type === "SphereGeometry" && o.parent?.type === "Group") {
+        min = Math.min(min, o.scale.x);
+      }
+    });
+    return min;
+  });
+  expect(smallest, `いちばん小さい天体の半径 ${smallest}`).toBeGreaterThanOrEqual(0.3);
+
+  // 気体の箱は、速さの分布のパネルの陰に入らないよう左へ寄せて描く。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "気体の分子");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#field-panel")).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(800);
+  const offset = await page.evaluate(
+    () => (window as unknown as Record<string, any>).__camera.view?.offsetX ?? 0,
+  );
+  expect(offset, "描く範囲をパネルの幅の半分だけずらす").toBeGreaterThan(50);
+  const pointSize = await page.evaluate(() => {
+    let size = 0;
+    (window as unknown as Record<string, any>).__scene.traverseVisible((o: any) => {
+      if (o.isPoints) size = Math.max(size, o.material.size);
+    });
+    return size;
+  });
+  expect(pointSize).toBeGreaterThanOrEqual(0.1);
+  expect(errors).toEqual([]);
+});
+
+// 「2 つの隙間を抜けて」と言いながら、隙間のある壁が描かれていなかった。
+test("二重スリットでは、隙間のある壁が絵に描かれる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "二重スリット");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#field-panel")).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(1500);
+  const wallColumns = await page.evaluate(() => {
+    const c = document.getElementById("field-canvas") as HTMLCanvasElement;
+    const data = c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data;
+    // 壁の灰色(139,146,156)が縦に並ぶ列を数え、その列の中に隙間(灰色でない行)が
+    // 2 か所あることを確かめる。
+    const isWall = (x: number, y: number) => {
+      const i = (y * c.width + x) * 4;
+      return data[i] === 139 && data[i + 1] === 146 && data[i + 2] === 156;
+    };
+    for (let x = 0; x < c.width; x += 1) {
+      let wall = 0;
+      for (let y = 0; y < c.height; y += 1) if (isWall(x, y)) wall += 1;
+      if (wall < c.height * 0.5) continue;
+      let gaps = 0;
+      let inGap = false;
+      for (let y = 0; y < c.height; y += 1) {
+        const open = !isWall(x, y);
+        if (open && !inGap) gaps += 1;
+        inGap = open;
+      }
+      return { x, gaps };
+    }
+    return null;
+  });
+  expect(wallColumns, "壁の列が描かれている").not.toBeNull();
+  expect(wallColumns!.gaps, "隙間が 2 つ").toBe(2);
+  expect(errors).toEqual([]);
+});
+
 // **課題(利用者役⑨の観察)**: 「煙が流れる(3D)」の説明は「球のまわりを煙が
 // 流れていきます」「球の裏側で巻き込まれ」と書いていたのに、**この場面に球は
 // 無い**(場面ファイルの `bodies` は空、格子流体の境界も流入だけ)。利用者役は
