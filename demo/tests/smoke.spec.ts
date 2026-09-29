@@ -135,7 +135,10 @@ test("Probe Graphs の対数軸トグルと CSV エクスポートが動く(増�
   const stream = await download.createReadStream();
   const chunks: Buffer[] = [];
   for await (const c of stream) chunks.push(c as Buffer);
-  const csv = Buffer.concat(chunks).toString("utf8");
+  const raw = Buffer.concat(chunks).toString("utf8");
+  // 先頭の BOM は、日本語の表計算ソフトに UTF-8 だと知らせるため(利用者役⑮)。
+  expect(raw.startsWith("\uFEFF")).toBe(true);
+  const csv = raw.slice(1);
   const lines = csv.split("\n");
   // 1列目は**経過時間(秒)**。サンプル番号のままでは「何秒の値か」を表計算側で
   // 計算し直す必要があった(利用者役の観察)。
@@ -205,8 +208,8 @@ test("増分G1で追加した3シーン(D8/D12/D36)がギャラリーから読�
   // シーン定義プローブ8本が Probes サブツリーに並ぶ。
   await page.click('.scene-gallery-list button[data-scene-file="d36-swingby.json"]');
   await expect(page.locator("#hierarchy-tree .tree-body")).toHaveCount(0);
-  await expect(hierarchy.getByText("横の位置(1)", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("縦の速さ(0)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("横の位置(天体 1)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("縦の速さ(天体 0)", { exact: true })).toBeVisible();
 
   // 剛体が無いシーンでも再生して描画ループが回ること。
   await page.click("#btn-mode-play");
@@ -300,16 +303,16 @@ test("増分Hで追加した5シーン(D13/D14/D15/D16/D23)がギャラリーか
 
   // D13 ロープ: 剛体0体・ソフトボディ21粒子。プローブで観測する。
   await page.click('.scene-gallery-list button[data-scene-file="d13-rope.json"]');
-  await expect(hierarchy.getByText("高さ(10)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("高さ(ひもの点 10)", { exact: true })).toBeVisible();
 
   // D16 熱伝導レース: 1D棒の格子点温度。
   await page.click('.scene-gallery-list button[data-scene-file="d16-conduction-race.json"]');
-  await expect(hierarchy.getByText("棒の温度(20)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("棒の温度(区画 20)", { exact: true })).toBeVisible();
 
   // D15 対流: 格子流体の平均鉛直速度 + 熱ノード。
   await page.click('.scene-gallery-list button[data-scene-file="d15-convection.json"]');
   await expect(hierarchy.getByText("流れの速さ(平均)", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("温度(0)", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("温度(熱の点 0)", { exact: true })).toBeVisible();
 
   // D14 渦: 鉛直速度のRMS(平均だと上下対称で打ち消し合って0のまま)。
   await page.click('.scene-gallery-list button[data-scene-file="d14-vortex.json"]');
@@ -318,8 +321,9 @@ test("増分Hで追加した5シーン(D13/D14/D15/D16/D23)がギャラリーか
 
   // D23 注ぐ水: SPH粒子。
   await page.click('.scene-gallery-list button[data-scene-file="d23-pouring-water.json"]');
-  await expect(hierarchy.getByText("SphPosY[0]", { exact: true })).toBeVisible();
-  await expect(hierarchy.getByText("SphDensity[86]", { exact: true })).toBeVisible();
+  // 生の名前(`SphPosY[0]`・`SphDensity[86]`)ではなく、画面の言葉で並ぶ(利用者役⑮)。
+  await expect(hierarchy.getByText("水の粒 0 番の高さ", { exact: true })).toBeVisible();
+  await expect(hierarchy.getByText("水の粒 86 番のまわりの密度", { exact: true })).toBeVisible();
 
   // 再生してもクラッシュしないこと。
   await page.click('.project-tab[data-tab="scenes"]');
@@ -343,7 +347,7 @@ test("増分K: Toolbarのシーン選択・Inspectorの追加Component・Console
   const hierarchy = page.locator("#hierarchy-tree");
   // 生の名前(`CircuitV[2]`)ではなく、画面のほかの場所と同じ日本語で並ぶ。
   await expect(
-    hierarchy.getByText("つなぎ目の電圧(2)", { exact: true }),
+    hierarchy.getByText("つなぎ目 2 の電圧", { exact: true }),
   ).toBeVisible();
 
   // ② Inspector の追加 Component。D19 は剛体を持たないので、まず剛体のある

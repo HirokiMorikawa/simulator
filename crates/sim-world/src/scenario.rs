@@ -3127,9 +3127,15 @@ impl World {
                     if let Some(axis) = suspension_axis {
                         joint.suspension_axis = array_to_vec3(*axis);
                     }
-                    if let Some(axis) = axle_axis {
-                        joint.axle_axis = array_to_vec3(*axis);
-                    }
+                    // 車軸の向きを書いていなければ、車体の形から決める
+                    // (`WheelJoint::axle_for_chassis` のdoc。x 向きに長い車体が
+                    // 横向きに走っていた)。
+                    joint.axle_axis = match axle_axis {
+                        Some(axis) => array_to_vec3(*axis),
+                        None => sim_mechanics::WheelJoint::axle_for_chassis(
+                            world.mechanics().bodies.shape_of(chassis_id.index as usize),
+                        ),
+                    };
                     if let Some(f) = frequency {
                         joint.soft.frequency = *f;
                     }
@@ -4302,8 +4308,12 @@ mod tests {
         // 繋がるので、両重心の3D距離は拘束により常に 0.7 に保たれる。
         // プローブは x と y しか取れない(`ProbeTarget` に Z が無い)が、
         // **3D距離の xy 平面への射影は元の距離を超えられない**ので、
-        // 「射影距離が 0.7 を超えない」は拘束が破れていないことの厳密な必要条件になる。
-        // 実測の最大値は 0.7000000000000004(浮動小数の丸め以内で上限に張り付く)。
+        // 「射影距離が 0.7 を超えない」は拘束が破れていないことの必要条件になる。
+        // 許容は下の 3D 距離と同じ 0.02——関節はステップの頭で一度解き、そのあとの
+        // 接触解決が着地の瞬間の大きな力積で少しだけ引き伸ばす(実測: 床に当たった
+        // step で最大 0.7004)。人形を少し傾けて落とすようにした(利用者役⑭、
+        // `scenes/d12-ragdoll.json`)ので、着地は左右対称ではなくなり、以前の
+        // 「0.7 ちょうどに張り付く」(実測 0.7000000000000004)は成り立たない。
         //
         // 逆向き(拘束が消えていないこと)は射影では見られない——胴体が倒れると
         // 頭は z 方向へ回るため、射影距離は最終的に 0.084 まで縮む。そこで
@@ -4316,7 +4326,7 @@ mod tests {
         {
             let projected = ((hx - tx).powi(2) + (hy - ty).powi(2)).sqrt();
             assert!(
-                projected < 0.7 + 1e-9,
+                projected < 0.7 + 0.02,
                 "BallJointの拘束距離0.7を射影距離が超えた(拘束が破れている): step={i} projected={projected}"
             );
         }
@@ -4686,14 +4696,22 @@ mod tests {
     /// リテラルなので焼き込みに計算は不要——このRust側の`ambient`/`c`/`h`/`area`/
     /// `t0`/`dt`はJSONに焼き込んだ値と同じものを、解析解(ニュートン冷却の
     /// 指数減衰)の計算に使う。
+    ///
+    /// **本物のコーヒー 1 杯の値にした**(利用者役⑮: 75 ℃ のコーヒーが 15 秒で
+    /// 32 ℃ まで冷め、日常の感覚と合わなかった)。もとは熱容量 100 J/K・
+    /// 放熱 10 W/K で $\tau = 10$ 秒——お湯なら 24 g を 1 m² の板に広げたのと
+    /// 同じだった。コーヒー 250 g(4186 J/(kg·K) × 0.25 kg = 1046.5 J/K)、
+    /// カップの表面 0.035 m²・自然対流 10 W/(m²·K) にすると
+    /// $\tau \approx 3000$ 秒(約 50 分)。刻みは 1 秒(熱だけの場面で、
+    /// $\Delta t/\tau = 3\times10^{-4}$ なので陽解法でも十分に正確)。
     #[test]
     fn run_headless_scenario_cooling_coffee_matches_newton_cooling_exponential_decay() {
         let ambient: f64 = 293.15;
-        let c: f64 = 100.0;
+        let c: f64 = 1046.5;
         let h: f64 = 10.0;
-        let area: f64 = 1.0;
+        let area: f64 = 0.035;
         let t0: f64 = 350.0; // 約77°C(熱いコーヒー相当)
-        let dt: f64 = 0.008333333;
+        let dt: f64 = 1.0;
         let tau = c / (h * area);
         let steps = (2.0 * tau / dt) as u32;
 
@@ -6564,6 +6582,23 @@ mod tests {
         assert!(
             speed.is_finite() && speed < 50.0,
             "速度が発散していないこと: speed={speed}"
+        );
+        // **車体の長い向き(x)へまっすぐ走る**(利用者役⑮)。車軸が車体の長い軸と
+        // 同じ向きだったころは、横(z)へ 3.6 m/s、前(x)へ 1.3 m/s で斜め横に
+        // 走り、「速さ」と「進んだ距離」の増え方が食い違っていた。横へずれず、
+        // 速さがそのまま x の増え方になっていること。
+        let z = world.mechanics().bodies.position[1].z;
+        assert!(z.abs() < 0.05, "車は横へずれないはず: z={z}");
+        let before_x = end_x;
+        for _ in 0..240 {
+            world.step();
+        }
+        let after_x = world.probe(0).unwrap().history().last().copied().unwrap();
+        let speed_now = world.probe(2).unwrap().history().last().copied().unwrap();
+        let dx_per_second = (after_x - before_x) / (240.0 * scenario.world.dt);
+        assert!(
+            (dx_per_second - speed_now).abs() < 0.05 * speed_now,
+            "速さと進んだ距離の増え方が合うはず: dx/dt={dx_per_second} speed={speed_now}"
         );
 
         // ④ **駆動を切ると加速が止まる**(モーターが実際に効いていることの対照実験)。

@@ -729,7 +729,7 @@ test("書き出した数値には単位が付いている", async ({ page }) => 
   const stream = await download.createReadStream();
   const chunks: Buffer[] = [];
   for await (const c of stream) chunks.push(c as Buffer);
-  const header = Buffer.concat(chunks).toString("utf8").split("\n")[0];
+  const header = Buffer.concat(chunks).toString("utf8").replace(/^\uFEFF/, "").split("\n")[0];
   // 画面には ℃ と出ているのにファイルは数字だけ、を残さない。
   expect(header).toContain("[℃]");
   expect(header.startsWith("time_s,")).toBe(true);
@@ -784,12 +784,13 @@ test("秒より大きい単位で進む実験は、書き出したCSVの時刻�
     .split("\n")
     .filter((l) => l.length > 0);
 
-  // 見出し1列目は画面と同じ単位を角括弧で書く。`time_s`ではない
-  // (`time_s`は「秒のときだけ」の書き方——下のコメント参照)。
-  const header = lines[0].split(",");
-  expect(header[0]).toBe(`time [${unit}]`);
+  // 1 列目はいつも秒(`time_s`)——走らせた長さで 1 列目の意味が変わると
+  // 表計算で比べられない(利用者役⑮)。画面と同じ単位の列はその隣。
+  const header = lines[0].replace(/^\uFEFF/, "").split(",");
+  expect(header[0]).toBe("time_s");
+  expect(header[1]).toBe(`time [${unit}]`);
 
-  const times = lines.slice(1).map((l) => Number.parseFloat(l.split(",")[0]));
+  const times = lines.slice(1).map((l) => Number.parseFloat(l.split(",")[1]));
   expect(times.length).toBeGreaterThan(5);
   expect(times.every((t) => Number.isFinite(t))).toBe(true);
 
@@ -798,7 +799,7 @@ test("秒より大きい単位で進む実験は、書き出したCSVの時刻�
   // (`csvTimeDigits`のdoc参照——歩幅に応じて2桁より増えることはあるが、
   // 生の浮動小数点の全桁がそのまま出ることはない)。
   for (const line of lines.slice(1, 6)) {
-    const cell = line.split(",")[0];
+    const cell = line.split(",")[1];
     const fractionDigits = cell.includes(".") ? cell.split(".")[1].length : 0;
     expect(fractionDigits).toBeGreaterThanOrEqual(2);
     expect(fractionDigits).toBeLessThanOrEqual(10);
@@ -940,14 +941,12 @@ test("つまみを途中の位置へ動かすと、その時刻の値が読め�
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 2);
-  // リングバッファ(最大8個)が複数貯まるまで走らせる——端点2つだけでなく
+  // 記録(最大16個)が複数貯まるまで走らせる——端点2つだけでなく
   // 「途中」と呼べる位置が実在することを確かめたい。
   await expect.poll(() => elapsedSeconds(page), { timeout: 30_000 }).toBeGreaterThan(6);
 
   const scrubber = page.locator("#timeline-scrubber");
   await expect(scrubber).toHaveAttribute("step", "1");
-  const max = Number(await scrubber.getAttribute("max"));
-  expect(max).toBeGreaterThan(2);
 
   const box = (await scrubber.boundingBox())!;
   // 止める。
@@ -955,6 +954,11 @@ test("つまみを途中の位置へ動かすと、その時刻の値が読め�
   await page.mouse.down();
   await page.mouse.up();
   await page.waitForTimeout(200);
+  // 記録の数は**止めてから**読む。走っているあいだは記録が増え続ける
+  // (0.25 秒ごと、利用者役⑮)ので、止める前に読むと、止めた時点の右端が
+  // 読んだ値より先へ進んでいる。
+  const max = Number(await scrubber.getAttribute("max"));
+  expect(max).toBeGreaterThan(2);
 
   // 端(0 / max)ではない、途中の位置へつまみを動かす。
   await page.mouse.move(box.x + box.width - 6, box.y + box.height / 2);
@@ -2021,7 +2025,7 @@ test("時間の帯は、どこまで戻れるのかを言う", async ({ page }) 
     })
     // 飛び飛びであることも言う(下の「時間を戻す帯は、飛び飛びであることを
     // 先に言う」のdoc参照)。
-    .toMatch(/つまむと、記録した \d+ つの時点\(.+ 〜 .+、1 秒ごと\)へ戻せます/);
+    .toMatch(/つまむと、記録した \d+ つの時点\(.+ 〜 .+、.+ごと\)へ戻せます/);
   expect(errors).toEqual([]);
 });
 
@@ -7879,7 +7883,9 @@ test("時間を戻す帯は、飛び飛びであることを先に言う", async
 
   const hint = await page.locator("#timeline-hint").innerText();
   expect(hint, hint).toContain("記録した");
-  expect(hint, hint).toContain("1 秒ごと");
+  // 間隔は走らせた長さで変わる(はじめは 0.25 秒、長く走るほど 2 倍ずつ、
+  // 利用者役⑮)ので、決め打ちせず「◯ごと」と書いてあることを見る。
+  expect(hint, hint).toMatch(/、[^、)]+ごと\)/);
   // 帯が実際に止まれる数と、文が言う数が合っている。
   const stops = await page.evaluate(() => {
     const el = document.getElementById("timeline-scrubber") as HTMLInputElement | null;
@@ -7958,30 +7964,38 @@ test("止まらない場面でも、「ほぼ止まった時刻」の行が消�
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 1);
+  // 振れ続けるふりこは止まらない。**行は残り、止まっていないと言う**——ここが本題。
+  // (以前は 16 段の塔を「崩れ続ける」例に使っていたが、接触の計算を直して
+  // まっすぐ積んだ塔は立ったまま静まるようになった——下で確かめる。)
   await page.keyboard.press("Control+k");
-  await page.fill("#palette-input", "積み木");
+  await page.fill("#palette-input", "ふりこ");
   await page.keyboard.press("Enter");
-  await expect(page.locator("#crumb-experiment")).toContainText("積み木");
-
-  const floors = page.locator('.knob[data-knob-id="floors"] input[type="range"]');
+  await expect(page.locator("#crumb-experiment")).toContainText("ふりこ");
   const settled = page.locator("#readout-settled");
-  // 高い塔は崩れ続ける。**行は残り、止まっていないと言う**——ここが本題。
-  // (止まったときに時刻が出ることは「動きが止まったら、その時刻が数値に
-  // 出る」が見ている。低い塔も必ず静止するとは限らない——3 段でも接触が
-  // 微妙に震え続けることがあり、実測で 30 秒待っても止まらない回があった
-  // ので、こちらの前提には使わない。)
-  await floors.fill("16");
   await expect
     .poll(async () => await settled.textContent(), { timeout: 30_000 })
     .toContain("まだ止まっていません");
   await expect(page.locator("#readout-settled-key")).toBeVisible();
   expect(await settled.getAttribute("data-seconds"), "止まっていないのに時刻がある").toBeNull();
 
-  // 16 段まで積める(上限 8 では崩れ方の違いを試しきれなかった)。
+  // 16 段まで積める(上限 8 では崩れ方の違いを試しきれなかった)。まっすぐ
+  // 積んだ 16 段の塔は、何も当てなければ立ったまま静まる(利用者役⑭⑮:
+  // 当てていないのに塔が勝手に崩れていたのは、接触の計算の不具合だった)。
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "積み木");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("積み木");
+  await page.locator('.knob[data-knob-id="floors"] input[type="range"]').fill("16");
+  await expect
+    .poll(async () => await settled.getAttribute("data-seconds"), { timeout: 30_000 })
+    .not.toBeNull();
   const bodies = await page.evaluate(() =>
     Number((window as unknown as Record<string, any>).__world.read_component("body_count", "")),
   );
   expect(bodies, `積んだ数 ${bodies}(床を含む)`).toBeGreaterThanOrEqual(17);
+  await expect
+    .poll(() => readoutValue(page, "いちばん上の箱の高さ"), { timeout: 10_000 })
+    .toBeGreaterThan(15.4);
 
   expect(errors).toEqual([]);
 });
@@ -8047,5 +8061,193 @@ test("融ける氷は、沈んだまま画面の上でも小さくなってい�
   expect(after.distance).toBeGreaterThan(before.distance * 0.9);
   // 沈んだまま(重心は水面 y=0 より下)。
   expect(after.y).toBeLessThan(0);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑮の観察)**: 「振り子」で探すと「見つかりません」(実験名は
+// 「ふりこ」)、「落下」では「ボールを落とす」が出なかった。
+test("言い方が違っても、実験が見つかる(振り子・落下)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "振り子");
+  await expect(page.locator(".palette-row").first()).toContainText("ふりこ");
+  await page.fill("#palette-input", "落下");
+  await expect(page.locator(".palette-row", { hasText: "ボールを落とす" })).toHaveCount(1);
+  await page.fill("#palette-input", "フリコ");
+  await expect(page.locator(".palette-row").first()).toContainText("ふりこ");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑮の実測)**: 数値の CSV が全実験で拡張子の無い「download」
+// になり、BOM も無く、日本語の表計算ソフトで列名が化けた。
+test("数値の CSV は .csv の名前で、BOM 付き、1 列目は秒", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await expect.poll(() => elapsedSeconds(page), { timeout: 15_000 }).toBeGreaterThan(1);
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    page.click("#btn-probe-csv"),
+  ]);
+  // 名前(「ボールを落とす_….csv」)は「書き出したファイルの名前」のテストが
+  // `<a download>` の値で見ている。`suggestedFilename()` では確かめない——
+  // ロケールが設定されていない Linux(このテスト環境)の Chromium は、
+  // 日本語の名前をすべて「download」に置き換える(LANG=C.UTF-8 なら日本語の
+  // まま。利用者役⑮の「download」はこの環境の癖で、アプリの側は直した
+  // うえでも同じ)。
+  expect(download.suggestedFilename()).not.toBe("");
+  const stream = await download.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const c of stream) chunks.push(c as Buffer);
+  const text = Buffer.concat(chunks).toString("utf8");
+  expect(text.startsWith("﻿time_s,")).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑮の観察)**: 巻き戻しは直近 8 秒を 1 秒刻みでしか戻れず、
+// 「しらべる」では戻れる範囲も書いていなかった。巻き戻すと、落ちている最中
+// なのに「止まりかけています…」と出た。
+test("巻き戻しは走り始めから戻れ、戻した時点の止まり具合を言う", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await expect.poll(() => elapsedSeconds(page), { timeout: 30_000 }).toBeGreaterThan(12);
+  await page.click("#btn-run"); // とめる
+  const hint = await page.locator("#timeline-hint").innerText();
+  expect(hint, hint).toMatch(/記録した \d+ つの時点/);
+  // いちばん古い記録は走り始めの近く(以前は「いまの 8 秒前」)。
+  const firstTime = await page.evaluate(() =>
+    Number((window as unknown as Record<string, any>).__world.read_component("snapshot_time_at", "0")),
+  );
+  expect(firstTime).toBeLessThanOrEqual(2.0 + 1e-6);
+  // 落ちている最中(1 秒の時点)へ戻す。
+  const index = await page.evaluate(() => {
+    const w = (window as unknown as Record<string, any>).__world;
+    const n = Number(w.read_component("snapshot_count", ""));
+    for (let i = 0; i < n; i += 1) {
+      if (Number(w.read_component("snapshot_time_at", String(i))) >= 1.0) return i;
+    }
+    return 0;
+  });
+  await page.locator("#timeline-scrubber").evaluate((el: HTMLInputElement, v: number) => {
+    el.value = String(v);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }, index);
+  await page.waitForTimeout(300);
+  await expect(page.locator("#readout-settled")).not.toHaveText("止まりかけています…");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑮の実測)**: 車の速さは 3.83 m/s なのに「進んだ距離」は毎秒
+// 1.31 m しか増えなかった——車輪の軸が車体の長い向きを向いていて、車が
+// 横向きに走っていた。
+test("車は前へまっすぐ走り、速さのぶんだけ距離が伸びる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 1);
+  await openTouching(page, "車を走らせる");
+  await expect.poll(() => elapsedSeconds(page), { timeout: 30_000 }).toBeGreaterThan(5);
+  await page.click("#btn-run"); // とめる
+  const read = () =>
+    page.evaluate(() => {
+      const w = (window as unknown as Record<string, any>).__world;
+      const p = w.body_position_at_f32(1);
+      return { x: p[0] as number, z: p[2] as number, t: Number(w.read_component("time", "")) };
+    });
+  const before = await read();
+  const speed = await readoutValue(page, "車の速さ");
+  await page.click("#btn-run"); // うごかす
+  await expect.poll(() => elapsedSeconds(page), { timeout: 30_000 }).toBeGreaterThan(before.t + 2);
+  await page.click("#btn-run");
+  const after = await read();
+  expect(Math.abs(after.z), "横へずれない").toBeLessThan(0.1);
+  const rate = (after.x - before.x) / (after.t - before.t);
+  expect(Math.abs(rate - speed) / speed, `距離の伸び ${rate} / 速さ ${speed}`).toBeLessThan(0.1);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑮の観察)**: グラフの題が「1 回目に跳ね返った高さ: 最大 2.00 m・
+// 最小 -0.018 m」なのに線は高さの時間変化だった——ひとつの数に要約した
+// 読み値の名前を、元の線にも付けていた。
+test("要約した読み値の名前は、時間変化の線に付けない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "ボールを跳ねさせる");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#crumb-experiment")).toContainText("跳ね");
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () => ((window as unknown as Record<string, any>).__probeGraphLegend as string[] | undefined)?.join(" / ") ?? "",
+        ),
+      { timeout: 10_000 },
+    )
+    .toContain("高さ");
+  const legend = await page.evaluate(
+    () => ((window as unknown as Record<string, any>).__probeGraphLegend as string[]).join(" / "),
+  );
+  expect(legend, legend).not.toContain("1 回目に跳ね返った高さ");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑮の観察)**: 「見る範囲」は直近 30/10/3 秒だけで、途中の区間
+// (1.9〜2.1 秒など)を広げられなかった。グラフの上をドラッグすると、その
+// 区間だけを描く。ダブルクリックで元に戻る。
+test("グラフをドラッグした区間だけを大きく見られる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await expect.poll(() => elapsedSeconds(page), { timeout: 20_000 }).toBeGreaterThan(4);
+  await page.click("#btn-run"); // とめる
+  const canvas = page.locator("#probe-canvas");
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.5);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.locator("#probe-window")).toHaveValue("zoom");
+  await expect(page.locator('#probe-window option[value="zoom"]')).toContainText("選んだ区間");
+  const range = (await page.locator("#probe-time-range").textContent()) ?? "";
+  expect(range, range).toMatch(/t = /);
+  await canvas.dblclick();
+  await expect(page.locator("#probe-window")).toHaveValue("0");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑮の観察)**: 二重スリットでしまは見えても、間隔を測る手段が
+// 無かった。場の絵を指すと、ます目の位置と明るさが読める。
+test("場の絵を指すと、その場所の明るさが読める(二重スリット)", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 2);
+  await page.keyboard.press("Control+k");
+  await page.fill("#palette-input", "二重スリット");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#field-panel")).toBeVisible({ timeout: 10_000 });
+  const canvas = page.locator("#field-canvas");
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.5);
+  await expect(page.locator("#field-readout")).toBeVisible();
+  await expect(page.locator("#field-readout")).toContainText("ます目");
+  // 場だけの実験に「球を1つ足す」は出さない。
+  await expect(page.locator("#context")).not.toContainText("球を1つ足す");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑮の実測)**: 「しらべる」で「いまの数値」が最初の画面の下
+// (上端 875 px)にあった。「しらべる」では「ここを見る」のすぐ下に置く。
+test("「しらべる」では、いまの数値が最初の画面に入る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await boot(page);
+  await setGrain(page, 2);
+  await page.waitForTimeout(500);
+  const numbers = page.locator('.card[data-card="numbers"]');
+  const top = await numbers.evaluate((el) => el.getBoundingClientRect().top);
+  expect(top, `いまの数値の上端 ${top}px`).toBeLessThan(720 - 60);
   expect(errors).toEqual([]);
 });

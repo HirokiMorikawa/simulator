@@ -3624,12 +3624,7 @@ function setUpProjectDrawer(
       const blob = new Blob([JSON.stringify(latestBodies, null, 2)], {
         type: "application/json",
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "scene.json";
-      a.click();
-      URL.revokeObjectURL(url);
+      saveBlobAsFile(blob, "scene.json");
     });
     body.appendChild(exportButton);
 
@@ -3645,12 +3640,7 @@ function setUpProjectDrawer(
       const blob = new Blob([JSON.stringify(bundle, null, 2)], {
         type: "application/json",
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "project_bundle.json";
-      a.click();
-      URL.revokeObjectURL(url);
+      saveBlobAsFile(blob, "project_bundle.json");
       projectExportedRef.current?.();
     });
     body.appendChild(bundleButton);
@@ -4171,12 +4161,7 @@ function setUpProjectDrawer(
       const blob = new Blob([JSON.stringify(commandLog, null, 2)], {
         type: "application/json",
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "command_log.json";
-      a.click();
-      URL.revokeObjectURL(url);
+      saveBlobAsFile(blob, "command_log.json");
     });
     body.appendChild(exportButton);
 
@@ -4794,9 +4779,9 @@ const BODY_NAME_WORDS: Record<string, string> = {
   balloon: "風船",
   bob: "おもり",
   box: "箱",
-  box1: "箱1",
-  box2: "箱2",
-  box3: "箱3",
+  box1: "箱 1",
+  box2: "箱 2",
+  box3: "箱 3",
   brake_pad: "ブレーキパッド",
   chassis: "車体",
   head: "頭",
@@ -4811,75 +4796,95 @@ const BODY_NAME_WORDS: Record<string, string> = {
   rod: "磁石",
   shell: "弾",
   floor: "床",
+  item: "落とした物",
+  wrecker: "鉄球",
+  crank: "軸",
+  wheel_fl: "左前の車輪",
+  wheel_fr: "右前の車輪",
+  wheel_rl: "左後ろの車輪",
+  wheel_rr: "右後ろの車輪",
+  ground: "床",
 };
 
 function bodyNameInWords(raw: string): string {
-  return BODY_NAME_WORDS[raw] ?? raw;
+  const known = BODY_NAME_WORDS[raw];
+  if (known) return known;
+  // 番号付きの名前(`box5`・`Body_0`・`Sphere_2`)も言葉にする。「速さ(box5)」
+  // 「Body_0」がそのまま凡例や CSV の列名に出ていた(利用者役⑮)。
+  const numbered = raw.match(/^(box|body|sphere|ball|s)_?(\d+)$/i);
+  if (numbered) {
+    const word: Record<string, string> = { box: "箱", body: "物", sphere: "球", ball: "球", s: "球" };
+    // 画面のほかの場所(物の一覧の「箱 1」「球 2」)と同じ書き方にする。
+    return `${word[numbered[1].toLowerCase()]} ${numbered[2]}`;
+  }
+  return raw;
 }
 
+/**
+ * 生の観測点の名前(sim-wasm `imported_probe_label_at`)を、画面の言葉にする。
+ * 表は**Rust が実際に出す書式**に合わせる——`SphDensity[86]`・`GasT [K]`・
+ * `Ising磁化` のように、以前の表(`SphParticleDensity`・`GasTemperature`・
+ * `IsingMagnetization`)と食い違っていた名前は訳されずにそのまま凡例と
+ * CSV の列名に出ていた(利用者役⑮)。`[ ]`・`( )` の中身(何番の粒か、
+ * どの物か)は、何を指すのかが分かる言い方で添える。
+ */
 function friendlyProbeLabel(raw: string, aliveBodyNames?: ReadonlySet<string>): string {
-  const NAMES: [RegExp, string][] = [
-    [/^BodyPosY/, "高さ"],
-    [/^BodyPosX/, "横の位置"],
-    [/^BodySpeed/, "速さ"],
-    [/^AstroPosX/, "横の位置"],
-    [/^AstroPosY/, "縦の位置"],
-    [/^AstroVelX/, "横の速さ"],
-    [/^AstroVelY/, "縦の速さ"],
-    [/^SoftBodyPosX/, "横の位置"],
-    [/^SoftBodyPosY/, "高さ"],
-    [/^SphParticlePosY/, "水の粒の高さ"],
-    [/^SphParticleDensity/, "水の粒の密度"],
-    [/^NodeTemp/, "温度"],
-    [/^RodTemp/, "棒の温度"],
-    // **何を流れている電流なのかを名前に書く**。「電流(0)」とだけ出ていて、
-    // その (0) がどの導線なのか画面のどこにも無かった(利用者役「しらべる」の
-    // 観察: 自分で見当をつけて計算した値と合わず、確かめようがなかった)。
-    // `ProbeTarget::CircuitCurrent(idx)` は `circuit.source_current(idx)`
-    // ——**電圧源(電池・電源)idx を流れる電流**(`sim-world` の `ProbeTarget`
-    // のdoc参照)。「つないであるもの」札に並ぶ「電池・電源0: …」と同じ
-    // 番号を指すので、番号から現物へたどれる。
-    [/^CircuitCurrent/, "電池・電源を流れる電流"],
-    // Rust 側が出す生の名前は `CircuitV[4]`(`CircuitNodeVoltage` ではない)。
-    // 取りこぼしていたので、電気の実験の凡例だけがコード風の名前で並んでいた
-    // (利用者役①の観察)。
-    [/^CircuitNodeVoltage/, "電圧"],
-    [/^CircuitV\b/, "つなぎ目の電圧"],
-    [/^GridFluidMeanV/, "流れの速さ(平均)"],
-    [/^GridFluidRmsV/, "流れの速さ(実効値)"],
-    [/^QuantumNorm/, "波の総量"],
-    [/^QuantumMeanX/, "波の位置"],
-    [/^QuantumEnergy/, "波のエネルギー"],
-    [/^QuantumTransmission/, "通り抜けた割合"],
-    [/^GasTemperature/, "気体の温度"],
-    [/^GasPressure/, "気体の圧力"],
-    [/^IsingMagnetization/, "磁化"],
-    [/^IsingEnergyPerSpin/, "1スピンあたりのエネルギー"],
-    [/^BrownianMsd/, "広がり(平均二乗変位)"],
-    [/^FdtdEz/, "電場 Ez"],
-    [/^FdtdEnergy/, "電磁場のエネルギー"],
-    [/^LedgerKinetic/, "運動エネルギー"],
-    [/^StateHashDigest/, "状態の指紋"],
+  type Namer = (detail: string | null) => string;
+  const withDetail =
+    (name: string, describe: (detail: string) => string): Namer =>
+    (detail) =>
+      detail === null ? name : describe(detail);
+  const onBody = (name: string): Namer => withDetail(name, (d) => `${name}(${bodyNameInWords(d)})`);
+  const NAMES: [RegExp, Namer][] = [
+    [/^BodyPosY/, onBody("高さ")],
+    [/^BodyPosX/, onBody("横の位置")],
+    [/^BodySpeed/, onBody("速さ")],
+    [/^BodyMass/, onBody("重さ")],
+    [/^AstroPosX/, withDetail("横の位置", (d) => `横の位置(天体 ${d})`)],
+    [/^AstroPosY/, withDetail("縦の位置", (d) => `縦の位置(天体 ${d})`)],
+    [/^AstroVelX/, withDetail("横の速さ", (d) => `横の速さ(天体 ${d})`)],
+    [/^AstroVelY/, withDetail("縦の速さ", (d) => `縦の速さ(天体 ${d})`)],
+    [/^SoftBodyPosX/, withDetail("横の位置", (d) => `横の位置(ひもの点 ${d})`)],
+    [/^SoftBodyPosY/, withDetail("高さ", (d) => `高さ(ひもの点 ${d})`)],
+    [/^Sph(Particle)?PosY/, withDetail("水の粒の高さ", (d) => `水の粒 ${d} 番の高さ`)],
+    [/^Sph(Particle)?Density/, withDetail("水の粒の密度", (d) => `水の粒 ${d} 番のまわりの密度`)],
+    [/^NodeTemp/, withDetail("温度", (d) => `温度(熱の点 ${d})`)],
+    [/^RodTemp/, withDetail("棒の温度", (d) => `棒の温度(区画 ${d})`)],
+    // **何を流れている電流なのかを名前に書く**。`ProbeTarget::CircuitCurrent(idx)`
+    // は**電圧源(電池・電源)idx を流れる電流**。「つないであるもの」札に並ぶ
+    // 「電池・電源0: …」と同じ番号を指すので、番号から現物へたどれる。
+    [/^CircuitCurrent/, withDetail("電池・電源を流れる電流", (d) => `電池・電源 ${d} を流れる電流`)],
+    [/^CircuitNodeVoltage|^CircuitV\b/, withDetail("電圧", (d) => `つなぎ目 ${d} の電圧`)],
+    [/^GridFluidMeanV/, () => "流れの速さ(平均)"],
+    [/^GridFluidRmsV/, () => "流れの速さ(実効値)"],
+    [/^QuantumNorm/, () => "波の総量"],
+    [/^Quantum(MeanX|⟨x⟩)/, () => "波の位置"],
+    [/^Quantum(Energy|⟨H⟩)/, () => "波のエネルギー"],
+    [/^Quantum(Transmission|透過率)/, () => "通り抜けた割合"],
+    [/^Gas(Temperature|T\b)/, () => "気体の温度"],
+    [/^Gas(Pressure|P\b)/, () => "気体の圧力"],
+    [/^Ising(Magnetization|磁化)/, () => "磁石の向きの揃い具合"],
+    [/^Ising(EnergyPerSpin|E\/N)/, () => "1 つの磁石あたりのエネルギー"],
+    [/^Brownian/, () => "広がり(平均二乗変位)"],
+    [/^FdtdEz/, withDetail("電場の強さ", (d) => `電場の強さ(${d} の点)`)],
+    [/^Fdtd(Energy|エネルギー)/, () => "電磁場のエネルギー"],
+    [/^LedgerKinetic/, () => "運動エネルギー"],
+    [/^StateHashDigest/, () => "状態の指紋"],
   ];
-  for (const [pattern, name] of NAMES) {
+  for (const [pattern, namer] of NAMES) {
     if (!pattern.test(raw)) continue;
-    // `BodySpeed(chassis)` の `chassis`、`AstroPosX[0]` の `0` は残す。
-    const detail = raw.match(/[([]([^)\]]+)[)\]]/);
-    if (!detail) return name;
+    const detail = raw.match(/[([]([^)\]]+)[)\]]/)?.[1] ?? null;
+    const name = namer(detail);
     // **消した物の観測点が、実在するかのように残る不具合(利用者役の報告)**。
     // 物理コア側にプローブを消す手段が無く(`imported_probe_*`は追加専用)、
     // グラフに描いた過去データを黙って捨てるのも乱暴なので、記録は残した
     // まま「もう無い物」だと分かるようにする——`aliveBodyNames`(呼び出し側
     // が「いま生きているボディの名前」で渡す、`probeTargetBodyName`のdoc
-    // 参照)に無い名前なら注記を足す。呼び出し側が渡さない(=判定不要な)
-    // ときは今まで通り何も足さない。
+    // 参照)に無い名前なら注記を足す。
     const targetName = probeTargetBodyName(raw);
     const gone =
-      aliveBodyNames !== undefined &&
-      targetName !== null &&
-      !aliveBodyNames.has(targetName);
-    const shown = bodyNameInWords(detail[1]);
-    return gone ? `${name}(${shown}・消えた物)` : `${name}(${shown})`;
+      aliveBodyNames !== undefined && targetName !== null && !aliveBodyNames.has(targetName);
+    return gone ? (name.endsWith(")") ? name.replace(/\)$/, "・消えた物)") : `${name}・消えた物`) : name;
   }
   return raw;
 }
@@ -4915,20 +4920,21 @@ function unitForProbeLabel(raw: string): string | undefined {
   const UNITS: [RegExp, string][] = [
     [/^BodyPos[XY]/, "m"],
     [/^BodySpeed/, "m/s"],
+    [/^BodyMass/, "kg"],
     [/^AstroPos[XY]/, "m"],
     [/^AstroVel[XY]/, "m/s"],
     [/^SoftBodyPos[XY]/, "m"],
-    [/^SphParticlePosY/, "m"],
-    [/^SphParticleDensity/, "kg/m³"],
+    [/^Sph(Particle)?PosY/, "m"],
+    [/^Sph(Particle)?Density/, "kg/m³"],
     [/^NodeTemp/, "K"],
     [/^RodTemp/, "℃"],
     [/^CircuitCurrent/, "A"],
     [/^CircuitNodeVoltage/, "V"],
     [/^CircuitV\b/, "V"],
     [/^GridFluid(Mean|Rms)V/, "m/s"],
-    [/^GasTemperature/, "K"],
-    [/^GasPressure/, "Pa"],
-    [/^BrownianMsd/, "m²"],
+    [/^Gas(Temperature|T\b)/, "K"],
+    [/^Gas(Pressure|P\b)/, "Pa"],
+    [/^Brownian/, "m²"],
     [/^LedgerKinetic/, "J"],
   ];
   for (const [pattern, unit] of UNITS) if (pattern.test(raw)) return unit;
@@ -4991,6 +4997,27 @@ function csvTimeDigits(dt: number, factor: number): number {
  */
 let exportName: string | null = null;
 
+/**
+ * **ファイルとして保存させる**(書き出しボタン共通)。
+ *
+ * 作ったリンクを文書に入れずに押し、すぐ `revokeObjectURL` していたので、
+ * 名前(`download`)が効かず、保存されるファイルはいつも拡張子の無い
+ * 「download」だった(利用者役⑮の実測: 数値の CSV が全実験で「download」。
+ * 「じぶんの場面」の書き出しは利用者役④で同じ直しを入れてあった)。
+ * 文書に入れてから押し、取り消しは保存が始まってからにする。
+ */
+function saveBlobAsFile(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function probeSeriesToCsv(
   series: ProbeSeries[],
   dt: number,
@@ -5030,26 +5057,39 @@ function probeSeriesToCsv(
   // 見出しには**単位**も書く。画面には m / ℃ / V と出ているのに書き出した
   // ファイルには数字しか無く、後から見返すと「これ ℃ だっけ K だっけ」に
   // なると書かれた(利用者役③の観察)。
+  //
+  // **1 列目はいつも秒(`time_s`)**。画面と同じ単位の列を先にしていたので、
+  // 走らせた長さしだいで 1 列目が「time [分]」「time [日]」「time [年]」と
+  // 入れ替わり、保存するたびに列の意味が変わって表計算で比べられなかった
+  // (利用者役⑮)。機械で読む列を決まった位置に置き、画面と同じ単位の列は
+  // その隣に足す。
+  //
+  // 値は有効数字 9 桁まで(19.99931898269337 のような、計算の丸めの桁まで
+  // 並んでいた)。
   const lines = [
     [
-      timeHeader,
-      ...(alsoSeconds ? ["time_s"] : []),
+      "time_s",
+      ...(alsoSeconds ? [timeHeader] : []),
       ...series.map((s) => (s.unit ? `${s.label} [${s.unit}]` : s.label)),
     ]
       .map(escape)
       .join(","),
   ];
+  const cell = (value: number) =>
+    Number.isFinite(value) ? String(Number(value.toPrecision(9))) : "";
   for (let i = 0; i < rows; i++) {
     const time = currentTime - (rows - 1 - i) * dt;
-    const cells = [(time / timeFactor).toFixed(timeDigits)];
-    if (alsoSeconds) cells.push(time.toFixed(csvTimeDigits(dt, 1)));
+    const cells = [time.toFixed(csvTimeDigits(dt, 1))];
+    if (alsoSeconds) cells.push((time / timeFactor).toFixed(timeDigits));
     for (const s of series) {
       const at = i - (rows - s.history.length);
-      cells.push(at >= 0 && at < s.history.length ? String(s.history[at]) : "");
+      cells.push(at >= 0 && at < s.history.length ? cell(s.history[at]) : "");
     }
     lines.push(cells.join(","));
   }
-  return lines.join("\n");
+  // 先頭に BOM を付ける。付けないと、日本語の Windows の表計算ソフトが
+  // UTF-8 と気づかず、列の名前(日本語)が文字化けする(利用者役⑮)。
+  return "\uFEFF" + lines.join("\n");
 }
 
 // シーンギャラリー読み込み時(`isGalleryScene`参照)は、`scenario.probes`が
@@ -5103,9 +5143,71 @@ function setUpProbeGraph(): (
   canvas.addEventListener("mouseleave", () => {
     hoverX = null;
   });
+  /**
+   * **グラフの上をドラッグして、その区間だけを大きく見る**(絶対時刻 [秒])。
+   * 「見る範囲」は直近 30/10/3 秒しか選べず、1.9〜2.1 秒のような途中の区間を
+   * 広げられなかった——着地の前後のような短い出来事が読めない(利用者役⑮)。
+   * ダブルクリックか「見る範囲」の選び直しで元に戻る。記録そのものは切らない
+   * (CSV は全部)。
+   */
+  let zoom: { from: number; to: number } | null = null;
+  /** いま描いている横軸の左端の時刻と幅(ドラッグの位置を時刻に直すため)。 */
+  let drawnOldest = 0;
+  let drawnSpan = 0;
+  let dragStartX: number | null = null;
+  let dragNowX: number | null = null;
+  const ZOOM_OPTION = "zoom";
+  const clearZoom = () => {
+    zoom = null;
+    windowSelect?.querySelector(`option[value="${ZOOM_OPTION}"]`)?.remove();
+  };
+  canvas.title = "ドラッグで区間を選ぶと、その区間を大きく見られます(ダブルクリックで元に戻す)";
+  canvas.addEventListener("mousedown", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    dragStartX = event.clientX - rect.left;
+    dragNowX = dragStartX;
+  });
+  canvas.addEventListener("mousemove", () => {
+    if (dragStartX === null) return;
+    dragNowX = hoverX;
+    if (latest.length > 0) redraw(latest, latestDt, latestTime);
+  });
+  window.addEventListener("mouseup", () => {
+    if (dragStartX === null) return;
+    const start = dragStartX;
+    const end = dragNowX ?? start;
+    dragStartX = null;
+    dragNowX = null;
+    const width = canvas.clientWidth;
+    if (Math.abs(end - start) < 8 || width <= 0 || drawnSpan <= 0) {
+      if (latest.length > 0) redraw(latest, latestDt, latestTime);
+      return;
+    }
+    const toTime = (x: number) =>
+      drawnOldest + (Math.min(width, Math.max(0, x)) / width) * drawnSpan;
+    zoom = { from: toTime(Math.min(start, end)), to: toTime(Math.max(start, end)) };
+    if (windowSelect) {
+      let option = windowSelect.querySelector<HTMLOptionElement>(`option[value="${ZOOM_OPTION}"]`);
+      if (!option) {
+        option = document.createElement("option");
+        option.value = ZOOM_OPTION;
+        windowSelect.appendChild(option);
+      }
+      const label = timeAxisFormatter(Math.max(Math.abs(zoom.from), Math.abs(zoom.to)), latestDt);
+      option.textContent = `選んだ区間(${label(zoom.from)} 〜 ${label(zoom.to)})`;
+      windowSelect.value = ZOOM_OPTION;
+    }
+    if (latest.length > 0) redraw(latest, latestDt, latestTime);
+  });
+  canvas.addEventListener("dblclick", () => {
+    clearZoom();
+    if (windowSelect) windowSelect.value = "0";
+    if (latest.length > 0) redraw(latest, latestDt, latestTime);
+  });
   // 選び直したら、次の描画を待たずにその場で描き直す(止めている間に
   // 選んだときに何も起きないと、効いていないと読まれる)。
   windowSelect?.addEventListener("change", () => {
+    if (windowSelect.value !== ZOOM_OPTION) clearZoom();
     if (latest.length > 0) redraw(latest, latestDt, latestTime);
   });
   csvButton.addEventListener("click", () => {
@@ -5115,35 +5217,51 @@ function setUpProbeGraph(): (
     const blob = new Blob([probeSeriesToCsv(latest, latestDt, latestTime)], {
       type: "text/csv;charset=utf-8",
     });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
     // ファイル名に使えない文字だけ外す(日本語はそのまま——画面の言葉と
     // 同じであることが、見分けるための唯一の手がかりなので)。
-    a.download = `${(exportName ?? "probes").replace(/[\\/:*?"<>|]/g, "_").slice(0, 120)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    saveBlobAsFile(blob, `${(exportName ?? "probes").replace(/[\\/:*?"<>|]/g, "_").slice(0, 120)}.csv`);
   });
 
-  const redraw = (allSeries: ProbeSeries[], dt: number, currentTime: number) => {
+  const redraw = (allSeries: ProbeSeries[], dt: number, nowTime: number) => {
     latest = allSeries;
     latestDt = dt;
-    latestTime = currentTime;
+    latestTime = nowTime;
+    // 選んだ区間より前へやり直した(「はじめから」)ら、区間は忘れる。
+    if (zoom && nowTime < zoom.from) {
+      clearZoom();
+      if (windowSelect) windowSelect.value = "0";
+    }
     // **見る範囲**(index.html の `probe-window` のコメント参照)。記録は
     // そのまま持ったまま、描く範囲だけを切る——書き出す表(CSV)は `latest` を
     // 使うので、ここで切っても記録は減らない。
     const windowSeconds = Number(windowSelect?.value ?? "0") || 0;
     const keep =
       windowSeconds > 0 && dt > 0 ? Math.max(2, Math.ceil(windowSeconds / dt)) : 0;
-    const series = (
-      keep > 0
-        ? allSeries.map((s) =>
-            s.history.length > keep
-              ? { ...s, history: s.history.slice(s.history.length - keep) }
-              : s,
-          )
-        : allSeries
-    ).filter((s) => !s.csvOnly);
+    let currentTime = nowTime;
+    let windowed: ProbeSeries[];
+    if (zoom && dt > 0) {
+      // どの系列も右端が「いま」なので、同じ step 数だけ右と左を落とせば
+      // 同じ区間になる(`longest` の右詰めと辻褄が合う)。
+      const endShift = Math.max(0, Math.round((nowTime - zoom.to) / dt));
+      const startShift = Math.max(0, Math.round((nowTime - zoom.from) / dt));
+      currentTime = nowTime - endShift * dt;
+      windowed = allSeries.map((s) => {
+        const length = s.history.length;
+        const end = Math.max(0, length - endShift);
+        const start = Math.max(0, length - 1 - startShift);
+        return { ...s, history: s.history.slice(Math.min(start, end), end) };
+      });
+    } else {
+      windowed =
+        keep > 0
+          ? allSeries.map((s) =>
+              s.history.length > keep
+                ? { ...s, history: s.history.slice(s.history.length - keep) }
+                : s,
+            )
+          : allSeries;
+    }
+    const series = windowed.filter((s) => !s.csvOnly);
     // **空状態**(増分「UI 品質の底上げ」)。描ける系列(サンプル 2 点以上)が
     // 1 本も無いあいだは、黒い矩形ではなく「何をすれば線が出るか」を出す。
     const drawable = series.filter((s) => s.history.length >= 2);
@@ -5200,6 +5318,8 @@ function setUpProbeGraph(): (
     const longest = series.reduce((m, s) => Math.max(m, s.history.length), 0);
     const haveTime = longest >= 2 && dt > 0;
     const oldestTime = currentTime - (longest - 1) * dt;
+    drawnOldest = oldestTime;
+    drawnSpan = currentTime - oldestTime;
     const rangeTime = timeAxisFormatter(
       Math.max(Math.abs(currentTime), Math.abs(oldestTime)),
       dt,
@@ -5265,8 +5385,41 @@ function setUpProbeGraph(): (
         dt,
       );
       outlined(axisTime(oldestTime), 3, h - 3, "#8b929c");
-      outlined(axisTime(oldestTime + span / 2), w / 2, h - 3, "#8b929c", "center");
       outlined(axisTime(currentTime), w - 3, h - 3, "#8b929c", "right");
+      // **切りのよい時刻に目盛りと縦の線**。左端・まん中・右端の 3 つしか
+      // 無く、「2.0 秒のあたり」を線の上で探せなかった(利用者役⑮)。
+      // 90 px に 1 本ほど、1・2・5 × 10 のべき乗の刻みで置く。両端の文字と
+      // ぶつかる目盛りは線だけ引いて、数字は書かない。
+      if (span > 0) {
+        const rough = span / Math.max(2, Math.floor(w / 90));
+        const power = 10 ** Math.floor(Math.log10(rough));
+        const stepSeconds =
+          [1, 2, 5, 10].map((m) => m * power).find((candidate) => candidate >= rough) ??
+          10 * power;
+        const edgeLabelWidth = Math.max(
+          ctx.measureText(axisTime(oldestTime)).width,
+          ctx.measureText(axisTime(currentTime)).width,
+        );
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
+        ctx.lineWidth = 1;
+        for (
+          let tick = Math.ceil(oldestTime / stepSeconds) * stepSeconds;
+          tick < currentTime;
+          tick += stepSeconds
+        ) {
+          const x = ((tick - oldestTime) / span) * w;
+          if (x <= 1 || x >= w - 1) continue;
+          ctx.beginPath();
+          ctx.moveTo(Math.round(x) + 0.5, 0);
+          ctx.lineTo(Math.round(x) + 0.5, plotH);
+          ctx.stroke();
+          const label = axisTime(tick);
+          const half = ctx.measureText(label).width / 2;
+          if (x - half > edgeLabelWidth + 8 && x + half < w - edgeLabelWidth - 8) {
+            outlined(label, x, h - 3, "#8b929c", "center");
+          }
+        }
+      }
     }
 
     // **線を全部描いてから、文字を描く**。系列ごとに「線 → その凡例」の順で
@@ -5284,7 +5437,19 @@ function setUpProbeGraph(): (
       /** 段組みのとき、この系列に割り当てられた段の上端と高さ。 */
       bandTop: number;
       bandHeight: number;
+      /** 「小さい変化も見る」の対数の目盛りの基準(`logScaleOf` のdoc)。 */
+      logScale: number;
     };
+    /**
+     * **「小さい変化も見る」は、その線の大きさに対して小さい変化を広げる**。
+     * $\log_{10}(1+|v|)$ で描いていたので、1 より小さい量(高さ 0〜2 m・
+     * 電流 0.05 A)ではほぼ直線のままで、押しても線が変わらなかった
+     * (利用者役⑮: 題に「[log]」が付くだけ)。線ごとに、いちばん大きい値の
+     * 1000 分の 1 を 1 目盛りとして $\log_{10}(1+|v|/s)$ で描く——4 桁ぶんの
+     * 小さな変化が同じ高さに並ぶ。目盛りには元の値を書く(`back`)。
+     */
+    const logScaleOf = (min: number, max: number) =>
+      Math.max(Math.abs(min), Math.abs(max)) * 1e-3 || 1;
     /**
      * 値を縦の位置へ。
      *
@@ -5376,7 +5541,8 @@ function setUpProbeGraph(): (
         if (v < min) min = v;
         if (v > max) max = v;
       }
-      const plot = (v: number) => (useLog ? signedLog(v) : v);
+      const logScale = logScaleOf(min, max);
+      const plot = (v: number) => (useLog ? signedLog(v / logScale) : v);
       const plotMin = Math.min(plot(min), plot(max));
       const plotMax = Math.max(plot(min), plot(max));
       const bandTop = useBands ? bandIndex * bandH + BAND_GAP / 2 : 0;
@@ -5400,7 +5566,7 @@ function setUpProbeGraph(): (
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
-      drawn.push({ series: s, min, max, plotMin, plotMax, flatY, bandTop, bandHeight });
+      drawn.push({ series: s, min, max, plotMin, plotMax, flatY, bandTop, bandHeight, logScale });
       bandIndex += 1;
     }
 
@@ -5411,8 +5577,8 @@ function setUpProbeGraph(): (
     if (useBands) {
       // **段ごとに、名前と目盛りと 0 の線**。これがあって初めて「どの線が
       // 何を、いくつ指しているか」が画面だけで読める(`useBands` のdoc参照)。
-      const back = (v: number) => (useLog ? signedExp(v) : v);
       for (const [bandOrder, d] of drawn.entries()) {
+        const back = (v: number) => (useLog ? signedExp(v) * d.logScale : v);
         const unit = d.series.unit ? ` ${d.series.unit}` : "";
         const top = d.bandTop;
         const bottom = d.bandTop + d.bandHeight;
@@ -5478,7 +5644,7 @@ function setUpProbeGraph(): (
     } else if (drawn.length === 1) {
       const only = drawn[0];
       const unit = only.series.unit ? ` ${only.series.unit}` : "";
-      const back = (v: number) => (useLog ? signedExp(v) : v);
+      const back = (v: number) => (useLog ? signedExp(v) * only.logScale : v);
       for (const [ratio, plotted] of [
         [0, only.plotMax],
         [0.5, (only.plotMax + only.plotMin) / 2],
@@ -5644,15 +5810,17 @@ function setUpProbeGraph(): (
         );
         lines.push(`t = ${hoverTime(time)}`);
       }
-      for (const { series: sr, plotMin, plotMax, flatY } of drawn) {
+      for (const { series: sr, plotMin, plotMax, flatY, bandTop, bandHeight, logScale } of drawn) {
         const at = index - (longest - sr.history.length);
         if (at < 0 || at >= sr.history.length) continue;
         const value = sr.history[at];
         const y = plotY(
-          useLog ? signedLog(value) : value,
+          useLog ? signedLog(value / logScale) : value,
           plotMin,
           plotMax,
           flatY,
+          bandTop,
+          bandHeight,
         );
         ctx.fillStyle = sr.color;
         ctx.beginPath();
@@ -5664,11 +5832,24 @@ function setUpProbeGraph(): (
       }
       // 読み取り値は**いつも左**、凡例の下へ置く。右端は縦軸の目盛りが使って
       // いるので、指の位置で左右へ振ると目盛りと重なって両方読めなくなる。
-      let y = legendY + 4;
+      //
+      // **下地を敷く**。縁取りだけで線や題の上に直接書いていたので、題と
+      // 重なって「t = 2.07 秒床から球の下まで)」のように読め、線も文字を
+      // 横切った(利用者役⑮)。文字の幅ぶんの暗い板を先に塗る。
+      const top = legendY + 4;
+      const boxWidth = Math.max(...lines.map((line) => ctx.measureText(line).width)) + 10;
+      ctx.fillStyle = "rgba(14, 16, 20, 0.92)";
+      ctx.fillRect(0, top - 11, Math.min(boxWidth, w), lines.length * 13 + 5);
+      let y = top;
       for (const line of lines) {
         outlined(line, 4, y, "#e6e9ee");
         y += 13;
       }
+    }
+    // ドラッグで選んでいる区間(`zoom` のdoc)。
+    if (dragStartX !== null && dragNowX !== null) {
+      ctx.fillStyle = "rgba(120, 170, 255, 0.18)";
+      ctx.fillRect(Math.min(dragStartX, dragNowX), 0, Math.abs(dragNowX - dragStartX), plotH);
     }
   };
   return redraw;
@@ -7409,6 +7590,53 @@ async function setUpSceneView(
   const fieldCanvas = document.getElementById("field-canvas") as HTMLCanvasElement;
   const fieldTitle = document.getElementById("field-title")!;
   const fieldContext = fieldCanvas.getContext("2d");
+  /**
+   * **場の絵を指して、その場所の値を読む**。二重スリットではしまが見えても、
+   * 間隔を測る手段が無かった(利用者役⑮:「しまの間隔は測れません」)。
+   * 格子の絵(`drawScalarField`)を描いたときの中身を覚えておき、指した
+   * ます目の位置と、いちばん強い所に対する割合を出す。1D の折れ線や棒の図は
+   * 対象外(`lastScalarField = null`)。
+   */
+  let lastScalarField: {
+    values: Float32Array;
+    nx: number;
+    ny: number;
+    scale: number;
+    normalize: "signed" | "positive";
+  } | null = null;
+  const fieldReadout = document.createElement("p");
+  fieldReadout.id = "field-readout";
+  fieldReadout.hidden = true;
+  fieldPanel.appendChild(fieldReadout);
+  fieldCanvas.addEventListener("mousemove", (event) => {
+    const field = lastScalarField;
+    if (!field) {
+      fieldReadout.hidden = true;
+      return;
+    }
+    // 絵は枠に収まるよう縦横比を保って縮められている(`object-fit: contain`)。
+    const rect = fieldCanvas.getBoundingClientRect();
+    const cell = Math.min(rect.width / field.nx, rect.height / field.ny);
+    const offsetX = (rect.width - field.nx * cell) / 2;
+    const offsetY = (rect.height - field.ny * cell) / 2;
+    const i = Math.floor((event.clientX - rect.left - offsetX) / cell);
+    const fromTop = Math.floor((event.clientY - rect.top - offsetY) / cell);
+    const j = field.ny - 1 - fromTop;
+    if (i < 0 || i >= field.nx || j < 0 || j >= field.ny) {
+      fieldReadout.hidden = true;
+      return;
+    }
+    const value = field.values[j * field.nx + i];
+    const percent = (value / field.scale) * 100;
+    fieldReadout.textContent =
+      field.normalize === "positive"
+        ? `左から ${i}・下から ${j} ます目: 明るさ ${Math.abs(percent).toFixed(1)}%(いちばん明るい所を 100%)`
+        : `左から ${i}・下から ${j} ます目: 強さ ${percent.toFixed(0)}%(赤が +、青が −)`;
+    fieldReadout.hidden = false;
+  });
+  fieldCanvas.addEventListener("mouseleave", () => {
+    fieldReadout.hidden = true;
+  });
   /// 気体の箱の中心(粒子描画の原点合わせに使う)。シーン読み込み時に更新する。
   let gasBoxCenter: [number, number, number] = [0, 0, 0];
 
@@ -7441,6 +7669,7 @@ async function setUpSceneView(
     let scale = 0;
     for (let i = 0; i < values.length; i += 1) scale = Math.max(scale, Math.abs(values[i]));
     if (scale === 0) scale = 1;
+    lastScalarField = { values, nx, ny, scale, normalize };
     let wallMax = 0;
     if (options.walls) for (const w of options.walls) wallMax = Math.max(wallMax, w);
     const wallThreshold = wallMax > 0 ? wallMax * 0.5 : Infinity;
@@ -7466,6 +7695,7 @@ async function setUpSceneView(
   /// 1D の分布(|ψ|² とポテンシャル)を折れ線で描く。
   function drawQuantum1d(density: Float32Array, potential: Float32Array) {
     if (!fieldContext) return;
+    lastScalarField = null;
     const w = 512;
     const h = 160;
     fieldCanvas.width = w;
@@ -7526,10 +7756,16 @@ async function setUpSceneView(
   /// 正規化すると、数度の差が同じ色に潰れてしまう。
   function drawRodTemperature(values: Float32Array, min: number, max: number) {
     if (!fieldContext) return;
-    const w = 512;
-    const h = 190;
-    const strip = 26;
-    const pad = 18;
+    lastScalarField = null;
+    // **見えている大きさで描く**。512×190 の固定の絵を枠いっぱいに縮めて
+    // いたので、横長の枠(735 px)では 190×70 px ほどにしかならず、「100.0 ℃」
+    // 「熱源側」の文字が 5 px ほどに潰れていた(利用者役⑮)。枠の実寸
+    // (× 画面の細かさ)で描き、文字は 12 px のままにする。
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(320, Math.round((fieldCanvas.clientWidth || 512) * dpr));
+    const h = Math.max(150, Math.round((fieldCanvas.clientHeight || 190) * dpr));
+    const strip = Math.round(26 * dpr);
+    const pad = Math.round(18 * dpr);
     fieldCanvas.width = w;
     fieldCanvas.height = h;
     fieldContext.fillStyle = "#111";
@@ -7567,14 +7803,14 @@ async function setUpSceneView(
     }
     fieldContext.stroke();
 
-    fieldContext.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    fieldContext.font = `${Math.round(12 * dpr)}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
     fieldContext.fillStyle = "#8b929c";
     fieldContext.textAlign = "left";
-    fieldContext.fillText(`${max.toFixed(1)} ℃`, 4, top + 10);
-    fieldContext.fillText(`${min.toFixed(1)} ℃`, 4, bottom - 2);
-    fieldContext.fillText("熱源側", 4, h - 3);
+    fieldContext.fillText(`${max.toFixed(1)} ℃`, 4 * dpr, top + 12 * dpr);
+    fieldContext.fillText(`${min.toFixed(1)} ℃`, 4 * dpr, bottom - 3 * dpr);
+    fieldContext.fillText("熱源側", 4 * dpr, h - 4 * dpr);
     fieldContext.textAlign = "right";
-    fieldContext.fillText("反対の端", w - 4, h - 3);
+    fieldContext.fillText("反対の端", w - 4 * dpr, h - 4 * dpr);
     fieldContext.textAlign = "left";
   }
 
@@ -12250,6 +12486,7 @@ async function setUpSceneView(
   scrubber.addEventListener("input", () => {
     scrubberParked = Number(scrubber.value);
     applyComponent(world, "restore_snapshot", { index: scrubberParked });
+    noteTimeRestored();
     render();
   });
   const stopScrubbing = () => {
@@ -12284,6 +12521,7 @@ async function setUpSceneView(
         playing = false;
         playButton.textContent = "▶";
         applyComponent(world, "restore_bookmark", { index: i });
+        noteTimeRestored();
         render();
       });
       item.appendChild(chip);
@@ -12301,12 +12539,7 @@ async function setUpSceneView(
       exportButton.addEventListener("click", () => {
         const json = world.read_component("bookmark_export_scene_json", String(i));
         const blob = new Blob([json], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `bookmark_${world.read_component("bookmark_label_at", String(i))}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
+        saveBlobAsFile(blob, `bookmark_${world.read_component("bookmark_label_at", String(i))}.json`);
       });
       item.appendChild(exportButton);
 
@@ -12397,6 +12630,7 @@ async function setUpSceneView(
     playing = false;
     playButton.textContent = "▶";
     applyComponent(world, "restore_snapshot", { index: bestIndex });
+    noteTimeRestored();
     render();
   };
 
@@ -12503,6 +12737,22 @@ async function setUpSceneView(
     settledEverMoved = false;
     settledStillSince = null;
     settledAtTime = null;
+  }
+  /**
+   * **巻き戻した時点に合わせて、止まったかどうかを言い直す**。巻き戻しても
+   * 「止まりかけています…」が残り、2 秒の時点(秒速 19.6 m で落ちている
+   * 最中)に出ていた(利用者役⑮)。止まった時刻より後へ戻したならその時刻は
+   * 生きている。前へ戻したなら、止まった時刻も「止まりかけ」も無かったことに
+   * して、その時点の速さから数え直す。
+   */
+  function noteTimeRestored(): void {
+    const now = readNumber(world, "time");
+    if (settledAtTime !== null && now >= settledAtTime) return;
+    settledAtTime = null;
+    settledStillSince = null;
+    if (readNumber(world, "max_body_point_speed") > SETTLED_TRIGGER_SPEED) {
+      settledEverMoved = true;
+    }
   }
   function noteSettleAfterStep(): void {
     // 重心の速さだけでなく、**回っている物の表面の速さ**も数える
@@ -12955,7 +13205,13 @@ async function setUpSceneView(
         });
       }
       series.push(...derivedSeries);
-      for (let i = 0; i < probeCount; i++) {
+      const probeOrder = [
+        ...(guidedProbeOrder ?? []).filter((index) => index < probeCount),
+        ...Array.from({ length: probeCount }, (_, index) => index).filter(
+          (index) => !(guidedProbeOrder ?? []).includes(index),
+        ),
+      ];
+      for (const [position, i] of probeOrder.entries()) {
         series.push({
           csvOnly: derivedFrom.has(i),
           // かんたんモードでは、グラフの凡例も人間の言葉にする
@@ -12976,7 +13232,7 @@ async function setUpSceneView(
           // `undefined` のままにし、凡例は従来どおり `formatTickValue` で
           // 整形する。
           digits: guidedProbeDigits?.[i],
-          color: PROBE_GRAPH_COLORS[(i + derivedSeries.length) % PROBE_GRAPH_COLORS.length],
+          color: PROBE_GRAPH_COLORS[(position + derivedSeries.length) % PROBE_GRAPH_COLORS.length],
           // `imported_probe_history_f64`はWasmメモリを直接指す一時的なビューを
           // 返す(B16、`HotPathViewBuffers`のdoc参照)——このループが呼ぶたび
           // 同じ1本の永続バッファを使い回すため、`series`へ積んだ後の要素を
@@ -13185,6 +13441,10 @@ async function setUpSceneView(
       // 対応していない、と読まれた(利用者役②の観察)。実際に戻れる範囲を
       // そのまま出せば、位置と時刻は素直に結びつく。
       if (timelineHint) {
+        // 1 行に収めて「…」で切るので、全文は指したときに読めるようにする。
+        queueMicrotask(() => {
+          timelineHint.title = timelineHint.textContent ?? "";
+        });
         timelineHint.textContent =
           snapshotCount > 1
             // **飛び飛びであることを言う**。記録は 1 秒ごとなので、帯は
@@ -13193,13 +13453,19 @@ async function setUpSceneView(
             // 読まれ、「ぶつかる瞬間に止められない」と書かれた(利用者役⑩の
             // 観察: 2 秒で終わる落下に対し、止まれるのは 1/2/3/4 秒ちょうどの
             // 4 か所だけ)。いくつの時点へ戻れるのかを先に書く。
-            ? `⏪ つまむと、記録した ${snapshotCount} つの時点(${formatDuration(
-                readNumber(world, "snapshot_time_at", "0"),
-                readNumber(world, "dt"),
-              )} 〜 ${formatDuration(
-                readNumber(world, "snapshot_time_at", String(latestIndex)),
-                readNumber(world, "dt"),
-              )}、1 秒ごと)へ戻せます`
+            // 記録は走り始めから今までを等間隔で覆う(sim-wasm
+            // `SNAPSHOT_RING_CAPACITY` のdoc)。間隔は長く走るほど 2 倍ずつ
+            // 広がるので、「1 秒ごと」と決め打ちせず、いまの間隔を書く。
+            ? (() => {
+                const dt = readNumber(world, "dt");
+                const first = readNumber(world, "snapshot_time_at", "0");
+                const last = readNumber(world, "snapshot_time_at", String(latestIndex));
+                const spacing = (last - first) / latestIndex;
+                return `⏪ つまむと、記録した ${snapshotCount} つの時点(${formatDuration(
+                  first,
+                  dt,
+                )} 〜 ${formatDuration(last, dt)}、${formatDuration(spacing, dt)}ごと)へ戻せます`;
+              })()
             : "⏪ つまむと、記録した時点へ戻せます";
       }
       // 走らせている間は最新に追従し、止めている間は人が置いた場所に留まる
@@ -13289,6 +13555,8 @@ async function setUpSceneView(
   let guidedProbeDigits: Record<number, number> | null = null;
   /** 成分から作る量(速さ・距離)の線(`ProbeSeries.csvOnly` のdoc参照)。 */
   let guidedDerivedSeries: DerivedProbeSeries[] | null = null;
+  /** グラフと CSV に並べるプローブの順(workspace `probeOrderFor` のdoc)。 */
+  let guidedProbeOrder: number[] | null = null;
   let lastTimeMs = performance.now();
 
   function frame(nowMs: number) {
@@ -13483,7 +13751,8 @@ async function setUpSceneView(
     setExportName: (name) => {
       exportName = name;
     },
-    setProbeLabels: (labels, units, convert, digits, derived) => {
+    setProbeLabels: (labels, units, convert, digits, derived, order) => {
+      guidedProbeOrder = order?.length ? order : null;
       guidedProbeLabels = labels;
       guidedProbeUnits = units ?? null;
       guidedProbeConvert = convert ?? null;

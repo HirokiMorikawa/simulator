@@ -667,6 +667,11 @@ body {
   width: auto;
   max-height: 68%;
 }
+/* 主役のときは、図に高さを残す(横長の枠に縮められて 70 px ほどになり、
+   文字も線も読めなかった、利用者役⑮)。 */
+#scene-view[data-stage-empty="true"] #field-canvas {
+  min-height: 180px;
+}
 #stage-empty-note {
   position: absolute;
   top: var(--space-6);
@@ -689,6 +694,16 @@ body {
   color: var(--text);
 }
 #stage-empty-note[hidden] {
+  display: none;
+}
+/* 場の絵を指したときの読み取り(main.ts `lastScalarField` のdoc)。 */
+#field-readout {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+#field-readout[hidden] {
   display: none;
 }
 #field-canvas {
@@ -945,6 +960,14 @@ body {
   font-variant-numeric: tabular-nums;
   color: var(--text-muted);
   margin-bottom: var(--space-2);
+}
+/* 時刻・step・状態の札は折り返さない。走っている間だけ「うごいています」が
+   2 行に折れて行が高くなり、止めた瞬間に 1 行へ戻って帯が 15 px 上へ跳ね、
+   つまもうとした指の下から逃げていた(利用者役⑮の再現)。縮むのは説明の文
+   (`#timeline-hint`)だけ。 */
+.timeline-header > :not(#timeline-hint) {
+  flex: none;
+  white-space: nowrap;
 }
 
 .badge {
@@ -2618,17 +2641,26 @@ kbd {
  * `t = 4.079 s step = 979` のような生の表示は、行の高さを超えて中身が
  * 切れる原因になっていた(利用者役の観察: 入力欄が下端で切れていた)。 */
 #app:not([data-grain="study"]):not([data-grain="build"]) .timeline-bookmarks,
-#app:not([data-grain="study"]):not([data-grain="build"]) #timeline-step {
+#app:not([data-grain="build"]) #timeline-step {
   display: none;
 }
-/* 帯が何をするものかは浅い粒度でこそ要る。深い粒度では t / step の生の値が
-   同じ行に並ぶので、そちらに場所を譲る。 */
-#app[data-grain="study"] #timeline-hint,
+/* 帯が何をするものか(どこからどこまで、何秒ごとに戻れるか)は「しらべる」
+   でも要る——「しらべる」では t と step しか出ず、戻れる範囲が分からな
+   かった(利用者役⑮)。step は「つくる」だけの生の値なので、そちらを外す。 */
 #app[data-grain="build"] #timeline-hint {
   display: none;
 }
 #timeline-hint {
   color: var(--text-subtle);
+  /* **1 行に収める**。戻れる範囲の文は走るにつれて長さが変わり(「0.25 秒
+     ごと」→「0.50 秒ごと」)、折り返すと帯が 18 px 下へずれて、つまもうと
+     した指の下から逃げた(利用者役⑮の再現)。はみ出す分は「…」にし、全文は
+     指したときに出す(`title`)。 */
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 

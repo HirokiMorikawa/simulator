@@ -28,11 +28,33 @@ use wasm_bindgen::prelude::*;
 
 mod component_schema;
 
-/// Timelineパネルのスナップショットリングバッファ(設計docs/00-foundation/
-/// 04-architecture.md §「巻き戻しのスナップショット予算」: 既定1s間隔・
-/// リングバッファN=8面・直近8s分)。1s間隔は`dt`から算出する
-/// (`WasmWorld::new`で`1.0/dt`を四捨五入)。
-const SNAPSHOT_RING_CAPACITY: usize = 8;
+/// Timelineパネルのスナップショットの面数(設計docs/00-foundation/
+/// 04-architecture.md §「巻き戻しのスナップショット予算」は 1s 間隔・8 面・
+/// 直近 8s 分)。
+///
+/// **はじめから今までを、いつでも戻れるようにした**(利用者役⑮)。直近 8 秒を
+/// 1 秒刻みで残すだけだったので、21 秒走らせると 14〜21 秒にしか戻れず、
+/// 2.02 秒の着地の瞬間を確かめられなかった。いまは 0.25 秒ごとに記録を
+/// 始め、面が埋まったら 1 つおきに間引いて間隔を 2 倍にする
+/// (`WasmWorld::record_snapshot`)。帯は常に走り始めから今までを覆い、
+/// 短い実験ほど細かく戻れる。面数は予算の 2 倍(16 面)。
+const SNAPSHOT_RING_CAPACITY: usize = 16;
+/// 最初の記録間隔 [秒](`SNAPSHOT_RING_CAPACITY` のdoc)。
+const SNAPSHOT_FIRST_INTERVAL_SECONDS: f64 = 0.25;
+/// 最初の記録間隔の上限 [step](ふつうの 1/120 秒刻みで 0.25 秒)。分子や
+/// 光の場面は 1 step が 1e-15 秒ほどで、「0.25 秒」には永久に届かず、記録が
+/// 1 つもできなかった——気体で 190 ピコ秒進んでも帯のつまみが左端のまま
+/// (利用者役⑮)。step で上限を切れば、どの時間の尺度でも記録が始まり、
+/// 間引きで走り始めから今までを覆う。
+const SNAPSHOT_FIRST_INTERVAL_MAX_STEPS: f64 = 30.0;
+
+/// 最初の記録間隔 [step](`SNAPSHOT_FIRST_INTERVAL_SECONDS` と
+/// `SNAPSHOT_FIRST_INTERVAL_MAX_STEPS` の小さいほう、1 以上)。
+fn first_snapshot_interval_steps(dt: f64) -> u64 {
+    (SNAPSHOT_FIRST_INTERVAL_SECONDS / dt)
+        .round()
+        .clamp(1.0, SNAPSHOT_FIRST_INTERVAL_MAX_STEPS) as u64
+}
 
 /// 分圧回路(`Command::SetSwitch`実証用、`WasmWorld::new`参照)の分圧点ノード番号。
 const CIRCUIT_DIVIDER_NODE: usize = 2;
@@ -519,6 +541,9 @@ pub struct WasmWorld {
     /// 持たないため、`WasmWorld::new`の時点では空。
     circuit_editor_motors: Vec<sim_em::MotorHandle>,
     snapshot_interval_steps: u64,
+    /// 記録を始めたときの間隔(間引きで 2 倍ずつ伸びる前の値)。記録を
+    /// 捨て直すときにここへ戻す(`SNAPSHOT_RING_CAPACITY` のdoc)。
+    snapshot_first_interval_steps: u64,
     snapshots: VecDeque<World>,
     /// **巻き戻して眺めている位置**(`None` = 最新にいる)。
     ///
@@ -658,7 +683,7 @@ impl WasmWorld {
         thermal.add_node(heater_node);
         inner.enable_thermal(thermal);
 
-        let snapshot_interval_steps = (1.0 / dt).round().max(1.0) as u64;
+        let snapshot_interval_steps = first_snapshot_interval_steps(dt);
         let bodies = vec![
             SpawnedBodyMeta {
                 id: ground_body,
@@ -687,6 +712,7 @@ impl WasmWorld {
             circuit_switch_index,
             circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
+            snapshot_first_interval_steps: snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             restored_to: None,
             bookmarks: Vec::new(),
@@ -799,7 +825,7 @@ impl WasmWorld {
             }
         }
 
-        let snapshot_interval_steps = (1.0 / scenario.world.dt).round().max(1.0) as u64;
+        let snapshot_interval_steps = first_snapshot_interval_steps(scenario.world.dt);
         Ok(WasmWorld {
             inner,
             bodies,
@@ -808,6 +834,7 @@ impl WasmWorld {
             circuit_switch_index: 0,
             circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
+            snapshot_first_interval_steps: snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             restored_to: None,
             bookmarks: Vec::new(),
@@ -3925,13 +3952,21 @@ impl WasmWorld {
         let chassis_id = self.try_body_id_at(chassis)?;
         let wheel_id = self.try_body_id_at(wheel)?;
         let default = sim_mechanics::WheelJoint::new(0, 0, Vec3::ZERO, rest_length);
+        // 車軸はシーン JSON と同じく車体の形から決める(`WheelJoint::axle_for_chassis`)。
+        // フォームで組んだ車とシーンの車が同じになる(縦串①の state_hash 一致)。
+        let axle_axis = sim_mechanics::WheelJoint::axle_for_chassis(
+            self.inner
+                .mechanics()
+                .bodies
+                .shape_of(chassis_id.index as usize),
+        );
         Ok(self.inner.create_joint(sim_world::JointDesc::Wheel {
             chassis: chassis_id,
             wheel: wheel_id,
             anchor_chassis: Vec3::new(acx, acy, acz),
             rest_length,
             suspension_axis: default.suspension_axis,
-            axle_axis: default.axle_axis,
+            axle_axis,
             frequency,
             damping_ratio,
             steer_angle,
@@ -5107,11 +5142,35 @@ impl WasmWorld {
             .step_count()
             .is_multiple_of(self.snapshot_interval_steps)
         {
-            if self.snapshots.len() >= SNAPSHOT_RING_CAPACITY {
-                self.snapshots.pop_front();
-            }
-            self.snapshots.push_back(self.inner.snapshot());
+            self.record_snapshot();
         }
+    }
+
+    /// 記録を 1 面積む。面が埋まっていたら、先に 1 つおきに間引いて間隔を
+    /// 2 倍にする(`SNAPSHOT_RING_CAPACITY` のdoc)。記録は間隔の倍数の
+    /// step に積まれるので、奇数番目(0 始まり)の面——新しい間隔の倍数の
+    /// 時点——を残せば、間引いたあとも等間隔のまま続く。
+    fn record_snapshot(&mut self) {
+        if self.snapshots.len() >= SNAPSHOT_RING_CAPACITY {
+            let kept: VecDeque<World> = std::mem::take(&mut self.snapshots)
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| i % 2 == 1)
+                .map(|(_, w)| w)
+                .collect();
+            self.snapshots = kept;
+            self.snapshot_interval_steps *= 2;
+            if !self
+                .inner
+                .step_count()
+                .is_multiple_of(self.snapshot_interval_steps)
+            {
+                // 間引いた直後のこの時点は新しい間隔の倍数ではない——
+                // 次の倍数まで待つ(等間隔を崩さない)。
+                return;
+            }
+        }
+        self.snapshots.push_back(self.inner.snapshot());
     }
 
     /// Timelineスクラバが表示できるスナップショット数(モジュールdoc参照)。
@@ -5239,6 +5298,7 @@ impl WasmWorld {
                 })?;
         self.inner.restore(snapshot);
         self.snapshots.clear();
+        self.snapshot_interval_steps = self.snapshot_first_interval_steps;
         Ok(())
     }
 
@@ -5928,6 +5988,49 @@ mod tests {
                 .expect("D1 must load");
         let value = world.imported_probe_value_at_impl(0);
         assert!(value > 1.0, "落とす前の高さは床より上のはず: {value}");
+    }
+
+    /// **巻き戻しの記録は、走り始めから今までを覆う**(`SNAPSHOT_RING_CAPACITY`
+    /// のdoc)。3 秒なら 0.25 秒刻みで全部、21 秒走らせても最初の数秒から
+    /// 今までを等間隔で持つ(以前は直近 8 秒だけで、2 秒の着地へ戻れなかった)。
+    #[test]
+    fn snapshots_cover_the_whole_run_at_an_even_spacing() {
+        let mut world =
+            WasmWorld::from_scene_json_impl(include_str!("../../../scenes/d1-free-fall.json"))
+                .expect("D1 must load");
+        let dt = world.inner.dt();
+        let times = |world: &WasmWorld| -> Vec<f64> {
+            (0..world.snapshot_count_impl())
+                .map(|i| world.snapshot_time_at_impl(i).unwrap())
+                .collect()
+        };
+        let steps_for = |seconds: f64| (seconds / dt).round() as usize;
+        for _ in 0..steps_for(3.0) {
+            world.step();
+        }
+        let early = times(&world);
+        assert!((early[0] - 0.25).abs() < 1e-6, "{early:?}");
+        assert!((early[early.len() - 1] - 3.0).abs() < 1e-6, "{early:?}");
+        for _ in steps_for(3.0)..steps_for(21.0) {
+            world.step();
+        }
+        let late = times(&world);
+        assert!(
+            late.len() >= 8 && late.len() <= SNAPSHOT_RING_CAPACITY,
+            "{late:?}"
+        );
+        assert!(
+            late[0] <= 2.0 + 1e-6,
+            "最初の記録は走り始めの近く: {late:?}"
+        );
+        assert!(late[late.len() - 1] >= 20.0 - 1e-6, "{late:?}");
+        let spacing = late[1] - late[0];
+        for pair in late.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - spacing).abs() < 1e-6,
+                "等間隔: {late:?}"
+            );
+        }
     }
 
     /// 融けて縮んだ氷の大きさが、画面の側から読めること

@@ -1539,6 +1539,23 @@ mod tests {
         world.create_body(floor);
 
         // 簡易ラグドール: 胴体(箱)+頭(箱)+左右の腕(箱)、BallJointで連結。
+        //
+        // **全体を少し(0.15 rad ≈ 8.6°)傾けて落とす**。完全に左右対称のまま
+        // 真下へ落とすと、胴体が端面で着地し、頭がその真上で釣り合ったまま
+        // 立ち続ける(不安定な釣り合いを、対称性だけが保っている)。以前は
+        // 接触ソルバが同じ面の 4 隅を 1 点ずつ解いていたため生じる横向きの
+        // 揺らぎで倒れていたが、その揺らぎは直した(`sim_mechanics::contact`
+        // の `solve_normal`)。本物の人形がぴったり対称に落ちることは無いので、
+        // 関節を保ったまま全体を傾けて始める(`scenes/d12-ragdoll.json` と同じ)。
+        // 傾ける向きは主に前後(胴体の薄い向き)——横へ傾けると幅の広い向きに
+        // 着地し、腕が突っ張って斜めに立ったまま残る。
+        let tilt =
+            sim_math::Quat::from_axis_angle(Vec3::new(1.0, 0.0, 0.2).normalize_or_zero(), 0.15);
+        let pivot = Vec3::new(0.0, 3.0, 0.0);
+        let tilted = |desc: &mut RigidBodyDesc| {
+            desc.transform.position = pivot + tilt.rotate(desc.transform.position - pivot);
+            desc.transform.rotation = tilt;
+        };
         let torso_half = Vec3::new(0.3, 0.5, 0.15);
         let mut torso_desc = RigidBodyDesc::dynamic(
             Shape::Box {
@@ -1547,6 +1564,7 @@ mod tests {
             wood,
         );
         torso_desc.transform.position = Vec3::new(0.0, 3.0, 0.0);
+        tilted(&mut torso_desc);
         let torso = world.create_body(torso_desc);
 
         let head_half = Vec3::new(0.2, 0.2, 0.2);
@@ -1557,6 +1575,7 @@ mod tests {
             wood,
         );
         head_desc.transform.position = Vec3::new(0.0, 3.0 + torso_half.y + head_half.y, 0.0);
+        tilted(&mut head_desc);
         let head = world.create_body(head_desc);
         world.mechanics_mut().add_ball_joint(BallJoint {
             body_a: torso.index as usize,
@@ -1567,6 +1586,8 @@ mod tests {
         });
 
         let arm_half = Vec3::new(0.5, 0.1, 0.1);
+        // 肩の高さは `scenes/d12-ragdoll.json` と同じ(胴の中心から 0.3 = 半高さの 0.6)。
+        let shoulder_y = torso_half.y * 0.6;
         for side in [-1.0, 1.0] {
             let mut arm_desc = RigidBodyDesc::dynamic(
                 Shape::Box {
@@ -1574,15 +1595,13 @@ mod tests {
                 },
                 wood,
             );
-            arm_desc.transform.position = Vec3::new(
-                side * (torso_half.x + arm_half.x),
-                3.0 + torso_half.y * 0.5,
-                0.0,
-            );
+            arm_desc.transform.position =
+                Vec3::new(side * (torso_half.x + arm_half.x), 3.0 + shoulder_y, 0.0);
+            tilted(&mut arm_desc);
             let arm = world.create_body(arm_desc);
             world.mechanics_mut().add_ball_joint(BallJoint {
                 body_a: torso.index as usize,
-                anchor_a: Vec3::new(side * torso_half.x, torso_half.y * 0.5, 0.0),
+                anchor_a: Vec3::new(side * torso_half.x, shoulder_y, 0.0),
                 body_b: Some(arm.index as usize),
                 anchor_b: Vec3::new(-side * arm_half.x, 0.0, 0.0),
                 disabled: false,

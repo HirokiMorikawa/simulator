@@ -829,6 +829,13 @@ impl Solver for MechanicsSolver {
             "contact resolution must not increase kinetic energy beyond numerical noise: \
              before={ke_before_contact} after={ke_after_contact}"
         );
+        // **関節を接触のあとでもう一度解く**(関節→接触→関節)。関節は step の
+        // 頭で一度解いてから接触を解くので、着地の瞬間の大きな接触力積が関節を
+        // そのまま押し縮めて残していた(利用者役⑭で傾けて落とした人形 D12: 床に
+        // 当たった step に頭と胴体の距離が 0.7 → 0.644、8% 縮んだ)。接触が
+        // 変えた速度に対して関節をもう一度満たせば、0.697(0.4%)で収まる。
+        // 接触の散逸の測定(上)には含めない——測っているのは接触だけの働き。
+        joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
         // 全体値は分解値の総和として作る(このフィールドのdocが約束する
         // 「総和は`last_contact_dissipation`と厳密に一致する」を保つため。
         // 補正を全体値へ独立に適用すると一致が崩れる)。

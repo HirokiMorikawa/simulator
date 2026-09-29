@@ -32,6 +32,7 @@ import {
   type Category,
   type Experiment,
   type Knob,
+  type Readout,
   type SceneDecoration,
   type SceneJson,
 } from "./catalog";
@@ -145,6 +146,8 @@ export type WorkspaceApi = {
     convert?: Record<number, (value: number) => number> | null,
     digits?: Record<number, number> | null,
     derived?: DerivedProbeSeries[] | null,
+    /** グラフと CSV に並べるプローブの順(「いまの数値」の並び、`probeOrderFor`)。 */
+    order?: number[] | null,
   ) => void;
   /**
    * **いまの場面をそのまま文書にする**(利用者役④の観察: 自分で組み立てた
@@ -778,6 +781,36 @@ function readStoredDetail(): number {
   }
 }
 
+/** カタカナをひらがなへそろえる(「フリコ」でも「ふりこ」が見つかるように)。 */
+function foldKana(text: string): string {
+  return text.replace(/[\u30a1-\u30f6]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0x60));
+}
+
+/**
+ * 検索の言いかえの組(`queryMatches` のdoc)。同じ組のどれで探しても、
+ * ほかの言い方で書かれた実験に当たる。ひらがなで書く(カタカナは
+ * `foldKana` でひらがなにそろえてから比べる)。
+ */
+const SEARCH_SYNONYMS: string[][] = [
+  ["振り子", "ふりこ", "pendulum"],
+  ["落下", "落ち", "落と", "おち", "おと", "fall", "drop"],
+  ["跳ね", "はね", "ばうんど", "弾む", "はずむ", "bounce"],
+  ["摩擦", "こすれ", "すべ", "滑", "friction"],
+  ["浮力", "浮く", "浮か", "浮き", "うく", "うか"],
+  ["温度", "熱", "冷め", "あたたか", "暖", "温"],
+  ["電気", "電流", "電圧", "回路", "でんき"],
+  ["磁石", "磁", "じしゃく"],
+  ["惑星", "軌道", "宇宙", "天体", "星"],
+  ["分子", "気体", "粒", "つぶ"],
+  ["波", "なみ", "電波"],
+  ["水", "みず", "液体", "流れ"],
+  ["車", "くるま", "自動車"],
+  ["積み木", "積む", "積ん", "たわー", "塔", "つみき"],
+  ["重力", "引力"],
+  ["衝突", "ぶつか", "ぶつけ"],
+  ["空気抵抗", "空気の抵抗", "頭打ち"],
+];
+
 export function setUpWorkspace(
   apiRef: WorkspaceApiRef,
   confirmDiscardRef?: ConfirmDiscardRef,
@@ -1036,7 +1069,13 @@ export function setUpWorkspace(
     detail = Math.min(3, Math.max(0, next));
     if (byPerson) chosenDetail = detail;
     app.style.setProperty("--detail", detail.toFixed(3));
+    const previousGrain = app.dataset.grain;
     app.dataset.grain = nearestStop(detail).key;
+    // 札の並びは粒度で変わる(「しらべる」では数値が先、`renderContext`)ので、
+    // 段が変わったら組み直す。
+    if (previousGrain !== undefined && previousGrain !== app.dataset.grain && current) {
+      renderContext();
+    }
 
     // **寸法はすべてこの 1 箇所で、粒度ひとつから決まる**。
     // 文脈の柱だけは最初から在る——「いま何を見ているか」は、どんな粒度でも
@@ -1502,14 +1541,41 @@ export function setUpWorkspace(
           result.push({ kind: "experiment", experiment });
           continue;
         }
-        const haystack =
+        const haystack = foldKana(
           `${experiment.title} ${experiment.blurb} ${category.title} ` +
-          `${experiment.watch.join(" ")} ${experiment.id}`.toLowerCase();
-        if (haystack.includes(query)) result.push({ kind: "experiment", experiment });
+            `${experiment.watch.join(" ")} ${experiment.id}`.toLowerCase(),
+        );
+        if (queryMatches(haystack, query)) result.push({ kind: "experiment", experiment });
       }
     }
     if (!newSceneFirst && newSceneMatches(query)) result.push({ kind: "new-scene" });
     return result;
+  }
+
+  /**
+   * **言い方が違っても見つける**。「振り子」で探すと、実験の名前が「ふりこ」
+   * なので「見つかりません」と出た。「落下」でも、「ボールを落とす」は出ず
+   * 銅管の磁石 1 件だけだった(利用者役⑮)。漢字とかな・日常のことばの
+   * 言いかえをいくつか持ち、どれかで当たれば見つけたことにする。空白で
+   * 区切った言葉は、全部当たるものだけ(「ボール 月」など)。
+   */
+  function queryMatches(haystack: string, query: string): boolean {
+    return foldKana(query)
+      .split(/\s+/)
+      .filter((word) => word.length > 0)
+      .every((word) => wordVariants(word).some((variant) => haystack.includes(variant)));
+  }
+
+  /** 検索語の言いかえ(`queryMatches` のdoc)。 */
+  function wordVariants(word: string): string[] {
+    const variants = new Set([word]);
+    for (const group of SEARCH_SYNONYMS) {
+      for (const member of group) {
+        if (!word.includes(member)) continue;
+        for (const other of group) variants.add(word.replace(member, other));
+      }
+    }
+    return [...variants];
   }
 
   /** パレットの1行が指すもの。用意された実験か、自分で保存した場面か、
@@ -1670,13 +1736,48 @@ export function setUpWorkspace(
     return values;
   }
 
+  /**
+   * **その読み値の名前が、プローブの時間変化そのものを指しているか**。
+   *
+   * 「いちばん高く上がった高さ」(最大値)・「1 回目に跳ね返った高さ」(山の
+   * 高さ)のような**ひとつの数に要約した**読み値や、`format` で別の量に
+   * 読み替えた読み値(kg を「残っている氷 %」に、球の中心を「床から球の
+   * 下まで」に)の名前を、元の時間変化の線と CSV の列にも付けていた。
+   * グラフの題が「1 回目に跳ね返った高さ: 最大 2.00 m・最小 -0.018 m」で
+   * 線は高さの時間変化、CSV の「いちばん高く上がった高さ」の列が 0.317 から
+   * 0.096 まで変わる——名前と中身が食い違っていた(利用者役⑮)。そういう
+   * 読み値の名前は線には付けず、線は「高さ(ボール)」のような元の量の名前の
+   * ままにする。`graph` で同じ変換を線にも掛けている読み値は、線も同じ量なので
+   * 名前を付けてよい。
+   */
+  function readoutNamesItsSeries(readout: Readout): boolean {
+    if (readout.derive || readout.extreme || readout.peakBetween) return false;
+    if (readout.format && !readout.graph) return false;
+    return true;
+  }
+
+  /**
+   * **グラフと CSV の線を、「いまの数値」と同じ順に並べる**。線はプローブの
+   * 番号順に並んでいたので、「熱が棒を伝わる」では 0.50・0.25・0.75 m の順
+   * ——数値の欄(熱源に近い順)と食い違っていた(利用者役⑮)。読み値が
+   * 名前を付けるプローブを宣言の順に先へ置き、残りは番号順。
+   */
+  function probeOrderFor(experiment: Experiment): number[] {
+    const order: number[] = [];
+    for (const readout of experiment.readouts ?? []) {
+      if (!readoutNamesItsSeries(readout)) continue;
+      if (!order.includes(readout.probe)) order.push(readout.probe);
+    }
+    return order;
+  }
+
   function probeLabelsFor(experiment: Experiment): Record<number, string> {
     const labels: Record<number, string> = {};
     for (const [index, entry] of Object.entries(experiment.series ?? {})) {
       labels[Number(index)] = typeof entry === "string" ? entry : entry.label;
     }
     for (const readout of experiment.readouts ?? []) {
-      if (readout.derive) continue;
+      if (!readoutNamesItsSeries(readout)) continue;
       labels[readout.probe] = readout.label;
     }
     return labels;
@@ -1689,7 +1790,7 @@ export function setUpWorkspace(
       if (typeof entry !== "string" && entry.unit) units[Number(index)] = entry.unit;
     }
     for (const readout of experiment.readouts ?? []) {
-      if (readout.derive) continue;
+      if (!readoutNamesItsSeries(readout)) continue;
       // `graph` を持つ読み値は**変換後の単位**を出す(表と同じ量を描くため)。
       const unit = readout.graph?.unit ?? readout.unit;
       if (unit) units[readout.probe] = unit;
@@ -1708,7 +1809,7 @@ export function setUpWorkspace(
   function probeDigitsFor(experiment: Experiment): Record<number, number> {
     const digits: Record<number, number> = {};
     for (const readout of experiment.readouts ?? []) {
-      if (readout.derive || readout.format) continue;
+      if (!readoutNamesItsSeries(readout) || readout.format) continue;
       digits[readout.probe] = readout.digits ?? 2;
     }
     return digits;
@@ -1985,6 +2086,7 @@ export function setUpWorkspace(
       probeConvertFor(current),
       probeDigitsFor(current),
       derivedSeriesFor(current),
+      probeOrderFor(current),
     );
     api.setExportName(exportNameFor(current));
     api.setPace(current.pace * speedMultiplier);
@@ -2848,10 +2950,24 @@ export function setUpWorkspace(
       const [knobsSpec] = specs.splice(knobsAt, 1);
       specs.splice(watchAt + 1, 0, knobsSpec);
     }
+    // **「しらべる」では、数値を先に**。「しらべる」は数値とグラフで答えを
+    // 出す段なのに、「いまの数値」が最初の画面の下(上端 875 px、画面の高さ
+    // 720 / 900 px)にあり、見るたびにスクロールが 1 手増えた(利用者役⑮)。
+    // 「ここを見る」→「いまの数値」→「変えてみる」の順にする。
+    if (nearestStop(detail).key === "study") {
+      const numbersAt = specs.findIndex((spec) => spec.id === "numbers");
+      const watchIndex = specs.findIndex((spec) => spec.id === "watch");
+      if (numbersAt > watchIndex + 1 && watchIndex >= 0) {
+        const [numbersSpec] = specs.splice(numbersAt, 1);
+        specs.splice(watchIndex + 1, 0, numbersSpec);
+      }
+    }
     for (const spec of specs) contextBody.appendChild(buildCard(spec));
     // 用意された実験の上でも、「これを消す」と同じ足場で「足す」ができる
-    // ようにする(`addBodyCard`のdoc参照)。
-    contextBody.appendChild(buildCard(addBodyCard()));
+    // ようにする(`addBodyCard`のdoc参照)。ただし**場だけの実験**(二重スリット・
+    // 電波・磁石の格子)には足す先の空間が無い——球を置いても波とは関わらず、
+    // 「球を1つ足す」が出ているのは場違いだった(利用者役⑮)。
+    if (current?.view !== "field") contextBody.appendChild(buildCard(addBodyCard()));
     appendFocusCard();
     // **用意された実験の上に組み立てた場合も保存できる**。以前は「自分の場面」
     // (実験を選んでいない状態)のときしか保存の口を出しておらず、実験に物を
