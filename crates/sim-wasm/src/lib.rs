@@ -28,11 +28,33 @@ use wasm_bindgen::prelude::*;
 
 mod component_schema;
 
-/// Timelineパネルのスナップショットリングバッファ(設計docs/00-foundation/
-/// 04-architecture.md §「巻き戻しのスナップショット予算」: 既定1s間隔・
-/// リングバッファN=8面・直近8s分)。1s間隔は`dt`から算出する
-/// (`WasmWorld::new`で`1.0/dt`を四捨五入)。
-const SNAPSHOT_RING_CAPACITY: usize = 8;
+/// Timelineパネルのスナップショットの面数(設計docs/00-foundation/
+/// 04-architecture.md §「巻き戻しのスナップショット予算」は 1s 間隔・8 面・
+/// 直近 8s 分)。
+///
+/// **はじめから今までを、いつでも戻れるようにした**(利用者役⑮)。直近 8 秒を
+/// 1 秒刻みで残すだけだったので、21 秒走らせると 14〜21 秒にしか戻れず、
+/// 2.02 秒の着地の瞬間を確かめられなかった。いまは 0.25 秒ごとに記録を
+/// 始め、面が埋まったら 1 つおきに間引いて間隔を 2 倍にする
+/// (`WasmWorld::record_snapshot`)。帯は常に走り始めから今までを覆い、
+/// 短い実験ほど細かく戻れる。面数は予算の 2 倍(16 面)。
+const SNAPSHOT_RING_CAPACITY: usize = 16;
+/// 最初の記録間隔 [秒](`SNAPSHOT_RING_CAPACITY` のdoc)。
+const SNAPSHOT_FIRST_INTERVAL_SECONDS: f64 = 0.25;
+/// 最初の記録間隔の上限 [step](ふつうの 1/120 秒刻みで 0.25 秒)。分子や
+/// 光の場面は 1 step が 1e-15 秒ほどで、「0.25 秒」には永久に届かず、記録が
+/// 1 つもできなかった——気体で 190 ピコ秒進んでも帯のつまみが左端のまま
+/// (利用者役⑮)。step で上限を切れば、どの時間の尺度でも記録が始まり、
+/// 間引きで走り始めから今までを覆う。
+const SNAPSHOT_FIRST_INTERVAL_MAX_STEPS: f64 = 30.0;
+
+/// 最初の記録間隔 [step](`SNAPSHOT_FIRST_INTERVAL_SECONDS` と
+/// `SNAPSHOT_FIRST_INTERVAL_MAX_STEPS` の小さいほう、1 以上)。
+fn first_snapshot_interval_steps(dt: f64) -> u64 {
+    (SNAPSHOT_FIRST_INTERVAL_SECONDS / dt)
+        .round()
+        .clamp(1.0, SNAPSHOT_FIRST_INTERVAL_MAX_STEPS) as u64
+}
 
 /// 分圧回路(`Command::SetSwitch`実証用、`WasmWorld::new`参照)の分圧点ノード番号。
 const CIRCUIT_DIVIDER_NODE: usize = 2;
@@ -478,6 +500,10 @@ struct HotPathViewBuffers {
     conduction_rod_temperatures: Vec<f32>,
     /// `fluid_particle_positions_f32`用。
     fluid_particle_positions: Vec<f32>,
+    /// `fluid_boundary_positions_f32`用。
+    fluid_boundary_positions: Vec<f32>,
+    /// `grid_fluid_3d_smoke_points_f32`用。
+    grid_fluid_3d_smoke: Vec<f32>,
     /// `y_probe_history_f64`用。
     y_probe_history: Vec<f64>,
     /// `speed_probe_history_f64`用。
@@ -515,7 +541,19 @@ pub struct WasmWorld {
     /// 持たないため、`WasmWorld::new`の時点では空。
     circuit_editor_motors: Vec<sim_em::MotorHandle>,
     snapshot_interval_steps: u64,
+    /// 記録を始めたときの間隔(間引きで 2 倍ずつ伸びる前の値)。記録を
+    /// 捨て直すときにここへ戻す(`SNAPSHOT_RING_CAPACITY` のdoc)。
+    snapshot_first_interval_steps: u64,
     snapshots: VecDeque<World>,
+    /// **巻き戻して眺めている位置**(`None` = 最新にいる)。
+    ///
+    /// 巻き戻した先より後のスナップショットは、そこから**進めた瞬間に**
+    /// 実際の未来ではなくなる。以前は巻き戻したその場で捨てていたが、
+    /// それだと止めたまま前後に行き来できず、スクラバを左へ引いて離すと
+    /// つまみが右端へ戻る(=動いていないように見える)ことになっていた
+    /// ——利用者役が2人続けて「マウスで動かせない」と書いた原因。
+    /// 記録は残したまま位置だけ覚えておき、実際に進めるときに切り捨てる。
+    restored_to: Option<usize>,
     bookmarks: Vec<(String, World)>,
     /// `spawn_fluid_block`を呼んだ回数(複数の水塊を並べてスポーンする際、
     /// 塊どうしが重ならないようX方向のオフセットを決めるのに使う。Hierarchyの
@@ -645,7 +683,7 @@ impl WasmWorld {
         thermal.add_node(heater_node);
         inner.enable_thermal(thermal);
 
-        let snapshot_interval_steps = (1.0 / dt).round().max(1.0) as u64;
+        let snapshot_interval_steps = first_snapshot_interval_steps(dt);
         let bodies = vec![
             SpawnedBodyMeta {
                 id: ground_body,
@@ -674,7 +712,9 @@ impl WasmWorld {
             circuit_switch_index,
             circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
+            snapshot_first_interval_steps: snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
+            restored_to: None,
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
             imported_probe_handles: Vec::new(),
@@ -742,7 +782,7 @@ impl WasmWorld {
             .add_scenario_probes(&scenario, &body_ids_by_name)
             .map_err(WasmError::ScenarioProbes)?;
 
-        let bodies = scenario
+        let mut bodies: Vec<SpawnedBodyMeta> = scenario
             .bodies
             .iter()
             .zip(ids.iter())
@@ -762,7 +802,30 @@ impl WasmWorld {
             })
             .collect();
 
-        let snapshot_interval_steps = (1.0 / scenario.world.dt).round().max(1.0) as u64;
+        // **読み込んだ場面のDistanceJointも、スポーン時と同じように控えておく。**
+        // ここが`None`のままだと`constraint_anchor_points_at`が何も返さず、
+        // Scene Viewの拘束線もHierarchyの「つなぎ目」もそのボディには出ない
+        // ——振り子を保存して開き直した瞬間に、同じ揺れ方をしているのに紐だけが
+        // 消える(拘束は`World::from_scenario`が確かに作っているのに、UIから
+        // 見えなくなる)という壊れ方をしていた。
+        for joint in inner.joints() {
+            if joint.kind != sim_world::JointKind::Distance {
+                continue;
+            }
+            if let Some(meta) = bodies
+                .iter_mut()
+                .find(|meta| meta.id.index as usize == joint.body_a)
+            {
+                // 1つのボディが複数のDistanceJointを持つことはありうるが、
+                // 控えられるのは1本だけ(`SpawnedBodyMeta`)。先に見つけた方を
+                // 採る——描けるものを描く方が、何も描かないよりよい。
+                if meta.constraint_joint_index.is_none() {
+                    meta.constraint_joint_index = Some(joint.index);
+                }
+            }
+        }
+
+        let snapshot_interval_steps = first_snapshot_interval_steps(scenario.world.dt);
         Ok(WasmWorld {
             inner,
             bodies,
@@ -771,7 +834,9 @@ impl WasmWorld {
             circuit_switch_index: 0,
             circuit_editor_motors: Vec::new(),
             snapshot_interval_steps,
+            snapshot_first_interval_steps: snapshot_interval_steps,
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
+            restored_to: None,
             bookmarks: Vec::new(),
             fluid_spawn_count: 0,
             imported_probe_handles,
@@ -905,6 +970,26 @@ impl WasmWorld {
                 Shape::ConvexMesh { .. } => "convex_mesh".to_string(),
             },
         )
+    }
+
+    /// いまの形が、置いたときの形(`base_shape`)の何倍の大きさか(体積比の立方根)。
+    /// 融けて小さくなる氷(`PhaseChangeMorph`)は計算の中で形が縮むので、
+    /// 画面の側はこれを見て描く大きさを合わせる——読まないと、計算では 4 割に
+    /// 縮んだ氷が画面では元の大きさのまま浮いて見える(利用者役⑭)。
+    /// 大きさを持たない形(平面)や読めない形は 1。
+    fn body_size_ratio_at_impl(&self, index: usize) -> Result<f64, WasmError> {
+        let id = self.try_body_id_at(index)?;
+        let base = self.try_body_meta_at(index)?.base_shape.volume();
+        let now = self
+            .inner
+            .mechanics()
+            .bodies
+            .shape_of(id.index as usize)
+            .volume();
+        Ok(match (base, now) {
+            (Some(base), Some(now)) if base > 0.0 && now > 0.0 => (now / base).cbrt(),
+            _ => 1.0,
+        })
     }
 
     /// `index`番目のボディの、入れ子構造も含めた完全な形状記述をシーンJSON
@@ -1428,11 +1513,19 @@ impl WasmWorld {
     /// `probe_index`は`scenario.probes`配列内でのインデックス(`prediction_prompts
     /// [].probe_index`と同じ添字系)。範囲外、または該当プローブの履歴がまだ
     /// 1件も無い(1stepも進んでいない)場合は0.0を返す。
+    /// プローブの最新の値。**まだ 1 度も記録していなければ、いまの状態から読む**。
+    /// 止めたままつまみを動かすと場面は t=0 で組み直され、step を進めるまで
+    /// 記録が空のまま——以前はそこで 0 を返していたので、「ボールの高さ」が
+    /// 高いところにボールが見えているのに -0.30 m(0 から球の半径を引いた値)と
+    /// 出た(利用者役⑭)。
     fn imported_probe_value_at_impl(&self, probe_index: usize) -> f64 {
-        self.imported_probe_handles
-            .get(probe_index)
-            .and_then(|&handle| self.inner.probe(handle))
+        let Some(&handle) = self.imported_probe_handles.get(probe_index) else {
+            return 0.0;
+        };
+        self.inner
+            .probe(handle)
             .and_then(|probe| probe.history().last().copied())
+            .or_else(|| self.inner.probe_current_value(handle))
             .unwrap_or(0.0)
     }
 
@@ -1501,6 +1594,61 @@ impl WasmWorld {
             }
         }
         out
+    }
+
+    /// 気体の**箱の大きさ** `[x, y, z]` [m]。気体ドメインが無ければ空。
+    ///
+    /// 箱は `[0, x] × [0, y] × [0, z]`。「400 個の分子が箱の中で飛び回ります」と
+    /// 書いてあるのに、画面には箱の枠も壁も無く、点が真っ黒な空間に浮いている
+    /// だけに見えた(利用者役①の観察)。枠を描けるように、寸法をそのまま渡す。
+    pub fn kinetic_gas_box_size_f32(&self) -> Vec<f32> {
+        match self.inner.kinetic_gas() {
+            Some(gas) => vec![
+                gas.box_size.x as f32,
+                gas.box_size.y as f32,
+                gas.box_size.z as f32,
+            ],
+            None => Vec::new(),
+        }
+    }
+
+    /// 3D格子流体の**煙**を、点群として返す。
+    ///
+    /// 1 点あたり 4 要素 `[x, y, z, 濃さ]`。`stride` でセルを間引き、`threshold`
+    /// 以下の薄いセルは飛ばす(全セルを返すと数万点になり、ほとんどが空気)。
+    ///
+    /// **なぜ要ったか**: 「煙が流れる(3D)」は 3D の舞台が最初から最後まで
+    /// 真っ暗だった——剛体も粒子も無く、煙は格子の中の数値としてしか存在して
+    /// いなかったため。「まん中の 3D を見てください」と案内している隣で何も
+    /// 映らない、という一番がっかりする画面になっていた(利用者役③の観察)。
+    /// 濃さをそのまま渡して、点として描けるようにする。読み出すだけで、計算には
+    /// 触らない。
+    pub fn grid_fluid_3d_smoke_points_f32(
+        &mut self,
+        stride: usize,
+        threshold: f32,
+    ) -> Float32Array {
+        let buf = &mut self.view_buffers.grid_fluid_3d_smoke;
+        buf.clear();
+        if let Some(grid) = self.inner.grid_fluid_3d() {
+            let step = stride.max(1);
+            for k in (0..grid.nz).step_by(step) {
+                for j in (0..grid.ny).step_by(step) {
+                    for i in (0..grid.nx).step_by(step) {
+                        let density = grid.smoke_density[i + grid.nx * (j + grid.ny * k)] as f32;
+                        if density <= threshold || !density.is_finite() {
+                            continue;
+                        }
+                        buf.push(((i as f64 + 0.5) * grid.h) as f32);
+                        buf.push(((j as f64 + 0.5) * grid.h) as f32);
+                        buf.push(((k as f64 + 0.5) * grid.h) as f32);
+                        buf.push(density);
+                    }
+                }
+            }
+        }
+        // SAFETY: `fluid_particle_positions_f32`と同じ(`HotPathViewBuffers`のdoc参照)。
+        unsafe { Float32Array::view(buf) }
     }
 
     /// 3D格子流体ドメインの概要(**群9で追加**)。無ければ空文字列。
@@ -1757,6 +1905,25 @@ impl WasmWorld {
             .fold(0.0_f64, f64::max)
     }
 
+    /// **物のどこかの点が動いているいちばんの速さ**(重心の速さ + 回る速さ ×
+    /// 中心からいちばん遠い点までの距離)。
+    ///
+    /// `max_body_speed` は重心の速さしか見ないので、その場で回り続ける物
+    /// (手回し発電機のクランク)は 0 m/s と読める。「ほぼ止まった時刻」の
+    /// 判定がこれを使っていたため、クランクが画面で回っている隣に
+    /// 「はじめから動いていません」と出ていた(利用者役⑬の観察)。回っている
+    /// 物も「動いている」と数える。上から押さえる見積もり(`|v| + |ω|R`)で、
+    /// 止まっている物には 0 を返す。
+    fn max_body_point_speed_impl(&self) -> f64 {
+        let bodies = &self.inner.mechanics().bodies;
+        (0..bodies.position.len())
+            .map(|i| {
+                bodies.linear_velocity[i].length()
+                    + bodies.angular_velocity[i].length() * shape_reach(bodies.shape_of(i))
+            })
+            .fold(0.0_f64, f64::max)
+    }
+
     /// 登録済み結合の件数。
     fn coupling_count_impl(&self) -> usize {
         self.inner.coupling_count()
@@ -1952,48 +2119,73 @@ impl WasmWorld {
             .inner
             .circuit()
             .ok_or(WasmError::CircuitDomainNotEnabled)?;
+        // **記号ではなく、読める言葉で書く**。
+        //
+        // ここは以前 `V0: GND → N1 9 V` / `R: N1 – N2 1000 Ω` / `SW0: N1 – N4 (閉)`
+        // のように、回路図の略記をそのまま出していた。この文字列は Hierarchy と
+        // 回路タブに**そのまま**並ぶ画面表示で、回路を知らない人には
+        // `GND`(基準のつなぎ目)も `N1`(1番のつなぎ目)も `R`(抵抗)も読めない
+        // ——利用者役は「知らない記号しか出てこない」と言って読むのをやめた。
+        // 素子の呼び名と、つなぎ目の呼び方を日常語にする。番号は残す
+        // (同じ種類が複数あるときの区別と、`SetSwitch` などが取る index が
+        // 画面の番号と一致していることが要るため)。
+        //
+        // スイッチの「閉/開」も言い換える。電気の世界では「閉=つながる」だが、
+        // 日常の語感は逆(閉じる=止まる)で、初めての人がまず取り違える所。
         let node = |n: usize| {
             if n == sim_em::GROUND {
-                "GND".to_string()
+                format!("つなぎ目{n}(基準)")
             } else {
-                format!("N{n}")
+                format!("つなぎ目{n}")
             }
         };
         let mut i = index;
         for (k, (a, b, v)) in circuit.voltage_sources().iter().enumerate() {
             if i == 0 {
-                return Ok(format!("V{k}: {} → {} {v} V", node(*b), node(*a)));
+                return Ok(format!("電池・電源{k}: {} → {} {v} V", node(*b), node(*a)));
             }
             i -= 1;
         }
         for (a, b, r) in circuit.resistors() {
             if i == 0 {
-                return Ok(format!("R: {} – {} {r} Ω", node(*a), node(*b)));
+                return Ok(format!("抵抗: {} — {} {r} Ω", node(*a), node(*b)));
             }
             i -= 1;
         }
         for (a, b, c) in circuit.capacitors() {
             if i == 0 {
-                return Ok(format!("C: {} – {} {c} F", node(*a), node(*b)));
+                return Ok(format!("コンデンサ: {} — {} {c} F", node(*a), node(*b)));
             }
             i -= 1;
         }
         for (a, b, l) in circuit.inductors() {
             if i == 0 {
-                return Ok(format!("L: {} – {} {l} H", node(*a), node(*b)));
+                return Ok(format!("コイル: {} — {} {l} H", node(*a), node(*b)));
             }
             i -= 1;
         }
         for (a, k, _, _) in circuit.diodes() {
             if i == 0 {
-                return Ok(format!("D: {} → {}", node(*a), node(*k)));
+                return Ok(format!(
+                    "ダイオード: {} → {}(この向きにだけ流れる)",
+                    node(*a),
+                    node(*k)
+                ));
             }
             i -= 1;
         }
         for (k, (a, b, closed)) in circuit.switches().iter().enumerate() {
             if i == 0 {
-                let state = if *closed { "閉" } else { "開" };
-                return Ok(format!("SW{k}: {} – {} ({state})", node(*a), node(*b)));
+                let state = if *closed {
+                    "入・つながっている"
+                } else {
+                    "切・切れている"
+                };
+                return Ok(format!(
+                    "スイッチ{k}: {} — {} ({state})",
+                    node(*a),
+                    node(*b)
+                ));
             }
             i -= 1;
         }
@@ -2093,6 +2285,7 @@ impl WasmWorld {
             ProbeTarget::BodyPosY(id) => format!("BodyPosY({})", body_label(id)),
             ProbeTarget::BodyPosX(id) => format!("BodyPosX({})", body_label(id)),
             ProbeTarget::BodySpeed(id) => format!("BodySpeed({})", body_label(id)),
+            ProbeTarget::BodyMass(id) => format!("BodyMass({})", body_label(id)),
             ProbeTarget::NodeTemp(idx) => format!("NodeTemp[{idx}]"),
             ProbeTarget::AstroPosX(idx) => format!("AstroPosX[{idx}]"),
             ProbeTarget::AstroPosY(idx) => format!("AstroPosY[{idx}]"),
@@ -3154,6 +3347,14 @@ impl WasmWorld {
                 self.set_body_rotation_at_impl(u("index"), f("x"), f("y"), f("z"), f("w"))?;
                 Ok("{}".to_string())
             }
+            "add_body_probes" => {
+                let first = self.add_body_probes_impl(u("index"))?;
+                Ok(format!("{{\"index\":{first}}}"))
+            }
+            "set_body_mass_at" => {
+                self.set_body_mass_at_impl(u("index"), f("mass"))?;
+                Ok("{}".to_string())
+            }
             "set_body_scale_at" => {
                 self.set_body_scale_at_impl(u("index"), f("scale"))?;
                 Ok("{}".to_string())
@@ -3173,6 +3374,14 @@ impl WasmWorld {
             }
             "push_set_body_type" => {
                 self.push_set_body_type_impl(u("body_index"), s("kind"))?;
+                Ok("{}".to_string())
+            }
+            "set_body_type_at" => {
+                self.set_body_type_at_impl(u("index"), s("kind"))?;
+                Ok("{}".to_string())
+            }
+            "set_collision_filter_at" => {
+                self.set_collision_filter_at_impl(u("index"), u("group") as u32, u("mask") as u32)?;
                 Ok("{}".to_string())
             }
             "push_set_collision_filter" => {
@@ -3480,6 +3689,10 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 self.body_shape_json_at_impl(index)
             }
+            "body_size_ratio_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_size_ratio_at_impl(index)?.to_string())
+            }
             "body_material_label_at" => {
                 let index: usize = arg.parse().unwrap_or(0);
                 self.body_material_label_at_impl(index)
@@ -3511,6 +3724,7 @@ impl WasmWorld {
             "state_hash" => Ok(self.state_hash_impl()),
             "energy_residual" => Ok(self.energy_residual_impl().to_string()),
             "max_body_speed" => Ok(self.max_body_speed_impl().to_string()),
+            "max_body_point_speed" => Ok(self.max_body_point_speed_impl().to_string()),
             "active_approximations_text" => Ok(self.active_approximations_text_impl()),
             "imported_probe_count" => Ok(self.imported_probe_count_impl().to_string()),
             "imported_probe_label_at" => {
@@ -3599,13 +3813,14 @@ impl WasmWorld {
                 "body_collision_group_at", "body_collision_mask_at",
                 "body_count", "body_label_at", "body_is_static_at",
                 "body_shape_label_at", "body_shape_kind_at", "body_shape_json_at",
+                "body_size_ratio_at",
                 "body_material_label_at", "body_is_removed_at",
                 "material_properties_f64",
                 "circuit_element_count", "circuit_element_label_at",
                 "circuit_divider_voltage", "circuit_editor_motor_current",
                 "circuit_node_voltage", "heater_node_temperature",
                 "time", "step_count", "state_hash", "energy_residual",
-                "max_body_speed", "active_approximations_text",
+                "max_body_speed", "max_body_point_speed", "active_approximations_text",
                 "last_import_skipped_sections",
                 "imported_probe_count", "imported_probe_label_at",
                 "imported_probe_value_at", "probe_history_bytes_estimate",
@@ -3737,13 +3952,21 @@ impl WasmWorld {
         let chassis_id = self.try_body_id_at(chassis)?;
         let wheel_id = self.try_body_id_at(wheel)?;
         let default = sim_mechanics::WheelJoint::new(0, 0, Vec3::ZERO, rest_length);
+        // 車軸はシーン JSON と同じく車体の形から決める(`WheelJoint::axle_for_chassis`)。
+        // フォームで組んだ車とシーンの車が同じになる(縦串①の state_hash 一致)。
+        let axle_axis = sim_mechanics::WheelJoint::axle_for_chassis(
+            self.inner
+                .mechanics()
+                .bodies
+                .shape_of(chassis_id.index as usize),
+        );
         Ok(self.inner.create_joint(sim_world::JointDesc::Wheel {
             chassis: chassis_id,
             wheel: wheel_id,
             anchor_chassis: Vec3::new(acx, acy, acz),
             rest_length,
             suspension_axis: default.suspension_axis,
-            axle_axis: default.axle_axis,
+            axle_axis,
             frequency,
             damping_ratio,
             steer_angle,
@@ -4700,6 +4923,29 @@ impl WasmWorld {
         unsafe { Float32Array::view(buf) }
     }
 
+    /// **境界粒子**の位置をフラットな`[x0,y0,z0,...]`(f32)で返す。
+    ///
+    /// 水を受け止めている器は、これまで**画面のどこにも描かれていなかった**
+    /// ——「水のかたまりが落ちて、容器に溜まります」と書いてある隣で、真っ暗な
+    /// 空間に水色の塊が浮いているだけに見えた(利用者役①の観察)。器は物理側に
+    /// 境界粒子として実在するので、その位置をそのまま渡して描けるようにする。
+    /// 読み出すだけで、計算には一切触らない。
+    ///
+    /// 規約は`fluid_particle_positions_f32`と同じ(一時的なビュー)。
+    pub fn fluid_boundary_positions_f32(&mut self) -> Float32Array {
+        let buf = &mut self.view_buffers.fluid_boundary_positions;
+        buf.clear();
+        if let Some(sph) = self.inner.sph() {
+            buf.extend(
+                sph.boundary_position
+                    .iter()
+                    .flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]),
+            );
+        }
+        // SAFETY: `fluid_particle_positions_f32`と同じ。
+        unsafe { Float32Array::view(buf) }
+    }
+
     /// `index`番目のボディの位置 [x, y, z](f32)。
     /// `imported_probe_history_f64`と同じ理由で、index検証と値の取り出しは
     /// `body_position_at_impl`側(ネイティブテスト可能)。
@@ -4885,17 +5131,46 @@ impl WasmWorld {
     /// リングバッファへ記録する(モジュールdoc「スナップショットリングバッファ」
     /// 参照、既存の`World::snapshot`をそのまま使う)。
     pub fn step(&mut self) {
+        // 巻き戻した位置から**実際に進める**ときが、記録済みの未来を捨てる
+        // 瞬間である(`restored_to`のdoc参照)。ここから先は新しい時間の筋。
+        if let Some(index) = self.restored_to.take() {
+            self.snapshots.truncate(index + 1);
+        }
         self.inner.step();
         if self
             .inner
             .step_count()
             .is_multiple_of(self.snapshot_interval_steps)
         {
-            if self.snapshots.len() >= SNAPSHOT_RING_CAPACITY {
-                self.snapshots.pop_front();
-            }
-            self.snapshots.push_back(self.inner.snapshot());
+            self.record_snapshot();
         }
+    }
+
+    /// 記録を 1 面積む。面が埋まっていたら、先に 1 つおきに間引いて間隔を
+    /// 2 倍にする(`SNAPSHOT_RING_CAPACITY` のdoc)。記録は間隔の倍数の
+    /// step に積まれるので、奇数番目(0 始まり)の面——新しい間隔の倍数の
+    /// 時点——を残せば、間引いたあとも等間隔のまま続く。
+    fn record_snapshot(&mut self) {
+        if self.snapshots.len() >= SNAPSHOT_RING_CAPACITY {
+            let kept: VecDeque<World> = std::mem::take(&mut self.snapshots)
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| i % 2 == 1)
+                .map(|(_, w)| w)
+                .collect();
+            self.snapshots = kept;
+            self.snapshot_interval_steps *= 2;
+            if !self
+                .inner
+                .step_count()
+                .is_multiple_of(self.snapshot_interval_steps)
+            {
+                // 間引いた直後のこの時点は新しい間隔の倍数ではない——
+                // 次の倍数まで待つ(等間隔を崩さない)。
+                return;
+            }
+        }
+        self.snapshots.push_back(self.inner.snapshot());
     }
 
     /// Timelineスクラバが表示できるスナップショット数(モジュールdoc参照)。
@@ -4921,9 +5196,12 @@ impl WasmWorld {
     }
 
     /// Timelineスクラバ操作: `index`番目のスナップショットへ巻き戻す(既存の
-    /// `World::restore`をそのまま使う)。巻き戻した時点より後のスナップショットは
-    /// もはや実際の未来を表さないため破棄する(新しいタイムラインがそこから
-    /// 再開する、設計の「直前スナップショットへの巻き戻し」と同じ発想)。
+    /// `World::restore`をそのまま使う)。
+    ///
+    /// 巻き戻した時点より後のスナップショットは、**そこから進めた瞬間に**
+    /// 実際の未来ではなくなる——破棄するのはその瞬間であって、巻き戻した
+    /// 時点ではない(`restored_to`のdoc参照)。止めたまま前後に行き来する
+    /// 操作を壊さないための区別である。
     fn restore_snapshot_impl(&mut self, index: usize) -> Result<(), WasmError> {
         // `try_snapshot_at`は`&self`(disjointでない全体借用)を取るため、
         // その戻り値を保持したまま`&mut self.inner`は取れない。フィールドへ
@@ -4937,7 +5215,9 @@ impl WasmWorld {
                 count: self.snapshots.len(),
             })?;
         self.inner.restore(snapshot);
-        self.snapshots.truncate(index + 1);
+        // ここでは捨てない——止めたまま前後に行き来できるようにする
+        // (`restored_to`のdoc参照)。捨てるのは次に進めるとき。
+        self.restored_to = Some(index);
         Ok(())
     }
 
@@ -5018,6 +5298,7 @@ impl WasmWorld {
                 })?;
         self.inner.restore(snapshot);
         self.snapshots.clear();
+        self.snapshot_interval_steps = self.snapshot_first_interval_steps;
         Ok(())
     }
 
@@ -5148,6 +5429,53 @@ impl WasmWorld {
         Ok(())
     }
 
+    /// 指定したボディの**高さと速さを記録し始める**(観測点を2本足す)。
+    ///
+    /// **なぜ要ったか**: 観測点はシーンJSONが宣言したものしか無く、エディタで
+    /// 自分が置いた物には一本も付かなかった。そのため自分で組み立てた場面では
+    /// グラフが永久に「まだデータがありません」のままで、CSVボタンも押せない
+    /// ——用意された実験では動くだけに、壊れているとしか読めなかった
+    /// (利用者役の観察)。
+    ///
+    /// 追加した観測点は`imported_probe_handles`へ積む。シーンJSONが宣言した
+    /// ものと同じ扱いになり、既存の読み出し(`imported_probe_*`)がそのまま
+    /// 使えるためである。戻り値は最初のハンドル(高さの方)。
+    fn add_body_probes_impl(&mut self, index: usize) -> Result<usize, WasmError> {
+        let id = self.try_body_id_at(index)?;
+        let y = self.inner.add_probe(sim_world::ProbeTarget::BodyPosY(id));
+        let speed = self.inner.add_probe(sim_world::ProbeTarget::BodySpeed(id));
+        self.imported_probe_handles.push(y);
+        self.imported_probe_handles.push(speed);
+        Ok(y)
+    }
+
+    /// 質量を**その場で**変える(`set_body_position_at`等と同じ「Edit中の直接
+    /// 設定」の一員)。
+    ///
+    /// **なぜ要ったか**: 質量の変更は`Command`(`push_set_body_mass`)しか
+    /// 経路が無く、Commandは**次stepの先頭**で適用される。Editモードはstepが
+    /// 進まないので、Inspectorに質量を打ち込んでも永久に何も起きなかった
+    /// ——「10と入れたのに元の重さのまま落ちてくる」という、いちばん信用を
+    /// 失う壊れ方をしていた(利用者役の観察)。
+    ///
+    /// 適用する処理は`Command::SetBodyMass`の腕と**同一**
+    /// (`RigidBodySet::set_mass`)なので、Editで打つのとPlay中にCommandで
+    /// 送るのとで結果は変わらない。決定論とリプレイ再現性の観点でも、
+    /// 「Play中の介入はCommand」という取り決めは崩していない——これはPlayに
+    /// 入る前の初期条件づくりであり、`set_body_position_at`が既にそうである
+    /// のと同じ位置付けである。
+    fn set_body_mass_at_impl(&mut self, index: usize, mass: f64) -> Result<(), WasmError> {
+        if mass <= 0.0 || !mass.is_finite() {
+            return Err(WasmError::InvalidMass);
+        }
+        let id = self.try_body_id_at(index)?;
+        self.inner
+            .mechanics_mut()
+            .bodies
+            .set_mass(id.index as usize, mass);
+        Ok(())
+    }
+
     /// Body type を切り替える。**Dynamic へ戻すときの質量をこちら側で確保する**
     /// のが要点——`Static` 化すると `inv_mass = 0`(無限質量)になり元の質量は
     /// 復元できないため、切替前の値を読んで `Command` に載せる。
@@ -5177,6 +5505,56 @@ impl WasmWorld {
             body_type,
             mass,
         });
+        Ok(())
+    }
+
+    /// **止めている間の「動き方」は、その場で効かせる**(`set_body_mass_at_impl`
+    /// と同じ位置付け——Play に入る前の初期条件づくり)。
+    ///
+    /// `push_set_body_type` は Command なので**次の step の先頭**でしか効かない。
+    /// 止めている間に「動かない(Static)」を選ぶと、Command は積まれたまま
+    /// 世界は Dynamic のまま——そこで材質を変えると、場面を書き出して組み
+    /// 直す(`patchSceneBody`)ので、**積まれた Command ごと捨てられて**
+    /// Dynamic に戻る。画面の札は Static のまま、走らせると坂が倒れて床に
+    /// 落ちた(利用者役⑫の観察、書き出したファイルでも type 無し)。
+    ///
+    /// 適用する処理は `Command::SetBodyType` の腕と**同一**
+    /// (`RigidBodySet::set_body_type`)。質量の確保も `push_set_body_type_impl`
+    /// と同じ規則。
+    fn set_body_type_at_impl(&mut self, index: usize, kind: String) -> Result<(), WasmError> {
+        let body = self.try_body_id_at(index)?;
+        let body_type = match kind.as_str() {
+            "Dynamic" => BodyType::Dynamic,
+            "Static" => BodyType::Static,
+            "Kinematic" => BodyType::Kinematic,
+            other => return Err(WasmError::UnknownBodyType(other.to_string())),
+        };
+        let idx = body.index as usize;
+        let mut mass = self.inner.mechanics().bodies.mass(idx);
+        if mass <= 0.0 {
+            let bodies = &self.inner.mechanics().bodies;
+            let material = self.inner.materials().get(bodies.material[idx]);
+            mass = bodies.shape_of(idx).volume().unwrap_or(0.0) * material.density;
+        }
+        let bodies = &mut self.inner.mechanics_mut().bodies;
+        bodies.set_body_type(idx, body_type, mass);
+        bodies.asleep[idx] = false;
+        Ok(())
+    }
+
+    /// 衝突フィルタも、止めている間はその場で効かせる(`set_body_type_at_impl`
+    /// と同じ理由——Command のまま積むと、組み直しで捨てられる)。
+    fn set_collision_filter_at_impl(
+        &mut self,
+        index: usize,
+        group: u32,
+        mask: u32,
+    ) -> Result<(), WasmError> {
+        let body = self.try_body_id_at(index)?;
+        let idx = body.index as usize;
+        let bodies = &mut self.inner.mechanics_mut().bodies;
+        bodies.set_collision_filter(idx, group, mask);
+        bodies.asleep[idx] = false;
         Ok(())
     }
 
@@ -5540,6 +5918,27 @@ fn sketch_extrude_shape_json_impl(request_json: &str) -> Result<String, WasmErro
 /// 戻り値の中身は検証しない——ただしindex検証を担う`*_impl`
 /// (`body_position_at_impl`等)は素のRust配列を返すため、成功値もエラーも
 /// ここで検証できる。
+/// 物の中心から、いちばん遠い点までの距離(`max_body_point_speed_impl` 用)。
+/// 無限平面は回っても点が動いて見えないので 0 とする。
+fn shape_reach(shape: &Shape) -> f64 {
+    match shape {
+        Shape::Sphere { radius } => *radius,
+        Shape::Box { half_extents } => half_extents.length(),
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => radius + half_height,
+        Shape::Plane { .. } => 0.0,
+        Shape::Compound { children } => children
+            .iter()
+            .map(|(xf, child)| xf.position.length() + shape_reach(child))
+            .fold(0.0_f64, f64::max),
+        Shape::ConvexMesh { vertices } => {
+            vertices.iter().map(|v| v.length()).fold(0.0_f64, f64::max)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5579,6 +5978,108 @@ mod tests {
                 ),
             }
         };
+    }
+
+    /// 記録がまだ無いプローブは、いまの状態の値を返す(0 ではなく)。
+    #[test]
+    fn imported_probe_value_reads_the_current_state_before_any_step() {
+        let world =
+            WasmWorld::from_scene_json_impl(include_str!("../../../scenes/d1-free-fall.json"))
+                .expect("D1 must load");
+        let value = world.imported_probe_value_at_impl(0);
+        assert!(value > 1.0, "落とす前の高さは床より上のはず: {value}");
+    }
+
+    /// **巻き戻しの記録は、走り始めから今までを覆う**(`SNAPSHOT_RING_CAPACITY`
+    /// のdoc)。3 秒なら 0.25 秒刻みで全部、21 秒走らせても最初の数秒から
+    /// 今までを等間隔で持つ(以前は直近 8 秒だけで、2 秒の着地へ戻れなかった)。
+    #[test]
+    fn snapshots_cover_the_whole_run_at_an_even_spacing() {
+        let mut world =
+            WasmWorld::from_scene_json_impl(include_str!("../../../scenes/d1-free-fall.json"))
+                .expect("D1 must load");
+        let dt = world.inner.dt();
+        let times = |world: &WasmWorld| -> Vec<f64> {
+            (0..world.snapshot_count_impl())
+                .map(|i| world.snapshot_time_at_impl(i).unwrap())
+                .collect()
+        };
+        let steps_for = |seconds: f64| (seconds / dt).round() as usize;
+        for _ in 0..steps_for(3.0) {
+            world.step();
+        }
+        let early = times(&world);
+        assert!((early[0] - 0.25).abs() < 1e-6, "{early:?}");
+        assert!((early[early.len() - 1] - 3.0).abs() < 1e-6, "{early:?}");
+        for _ in steps_for(3.0)..steps_for(21.0) {
+            world.step();
+        }
+        let late = times(&world);
+        assert!(
+            late.len() >= 8 && late.len() <= SNAPSHOT_RING_CAPACITY,
+            "{late:?}"
+        );
+        assert!(
+            late[0] <= 2.0 + 1e-6,
+            "最初の記録は走り始めの近く: {late:?}"
+        );
+        assert!(late[late.len() - 1] >= 20.0 - 1e-6, "{late:?}");
+        let spacing = late[1] - late[0];
+        for pair in late.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - spacing).abs() < 1e-6,
+                "等間隔: {late:?}"
+            );
+        }
+    }
+
+    /// 融けて縮んだ氷の大きさが、画面の側から読めること
+    /// (`body_size_ratio_at_impl` のdoc参照)。
+    #[test]
+    fn body_size_ratio_reports_a_melting_ice_cube_shrinking() {
+        let mut world =
+            WasmWorld::from_scene_json_impl(include_str!("../../../scenes/d18-ice-in-drink.json"))
+                .expect("D18 must load");
+        let ratios = |world: &WasmWorld| -> Vec<f64> {
+            let count = world.body_count_impl();
+            (0..count)
+                .map(|i| {
+                    world
+                        .read_component_impl("body_size_ratio_at", &i.to_string())
+                        .unwrap()
+                        .parse::<f64>()
+                        .unwrap()
+                })
+                .collect()
+        };
+        assert!(ratios(&world).iter().all(|r| (r - 1.0).abs() < 1e-12));
+        for _ in 0..3000 {
+            world.step();
+        }
+        let smallest = ratios(&world).into_iter().fold(f64::INFINITY, f64::min);
+        assert!(smallest < 0.95, "融けた氷は小さく読めるはず: {smallest}");
+    }
+
+    /// 回っているだけの物(重心は動かない)も「動いている」と読めること
+    /// (`max_body_point_speed_impl` のdoc参照)。手回し発電機のクランクは
+    /// 半径 0.05 m の球が 10 rad/s で回るので、表面の点は 0.5 m/s で動く。
+    #[test]
+    fn max_body_point_speed_counts_a_spinning_crank_as_moving() {
+        let mut world = WasmWorld::from_scene_json_impl(include_str!(
+            "../../../scenes/d20-hand-crank-generator.json"
+        ))
+        .expect("D20 must load");
+        world.step();
+        let read = |key: &str| -> f64 {
+            world
+                .read_component_impl(key, "")
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+        };
+        assert!(read("max_body_speed") < 1e-9, "重心は動かない");
+        let point = read("max_body_point_speed");
+        assert!((point - 0.5).abs() < 1e-6, "表面の点は 0.5 m/s: {point}");
     }
 
     /// 検証パネル(**残タスク完遂の縦串④増分**)——`run_headless_scenario_json`が
@@ -5932,6 +6433,102 @@ mod tests {
                 &format!(r#"{{"index":{body},"scale":2.0}}"#),
             )
             .expect("set_body_scale_at via apply_component must succeed");
+
+        // 自分で置いた物にも観測点を足せる(`add_body_probes_impl`のdoc参照)。
+        let before: usize = world
+            .read_component_impl("imported_probe_count", "")
+            .unwrap()
+            .parse()
+            .unwrap();
+        world
+            .apply_component_impl("add_body_probes", &format!(r#"{{"index":{body}}}"#))
+            .expect("add_body_probes via apply_component must succeed");
+        let after: usize = world
+            .read_component_impl("imported_probe_count", "")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(after, before + 2, "高さと速さの2本が足される");
+        assert!(
+            world
+                .read_component_impl("imported_probe_label_at", &before.to_string())
+                .unwrap()
+                .starts_with("BodyPosY"),
+            "1本目は高さ"
+        );
+        assert!(
+            world
+                .apply_component_impl("add_body_probes", r#"{"index":9999}"#)
+                .is_err(),
+            "存在しないボディは弾く"
+        );
+
+        // 質量の直接設定は**stepを挟まずに**効く(Editモードでも打った値が
+        // 反映される、`set_body_mass_at_impl`のdoc参照)。
+        world
+            .apply_component_impl(
+                "set_body_mass_at",
+                &format!(r#"{{"index":{body},"mass":7.0}}"#),
+            )
+            .expect("set_body_mass_at via apply_component must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_mass_at", &body.to_string())
+                .unwrap(),
+            7.0_f64.to_string(),
+            "set_body_mass_at must apply immediately (no step)"
+        );
+        assert!(
+            world
+                .apply_component_impl(
+                    "set_body_mass_at",
+                    &format!(r#"{{"index":{body},"mass":0.0}}"#)
+                )
+                .is_err(),
+            "set_body_mass_at must reject a non-positive mass"
+        );
+
+        // 動き方と衝突フィルタの直接設定も**stepを挟まずに**効く
+        // (`set_body_type_at_impl`のdoc参照——Command のまま積むと、場面の
+        // 組み直しで捨てられて Dynamic に戻っていた)。
+        world
+            .apply_component_impl(
+                "set_body_type_at",
+                &format!(r#"{{"index":{body},"kind":"Static"}}"#),
+            )
+            .expect("set_body_type_at via apply_component must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_type_at", &body.to_string())
+                .unwrap(),
+            "Static",
+            "set_body_type_at must apply immediately (no step)"
+        );
+        world
+            .apply_component_impl(
+                "set_body_type_at",
+                &format!(r#"{{"index":{body},"kind":"Dynamic"}}"#),
+            )
+            .expect("set_body_type_at back to Dynamic must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_type_at", &body.to_string())
+                .unwrap(),
+            "Dynamic"
+        );
+        world
+            .apply_component_impl(
+                "set_collision_filter_at",
+                &format!(r#"{{"index":{body},"group":8,"mask":16}}"#),
+            )
+            .expect("set_collision_filter_at via apply_component must succeed");
+        assert_eq!(
+            world
+                .read_component_impl("body_collision_group_at", &body.to_string())
+                .unwrap(),
+            "8",
+            "set_collision_filter_at must apply immediately (no step)"
+        );
 
         let result = world
             .apply_component_impl(
@@ -7375,6 +7972,48 @@ mod tests {
     /// index範囲外などの別の`Err`にはなり得るが、それはkindが存在する証拠に
     /// なるので構わない)、②件数が一致すること(ディスパッチ側にだけ足された
     /// kindを検出する)、③kind名に重複が無いこと、を見る。
+    /// **止めたまま前後に行き来できる**(`restored_to`のdoc参照)。
+    ///
+    /// 以前は巻き戻したその場で後ろの記録を捨てていたため、左へ引いて離すと
+    /// つまみが右端へ戻り、利用者からは「マウスで動かせない」と見えていた。
+    /// 記録を捨てるのは**そこから進めたとき**である。
+    #[test]
+    fn restoring_a_snapshot_keeps_the_recorded_future_until_stepping_again() {
+        // dt = 0.1s なので 1s 間隔 = 10 step ごとに記録される。
+        let mut world = WasmWorld::new(-9.80665, 0.1, 50.0);
+        for _ in 0..50 {
+            world.step();
+        }
+        let recorded = world.snapshot_count_impl();
+        assert!(recorded >= 4, "記録が足りない: {recorded}");
+
+        // 巻き戻しても記録は残る——前後に行き来できる。
+        world.restore_snapshot_impl(1).expect("有効なindex");
+        assert_eq!(
+            world.snapshot_count_impl(),
+            recorded,
+            "巻き戻しただけでは記録を捨てない"
+        );
+        let back = world.read_component_impl("time", "").unwrap();
+        world
+            .restore_snapshot_impl(recorded - 1)
+            .expect("有効なindex");
+        assert_ne!(
+            world.read_component_impl("time", "").unwrap(),
+            back,
+            "先へも戻れる"
+        );
+
+        // 進めた瞬間に、そこから先の記録は実際の未来ではなくなるので捨てる。
+        world.restore_snapshot_impl(1).expect("有効なindex");
+        world.step();
+        assert_eq!(
+            world.snapshot_count_impl(),
+            2,
+            "巻き戻した位置から進めたら、そこから先は新しい時間の筋になる"
+        );
+    }
+
     #[test]
     fn component_schema_covers_every_apply_kind() {
         let schema: serde_json::Value = serde_json::from_str(&new_world().component_schema())
@@ -7412,7 +8051,7 @@ mod tests {
         // `apply_component_impl`の`match kind`のarm数。**ディスパッチへkindを
         // 足したらこの数と`component_schema`の表の両方を更新すること**——
         // ここが落ちるのは「スキーマに載せ忘れた」ことの検出である。
-        const APPLY_KIND_COUNT: usize = 76;
+        const APPLY_KIND_COUNT: usize = 80;
         assert_eq!(
             entries.len(),
             APPLY_KIND_COUNT,
@@ -8654,6 +9293,36 @@ mod tests {
         assert!(world
             .read_component_impl("imported_probe_history_len", "9")
             .is_err());
+    }
+
+    /// **読み込んだ場面のつなぎ目が、画面から消えないこと。**
+    ///
+    /// 振り子を保存して開き直すと、拘束(`World::from_scenario`が作る
+    /// DistanceJoint)は確かに効いているのに`constraint_anchor_points_at`が
+    /// 空を返し、Scene Viewの紐もHierarchyの「つなぎ目」も出なかった——
+    /// `SpawnedBodyMeta::constraint_joint_index`をスポーン経路でしか
+    /// 埋めていなかったため。読み込み経路でも埋める。
+    #[test]
+    fn a_distance_joint_read_from_a_scene_is_visible_to_the_editor() {
+        let json = r#"{
+            "name": "pendulum",
+            "world": { "gravity": 9.80665, "dt": 0.008333333 },
+            "bodies": [
+                { "name": "bob", "shape": { "sphere": { "radius": 0.2 } },
+                  "material": "鋼(炭素鋼)", "position": [1.5, 4, 0] }
+            ],
+            "joints": [
+                { "distance": { "body_a": "bob", "anchor_a": [0, 0, 0],
+                                "anchor_b": [1.5, 6, 0], "length": 2 } }
+            ]
+        }"#;
+        let world = WasmWorld::from_scene_json_impl(json).expect("scene must be valid");
+        let anchors = world
+            .constraint_anchor_points_impl(0)
+            .expect("body 0 must exist")
+            .expect("the loaded distance joint must be reachable from its body");
+        // 固定点側は書いたとおりの位置に出る(可動体側は物理が決める)。
+        assert_eq!([anchors[3], anchors[4], anchors[5]], [1.5, 6.0, 0.0]);
     }
 
     /// **エディタでシーンを保存しても合格基準が消えないこと**

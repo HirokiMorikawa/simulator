@@ -578,9 +578,10 @@ impl MechanicsSolver {
                 if let (Some(water), Shape::Box { half_extents }, Some((up, g))) =
                     (water, self.bodies.shape_of(i), up_and_g)
                 {
+                    let half_extents = *half_extents;
                     let (v_sub, _c_buoy) = sim_fluid::submerged_box_below_plane(
                         self.bodies.position[i],
-                        *half_extents,
+                        half_extents,
                         up,
                         water.water_level,
                     );
@@ -594,6 +595,16 @@ impl MechanicsSolver {
                     if v_sub > 0.0 {
                         self.bodies.force_accum[i] = self.bodies.force_accum[i]
                             + sim_fluid::buoyancy_force(v_sub, water.density, g, up);
+                        // 水の抵抗(`sim_fluid::drag_force_submerged_box`のdoc)。
+                        // 浮力だけでは浮き沈みがいつまでも減らなかった。
+                        let box_volume = 8.0 * half_extents.x * half_extents.y * half_extents.z;
+                        self.bodies.force_accum[i] = self.bodies.force_accum[i]
+                            + sim_fluid::drag_force_submerged_box(
+                                half_extents,
+                                v_sub / box_volume,
+                                water.density,
+                                self.bodies.linear_velocity[i],
+                            );
                     }
                 }
             }
@@ -818,6 +829,13 @@ impl Solver for MechanicsSolver {
             "contact resolution must not increase kinetic energy beyond numerical noise: \
              before={ke_before_contact} after={ke_after_contact}"
         );
+        // **関節を接触のあとでもう一度解く**(関節→接触→関節)。関節は step の
+        // 頭で一度解いてから接触を解くので、着地の瞬間の大きな接触力積が関節を
+        // そのまま押し縮めて残していた(利用者役⑭で傾けて落とした人形 D12: 床に
+        // 当たった step に頭と胴体の距離が 0.7 → 0.644、8% 縮んだ)。接触が
+        // 変えた速度に対して関節をもう一度満たせば、0.697(0.4%)で収まる。
+        // 接触の散逸の測定(上)には含めない——測っているのは接触だけの働き。
+        joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
         // 全体値は分解値の総和として作る(このフィールドのdocが約束する
         // 「総和は`last_contact_dissipation`と厳密に一致する」を保つため。
         // 補正を全体値へ独立に適用すると一致が崩れる)。

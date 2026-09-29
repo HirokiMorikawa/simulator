@@ -1,0 +1,16 @@
+{
+  "name": "d38-two-balls-fall",
+  "world": { "gravity": 9.80665, "dt": 0.008333333,
+    "atmosphere": { "density": 1.225, "viscosity": 1.81e-5 } },
+  "bodies": [
+    { "shape": { "sphere": { "radius": 0.1 } },
+      "material": "鋼(炭素鋼)",
+      "position": [-0.25, 160.0, 0.0],
+      "drag": true, "name": "heavy" },
+    { "shape": { "sphere": { "radius": 0.1 } },
+      "material": "木材(松)",
+      "position": [0.25, 160.0, 0.0],
+      "drag": true, "name": "light" }
+  ],
+  "probes": [ { "body_pos_y": "heavy" }, { "body_pos_y": "light" } ]
+}

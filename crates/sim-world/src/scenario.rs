@@ -827,6 +827,8 @@ pub enum ProbeJson {
     /// D11(振り子)の振れ角再構成のため追加)。
     BodyPosX(String),
     BodySpeed(String),
+    /// 物の質量(`ProbeTarget::BodyMass` のdoc参照)。
+    BodyMass(String),
     NodeTemp(usize),
     /// `astro.bodies`配列のインデックス(0起点、名前解決を経ない——`NodeTemp`と
     /// 同じ理由、D34太陽系儀の軌道半径再構成に使う)。
@@ -3125,9 +3127,15 @@ impl World {
                     if let Some(axis) = suspension_axis {
                         joint.suspension_axis = array_to_vec3(*axis);
                     }
-                    if let Some(axis) = axle_axis {
-                        joint.axle_axis = array_to_vec3(*axis);
-                    }
+                    // 車軸の向きを書いていなければ、車体の形から決める
+                    // (`WheelJoint::axle_for_chassis` のdoc。x 向きに長い車体が
+                    // 横向きに走っていた)。
+                    joint.axle_axis = match axle_axis {
+                        Some(axis) => array_to_vec3(*axis),
+                        None => sim_mechanics::WheelJoint::axle_for_chassis(
+                            world.mechanics().bodies.shape_of(chassis_id.index as usize),
+                        ),
+                    };
                     if let Some(f) = frequency {
                         joint.soft.frequency = *f;
                     }
@@ -3551,13 +3559,15 @@ impl World {
             let target = match probe {
                 ProbeJson::BodyPosY(name)
                 | ProbeJson::BodyPosX(name)
-                | ProbeJson::BodySpeed(name) => {
+                | ProbeJson::BodySpeed(name)
+                | ProbeJson::BodyMass(name) => {
                     let id = body_ids_by_name
                         .get(name)
                         .ok_or_else(|| SceneError::UnknownBodyName(name.to_string()))?;
                     match probe {
                         ProbeJson::BodyPosY(_) => ProbeTarget::BodyPosY(*id),
                         ProbeJson::BodyPosX(_) => ProbeTarget::BodyPosX(*id),
+                        ProbeJson::BodyMass(_) => ProbeTarget::BodyMass(*id),
                         _ => ProbeTarget::BodySpeed(*id),
                     }
                 }
@@ -3835,9 +3845,9 @@ mod tests {
         {
           "name": "d6-floating-box-f4",
           "world": { "gravity": 9.80665, "dt": 0.008333333 },
-          "materials": [ { "extends": "木材(松)", "name": "d6-density", "density": 598.92 } ],
+          "materials": [ { "extends": "木材(松)", "name": "木(密度 599)", "density": 598.92 } ],
           "bodies": [
-            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "d6-density",
+            { "shape": { "box": { "half": [0.5, 0.5, 0.5] } }, "material": "木(密度 599)",
               "position": [0, -0.1, 0], "name": "box" }
           ]
         }
@@ -3855,7 +3865,7 @@ mod tests {
             .clone();
         let m = world
             .materials()
-            .get(world.materials().find_by_name("d6-density").unwrap());
+            .get(world.materials().find_by_name("木(密度 599)").unwrap());
         // 密度だけが差し替わり、他は基底(松)のまま = 増分C9以前と同じ挙動。
         assert_eq!(m.density, 598.92);
         assert_eq!(m.friction, pine.friction);
@@ -4298,8 +4308,12 @@ mod tests {
         // 繋がるので、両重心の3D距離は拘束により常に 0.7 に保たれる。
         // プローブは x と y しか取れない(`ProbeTarget` に Z が無い)が、
         // **3D距離の xy 平面への射影は元の距離を超えられない**ので、
-        // 「射影距離が 0.7 を超えない」は拘束が破れていないことの厳密な必要条件になる。
-        // 実測の最大値は 0.7000000000000004(浮動小数の丸め以内で上限に張り付く)。
+        // 「射影距離が 0.7 を超えない」は拘束が破れていないことの必要条件になる。
+        // 許容は下の 3D 距離と同じ 0.02——関節はステップの頭で一度解き、そのあとの
+        // 接触解決が着地の瞬間の大きな力積で少しだけ引き伸ばす(実測: 床に当たった
+        // step で最大 0.7004)。人形を少し傾けて落とすようにした(利用者役⑭、
+        // `scenes/d12-ragdoll.json`)ので、着地は左右対称ではなくなり、以前の
+        // 「0.7 ちょうどに張り付く」(実測 0.7000000000000004)は成り立たない。
         //
         // 逆向き(拘束が消えていないこと)は射影では見られない——胴体が倒れると
         // 頭は z 方向へ回るため、射影距離は最終的に 0.084 まで縮む。そこで
@@ -4312,7 +4326,7 @@ mod tests {
         {
             let projected = ((hx - tx).powi(2) + (hy - ty).powi(2)).sqrt();
             assert!(
-                projected < 0.7 + 1e-9,
+                projected < 0.7 + 0.02,
                 "BallJointの拘束距離0.7を射影距離が超えた(拘束が破れている): step={i} projected={projected}"
             );
         }
@@ -4682,14 +4696,22 @@ mod tests {
     /// リテラルなので焼き込みに計算は不要——このRust側の`ambient`/`c`/`h`/`area`/
     /// `t0`/`dt`はJSONに焼き込んだ値と同じものを、解析解(ニュートン冷却の
     /// 指数減衰)の計算に使う。
+    ///
+    /// **本物のコーヒー 1 杯の値にした**(利用者役⑮: 75 ℃ のコーヒーが 15 秒で
+    /// 32 ℃ まで冷め、日常の感覚と合わなかった)。もとは熱容量 100 J/K・
+    /// 放熱 10 W/K で $\tau = 10$ 秒——お湯なら 24 g を 1 m² の板に広げたのと
+    /// 同じだった。コーヒー 250 g(4186 J/(kg·K) × 0.25 kg = 1046.5 J/K)、
+    /// カップの表面 0.035 m²・自然対流 10 W/(m²·K) にすると
+    /// $\tau \approx 3000$ 秒(約 50 分)。刻みは 1 秒(熱だけの場面で、
+    /// $\Delta t/\tau = 3\times10^{-4}$ なので陽解法でも十分に正確)。
     #[test]
     fn run_headless_scenario_cooling_coffee_matches_newton_cooling_exponential_decay() {
         let ambient: f64 = 293.15;
-        let c: f64 = 100.0;
+        let c: f64 = 1046.5;
         let h: f64 = 10.0;
-        let area: f64 = 1.0;
+        let area: f64 = 0.035;
         let t0: f64 = 350.0; // 約77°C(熱いコーヒー相当)
-        let dt: f64 = 0.008333333;
+        let dt: f64 = 1.0;
         let tau = c / (h * area);
         let steps = (2.0 * tau / dt) as u32;
 
@@ -4802,6 +4824,23 @@ mod tests {
                 "D26 pass criterion (image charge qualitative): charged balloon should be \
                  pulled to the wall by the image charge force and *stay* against it \
                  (0 <= x <= 0.03, sphere radius 0.02): final_x={final_x}"
+            );
+
+            // **貼りついたら、そのまま静かに止まっている**。眠った風船にも鏡像力を
+            // 積み続けていたため、0.6 秒ごとに壁へ 5 mm めり込んで 0.5 m/s で
+            // 跳ね返っていた(`sim_coupling::ImageChargeForce::apply_pre`のdoc参照)。
+            // 最終位置だけを見ていた上の判定では、この揺れは見えなかった。
+            let with_speed = json.replace(
+                r#"[ { "body_pos_x": "balloon" } ]"#,
+                r#"[ { "body_pos_x": "balloon" }, { "body_speed": "balloon" } ]"#,
+            );
+            let result = run_headless_scenario(&with_speed, 6000).expect("valid scenario JSON");
+            let speeds = &result.probe_histories[1];
+            // 0.2 m から約 0.7 秒(84 step)で壁に着く。着いて 1 秒後から先を見る。
+            let late_max = speeds[200..].iter().cloned().fold(0.0_f64, f64::max);
+            assert!(
+                late_max < 0.01,
+                "貼りついた風船は止まったままのはず: 200 step 以降の最大の速さ={late_max}"
             );
         }
 
@@ -4946,12 +4985,17 @@ mod tests {
     /// `Scenario::circuit`+`CouplingJson::InductionCoupling`スキーマ拡張)を
     /// シーンJSON経由で再現し、終端速度が解析解$v_{term}=mgR/(B\ell)^2$と
     /// rel<0.02一致することを確認する。
+    ///
+    /// 抵抗は銅らしく小さく `R = 0.0064 Ω` にしてある。以前は `1 Ω` で、終端速度が
+    /// 39 m/s・そこへ近づく時定数が 4 秒——「ゆっくり落ちる」はずの磁石が、画面では
+    /// 自由落下と見分けがつかない速さで落ち続けていた(利用者役⑬の観察。実物の
+    /// 銅管では磁石は毎秒数十 cm で落ちる)。いまは終端速度 0.25 m/s、時定数 0.026 秒。
     #[test]
     fn run_headless_scenario_copper_tube_drop_reaches_analytic_terminal_velocity() {
         let mass: f64 = 0.01;
         let length: f64 = 0.1;
         let b: f64 = 0.5;
-        let r: f64 = 1.0;
+        let r: f64 = 0.0064;
         let gravity: f64 = 9.80665;
         let dt: f64 = 0.001;
         let tau = mass * r / (b * length).powi(2);
@@ -5722,8 +5766,23 @@ mod tests {
         );
 
         // 台帳(効率): 発電電力がそのままジュール熱として熱ノードへ入る。
+        //
+        // 熱容量は**シーンから読む**。ここに数値を直接書いていたときは、
+        // シーンの熱ノードを現実的な値へ調整した(1000 J/K = 水 1 kg 相当では
+        // 温度上昇が毎秒 0.000025 ℃ で、画面上「上がる」と書いてあるのに
+        // 確かめようがなかった)だけでこのテストが落ちた。確かめたいのは
+        // 「発電した電力がそのまま熱になる」ことであって、熱容量の値そのもの
+        // ではない。
+        let scenario: Scenario = serde_json::from_str(json).expect("valid scenario JSON");
+        let heat_capacity = scenario
+            .thermal
+            .as_ref()
+            .and_then(|t| t.nodes.first())
+            .map(|n| n.heat_capacity)
+            .expect("d20 は熱ノードを1つ持つ");
         let dt = 0.008333333;
-        let expected_delta_t = expected_emf * expected_current * (steps as f64 * dt) / 1000.0;
+        let expected_delta_t =
+            expected_emf * expected_current * (steps as f64 * dt) / heat_capacity;
         let delta_t = last(2) - 293.15;
         assert!(
             (delta_t - expected_delta_t).abs() / expected_delta_t < 0.02,
@@ -5774,6 +5833,75 @@ mod tests {
         );
     }
 
+    /// **気体ばねは、何度弾んでも振れ幅が育たない**(利用者役⑬の「空気をばねにする」を
+    /// 縦置きに作り直したときの形)。ピストンを縦に立て、自分の重さで気体を押させる。
+    /// 1 step ごとの断熱変化を1次近似で積んでいた頃は、往復のたびに少しずつ
+    /// エネルギーが増え、2 kg では 15 秒ほどで位置が −2.4e8 m まで発散した
+    /// (`sim_thermal::GasCompartment::apply_step_volume_change`のdoc参照)。
+    #[test]
+    fn a_vertical_gas_spring_keeps_bouncing_with_the_same_amplitude() {
+        for mass in ["1.0", "2.0"] {
+            let json = include_str!("../../../scenes/d17-piston.json")
+                .replace(r#""gravity": 0.0"#, r#""gravity": 9.80665"#)
+                .replace(r#""n_moles": 1.0e-4"#, r#""n_moles": 3.0e-4"#)
+                .replace(r#""axis": [1, 0, 0]"#, r#""axis": [0, 1, 0]"#)
+                .replace(
+                    r#""linear_velocity": [-0.5, 0, 0]"#,
+                    r#""linear_velocity": [0, 0, 0]"#,
+                )
+                .replace(
+                    r#""mass_override": 1.0"#,
+                    &format!(r#""mass_override": {mass}"#),
+                )
+                .replace(
+                    r#"{ "body_pos_x": "piston" }"#,
+                    r#"{ "body_pos_y": "piston" }"#,
+                );
+            // 20 秒。はじめの 5 秒と、おわりの 5 秒で振れ幅を比べる。
+            let result = run_headless_scenario(&json, 2400).expect("valid scenario JSON");
+            let y = &result.probe_histories[0];
+            let span = |r: std::ops::Range<usize>| {
+                let lo = y[r.clone()].iter().cloned().fold(f64::MAX, f64::min);
+                let hi = y[r].iter().cloned().fold(f64::MIN, f64::max);
+                (lo, hi)
+            };
+            let (lo0, hi0) = span(0..600);
+            let (lo1, hi1) = span(1800..2400);
+            assert!(
+                hi0 - lo0 > 0.02,
+                "m={mass}: 実際に弾んでいるべき: {lo0}..{hi0}"
+            );
+            assert!(
+                (lo1 - lo0).abs() < 1.0e-3 && (hi1 - hi0).abs() < 1.0e-3,
+                "m={mass}: 振れ幅は育ちも縮みもしないはず: 最初 {lo0}..{hi0} 最後 {lo1}..{hi1}"
+            );
+        }
+    }
+
+    /// **水に落とした箱は、浮き沈みしながら釣り合いの深さへ落ち着く**
+    /// (`sim_fluid::drag_force_submerged_box`のdoc参照)。浮力だけだった頃は、
+    /// 水面から落とすと ±0.6 m の上下を 20 秒たっても同じ幅で続けていた。
+    #[test]
+    fn a_box_dropped_onto_water_bobs_and_settles_toward_the_floating_depth() {
+        let json = include_str!("../../../scenes/d6-floating-box-f4.json")
+            .replace("-0.09999999999999998", "0.5");
+        let result = run_headless_scenario(&json, 2400).expect("valid scenario JSON");
+        let y = &result.probe_histories[0];
+        // 釣り合いは中心が水面の 0.1 m 下(密度 599 / 998.2 ≒ 6 割沈む)。
+        let equilibrium = 0.5 - 598.92 / 998.2;
+        let swing = |r: std::ops::Range<usize>| {
+            y[r].iter()
+                .map(|v| (v - equilibrium).abs())
+                .fold(0.0_f64, f64::max)
+        };
+        let (first, last) = (swing(0..600), swing(1800..2400));
+        assert!(first > 0.4, "はじめは大きく浮き沈みする: {first}");
+        assert!(
+            last < 0.5 * first,
+            "水の抵抗で落ち着いていくはず: 最初の振れ {first} 最後の振れ {last}"
+        );
+    }
+
     /// **群9** D18b(氷が水になる): `phase_change_morph.melt_spawn` によって、
     /// 融けた質量ぶんが**実際にSPH粒子として生成される**ことをシーンJSON経由で確認する。
     ///
@@ -5818,25 +5946,52 @@ mod tests {
     }
 
     /// **増分H3** D18(氷と飲み物): 浮いた氷が`couplings[].phase_change_morph`で
-    /// 融解して質量を失い、**喫水が浅くなって浮き上がる**(アルキメデスとの統合)。
+    /// 融解して質量を失い、**相似に小さくなりながら浮き続ける**(アルキメデスとの統合)。
     ///
-    /// 実測(6000step = 50秒): 質量 0.900 → 0.3545 kg(61%融解)、
-    /// 重心 y = -0.0402 → +0.0098(浮き上がり)、飲み物 350.0 → 349.04 K。
-    /// 「水位不変」は自由表面を追跡しない本実装の対象外(既存の記載どおり)。
+    /// **形も縮むようにした**(利用者役⑭)。もとは質量だけが減って形が据え置き
+    /// だったので、密度が下がり続けた氷が浮き上がり、重心が水面の 4 cm 下から
+    /// 4 cm 上へ——体の 8 割以上が水の上に出ていた。本物の氷は融けても
+    /// 密度(0.9 g/cm³)は変わらないので、**沈んでいる割合(9 割)は最後まで同じ**
+    /// で、ただ小さくなる。ここではその 2 つ——辺が質量の立方根に比例して縮むこと、
+    /// 沈んでいる割合が保たれること——を確かめる。
+    ///
+    /// **飲み物の熱容量と熱伝導を、飲み物らしい大きさに直した**
+    /// (`scenes/d18-ice-in-drink.json`、進行管理役の実測)。もとは
+    /// 熱容量 200000 J/K ——水にすると **48 kg**、つまり 0.9 kg の氷を
+    /// 一杯のドリンクではなく風呂に浮かべているのと同じで、融かしても
+    /// 温度が 1 K も動かなかった。15000 J/K(= 水 3.6 kg、10cm の氷塊に
+    /// 見合う大きさ)と 65 W/K に直してある。
     #[test]
-    fn run_headless_scenario_melting_ice_rises_as_it_loses_mass() {
+    fn run_headless_scenario_melting_ice_shrinks_and_keeps_floating_at_the_same_depth_ratio() {
         let json = include_str!("../../../scenes/d18-ice-in-drink.json");
         let scenario = Scenario::from_json(json).expect("valid scenario JSON");
         let mut world = World::from_scenario(&scenario).expect("valid world");
-        let y0 = world.mechanics().bodies.position[0].y;
-        let m0 = world.mechanics().bodies.mass(0);
+        let half_y = |world: &World| match world.mechanics().bodies.shape_of(0) {
+            sim_mechanics::Shape::Box { half_extents } => half_extents.y,
+            other => panic!("氷は箱のはず: {other:?}"),
+        };
+        // 沈んでいる割合 = (水面より下の高さ) / (全体の高さ)。水面は y = 0。
+        let submerged = |world: &World| {
+            let h = half_y(world);
+            let y = world.mechanics().bodies.position[0].y;
+            ((h - y) / (2.0 * h)).clamp(0.0, 1.0)
+        };
+        for _ in 0..600 {
+            world.step(); // 置いた直後の揺れを落とす
+        }
+        let (h0, m0, sub0) = (
+            half_y(&world),
+            world.mechanics().bodies.mass(0),
+            submerged(&world),
+        );
         let drink0 = world.thermal().expect("熱ドメイン").nodes[0].temperature;
-        for _ in 0..6000 {
+        for _ in 0..5400 {
             world.step();
         }
-        let (y1, m1) = (
-            world.mechanics().bodies.position[0].y,
+        let (h1, m1, sub1) = (
+            half_y(&world),
             world.mechanics().bodies.mass(0),
+            submerged(&world),
         );
         let drink1 = world.thermal().expect("熱ドメイン").nodes[0].temperature;
 
@@ -5844,9 +5999,18 @@ mod tests {
             m1 < 0.5 * m0 && m1 > 0.0,
             "融解して質量が部分的に減るべき(T7の融解プラトー): {m0} -> {m1}"
         );
+        let expected_h = h0 * (m1 / m0).cbrt();
         assert!(
-            y1 > y0 + 0.03,
-            "質量が減ったぶん喫水が浅くなって浮き上がるべき: {y0} -> {y1}"
+            (h1 - expected_h).abs() < 0.01 * h0,
+            "辺は質量の立方根に比例して縮むべき: {h0} -> {h1}(期待 {expected_h})"
+        );
+        assert!(
+            (sub0 - 0.9).abs() < 0.03,
+            "はじめは 9 割が沈んでいるべき(0.9 g/cm³ の氷): {sub0}"
+        );
+        assert!(
+            (sub1 - sub0).abs() < 0.03,
+            "小さくなっても沈んでいる割合は変わらないべき: {sub0} -> {sub1}"
         );
         assert!(
             drink1 < drink0,
@@ -6079,60 +6243,81 @@ mod tests {
     /// **増分G1** D36(スイングバイ): 双曲線フライバイを`scenes/d36-swingby.json`
     /// 経由で解析解と突き合わせる。
     ///
-    /// シーンは**近点から**始める配置にしてある——探査機の位置は惑星から+x方向に
-    /// `r_p = 5e6 m`、相対速度は+y方向(位置ベクトルと直交)なので、この点が
-    /// 定義上そのまま近点になる。相対速度の大きさ `v_p = 7189.993045893716 m/s` は
-    /// 無限遠速度がちょうど `v_inf = 5000 m/s` になるよう逆算して焼き込んだ値
-    /// (`v_p = sqrt(v_inf^2 + 2GM/r_p)`)。ここから離心率と漸近真近点角が閉形式で出る:
+    /// シーンは**遠くから近づいてくる途中**(惑星から近点距離の約8倍)から始める。
+    /// 以前は近点から始めていたが、その配置では探査機が惑星の進む向きへ飛び出す
+    /// 後半しか映らず、画面では「スイングバイで加速する」の隣で速さが**下がって**
+    /// いった(利用者役⑬の観察)。いまは惑星の**後ろ側**を回り込み、出ていく向きが
+    /// 惑星の進む向きにそろう配置にしてある——重力アシストで速くなる典型の通り方。
     ///
-    /// - `e = r_p * v_p^2 / GM - 1 = 2.8729397662571174`
-    /// - `nu_inf = arccos(-1/e) = 110.36965034969745°`(近点方向=+x から測った角度)
+    /// 初期状態(JSON から読む)の相対位置・相対速度だけから、2体問題の閉形式で
+    /// 双曲線の形が決まる:
     ///
-    /// 近点で相対速度は+y(=+xから90°)を向いており、無限遠では漸近線に平行=
-    /// `nu_inf` を向く。つまり**近点から無限遠までの偏向は `nu_inf - 90° = 20.37°`**
-    /// (全偏向 `2*arcsin(1/e) = 40.74°` の半分)。
+    /// - エネルギー `ε = v²/2 - GM/r` → 無限遠速度 `v_inf = sqrt(2ε)`
+    /// - 離心率ベクトル `e = ((v² - GM/r) r - (r·v) v) / GM`
+    /// - 出ていく漸近線の向き = 近点方向 `ê` を運動の向きに `nu_inf = arccos(-1/|e|)` 回した向き
     ///
-    /// 実測(1e5秒 = 20,000ステップ後、r = 5.10e8 m ≒ 近点の102倍):
-    /// 速度方向 110.36749°(解析解との相対誤差 **2.0e-5**)、
-    /// 相対速さ 5026.0909 m/s に対し同じrでのvis-viva `sqrt(v_inf^2 + 2GM/r)` は
-    /// 5026.0809 m/s(相対誤差 **2.0e-6**)。
+    /// これと、十分遠くまで飛ばした後の実測とを比べる。
     #[test]
     fn run_headless_scenario_swingby_deflection_matches_hyperbolic_analytic_solution() {
         let gm = sim_astro::GRAVITATIONAL_CONSTANT * 1.0e24; // JSON側の惑星質量。
-        let r_p: f64 = 5.0e6; // JSON側の初期相対距離(=近点距離)。
-        let v_inf: f64 = 5000.0; // JSON側の初期相対速度はこれを与えるよう逆算済み。
-        let v_p = (v_inf * v_inf + 2.0 * gm / r_p).sqrt();
-        let eccentricity = r_p * v_p * v_p / gm - 1.0;
-        let nu_inf = (-1.0 / eccentricity).acos().to_degrees();
-
         let json = include_str!("../../../scenes/d36-swingby.json");
-        let steps = 20_000u32; // dt=5s → 1e5秒。近点から近点距離の約100倍まで飛ばす。
+        let scene: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+        let body = |i: usize, key: &str, axis: usize| {
+            scene["astro"]["bodies"][i][key][axis]
+                .as_f64()
+                .expect("数値")
+        };
+        let planet_speed = body(0, "velocity", 1); // 惑星は+y方向へ等速。
+        assert_eq!(body(0, "velocity", 0), 0.0);
+        let (rx0, ry0) = (
+            body(1, "position", 0) - body(0, "position", 0),
+            body(1, "position", 1) - body(0, "position", 1),
+        );
+        let (vx0, vy0) = (
+            body(1, "velocity", 0),
+            body(1, "velocity", 1) - planet_speed,
+        );
+        let r0 = rx0.hypot(ry0);
+        let v0_sq = vx0 * vx0 + vy0 * vy0;
+        let v_inf = (v0_sq - 2.0 * gm / r0).sqrt();
+        let r_dot_v = rx0 * vx0 + ry0 * vy0;
+        let ex = ((v0_sq - gm / r0) * rx0 - r_dot_v * vx0) / gm;
+        let ey = ((v0_sq - gm / r0) * ry0 - r_dot_v * vy0) / gm;
+        let eccentricity = ex.hypot(ey);
+        assert!(eccentricity > 1.0, "双曲線であるべき: e={eccentricity}");
+        let h = rx0 * vy0 - ry0 * vx0; // 正なら反時計回り。
+        let r_p = h * h / (gm * (1.0 + eccentricity));
+        let nu_inf = (-1.0 / eccentricity).acos();
+        let out_angle = ey.atan2(ex) + h.signum() * nu_inf;
+        // 始点は近づいてくる途中(r·v < 0)で、近点から十分離れている。
+        assert!(r_dot_v < 0.0 && r0 > 5.0 * r_p, "r0/r_p={}", r0 / r_p);
+
+        let steps = 40_000u32; // dt=5s → 2e5秒。近点を過ぎて、近点距離の100倍以上まで飛ばす。
         let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
         let last = |i: usize| *result.probe_histories[i].last().expect("履歴が空でない");
-        // プローブ0..3が探査機、4..7が惑星(惑星自身も+y方向へ 20 km/s で動いている
-        // ため、双曲線軌道の量は**相対**座標で見る必要がある)。
+        // プローブ0..3が探査機、4..7が惑星(惑星自身も動いているので、双曲線軌道の
+        // 量は**相対**座標で見る)。
         let (rx, ry) = (last(0) - last(4), last(1) - last(5));
         let (vx, vy) = (last(2) - last(6), last(3) - last(7));
         let r = rx.hypot(ry);
         let v = vx.hypot(vy);
-
         assert!(
-            r > 50.0 * r_p,
-            "漸近的な向きを見るには十分遠方まで飛ばす必要がある: r/r_p={}",
+            r > 100.0 * r_p && rx * vx + ry * vy > 0.0,
+            "近点を過ぎて十分遠方まで飛んでいるべき: r/r_p={}",
             r / r_p
         );
 
-        // ①偏向: 相対速度の向きが漸近真近点角と一致する。
-        let angle = vy.atan2(vx).to_degrees();
-        let angle_rel_err = (angle - nu_inf).abs() / nu_inf;
+        // ①偏向: 相対速度の向きが、出ていく漸近線の向きと一致する(実測の差 2.9e-5 rad)。
+        let angle = vy.atan2(vx);
+        let diff = (angle - out_angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
         assert!(
-            angle_rel_err < 1.0e-4,
+            diff.abs() < 2.0e-4,
             "双曲線フライバイの漸近方向が解析解と一致すべき: \
-             angle={angle} nu_inf={nu_inf} rel_err={angle_rel_err:e}"
+             angle={angle} out_angle={out_angle} diff={diff:e} rad"
         );
 
-        // ②エネルギー保存: 到達した距離でのvis-viva速度と一致する
-        // (無限遠ではないので `v_inf` そのものではなく `sqrt(v_inf^2 + 2GM/r)` と比べる)。
+        // ②エネルギー保存: 到達した距離でのvis-viva速度と一致する。
         let vis_viva = (v_inf * v_inf + 2.0 * gm / r).sqrt();
         let speed_rel_err = (v - vis_viva).abs() / vis_viva;
         assert!(
@@ -6140,26 +6325,26 @@ mod tests {
             "相対速さがvis-vivaと一致すべき: v={v} vis_viva={vis_viva} rel_err={speed_rel_err:e}"
         );
 
-        // ③スイングバイであること: 惑星に対する速さは(散逸が無いので)保存される
-        // 一方、**慣性系での速さは変化する**——これが重力アシストの定義そのもの。
-        // この配置では探査機は惑星の進行方向へ向かって近点を通るため**減速**する。
-        // 解析的な漸近値は `|v_inf*(cos nu_inf, sin nu_inf) + (0, 20000)|`。
-        let planet_speed: f64 = 20_000.0; // JSON側の惑星速度(+y)。
-        let asymptotic_inertial = (v_inf * nu_inf.to_radians().cos())
-            .hypot(v_inf * nu_inf.to_radians().sin() + planet_speed);
-        let initial_inertial = v_p + planet_speed; // 近点では両者とも+y向き。
+        // ③スイングバイであること: 惑星に対する速さは保存される一方、**慣性系での
+        // 速さは増える**——惑星の後ろを回り込んだので、出ていく向きが惑星の進む
+        // 向きにそろう(実測 7.95 → 11.87 km/s)。解析的な漸近値は
+        // `|v_inf*(cos, sin)(out_angle) + (0, V)|`(有限距離なので 0.1% ほどずれる)。
+        let asymptotic_inertial =
+            (v_inf * out_angle.cos()).hypot(v_inf * out_angle.sin() + planet_speed);
+        let initial_inertial = body(1, "velocity", 0).hypot(body(1, "velocity", 1));
         let final_inertial = last(2).hypot(last(3));
         assert!(
-            final_inertial < initial_inertial - 2_000.0,
-            "スイングバイで慣性系の速さが変化しているべき: \
+            final_inertial > initial_inertial + 3_000.0,
+            "スイングバイで慣性系の速さが増えるべき: \
              initial={initial_inertial} final={final_inertial}"
         );
-        // 有限距離(r は近点の約100倍)なので漸近値からは0.1%ほどずれる。
         assert!(
             (final_inertial - asymptotic_inertial).abs() / asymptotic_inertial < 3.0e-3,
             "慣性系の速さが解析的な漸近値に近づくべき: \
              final={final_inertial} asymptotic={asymptotic_inertial}"
         );
+        // 探査機は惑星に比べて無視できるほど軽いので、惑星の速さは変わらない。
+        assert!((last(7) - planet_speed).abs() < 1.0e-6 && last(6).abs() < 1.0e-6);
     }
 
     /// D2(弾道): 45°射出の真空放物運動を`body_pos_y`/`body_speed`の2プローブのみで検証する。
@@ -6397,6 +6582,23 @@ mod tests {
         assert!(
             speed.is_finite() && speed < 50.0,
             "速度が発散していないこと: speed={speed}"
+        );
+        // **車体の長い向き(x)へまっすぐ走る**(利用者役⑮)。車軸が車体の長い軸と
+        // 同じ向きだったころは、横(z)へ 3.6 m/s、前(x)へ 1.3 m/s で斜め横に
+        // 走り、「速さ」と「進んだ距離」の増え方が食い違っていた。横へずれず、
+        // 速さがそのまま x の増え方になっていること。
+        let z = world.mechanics().bodies.position[1].z;
+        assert!(z.abs() < 0.05, "車は横へずれないはず: z={z}");
+        let before_x = end_x;
+        for _ in 0..240 {
+            world.step();
+        }
+        let after_x = world.probe(0).unwrap().history().last().copied().unwrap();
+        let speed_now = world.probe(2).unwrap().history().last().copied().unwrap();
+        let dx_per_second = (after_x - before_x) / (240.0 * scenario.world.dt);
+        assert!(
+            (dx_per_second - speed_now).abs() < 0.05 * speed_now,
+            "速さと進んだ距離の増え方が合うはず: dx/dt={dx_per_second} speed={speed_now}"
         );
 
         // ④ **駆動を切ると加速が止まる**(モーターが実際に効いていることの対照実験)。
@@ -6888,5 +7090,93 @@ mod tests {
         "#;
         let scenario = Scenario::from_json(json).unwrap();
         assert!(scenario.pass_criteria.is_empty());
+    }
+
+    /// D38「重い球と軽い球を並べて落とす」(かんたんモードの新規実験)。
+    ///
+    /// 「重い物のほうが速く落ちる」という誤解の正体を見せる実験で、理論は
+    /// 2つに分かれる:
+    /// - **空気が無ければ**、重力加速度は質量によらないので、密度比15.7倍
+    ///   (鋼7850 kg/m³ / 木材(松)500 kg/m³)の2球でも**同時に**着地する。
+    /// - **空気があれば**、抗力(`sim_fluid::drag_force_sphere`、
+    ///   0.5ρCdA|v|v)は質量に依存しないぶん、軽い球ほど加速度への影響が
+    ///   相対的に大きく、**軽いほうが遅れて**着地する。
+    ///
+    /// 着地時刻は`body_pos_y`プローブの履歴で「y が球の半径以下になった
+    /// 最初のstep」を探して求める(半径は`scenes/d38-two-balls-fall.json`と
+    /// 同じ 0.1 m)。この場面は出荷アセット(`scenes/d38-two-balls-fall.json`、
+    /// かんたんモードのカタログ`d38-two-balls`が読み込む実物)をそのまま使う
+    /// ——アセットが壊れれば直ちにこのテストがRedになる。
+    fn d38_landing_step(history: &[f64], radius: f64) -> Option<usize> {
+        history.iter().position(|&y| y <= radius)
+    }
+
+    /// 空気ありの場合(シーンJSONの既定`atmosphere.density = 1.225`、
+    /// かんたんモードの「空気あり」つまみと同じ)。実測(dt=1/120、半径0.1m、
+    /// 高さ160m): 鋼球は約5.74秒、木球は約6.37秒で着地し、その差は約0.63秒
+    /// ——数値誤差(1step=1/120秒)よりずっと大きく、画面でもはっきり見える
+    /// 差になるよう高さ・半径を実測で選んである(進行管理役の見込みだった
+    /// 高さ20mでは、終端速度に対して落下速度が低く差がほぼ出なかったため、
+    /// 高さ160m・半径0.1mへ実測で調整した)。
+    #[test]
+    fn run_headless_scenario_d38_two_balls_fall_light_ball_lags_behind_in_air() {
+        let json = include_str!("../../../scenes/d38-two-balls-fall.json");
+        let radius = 0.1;
+        let dt = 0.008333333;
+        let steps = 900; // 7.5秒分、両方の着地に十分な余裕
+
+        let result = run_headless_scenario(json, steps).expect("valid scenario JSON");
+        assert_eq!(result.probe_histories.len(), 2);
+
+        let heavy_step =
+            d38_landing_step(&result.probe_histories[0], radius).expect("鋼球は着地するはず");
+        let light_step =
+            d38_landing_step(&result.probe_histories[1], radius).expect("木球は着地するはず");
+
+        let heavy_time = heavy_step as f64 * dt;
+        let light_time = light_step as f64 * dt;
+        assert!(
+            light_time - heavy_time > 0.3,
+            "空気があるとき、軽い木球は鋼球より有意に遅れて着地すべき: \
+             heavy={heavy_time:.3}s light={light_time:.3}s"
+        );
+        // 実測値(0.633秒)を大きく外れていないことも確認する。
+        assert!(
+            (0.4..0.9).contains(&(light_time - heavy_time)),
+            "着地時刻の差が実測(約0.63秒)から大きくずれている: {}",
+            light_time - heavy_time
+        );
+    }
+
+    /// 空気なしの場合(かんたんモードの「空気なし(真空)」つまみがシーンの
+    /// `atmosphere.density`を書き換えるのと同じ操作を、テスト側で再現する)。
+    /// 質量に依存しない一様重力の下では、密度が15.7倍違っても2球は
+    /// **ぴったり同時に**着地するはずで、実測でも差は文字通りゼロ
+    /// (両者とも同一の離散化された軌道をたどるため)。
+    #[test]
+    fn run_headless_scenario_d38_two_balls_fall_land_together_in_vacuum() {
+        let json = include_str!("../../../scenes/d38-two-balls-fall.json");
+        let mut scene: serde_json::Value =
+            serde_json::from_str(json).expect("d38 シーンは valid JSON");
+        // かんたんモードの「空気なし(真空)」つまみと同じ書き換え
+        // (`demo/src/catalog.ts`の`d38-two-balls`実験、`air`つまみの`apply`)。
+        scene["world"]["atmosphere"]["density"] = serde_json::json!(0.0);
+        let vacuum_json = serde_json::to_string(&scene).expect("再シリアライズできる");
+
+        let radius = 0.1;
+        let steps = 900;
+
+        let result = run_headless_scenario(&vacuum_json, steps).expect("valid scenario JSON");
+        assert_eq!(result.probe_histories.len(), 2);
+
+        let heavy_step =
+            d38_landing_step(&result.probe_histories[0], radius).expect("鋼球は着地するはず");
+        let light_step =
+            d38_landing_step(&result.probe_histories[1], radius).expect("木球は着地するはず");
+
+        assert_eq!(
+            heavy_step, light_step,
+            "真空中では、重さが違っても同時に着地すべき(理論上は厳密に同時)"
+        );
     }
 }

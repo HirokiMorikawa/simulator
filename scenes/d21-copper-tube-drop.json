@@ -7,7 +7,7 @@
   ],
   "circuit": {
     "num_nodes": 2,
-    "resistors": [ { "a": 1, "b": 0, "resistance": 1.0 } ],
+    "resistors": [ { "a": 1, "b": 0, "resistance": 0.0064 } ],
     "voltage_sources": [ { "a": 1, "b": 0, "voltage": 0.0 } ]
   },
   "couplings": [

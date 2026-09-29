@@ -56,6 +56,17 @@ impl Coupling for ImageChargeForce {
         if mass <= 0.0 {
             return; // 静的/キネマティック剛体には適用しない。
         }
+        // **眠っている剛体には積まない**(重力と同じ扱い、`sim_mechanics::sleep`の
+        // モジュールdoc「停止するのは力適用・速度積分・位置積分」)。眠っている間は
+        // 接触も解かれないので、ここで速度を積み続けると、壁に貼りついて眠った風船が
+        // 1 step に 0.47 m/s ずつ速度を溜め、起きた瞬間に壁へ 5 mm めり込んで
+        // 0.5 m/s で跳ね返る——0.6 秒周期でそれを繰り返していた(利用者役⑬が見た
+        // 「ほぼ止まった時刻」のぶれの原因)。鏡像力は常に壁向きの引力で、眠るのは
+        // 壁に押し付けられて静止したときだけなので、重力で床に眠る物と同じく、
+        // 接触がこの力を受け止めている状態のまま止めておけばよい。
+        if world.mechanics.bodies.asleep[self.body_index] {
+            return;
+        }
         let pos = world.mechanics.bodies.position[self.body_index];
         let distance = pos.dot(self.plane_normal) - self.plane_d;
         if distance <= 0.0 {

@@ -4,8 +4,8 @@
   "astro": {
     "softening": 0.0,
     "bodies": [
-      { "position": [0, 0, 0], "velocity": [0, 20000.0, 0], "mass": 1.0e24 },
-      { "position": [5000000.0, 0, 0], "velocity": [0, 27189.993045893716, 0], "mass": 1.0 }
+      { "position": [0, 0, 0], "velocity": [0, 10000.0, 0], "mass": 1.0e24 },
+      { "position": [-34692568.0, 19910443.0, 0], "velocity": [3351.943, 7211.545, 0], "mass": 1.0 }
     ]
   },
   "probes": [

@@ -53,6 +53,19 @@ pub fn drag_coefficient_sphere(re: f64) -> f64 {
 /// 球への抗力。設計 §2.1: F_d = -0.5 ρ Cd A |v_rel| v_rel、v_rel = v - wind。
 /// 相対速度がゼロなら 0 を返す(Re=0 での Cd 特異点を回避)。
 pub fn drag_force_sphere(radius: f64, atm: &Atmosphere, velocity: Vec3) -> Vec3 {
+    // **媒質が無ければ抗力は生じない**。密度 0(真空)では Re=0 となり
+    // `Cd = 24/Re` が無限大、`0.5 ρ Cd` が `0 × ∞ = NaN` になって速度へ
+    // 流れ込んでいた——「空気の濃さ」を真空にすると落ちる速さが数値として
+    // 出てこなくなっていた(利用者役③の観察)。物理としても真空中の抗力は
+    // ゼロなので、ここで打ち切るのが正しい(粘性 0 でも Re が無限大になる
+    // ので同じ扱いにする)。
+    if atm.density <= 0.0
+        || atm.viscosity <= 0.0
+        || !atm.density.is_finite()
+        || !atm.viscosity.is_finite()
+    {
+        return Vec3::ZERO;
+    }
     let v_rel = velocity - atm.wind;
     let speed = v_rel.length();
     if speed < 1e-12 {
@@ -224,6 +237,24 @@ mod tests {
         atm.wind = Vec3::new(3.0, 0.0, 0.0);
         let f = drag_force_sphere(0.01, &atm, Vec3::new(3.0, 0.0, 0.0));
         assert_eq!(f, Vec3::ZERO);
+    }
+
+    /// 真空(密度 0)では抗力はゼロで、NaN を作らない。
+    ///
+    /// 以前は `Cd = 24/Re` が Re=0 で無限大になり、`0.5 ρ Cd` が `0 × ∞ = NaN`
+    /// になっていた。落ちる速さが数値として出てこなくなり、画面には「—」しか
+    /// 残らなかった(利用者役③の観察)。
+    #[test]
+    fn drag_in_a_vacuum_is_zero_and_finite() {
+        let vacuum = Atmosphere::still(0.0, 1.81e-5);
+        let f = drag_force_sphere(0.05, &vacuum, Vec3::new(0.0, -30.0, 0.0));
+        assert_eq!(f, Vec3::ZERO, "真空では抗力は生じない: f={f:?}");
+        assert!(f.x.is_finite() && f.y.is_finite() && f.z.is_finite());
+
+        // 粘性 0 でも同じ(Re が無限大になる)。
+        let inviscid = Atmosphere::still(1.225, 0.0);
+        let g = drag_force_sphere(0.05, &inviscid, Vec3::new(0.0, -30.0, 0.0));
+        assert!(g.x.is_finite() && g.y.is_finite() && g.z.is_finite());
     }
 
     #[test]

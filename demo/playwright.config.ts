@@ -21,6 +21,20 @@ export default defineConfig({
   use: {
     baseURL: "http://127.0.0.1:4173",
     trace: "on-first-retry",
+    // **既定は「つくる」の粒度で開く**。画面はひとつだが、見る深さ
+    // (`--detail`)が浅いとエディタの道具は畳まれている——それらを操作する
+    // 既存のテストは、深さを明示しておく必要がある(実ユーザーもダイヤルを
+    // 右端へ回せば同じ状態になる)。浅い粒度そのものの検証は
+    // `workspace.spec.ts` が `test.use` で深さを指定して行う。
+    storageState: {
+      cookies: [],
+      origins: [
+        {
+          origin: "http://127.0.0.1:4173",
+          localStorage: [{ name: "simulator.ui.detail", value: "3" }],
+        },
+      ],
+    },
   },
   projects: [
     {
