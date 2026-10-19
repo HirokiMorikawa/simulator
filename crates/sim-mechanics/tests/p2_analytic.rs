@@ -266,3 +266,69 @@ fn sleeping_box_wakes_on_new_contact_from_falling_body() {
         "resting box should wake once the falling box lands on it"
     );
 }
+
+/// 16 段の鋼の箱を、ちょうど接した状態から 10 秒置いておく。誰も触らなければ
+/// 塔は立ったまま——横にずれず、運動エネルギーも増えない(利用者役⑭「積み木を
+/// 積む」: 当てていないのに塔が勝手に崩れた)。
+///
+/// 崩れた原因は摩擦の warm start。接線の基底(`Vec3::orthonormal_basis`)は
+/// 法線がわずかに傾くだけで補助軸が x ⇄ z に切り替わり 90° 回るので、前の step の
+/// 摩擦インパルスを**基底の成分のまま**引き継ぐと、横向きに間違った力が入っていた。
+#[test]
+fn a_sixteen_box_steel_tower_stands_still_when_nobody_touches_it() {
+    let materials = MaterialDb::standard();
+    let steel = materials.find_by_name("鋼(炭素鋼)").unwrap();
+
+    let mut solver = MechanicsSolver::new(9.80665);
+    let ground = RigidBodyDesc {
+        body_type: BodyType::Static,
+        ..RigidBodyDesc::dynamic(
+            Shape::Plane {
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                d: 0.0,
+            },
+            steel,
+        )
+    };
+    solver.create_body(ground, &materials);
+
+    let half = 0.25;
+    let mut box_indices = Vec::new();
+    for level in 0..16 {
+        let mut desc = RigidBodyDesc::dynamic(
+            Shape::Box {
+                half_extents: Vec3::new(half, half, half),
+            },
+            steel,
+        );
+        desc.transform.position = Vec3::new(0.0, half + level as f64 * 2.0 * half, 0.0);
+        box_indices.push(solver.create_body(desc, &materials));
+    }
+
+    let dt = 1.0 / 120.0;
+    let mut rng = SimRng::new(1, 1);
+    let mut events = EventQueue::new();
+    let mut max_sideways: f64 = 0.0;
+    for _ in 0..1200 {
+        let mut ctx = SolverContext {
+            materials: &materials,
+            rng: &mut rng,
+            events: &mut events,
+        };
+        solver.step(dt, &mut ctx);
+        let _: Vec<Event> = events.drain_sorted();
+        for &idx in &box_indices {
+            let p = solver.bodies.position[idx];
+            max_sideways = max_sideways.max(p.x.abs()).max(p.z.abs());
+        }
+    }
+    assert!(
+        max_sideways < 0.01,
+        "誰も触らない塔が横に {max_sideways} m ずれた"
+    );
+    let top = solver.bodies.position[*box_indices.last().unwrap()].y;
+    assert!(
+        (top - (half + 15.0 * 2.0 * half)).abs() < 0.05,
+        "いちばん上の箱の高さ {top}"
+    );
+}

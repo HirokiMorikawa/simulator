@@ -589,6 +589,14 @@ pub fn apply_schema() -> Vec<ComponentKindSchema> {
             "set_body_rotation_at",
             vec![u("index"), f_nd("x"), f_nd("y"), f_nd("z"), f_nd("w")],
         ),
+        // 自分で置いた物の高さと速さを記録し始める。
+        kind("add_body_probes", vec![u("index")]),
+        // 質量の直接設定(Edit中)。`push_set_body_mass`と同じ検証
+        // (正の有限値)を通るので`min`を載せる。
+        kind(
+            "set_body_mass_at",
+            vec![u("index"), f("mass", "kg").positive()],
+        ),
         // `set_body_scale_at`は`scale`を検証しない(`set_body_scale_xyz_at`
         // だけが正の有限値を要求する)ので`min`を載せない——載せると
         // 「弾かれる」という誤った期待を与える。
@@ -611,6 +619,13 @@ pub fn apply_schema() -> Vec<ComponentKindSchema> {
             vec![u("body_index"), f("mass", "kg").positive()],
         ),
         kind("push_set_body_type", vec![u("body_index"), s("kind")]),
+        // 動き方・衝突フィルタの直接設定(止めている間)。Command のまま
+        // 積むと、場面の組み直しで捨てられる(`set_body_type_at_impl`のdoc参照)。
+        kind("set_body_type_at", vec![u("index"), s("kind")]),
+        kind(
+            "set_collision_filter_at",
+            vec![u("index"), u("group"), u("mask")],
+        ),
         // `group`/`mask`は衝突フィルタのビットマスク(u32)。
         kind(
             "push_set_collision_filter",

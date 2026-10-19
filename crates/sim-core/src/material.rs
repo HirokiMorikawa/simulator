@@ -180,7 +180,30 @@ impl MaterialDb {
         if let Some(over) = self.friction_pairs.get(&pair_key(a, b)) {
             return over.restitution;
         }
-        (self.get(a).restitution * self.get(b).restitution).sqrt()
+        let (ma, mb) = (self.get(a), self.get(b));
+        // **柔らかいほうが、ぶつかったときの変形とエネルギーの損失を受け持つ**。
+        // 2 つの材質の反発係数の相乗平均をとっていたので、ゴム(0.8)の球を
+        // コンクリート(0.2)の床へ落とすと 0.4——落とした高さの 16% しか
+        // 跳ね返らなかった(利用者役⑮: 同じ「ゴム」がゴムの床では 65%、
+        // コンクリートの床では 15%)。本物のゴムまりはコンクリートでも 0.8
+        // ほどで跳ねる。硬いコンクリートはほとんど変形せず、弾性エネルギーは
+        // ほぼ全部ゴムにたまり、ゴムが自分の割合 $e^2$ で返すからである。
+        //
+        // 接触でたまる弾性エネルギーは各物体のコンプライアンス $C = 1/E$ に
+        // 比例して分かれる(ヘルツ接触)ので、失われる割合をその重みで足す:
+        // $e^2 = 1 - \frac{C_a(1-e_a^2) + C_b(1-e_b^2)}{C_a + C_b}$。
+        // 同じ材質どうしなら $e = e_a$(相乗平均と一致)。ヤング率が分からない
+        // 材質を含むときは、従来どおり相乗平均。
+        match (ma.youngs_modulus, mb.youngs_modulus) {
+            (Some(ea), Some(eb)) if ea > 0.0 && eb > 0.0 => {
+                let (ca, cb) = (1.0 / ea, 1.0 / eb);
+                let loss = (ca * (1.0 - ma.restitution * ma.restitution)
+                    + cb * (1.0 - mb.restitution * mb.restitution))
+                    / (ca + cb);
+                (1.0 - loss).max(0.0).sqrt()
+            }
+            _ => (ma.restitution * mb.restitution).sqrt(),
+        }
     }
 }
 
@@ -490,5 +513,36 @@ mod tests {
         let ice = db.find_by_name("氷(0°C)").unwrap();
         let expected = (db.get(steel).friction * db.get(ice).friction).sqrt();
         assert_eq!(db.friction_pair(steel, ice), expected);
+    }
+
+    /// 柔らかいほうが損失を受け持つ(`restitution_pair` のdoc)。ゴムまりは
+    /// コンクリートの床でも、ゴム自身の反発係数(0.8)に近い値で跳ねる。
+    #[test]
+    fn a_rubber_ball_on_concrete_bounces_with_the_rubbers_own_restitution() {
+        let db = MaterialDb::standard();
+        let rubber = db.find_by_name("ゴム(天然)").unwrap();
+        let concrete = db.find_by_name("コンクリート").unwrap();
+        let e = db.restitution_pair(rubber, concrete);
+        assert!((e - 0.8).abs() < 0.005, "e={e}");
+        assert_eq!(e, db.restitution_pair(concrete, rubber));
+    }
+
+    #[test]
+    fn restitution_pair_of_a_material_with_itself_is_its_own_restitution() {
+        let db = MaterialDb::standard();
+        for name in ["鋼(炭素鋼)", "コンクリート", "木材(松)", "ゴム(天然)"] {
+            let m = db.find_by_name(name).unwrap();
+            let e = db.restitution_pair(m, m);
+            assert!((e - db.get(m).restitution).abs() < 1e-12, "{name}: {e}");
+        }
+    }
+
+    #[test]
+    fn restitution_pair_falls_back_to_geometric_mean_without_stiffness() {
+        let db = MaterialDb::standard();
+        let steel = db.find_by_name("鋼(炭素鋼)").unwrap();
+        let body = db.find_by_name("人体(平均)").unwrap();
+        let expected = (db.get(steel).restitution * db.get(body).restitution).sqrt();
+        assert_eq!(db.restitution_pair(steel, body), expected);
     }
 }

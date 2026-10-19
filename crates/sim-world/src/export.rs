@@ -1386,6 +1386,7 @@ fn probe_target_to_json(
         ProbeTarget::BodyPosY(id) => ProbeJson::BodyPosY(names.get(id)?.clone()),
         ProbeTarget::BodyPosX(id) => ProbeJson::BodyPosX(names.get(id)?.clone()),
         ProbeTarget::BodySpeed(id) => ProbeJson::BodySpeed(names.get(id)?.clone()),
+        ProbeTarget::BodyMass(id) => ProbeJson::BodyMass(names.get(id)?.clone()),
         ProbeTarget::NodeTemp(i) => ProbeJson::NodeTemp(*i),
         ProbeTarget::AstroPosX(i) => ProbeJson::AstroPosX(*i),
         ProbeTarget::AstroPosY(i) => ProbeJson::AstroPosY(*i),

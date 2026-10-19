@@ -295,6 +295,10 @@ pub enum ProbeTarget {
     /// 振れ角(周期の判定に使う量)を再構成できないシナリオに対応するため追加。
     BodyPosX(BodyId),
     BodySpeed(BodyId),
+    /// 物の質量 [kg]。融けて軽くなる氷(`PhaseChangeMorph`)の「どれだけ残っているか」を
+    /// 読むために追加(利用者役⑭: 読めたのは氷の重心の高さだけで、融け具合が
+    /// 数字に出ていなかった)。動かない物・消えた物は 0。
+    BodyMass(BodyId),
     /// 熱ドメインの`ThermalNode`index(モジュールdoc「縮約実装の理由」参照)。
     NodeTemp(usize),
     /// 天体ドメイン(`sim_astro::NBodySystem`)の`position`配列index(D34太陽系儀
@@ -1011,6 +1015,32 @@ impl World {
         self.probe_entities.len() - 1
     }
 
+    /// `from`の物を見ているプローブ(高さ・横位置・速さ・質量)を、`to`の物を
+    /// 見るように付け替え、それまでの記録を捨てる。付け替えた本数を返す。
+    ///
+    /// 画面は最初に置いた物を自動で記録し始めるが、その物を坂やシーソーの台の
+    /// ような「動かない物」にすると、グラフにはずっと同じ値の平らな線しか
+    /// 出なかった(利用者役⑯)。動く物へ記録を移すための口。
+    pub fn retarget_body_probes(&mut self, from: BodyId, to: BodyId) -> usize {
+        let mut moved = 0;
+        for &entity in &self.probe_entities {
+            let Some(probe) = self.probes_ecs.get_mut::<Probe>(entity) else {
+                continue;
+            };
+            let next = match probe.target {
+                ProbeTarget::BodyPosY(b) if b == from => ProbeTarget::BodyPosY(to),
+                ProbeTarget::BodyPosX(b) if b == from => ProbeTarget::BodyPosX(to),
+                ProbeTarget::BodySpeed(b) if b == from => ProbeTarget::BodySpeed(to),
+                ProbeTarget::BodyMass(b) if b == from => ProbeTarget::BodyMass(to),
+                _ => continue,
+            };
+            probe.target = next;
+            probe.history.clear();
+            moved += 1;
+        }
+        moved
+    }
+
     pub fn probe(&self, handle: usize) -> Option<&Probe> {
         let entity = *self.probe_entities.get(handle)?;
         self.probes_ecs.get::<Probe>(entity)
@@ -1037,6 +1067,13 @@ impl World {
             * std::mem::size_of::<f64>()
     }
 
+    /// `handle`のプローブが指す観測量の**いまの値**(記録を待たずに読む)。
+    /// ハンドルが無効なら`None`。
+    pub fn probe_current_value(&self, handle: usize) -> Option<f64> {
+        self.probe(handle)
+            .map(|probe| self.sample_probe_target(probe.target))
+    }
+
     /// `target`が指す観測量の現在値を読む(`step()`末尾の毎stepサンプルと同じロジック)。
     /// 対象が無効(削除済み`BodyId`・未有効化ドメインのインデックス範囲外)の場合は`0.0`
     /// (パニックしない、設計の不変条件)。
@@ -1045,6 +1082,16 @@ impl World {
             ProbeTarget::BodyPosY(id) => self.body_position(id).map_or(0.0, |p| p.y),
             ProbeTarget::BodyPosX(id) => self.body_position(id).map_or(0.0, |p| p.x),
             ProbeTarget::BodySpeed(id) => self.body_velocity(id).map_or(0.0, |v| v.length()),
+            ProbeTarget::BodyMass(id) => {
+                let index = id.index as usize;
+                if self.is_valid(id)
+                    && matches!(self.mechanics.bodies.body_type[index], BodyType::Dynamic)
+                {
+                    self.mechanics.bodies.mass(index)
+                } else {
+                    0.0
+                }
+            }
             ProbeTarget::NodeTemp(idx) => self
                 .thermal
                 .as_ref()

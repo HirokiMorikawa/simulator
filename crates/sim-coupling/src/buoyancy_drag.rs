@@ -165,6 +165,18 @@ impl Coupling for BuoyancyDrag {
                     }
                 }
             }
+            // 球にも同じ浮力を出す(埋め込み経路`MechanicsSolver::fluids`と揃える)。
+            if let Shape::Sphere { radius } = *world.mechanics.bodies.shape_of(idx) {
+                let pos = world.mechanics.bodies.position[idx];
+                let up_and_g = world.mechanics.gravity_field().up_and_magnitude_at(pos);
+                if let (Some((up, g)), true) = (up_and_g, water.contains(pos)) {
+                    let v_sub =
+                        sim_fluid::submerged_sphere_below_plane(pos, radius, up, water.water_level);
+                    if v_sub > 0.0 {
+                        force = force + sim_fluid::buoyancy_force(v_sub, water.density, g, up);
+                    }
+                }
+            }
         }
         if let Some(atm) = &self.atmosphere {
             let velocity = world.mechanics.bodies.linear_velocity[idx];

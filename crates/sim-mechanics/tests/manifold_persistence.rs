@@ -74,37 +74,37 @@ fn four_box_stack_penetrations(persistence: bool) -> Vec<f64> {
     penetrations
 }
 
-/// **対照実験**: マニフォールド持続化が M12(4段スタック)の貫入量を実際に減らすことを、
-/// 移行前の挙動(`set_manifold_persistence(false)`)と並べて確認する。
+/// **対照実験**: M12(4段スタック)の貫入量を、マニフォールド持続化の有無で並べる。
 ///
-/// 移行前の実測値は既に記録されていた(docs/22-roadmap/02-feature-checklist.md の Q4:
-/// 0.00226/0.00353/0.00378/0.00468、最上段が slop=0.005 の 93.5%)。持続化オフの側が
-/// その値を再現することも同時に確認し、対照が正しく「移行前」を表していることを保証する。
+/// 移行前の実測値(docs/22-roadmap/02-feature-checklist.md の Q4:
+/// 0.00226/0.00353/0.00378/0.00468、最上段が slop=0.005 の 93.5%)は、
+/// 同じ面の接触点を 1 点ずつ順に解いていたころの値。先に解いた隅が荷重を
+/// 多く受け持って箱が回り、接触点がずれるので、ずれた点へ古いインパルスを
+/// 引き継ぐ(持続化なし)と悪化していた。
+///
+/// **いまは同じ面の接触点を同時に解く**(`contact::solve_normal` のdoc、
+/// 利用者役⑭で 16 段の塔が勝手に崩れたのを直したとき)ので、対称に積んだ
+/// 箱は回らず、接触点もずれない。持続化の判定(アンカーのずれ 2mm)が
+/// 働く場面そのものが無くなり、**両者は同じ値になり、どちらも移行前の記録を
+/// 下回る**。ここではそれを確かめる(ずれたときに引き継がないこと自体は
+/// `contact` の単体テスト `warm_start_is_inherited_only_while_the_anchors_stay_within_two_millimetres`)。
 #[test]
 fn manifold_persistence_reduces_stack_penetration_compared_to_unconditional_warm_start() {
     let without = four_box_stack_penetrations(false);
     let with = four_box_stack_penetrations(true);
 
-    // 対照側が Q4 の記録値を再現していること(= 対照が本当に「移行前」であること)。
     let recorded = [0.0022612, 0.0035274, 0.0037759, 0.0046779];
-    for (measured, expected) in without.iter().zip(recorded.iter()) {
+    for (pair, (measured, before)) in with.iter().zip(recorded.iter()).enumerate() {
         assert!(
-            (measured - expected).abs() < 1e-6,
-            "control run must reproduce the recorded pre-migration penetrations: \
-             measured={without:?} recorded={recorded:?}"
+            measured < before,
+            "pair {pair}: penetration must not be worse than the pre-migration record: \
+             with={with:?} recorded={recorded:?}"
         );
     }
-
-    let max_without = without.iter().cloned().fold(f64::MIN, f64::max);
     let max_with = with.iter().cloned().fold(f64::MIN, f64::max);
     assert!(
-        max_with < 0.5 * max_without,
-        "manifold persistence must substantially reduce the worst penetration: \
-         without={without:?} (max {max_without}) with={with:?} (max {max_with})"
-    );
-    assert!(
-        max_with < SLOP,
-        "penetration {max_with} must stay below slop {SLOP}"
+        max_with < 0.5 * SLOP,
+        "penetration {max_with} must stay well below slop {SLOP}"
     );
     // 全ペアで悪化していないこと(平均だけ改善して局所的に悪化する、を許さない)。
     for (a, b) in without.iter().zip(with.iter()) {

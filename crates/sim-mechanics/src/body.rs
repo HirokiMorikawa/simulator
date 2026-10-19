@@ -27,6 +27,13 @@ impl ShapeStore {
     pub fn get(&self, handle: ShapeHandle) -> &Shape {
         &self.shapes[handle.0 as usize]
     }
+
+    /// 置き場を増やさずに、その場で形を書き換える。ハンドルは剛体ごとに
+    /// 別々に作られる(`RigidBodySet::create_body` が毎回 `insert` する)ので、
+    /// 書き換えが他の剛体へ波及することはない。
+    fn replace(&mut self, handle: ShapeHandle, shape: Shape) {
+        self.shapes[handle.0 as usize] = shape;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -384,6 +391,19 @@ impl RigidBodySet {
     /// これは `RigidBodyDesc::mass_override` と同じ意味論であり、材質の密度は
     /// `MaterialDb` 側の値のまま残る(材質を共有する他のボディを巻き込まない)。
     pub fn set_mass(&mut self, index: usize, mass: f64) {
+        self.rebuild_inertia(index, mass);
+    }
+
+    /// 形状と質量を**同時に**差し替える(材質の密度から質量を出し直さない)。
+    /// 融けて小さく・軽くなる氷(`sim_coupling::PhaseChangeMorph`)のように、
+    /// 質量は外から決まっていて、形はそれに合わせて縮む物に使う。
+    /// 形状のローカル原点を保つ点は `set_shape` と同じ。毎 step 呼ばれうるので、
+    /// 置き場は増やさずその場で書き換える(`ShapeStore::replace`)。
+    pub fn set_shape_with_mass(&mut self, index: usize, shape: Shape, mass: f64) {
+        let origin = self.origin_position(index);
+        self.center_of_mass[index] = shape.center_of_mass();
+        self.set_origin_position(index, origin);
+        self.shapes.replace(self.shape[index], shape);
         self.rebuild_inertia(index, mass);
     }
 

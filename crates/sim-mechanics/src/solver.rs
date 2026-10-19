@@ -575,15 +575,9 @@ impl MechanicsSolver {
                 // `submerged_box_below_plane`も`buoyancy_force`も移行前と
                 // ビット単位で同一の値を返す(それぞれのdoc参照)。
                 let up_and_g = self.field.up_and_magnitude_at(self.bodies.position[i]);
-                if let (Some(water), Shape::Box { half_extents }, Some((up, g))) =
-                    (water, self.bodies.shape_of(i), up_and_g)
-                {
-                    let (v_sub, _c_buoy) = sim_fluid::submerged_box_below_plane(
-                        self.bodies.position[i],
-                        *half_extents,
-                        up,
-                        water.water_level,
-                    );
+                if let (Some(water), Some((up, g))) = (water, up_and_g) {
+                    let position = self.bodies.position[i];
+                    let velocity = self.bodies.linear_velocity[i];
                     // 浮心(`_c_buoy`)からトルクは積まない。重力が`-y`向きなら
                     // 直立対称箱の浮心は body 中心と同じ x,z を持ち、浮力も鉛直成分
                     // のみなのでトルクは厳密に0だった(r×F、r・Fが共にy軸方向で外積0)。
@@ -591,9 +585,51 @@ impl MechanicsSolver {
                     // 浮心が`up`から横へずれる)が、姿勢を扱わないモデルで復原
                     // モーメントだけ入れても整合しないため引き続き積まない
                     // (`sim_fluid::buoyancy`モジュールdocの「既知の限界」)。
+                    // 球は浮心が常に中心と`up`の線上にあるのでトルクは厳密に0。
+                    let (v_sub, drag) = match self.bodies.shape_of(i) {
+                        Shape::Box { half_extents } => {
+                            let half_extents = *half_extents;
+                            let (v_sub, _c_buoy) = sim_fluid::submerged_box_below_plane(
+                                position,
+                                half_extents,
+                                up,
+                                water.water_level,
+                            );
+                            // 水の抵抗(`sim_fluid::drag_force_submerged_box`のdoc)。
+                            // 浮力だけでは浮き沈みがいつまでも減らなかった。
+                            let box_volume = 8.0 * half_extents.x * half_extents.y * half_extents.z;
+                            let drag = sim_fluid::drag_force_submerged_box(
+                                half_extents,
+                                v_sub / box_volume,
+                                water.density,
+                                velocity,
+                            );
+                            (v_sub, drag)
+                        }
+                        // 球にも浮力が効く(利用者役⑯: 発泡スチロールの球が沈んでいた)。
+                        Shape::Sphere { radius } => {
+                            let radius = *radius;
+                            let v_sub = sim_fluid::submerged_sphere_below_plane(
+                                position,
+                                radius,
+                                up,
+                                water.water_level,
+                            );
+                            let volume = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
+                            let drag = sim_fluid::drag_force_submerged_sphere(
+                                radius,
+                                v_sub / volume,
+                                water.density,
+                                velocity,
+                            );
+                            (v_sub, drag)
+                        }
+                        _ => (0.0, Vec3::ZERO),
+                    };
                     if v_sub > 0.0 {
                         self.bodies.force_accum[i] = self.bodies.force_accum[i]
-                            + sim_fluid::buoyancy_force(v_sub, water.density, g, up);
+                            + sim_fluid::buoyancy_force(v_sub, water.density, g, up)
+                            + drag;
                     }
                 }
             }
@@ -771,7 +807,15 @@ impl Solver for MechanicsSolver {
         joint::resolve_slider(&self.slider_joints, &mut self.bodies, dt);
         joint::resolve_wheel(&self.wheel_joints, &mut self.bodies, dt);
         joint::resolve_hinge_limits(&self.hinge_motors, &mut self.bodies, dt);
-        let manifolds = collision::detect(&self.bodies, &mut self.axis_cache);
+        // 車輪と車体は車軸でつながった一つの組なので、互いの接触は作らない
+        // (`collision::detect_excluding`のdoc参照)。
+        let axle_pairs: Vec<(usize, usize)> = self
+            .wheel_joints
+            .iter()
+            .map(|w| (w.chassis.min(w.wheel), w.chassis.max(w.wheel)))
+            .collect();
+        let manifolds =
+            collision::detect_excluding(&self.bodies, &mut self.axis_cache, &axle_pairs);
         self.emit_contact_events(&manifolds, ctx);
         self.last_manifolds = manifolds.clone();
         // 両側の dynamic body が全て asleep な接触は再解決しない(収束済みで変化が無いのに
@@ -818,6 +862,13 @@ impl Solver for MechanicsSolver {
             "contact resolution must not increase kinetic energy beyond numerical noise: \
              before={ke_before_contact} after={ke_after_contact}"
         );
+        // **関節を接触のあとでもう一度解く**(関節→接触→関節)。関節は step の
+        // 頭で一度解いてから接触を解くので、着地の瞬間の大きな接触力積が関節を
+        // そのまま押し縮めて残していた(利用者役⑭で傾けて落とした人形 D12: 床に
+        // 当たった step に頭と胴体の距離が 0.7 → 0.644、8% 縮んだ)。接触が
+        // 変えた速度に対して関節をもう一度満たせば、0.697(0.4%)で収まる。
+        // 接触の散逸の測定(上)には含めない——測っているのは接触だけの働き。
+        joint::resolve_ball(&self.ball_joints, &mut self.bodies, dt);
         // 全体値は分解値の総和として作る(このフィールドのdocが約束する
         // 「総和は`last_contact_dissipation`と厳密に一致する」を保つため。
         // 補正を全体値へ独立に適用すると一致が崩れる)。
@@ -1995,6 +2046,70 @@ mod tests {
         solver.step(1.0 / 240.0, &mut ctx);
         let _: Vec<Event> = events.drain_sorted();
         solver.bodies.linear_velocity[idx].y
+    }
+
+    /// **球も水に浮く**(利用者役⑯)。密度 ρ の球は、水(1000 kg/m³)の中で
+    /// 体積の ρ/1000 だけ沈んだ深さを中心に浮き沈みし、その揺れは水の抵抗で
+    /// 小さくなっていく。重い球(7800 kg/m³)は沈み続ける。
+    #[test]
+    fn a_light_sphere_floats_at_archimedes_depth_and_a_heavy_one_sinks() {
+        // 返り値: (最初の 5 秒の揺れ幅, 最後の 5 秒の揺れ幅, 最後の 5 秒の平均の高さ, 最後の高さ)
+        let run = |density: f64| {
+            let mut materials = MaterialDb::standard();
+            let material = buoyancy_material(&mut materials, density);
+            let mut rng = SimRng::new(1, 1);
+            let mut events = EventQueue::new();
+            let mut solver = MechanicsSolver::new(9.80665);
+            solver.fluids = vec![FluidRegion::new(0.0, 1000.0)];
+            let mut desc = RigidBodyDesc::dynamic(Shape::Sphere { radius: 0.5 }, material);
+            desc.transform.position = Vec3::new(0.0, 1.0, 0.0);
+            let idx = solver.create_body(desc, &materials);
+            let steps_per_second = 240;
+            let mut ys = Vec::new();
+            for _ in 0..steps_per_second * 30 {
+                let mut ctx = make_ctx(&materials, &mut rng, &mut events);
+                solver.step(1.0 / steps_per_second as f64, &mut ctx);
+                let _: Vec<Event> = events.drain_sorted();
+                ys.push(solver.bodies.position[idx].y);
+            }
+            let window = 5 * steps_per_second;
+            let span = |w: &[f64]| {
+                w.iter().cloned().fold(f64::MIN, f64::max)
+                    - w.iter().cloned().fold(f64::MAX, f64::min)
+            };
+            let first = &ys[steps_per_second..steps_per_second + window];
+            let last = &ys[ys.len() - window..];
+            let mean = last.iter().sum::<f64>() / last.len() as f64;
+            (span(first), span(last), mean, *ys.last().unwrap())
+        };
+        let r: f64 = 0.5;
+        let (first_swing, last_swing, mean_y, _) = run(250.0);
+        assert!(
+            last_swing < 0.5 * first_swing,
+            "揺れは水の抵抗で小さくなるはず: 最初 {first_swing} 最後 {last_swing}"
+        );
+        // 沈んだ体積 = 球の 1/4。球欠の式から h を求め、中心の高さ y = r − h。
+        let cap = |h: f64| std::f64::consts::PI * h * h * (3.0 * r - h) / 3.0;
+        let target = 0.25 * 4.0 / 3.0 * std::f64::consts::PI * r.powi(3);
+        let (mut lo, mut hi) = (0.0, 2.0 * r);
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if cap(mid) < target {
+                lo = mid
+            } else {
+                hi = mid
+            }
+        }
+        let expected_y = r - lo;
+        assert!(
+            (mean_y - expected_y).abs() < 0.02,
+            "平均の高さはアルキメデスの深さのはず: y={mean_y} expected={expected_y}"
+        );
+        let (_, _, _, y_heavy) = run(7800.0);
+        assert!(
+            y_heavy < -5.0,
+            "鉄の球は沈み続けるはず(底が無い): y={y_heavy}"
+        );
     }
 
     /// 一辺1m・質量500kgの立方体が全没しているときの1step後の`v_y`(解析値)。

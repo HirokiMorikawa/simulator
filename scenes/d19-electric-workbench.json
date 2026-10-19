@@ -25,7 +25,7 @@
   "thermal": {
     "ambient_temperature": 293.15,
     "nodes": [
-      { "temperature": 293.15, "heat_capacity": 1000.0 }
+      { "temperature": 293.15, "heat_capacity": 0.2 }
     ]
   },
   "couplings": [

@@ -22,9 +22,8 @@
 //! 同一実装内で対記帳」)。
 //!
 //! 剛体の質量は`initial_mass*(1-liquid_fraction)`(固相残存質量比)として
-//! `RigidBodySet::inv_mass`を直接更新する(形状(`Shape`)自体は縮小しない——密度が
-//! 見かけ上下がっていく近似、`Shape`のランタイム変形は`RigidBodySet`に未実装のため
-//! 対象外)。この質量変化は既存の`BuoyancyDrag`・埋め込み浮力(`MechanicsSolver.fluids`)
+//! `RigidBodySet::inv_mass`を直接更新し、形状も密度を保ったまま相似に縮める
+//! (`RigidBodySet::set_shape_with_mass`、`apply` 内のコメント参照)。この質量変化は既存の`BuoyancyDrag`・埋め込み浮力(`MechanicsSolver.fluids`)
 //! 双方に無変更で伝播する(いずれも毎step`bodies.mass(idx)`を読み直すため、本
 //! Couplingが質量を更新するだけで浮力側が自動的に追従する——D18「氷と飲み物」の
 //! 「アルキメデス統合」が求める浮力との連動は、新規コードなしでこの構成上の性質から
@@ -76,6 +75,11 @@ pub struct PhaseChangeMorph {
     spawned_particles: usize,
     /// 直前の`apply`時点の液相率(増分から今stepの融解質量を出すために持つ)。
     last_liquid_fraction: f64,
+    /// いまの剛体の形が表している固相の質量 [kg](`None` はまだ見ていない)。
+    /// 融けたぶん**形も相似に縮める**ときの基準(`apply` 内のコメント参照)。
+    /// 保存しない——書き出した場面には縮んだ形そのものが残るので、読み直した
+    /// 直後の最初の `apply` で `last_liquid_fraction` から決め直せる。
+    shape_mass: Option<f64>,
 }
 
 impl PhaseChangeMorph {
@@ -104,6 +108,7 @@ impl PhaseChangeMorph {
             pending_spawn_mass: 0.0,
             spawned_particles: 0,
             last_liquid_fraction: 0.0,
+            shape_mass: None,
         }
     }
 
@@ -247,6 +252,7 @@ impl Coupling for PhaseChangeMorph {
         self.pending_spawn_mass = *pending_spawn_mass;
         self.spawned_particles = *spawned_particles;
         self.last_liquid_fraction = *last_liquid_fraction;
+        self.shape_mass = None;
         Ok(())
     }
 
@@ -254,6 +260,11 @@ impl Coupling for PhaseChangeMorph {
         if self.despawned {
             return; // 既に完全融解済み(モジュールdoc参照)。
         }
+        // いまの形が表している質量(はじめて見るときだけ決める)。この step で
+        // 液相率が進む**前**の値から出す(`shape_mass` のdoc参照)。
+        let shape_mass = *self
+            .shape_mass
+            .get_or_insert(self.initial_mass * (1.0 - self.last_liquid_fraction));
         let Some(thermal) = &mut world.thermal else {
             return;
         };
@@ -282,6 +293,22 @@ impl Coupling for PhaseChangeMorph {
         let idx = self.body_index;
         if remaining_mass > 1e-9 {
             world.mechanics.bodies.inv_mass[idx] = 1.0 / remaining_mass;
+            // **融けたぶん、形も小さくする**。質量だけ減らして形を据え置くと、
+            // 密度が下がり続けた氷が水面から浮き上がっていき、半分融けた
+            // ところで体の 8 割以上が水の上に出ていた(本物の氷は、どれだけ
+            // 融けても 9 割が沈んだまま小さくなる。利用者役⑭の実測: 氷の中心が
+            // 水面の 4 cm 下から 4 cm 上まで上がった)。密度を保って相似に縮めれば、
+            // 浮力(沈んだ体積 × 水の密度)との釣り合いも元の割合のまま保たれる。
+            // 縮める刻みが粗いと、縮むたびに沈みすぎた氷が浮き直して小さく
+            // 揺れ続ける(0.5% 刻みでは 0.05 m/s の上下動が出た)。辺が 0.01% 変わる
+            // たびに縮めて、釣り合いを滑らかに追わせる。
+            let linear = (remaining_mass / shape_mass).cbrt();
+            if (1.0 - linear).abs() > 1e-4 {
+                let bodies = &mut world.mechanics.bodies;
+                let shrunk = bodies.shape_of(idx).scaled(linear);
+                bodies.set_shape_with_mass(idx, shrunk, remaining_mass);
+                self.shape_mass = Some(remaining_mass);
+            }
             // 質量が変化した剛体はスリープ(設計 docs/10-mechanics/01-rigid-body.md、
             // `sim_mechanics::sleep`、静止0.5秒継続で自動停止)から起こす——スリープ中は
             // 力の適用・速度/位置積分が完全に止まる(`MechanicsSolver::apply_forces`/

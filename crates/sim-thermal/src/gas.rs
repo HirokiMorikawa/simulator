@@ -66,10 +66,18 @@ impl GasCompartment {
     /// 前提の下、1回の`Coupling::apply`呼び出し内で$dT/T=-(\gamma-1)dV/V$を1次近似で
     /// 適用する(`adiabatic_quasi_static_volume_change`が`steps`回の細分で検証している
     /// のと同じ式を、実際のシミュレーションstep一回分だけ適用する形)。
+    ///
+    /// **1 step の中は閉形式 $T V^{\gamma-1}=const$ で進める**。以前は1次近似
+    /// $T \leftarrow T\,(1-(\gamma-1)\,dV/V)$ だったが、これは押して戻すと元の温度に
+    /// 戻らない(往復で $O(dV^2)$ ずつずれる)ので、気体をばねにしたピストンが
+    /// 往復のたびに少しずつエネルギーを得て、振れ幅が育ち続け、最後は体積が
+    /// 潰れて発散した(実測: 重さ 1.5 kg のピストンを縦に置くと 15 秒あたりで
+    /// 位置が −3.7e13 m。利用者役⑬の「空気をばねにする」を作り直す途中で発見)。
+    /// 可逆断熱変化の温度は体積だけで決まるので、刻みの大きさや往復の回数に
+    /// よらず同じ体積なら同じ温度に戻る——閉形式ならそれがそのまま成り立つ。
     pub fn apply_step_volume_change(&mut self, new_volume: f64) {
         let gamma = self.heat_capacity_ratio();
-        let dv = new_volume - self.volume;
-        self.temperature *= 1.0 - (gamma - 1.0) * dv / self.volume;
+        self.temperature *= (self.volume / new_volume).powf(gamma - 1.0);
         self.volume = new_volume;
     }
 }
@@ -82,6 +90,31 @@ pub fn carnot_efficiency_bound(t_hot: f64, t_cold: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 1 step ずつの断熱変化を、押して戻す往復で何度繰り返しても、元の体積に
+    /// 戻れば元の温度に戻る(`apply_step_volume_change`のdoc参照)。
+    #[test]
+    fn step_volume_changes_return_to_the_same_temperature_after_round_trips() {
+        let mut gas = GasCompartment {
+            n_moles: 1.0,
+            volume: 1.0e-3,
+            temperature: 300.0,
+            gas: GasSpecies::AIR,
+        };
+        for _ in 0..1000 {
+            for k in 1..=20 {
+                gas.apply_step_volume_change(1.0e-3 * (1.0 - 0.02 * k as f64));
+            }
+            for k in (0..20).rev() {
+                gas.apply_step_volume_change(1.0e-3 * (1.0 - 0.02 * k as f64));
+            }
+        }
+        assert!(
+            (gas.temperature - 300.0).abs() < 1e-6,
+            "往復 1000 回で温度がずれた: {}",
+            gas.temperature
+        );
+    }
 
     /// T5: 断熱圧縮 — 体積半分でT2=T1(V1/V2)^(γ-1)、rel<1%
     /// (docs/21-verification/01-analytic-tests.md T5)。

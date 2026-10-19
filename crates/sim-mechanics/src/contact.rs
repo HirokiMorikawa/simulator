@@ -31,10 +31,18 @@ use std::collections::{BTreeMap, BTreeSet};
 /// ——これが「同一の物理接触点であり続けているか」の判定になる。
 pub const PERSISTENCE_TOLERANCE: f64 = 0.002;
 
+/// 引き継ぐ累積インパルス。**摩擦はワールド座標のベクトルで持つ**。
+///
+/// 接線の基底(`Vec3::orthonormal_basis`)は法線の向きだけから決まり、法線が
+/// わずかに傾いただけで補助軸が x ⇄ z に切り替わって 90° 回る。基底の成分
+/// (t1, t2)のまま引き継ぐと、次の step では同じ数字が**別の向き**の摩擦として
+/// 入り、誰も触っていない 16 段の塔が横へ押されて運動エネルギーが増え、崩れた
+/// (利用者役⑭「積み木を積む」)。ベクトルで持っておき、その step の基底へ
+/// 射影し直せば、向きは基底の選び方によらない。
 #[derive(Clone, Copy, Default)]
 pub struct WarmStartImpulse {
     normal: f64,
-    tangent: (f64, f64),
+    tangent_world: Vec3,
 }
 
 /// キャッシュされた接触点。インパルスに加えて**両ボディのローカル座標での接触点位置**を
@@ -124,6 +132,10 @@ const BAUMGARTE_BETA_POS: f64 = 0.2;
 const SLOP: f64 = 0.005;
 /// velocity iterations 既定回数。設計 §9。
 pub const VELOCITY_ITERATIONS: u32 = 10;
+/// 積み重ねの段数 1 つあたりに足す velocity iterations の回数(`velocity_iterations_for`)。
+const ITERATIONS_PER_STACK_LEVEL: u32 = 3;
+/// velocity iterations の上限(積み重ねがどれだけ高くても、これ以上は回さない)。
+const MAX_VELOCITY_ITERATIONS: u32 = 64;
 /// position iterations 既定回数。設計 §9(Box2D 準拠)。
 pub const POSITION_ITERATIONS: u32 = 4;
 /// 転がり摩擦係数の既定値(設計 04-friction.md §9「硬い面の代表値」)。材料ペア表は
@@ -310,7 +322,7 @@ fn prepare(
                         velocity_bias: restitution_bias,
                         penetration: p.penetration,
                         normal_impulse: warm.normal,
-                        tangent_impulse: warm.tangent,
+                        tangent_impulse: (warm.tangent_world.dot(t1), warm.tangent_world.dot(t2)),
                         rolling_impulse: (0.0, 0.0),
                     }
                 })
@@ -339,8 +351,86 @@ fn apply_impulse(bodies: &mut RigidBodySet, body: usize, impulse: Vec3, r: Vec3,
         bodies.angular_velocity[body] + inv_i.mul_vec(angular_impulse).scale(sign);
 }
 
+/// 同じ面の接触点(2 点以上)の法線インパルスを、**同じ速度から同時に**更新する。
+///
+/// 各点を単独で解いたときの増分 $d_i = m_i\,r_i$($r_i = -(v_{n,i} - b_i)$、
+/// $m_i$ はその点の有効質量)を並べた向き $d$ に沿って、この面の二次式
+/// $f(\alpha) = -\alpha\,d^\top r + \tfrac12\alpha^2\,d^\top K d$ を最小にする
+/// $\alpha^* = d^\top r / d^\top K d$ だけ進む($K = J M^{-1} J^\top$、$K d$ は $d$ を
+/// 仮に加えたときの相対法線速度の変化)。目標速度が 0 のとき $f$ は運動エネルギーの
+/// 変化量そのものなので、$\alpha^*$ の一歩は運動エネルギーを増やさない。
+/// 向き $d$ は対称な接触では対称なので、対称な力しか出ない。
+///
+/// その一歩で累積インパルスが負になる(=引っぱる)点があるときは、各点を単独で
+/// 解いた増分の $1/k$ ずつ(0 で打ち切り)を加える——それぞれが単独では運動
+/// エネルギーを増やさない更新なので、その平均も増やさない(凸性)。
+fn solve_normal_block(c: &mut Constraint, bodies: &mut RigidBodySet) -> bool {
+    const MAX_BLOCK: usize = 8;
+    let k = c.points.len();
+    if !(2..=MAX_BLOCK).contains(&k) {
+        return false;
+    }
+    let (a, b) = (c.body_a, c.body_b);
+    let n = c.normal;
+    let mut rhs = [0.0; MAX_BLOCK];
+    let mut d = [0.0; MAX_BLOCK];
+    for (i, p) in c.points.iter().enumerate() {
+        let v_a = point_velocity(bodies.linear_velocity[a], bodies.angular_velocity[a], p.r_a);
+        let v_b = point_velocity(bodies.linear_velocity[b], bodies.angular_velocity[b], p.r_b);
+        rhs[i] = -(n.dot(v_b - v_a) - p.velocity_bias);
+        d[i] = rhs[i] * p.normal_mass;
+    }
+    // d を仮に加えたときの、両ボディの速度の変化。
+    let (mut dv_a, mut dw_a, mut dv_b, mut dw_b) = (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
+    for (p, &di) in c.points.iter().zip(d.iter()) {
+        let impulse = n.scale(di);
+        dv_a = dv_a - impulse.scale(bodies.inv_mass[a]);
+        dw_a = dw_a - bodies.inv_inertia_world[a].mul_vec(p.r_a.cross(impulse));
+        dv_b = dv_b + impulse.scale(bodies.inv_mass[b]);
+        dw_b = dw_b + bodies.inv_inertia_world[b].mul_vec(p.r_b.cross(impulse));
+    }
+    let (mut d_r, mut d_kd) = (0.0, 0.0);
+    for (i, p) in c.points.iter().enumerate() {
+        let kd = n.dot(point_velocity(dv_b, dw_b, p.r_b) - point_velocity(dv_a, dw_a, p.r_a));
+        d_r += d[i] * rhs[i];
+        d_kd += d[i] * kd;
+    }
+    let optimal = if d_kd > 0.0 { d_r / d_kd } else { 0.0 };
+    let pulls = c
+        .points
+        .iter()
+        .zip(d.iter())
+        .any(|(p, &di)| p.normal_impulse + optimal * di < 0.0);
+    let share = 1.0 / k as f64;
+    let mut applied = [0.0; MAX_BLOCK];
+    for (i, p) in c.points.iter_mut().enumerate() {
+        let old = p.normal_impulse;
+        p.normal_impulse = if pulls || optimal <= 0.0 {
+            (old + d[i] * share).max(0.0)
+        } else {
+            old + d[i] * optimal
+        };
+        applied[i] = p.normal_impulse - old;
+    }
+    for (p, &applied) in c.points.iter().zip(applied.iter()) {
+        let impulse = n.scale(applied);
+        apply_impulse(bodies, a, impulse, p.r_a, -1.0);
+        apply_impulse(bodies, b, impulse, p.r_b, 1.0);
+    }
+    true
+}
+
 /// 設計 §4.2「solve_normal」。
+///
+/// **同じ面の接触点は、同じ速度から同時に解く**(`solve_normal_block`)。1 点ずつ
+/// 順に解くと、先に解いた隅が荷重を多く受け持ち、完全に左右対称に積んだ箱にも
+/// 回転が生まれる。回転は摩擦を通して横向きの速度になり、16 段の塔が誰にも
+/// 触られずに傾いて崩れた(利用者役⑭「積み木を積む」)。同時に解けば、
+/// 対称な接触からは対称な力しか出ない。接触点が 1 つのときは従来どおり。
 fn solve_normal(c: &mut Constraint, bodies: &mut RigidBodySet) {
+    if solve_normal_block(c, bodies) {
+        return;
+    }
     for p in &mut c.points {
         let v_a = point_velocity(
             bodies.linear_velocity[c.body_a],
@@ -477,6 +567,109 @@ fn apply_warm_start(constraints: &[Constraint], bodies: &mut RigidBodySet) {
     }
 }
 
+/// **warm start で運動エネルギーを増やさない**。
+///
+/// 前の step の累積インパルスは「たぶんこのくらい」という初期値にすぎない。
+/// 積み重ねが押し戻される途中など、前の step の値が今の step には大きすぎると、
+/// それをそのまま加えた時点で物が弾き上げられ、**誰も触っていない塔に運動
+/// エネルギーが湧いた**(利用者役⑭「積み木を積む」、16 段の鋼の箱で 1 step に
+/// 20.9 J → 82.7 J)。その後の反復(射影)は 1 回ごとに運動エネルギーを
+/// 増やさないので、湧くのは warm start だけ。
+///
+/// 加えたあとの速度は倍率 $s$ の一次式 $v_0 + s\,\Delta v$ なので、運動エネルギーは
+/// $K(s) = K_0 + sB + s^2 A$($A \ge 0$)。全部加えて増えない($A + B \le 0$)なら
+/// そのまま、増えるなら $K(s) \le K_0$ を保つ最大の $s = -B/A$(0〜1)まで縮める。
+/// 累積インパルスも同じ倍率で縮めるので、反復はその値から続きを解く。
+fn apply_warm_start_without_adding_energy(
+    constraints: &mut [Constraint],
+    bodies: &mut RigidBodySet,
+) {
+    if constraints.is_empty() {
+        return;
+    }
+    let v0 = bodies.linear_velocity.clone();
+    let w0 = bodies.angular_velocity.clone();
+    apply_warm_start(constraints, bodies);
+    let (mut a, mut b) = (0.0, 0.0);
+    for i in 0..v0.len() {
+        if bodies.inv_mass[i] <= 0.0 {
+            continue;
+        }
+        let mass = 1.0 / bodies.inv_mass[i];
+        let dv = bodies.linear_velocity[i] - v0[i];
+        a += 0.5 * mass * dv.dot(dv);
+        b += mass * v0[i].dot(dv);
+        if let Some(inertia) = bodies.inv_inertia_world[i].inverse() {
+            let dw = bodies.angular_velocity[i] - w0[i];
+            let i_dw = inertia.mul_vec(dw);
+            a += 0.5 * dw.dot(i_dw);
+            b += w0[i].dot(i_dw);
+        }
+    }
+    if a <= 0.0 || a + b <= 0.0 {
+        return;
+    }
+    let scale = (-b / a).clamp(0.0, 1.0);
+    for i in 0..v0.len() {
+        if bodies.inv_mass[i] <= 0.0 {
+            continue;
+        }
+        bodies.linear_velocity[i] = v0[i] + (bodies.linear_velocity[i] - v0[i]).scale(scale);
+        bodies.angular_velocity[i] = w0[i] + (bodies.angular_velocity[i] - w0[i]).scale(scale);
+    }
+    for c in constraints.iter_mut() {
+        for p in &mut c.points {
+            p.normal_impulse *= scale;
+            p.tangent_impulse = (p.tangent_impulse.0 * scale, p.tangent_impulse.1 * scale);
+        }
+    }
+}
+
+/// **積み重ねの高さに見合う回数だけ反復する**。
+///
+/// 逐次インパルスは 1 回の反復で、力を接触 1 段ぶんしか伝えない。16 段の塔の
+/// いちばん下は 16 個ぶんの重さを支える必要があるのに、既定の 10 回では
+/// 1 step で 4 割しか伝わらず、塔は数 step かけて沈み込み、その勢いで
+/// 押し戻されては揺れ続けた(利用者役⑭)。床など動かない物から接触を
+/// たどった段数(`stack_depth`)の 3 倍を回す(下限は既定の 10 回、上限 64 回)。
+/// 積み重ねの無い場面(散らばった球・1 段の箱)は既定の 10 回のまま。
+fn velocity_iterations_for(constraints: &[Constraint], bodies: &RigidBodySet) -> u32 {
+    let depth = stack_depth(constraints, bodies);
+    (depth * ITERATIONS_PER_STACK_LEVEL).clamp(VELOCITY_ITERATIONS, MAX_VELOCITY_ITERATIONS)
+}
+
+/// 動かない物(質量無限大: 床・壁)に触れている物を 1 段目として、接触を
+/// たどって何段目まで積み重なっているか。動かない物に届かない塊(宙に浮いた
+/// 物どうしの接触)は数えない——支える重さが無いので、反復を増やす理由が無い。
+fn stack_depth(constraints: &[Constraint], bodies: &RigidBodySet) -> u32 {
+    let n = bodies.len();
+    let mut level = vec![u32::MAX; n];
+    let mut anchored = false;
+    for c in constraints {
+        for (me, other) in [(c.body_a, c.body_b), (c.body_b, c.body_a)] {
+            if bodies.inv_mass[me] > 0.0 && bodies.inv_mass[other] <= 0.0 && level[me] == u32::MAX {
+                level[me] = 1;
+                anchored = true;
+            }
+        }
+    }
+    let mut depth = 0;
+    let mut reached = anchored;
+    while reached {
+        depth += 1;
+        reached = false;
+        for c in constraints {
+            for (from, to) in [(c.body_a, c.body_b), (c.body_b, c.body_a)] {
+                if level[from] == depth && bodies.inv_mass[to] > 0.0 && level[to] == u32::MAX {
+                    level[to] = depth + 1;
+                    reached = true;
+                }
+            }
+        }
+    }
+    depth
+}
+
 /// 設計 §4.5「split impulse / NGS」: 速度とは別チャンネルで貫入を直接解消する。
 /// `Δλ = β_pos・max(δ-δ_slop,0)・m_eff` を位置・姿勢へ直接適用し(速度は変更しない)、
 /// エネルギーを汚さない。r_a/r_b はワールド系オフセットとして固定のまま扱う近似
@@ -551,8 +744,8 @@ pub fn resolve(
         restitution_velocity_threshold,
         warm_start_cache,
     );
-    apply_warm_start(&constraints, bodies);
-    for _ in 0..VELOCITY_ITERATIONS {
+    apply_warm_start_without_adding_energy(&mut constraints, bodies);
+    for _ in 0..velocity_iterations_for(&constraints, bodies) {
         for c in &mut constraints {
             solve_normal(c, bodies);
             solve_tangent(c, bodies);
@@ -575,7 +768,8 @@ pub fn resolve(
                     local_b: p.local_b,
                     impulse: WarmStartImpulse {
                         normal: p.normal_impulse,
-                        tangent: p.tangent_impulse,
+                        tangent_world: c.tangent.0.scale(p.tangent_impulse.0)
+                            + c.tangent.1.scale(p.tangent_impulse.1),
                     },
                 },
             );

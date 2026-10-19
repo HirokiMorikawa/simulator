@@ -2015,9 +2015,25 @@ fn bvh_candidate_pairs(bodies: &RigidBodySet) -> Vec<(usize, usize)> {
 
 /// BVH broadphase(§4.1)+ narrowphase ディスパッチ(§4.2)。
 /// ペア列挙順は (indexA, indexB) 昇順に固定(決定論)。
+#[cfg(test)]
 pub fn detect(bodies: &RigidBodySet, axis_cache: &mut AxisCache) -> Vec<ContactManifold> {
+    detect_excluding(bodies, axis_cache, &[])
+}
+
+/// `detect`と同じだが、`excluded`に挙げた (小さいindex, 大きいindex) のペアは
+/// 接触を作らない。車輪と車体のように**車軸で一体になっている**組は、
+/// 実物では車軸が車輪を貫いていて互いに擦れ合わない。形どうしが重なって
+/// いても接触を作ると、車輪の回転が車体との摩擦で止められてしまう。
+pub fn detect_excluding(
+    bodies: &RigidBodySet,
+    axis_cache: &mut AxisCache,
+    excluded: &[(usize, usize)],
+) -> Vec<ContactManifold> {
     let mut manifolds = Vec::new();
     for (a, b) in bvh_candidate_pairs(bodies) {
+        if excluded.contains(&(a.min(b), a.max(b))) {
+            continue;
+        }
         // static/kinematic 同士は無意味ペア(設計 §4.4 表)。
         if bodies.body_type[a] != BodyType::Dynamic && bodies.body_type[b] != BodyType::Dynamic {
             continue;
