@@ -1015,6 +1015,32 @@ impl World {
         self.probe_entities.len() - 1
     }
 
+    /// `from`の物を見ているプローブ(高さ・横位置・速さ・質量)を、`to`の物を
+    /// 見るように付け替え、それまでの記録を捨てる。付け替えた本数を返す。
+    ///
+    /// 画面は最初に置いた物を自動で記録し始めるが、その物を坂やシーソーの台の
+    /// ような「動かない物」にすると、グラフにはずっと同じ値の平らな線しか
+    /// 出なかった(利用者役⑯)。動く物へ記録を移すための口。
+    pub fn retarget_body_probes(&mut self, from: BodyId, to: BodyId) -> usize {
+        let mut moved = 0;
+        for &entity in &self.probe_entities {
+            let Some(probe) = self.probes_ecs.get_mut::<Probe>(entity) else {
+                continue;
+            };
+            let next = match probe.target {
+                ProbeTarget::BodyPosY(b) if b == from => ProbeTarget::BodyPosY(to),
+                ProbeTarget::BodyPosX(b) if b == from => ProbeTarget::BodyPosX(to),
+                ProbeTarget::BodySpeed(b) if b == from => ProbeTarget::BodySpeed(to),
+                ProbeTarget::BodyMass(b) if b == from => ProbeTarget::BodyMass(to),
+                _ => continue,
+            };
+            probe.target = next;
+            probe.history.clear();
+            moved += 1;
+        }
+        moved
+    }
+
     pub fn probe(&self, handle: usize) -> Option<&Probe> {
         let entity = *self.probe_entities.get(handle)?;
         self.probes_ecs.get::<Probe>(entity)

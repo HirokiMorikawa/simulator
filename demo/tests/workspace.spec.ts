@@ -2996,7 +2996,7 @@ test("動き方の選択肢とバッジ、「＋追加」メニューが人の�
   expect(menuTexts.join(" / ")).not.toContain("SPH");
   expect(menuTexts).toContain("＋ 振り子(長さの変わらないひもで吊るす)");
   expect(menuTexts).toContain("＋ モーター (角度を指定して止まる。回り続けません)");
-  expect(menuTexts).toContain("＋ 流体(水のかたまり)");
+  expect(menuTexts).toContain("＋ 水の粒(流れる水のかたまり)");
   await page.keyboard.press("Escape");
 
   // ↑ Nudge ボタンも人の言葉が主になり、内部の仕組み(Command経由)は
@@ -3738,7 +3738,7 @@ test("流体を追加すると、置いた直後から画面でちゃんと見�
   await boot(page);
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
-  await addViaMenu(page, "流体");
+  await addViaMenu(page, "＋ 水の粒");
   await page.waitForTimeout(300);
 
   // 直したのは「1〜2ピクセルの点」——十分大きな余裕を見て、1桁ピクセルより
@@ -3753,15 +3753,15 @@ test("流体を追加すると、置いた直後から画面でちゃんと見�
 // 粒子や塊は(SPH流体がボディのような個別IDを持たないため)他のボディと
 // 同じInspectorでは選べないが、それは「押しても無反応」の理由にはならない
 // ——せめて数量が読め、選べない理由も画面で言う。
-test("Fluidsの一覧行を選ぶと、数量と選べない理由が読める", async ({ page }) => {
+test("水の粒の一覧行を選ぶと、数量と選べない理由が読める", async ({ page }) => {
   const errors = collectPageErrors(page);
   await boot(page);
   await setGrain(page, 3);
   await page.click("#btn-new-scene");
-  await addViaMenu(page, "流体");
+  await addViaMenu(page, "＋ 水の粒");
   await page.waitForTimeout(200);
 
-  const fluidRow = page.locator("#hierarchy-tree li", { hasText: "Fluids" }).last();
+  const fluidRow = page.locator("#hierarchy-tree li", { hasText: "水の粒" }).last();
   await fluidRow.click();
 
   const inspector = page.locator("#inspector-body");
@@ -4647,7 +4647,7 @@ test("道具の名前に、中の言葉が出ていない", async ({ page }) => 
   expect(items, "追加メニューに中の言葉が出ていない").not.toContain("DistanceJoint");
   expect(items, "追加メニューに中の言葉が出ていない").not.toContain("SPH");
   expect(items).toContain("振り子");
-  expect(items).toContain("流体");
+  expect(items).toContain("水の粒");
   await page.keyboard.press("Escape");
 
   // パネルの見出しも日本語で書く。
@@ -5660,8 +5660,18 @@ test("物の上に、物を積める(札からも、右クリックからも)", 
   expect(heights[2] - heights[1], `段の間隔 ${JSON.stringify(heights)}`).toBeGreaterThan(0.5);
 
   // 右クリックの献立も「◯◯の上に」と言う(地面の座標ではない)。
+  // いちばん上の箱が画面に映っている所を右クリックする(置いてもカメラは
+  // 寄らないので、舞台のまん中とは限らない)。
   const canvas = (await page.locator("#scene-view canvas").first().boundingBox())!;
-  await page.mouse.click(canvas.x + canvas.width * 0.5, canvas.y + canvas.height * 0.5, {
+  const [sx, sy] = await page.evaluate(() => {
+    const w = window as unknown as Record<string, any>;
+    const c = w.__camera;
+    const n = Number(w.__world.read_component("body_count", ""));
+    const p = w.__world.body_position_at_f32(n - 1);
+    const v = new c.position.constructor(p[0], p[1], p[2]).project(c);
+    return [(v.x + 1) / 2, (1 - v.y) / 2];
+  });
+  await page.mouse.click(canvas.x + canvas.width * sx, canvas.y + canvas.height * sy, {
     button: "right",
   });
   await expect(page.locator("#context-menu")).toBeVisible();
@@ -8249,5 +8259,233 @@ test("「しらべる」では、いまの数値が最初の画面に入る", as
   const numbers = page.locator('.card[data-card="numbers"]');
   const top = await numbers.evaluate((el) => el.getBoundingClientRect().top);
   expect(top, `いまの数値の上端 ${top}px`).toBeLessThan(720 - 60);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑯の実測)**: 大きさを変えた箱を Ctrl+D で複製すると、複製は
+// 0.80 m 角に戻った。数字の欄で Enter を押した直後の Ctrl+D は何も起こさず、
+// 名前も `Box_1_copy_2_copy_3…` と伸びた。
+test("複製(Ctrl+D)は、いまの大きさのまま、欄の中からでも作れる", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.waitForTimeout(400);
+  const sy = page.locator("#inspector-scale-y");
+  await sy.fill("2");
+  await sy.press("Enter");
+  await page.keyboard.press("Control+d"); // 焦点は大きさの欄に残ったまま
+  await expect
+    .poll(() =>
+      page.evaluate(() => Number((window as unknown as Record<string, any>).__world.read_component("body_count", ""))),
+    )
+    .toBe(3);
+  const copy = await page.evaluate(() => {
+    const w = (window as unknown as Record<string, any>).__world;
+    return {
+      label: w.read_component("body_label_at", "2") as string,
+      shape: w.read_component("body_shape_json_at", "2") as string,
+      meshY: (window as unknown as Record<string, any>).__bodyMeshFor(2).scale.y as number,
+    };
+  });
+  expect(copy.shape).toContain("0.8");
+  expect(copy.meshY).toBeCloseTo(2, 5);
+  expect(copy.label).not.toContain("_copy_");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑯の実測)**: 置き場所を数値で打ち替えたあとに「⬆ この上に
+// 箱を置く」を押すと、動かす前の場所の上に積まれた。
+test("「この上に箱を置く」は、動かしたあとの場所の上に置く", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.waitForTimeout(400);
+  for (const [axis, value] of [["x", "0"], ["y", "0.4"]] as const) {
+    const field = page.locator(`#focus-pos-${axis}`);
+    await field.fill(value);
+    await field.press("Enter");
+    await page.waitForTimeout(150);
+  }
+  await page.click("#btn-place-box-on-top");
+  const stacked = await page.evaluate(() =>
+    Array.from((window as unknown as Record<string, any>).__world.body_position_at_f32(2) as Float32Array),
+  );
+  expect(Math.abs(stacked[0])).toBeLessThan(0.01);
+  expect(stacked[1]).toBeGreaterThan(1.2);
+  expect(stacked[1]).toBeLessThan(1.3);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑯の実測)**: 自分で組んだ車が 0.03 m/s しか走らなかった
+// (車輪が車体の下面にこすれてブレーキになっていた)。しかも 1 輪ごとに
+// chassis・acx・rest_length… と読めない 11 個の欄を埋め、押すたびに種類が
+// Distance に戻った。車体を選んで「車輪を付ける」を選び、「つなぐ」を 4 回
+// 押すだけで、4 輪とも別の車輪がつながり、車が走ること。
+test("車体を選び「車輪を付ける」で「つなぐ」を4回押すと、4輪の車が走る", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  const setField = async (id: string, value: string) => {
+    const field = page.locator(id);
+    await field.fill(value);
+    await field.press("Enter");
+    await page.waitForTimeout(150);
+  };
+  await page.evaluate(() => document.getElementById("btn-spawn-box")!.click());
+  await page.waitForTimeout(400);
+  await setField("#inspector-scale-x", "2.5");
+  await setField("#inspector-scale-y", "0.5");
+  await setField("#inspector-scale-z", "1.25");
+  for (const [axis, v] of [["x", "0"], ["y", "1"], ["z", "0"]] as const) {
+    await setField(`#focus-pos-${axis}`, v);
+  }
+  for (const [x, z] of [[0.7, 0.9], [0.7, -0.9], [-0.7, 0.9], [-0.7, -0.9]]) {
+    await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+    await page.waitForTimeout(300);
+    for (const [axis, v] of [["x", x], ["y", 0.4], ["z", z]] as const) {
+      await setField(`#focus-pos-${axis}`, String(v));
+    }
+  }
+  await page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" }).click();
+  // 欄の名前は人の言葉、物は名前で選ぶ。
+  await page.selectOption("#add-joint-kind", "wheel");
+  await expect(page.locator("#add-joint-fields")).toContainText("車体");
+  await expect(page.locator("#add-joint-fields")).not.toContainText("chassis");
+  await expect(page.locator("#add-joint-field-chassis")).toHaveValue("1");
+  for (let i = 0; i < 4; i++) {
+    // 押したあとも種類は「車輪を付ける」のまま。
+    await expect(page.locator("#add-joint-kind")).toHaveValue("wheel");
+    await page.click("#add-joint-button");
+    await page.waitForTimeout(200);
+  }
+  const wheels = await page.evaluate(() =>
+    ((window as unknown as Record<string, any>).__world.read_component("joint_info_text", "-1") as string)
+      .split("\n")
+      .filter((l) => l.startsWith("WheelJoint"))
+      .map((l) => l.match(/body#(\d+) ↔ body#(\d+)/)![2]),
+  );
+  expect(new Set(wheels)).toEqual(new Set(["2", "3", "4", "5"]));
+  await page.click("#btn-run");
+  const chassisX = () =>
+    page.evaluate(() =>
+      Math.abs((window as unknown as Record<string, any>).__world.body_position_at_f32(1)[0] as number),
+    );
+  await expect.poll(chassisX, { timeout: 20_000 }).toBeGreaterThan(2);
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑯の実測)**: 「木は浮き、鉄は沈む」を作れなかった。「＋ 流体」は
+// 水の粒が床に散らばるだけで、⚙ の水域は見つけにくく、球には浮力が効かなかった
+// (発泡スチロールの球も沈む)。「＋ 水を張る」の1手で、すべての物に浮力が
+// はたらく水が張られ、木の箱と発泡スチロールの球は浮き、鉄の球は沈むこと。
+test("「＋ 水を張る」で、木の箱と発泡スチロールの球は浮き、鉄の球は沈む", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await addViaMenu(page, "＋ 水を張る");
+  await expect
+    .poll(() =>
+      page.evaluate(() => Number((window as unknown as Record<string, any>).__world.read_component("water_level", ""))),
+    )
+    .toBe(1);
+  const place = async (spawn: string, material: string, x: number) => {
+    await page.selectOption("#select-spawn-material", { label: material });
+    await page.evaluate((id) => document.getElementById(id)!.click(), spawn);
+    await page.waitForTimeout(300);
+    for (const [axis, v] of [["x", x], ["y", 2.5], ["z", 0]] as const) {
+      const field = page.locator(`#focus-pos-${axis}`);
+      await field.fill(String(v));
+      await field.press("Enter");
+      await page.waitForTimeout(120);
+    }
+  };
+  await place("btn-spawn-box", "木材(松)", -2);
+  await place("btn-spawn-sphere", "発泡スチロール", 0);
+  await place("btn-spawn-sphere", "鋼(炭素鋼)", 2);
+  await page.click("#btn-run");
+  const heights = () =>
+    page.evaluate(() =>
+      [1, 2, 3].map((i) => (window as unknown as Record<string, any>).__world.body_position_at_f32(i)[1] as number),
+    );
+  await expect.poll(async () => (await heights())[2], { timeout: 20_000 }).toBeLessThan(0.45);
+  await page.waitForTimeout(4000);
+  const [wood, foam, steel] = await heights();
+  // 水面は 1 m。浮いた物は水面のあたりに、沈んだ鉄は底(床)にいる。
+  expect(wood).toBeGreaterThan(0.8);
+  expect(foam).toBeGreaterThan(0.8);
+  expect(steel).toBeLessThan(0.45);
+  // 水面が 3D に描かれている。
+  expect(
+    await page.evaluate(() => (window as unknown as Record<string, any>).__world.read_component("water_level", "")),
+  ).toBe("1");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑯の実測)**: 熱の実験が作れなかった。⚙ の「熱ノードを追加」で
+// 373 K を足しても「発熱部0の温度 = 293.15 K」としか出ず、どの物の温度か
+// 分からなかった。物を選んで「🔥 温める」を押すと、その物の温度が札に出て、
+// ▶ でまわりの空気の温度へ冷めていくこと。
+test("物を選んで「🔥 温める」を押すと、温度が出て、うごかすと冷めていく", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.evaluate(() => document.getElementById("btn-spawn-sphere")!.click());
+  await page.waitForTimeout(400);
+  await expect(page.locator("#focus-temperature")).toContainText("まだ持っていません");
+  await page.click("#btn-heat-body");
+  await expect(page.locator("#focus-temperature")).toContainText("温度 100.00 °C");
+  await expect(page.locator("#focus-temperature")).toContainText("まわりの空気は 20.0 °C");
+  // 大きな鉄の球(2 t)はなかなか冷めない。その理由を時間で言っている。
+  await expect(page.locator("#focus-temperature")).toContainText("差が半分になるまで約");
+  await page.click("#btn-run");
+  const temperature = () =>
+    page.evaluate(() =>
+      Number((window as unknown as Record<string, any>).__world.read_component("body_temperature_at", "1")),
+    );
+  await expect.poll(temperature, { timeout: 20_000 }).toBeLessThan(373.14);
+  expect(await temperature()).toBeGreaterThan(293.15);
+  // 札の数字も動いている。
+  await expect(page.locator("#focus-temperature")).not.toContainText("温度 100.00 °C");
+  expect(errors).toEqual([]);
+});
+
+// **課題(利用者役⑯の実測)**: 舞台の 3 か所で右クリック→「ここに箱を配置」を
+// すると、置くたびにカメラがその箱へ寄り(8 m 先の 0.8 m の箱を「見えていない」
+// と判断していた)、▶ を押すと最後に置いた箱へ寄って、組んだ全体が見えなく
+// なった。置いた物が見えている間は、置いても選んでも ▶ を押しても、カメラは
+// 動かないこと。
+test("見えている所に物を置いても、選んでも、うごかしても、カメラは勝手に寄らない", async ({ page }) => {
+  const errors = collectPageErrors(page);
+  await boot(page);
+  await setGrain(page, 3);
+  await page.click("#btn-new-scene");
+  await page.waitForTimeout(500);
+  const camera = () =>
+    page.evaluate(() => {
+      const c = (window as unknown as Record<string, any>).__camera;
+      return [c.position.x, c.position.y, c.position.z] as number[];
+    });
+  const canvas = (await page.locator("#scene-view-canvas-host canvas").first().boundingBox())!;
+  const start = await camera();
+  for (const [fx, fy] of [[0.3, 0.75], [0.7, 0.75], [0.5, 0.5]]) {
+    await page.mouse.click(canvas.x + canvas.width * fx, canvas.y + canvas.height * fy, { button: "right" });
+    await page.locator("#context-menu button", { hasText: /ここに箱を(置く|配置)/ }).first().click();
+    await page.waitForTimeout(300);
+  }
+  const near = (a: number[], b: number[]) => a.every((v, i) => Math.abs(v - b[i]) < 0.05);
+  expect(near(await camera(), start)).toBe(true);
+  await page.locator("#hierarchy-tree .tree-body", { hasText: "箱 1" }).click();
+  await page.waitForTimeout(300);
+  expect(near(await camera(), start)).toBe(true);
+  await page.click("#btn-run");
+  await page.waitForTimeout(1500);
+  expect(near(await camera(), start)).toBe(true);
   expect(errors).toEqual([]);
 });

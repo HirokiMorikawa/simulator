@@ -133,11 +133,11 @@
 
       <header id="toolbar" class="panel">
         <div class="toolbar-group" id="mode-toggle">
-          <button id="btn-mode-edit" class="mode-btn" title="Editモード: シーンを直接編集(シミュレーション停止)">
-            Edit
+          <button id="btn-mode-edit" class="mode-btn" title="組み立てる: 時間を止めて、物を置いたり動かしたりする">
+            ✏ 組み立て
           </button>
-          <button id="btn-mode-play" class="mode-btn" title="Playモード: 決まった操作だけでシミュレーションを実行">
-            ▶ Play
+          <button id="btn-mode-play" class="mode-btn" title="実験する: 時間を進め、押す・切り替えるなどの操作だけを記録しながら動かす">
+            ▶ 実験
           </button>
         </div>
         <div class="toolbar-group">
@@ -164,10 +164,10 @@
           <button id="btn-tool-sketch" title="スケッチツール (S): 地面(y=0)に多角形を描き、ブーリアン合成して押し出す">S スケッチ</button>
           <button
             id="btn-gizmo-space"
-            title="Gizmo の座標系を World / Local で切り替える (X)"
+            title="動かす矢印を、世界の向き(上下・左右)と物の向きのどちらに合わせるか (X)"
             data-space="world"
           >
-            🌐 World
+            🌐 世界の向き
           </button>
           <button id="btn-nudge" title="選択中の物に上向きの力を加える(向きを選んで押すなら、右の「選んだもの」札の「そっと押す」)">
             ↑ 押し上げる
@@ -242,7 +242,7 @@
           <label><input type="checkbox" id="toggle-constraint-overlay" checked /> 拘束オーバーレイ</label>
           <label><input type="checkbox" id="toggle-frame-overlay" checked /> フレーム軸オーバーレイ</label>
           <label><input type="checkbox" id="toggle-grid-fluid-overlay" checked /> 流体場オーバーレイ</label>
-            <h4>デモ操作</h4>
+            <h4>見本の場面の操作</h4>
 
           <label><input type="checkbox" id="toggle-circuit-switch" /> 回路スイッチ(閉)</label>
           <label><input type="checkbox" id="toggle-heater" /> ヒーター</label>
@@ -271,18 +271,18 @@
             </label>
             <label>高度 [m](ISA標準大気から密度を計算) <input type="number" id="input-isa-altitude" step="100" value="0" /></label>
             <button id="btn-apply-isa-density" title="国際標準大気(対流圏近似)の高度依存密度を密度欄へ書き込む">ISA密度を計算</button>
-            <label><input type="checkbox" id="toggle-water" /> 静的水域を有効化</label>
-            <label>水位 [m] <input type="number" id="input-water-level" step="0.1" value="0" /></label>
-            <label>水密度 [kg/m³] <input type="number" id="input-water-density" step="1" min="0" value="1000" /></label>
-            <p class="settings-note">大気・水域は`BuoyancyDrag`結合(Inspectorの Add Coupling)を持つ剛体にのみ効く。設定はEditモード・Playモードどちらでも即座に反映される。</p>
-            <h4>ドメイン(熱ノード・格子流体・気体)</h4>
-            <p class="settings-note">Add Couplingの残り6種(PhaseChangeMorph/SphRigid/GridFluidRigid/BoussinesqBuoyancy/ConvectionLink/PistonGas)は、参照するドメインが有効なシーンでのみ追加できる。ここで先にドメインを作る(冪等——複数回押しても壊れない)。</p>
+            <label><input type="checkbox" id="toggle-water" /> 水を張る</label>
+            <label>水面の高さ [m] <input type="number" id="input-water-level" step="0.1" value="0" /></label>
+            <label>水の密度 [kg/m³] <input type="number" id="input-water-density" step="1" min="0" value="1000" /></label>
+            <p class="settings-note">水を張ると、水面より下にある箱と球すべてに浮力と水の抵抗がはたらきます。空気は球に抵抗を与えます。動かしている途中でも、変えるとすぐに効きます。</p>
+            <h4>熱・流れ・気体の道具</h4>
+            <p class="settings-note">物を温めたり冷やしたりするには、物を選んで札の「🔥 温める」「❄ 冷やす」を押します。ここは、物とは別の「熱のかたまり」や流れの場・気体を場面に入れるところです(「はたらきかけを足す」で「…が要る」と書いたものに使います)。何度押しても壊れません。</p>
             <label>温度 [K] <input type="number" id="input-new-thermal-node-temperature" step="1" value="293.15" /></label>
             <label>熱容量 [J/K] <input type="number" id="input-new-thermal-node-heat-capacity" step="1" min="0" value="100" /></label>
-            <button id="btn-add-thermal-node" title="熱ノードを1個追加する(熱ドメインが無効なら周囲温度293.15Kで自動的に有効化する)">熱ノードを追加</button>
+            <button id="btn-add-thermal-node" title="物とは結ばない熱のかたまりを1つ足します(まわりの空気は 20 °C)">熱のかたまりを足す</button>
             <span id="thermal-node-count-display"></span>
-            <button id="btn-enable-grid-fluid" title="格子流体(2D)ドメインを既定パラメータで有効化する(GridFluidRigid/BoussinesqBuoyancyが必要とする)">格子流体ドメインを有効化</button>
-            <button id="btn-enable-gas" title="気体区画を既定パラメータ(空気1mol・1L・常温)で有効化する(PistonGasが必要とする)">気体ドメインを有効化</button>
+            <button id="btn-enable-grid-fluid" title="平面の流れの場を入れます(「流れの中に置く」「温まった流れが上る」に使います)">流れの場を入れる</button>
+            <button id="btn-enable-gas" title="空気 1 L を閉じこめた部屋を入れます(「ピストンで気体を押す」に使います)">閉じこめた気体を入れる</button>
             <h4>量子ドメイン(プリセット)</h4>
             <p class="settings-note">シーンJSONの<code>raw_state</code>は任意の波動関数・ポテンシャルを保存できるが、構築レシピ(ガウス波束・矩形障壁・調和振動子)はスキーマから撤去済み——ここはエディタ限定のプリセット計算で、ガウス波束を生成しシーンJSONと同じ生配列としてWorldへ渡す。原子単位(ℏ=mₑ=1)。</p>
             <h5>1D</h5>
@@ -490,12 +490,12 @@
 
       <section id="console-panel" class="panel">
         <div class="console-tabs" role="tablist" aria-label="Console のフィルタ">
-          <button class="console-tab active" role="tab" aria-selected="true" data-tab="all">All</button>
-          <button class="console-tab" role="tab" aria-selected="false" data-tab="errors">Errors</button>
-          <button class="console-tab" role="tab" aria-selected="false" data-tab="warnings">Warnings</button>
-          <button class="console-tab" role="tab" aria-selected="false" data-tab="info">Info</button>
-          <button class="console-tab" role="tab" aria-selected="false" data-tab="contacts">Contacts</button>
-          <button class="console-tab" role="tab" aria-selected="false" data-tab="events">Events</button>
+          <button class="console-tab active" role="tab" aria-selected="true" data-tab="all">すべて</button>
+          <button class="console-tab" role="tab" aria-selected="false" data-tab="errors">まちがい</button>
+          <button class="console-tab" role="tab" aria-selected="false" data-tab="warnings">注意</button>
+          <button class="console-tab" role="tab" aria-selected="false" data-tab="info">お知らせ</button>
+          <button class="console-tab" role="tab" aria-selected="false" data-tab="contacts">ぶつかり</button>
+          <button class="console-tab" role="tab" aria-selected="false" data-tab="events">できごと</button>
           <span id="console-badges" class="console-badges"></span>
         </div>
         <ul id="console-log"></ul>
@@ -540,12 +540,12 @@
 
       <footer id="project-drawer" class="panel">
         <div class="project-tabs" role="tablist" aria-label="Project ドロワー">
-          <button class="project-tab active" role="tab" aria-selected="true" data-tab="scenes">Scenes</button>
-          <button class="project-tab" role="tab" aria-selected="false" data-tab="materials">Materials</button>
-          <button class="project-tab" role="tab" aria-selected="false" data-tab="circuit">Circuit</button>
-          <button class="project-tab" role="tab" aria-selected="false" data-tab="prefabs">Prefabs</button>
-          <button class="project-tab" role="tab" aria-selected="false" data-tab="replays">Replays</button>
-          <button class="project-tab" role="tab" aria-selected="false" data-tab="validation">Validation</button>
+          <button class="project-tab active" role="tab" aria-selected="true" data-tab="scenes">場面</button>
+          <button class="project-tab" role="tab" aria-selected="false" data-tab="materials">材質</button>
+          <button class="project-tab" role="tab" aria-selected="false" data-tab="circuit">回路</button>
+          <button class="project-tab" role="tab" aria-selected="false" data-tab="prefabs">部品</button>
+          <button class="project-tab" role="tab" aria-selected="false" data-tab="replays">記録の再生</button>
+          <button class="project-tab" role="tab" aria-selected="false" data-tab="validation">確かめ</button>
         </div>
         <div id="project-body"></div>
       </footer>

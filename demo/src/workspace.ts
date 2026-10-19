@@ -98,7 +98,12 @@ export type WorkspaceApi = {
    */
   setTethers: (tethers: { bodyIndex: number; anchor: [number, number, number] }[]) => void;
   /** 追従カメラの入り切り。 */
-  followCamera: (enabled: boolean) => void;
+  /**
+   * `gentle` のときは、動く物がいまの画角に収まっている間はカメラを動かさず、
+   * 画面から出そうになったときだけ合わせ直す(自分で組んだ場面の ▶ 用——
+   * 組み立てた人が決めた見方を、押した瞬間に奪わない)。
+   */
+  followCamera: (enabled: boolean, gentle?: boolean) => void;
   /**
    * **選んだ物**を追いかける(「選んだもの」札の「👀 これを追いかける」)。
    *
@@ -313,6 +318,20 @@ export type WorkspaceApi = {
    */
   bodyBounds: (index: number) => { min: [number, number, number]; max: [number, number, number] } | null;
   /**
+   * **その物の温度 [K]**。温度を持っていない物(温めたことの無い物)は `NaN`。
+   */
+  bodyTemperature: (index: number) => number;
+  /** まわりの空気の温度 [K](熱を扱っていない場面では `NaN`)。 */
+  ambientTemperature: () => number;
+  /** まわりとの温度差が半分になるまでの時間 [s](温度を持たない物は `NaN`)。 */
+  coolingHalfTime: (index: number) => number;
+  /**
+   * **その物を温める・冷やす**(利用者役⑯「熱が作れない」)。初めてなら
+   * その物の熱容量・表面積で温度を持たせ、まわりの空気へ冷めて(温まって)
+   * いくようにする。
+   */
+  setBodyTemperature: (index: number, kelvin: number) => void;
+  /**
    * **その場所に球を1つ置いて、それを選ぶ**。
    *
    * 既存のスポーン経路(`spawnShapeAt`)をそのまま通す——置く場所だけこちらが
@@ -509,6 +528,27 @@ const sceneFiles = import.meta.glob("../../scenes/*.json", {
   eager: true,
 }) as Record<string, string>;
 
+/**
+ * 下の場面一覧(`scenes/index.json`)での名前。実験の名前とは別の名前
+ * (「車の実験場」と「車を走らせる」)で並んでいて、一覧で見た名前で
+ * Ctrl+K を引くと「見つかりません」になった(利用者役⑯)。探すときに
+ * こちらの名前でも当たるようにする。
+ */
+const GALLERY_TITLES: Record<string, string> = (() => {
+  try {
+    const index = JSON.parse(sceneFileContent("index.json") ?? "{}") as {
+      scenes?: { file?: string; title?: string; demo?: string }[];
+    };
+    const titles: Record<string, string> = {};
+    for (const scene of index.scenes ?? []) {
+      if (scene.file && scene.title) titles[scene.file] = `${scene.demo ?? ""} ${scene.title}`;
+    }
+    return titles;
+  } catch {
+    return {};
+  }
+})();
+
 function sceneFileContent(file: string): string | null {
   const entry = Object.entries(sceneFiles).find(([path]) =>
     path.endsWith(`/${file}`),
@@ -595,7 +635,7 @@ function japaneseMagnitude(value: number): string | null {
  * 小さくなったのかすら読めなかった(利用者役⑨の観察)。教科書と同じ形に
  * すれば、少なくとも「10 の何乗か」は読める。**値は変えない**。
  */
-function humanExponent(exponential: string): string {
+export function humanExponent(exponential: string): string {
   const match = exponential.match(/^(-?[\d.]+)e([+-])(\d+)$/);
   if (!match) return exponential;
   const SUPERSCRIPT: Record<string, string> = {
@@ -698,6 +738,27 @@ function friendlyShape(raw: string): string {
     return `${name}(太さ ${meters(numbers[0] * 2)}・長さ ${meters(numbers[1] * 2)})`;
   }
   return name;
+}
+
+/** 札に出す温度の書き方(°C、温度を持たない物はそう書く)。 */
+function temperatureText(kelvin: number, ambientKelvin: number, halfTime: number): string {
+  if (!Number.isFinite(kelvin)) return "温度:まだ持っていません(下のボタンで温めたり冷やしたりできます)";
+  const parts: string[] = [];
+  if (Number.isFinite(ambientKelvin)) {
+    parts.push(`まわりの空気は ${(ambientKelvin - 273.15).toFixed(1)} °C`);
+  }
+  // 大きな物はなかなか冷めない(2 t の鉄の球は差が半分になるまで何時間も
+  // かかる)。数字が止まって見える理由を、時間で言う。
+  if (Number.isFinite(halfTime) && halfTime > 0) parts.push(`差が半分になるまで約 ${durationInWords(halfTime)}`);
+  // 小数 2 桁: ゆっくり冷める物でも、動いていることが見えるように。
+  return `温度 ${(kelvin - 273.15).toFixed(2)} °C${parts.length ? `(${parts.join("。")})` : ""}`;
+}
+
+function durationInWords(seconds: number): string {
+  if (seconds < 90) return `${Math.round(seconds)} 秒`;
+  if (seconds < 90 * 60) return `${Math.round(seconds / 60)} 分`;
+  if (seconds < 48 * 3600) return `${(seconds / 3600).toFixed(1)} 時間`;
+  return `${Math.round(seconds / 86400)} 日`;
 }
 
 /**
@@ -1217,6 +1278,10 @@ export function setUpWorkspace(
       : Math.max(
           160,
           Math.min(drawerOpen ? 200 : 240, window.innerHeight - outside - reserved),
+          // **舞台は、残りの高さの半分を下回らない**(利用者役⑯: 1280×720 では
+          // 3D が 668×240 しかなく、画面の 17% だった)。グラフ・時間の帯・
+          // 記録の段は、残りの半分を分け合う(足りなければ同じ割合で細る)。
+          Math.round((window.innerHeight - outside) * 0.5),
         );
     let room = Math.max(0, window.innerHeight - outside - minStage);
 
@@ -1543,7 +1608,8 @@ export function setUpWorkspace(
         }
         const haystack = foldKana(
           `${experiment.title} ${experiment.blurb} ${category.title} ` +
-            `${experiment.watch.join(" ")} ${experiment.id}`.toLowerCase(),
+            `${experiment.watch.join(" ")} ${experiment.id} ` +
+            `${experiment.file ? (GALLERY_TITLES[experiment.file] ?? "") : ""}`.toLowerCase(),
         );
         if (queryMatches(haystack, query)) result.push({ kind: "experiment", experiment });
       }
@@ -2157,7 +2223,7 @@ export function setUpWorkspace(
       //     一時停止中に自分でカメラを動かした操作を、再開のたびに奪わない
       //     ——`isEditing()`は再開時には偽になる。
       if (!current && api.isEditing()) {
-        api.followCamera(true);
+        api.followCamera(true, true);
         // 止めた状態(組み立て中)から走らせる瞬間を、自分の場面の「はじめ」と
         // して覚える(`ownSceneStart` のdoc参照)。
         ownSceneStart = api.exportSceneJson();
@@ -2639,7 +2705,15 @@ export function setUpWorkspace(
             json: text,
           });
         });
-        files.append(download, upload);
+        // ブラウザ既定の「Choose File / No file chosen」(英語)を出さない
+        // (利用者役⑯)。選ぶ口は日本語のボタンにし、本物の欄は隠して使う。
+        upload.hidden = true;
+        const pick = document.createElement("button");
+        pick.type = "button";
+        pick.id = "btn-open-scene-file";
+        pick.textContent = "📂 ファイルから開く";
+        pick.addEventListener("click", () => upload.click());
+        files.append(download, pick, upload);
         body.appendChild(files);
       },
     };
@@ -3075,7 +3149,14 @@ export function setUpWorkspace(
             list.className = "readouts";
             const rows: [string, string][] = [
               ["かたち", friendlyShape(readout.shape)],
-              ["重さ", `${readout.mass.toFixed(3)} kg`],
+              // 動かない物は重さを計算に使わない(物理側は 0 として持つ)。
+              // 「0.000 kg」と出すと、坂が重さを持たない物に見えた(利用者役⑯)。
+              [
+                "重さ",
+                readout.motion === "Static" && readout.mass === 0
+                  ? "—(動かない物は重さを使いません)"
+                  : `${readout.mass.toFixed(3)} kg`,
+              ],
               ["高さ", `${readout.position[1].toFixed(3)} m`],
               ["速さ", `${readout.speed.toFixed(3)} m/s`],
             ];
@@ -3339,8 +3420,6 @@ export function setUpWorkspace(
             const bounds = api.bodyBounds(selected);
             if (bounds) {
               const top = bounds.max[1];
-              const cx = (bounds.min[0] + bounds.max[0]) / 2;
-              const cz = (bounds.min[2] + bounds.max[2]) / 2;
               const topRow = document.createElement("p");
               topRow.className = "card-note";
               topRow.id = "focus-top-note";
@@ -3364,14 +3443,53 @@ export function setUpWorkspace(
                 onTop.textContent = text;
                 onTop.title = "選んでいる物のまん中・上の面のすぐ上へ置きます";
                 onTop.addEventListener("click", () => {
+                  // **押した時点の姿で決める**。札を作ったときの位置を使って
+                  // いたので、置き場所を数値で打ち替えたあとに押すと、**動かす
+                  // 前の場所**の上に積まれた(利用者役⑯: x=0・y=0.4 へ動かした
+                  // 箱の上に押すと (0.960, 1.850)——横に 0.96 m ずれ 0.65 m 浮く)。
+                  const now = api.bodyBounds(selected) ?? bounds;
+                  const nowTop = now.max[1];
+                  const nowX = (now.min[0] + now.max[0]) / 2;
+                  const nowZ = (now.min[2] + now.max[2]) / 2;
                   // 触れるか触れないかの境目に置くと、そのまま食い込んで
                   // 弾かれる。半分の高さぶん + わずかな隙間だけ上へ。
-                  add(cx, top + half + 0.05, cz);
+                  add(nowX, nowTop + half + 0.05, nowZ);
                   renderContext();
                 });
                 placeActions.appendChild(onTop);
               }
               onTopSection.appendChild(placeActions);
+            }
+
+            // **温める・冷やす**(利用者役⑯「熱が作れない」)。以前は ⚙ の
+            // 「熱ノードを追加」で、どの物とも結ばれていない温度の点を足せる
+            // だけだった——何の温度なのか分からず、3D にも何も出なかった。
+            // 選んだ物そのものを温め、温度を札と色(赤く光る/青白くなる)で
+            // 見せる。▶ で、まわりの空気(20 °C)へ冷めていくのが見える。
+            if (bounds) {
+              const heatSection = section("touch");
+              const tempRow = document.createElement("p");
+              tempRow.className = "card-note";
+              tempRow.id = "focus-temperature";
+              tempRow.textContent = temperatureText(api.bodyTemperature(selected), api.ambientTemperature(), api.coolingHalfTime(selected));
+              heatSection.appendChild(tempRow);
+              const heatActions = document.createElement("div");
+              heatActions.className = "card-actions";
+              for (const [id, text, kelvin] of [
+                ["btn-heat-body", "🔥 温める(100 °C)", 373.15],
+                ["btn-cool-body", "❄ 冷やす(0 °C)", 273.15],
+              ] as const) {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.id = id;
+                button.textContent = text;
+                button.addEventListener("click", () => {
+                  api.setBodyTemperature(selected, kelvin);
+                  tempRow.textContent = temperatureText(api.bodyTemperature(selected), api.ambientTemperature(), api.coolingHalfTime(selected));
+                });
+                heatActions.appendChild(button);
+              }
+              heatSection.appendChild(heatActions);
             }
 
             // **きっかけを作る道具**。
@@ -3896,6 +4014,11 @@ export function setUpWorkspace(
       api.onSceneReplaced(() => {
         current = null;
         ownSceneName = "";
+        // 前の場面の名前と「取っておきました」の文も忘れる(利用者役⑯: 🆕 新規
+        // シーンにしても保存欄に前の名前が残り、そのまま押すと前の場面を
+        // 上書きしてしまいそうだった)。
+        sceneNameDraft = "";
+        sceneSaveNote = null;
         ownSceneStart = null;
         cardOverrides.clear();
         // **読み込み直後は何も選ばれていない状態から始める**(`reload`と
@@ -4286,7 +4409,10 @@ export function setUpWorkspace(
             focusNodes["かたち"].textContent = friendlyShape(readout.shape);
           }
           if (focusNodes["重さ"]) {
-            focusNodes["重さ"].textContent = `${readout.mass.toFixed(3)} kg`;
+            focusNodes["重さ"].textContent =
+              readout.motion === "Static" && readout.mass === 0
+                ? "—(動かない物は重さを使いません)"
+                : `${readout.mass.toFixed(3)} kg`;
           }
           // **「とめたら押せる」も毎フレーム揃える**(進行管理役の実測)。
           // 材質の欄は走っている間だけ押せない(理由は札の注記に出している)。
@@ -4368,6 +4494,24 @@ export function setUpWorkspace(
             materialSelect.value = readout.material;
           }
         }
+      }
+
+      // 「上の面の高さ」も、いまの姿から言い直す。札を作ったときの値のまま
+      // だったので、動いた物(4.268 m にある振り子のおもり)に「上の面の高さ
+      // 0.300 m」と出ていた(利用者役⑯)。
+      const topNote = document.getElementById("focus-top-note");
+      if (topNote && lastSelection >= 0) {
+        const nowBounds = api.bodyBounds(lastSelection);
+        if (nowBounds) {
+          const text = `上の面の高さ ${nowBounds.max[1].toFixed(3)} m(ここに物を載せられます)`;
+          if (topNote.textContent !== text) topNote.textContent = text;
+        }
+      }
+
+      const tempNote = document.getElementById("focus-temperature");
+      if (tempNote && lastSelection >= 0) {
+        const text = temperatureText(api.bodyTemperature(lastSelection), api.ambientTemperature(), api.coolingHalfTime(lastSelection));
+        if (tempNote.textContent !== text) tempNote.textContent = text;
       }
 
       if (playButton.dataset.playing !== String(api.isPlaying())) syncRun();

@@ -431,7 +431,7 @@ test("増分L: 流体場オーバーレイ・カプセル・材料派生", async
   // 順番にキューから answers を取り出すハンドラのほうが確実。
   const answers = ["テスト軽量材", "321"];
   page.on("dialog", (d) => d.accept(answers.shift() ?? ""));
-  await addViaMenu(page, "材料派生");
+  await addViaMenu(page, "＋ 重さ違いの材質を作る");
   await expect(page.locator("#select-spawn-material option")).toHaveCount(before + 1);
   await expect(page.locator("#select-spawn-material")).toHaveValue("テスト軽量材");
 
@@ -1102,13 +1102,13 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
 
   // ① ツールバー「＋ 追加」メニューから複合形状(L字)を追加。
   const before = await rowCount();
-  await addViaMenu(page, "＋ 複合形状 (L字)");
+  await addViaMenu(page, "＋ L字の形");
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 1);
   await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("複合形状");
 
   // ② 同じく凸包メッシュを追加。
-  await addViaMenu(page, "＋ 凸包メッシュ");
+  await addViaMenu(page, "＋ 角ばった形");
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 2);
   await expect(page.locator("#hierarchy-tree .tree-body").last()).toContainText("凸包メッシュ");
@@ -1121,14 +1121,14 @@ test("残タスク完遂の縦串⑤前後: 複合形状(L字)/凸包メッシ�
   await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.3, { button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
   await page
-    .locator("#context-menu button", { hasText: "複合形状(L字)を配置" })
+    .locator("#context-menu button", { hasText: "L字の形を配置" })
     .click();
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 3);
 
   await page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.3, { button: "right" });
   await expect(page.locator("#context-menu")).toBeVisible();
-  await page.locator("#context-menu button", { hasText: "凸包メッシュを配置" }).click();
+  await page.locator("#context-menu button", { hasText: "角ばった形を配置" }).click();
   await page.waitForTimeout(100);
   expect(await rowCount()).toBe(before + 4);
 
@@ -1174,9 +1174,9 @@ test("Prefab: 複合形状/凸包メッシュをプレハブ化して再スポ�
   const rowCount = () => page.locator("#hierarchy-tree .tree-body").count();
 
   // ① プレハブ化の元になるボディを2つ作る(複合形状と凸包メッシュ)。
-  await addViaMenu(page, "＋ 複合形状 (L字)");
+  await addViaMenu(page, "＋ L字の形");
   await page.waitForTimeout(100);
-  await addViaMenu(page, "＋ 凸包メッシュ");
+  await addViaMenu(page, "＋ 角ばった形");
   await page.waitForTimeout(100);
 
   // ② Hierarchy 右クリック →「プレハブ化」。旧実装ではここで
@@ -1249,7 +1249,7 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
   await page.click("#btn-settings"); // ポップオーバーを閉じる。
 
   // SPHドメインは既存の「+ 流体」ボタン(スポーンパレット)で有効化する。
-  await addViaMenu(page, "＋ 流体(水のかたまり)");
+  await addViaMenu(page, "＋ 水の粒");
 
   // フィールドIDは`component_schema`が返す`add_*_coupling`の実引数名
   // そのもの(`#add-coupling-field-${name}`、B12〜B15でスキーマ駆動フォーム
@@ -1263,7 +1263,12 @@ test("残タスク完遂: 結合14種の残り6種(熱ノード/SPH/格子流体
     // `Object.entries`を`Array.forEach`に渡すとコールバックのawaitを待たない
     // (並行実行される)ため、直列に`page.fill`を呼ぶには明示的なforループが要る。
     for (const [name, value] of Object.entries(fields)) {
-      await page.fill(`#add-coupling-field-${name}`, String(value));
+      // 物を指す欄は名前の一覧から選ぶ(利用者役⑯)。
+      if (name === "body") {
+        await page.selectOption(`#add-coupling-field-${name}`, String(value));
+      } else {
+        await page.fill(`#add-coupling-field-${name}`, String(value));
+      }
     }
     await page.click("#add-coupling-button");
   };
@@ -1365,7 +1370,7 @@ test("縦串⑤(飛行機の物理): 翼揚力/マグヌス揚力をUIから追�
   // ① WingLift: body=Box_1, chord_local=(1,0,0), span_local=(0,0,1),
   // wing_area=2m^2, atmosphere_density=1.225, atmosphere_viscosity=1.81e-5。
   await page.selectOption("#add-coupling-kind", "wing_lift");
-  await page.fill("#add-coupling-field-body", "1");
+  await page.selectOption("#add-coupling-field-body", "1");
   await page.fill("#add-coupling-field-chord_x", "1");
   await page.fill("#add-coupling-field-chord_y", "0");
   await page.fill("#add-coupling-field-chord_z", "0");

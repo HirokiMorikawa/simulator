@@ -84,7 +84,7 @@ test("Console / Project のタブは左右キーで移動でき、aria-selected 
 
   await page.locator('.console-tab[data-tab="all"]').focus();
   await page.keyboard.press("ArrowRight");
-  await expect(page.locator(".console-tab.active")).toHaveText("Errors");
+  await expect(page.locator(".console-tab.active")).toHaveText("まちがい");
   await expect(page.locator(".console-tab.active")).toHaveAttribute(
     "aria-selected",
     "true",
@@ -95,7 +95,7 @@ test("Console / Project のタブは左右キーで移動でき、aria-selected 
   );
 
   await page.keyboard.press("End");
-  await expect(page.locator(".console-tab.active")).toHaveText("Events");
+  await expect(page.locator(".console-tab.active")).toHaveText("できごと");
 
   expect(errors).toEqual([]);
 });

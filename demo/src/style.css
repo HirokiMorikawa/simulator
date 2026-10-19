@@ -2754,3 +2754,20 @@ kbd {
   flex: 1;
   min-width: 0;
 }
+
+/* **背の低い画面では、いちばん上の帯を 1 行にする**(利用者役⑯: 1280×720 で
+   帯が 123px あり、3D の舞台が 240px しか残らなかった)。決め打ちの改行を
+   外し、「画面の詳しさ」の説明文(2 行)は畳む——目盛りの名前とつまみは残る。
+   幅が足りなければ、これまでどおり次の行へ送られる。 */
+@media (max-height: 820px) {
+  #app .commandbar-break {
+    display: none;
+  }
+  #app .detail-hint {
+    display: none;
+  }
+  #app .detail-control {
+    flex: 0 1 260px;
+    min-width: 200px;
+  }
+}

@@ -6616,6 +6616,43 @@ mod tests {
         );
     }
 
+    /// **衝突の組分けを知らなくても、自分で組んだ車は走る**(利用者役⑯)。
+    /// D24 から `collision_group/mask` を取り去ると、車輪が車体の下面に
+    /// 食い込む位置関係のまま全物体が互いに当たる設定になる。以前はこの
+    /// 擦れが車輪の回転を止め、0.03 m/s しか出なかった。車輪と車体は車軸で
+    /// 一体の組なので互いに接触せず、駆動輪の周速 ω·r まで加速するはず。
+    #[test]
+    fn a_car_built_without_collision_groups_still_drives_at_wheel_speed() {
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../../../scenes/d24-car.json")).unwrap();
+        for body in json["bodies"].as_array_mut().unwrap() {
+            let body = body.as_object_mut().unwrap();
+            body.remove("collision_group");
+            body.remove("collision_mask");
+        }
+        let scenario = Scenario::from_json(&json.to_string()).unwrap();
+        let mut world = World::from_scenario(&scenario).unwrap();
+        for _ in 0..1800 {
+            world.step();
+        }
+        let joints = &world.mechanics().wheel_joints;
+        let driven = joints
+            .iter()
+            .find(|j| j.motor_max_torque > 0.0)
+            .expect("駆動輪がある");
+        let radius = match world.mechanics().bodies.shape_of(driven.wheel) {
+            sim_mechanics::Shape::Sphere { radius } => *radius,
+            other => panic!("車輪は球のはず: {other:?}"),
+        };
+        let wheel_speed = driven.motor_speed.abs() * radius;
+        let v = world.mechanics().bodies.linear_velocity[driven.chassis];
+        let speed = (v.x * v.x + v.z * v.z).sqrt();
+        assert!(
+            (speed - wheel_speed).abs() < 0.1 * wheel_speed,
+            "車は車輪の周速まで走るはず: speed={speed} ω·r={wheel_speed}"
+        );
+    }
+
     /// **群3で追加した7シーン(D27–D33)の物理的な検証**。
     ///
     /// マニフェストのテストは「壊れたアセットを出荷しない」ための安全網で、

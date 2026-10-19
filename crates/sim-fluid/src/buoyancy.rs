@@ -401,9 +401,65 @@ pub fn drag_force_submerged_box(
     velocity.scale(-magnitude)
 }
 
+/// **水面より下にある球の体積**(球欠の体積 $V = \pi h^2 (3r - h)/3$、
+/// $h$ は水面下に沈んだ高さ)。
+///
+/// 浮力が直方体にしか効かなかった頃は、発泡スチロールの球を水に落としても
+/// 底まで沈んでいた(利用者役⑯の「木は浮き、鉄は沈む」が作れなかった)。
+/// 球は向きを持たないので、水面がどちらへ傾いていても `up` 方向の距離だけで
+/// 厳密に決まる。
+pub fn submerged_sphere_below_plane(center: Vec3, radius: f64, up: Vec3, water_level: f64) -> f64 {
+    if radius <= 0.0 {
+        return 0.0;
+    }
+    let depth_of_center = water_level - center.dot(up);
+    let h = (depth_of_center + radius).clamp(0.0, 2.0 * radius);
+    std::f64::consts::PI * h * h * (3.0 * radius - h) / 3.0
+}
+
+/// 水の粘性係数 [Pa·s](20 °C 付近)。水中の球の抵抗に使う。
+pub const WATER_VISCOSITY: f64 = 1.0e-3;
+
+/// **水の中で動く球が受ける抵抗**。空気中の球と同じ式
+/// (`crate::aero::drag_force_sphere`)を水の密度と粘性で評価し、水に浸かって
+/// いる割合 `submerged_fraction` だけ効かせる(`drag_force_submerged_box` と
+/// 同じ扱い)。止まっている球には 0 を返すので、釣り合いの深さは変わらない。
+pub fn drag_force_submerged_sphere(
+    radius: f64,
+    submerged_fraction: f64,
+    fluid_density: f64,
+    velocity: Vec3,
+) -> Vec3 {
+    if submerged_fraction <= 0.0 {
+        return Vec3::ZERO;
+    }
+    let water = crate::aero::Atmosphere {
+        density: fluid_density,
+        viscosity: WATER_VISCOSITY,
+        wind: Vec3::ZERO,
+    };
+    crate::aero::drag_force_sphere(radius, &water, velocity).scale(submerged_fraction.min(1.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 球の水面下体積: 水の外で 0、半分沈めば半球、全没で球全体。
+    #[test]
+    fn submerged_sphere_volume_is_a_spherical_cap() {
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        let r = 0.5;
+        let full = 4.0 / 3.0 * std::f64::consts::PI * r * r * r;
+        let at = |y: f64| submerged_sphere_below_plane(Vec3::new(0.0, y, 0.0), r, up, 0.0);
+        assert_eq!(at(1.0), 0.0);
+        assert!((at(0.0) - full / 2.0).abs() < 1e-12);
+        assert!((at(-1.0) - full).abs() < 1e-12);
+        // 浅く浸かった球欠(h = 0.1): π h² (3r − h)/3。
+        let h: f64 = 0.1;
+        let cap = std::f64::consts::PI * h * h * (3.0 * r - h) / 3.0;
+        assert!((at(0.4) - cap).abs() < 1e-12);
+    }
 
     /// 水中の箱の抵抗: 速度と逆向きで、大きさは $\tfrac12\rho C_d A v^2$、
     /// 浸かっている割合に比例し、止まっていれば 0。

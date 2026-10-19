@@ -14,6 +14,7 @@ import {
   materialLabel,
   pickDurationUnit,
   readoutNumber,
+  humanExponent,
   setUpWorkspace,
   type ConfirmDiscardRef,
   type DerivedProbeSeries,
@@ -186,6 +187,13 @@ const NEW_SCENE_JSON = JSON.stringify({
 /// 非ブロッキングに置き換える。`#toast-region` は `aria-live="polite"` なので
 /// 読み上げにも届く(`window.alert` はフォーカスを奪う代わりに、閉じた後に
 /// 何も残さない点でスクリーンリーダー利用者にも不利だった)。
+/// 「＋ 水を張る」で張る水の水面の高さ [m]。床から 1 m——箱や球を置くと
+/// ちょうど半分ほどの深さで、浮き沈みが見やすい。
+const WATER_POOL_LEVEL = 1;
+
+/// 何も無い場面を開いたときのカメラの位置(原点の斜め上手前から、床の
+/// 10 m 四方ほどが見える)。
+const EMPTY_SCENE_CAMERA = [5, 3.5, 7] as const;
 const TOAST_TIMEOUT_MS = 8000;
 function showToast(
   message: string,
@@ -1472,9 +1480,9 @@ function setUpHierarchy(
   const fluidSpawnCount = readNumber(world, "fluid_spawn_count");
   if (fluidSpawnCount > 0) {
     const fluidItem = document.createElement("li");
-    fluidItem.textContent = `Fluids (${fluidSpawnCount}塊, ${readNumber(world, "fluid_particle_count")}粒子)`;
+    fluidItem.textContent = `水の粒 (${fluidSpawnCount}かたまり, ${readNumber(world, "fluid_particle_count")}粒)`;
     fluidItem.classList.add("tree-selectable");
-    fluidItem.title = "個々の粒子や塊は選べません(SPH流体はボディのような個別IDを持たないため)。クリックすると合計の数値だけ見られます。";
+    fluidItem.title = "粒の一つひとつは選べません。クリックすると、かたまりの数と粒の数が見られます。";
     fluidItem.addEventListener("click", () => {
       hierarchyMultiSelection.clear();
       highlight(FLUID_SELECTED_SENTINEL);
@@ -1739,7 +1747,7 @@ function renderFluidSummaryInspector(world: WasmWorld): void {
     // 呼ばれた後にワールドが差し替わり、流体が無くなっていた場合の保険。
     body.innerHTML = `
       <div class="empty-state">
-        <p>Fluidsはもうありません。</p>
+        <p>水の粒はもうありません。</p>
       </div>
     `;
     return;
@@ -2391,43 +2399,179 @@ function applyFieldInputId(prefix: string, field: ApplyFieldSchema): string {
   return `${prefix}-field-${field.name}`;
 }
 
-/// スキーマ1フィールドぶんの入力欄HTML。ラベルは`name`そのもの(+単位・
-/// 値域・センチネルの注記)——「どのkindで何を意味するか」がラベルだけで
-/// 分かるようにする(以前の`title`ツールチップだけに頼る構成をやめる)。
+/// 欄の名前を人の言葉にする表(利用者役⑯)。以前はプログラムの引数名
+/// (`chassis`・`acx`・`rest_length`・`damping_ratio`…)がそのまま欄の名前に
+/// 出ていて、中学生には何を打てばよいか読めなかった。送る値の名前(`id`・
+/// payload のキー)は変えず、見える文字だけを差し替える。元の名前は欄に
+/// マウスを載せると出る。
+const APPLY_FIELD_WORDS: Record<string, string> = {
+  body_a: "つなぐ物",
+  body_b: "つなぐ相手",
+  body: "どの物に",
+  chassis: "車体",
+  wheel: "車輪",
+  ax: "つなぐ物の上の点 x(物の中心から)",
+  ay: "つなぐ物の上の点 y(物の中心から)",
+  az: "つなぐ物の上の点 z(物の中心から)",
+  bx: "相手の上の点 x(空中なら、その場所)",
+  by: "相手の上の点 y(空中なら、その場所)",
+  bz: "相手の上の点 z(空中なら、その場所)",
+  length: "長さ",
+  axis_x: "向き x",
+  axis_y: "向き y",
+  axis_z: "向き z",
+  acx: "車輪を付ける場所 x(車体の中心から)",
+  acy: "車輪を付ける場所 y(車体の中心から)",
+  acz: "車輪を付ける場所 z(車体の中心から)",
+  rest_length: "ばねの長さ",
+  frequency: "ばねの硬さ(1 秒に揺れる回数)",
+  damping_ratio: "揺れの止まりやすさ(0〜1)",
+  steer_angle: "ハンドルを切る角度(0 でまっすぐ)",
+  motor_speed: "モーターで回す速さ(マイナスで逆回り)",
+  motor_max_torque: "モーターの強さ(0 でモーターなし)",
+  theta_target: "目指す角度",
+  kp: "目指す角度へ向かう素早さ",
+  kd: "揺れの抑え",
+  torque_max: "回す力の上限",
+  charge: "電気の量",
+  plane_normal_x: "鏡になる板の向き x",
+  plane_normal_y: "鏡になる板の向き y",
+  plane_normal_z: "鏡になる板の向き z",
+  plane_d: "鏡になる板の位置",
+  water_level: "水面の高さ",
+  water_density: "水の密度(水は 1000)",
+  thermal_node: "熱のかたまりの番号",
+  radius: "半径",
+  viscosity: "液体のねばり",
+  seed: "揺らぎの種",
+  stream: "揺らぎの列",
+  voltage_source_index: "電池の番号",
+  torque_constant: "モーターの強さ(電流あたり)",
+  magnetic_field: "磁石の強さ",
+  boundary_points: "表面の点の数",
+  half_width: "幅の半分",
+  half_height: "高さの半分",
+  area: "面積",
+  initial_volume: "はじめの体積",
+  wing_area: "翼の面積",
+  chord_x: "翼の前後の向き x",
+  chord_y: "翼の前後の向き y",
+  chord_z: "翼の前後の向き z",
+  span_x: "翼の左右の向き x",
+  span_y: "翼の左右の向き y",
+  span_z: "翼の左右の向き z",
+  atmosphere_density: "空気の密度(ふつう 1.2)",
+  atmosphere_viscosity: "空気のねばり",
+  ambient_temperature: "まわりの温度",
+  thermal_expansion_coefficient: "温まると膨らむ割合",
+  fluid_node: "流れる側の熱のかたまりの番号",
+  surface_node: "表面の熱のかたまりの番号",
+  characteristic_length: "物の代表の長さ",
+  mode: "流れ方(0〜3)",
+  fluid_thermal_conductivity: "流れる物の熱の伝えやすさ",
+  kinematic_viscosity: "流れる物のねばり",
+  prandtl_number: "プラントル数",
+  melting_temperature: "溶ける温度",
+  latent_heat_fusion: "溶けるのに要る熱",
+  specific_heat_solid: "温まりにくさ(固体)",
+  specific_heat_liquid: "温まりにくさ(液体)",
+  initial_mass: "はじめの重さ",
+  conductance: "熱の伝わりやすさ",
+  initial_enthalpy: "はじめの熱の量",
+  temperature: "温度",
+  heat_capacity: "温まりにくさ",
+};
+
+/// 単位の書き方も読める形にする(`rad`→「ラジアン」など)。
+const APPLY_UNIT_WORDS: Record<string, string> = {
+  rad: "ラジアン",
+  "rad/s": "ラジアン/秒",
+  Hz: "回/秒",
+  "1/s": "1/秒",
+  "m^2": "m²",
+  "m^3": "m³",
+  "kg/m^3": "kg/m³",
+  "m^2/s": "m²/秒",
+};
+
+/// 物を番号で打たせず、一覧から名前で選ばせる欄(利用者役⑯)。
+const BODY_REFERENCE_FIELDS = new Set(["body_a", "body_b", "body", "chassis", "wheel"]);
+
+/// 一覧に出す物(番号と、場面の中身と同じ名前)。床は「つなぐ相手」には
+/// 出さない(床に留めたいときは「空中の決まった点」を選ぶ)。
+interface BodyChoice {
+  index: number;
+  name: string;
+}
+
+function bodyChoices(world: WasmWorld): BodyChoice[] {
+  const count = readNumber(world, "body_count");
+  const choices: BodyChoice[] = [];
+  for (let i = 1; i < count; i++) {
+    // 消した物は選べない(位置も読めない)。
+    if (world.read_component("body_is_removed_at", String(i)) === "true") continue;
+    choices.push({
+      index: i,
+      name: friendlyBodyLabel(world.read_component("body_label_at", String(i))),
+    });
+  }
+  // 同じ名前が並ぶと選び分けられないので、そのときだけ番号を添える。
+  const seen = new Map<string, number>();
+  for (const c of choices) seen.set(c.name, (seen.get(c.name) ?? 0) + 1);
+  return choices.map((c) =>
+    (seen.get(c.name) ?? 0) > 1 ? { ...c, name: `${c.name}(${c.index} 番)` } : c,
+  );
+}
+
+/// スキーマ1フィールドぶんの入力欄HTML。見える名前は`APPLY_FIELD_WORDS`の
+/// 言葉(+単位)、元の引数名は`title`に残す。物を指す欄は一覧から選ぶ。
 function renderApplyField(
   prefix: string,
   field: ApplyFieldSchema,
   selectedBodyIndex: number,
+  bodies: BodyChoice[],
 ): string {
   const escape = (text: string) =>
     text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const id = applyFieldInputId(prefix, field);
-  const unitSuffix = field.unit ? ` [${field.unit}]` : "";
-  const rangeSuffix =
-    field.min !== null || field.max !== null
-      ? ` (${field.min ?? "-∞"}〜${field.max ?? "∞"})`
-      : "";
-  const nullableSuffix = field.nullable ? " ※負値/特定値がセンチネル" : "";
-  const label = `${escape(field.name)}${unitSuffix}${rangeSuffix}${nullableSuffix}`;
+  const unit = field.unit ? (APPLY_UNIT_WORDS[field.unit] ?? field.unit) : "";
+  const unitSuffix = unit ? ` [${unit}]` : "";
+  const label = `${escape(APPLY_FIELD_WORDS[field.name] ?? field.name)}${escape(unitSuffix)}`;
+  const tip = `title="${escape(field.name)}"`;
   const initial = initialApplyFieldValue(field, selectedBodyIndex);
+  if (BODY_REFERENCE_FIELDS.has(field.name) && field.type !== "string") {
+    const options = bodies.map(
+      (b) =>
+        `<option value="${b.index}"${b.index === initial ? " selected" : ""}>${escape(b.name)}</option>`,
+    );
+    if (field.name === "body_b") {
+      options.unshift(
+        `<option value="-1"${initial === -1 ? " selected" : ""}>空中の決まった点(動かない)</option>`,
+      );
+    }
+    return (
+      `<div class="inspector-field"><span ${tip}>${label}</span>` +
+      `<select id="${id}" ${tip}>${options.join("")}</select></div>`
+    );
+  }
   if (field.type === "bool") {
     return (
-      `<div class="inspector-field"><label>` +
+      `<div class="inspector-field"><label ${tip}>` +
       `<input type="checkbox" id="${id}" ${initial ? "checked" : ""} /> ${label}` +
       `</label></div>`
     );
   }
   if (field.type === "string") {
     return (
-      `<div class="inspector-field"><span>${label}</span>` +
+      `<div class="inspector-field"><span ${tip}>${label}</span>` +
       `<input type="text" id="${id}" value="${escape(String(initial))}" /></div>`
     );
   }
   const step = field.type === "f64" ? "0.1" : "1";
   const min = field.type === "usize" ? 0 : field.min;
   return (
-    `<div class="inspector-field"><span>${label}</span>` +
-    `<input type="number" id="${id}" step="${step}"` +
+    `<div class="inspector-field"><span ${tip}>${label}</span>` +
+    `<input type="number" id="${id}" ${tip} step="${step}"` +
     `${min !== null ? ` min="${min}"` : ""}` +
     `${field.max !== null ? ` max="${field.max}"` : ""}` +
     ` value="${initial}" /></div>`
@@ -2441,9 +2585,10 @@ function renderApplyFieldsInto(
   prefix: string,
   fields: ApplyFieldSchema[],
   selectedBodyIndex: number,
+  bodies: BodyChoice[],
 ): void {
   container.innerHTML = fields
-    .map((field) => renderApplyField(prefix, field, selectedBodyIndex))
+    .map((field) => renderApplyField(prefix, field, selectedBodyIndex, bodies))
     .join("");
 }
 
@@ -2456,12 +2601,13 @@ function readApplyFieldsFrom(
 ): Record<string, number | string | boolean> {
   const payload: Record<string, number | string | boolean> = {};
   for (const field of fields) {
-    const el = document.getElementById(
-      applyFieldInputId(prefix, field),
-    ) as HTMLInputElement | null;
+    const el = document.getElementById(applyFieldInputId(prefix, field)) as
+      | HTMLInputElement
+      | HTMLSelectElement
+      | null;
     if (!el) continue;
     if (field.type === "bool") {
-      payload[field.name] = el.checked;
+      payload[field.name] = (el as HTMLInputElement).checked;
     } else if (field.type === "string") {
       payload[field.name] = el.value;
     } else {
@@ -2625,6 +2771,149 @@ function jointApplyKind(selectValue: string): string {
 /// 各欄が実際のフィールド名(`length`・`rest_length`・`theta_target`等)で
 /// 出る。送信時も同じスキーマのフィールド一覧を辿ってpayloadを組み立てる
 /// ので、フィールドの並びや意味がこことRust側でずれる余地が無い。
+/// 最後に選んだ種類を覚えておく。「つなぐ」を押すと Inspector ごと描き直す
+/// ので、以前は 1 輪足すたびに種類が Distance に戻り、4 輪なら 4 回
+/// 選び直しが要った(利用者役⑯)。
+let lastJointKind: string | null = null;
+let lastCouplingKind: string | null = null;
+
+/// 物の位置・向き・形を読む(フォームの自動入力用)。
+function bodyPose(world: WasmWorld, index: number) {
+  const p = Array.from(world.body_position_at_f32(index));
+  const q = Array.from(world.body_rotation_at_f32(index));
+  let radius: number | null = null;
+  let isSphere = false;
+  try {
+    const shape = JSON.parse(world.read_component("body_shape_json_at", String(index)));
+    if (shape.sphere) {
+      isSphere = true;
+      radius = Number(shape.sphere.radius);
+    }
+  } catch {
+    // 形が読めなくても位置だけで続けられる。
+  }
+  return {
+    position: new THREE.Vector3(p[0], p[1], p[2]),
+    rotation: new THREE.Quaternion(q[0], q[1], q[2], q[3]),
+    isSphere,
+    radius,
+    mass: readNumber(world, "body_mass_at", String(index)),
+  };
+}
+
+/// いま車輪としてつながっている物の番号(同じ車輪を二度つながないため)。
+function bodiesAlreadyUsedAsWheels(world: WasmWorld): Set<number> {
+  const used = new Set<number>();
+  for (const line of world.read_component("joint_info_text", "-1").split("\n")) {
+    if (!line.startsWith("WheelJoint")) continue;
+    const m = line.match(/body#(\d+) ↔ body#(\d+)/);
+    if (m) used.add(Number(m[2]));
+  }
+  return used;
+}
+
+function setFieldValue(prefix: string, name: string, value: number): void {
+  const el = document.getElementById(`${prefix}-field-${name}`) as
+    | HTMLInputElement
+    | HTMLSelectElement
+    | null;
+  if (!el) return;
+  el.value = String(Number.isInteger(value) ? value : Number(value.toFixed(4)));
+}
+
+function fieldNumber(prefix: string, name: string): number {
+  const el = document.getElementById(`${prefix}-field-${name}`) as
+    | HTMLInputElement
+    | HTMLSelectElement
+    | null;
+  return el ? Number(el.value) : NaN;
+}
+
+/// 車輪のつなぎ目の数字を、**いま置いてある車体と車輪の位置から**埋める
+/// (利用者役⑯)。以前は付ける場所・ばねの長さ・硬さ・モーターを 1 輪ごとに
+/// 11 個打つ必要があり、既定の 0 のままではばねも無くモーターも回らなかった。
+/// 付ける場所は「車輪のいまの中心の、ばねの長さぶん上」——こうすると
+/// ばねが伸び縮みしない位置に車輪がそのまま収まる。モーターは車体の重さを
+/// 4 輪で動かせる強さにする(1 輪あたり 車体の重さ×g×半径×¼)。
+function autofillWheelFields(world: WasmWorld): void {
+  const chassis = fieldNumber("add-joint", "chassis");
+  const wheel = fieldNumber("add-joint", "wheel");
+  if (!Number.isInteger(chassis) || !Number.isInteger(wheel) || chassis === wheel) return;
+  const c = bodyPose(world, chassis);
+  const w = bodyPose(world, wheel);
+  const restLength = Math.max(0.1, w.radius ?? 0.3);
+  const local = w.position
+    .clone()
+    .sub(c.position)
+    .applyQuaternion(c.rotation.clone().invert());
+  setFieldValue("add-joint", "acx", local.x);
+  setFieldValue("add-joint", "acy", local.y + restLength);
+  setFieldValue("add-joint", "acz", local.z);
+  setFieldValue("add-joint", "rest_length", restLength);
+  setFieldValue("add-joint", "frequency", 2.5);
+  setFieldValue("add-joint", "damping_ratio", 0.7);
+  setFieldValue("add-joint", "steer_angle", 0);
+  setFieldValue("add-joint", "motor_speed", 10);
+  setFieldValue(
+    "add-joint",
+    "motor_max_torque",
+    Math.max(1, Math.round(c.mass * 9.81 * (w.radius ?? 0.3) * 0.25)),
+  );
+}
+
+/// 車輪の種類を選んだときの既定の組み合わせ。選んでいる物が球なら
+/// それを車輪に、そうでなければ車体にし、相手はまだつないでいない球から選ぶ。
+function chooseDefaultWheelPair(world: WasmWorld, selected: number, bodies: BodyChoice[]) {
+  const poses = new Map(bodies.map((b) => [b.index, bodyPose(world, b.index)]));
+  const used = bodiesAlreadyUsedAsWheels(world);
+  const selectedIsSphere = poses.get(selected)?.isSphere ?? false;
+  let chassis = selected;
+  if (selectedIsSphere) {
+    let heaviest = -1;
+    for (const b of bodies) {
+      const pose = poses.get(b.index);
+      if (!pose || pose.isSphere) continue;
+      if (heaviest < 0 || pose.mass > (poses.get(heaviest)?.mass ?? 0)) heaviest = b.index;
+    }
+    if (heaviest >= 0) chassis = heaviest;
+  }
+  let wheel = selectedIsSphere && !used.has(selected) ? selected : -1;
+  if (wheel < 0) {
+    wheel =
+      bodies.find((b) => b.index !== chassis && poses.get(b.index)?.isSphere && !used.has(b.index))
+        ?.index ?? -1;
+  }
+  return { chassis, wheel };
+}
+
+/// つなぐ相手が決まったら、距離のつなぎ目の長さを「いまの離れ具合」にする。
+/// 空中の点につなぐときは、物の 2 m 上を既定の吊り下げ点にする(振り子)。
+function autofillPairFields(world: WasmWorld, kind: string): void {
+  const a = fieldNumber("add-joint", "body_a");
+  const b = fieldNumber("add-joint", "body_b");
+  if (!Number.isInteger(a)) return;
+  const pa = bodyPose(world, a).position;
+  if (b < 0) {
+    const lift = kind === "distance" ? 2 : 0;
+    setFieldValue("add-joint", "bx", pa.x);
+    setFieldValue("add-joint", "by", pa.y + lift);
+    setFieldValue("add-joint", "bz", pa.z);
+    setFieldValue("add-joint", "length", lift);
+  } else {
+    const pb = bodyPose(world, b).position;
+    setFieldValue("add-joint", "bx", 0);
+    setFieldValue("add-joint", "by", 0);
+    setFieldValue("add-joint", "bz", 0);
+    setFieldValue("add-joint", "length", pa.distanceTo(pb));
+  }
+}
+
+/// **スキーマ駆動フォーム(B11)**: 種別セレクトを切り替えるたびに
+/// `component_schema`から該当kindのフィールド一覧を引き直し、入力欄を
+/// 丸ごと描き直す。送信時も同じスキーマのフィールド一覧を辿ってpayloadを
+/// 組み立てるので、フィールドの並びや意味がこことRust側でずれる余地が無い。
+/// 欄の名前は人の言葉、物は一覧から選び、数字はいまの置き方から埋める
+/// (利用者役⑯)。
 function wireAddJointForm(world: WasmWorld, index: number): void {
   const kindSelect = document.getElementById(
     "add-joint-kind",
@@ -2632,9 +2921,43 @@ function wireAddJointForm(world: WasmWorld, index: number): void {
   const fieldsContainer = document.getElementById("add-joint-fields");
   const button = document.getElementById("add-joint-button");
   if (!kindSelect || !fieldsContainer || !button) return;
+  if (lastJointKind) kindSelect.value = lastJointKind;
+  const bodies = bodyChoices(world);
   const rerender = () => {
+    lastJointKind = kindSelect.value;
     const fields = applyKindSchema(world, jointApplyKind(kindSelect.value)).fields;
-    renderApplyFieldsInto(fieldsContainer, "add-joint", fields, index);
+    renderApplyFieldsInto(fieldsContainer, "add-joint", fields, index, bodies);
+    // 数字の自動入力は手助けにすぎない。読めない物があっても、欄は出したままにする。
+    try {
+      autofillForKind();
+    } catch {
+      // 既定の数字のまま。
+    }
+  };
+  const autofillForKind = () => {
+    const select = (name: string) =>
+      document.getElementById(`add-joint-field-${name}`) as HTMLSelectElement | null;
+    if (kindSelect.value === "wheel") {
+      const pair = chooseDefaultWheelPair(world, index, bodies);
+      if (select("chassis")) select("chassis")!.value = String(pair.chassis);
+      if (pair.wheel >= 0 && select("wheel")) select("wheel")!.value = String(pair.wheel);
+      autofillWheelFields(world);
+      select("chassis")?.addEventListener("change", () => autofillWheelFields(world));
+      select("wheel")?.addEventListener("change", () => autofillWheelFields(world));
+    } else if (select("body_b")) {
+      autofillPairFields(world, kindSelect.value);
+      select("body_a")?.addEventListener("change", () =>
+        autofillPairFields(world, kindSelect.value),
+      );
+      select("body_b")?.addEventListener("change", () =>
+        autofillPairFields(world, kindSelect.value),
+      );
+    } else if (kindSelect.value === "hinge_motor") {
+      setFieldValue("add-joint", "axis_z", 1);
+      setFieldValue("add-joint", "kp", 5);
+      setFieldValue("add-joint", "kd", 1);
+      setFieldValue("add-joint", "torque_max", 100);
+    }
   };
   kindSelect.addEventListener("change", rerender);
   rerender();
@@ -2644,9 +2967,10 @@ function wireAddJointForm(world: WasmWorld, index: number): void {
     try {
       applyComponent(world, kind, readApplyFieldsFrom("add-joint", fields));
     } catch (err) {
-      reportError(`Joint の追加に失敗しました: ${String(err)}`);
+      reportError(`つなぐことができませんでした: ${String(err)}`);
       return;
     }
+    showToast("つなぎました。▶ うごかす で動きを確かめられます。", "success");
     renderInspectorFor(world, index);
   });
 }
@@ -2676,9 +3000,28 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
   const fieldsContainer = document.getElementById("add-coupling-fields");
   const button = document.getElementById("add-coupling-button");
   if (!kindSelect || !fieldsContainer || !button) return;
+  if (lastCouplingKind) kindSelect.value = lastCouplingKind;
+  const bodies = bodyChoices(world);
   const rerender = () => {
+    lastCouplingKind = kindSelect.value;
     const fields = applyKindSchema(world, couplingApplyKind(kindSelect.value)).fields;
-    renderApplyFieldsInto(fieldsContainer, "add-coupling", fields, index);
+    renderApplyFieldsInto(fieldsContainer, "add-coupling", fields, index, bodies);
+    // 「水に浮かべる」の既定は 0 m・密度 0 で、そのまま足すと何も起きなかった
+    // (利用者役⑯)。張ってある水があればその値、無ければ「＋ 水を張る」と
+    // 同じ水を既定にする。張ってある水は、それだけで場面のすべての物に
+    // 浮力を出すので、重ねて足すと浮力が二重にかかることも書いておく。
+    if (kindSelect.value === "buoyancy_drag") {
+      const level = Number(world.read_component("water_level", ""));
+      const density = Number(world.read_component("water_density", ""));
+      setFieldValue("add-coupling", "water_level", Number.isNaN(level) ? WATER_POOL_LEVEL : level);
+      setFieldValue("add-coupling", "water_density", Number.isNaN(density) ? 1000 : density);
+      if (!Number.isNaN(level)) {
+        fieldsContainer.insertAdjacentHTML(
+          "beforeend",
+          `<p class="inspector-note" id="add-coupling-water-hint">水はもう張ってあり、すべての物に浮力がはたらいています。ここで足すと浮力が二重になります。</p>`,
+        );
+      }
+    }
   };
   kindSelect.addEventListener("change", rerender);
   rerender();
@@ -2688,7 +3031,7 @@ function wireAddCouplingForm(world: WasmWorld, index: number): void {
     try {
       applyComponent(world, kind, readApplyFieldsFrom("add-coupling", fields));
     } catch (err) {
-      reportError(`Coupling の追加に失敗しました: ${String(err)}`);
+      reportError(`はたらきかけを足せませんでした: ${String(err)}`);
       return;
     }
     renderInspectorFor(world, index);
@@ -3134,20 +3477,20 @@ function renderInspectorExtraComponents(
   // 挙動は`initialApplyFieldValue`が踏襲する。
   sections.push(`
     <div class="inspector-component" data-stacked>
-      <h3>つなぎ目を足す (Add Joint)</h3>
+      <h3>ほかの物とつなぐ</h3>
       <div class="inspector-field">
-        <span>種別</span>
+        <span>つなぎ方</span>
         <select id="add-joint-kind">
-          <option value="distance">Distance(距離拘束)</option>
-          <option value="ball">Ball(球面拘束)</option>
-          <option value="slider">Slider(1軸並進)</option>
-          <option value="wheel">Wheel(車輪、chassisがシャシー・wheelが車輪)</option>
-          <option value="hinge_motor">HingeMotor(1軸ヒンジ)</option>
+          <option value="distance">ひもでつなぐ(長さを保つ)</option>
+          <option value="ball">関節でつなぐ(どの向きにも回る)</option>
+          <option value="slider">レールに乗せる(1 つの向きにだけ滑る)</option>
+          <option value="wheel">車輪を付ける(車体と車輪)</option>
+          <option value="hinge_motor">扉のように回す(決めた角度へ向かう)</option>
         </select>
       </div>
       <div id="add-joint-fields"></div>
-      <button id="add-joint-button">Joint を追加</button>
-      <p class="inspector-note">入力欄は種別を選ぶと実引数どおりに再構成される(Wheelの<code>suspension_axis</code>/<code>axle_axis</code>は<code>WheelJoint::new</code>の既定値固定でUIに出さない——「普通の車」を作れることを優先した縮約、<code>add_wheel_joint_impl</code>のdoc参照)。追加は即座に反映され、Command化されない(シーン構築操作のため——設計 docs/20-integration/04-world-api.md §1)。</p>
+      <button id="add-joint-button">🔗 つなぐ</button>
+      <p class="inspector-note">つなぐ物と相手を選んで「🔗 つなぐ」を押すだけで足せます。位置や長さの数字は、いまの置き方から自動で入ります(打ち直してもかまいません)。</p>
     </div>
   `);
 
@@ -3180,31 +3523,31 @@ function renderInspectorExtraComponents(
   // `<div id="add-coupling-fields">`をJointと同じ設計で描き直す。
   sections.push(`
     <div class="inspector-component" data-stacked>
-      <h3>はたらきかけを足す (Add Coupling)</h3>
+      <h3>はたらきかけを足す</h3>
       <div class="inspector-field">
-        <span>種別</span>
+        <span>はたらき</span>
         <select id="add-coupling-kind">
-          <option value="image_charge_force">ImageChargeForce(鏡像力)</option>
-          <option value="lorentz_force">LorentzForce(ローレンツ力)</option>
-          <option value="buoyancy_drag">BuoyancyDrag(浮力・抗力)</option>
-          <option value="dissipation_to_heat">DissipationToHeat(摩擦の熱、要熱ドメイン)</option>
-          <option value="joule_heat">JouleHeat(回路損失の熱、要熱・回路ドメイン)</option>
-          <option value="brownian_force">BrownianForce(ブラウン運動、要熱ドメイン)</option>
-          <option value="motor_coupling">MotorCoupling(モーター、要回路ドメイン)</option>
-          <option value="induction_coupling">InductionCoupling(電磁誘導、要回路ドメイン)</option>
-          <option value="phase_change_morph">PhaseChangeMorph(相変化、要熱ドメイン)</option>
-          <option value="sph_rigid">SphRigid(SPH流体との相互作用、要SPHドメイン)</option>
-          <option value="grid_fluid_rigid">GridFluidRigid(格子流体との相互作用、要格子流体ドメイン)</option>
-          <option value="boussinesq_buoyancy">BoussinesqBuoyancy(温度差浮力、要熱・格子流体ドメイン)</option>
-          <option value="convection_link">ConvectionLink(対流熱伝達、要熱ドメイン)</option>
-          <option value="piston_gas">PistonGas(ピストン気体、要気体ドメイン)</option>
-          <option value="wing_lift">WingLift(BuoyancyDrag+翼揚力、薄翼理論)</option>
-          <option value="magnus_lift">MagnusLift(BuoyancyDrag+マグヌス揚力、回転球)</option>
+          <option value="image_charge_force">電気を帯びた物を板が引き寄せる(鏡像力)</option>
+          <option value="lorentz_force">電気を帯びた物が磁場で曲がる(ローレンツ力)</option>
+          <option value="buoyancy_drag">水に浮かべる(浮力と水の抵抗)</option>
+          <option value="dissipation_to_heat">こすれた分を熱にする(熱のかたまりが要る)</option>
+          <option value="joule_heat">電流の熱(熱のかたまりと回路が要る)</option>
+          <option value="brownian_force">熱でぶるぶる揺れる(ブラウン運動、熱のかたまりが要る)</option>
+          <option value="motor_coupling">回路のモーターで回す(回路が要る)</option>
+          <option value="induction_coupling">動くと電気が起きる(電磁誘導、回路が要る)</option>
+          <option value="phase_change_morph">温まると溶ける(熱のかたまりが要る)</option>
+          <option value="sph_rigid">水の粒とぶつかる(＋ 流体 が要る)</option>
+          <option value="grid_fluid_rigid">流れの中に置く(⚙ の流れの場が要る)</option>
+          <option value="boussinesq_buoyancy">温まった流れが上る(熱と流れの場が要る)</option>
+          <option value="convection_link">流れで熱が運ばれる(熱のかたまりが要る)</option>
+          <option value="piston_gas">ピストンで気体を押す(⚙ の気体が要る)</option>
+          <option value="wing_lift">翼にする(風で持ち上がる)</option>
+          <option value="magnus_lift">回る球が曲がる(マグヌス効果)</option>
         </select>
       </div>
       <div id="add-coupling-fields"></div>
-      <button id="add-coupling-button">Coupling を追加</button>
-      <p class="inspector-note">入力欄は種別を選ぶと実引数どおりに再構成される。熱ノード・電圧源を参照する5種は、対応ドメインが有効なシーン(既定の起動シーンはどちらもindex 0を1つ持つ)でのみ成功する。残り6種は対応ドメイン(熱ノード・SPH流体・格子流体・気体区画)が必要——Settingsの「ドメイン」パネル(または「＋ 流体」)で先に有効化すること。</p>
+      <button id="add-coupling-button">＋ 足す</button>
+      <p class="inspector-note">「…が要る」と書いたものは、先にその道具を場面に入れておくと足せます(熱のかたまり・流れの場・気体は ⚙ から、水の粒は「＋ 流体」から)。</p>
     </div>
   `);
 
@@ -3665,7 +4008,13 @@ function setUpProjectDrawer(
     const importInput = document.createElement("input");
     importInput.type = "file";
     importInput.accept = "application/json,.json";
-    body.appendChild(importInput);
+    // 「Choose File / No file chosen」(英語)を出さず、日本語のボタンから選ぶ。
+    importInput.hidden = true;
+    const importPick = document.createElement("button");
+    importPick.type = "button";
+    importPick.textContent = "📂 ファイルを選んで足す";
+    importPick.addEventListener("click", () => importInput.click());
+    body.append(importPick, importInput);
 
     const importStatus = document.createElement("p");
     importStatus.id = "scene-import-status";
@@ -3725,8 +4074,8 @@ function setUpProjectDrawer(
       lines.push("");
       lines.push(
         circuitFreeWiringState.active
-          ? "(この一覧は現在のワールドの回路そのもの。画面上部の「回路スイッチ(閉)」チェックボックスは固定デモ回路専用のため無効です)"
-          : "スイッチの開閉は画面上部の「回路スイッチ(閉)」チェックボックスで操作する。",
+          ? "(この一覧が、いまの場面の回路そのものです)"
+          : "スイッチの入り切りは ⚙ の「回路スイッチ(閉)」で操作します。",
       );
       topology.textContent = lines.join("\n");
     } else {
@@ -4058,7 +4407,7 @@ function setUpProjectDrawer(
         const voltage = circuitRef.current();
         const switchState = switchCheckbox?.checked ? "閉" : "開";
         voltageLine.textContent = circuitFreeWiringState.active
-          ? "固定デモ回路は自由配線回路に置き換え済みです"
+          ? "いまの場面の回路は、下の「自分で回路を組む」で組んだものです"
           : `つなぎ目2の電圧: ${voltage.toFixed(3)} V (スイッチ: ${switchState})`;
       }
       circuitFreeWiringRefresh?.();
@@ -4666,8 +5015,10 @@ function formatTickValue(value: number): string {
   const magnitude = Math.abs(value);
   // 0 は「0」。以前は下の指数の枝に落ちて「0.0e+0 Pa」と出ていた(利用者役⑬)。
   if (magnitude === 0) return "0";
-  // 小さすぎる値は、パネルと同じ日本語の数の言葉で(`readoutNumber`)。
-  if (magnitude < 0.001) return readoutNumber(value, 3);
+  // 小さすぎる値は、目盛りでは短く「2.4×10⁻⁴」と書く。パネルと同じ言葉
+  // (「約 4094 分の 1」)にすると目盛りの字が長すぎて、線と重なった
+  // (利用者役⑯)。並んだ目盛りどうしで桁の比べやすさも、こちらが上。
+  if (magnitude < 0.001) return humanExponent(value.toExponential(1));
   // 千以上は位取りのカンマで書く。`toPrecision(4)` は 1 万を超えると
   // `4.932e+4 km` のような指数になり、中を知らない人には読めなかった
   // (利用者役⑬の観察)。1 億を超える桁は「1.50 億」のように位の言葉で書く
@@ -6122,7 +6473,7 @@ async function setUpSceneView(
     if (gizmoSpaceButton) {
       gizmoSpaceButton.dataset.space = space;
       gizmoSpaceButton.textContent =
-        space === "world" ? "🌐 World" : "📦 Local";
+        space === "world" ? "🌐 世界の向き" : "📦 物の向き";
     }
   }
   gizmoSpaceButton?.addEventListener("click", () =>
@@ -6481,7 +6832,11 @@ async function setUpSceneView(
       // 他の Ctrl 組み合わせ(Ctrl+A の全選択など)は欄の中では横取りしない
       // ——文字の全選択が効かなくなるほうが困る。
       const key = event.key.toLowerCase();
-      if (inField && key !== "z" && key !== "y") return;
+      // 複製(Ctrl+D)も欄の中で効かせる。大きさを打って Enter を押した直後は
+      // 焦点が欄に残っていて、Ctrl+D が何も起こさず(ブラウザの「ブックマーク」
+      // に取られる)、そのまま位置を打つと**元の物が動いた**(利用者役⑯)。
+      // 欄の中で Ctrl+D が文字に効くことは無い。
+      if (inField && key !== "z" && key !== "y" && key !== "d") return;
       switch (key) {
         case "z":
           (event.shiftKey ? redoButton : undoButton).click();
@@ -8001,8 +8356,16 @@ async function setUpSceneView(
     // `project` は z > 1 でカメラの後ろ、|x|,|y| > 1 で画面の外。少し内側
     // (0.9)で判定して、隅にかろうじて映っている状態も「見えない」側に倒す。
     if (Math.abs(ndc.x) > 0.9 || Math.abs(ndc.y) > 0.9 || ndc.z > 1) return false;
-    // 半径の 20 倍より遠いと、画面の高さの 1 割にも満たない粒になる。
-    return camera.position.distanceTo(point) <= Math.max(radius, 0.05) * 20;
+    // **見かけの大きさで決める**(利用者役⑯)。以前は「半径の 20 倍より遠い
+    // =見えていない」としていた——画面の高さの 1 割を下回ると見えない扱いで、
+    // 0.8 m の箱は 8 m 先でもう「見えない」。舞台の 3 か所に右クリックで箱を
+    // 置くと、置くたびにその箱へカメラが寄り、他の物が画面から消えた(次に
+    // 右クリックした所も、寄った後の画角でまったく別の場所になった)。
+    // 物の直径が画面の高さの 6% (300px の舞台で 18px ほど)あれば、置いた
+    // ことは見える。
+    const distance = camera.position.distanceTo(point);
+    const halfHeight = distance * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    return Math.max(radius, 0.05) / halfHeight >= 0.06;
   }
 
   /**
@@ -8331,6 +8694,8 @@ async function setUpSceneView(
    */
   let guidedFollowCamera = false;
   let guidedCameraSnap = false;
+  /// `WorkspaceApi.followCamera` の `gentle`(そちらのdoc参照)。
+  let guidedFollowGentle = false;
   /**
    * **いま単独で追っている物**(課題2、進行管理役の実測)。
    *
@@ -8612,6 +8977,27 @@ async function setUpSceneView(
     }
     return box;
   }
+  /// 置いてある物(床・壁を除く)が、どれも画面の内側(少し余白を残して)に
+  /// 収まっているか。物ごとに見る——全体を囲む箱の隅は何も無い所で、そこが
+  /// 画面の外でも、物はすべて見えていることがある。
+  function everyBodyIsComfortablyInView(): boolean {
+    const corner = new THREE.Vector3();
+    for (const [index, mesh] of bodyMeshes) {
+      if (world.read_component("body_shape_kind_at", String(index)) === "plane") continue;
+      const box = new THREE.Box3().setFromObject(mesh);
+      if (box.isEmpty()) continue;
+      for (const x of [box.min.x, box.max.x]) {
+        for (const y of [box.min.y, box.max.y]) {
+          for (const z of [box.min.z, box.max.z]) {
+            corner.set(x, y, z).project(camera);
+            if (Math.abs(corner.x) > 0.95 || Math.abs(corner.y) > 0.95 || corner.z > 1) return false;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
   function updateGuidedFollowCamera() {
     // **単独追跡が有効な間は、アグリゲートな計算を一切通さない**
     // (`followedBodyBox`のdoc参照「試作2」——アグリゲート用の式に単独追跡を
@@ -8645,6 +9031,7 @@ async function setUpSceneView(
     }
     const box = contentBoundingBox();
     if (!box) return;
+    if (guidedFollowGentle && everyBodyIsComfortablyInView()) return;
     if (guidedSceneStartPending) {
       guidedSceneStartPending = false;
       guidedSceneStartBox = box.clone();
@@ -9219,6 +9606,43 @@ async function setUpSceneView(
    * のが要点——足さないと、材質を変えて場面を組み直した瞬間や、保存して開き
    * 直した瞬間に、記録だけが黙って消える(`sceneOwnProbes`のdoc参照)。
    */
+  /// 置いたときに自動で記録を始めた物(自分で「グラフに記録する」を押した
+  /// 物は含めない)。材質を変えたときなどの読み直しをまたいで覚えておき、
+  /// 名前が変わっていたら(別の場面になったら)使わない。
+  let autoProbedBody: { index: number; name: string } | null = null;
+
+  /// **自動で記録している物が「動かない」になったら、記録を動く物へ移す**
+  /// (利用者役⑯)。最初に置いた物を自動で記録するので、それを坂やシーソーの
+  /// 台にすると、グラフには「高さ(箱 1)」の平らな線だけが出続け、球を
+  /// 選んでも変わらなかった。いちばん最近置いた、動く物へ移す(まだ無ければ、
+  /// 次に動く物を置いたときに移す)。
+  function moveAutoProbesOffStaticBody(): void {
+    if (autoProbedBody === null) return;
+    const from = autoProbedBody.index;
+    if (from >= readNumber(world, "body_count")) return;
+    if (world.read_component("body_label_at", String(from)) !== autoProbedBody.name) return;
+    if (world.read_component("body_is_static_at", String(from)) !== "true") return;
+    const count = readNumber(world, "body_count");
+    for (let to = count - 1; to >= 1; to -= 1) {
+      if (to === from || !bodyMeshes.has(to)) continue;
+      if (world.read_component("body_is_static_at", String(to)) === "true") continue;
+      if (world.read_component("body_shape_kind_at", String(to)) === "plane") continue;
+      try {
+        applyComponent(world, "retarget_body_probes", { from, to });
+      } catch {
+        return;
+      }
+      const fromName = world.read_component("body_label_at", String(from));
+      const toName = world.read_component("body_label_at", String(to));
+      sceneOwnProbes = sceneOwnProbes.map((probe) =>
+        JSON.parse(JSON.stringify(probe).split(JSON.stringify(fromName)).join(JSON.stringify(toName))),
+      );
+      autoProbedBody = { index: to, name: toName };
+      highlightHierarchy = rebuildHierarchy();
+      return;
+    }
+  }
+
   function addProbesForBody(bodyIndex: number): void {
     if (bodyIndex < 0 || bodyIndex >= readNumber(world, "body_count")) return;
     const name = world.read_component("body_label_at", String(bodyIndex));
@@ -9369,6 +9793,7 @@ async function setUpSceneView(
       if (world.read_component("body_type_at", String(bodyIndex)) !== kind) pushSceneUndo();
       applyComponent(world, "set_body_type_at", { index: bodyIndex, kind });
       markUnsaved();
+      moveAutoProbesOffStaticBody();
       return;
     }
     applyComponent(world, "push_set_body_type", { body_index: bodyIndex, kind });
@@ -10330,6 +10755,20 @@ async function setUpSceneView(
     circuitSwitchToggle.disabled =
       mode === "edit" || circuitFreeWiringState.active;
     heaterToggle.disabled = mode === "edit";
+    // **押せない理由を、押せない欄のそばで言う**(利用者役⑯: ⚙ の「回路
+    // スイッチ」「ヒーター」が灰色なのに理由がどこにも無かった)。最初の
+    // 見本の回路にしか無いスイッチは、ほかの場面では出さない。
+    const switchLabel = circuitSwitchToggle.closest("label");
+    if (switchLabel) switchLabel.hidden = circuitFreeWiringState.active;
+    const heaterLabel = heaterToggle.closest("label");
+    if (heaterLabel) {
+      heaterLabel.title = heaterToggle.disabled
+        ? "組み立て中(✏)は使えません。「▶ 実験」にすると、熱のかたまり 0 番を温め続けます"
+        : "熱のかたまり 0 番を温め続けます";
+      heaterLabel.lastChild!.textContent = heaterToggle.disabled
+        ? " ヒーター(組み立て中は使えません。▶ 実験で使えます)"
+        : " ヒーター(熱のかたまり 0 番を温める)";
+    }
     undoButton.disabled = mode !== "edit" || editUndoStack.length === 0;
     redoButton.disabled = mode !== "edit" || editRedoStack.length === 0;
     modeEditButton.classList.toggle("active", mode === "edit");
@@ -10983,6 +11422,8 @@ async function setUpSceneView(
     fluidBoundaryPoints.visible = false;
     circuitFreeWiringState.active = true;
     circuitSwitchToggle.disabled = true;
+    const switchLabelOnLoad = circuitSwitchToggle.closest("label");
+    if (switchLabelOnLoad) switchLabelOnLoad.hidden = true;
 
     world = WasmWorld.from_scene_json(json);
     isGalleryScene = true;
@@ -11184,6 +11625,14 @@ async function setUpSceneView(
     // **シーンの中身にカメラを合わせる(群3、`frameCameraOnContent`のdoc参照)**。
     // 剛体・ソフトボディ・天体・粒子群がすべて配置し終わった後に呼ぶ。
     frameCameraOnContent();
+    // **何も無い場面(🆕 新規シーン)は、原点のまわりを見る決まった画角から
+    // 始める**(利用者役⑯)。合わせる中身が無いのでカメラは前の場面の
+    // ままになり、遠くを向いていると右クリックで置く場所が数十 m 先になった。
+    if (!contentBoundingBox()) {
+      camera.position.set(EMPTY_SCENE_CAMERA[0], EMPTY_SCENE_CAMERA[1], EMPTY_SCENE_CAMERA[2]);
+      orbit.target.set(0, 0.5, 0);
+      orbit.update();
+    }
     // 場面が差し替わったことを上の画面へ伝える。ワークスペース自身の読み込み
     // (`loadSceneJson`)は既に知っているので通知しない(`workspaceIsLoading`)。
     if (!workspaceIsLoading) {
@@ -11665,6 +12114,12 @@ async function setUpSceneView(
     // 既定にしておき、増やしたい人は Inspector から足せるようにする。
     if (readNumber(world, "imported_probe_count") === 0) {
       addProbesForBody(bodyIndex);
+      autoProbedBody = {
+        index: bodyIndex,
+        name: world.read_component("body_label_at", String(bodyIndex)),
+      };
+    } else {
+      moveAutoProbesOffStaticBody();
     }
     // **置いた物が画面の外だと、置けたことが分からない**。既定の落下開始点は
     // 高さ 12 m で、起動時の画角では十字の目印しか映らず「何も無いところに
@@ -11719,9 +12174,17 @@ async function setUpSceneView(
       // という**形状の種類ごとに分かれた2経路**だった。同じ「複製後の実形状から
       // メッシュを作る」処理が2通りある必然性は無く(`meshFromShapeJson`は
       // 元から6形状すべてを描ける)、種類ごとの分岐ごと畳んだ。
+      // 複製はいまの大きさのまま作られる(sim-wasm `duplicate_body_at` のdoc)。
+      // 絵は元と同じく**置いたときの寸法**で作り、大きさの倍率も引き継ぐ
+      // ——ほかの物と同じ「寸法 × 倍率」の描き方にそろえる(倍率を引き継がないと、
+      // 計算は大きいのに絵は 0.8 m 角のまま、になる)。
       const shapeJson = JSON.parse(
-        world.read_component("body_shape_json_at", String(newIndex)),
+        world.read_component("body_base_shape_json_at", String(newIndex)),
       ) as ImportedShapeJson;
+      const sourceScale = currentScale.get(index);
+      if (sourceScale !== undefined) currentScale.set(newIndex, sourceScale);
+      const sourceXyz = currentScaleXyz.get(index);
+      if (sourceXyz) currentScaleXyz.set(newIndex, [sourceXyz[0], sourceXyz[1], sourceXyz[2]]);
       addSpawnedMesh(newIndex, meshFromShapeJson(shapeJson).mesh);
     },
     remove(index) {
@@ -11789,20 +12252,22 @@ async function setUpSceneView(
     showContextMenu(rect.left, rect.bottom, [
       { label: "＋ 球", onSelect: clickHidden("btn-spawn-sphere") },
       { label: "＋ 箱", onSelect: clickHidden("btn-spawn-box") },
+      // 注意書きは作り手の言葉(`Shape::Compound`・「接触判定は未実装」)
+      // ではなく、置いた人に何が起きるかで書く(利用者役⑯)。
       {
         label: "＋ カプセル",
         onSelect: clickHidden("btn-spawn-capsule"),
-        title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
+        title: "両端が丸い棒。箱とはぶつからず、すり抜けます",
       },
       {
-        label: "＋ 複合形状 (L字)",
+        label: "＋ L字の形",
         onSelect: clickHidden("btn-spawn-compound"),
-        title: "Shape::Compound(Box×2の子)",
+        title: "箱を 2 つ組み合わせた L 字の物",
       },
       {
-        label: "＋ 凸包メッシュ",
+        label: "＋ 角ばった形(頂点で決める)",
         onSelect: clickHidden("btn-spawn-convex-mesh"),
-        title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
+        title: "頂点で形を決める物。ほかの物とはぶつからず、すり抜けます",
       },
       { separator: true },
       {
@@ -11817,22 +12282,44 @@ async function setUpSceneView(
         onSelect: clickHidden("btn-spawn-motor"),
         title: "サーボのような動き方です。「うごかす」を押すといまの目標角度まで動いて止まり、ツールバーの「⟳ モーター切替」でその目標角度(0°⇔90°)を切り替えます。回転速度を設定する項目はありません(角度を保つ部品のため)",
       },
+      // **物を浮かべる水**(利用者役⑯)。浮かべる実験をしたい人は「＋ 流体」
+      // (水の粒のかたまり)を置いて、粒が床に散らばるだけで終わっていた。
+      // 水面の高さより下で、すべての物に浮力と水の抵抗がはたらく水を張る。
+      Number.isNaN(Number(world.read_component("water_level", "")))
+        ? {
+            label: "＋ 水を張る(物を浮かべる。木は浮き、鉄は沈む)",
+            onSelect: () => {
+              applyComponent(world, "set_water_region", {
+                water_level: WATER_POOL_LEVEL,
+                density: 1000,
+              });
+              showToast(
+                `水を張りました(水面の高さ ${WATER_POOL_LEVEL} m)。物を水の上に置いて ▶ うごかす を押すと、` +
+                  "水より軽い物は浮き、重い物は沈みます。水面の高さは ⚙ で変えられます。",
+                "success",
+              );
+            },
+          }
+        : {
+            label: "− 水を抜く",
+            onSelect: () => applyComponent(world, "clear_water_region", {}),
+          },
       {
         // `SPH` は水を粒で解く計算のやり方の名前で、置く人には要らない
         // (利用者役「つくる」の報告)。
-        label: "＋ 流体(水のかたまり)",
+        label: "＋ 水の粒(流れる水のかたまり)",
         onSelect: clickHidden("btn-spawn-fluid"),
       },
       { separator: true },
       {
-        label: "＋ フレーム",
+        label: "＋ 回る足場(回転する見方)",
         onSelect: clickHidden("btn-add-frame"),
-        title: "Hierarchy で選択中のフレーム(未選択なら ROOT)の子として追加",
+        title: "回りながら物を見る足場を足します。左の一覧で選んだ足場の上に重ねられます",
       },
       {
-        label: "材料派生",
+        label: "＋ 重さ違いの材質を作る",
         onSelect: clickHidden("btn-derive-material"),
-        title: "選択中の材質から密度違いの派生材料を作る",
+        title: "選んでいる材質をもとに、密度だけ違う材質を作ります",
       },
     ]);
   });
@@ -11960,17 +12447,18 @@ async function setUpSceneView(
               "capsule",
               SPAWN_CAPSULE_RADIUS + SPAWN_CAPSULE_HALF_HEIGHT,
             ),
-            title: "カプセル×箱の接触は未実装(箱とはすり抜けます)",
+            title: "両端が丸い棒。箱とはぶつからず、すり抜けます",
           },
+          // 作り手の言葉(`Shape::Compound`・凸包)ではなく、形で言う(利用者役⑯)。
           {
-            label: `${onLabel}複合形状(L字)を配置`,
+            label: `${onLabel}L字の形を配置`,
             onSelect: place("compound", SPAWN_COMPOUND_L_SHAPE_REST_OFFSET),
-            title: "Shape::Compound(Box×2の子)",
+            title: "箱を 2 つ組み合わせた L 字の物",
           },
           {
-            label: `${onLabel}凸包メッシュを配置`,
+            label: `${onLabel}角ばった形を配置`,
             onSelect: place("convex_mesh", SPAWN_CONVEX_MESH_HALF),
-            title: "Shape::ConvexMesh(立方体の8頂点)。接触判定は未実装(すり抜けます)",
+            title: "頂点で形を決める物。ほかの物とはぶつからず、すり抜けます",
           },
         ]
       : [
@@ -12967,6 +13455,28 @@ async function setUpSceneView(
     trail.line.geometry.computeBoundingSphere();
   }
 
+  /// **温度を色で見せる**(利用者役⑯「熱が作れない」)。温めた物はまわりより
+  /// 熱いほど赤く光り、冷やした物は冷たいほど青白くなる。温度を持たない物は
+  /// 何もしない(光らせていたら元に戻す)。
+  const heatAmbientFallback = 293.15;
+  function tintByTemperature(object: THREE.Object3D, kelvin: number): void {
+    const material = (object as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+    if (!material || !(material as THREE.MeshStandardMaterial).emissive) return;
+    if (!Number.isFinite(kelvin)) {
+      if (object.userData.heatTinted) {
+        material.emissive.setRGB(0, 0, 0);
+        object.userData.heatTinted = false;
+      }
+      return;
+    }
+    const ambientRead = Number(world.read_component("thermal_ambient_temperature", ""));
+    const ambient = Number.isFinite(ambientRead) ? ambientRead : heatAmbientFallback;
+    const hot = Math.min(1, Math.max(0, (kelvin - ambient) / 80));
+    const cold = Math.min(1, Math.max(0, (ambient - kelvin) / 30));
+    material.emissive.setRGB(0.9 * hot, 0.22 * hot + 0.25 * cold, 0.6 * cold);
+    object.userData.heatTinted = true;
+  }
+
   function render() {
     updatePredictionResults();
     // QA不具合5: 再生中は⏭(Nstep送り)を押しても無反応なのに、ボタンは
@@ -13002,6 +13512,7 @@ async function setUpSceneView(
       mesh.position.set(sp[0], sp[1], sp[2]);
       const sr = world.body_rotation_at_f32(bodyIndex);
       mesh.quaternion.set(sr[0], sr[1], sr[2], sr[3]);
+      tintByTemperature(mesh, Number(world.read_component("body_temperature_at", String(bodyIndex))));
       const xyz = currentScaleXyz.get(bodyIndex);
       if (xyz) mesh.scale.set(xyz[0], xyz[1], xyz[2]);
       // 大きさを変えていない物も、計算の中で形が変わることがある(融けて
@@ -13694,9 +14205,15 @@ async function setUpSceneView(
       followedBodyIndices = [];
       cameraMovedSinceSpawn = false;
     },
-    followCamera: (enabled) => {
+    followCamera: (enabled, gentle = false) => {
       guidedFollowCamera = enabled;
-      guidedCameraSnap = enabled;
+      guidedCameraSnap = enabled && !gentle;
+      guidedFollowGentle = enabled && gentle;
+      // **全体を追うときは、置いたばかりの1個だけを追う約束を解く**
+      // (利用者役⑯)。自分で組んだ場面で ▶ を押すと、最後に置いた物へ
+      // カメラが寄って画面いっぱいになり、塔が崩れるところ(組み合わせた
+      // 全体)が見えなかった。1個を追いたいときは「👀 これを追いかける」。
+      if (enabled) followedBodyIndices = [];
     },
     followSelectedBody: () => {
       // **選んでいる物があれば、その全部を単独追跡へ渡す**(`followedBodyIndices`
@@ -13806,6 +14323,22 @@ async function setUpSceneView(
         min: [box.min.x, box.min.y, box.min.z],
         max: [box.max.x, box.max.y, box.max.z],
       };
+    },
+    bodyTemperature: (index) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return NaN;
+      return Number(world.read_component("body_temperature_at", String(index)));
+    },
+    ambientTemperature: () => Number(world.read_component("thermal_ambient_temperature", "")),
+    coolingHalfTime: (index) => {
+      if (index < 0 || index >= readNumber(world, "body_count")) return NaN;
+      return Number(world.read_component("body_cooling_half_time_at", String(index)));
+    },
+    setBodyTemperature: (index, kelvin) => {
+      try {
+        applyComponent(world, "set_body_temperature_at", { index, temperature: kelvin });
+      } catch (err) {
+        reportError(`温度を変えられませんでした: ${String(err)}`);
+      }
     },
     addSphereAt: (x, y, z) => {
       const index = spawnShapeAt("sphere", x, y, z);

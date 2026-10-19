@@ -90,12 +90,14 @@ async function addWheelJoint(
   // スキーマ駆動フォーム化)——以前の`add-joint-body-a`/`add-joint-p1`等の
   // 汎用ID(意味は種別ごとにtitleツールチップでしか示されなかった)は
   // 廃止された。
+  // 車体・車輪は名前の一覧から選ぶ(利用者役⑯)。選ぶと付ける場所などが
+  // 自動で埋まるので、そのあとで D24 の値に打ち直す。
   await page.selectOption("#add-joint-kind", "wheel");
-  await page.fill("#add-joint-field-chassis", String(opts.chassis));
+  await page.selectOption("#add-joint-field-chassis", String(opts.chassis));
+  await page.selectOption("#add-joint-field-wheel", String(opts.wheel));
   await page.fill("#add-joint-field-acx", String(opts.anchor[0]));
   await page.fill("#add-joint-field-acy", String(opts.anchor[1]));
   await page.fill("#add-joint-field-acz", String(opts.anchor[2]));
-  await page.fill("#add-joint-field-wheel", String(opts.wheel));
   await page.fill("#add-joint-field-rest_length", String(opts.restLength));
   await page.fill("#add-joint-field-frequency", String(opts.frequency));
   await page.fill("#add-joint-field-damping_ratio", String(opts.dampingRatio));

@@ -39,6 +39,12 @@ mod component_schema;
 /// (`WasmWorld::record_snapshot`)。帯は常に走り始めから今までを覆い、
 /// 短い実験ほど細かく戻れる。面数は予算の 2 倍(16 面)。
 const SNAPSHOT_RING_CAPACITY: usize = 16;
+
+/// 静かな空気の中での自然対流の熱伝達率 [W/(m²·K)](教科書の代表値 5〜25 の中ほど)。
+const NATURAL_CONVECTION_IN_AIR: f64 = 10.0;
+
+/// 「＋ 水の粒」で置く水のかたまりの一辺の粒の数(3×3×3 = 27 粒)。
+const FLUID_BLOCK_SIDE: usize = 3;
 /// 最初の記録間隔 [秒](`SNAPSHOT_RING_CAPACITY` のdoc)。
 const SNAPSHOT_FIRST_INTERVAL_SECONDS: f64 = 0.25;
 /// 最初の記録間隔の上限 [step](ふつうの 1/120 秒刻みで 0.25 秒)。分子や
@@ -190,6 +196,8 @@ pub enum WasmError {
     InvalidDensity,
     /// `push_set_body_mass`——質量が正の有限値でない。
     InvalidMass,
+    /// `set_body_temperature_at`——温度が正の有限値[K]でない。
+    InvalidTemperature,
     /// `set_body_scale_xyz_at`——スケール成分が正の有限値でない。
     InvalidScaleComponent,
     /// `push_set_body_type`——Dynamic/Static/Kinematic以外の名前。
@@ -328,6 +336,9 @@ impl std::fmt::Display for WasmError {
             WasmError::InvalidDt => write!(f, "dt must be a positive finite number"),
             WasmError::InvalidDensity => write!(f, "density must be a positive finite number"),
             WasmError::InvalidMass => write!(f, "mass must be a positive finite number"),
+            WasmError::InvalidTemperature => {
+                write!(f, "temperature must be a positive finite number of kelvin")
+            }
             WasmError::InvalidScaleComponent => write!(f, "scale components must be positive"),
             // `{kind:?}`(引用符付き)は旧実装の`{other:?}`——`other`は`&str`
             // だった——と同じ出力になる(`String`のDebugは`str`のDebugと同一)。
@@ -826,6 +837,14 @@ impl WasmWorld {
         }
 
         let snapshot_interval_steps = first_snapshot_interval_steps(scenario.world.dt);
+        // 場面を読み直しても(材質を変えたとき・保存した場面を開いたとき)、
+        // 置いてある水の粒のかたまりの数を数え直す。0 に戻すと、一覧から
+        // 水の行が消え、次に足した水が前の水と同じ場所に重なっていた
+        // (利用者役⑯)。
+        let fluid_spawn_count = inner
+            .sph()
+            .map_or(0, |s| s.position.len().div_ceil(FLUID_BLOCK_SIDE.pow(3)))
+            as u32;
         Ok(WasmWorld {
             inner,
             bodies,
@@ -838,7 +857,7 @@ impl WasmWorld {
             snapshots: VecDeque::with_capacity(SNAPSHOT_RING_CAPACITY),
             restored_to: None,
             bookmarks: Vec::new(),
-            fluid_spawn_count: 0,
+            fluid_spawn_count,
             imported_probe_handles,
             last_import_skipped_sections: Vec::new(),
             view_buffers: HotPathViewBuffers::default(),
@@ -1018,6 +1037,15 @@ impl WasmWorld {
             .map_err(|e| WasmError::ShapeSerializeFailed(e.to_string()))
     }
 
+    /// 置いたときの寸法の形(`base_shape`)を、`body_shape_json_at` と同じ書式で返す。
+    /// 画面の側は物の絵をこの寸法で作り、大きさの倍率は絵の拡大で付ける
+    /// (`set_body_scale_at` の規約)。複製した物の絵も同じ作り方にそろえるために使う。
+    fn body_base_shape_json_at_impl(&self, index: usize) -> Result<String, WasmError> {
+        let shape_json = sim_world::shape_to_shape_json(&self.try_body_meta_at(index)?.base_shape);
+        serde_json::to_string(&shape_json)
+            .map_err(|e| WasmError::ShapeSerializeFailed(e.to_string()))
+    }
+
     /// Inspector表示用の材質名。
     fn body_material_label_at_impl(&self, index: usize) -> Result<String, WasmError> {
         Ok(self.try_body_meta_at(index)?.material_label.clone())
@@ -1120,10 +1148,15 @@ impl WasmWorld {
     /// **Hierarchy 右クリックメニューの「複製」(群2)**。元のボディの形状・材質を
     /// そのまま使い、`offset` だけずらした位置に新しいボディを作る。
     ///
-    /// **形状は現在の実形状ではなく `base_shape`(スポーン時の寸法)を複製する**
-    /// ——Scale Gizmo の倍率は `base_shape × scale` として保持されており、複製後の
-    /// ボディも同じ規約(`set_body_scale_at`)に乗せる必要があるため。倍率まで
-    /// 引き継ぎたい場合は複製後に改めてスケールを掛ける(既知の限界)。
+    /// **いまの形・向き・固定・重さのまま複製する**。以前は置いたときの寸法
+    /// (`base_shape`)で作っていたので、大きさを変えた箱を Ctrl+D すると複製は
+    /// 0.80 m 角に戻り、ドミノのように同じ物を並べるたびに大きさを 3 回打ち
+    /// 直すことになった(利用者役⑯: 0.80×1.60×0.80 m の箱の複製が 0.80×0.80×0.80 m)。
+    /// 寸法の基準(`base_shape`)は元と同じものを持たせるので、複製のあとで
+    /// 大きさを変えても元の箱と同じ倍率の規約に乗る。
+    ///
+    /// 名前は `Box_1_copy_2_copy_3…` と伸びていき、一覧で切れて見分けられなかった
+    /// ので、種類の名前に新しい番号を付けたもの(`Box_7`)にする。
     fn duplicate_body_at_impl(&mut self, index: usize, offset: f64) -> Result<usize, WasmError> {
         let meta = self.try_body_meta_at(index)?;
         let base_shape = meta.base_shape.clone();
@@ -1138,11 +1171,33 @@ impl WasmWorld {
             .inner
             .body_position(source_id)
             .ok_or(WasmError::CannotDuplicateRemovedBody)?;
-        let mut desc = RigidBodyDesc::dynamic(base_shape.clone(), material);
+        let source = source_id.index as usize;
+        let bodies = &self.inner.mechanics().bodies;
+        let current_shape = bodies.shape_of(source).clone();
+        let body_type = bodies.body_type[source];
+        let mass = bodies.mass(source);
+        let rotation = bodies.rotation[source];
+        let mut desc = RigidBodyDesc::dynamic(current_shape, material);
+        desc.body_type = body_type;
+        if matches!(body_type, BodyType::Dynamic) && mass > 0.0 {
+            desc.mass_override = Some(mass);
+        }
         desc.transform.position = position + sim_math::Vec3::new(offset, 0.0, 0.0);
+        desc.transform.rotation = rotation;
         let id = self.inner.create_body(desc);
         let new_index = self.body_count_impl();
-        let label = format!("{}_copy_{new_index}", self.bodies[index].label);
+        let source_label = &self.bodies[index].label;
+        let mut root = source_label.as_str();
+        while let Some(at) = root.find("_copy_") {
+            root = &root[..at];
+        }
+        let root = root.trim_end_matches(|c: char| c.is_ascii_digit());
+        let root = root.trim_end_matches(['_', ' ']);
+        let label = if root.is_empty() {
+            format!("{source_label}_{new_index}")
+        } else {
+            format!("{root}_{new_index}")
+        };
         self.bodies.push(SpawnedBodyMeta {
             id,
             label,
@@ -3355,6 +3410,18 @@ impl WasmWorld {
                 self.set_body_mass_at_impl(u("index"), f("mass"))?;
                 Ok("{}".to_string())
             }
+            "retarget_body_probes" => {
+                let from = self.try_body_id_at(u("from"))?;
+                let to = self.try_body_id_at(u("to"))?;
+                Ok(
+                    serde_json::json!({ "moved": self.inner.retarget_body_probes(from, to) })
+                        .to_string(),
+                )
+            }
+            "set_body_temperature_at" => {
+                self.set_body_temperature_at_impl(u("index"), f("temperature"))?;
+                Ok("{}".to_string())
+            }
             "set_body_scale_at" => {
                 self.set_body_scale_at_impl(u("index"), f("scale"))?;
                 Ok("{}".to_string())
@@ -3689,6 +3756,24 @@ impl WasmWorld {
                 let index: usize = arg.parse().unwrap_or(0);
                 self.body_shape_json_at_impl(index)
             }
+            "body_temperature_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_temperature_at_impl(index).to_string())
+            }
+            "body_cooling_half_time_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                Ok(self.body_cooling_half_time_at_impl(index).to_string())
+            }
+            // まわりの空気の温度[K](熱が無効なら`NaN`)。物は温度を持つとこの温度へ近づく。
+            "thermal_ambient_temperature" => Ok(self
+                .inner
+                .thermal()
+                .map_or(f64::NAN, |t| t.ambient_temperature)
+                .to_string()),
+            "body_base_shape_json_at" => {
+                let index: usize = arg.parse().unwrap_or(0);
+                self.body_base_shape_json_at_impl(index)
+            }
             "body_size_ratio_at" => {
                 let index: usize = arg.parse().unwrap_or(0);
                 Ok(self.body_size_ratio_at_impl(index)?.to_string())
@@ -3813,7 +3898,8 @@ impl WasmWorld {
                 "body_collision_group_at", "body_collision_mask_at",
                 "body_count", "body_label_at", "body_is_static_at",
                 "body_shape_label_at", "body_shape_kind_at", "body_shape_json_at",
-                "body_size_ratio_at",
+                "body_temperature_at", "thermal_ambient_temperature", "body_cooling_half_time_at",
+                "body_size_ratio_at", "body_base_shape_json_at",
                 "body_material_label_at", "body_is_removed_at",
                 "material_properties_f64",
                 "circuit_element_count", "circuit_element_label_at",
@@ -4067,6 +4153,133 @@ impl WasmWorld {
                 water: Some(sim_fluid::FluidRegion::new(water_level, water_density)),
                 atmosphere: None,
                 lift: None,
+            }));
+        Ok(())
+    }
+
+    /// 物の温度を持つ熱ノード(`DissipationToHeat`の剛体↔熱ノード対応表、
+    /// または`PhaseChangeMorph`が結んでいるもの)。結ばれていなければ`None`。
+    fn body_thermal_node(&self, index: usize) -> Option<usize> {
+        let body = self.try_body_id_at(index).ok()?.index as usize;
+        self.inner.couplings_raw().iter().find_map(|c| {
+            let any = c.as_any();
+            if let Some(d) = any.downcast_ref::<sim_coupling::DissipationToHeat>() {
+                return d
+                    .body_links
+                    .iter()
+                    .find(|l| l.body_index == body)
+                    .map(|l| l.thermal_node);
+            }
+            any.downcast_ref::<sim_coupling::PhaseChangeMorph>()
+                .filter(|m| m.body_index == body)
+                .map(|m| m.thermal_node)
+        })
+    }
+
+    /// 物の温度[K]。温度を持っていない物は`NaN`。
+    fn body_temperature_at_impl(&self, index: usize) -> f64 {
+        match (self.body_thermal_node(index), self.inner.thermal()) {
+            (Some(node), Some(thermal)) => {
+                thermal.nodes.get(node).map_or(f64::NAN, |n| n.temperature)
+            }
+            _ => f64::NAN,
+        }
+    }
+
+    /// まわりとの温度差が半分になるまでの時間[s](温度を持たない物は`NaN`)。
+    /// 熱ノードの冷え方は $C\,dT/dt = -(hA + 4\varepsilon\sigma T^3 A)(T - T_\infty)$
+    /// (放射はいまの温度で線形化)なので、時定数 $\tau = C/(hA + 4\varepsilon\sigma T^3 A)$、
+    /// 半減時間は $\tau \ln 2$。大きな鉄の球が何時間もかけて冷めることを、
+    /// 札の数字が止まって見える理由として画面で言うために使う。
+    fn body_cooling_half_time_at_impl(&self, index: usize) -> f64 {
+        let (Some(node), Some(thermal)) = (self.body_thermal_node(index), self.inner.thermal())
+        else {
+            return f64::NAN;
+        };
+        let Some(n) = thermal.nodes.get(node) else {
+            return f64::NAN;
+        };
+        let loss = n.convection_coefficient * n.area
+            + 4.0 * n.emissivity * sim_thermal::STEFAN_BOLTZMANN * n.temperature.powi(3) * n.area;
+        if loss <= 0.0 {
+            return f64::INFINITY;
+        }
+        n.heat_capacity / loss * std::f64::consts::LN_2
+    }
+
+    /// **物を温める・冷やす**(利用者役⑯「熱が作れない」)。以前は ⚙ の
+    /// 「熱ノードを追加」で、どの物とも結ばれていない温度の点を足せるだけで、
+    /// 何の温度なのか分からず、3D にも何も出なかった。
+    ///
+    /// その物の温度を受け持つ熱ノードを作り(初回のみ)、温度を`temperature`に
+    /// する。熱ノードはその物の
+    /// - 熱容量 = 密度 × 体積 × 比熱(材質から)、
+    /// - 表面積(球 4πr²、箱 8(ab+bc+ca)、ほかは体積から同じ体積の球で見積もる)、
+    /// - 空気への自然対流の熱伝達率 h = 10 W/(m²·K)(静かな空気の代表値)と、
+    ///   材質の放射率による放射
+    ///
+    /// を持ち、まわりの温度へニュートンの冷却則とシュテファン=ボルツマン則で
+    /// 近づいていく。物との対応は`DissipationToHeat`の対応表で結ぶ——摩擦や
+    /// 衝突で失われた運動エネルギーもこの物の熱になり、保存した場面にも
+    /// そのまま残る(`export`は対応表を書き出す)。
+    fn set_body_temperature_at_impl(
+        &mut self,
+        index: usize,
+        temperature: f64,
+    ) -> Result<(), WasmError> {
+        if !temperature.is_finite() || temperature <= 0.0 {
+            return Err(WasmError::InvalidTemperature);
+        }
+        let id = self.try_body_id_at(index)?;
+        if let Some(node) = self.body_thermal_node(index) {
+            if let Some(n) = self.inner.thermal_mut().and_then(|t| t.nodes.get_mut(node)) {
+                n.temperature = temperature;
+                return Ok(());
+            }
+        }
+        let body = id.index as usize;
+        let (shape, material_id) = {
+            let bodies = &self.inner.mechanics().bodies;
+            (bodies.shape_of(body).clone(), bodies.material[body])
+        };
+        let material = self.inner.materials().get(material_id).clone();
+        let volume = shape.volume().unwrap_or(0.0).max(1e-9);
+        let area = match &shape {
+            Shape::Sphere { radius } => 4.0 * std::f64::consts::PI * radius * radius,
+            Shape::Box { half_extents: h } => 8.0 * (h.x * h.y + h.y * h.z + h.z * h.x),
+            _ => {
+                let r = (3.0 * volume / (4.0 * std::f64::consts::PI)).cbrt();
+                4.0 * std::f64::consts::PI * r * r
+            }
+        };
+        if self.inner.thermal().is_none() {
+            self.inner
+                .enable_thermal(sim_thermal::ThermalSolver::new(293.15));
+        }
+        let node = self
+            .inner
+            .thermal_mut()
+            .expect("just enabled above")
+            .add_node(sim_thermal::ThermalNode {
+                temperature,
+                heat_capacity: material.density * volume * material.specific_heat,
+                emissivity: material.emissivity,
+                area,
+                heat_accum: 0.0,
+                convection_coefficient: NATURAL_CONVECTION_IN_AIR,
+            });
+        self.inner
+            .add_coupling(Box::new(sim_coupling::DissipationToHeat {
+                thermal_node: node,
+                body_links: vec![sim_coupling::BodyThermalLink {
+                    body_index: body,
+                    thermal_node: node,
+                    effusivity: sim_coupling::effusivity(
+                        material.conductivity,
+                        material.density,
+                        material.specific_heat,
+                    ),
+                }],
             }));
         Ok(())
     }
@@ -4779,7 +4992,7 @@ impl WasmWorld {
         let dx: f64 = 0.1;
         // 設計§4.1・§9 の規約 Δx = h/2。
         let h: f64 = 2.0 * dx;
-        let n: i32 = 3;
+        let n: i32 = FLUID_BLOCK_SIDE as i32;
         // 容器の壁の厚み(層数)。設計§4.1・§9 の既定。
         let layers: i32 = 3;
         let floor_y = -dx;
@@ -9044,6 +9257,99 @@ mod tests {
     /// Scale Gizmo(`set_body_scale_at`/`set_body_scale_xyz_at`)がスポーンした
     /// 球のスケールを成功パスで受理し、**床(index 0)と不正なスケール成分を
     /// 拒否する**こと。後者2つは`WasmError`導入で初めて検証できるようになった。
+    /// **自動で記録し始めた物を「動かない」にしたら、記録を動く物へ移せる**
+    /// (利用者役⑯: 坂にした箱の高さが、ずっと同じ値の平らな線で記録され
+    /// 続けた)。移した後は、移った先の物の値が記録される。
+    #[test]
+    fn body_probes_can_be_moved_to_another_body() {
+        let mut world = new_world();
+        let slope = world
+            .spawn_box_impl(0.0, 0.5, 0.0, 0.4, "コンクリート".to_string())
+            .unwrap();
+        let ball = world
+            .spawn_sphere_impl(0.0, 3.0, 0.0, 0.3, "鋼(炭素鋼)".to_string())
+            .unwrap();
+        world
+            .apply_component_impl("add_body_probes", &format!(r#"{{"index":{slope}}}"#))
+            .unwrap();
+        world.step();
+        let moved = world
+            .apply_component_impl(
+                "retarget_body_probes",
+                &format!(r#"{{"from":{slope},"to":{ball}}}"#),
+            )
+            .unwrap();
+        assert!(moved.contains(r#""moved":2"#), "{moved}");
+        world.step();
+        let handle = world.imported_probe_handles[0];
+        let history: Vec<f64> = world
+            .inner
+            .probe(handle)
+            .unwrap()
+            .history()
+            .copied()
+            .collect();
+        assert_eq!(history.len(), 1, "前の物の記録は捨てる");
+        assert!(history[0] > 2.5, "球の高さを記録している: {history:?}");
+    }
+
+    /// **物を温めると、まわりの温度へ冷めていき、保存し直しても温度が残る**
+    /// (利用者役⑯「熱が作れない」)。100 °C の鉄球は 20 °C の空気の中で
+    /// 少しずつ冷め、まわりの温度を下回らない。冷め方はニュートンの冷却則
+    /// (+放射)で、最初の 1 分の下がり幅は h·A·ΔT·t / C の見積もりと同じ桁。
+    #[test]
+    fn a_heated_body_cools_toward_ambient_and_keeps_its_temperature_when_reloaded() {
+        let mut world = new_world();
+        let ball = world
+            .spawn_sphere_impl(0.0, 0.5, 0.0, 0.1, "鋼(炭素鋼)".to_string())
+            .unwrap();
+        assert!(
+            world.body_temperature_at_impl(ball).is_nan(),
+            "温める前は温度を持たない"
+        );
+        assert_err_is(
+            world.set_body_temperature_at_impl(ball, -1.0),
+            WasmError::InvalidTemperature,
+        );
+        world.set_body_temperature_at_impl(ball, 373.15).unwrap();
+        assert_eq!(world.body_temperature_at_impl(ball), 373.15);
+        let dt = world.inner.dt();
+        let steps = (60.0 / dt).round() as usize;
+        for _ in 0..steps {
+            world.step();
+        }
+        let after = world.body_temperature_at_impl(ball);
+        assert!(
+            after < 373.15 && after > 293.15,
+            "冷めていくが室温より下がらない: {after}"
+        );
+        // 見積もり: 鋼 ρ=7850, c=490 → C = ρ·(4/3)πr³·c、A = 4πr²、h = 10。
+        let r: f64 = 0.1;
+        let c = 7850.0 * 4.0 / 3.0 * std::f64::consts::PI * r.powi(3) * 490.0;
+        let convective_drop = 10.0 * 4.0 * std::f64::consts::PI * r * r * 80.0 * 60.0 / c;
+        let drop = 373.15 - after;
+        assert!(
+            drop > 0.5 * convective_drop && drop < 4.0 * convective_drop,
+            "下がり幅 {drop} K は対流の見積もり {convective_drop} K と同じ桁のはず"
+        );
+        // 差が半分になる時間は τ·ln2、τ = C/(hA + 4εσT³A)(鋼の放射率 0.6)。
+        let area = 4.0 * std::f64::consts::PI * r * r;
+        let loss = 10.0 * area + 4.0 * 0.6 * sim_thermal::STEFAN_BOLTZMANN * after.powi(3) * area;
+        let half = world.body_cooling_half_time_at_impl(ball);
+        assert!(
+            (half - c / loss * std::f64::consts::LN_2).abs() < 1e-6 * half,
+            "half={half}"
+        );
+        // 温め直すと、同じ熱ノードの温度が変わる(ノードが増えない)。
+        let nodes = world.thermal_node_count_impl();
+        world.set_body_temperature_at_impl(ball, 350.0).unwrap();
+        assert_eq!(world.thermal_node_count_impl(), nodes);
+        // 保存して開き直しても、その物の温度のまま。
+        let json = world.export_scene_json_impl().unwrap();
+        let reloaded = WasmWorld::from_scene_json_impl(&json).unwrap();
+        assert_eq!(reloaded.body_temperature_at_impl(ball), 350.0);
+    }
+
     #[test]
     fn set_body_scale_at_succeeds_for_a_spawned_body() {
         let mut world = new_world();
